@@ -1347,7 +1347,7 @@ impl AppState {
     /// to.
     ///
     /// The computation is the SDK's canonical resolver policy snapshot
-    /// (`ak.did.resolver_policy.v1`) and nothing else, so soland, teabay,
+    /// (`ak.did.resolver_policy.v1`) and nothing else, so soland, flagon,
     /// bridges, coauth and inkson derive byte-identical digests from the same
     /// policy value instead of each encoding one.
     ///

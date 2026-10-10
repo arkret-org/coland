@@ -2,7 +2,7 @@
 //!
 //! All JWS verification semantics (RFC 7515 detached shape, Ed25519
 //! signature check and authority binding) live in the SDK so inkson, floria,
-//! cotest, teabay and soland share one wire-compatible implementation. This
+//! cotest, flagon and soland share one wire-compatible implementation. This
 //! module selects a document or accepted key from [`AppState`], then hands
 //! pinned material to the resolver-free SDK verifier.
 //!

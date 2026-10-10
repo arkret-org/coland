@@ -108,7 +108,7 @@ fn payload(
         "kind": kind,
         "title": title,
         "created_by": actor_id,
-        "created_at": at,
+        "created_at": arkret_canonical::format_timestamp_canonical(at),
     });
     if let Some(parent_id) = parent_id {
         object["parent_space_id"] = json!(parent_id);

@@ -29,6 +29,7 @@ env:
   # Service registration requires a canonical HTTPS public identity even when
   # this persistence drill probes its private listener directly over loopback.
   SOLAND_PUBLIC_BASE_URL: https://soland.drill.example:8989/
+  SOLAND_TRUST_DOMAIN: ak:trust_domain:soland.drill.example
   SOLAND_FIRST_PROVISIONING: "true"
   SOLAND_SERVICE_IDENTITY_BUNDLE_DIR: ${{ github.workspace }}/_drill/identity-bundle
   SOLAND_BACKUP_DIR: ${{ github.workspace }}/_drill/backups

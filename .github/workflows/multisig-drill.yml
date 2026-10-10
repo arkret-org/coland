@@ -139,13 +139,13 @@ jobs:
             _drill/logs
           head -c 32 /dev/urandom | base64 > "$SOLAND_KEYSTORE_MASTER_KEY_FILE"
           chmod 600 "$SOLAND_KEYSTORE_MASTER_KEY_FILE"
-          printf '{}\n' > "$GITHUB_WORKSPACE/_drill/config.json"
+          : > "$GITHUB_WORKSPACE/_drill/config.env"
 
       - name: Boot soland once to apply migrations
         working-directory: soland
         run: |
           set -euxo pipefail
-          "$SOLAND_DRILL_BIN" --config "$GITHUB_WORKSPACE/_drill/config.json" \
+          "$SOLAND_DRILL_BIN" --config "$GITHUB_WORKSPACE/_drill/config.env" \
             > "$GITHUB_WORKSPACE/_drill/logs/soland-boot.log" 2>&1 &
           SOLAND_PID=$!
           READY=false

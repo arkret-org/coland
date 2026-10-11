@@ -1539,6 +1539,17 @@ impl AuthorityCommitApplication {
             .await?)
     }
 
+    pub async fn replica_stream_has_hosted_member(
+        &self,
+        stream: &arkret_wire::CommitStreamRef,
+        local_service_id: &arkret_wire::DidCoreId,
+    ) -> ServiceResult<Option<bool>> {
+        Ok(self
+            .store()
+            .replica_stream_has_hosted_member(stream, local_service_id)
+            .await?)
+    }
+
     pub async fn replica_anchor_for_stream(
         &self,
         stream: &arkret_wire::CommitStreamRef,

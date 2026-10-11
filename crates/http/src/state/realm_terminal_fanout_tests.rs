@@ -12,6 +12,9 @@ use salvo::conn::{Acceptor as _, Listener as _};
 use super::realm_terminal_peer_tests::terminal_persistent_rows;
 use super::*;
 
+#[path = "realm_departure_fanout_tests.rs"]
+mod departure_tests;
+
 struct LiveStation {
     state: AppState,
     pool: PgPool,

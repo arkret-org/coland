@@ -410,7 +410,7 @@ pub(crate) async fn materialize_founding_in_connection(
     Ok(())
 }
 
-async fn hosts_joined_member(
+pub(super) async fn hosts_joined_member(
     conn: &mut AsyncPgConnection,
     stream: &arkret_wire::CommitStreamRef,
     local_service_id: &arkret_wire::DidCoreId,

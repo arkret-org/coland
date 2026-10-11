@@ -92,7 +92,6 @@ async fn require_agent_membership_keypackage(
            AND kc.stream_position=k.current_stream_position \
          WHERE kp.actor_id=$2 AND a.principal_id=$6 AND a.station_id=$3 \
            AND kp.device_id IS NULL AND kp.device_authorize_event_id IS NULL \
-           AND kp.intended_realm_id IS NULL \
            AND kp.endpoint_verification_method=e.envelope->'payload'->>'verification_method' \
            AND kp.lifetime_not_before <= $4 AND kp.lifetime_not_after > $4 \
            AND kp.capabilities @> '[\"ak.content.v1\",\"mimi.content.v1\"]'::jsonb \

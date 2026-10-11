@@ -1291,7 +1291,6 @@ async fn consumed_sidecar_agent_scenario() {
                 actor_id: agent.principal_id.to_string(),
                 device_id: None,
                 endpoint_verification_method: Some(method.to_string()),
-                intended_realm_id: None,
                 key_package_bytes: arkret_canonical::base64url_decode(&package.keypackage).unwrap(),
                 capabilities: package.capabilities.clone(),
                 capabilities_digest: arkret_canonical::canonical_sha256(&package.capabilities).unwrap(),
@@ -2568,7 +2567,6 @@ async fn encrypted_agent_join_rechecks_claimability_and_writes_nothing_on_refusa
         actor_id: agent.principal_id.to_string(),
         device_id: None,
         endpoint_verification_method: Some(format!("{agent_did}#runtime-1")),
-        intended_realm_id: None,
         key_package_bytes: b"verified-published-keypackage".to_vec(),
         capabilities: vec!["ak.content.v1".into(), "mimi.content.v1".into()],
         capabilities_digest: format!("sha256:{}", "8".repeat(64)),
@@ -2592,7 +2590,6 @@ async fn encrypted_agent_join_rechecks_claimability_and_writes_nothing_on_refusa
         "actor_id='ak:did_core:web:foreign-agent.example'",
         "agent_key_authorize_event_id=(SELECT id FROM canonical_events WHERE kind='ak.realm.create' ORDER BY pk LIMIT 1)",
         "endpoint_verification_method='did:web:wrong-agent.example#runtime-1'",
-        "agent_key_authorize_event_id=NULL,endpoint_verification_method='did:web:pairwise.example#key',intended_realm_id='another-realm'",
     ].into_iter().map(str::to_owned).collect::<Vec<_>>();
     mutations.push(format!("owner_account_pk={wrong_owner}"));
     for mutation in mutations {

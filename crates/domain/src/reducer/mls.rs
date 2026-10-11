@@ -27,10 +27,6 @@ pub enum MlsKeyPackagePublishTrustAnchor {
         event_id: String,
         verification_method: String,
     },
-    MinimalMetadataPairwise {
-        verification_method: String,
-        intended_realm_id: String,
-    },
 }
 
 /// Strongly typed local projection input for a KeyPackage upload.
@@ -80,37 +76,23 @@ pub fn apply_keypackage_upload_projection(
         Ok(bytes) => arkret_canonical::sha256_digest(bytes),
         Err(_) => return reject("mls_keypackage_capabilities_digest_failed"),
     };
-    let (
-        device_authorize_event_id,
-        agent_key_authorize_event_id,
-        endpoint_verification_method,
-        intended_realm_id,
-    ) = match &projection.trust_anchor {
-        MlsKeyPackagePublishTrustAnchor::DeviceAuthorize(event_id) => {
-            if projection.device_id.is_none() {
-                return reject("mls_keypackage_device_missing");
+    let (device_authorize_event_id, agent_key_authorize_event_id, endpoint_verification_method) =
+        match &projection.trust_anchor {
+            MlsKeyPackagePublishTrustAnchor::DeviceAuthorize(event_id) => {
+                if projection.device_id.is_none() {
+                    return reject("mls_keypackage_device_missing");
+                }
+                (Some(event_id.clone()), None, None)
             }
-            (Some(event_id.clone()), None, None, None)
-        }
-        MlsKeyPackagePublishTrustAnchor::AgentKeyAuthorize {
-            event_id,
-            verification_method,
-        } => (
-            None,
-            Some(event_id.clone()),
-            Some(verification_method.clone()),
-            None,
-        ),
-        MlsKeyPackagePublishTrustAnchor::MinimalMetadataPairwise {
-            verification_method,
-            intended_realm_id,
-        } => (
-            None,
-            None,
-            Some(verification_method.clone()),
-            Some(intended_realm_id.clone()),
-        ),
-    };
+            MlsKeyPackagePublishTrustAnchor::AgentKeyAuthorize {
+                event_id,
+                verification_method,
+            } => (
+                None,
+                Some(event_id.clone()),
+                Some(verification_method.clone()),
+            ),
+        };
     let row = MlsKeyPackageProjection {
         id: projection.keypackage_id.clone(),
         keypackage_ref: projection.keypackage_ref.clone(),
@@ -119,7 +101,6 @@ pub fn apply_keypackage_upload_projection(
         actor_id: projection.actor_id.clone(),
         device_id: projection.device_id.clone(),
         endpoint_verification_method,
-        intended_realm_id,
         lifetime: projection.lifetime.clone(),
         key_package_bytes: projection.key_package_bytes.clone(),
         capabilities: projection.capabilities.clone(),
@@ -270,8 +251,7 @@ fn reject(reason: &str) -> ProjectionEffect {
 }
 
 /// Exactly-one-of trust binding carried by every KeyPackage publication and
-/// claim: device authorization, Agent key authorization, or a minimal-metadata
-/// pairwise actor/method pair.
+/// claim: device authorization or Agent key authorization.
 ///
 /// Owned here because the reducer validates it off the wire payload and the
 /// `/keys/keypackages/*` routing layer validates the same shape off the stored
@@ -281,8 +261,6 @@ fn reject(reason: &str) -> ProjectionEffect {
 pub struct KeyPackageTrustBinding {
     pub device_authorize_event_id: Option<String>,
     pub agent_key_authorize_event_id: Option<String>,
-    pub pairwise_actor_id: Option<String>,
-    pub pairwise_verification_method: Option<String>,
 }
 
 impl KeyPackageTrustBinding {
@@ -290,8 +268,6 @@ impl KeyPackageTrustBinding {
         Self {
             device_authorize_event_id: Some(device_authorize_event_id),
             agent_key_authorize_event_id: None,
-            pairwise_actor_id: None,
-            pairwise_verification_method: None,
         }
     }
 
@@ -299,17 +275,6 @@ impl KeyPackageTrustBinding {
         Self {
             device_authorize_event_id: None,
             agent_key_authorize_event_id: Some(agent_key_authorize_event_id),
-            pairwise_actor_id: None,
-            pairwise_verification_method: None,
-        }
-    }
-
-    pub fn minimal_metadata_pairwise(actor_id: String, verification_method: String) -> Self {
-        Self {
-            device_authorize_event_id: None,
-            agent_key_authorize_event_id: None,
-            pairwise_actor_id: Some(actor_id),
-            pairwise_verification_method: Some(verification_method),
         }
     }
 
@@ -319,33 +284,12 @@ impl KeyPackageTrustBinding {
     pub fn from_parts(
         device_authorize_event_id: Option<String>,
         agent_key_authorize_event_id: Option<String>,
-        pairwise_actor_id: Option<String>,
-        pairwise_verification_method: Option<String>,
     ) -> Result<Self, &'static str> {
         let device_authorize_event_id = non_empty_trimmed(device_authorize_event_id);
         let agent_key_authorize_event_id = non_empty_trimmed(agent_key_authorize_event_id);
-        let pairwise_actor_id = non_empty_trimmed(pairwise_actor_id);
-        let pairwise_verification_method = non_empty_trimmed(pairwise_verification_method);
-        match (
-            device_authorize_event_id,
-            agent_key_authorize_event_id,
-            pairwise_actor_id,
-            pairwise_verification_method,
-        ) {
-            (Some(event_id), None, None, None) => Ok(Self::device_authorize(event_id)),
-            (None, Some(event_id), None, None) => Ok(Self::agent_key_authorize(event_id)),
-            (None, None, Some(actor_id), Some(method)) => {
-                let actor = actor_id
-                    .parse::<arkret_identifiers::DidCoreId>()
-                    .map_err(|_| arkret_wire::ReasonCode::DEVICE_GENERATION_FENCED)?;
-                let method_id = arkret_wire::DidUrl::new(method.clone())
-                    .map_err(|_| arkret_wire::ReasonCode::DEVICE_GENERATION_FENCED)?;
-                arkret_models_crypto::MlsEndpointIdentity::minimal_metadata_pairwise(
-                    actor, method_id,
-                )
-                .map_err(|_| arkret_wire::ReasonCode::DEVICE_GENERATION_FENCED)?;
-                Ok(Self::minimal_metadata_pairwise(actor_id, method))
-            }
+        match (device_authorize_event_id, agent_key_authorize_event_id) {
+            (Some(event_id), None) => Ok(Self::device_authorize(event_id)),
+            (None, Some(event_id)) => Ok(Self::agent_key_authorize(event_id)),
             _ => Err(arkret_wire::ReasonCode::DEVICE_GENERATION_FENCED),
         }
     }

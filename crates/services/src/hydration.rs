@@ -1329,7 +1329,6 @@ pub async fn hydrate_projections_from_persistence(
                     actor_id: row.actor_id,
                     device_id: row.device_id,
                     endpoint_verification_method: row.endpoint_verification_method,
-                    intended_realm_id: row.intended_realm_id,
                     lifetime: KeyPackageLifetimeProjection {
                         not_before: row.lifetime_not_before,
                         not_after: row.lifetime_not_after,

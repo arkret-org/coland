@@ -157,10 +157,6 @@ async fn local_keypackage_owner_account_pk(
 enum KeyPackageTrustSelector {
     Principal(KeyPackageTrustBinding),
     PerDevice(BTreeMap<String, KeyPackageTrustBinding>),
-    MinimalMetadataPairwise {
-        verification_method: String,
-        intended_realm_id: String,
-    },
 }
 
 /// Lift the reducer's exactly-one-of validation into this layer's error type.
@@ -169,19 +165,12 @@ enum KeyPackageTrustSelector {
 fn trust_binding_from_parts(
     device_authorize_event_id: Option<String>,
     agent_key_authorize_event_id: Option<String>,
-    pairwise_actor_id: Option<String>,
-    pairwise_verification_method: Option<String>,
     message: &'static str,
 ) -> Result<KeyPackageTrustBinding, AppError> {
-    KeyPackageTrustBinding::from_parts(
-        device_authorize_event_id,
-        agent_key_authorize_event_id,
-        pairwise_actor_id,
-        pairwise_verification_method,
-    )
-    .map_err(|reason_code| {
-        crate::app_error!(FailedPrecondition, message).with_rejection_code(reason_code)
-    })
+    KeyPackageTrustBinding::from_parts(device_authorize_event_id, agent_key_authorize_event_id)
+        .map_err(|reason_code| {
+            crate::app_error!(FailedPrecondition, message).with_rejection_code(reason_code)
+        })
 }
 
 fn trust_binding_from_keypackage(
@@ -190,11 +179,6 @@ fn trust_binding_from_keypackage(
     trust_binding_from_parts(
         kp.device_authorize_event_id.clone(),
         kp.agent_key_authorize_event_id.clone(),
-        (kp.device_authorize_event_id.is_none() && kp.agent_key_authorize_event_id.is_none())
-            .then(|| kp.actor_id.clone()),
-        (kp.device_authorize_event_id.is_none() && kp.agent_key_authorize_event_id.is_none())
-            .then(|| kp.endpoint_verification_method.clone())
-            .flatten(),
         "KeyPackage trust binding is invalid",
     )
 }
@@ -203,11 +187,6 @@ fn trust_binding_from_row(row: &MlsKeyPackageRow) -> Result<KeyPackageTrustBindi
     trust_binding_from_parts(
         row.device_authorize_event_id.clone(),
         row.agent_key_authorize_event_id.clone(),
-        (row.device_authorize_event_id.is_none() && row.agent_key_authorize_event_id.is_none())
-            .then(|| row.actor_id.clone()),
-        (row.device_authorize_event_id.is_none() && row.agent_key_authorize_event_id.is_none())
-            .then(|| row.endpoint_verification_method.clone())
-            .flatten(),
         "KeyPackage claim is missing a valid trust binding",
     )
 }
@@ -218,14 +197,6 @@ fn trust_binding_matches_keypackage(
 ) -> bool {
     kp.device_authorize_event_id == binding.device_authorize_event_id
         && kp.agent_key_authorize_event_id == binding.agent_key_authorize_event_id
-        && binding
-            .pairwise_actor_id
-            .as_ref()
-            .is_none_or(|actor_id| actor_id == &kp.actor_id)
-        && binding
-            .pairwise_verification_method
-            .as_deref()
-            .is_none_or(|method| kp.endpoint_verification_method.as_deref() == Some(method))
 }
 
 impl KeyPackageTrustSelector {
@@ -235,16 +206,6 @@ impl KeyPackageTrustSelector {
             Self::PerDevice(bindings) => bindings
                 .get(kp.device_id.as_deref().unwrap_or(""))
                 .is_some_and(|binding| trust_binding_matches_keypackage(binding, kp)),
-            Self::MinimalMetadataPairwise {
-                verification_method,
-                intended_realm_id,
-            } => {
-                kp.device_id.is_none()
-                    && kp.device_authorize_event_id.is_none()
-                    && kp.agent_key_authorize_event_id.is_none()
-                    && kp.endpoint_verification_method.as_deref() == Some(verification_method)
-                    && kp.intended_realm_id.as_deref() == Some(intended_realm_id)
-            }
         }
     }
 }
@@ -767,13 +728,6 @@ async fn upload_keypackage(
     let owner_account_pk = local_keypackage_owner_account_pk(state, &session).await?;
 
     let body = body.into_inner();
-    // The SDK upload shape retains retired pairwise fields. Reject them
-    // before admission under the current closed KeyPackage wire contract.
-    if body.pairwise_verification_method.is_some() || body.intended_realm_id.is_some() {
-        return Err(AppError::param_invalid(
-            "minimal-metadata pairwise KeyPackage upload is retired",
-        ));
-    }
     body.validate_shape().map_err(AppError::param_invalid)?;
     if session.agent_session().is_some()
         != (body.device_id.is_none()
@@ -786,7 +740,11 @@ async fn upload_keypackage(
     }
     let principal_id = body.principal_id.clone();
     let actor_id = body.principal_id.to_string();
-    if actor_id != session.actor {
+    let expected_actor = arkret_wire::ActorId::account(arkret_wire::AccountId {
+        principal_id: principal_id.clone(),
+        station_id: state.service_core_id().clone(),
+    });
+    if actor_id != session.actor || body.actor_id != expected_actor {
         return Err(AppError::capability_denied(
             "actor_id must match the calling session",
         ));
@@ -855,24 +813,9 @@ async fn upload_keypackage(
             },
         )
     } else {
-        let method = body
-            .pairwise_verification_method
-            .as_ref()
-            .expect("validated pairwise method");
-        let realm_id = body
-            .intended_realm_id
-            .as_ref()
-            .expect("validated pairwise Realm");
-        ensure_pairwise_realm_affinity(state, &principal_id, method, realm_id, state.service_id())
-            .await?;
-        (
-            None,
-            None,
-            coland_domain::reducer::mls::MlsKeyPackagePublishTrustAnchor::MinimalMetadataPairwise {
-                verification_method: method.as_str().to_owned(),
-                intended_realm_id: realm_id.as_str().to_owned(),
-            },
-        )
+        return Err(AppError::param_invalid(
+            "KeyPackage upload has no valid endpoint",
+        ));
     };
     let endpoint_device_id = device_id.as_deref();
     let unsigned_upload = body.unsigned();
@@ -906,17 +849,9 @@ async fn upload_keypackage(
         )
         .await?;
     } else {
-        let method = body
-            .pairwise_verification_method
-            .as_ref()
-            .expect("validated pairwise method");
-        verify_pairwise_keypackage_batch(
-            &principal_id,
-            method,
-            &body.endpoint_signature,
-            &upload_signing_input,
-        )
-        .map_err(AppError::param_invalid)?;
+        return Err(AppError::param_invalid(
+            "KeyPackage upload has no authorized signer",
+        ));
     }
 
     let mut accepted = 0_u32;
@@ -996,18 +931,6 @@ async fn upload_keypackage(
         {
             rejected.push(keypackage_failure(&entry, Some(endpoint_device_id), reason));
             continue;
-        }
-        if device_id.is_none() && trust_binding.is_none() {
-            let method = body
-                .pairwise_verification_method
-                .as_ref()
-                .expect("validated pairwise method");
-            if let Err(reason) =
-                validate_pairwise_keypackage_leaf(&principal_id, method, &key_package_bytes)
-            {
-                rejected.push(keypackage_failure(&entry, endpoint_device_id, reason));
-                continue;
-            }
         }
         let created_at = entry.created_at.timestamp();
         let expires_at = entry.expires_at.timestamp();
@@ -1096,16 +1019,6 @@ async fn peer_claim_keypackage(
 ) -> JsonResult<PeerKeyPackagesClaimQueryOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let (body, authorization) = verify_peer_claim_source_attestation(state, req).await?;
-    if body.target_pairwise_verification_method.is_some()
-        || matches!(
-            &body.requester_authorization,
-            PeerKeyPackageRequesterAuthorization::MinimalMetadataPairwise { .. }
-        )
-    {
-        return Err(peer_claim_schema_violation(
-            "minimal-metadata pairwise KeyPackage claim is retired",
-        ));
-    }
     let digest = arkret_wire::Hash::new(
         arkret_canonical::canonical_sha256(&body)
             .map_err(|error| AppError::internal(error.to_string()))?,
@@ -1151,16 +1064,6 @@ async fn claim_keypackage_at_destination(
     body: &PeerKeyPackagesClaimRequestBody,
     authorization: VerifiedClaimAuthorization,
 ) -> JsonResult<PeerKeyPackagesClaimOutcome> {
-    if body.target_pairwise_verification_method.is_some()
-        || matches!(
-            &body.requester_authorization,
-            PeerKeyPackageRequesterAuthorization::MinimalMetadataPairwise { .. }
-        )
-    {
-        return Err(peer_claim_schema_violation(
-            "minimal-metadata pairwise KeyPackage claim is retired",
-        ));
-    }
     let target_principal_id = body
         .unsigned_request()
         .target_principal_id()
@@ -1175,8 +1078,6 @@ async fn claim_keypackage_at_destination(
             .map_err(|error| AppError::internal(format!("target AccountId key: {error}")))?
     } else if let Some(agent_id) = &body.target_agent_id {
         agent_id.as_str().to_owned()
-    } else if let Some(method) = &body.target_pairwise_verification_method {
-        method.as_str().to_owned()
     } else {
         return Err(peer_claim_schema_violation(
             "claim target rate-limit identity is incomplete",
@@ -1245,9 +1146,6 @@ async fn claim_keypackage_at_destination(
             .map_err(|_| peer_claim_schema_violation("claim target identity is invalid"))?,
         &target_device_ids,
         Some(body.intended_realm_id.as_str()),
-        body.target_pairwise_verification_method
-            .as_ref()
-            .map(|method| method.as_str()),
     )
     .await
     .map_err(|_| peer_claim_failed())?;
@@ -1696,10 +1594,7 @@ fn validate_peer_claim_time_window(body: &PeerKeyPackagesClaimRequestBody) -> Re
     let authorization = &body.requester_authorization;
     let signed_at = match authorization {
         PeerKeyPackageRequesterAuthorization::Device { signed_at, .. }
-        | PeerKeyPackageRequesterAuthorization::Agent { signed_at, .. }
-        | PeerKeyPackageRequesterAuthorization::MinimalMetadataPairwise { signed_at, .. } => {
-            *signed_at
-        }
+        | PeerKeyPackageRequesterAuthorization::Agent { signed_at, .. } => *signed_at,
     };
     let current = now();
     if signed_at > current + chrono::Duration::seconds(60)
@@ -1755,52 +1650,6 @@ async fn verify_local_claim_participant_authorization(
         );
         Ok::<bool, AppError>(false)
     };
-    if let PeerKeyPackageRequesterAuthorization::MinimalMetadataPairwise {
-        verification_method,
-        signature,
-        ..
-    } = authorization
-    {
-        if signature.kid.as_str() != verification_method.as_str()
-            || signature
-                .signature_algorithm
-                .as_ref()
-                .is_some_and(|algorithm| algorithm.as_str() != "Ed25519")
-            || arkret_models_crypto::MlsEndpointIdentity::minimal_metadata_pairwise(
-                requester_id.clone(),
-                verification_method.clone(),
-            )
-            .is_err()
-            || ensure_pairwise_realm_affinity(
-                state,
-                &requester_id,
-                verification_method,
-                &body.intended_realm_id,
-                body.service_binding.source_id.as_str(),
-            )
-            .await
-            .is_err()
-        {
-            return reject("minimal_metadata_pairwise_signature_shape");
-        }
-        let signing_bytes = keypackage_claim_authorization_signing_bytes(
-            &body.unsigned_request(),
-            &body.service_binding,
-            authorization,
-        )
-        .map_err(|error| {
-            AppError::internal(format!("peer claim authorization transcript: {error}"))
-        })?;
-        let key =
-            crate::jws_verify::resolve_ed25519_pubkey_async(state, verification_method.as_str())
-                .await
-                .map_err(|error| AppError::internal(format!("pairwise signing key: {error}")))?;
-        return Ok(crate::routing::identity::device_signing::ed25519_verify(
-            &key,
-            &signing_bytes,
-            signature.sig.as_str(),
-        ));
-    }
     if let PeerKeyPackageRequesterAuthorization::Agent {
         verification_method,
         requester_agent_id,
@@ -1875,7 +1724,6 @@ async fn verify_local_claim_participant_authorization(
                 device_authorize_event_id,
             ),
             PeerKeyPackageRequesterAuthorization::Agent { .. } => unreachable!(),
-            PeerKeyPackageRequesterAuthorization::MinimalMetadataPairwise { .. } => unreachable!(),
         };
     if signature
         .signature_algorithm
@@ -1948,25 +1796,11 @@ async fn peer_claim_policy_authorized(
     body: &PeerKeyPackagesClaimRequestBody,
     source_id: &str,
 ) -> Result<bool, AppError> {
-    let target_principal_id = body
-        .unsigned_request()
-        .target_principal_id()
-        .ok_or_else(|| peer_claim_schema_violation("claim target identity is incomplete"))?;
     let requester_id = body
         .unsigned_request()
         .requester_principal_id(&body.requester_authorization)
         .ok_or_else(|| peer_claim_schema_violation("claim requester identity is incomplete"))?;
-    let target_authority_current = if let Some(method) = &body.target_pairwise_verification_method {
-        ensure_pairwise_realm_affinity(
-            state,
-            &target_principal_id,
-            method,
-            &body.intended_realm_id,
-            state.service_id(),
-        )
-        .await
-        .is_ok()
-    } else if let (Some(agent_id), Some(method), Some(event_id)) = (
+    let target_authority_current = if let (Some(agent_id), Some(method), Some(event_id)) = (
         &body.target_agent_id,
         &body.target_agent_verification_method,
         &body.target_agent_key_authorize_event_id,
@@ -2326,16 +2160,6 @@ async fn claim_keypackage(
     let session = aa.authenticated_session(state, req).await?;
 
     let body = body.into_inner();
-    if body.target_pairwise_verification_method.is_some()
-        || matches!(
-            &body.requester_authorization,
-            PeerKeyPackageRequesterAuthorization::MinimalMetadataPairwise { .. }
-        )
-    {
-        return Err(peer_claim_schema_violation(
-            "minimal-metadata pairwise KeyPackage claim is retired",
-        ));
-    }
     if session.agent_session().is_some()
         != matches!(
             &body.requester_authorization,
@@ -2386,7 +2210,6 @@ async fn claim_keypackage(
         PeerKeyPackageRequesterAuthorization::Agent {
             requester_agent_id, ..
         } if requester_agent_id.as_str() == session.actor => {}
-        PeerKeyPackageRequesterAuthorization::MinimalMetadataPairwise { .. } => {}
         _ => {
             return Err(AppError::capability_denied(
                 "requester authorization must match the authenticated session AccountId",
@@ -3029,14 +2852,6 @@ async fn consume_keypackages(
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let body = body.into_inner();
-    if matches!(
-        &body.recipient_durable_receipt.recipient,
-        arkret_models_crypto::RecipientMlsDurableSigner::MinimalMetadataPairwise { .. }
-    ) {
-        return Err(AppError::param_invalid(
-            "minimal-metadata pairwise KeyPackage consume is retired",
-        ));
-    }
     let durable_receipt = &body.recipient_durable_receipt;
     let recipient_principal_id = durable_receipt
         .recipient_principal_id()
@@ -3059,7 +2874,6 @@ async fn consume_keypackages(
         &session,
         &recipient_principal_id,
         &durable_receipt.recipient,
-        Some(&durable_receipt.realm_id),
         &keypackage_refs,
         &body.signature,
         &consume_signing_input,
@@ -3209,7 +3023,6 @@ async fn validate_recipient_durable_receipt(
         session,
         &recipient_principal_id,
         &receipt.recipient,
-        Some(&receipt.realm_id),
         std::slice::from_ref(&receipt.key_package_ref.to_string()),
         &receipt.signature,
         &signing_input,
@@ -3305,7 +3118,6 @@ async fn receipt_matches_welcome_binding(
                 && record.agent_key_authorize_event_id.as_ref()
                     == Some(agent_key_authorize_event_id)
         }
-        arkret_models_crypto::RecipientMlsDurableSigner::MinimalMetadataPairwise { .. } => false,
     };
     if receipt.claim_request_id != outcome.claim_request_id
         || receipt.key_package_ref.as_str() != record.keypackage_ref
@@ -3323,7 +3135,6 @@ async fn verify_keypackage_consumer_signature(
     session: &SessionRecord,
     owner: &arkret_wire::DidCoreId,
     consumer: &arkret_models_crypto::RecipientMlsDurableSigner,
-    realm_id: Option<&RealmId>,
     keypackage_refs: &[String],
     signature: &KeyOperationSignature,
     signing_input: &[u8],
@@ -3397,52 +3208,6 @@ async fn verify_keypackage_consumer_signature(
             })?;
             Ok(cached_keypackage.cloned())
         }
-        arkret_models_crypto::RecipientMlsDurableSigner::MinimalMetadataPairwise {
-            recipient_pairwise_verification_method,
-        } => {
-            let endpoint = arkret_models_crypto::MlsEndpointIdentity::minimal_metadata_pairwise(
-                owner.clone(),
-                recipient_pairwise_verification_method.clone(),
-            )
-            .map_err(|_| AppError::capability_denied("pairwise consume endpoint mismatch"))?;
-            let _ = endpoint;
-            let realm_id = realm_id.ok_or_else(|| {
-                crate::app_error!(
-                    FailedPrecondition,
-                    "pairwise consume requires exact Realm affinity",
-                )
-            })?;
-            ensure_pairwise_realm_affinity(
-                state,
-                owner,
-                recipient_pairwise_verification_method,
-                realm_id,
-                state.service_id(),
-            )
-            .await?;
-            if signature.kid.as_str() != recipient_pairwise_verification_method.as_str() {
-                return Err(AppError::capability_denied(
-                    "pairwise consume signature kid mismatch",
-                ));
-            }
-            let multibase = recipient_pairwise_verification_method
-                .as_str()
-                .split_once('#')
-                .and_then(|(controller, _)| controller.strip_prefix("did:key:"))
-                .ok_or_else(|| AppError::capability_denied("pairwise consume method invalid"))?;
-            let raw = arkret_canonical::decode_ed25519_multibase(multibase)
-                .map_err(|_| AppError::capability_denied("pairwise consume method invalid"))?;
-            let key = ed25519_dalek::VerifyingKey::from_bytes(&raw)
-                .map_err(|_| AppError::capability_denied("pairwise consume method invalid"))?;
-            if !crate::routing::identity::device_signing::ed25519_verify(
-                &key,
-                signing_input,
-                signature.sig.as_str(),
-            ) {
-                return Err(AppError::param_invalid("endpoint_signature_invalid"));
-            }
-            Ok(cached_keypackage.cloned())
-        }
     }
 }
 
@@ -3462,7 +3227,6 @@ fn keypackage_record_matches_consumer(
                 && session.actor == record.actor_id
                 && record.device_id.as_deref() == Some(recipient_device_id.as_str())
                 && record.endpoint_verification_method.is_none()
-                && record.intended_realm_id.is_none()
         }
         arkret_models_crypto::RecipientMlsDurableSigner::Agent {
             recipient_agent_id,
@@ -3475,26 +3239,8 @@ fn keypackage_record_matches_consumer(
                 && record.device_id.is_none()
                 && record.endpoint_verification_method.as_deref()
                     == Some(recipient_agent_verification_method.as_str())
-                && record.intended_realm_id.is_none()
                 && record.agent_key_authorize_event_id.as_deref()
                     == Some(agent_key_authorize_event_id.as_str())
-        }
-        arkret_models_crypto::RecipientMlsDurableSigner::MinimalMetadataPairwise {
-            recipient_pairwise_verification_method,
-        } => {
-            recipient_pairwise_verification_method
-                .as_str()
-                .split_once('#')
-                .and_then(|(controller, _)| arkret_wire::Did::new(controller.to_owned()).ok())
-                .and_then(|did| arkret_wire::project_did_to_core_id(&did).ok())
-                .is_some_and(|principal_id| principal_id.as_str() == record.actor_id)
-                && record.device_id.is_none()
-                && record.endpoint_verification_method.as_deref()
-                    == Some(recipient_pairwise_verification_method.as_str())
-                && record.intended_realm_id.as_deref()
-                    == Some(body.recipient_durable_receipt.realm_id.as_str())
-                && record.device_authorize_event_id.is_none()
-                && record.agent_key_authorize_event_id.is_none()
         }
     }
 }
@@ -3918,62 +3664,6 @@ async fn validate_agent_keypackage_leaf(
     validate_actor_keypackage_leaf(&owner, &public_key, key_package_bytes)
 }
 
-fn pairwise_keypackage_public_key(
-    principal: &arkret_wire::DidCoreId,
-    verification_method: &arkret_wire::DidUrl,
-) -> Result<[u8; 32], String> {
-    arkret_models_crypto::MlsEndpointIdentity::minimal_metadata_pairwise(
-        principal.clone(),
-        verification_method.clone(),
-    )
-    .map_err(|_| "claim_generation_mismatch".to_owned())?;
-    let controller = verification_method
-        .as_str()
-        .split_once('#')
-        .map(|(controller, _)| controller)
-        .ok_or_else(|| "claim_generation_mismatch".to_owned())?;
-    let multibase = controller
-        .strip_prefix("did:key:")
-        .ok_or_else(|| "claim_generation_mismatch".to_owned())?;
-    let public_key = arkret_canonical::decode_ed25519_multibase(multibase)
-        .map_err(|_| "claim_generation_mismatch".to_owned())?;
-    Ok(public_key)
-}
-
-fn verify_pairwise_keypackage_batch(
-    principal: &arkret_wire::DidCoreId,
-    verification_method: &arkret_wire::DidUrl,
-    signature: &KeyOperationSignature,
-    signing_input: &[u8],
-) -> Result<(), String> {
-    let public_key = pairwise_keypackage_public_key(principal, verification_method)?;
-    if signature.kid.as_str() != verification_method.as_str()
-        || signature
-            .signature_algorithm
-            .as_ref()
-            .is_some_and(|algorithm| algorithm.as_str() != "Ed25519")
-    {
-        return Err("claim_generation_mismatch".to_owned());
-    }
-    arkret_signatures::keypackages::verify_keypackage_signing_input(
-        &public_key,
-        verification_method.as_str(),
-        signing_input,
-        signature,
-    )
-    .map_err(|_| "endpoint_signature_invalid".to_owned())
-}
-
-fn validate_pairwise_keypackage_leaf(
-    principal: &arkret_wire::DidCoreId,
-    verification_method: &arkret_wire::DidUrl,
-    key_package_bytes: &[u8],
-) -> Result<(), String> {
-    let public_key = pairwise_keypackage_public_key(principal, verification_method)?;
-    let owner = arkret_wire::ActorId::service(principal.clone());
-    validate_actor_keypackage_leaf(&owner, &public_key, key_package_bytes)
-}
-
 /// The KeyPackage LeafNode must carry the owner's exact v1 BasicCredential,
 /// `UTF8(RFC8785_JCS(actor_id))` of the complete ActorId (never a collapsed
 /// principal, DID or device id), and be signed by the owner's authorized key
@@ -3996,22 +3686,6 @@ fn validate_actor_keypackage_leaf(
         return Err("claim_generation_mismatch".to_owned());
     }
     Ok(())
-}
-
-async fn ensure_pairwise_realm_affinity(
-    _state: &AppState,
-    _principal: &arkret_wire::DidCoreId,
-    _verification_method: &arkret_wire::DidUrl,
-    _realm_id: &RealmId,
-    _expected_service_id: &str,
-) -> Result<(), AppError> {
-    // There is no registered governance profile that could authorize this
-    // identity. A stale local realm_metadata bit cannot revive it.
-    Err(crate::app_error!(
-        FailedPrecondition,
-        "minimal-metadata pairwise Realm profile is retired",
-    )
-    .with_reason_code("claim_generation_mismatch"))
 }
 
 async fn validate_device_keypackage_leaf(
@@ -4418,24 +4092,7 @@ async fn current_keypackage_claim_trust_selector(
     principal: &arkret_wire::DidCoreId,
     target_device_ids: &BTreeSet<String>,
     intended_realm_id: Option<&str>,
-    pairwise_verification_method: Option<&str>,
 ) -> Result<KeyPackageTrustSelector, AppError> {
-    if let Some(verification_method) = pairwise_verification_method {
-        let realm_id = intended_realm_id.ok_or_else(|| {
-            crate::app_error!(FailedPrecondition, "pairwise claim requires Realm affinity",)
-                .with_reason_code("claim_generation_mismatch")
-        })?;
-        let method = arkret_wire::DidUrl::new(verification_method.to_owned())
-            .map_err(|_| AppError::param_invalid("pairwise verification method is invalid"))?;
-        let realm = RealmId::new(realm_id.to_owned())
-            .map_err(|_| AppError::param_invalid("pairwise Realm id is invalid"))?;
-        ensure_pairwise_realm_affinity(state, principal, &method, &realm, state.service_id())
-            .await?;
-        return Ok(KeyPackageTrustSelector::MinimalMetadataPairwise {
-            verification_method: verification_method.to_owned(),
-            intended_realm_id: realm_id.to_owned(),
-        });
-    }
     if let Some(binding) = current_agent_keypackage_trust_binding(state, principal).await? {
         if let Some(realm_id) = intended_realm_id {
             let agent = state
@@ -4586,8 +4243,7 @@ pub(crate) async fn has_claimable_realm_membership_keypackage(
     // paths continue to pass `Some(intended_realm_id)` and recheck effective
     // membership at commit time.
     let Ok(trust_selector) =
-        current_keypackage_claim_trust_selector(state, &principal, &target_device_ids, None, None)
-            .await
+        current_keypackage_claim_trust_selector(state, &principal, &target_device_ids, None).await
     else {
         return false;
     };
@@ -4628,7 +4284,6 @@ pub(crate) async fn claim_mimi_keypackage(
         principal,
         &target_device_ids,
         Some(realm_id),
-        None,
     )
     .await?;
     let now_secs = now().timestamp();
@@ -4811,23 +4466,7 @@ async fn keypackage_claim_record(
         principal_id.clone(),
         owner.account_id.station_id,
     ));
-    let pairwise_verification_method = if record.device_authorize_event_id.is_none()
-        && record.agent_key_authorize_event_id.is_none()
-    {
-        record
-            .endpoint_verification_method
-            .clone()
-            .map(arkret_wire::DidUrl::new)
-            .transpose()
-            .map_err(|error| AppError::internal(format!("pairwise method invalid: {error}")))?
-    } else {
-        None
-    };
-    let trust_binding = if pairwise_verification_method.is_none() {
-        Some(trust_binding_from_row(record)?)
-    } else {
-        None
-    };
+    let trust_binding = Some(trust_binding_from_row(record)?);
     let (device_id, agent_id, agent_verification_method) = if trust_binding
         .as_ref()
         .and_then(|binding| binding.agent_key_authorize_event_id.as_ref())
@@ -4868,7 +4507,6 @@ async fn keypackage_claim_record(
         device_id,
         agent_id,
         agent_verification_method,
-        pairwise_verification_method,
         keypackage,
         capabilities: record.capabilities.clone(),
         device_authorize_event_id: trust_binding
@@ -5186,20 +4824,16 @@ mod trust_binding_tests {
     #[test]
     fn agent_binding_is_an_exclusive_branch() {
         let event_id = "ak:event:AdkQ-RmB1a8zyc52yl9GWAsodQ_EUle1WAVZqbO7pc19";
-        let binding =
-            trust_binding_from_parts(None, Some(event_id.to_owned()), None, None, "invalid")
-                .unwrap();
+        let binding = trust_binding_from_parts(None, Some(event_id.to_owned()), "invalid").unwrap();
         assert_eq!(
             binding.agent_key_authorize_event_id.as_deref(),
             Some(event_id)
         );
-        assert!(trust_binding_from_parts(None, None, None, None, "invalid").is_err());
+        assert!(trust_binding_from_parts(None, None, "invalid").is_err());
         assert!(
             trust_binding_from_parts(
                 Some(event_id.to_owned()),
                 Some(event_id.to_owned()),
-                None,
-                None,
                 "invalid"
             )
             .is_err()
@@ -5217,7 +4851,6 @@ mod trust_binding_tests {
             actor_id: "ak:did_core:web:agent.example".into(),
             device_id: None,
             endpoint_verification_method: Some("did:web:agent.example#runtime-1".into()),
-            intended_realm_id: None,
             key_package_bytes: vec![],
             capabilities: vec![],
             capabilities_digest: format!("sha256:{}", "3".repeat(64)),
@@ -5242,7 +4875,6 @@ mod trust_binding_tests {
                 binding.agent_key_authorize_event_id.as_deref(),
                 Some(authorization)
             );
-            assert!(binding.pairwise_verification_method.is_none());
         }
         row.device_authorize_event_id = Some(authorization.into());
         assert!(trust_binding_from_keypackage(&row).is_err());
@@ -5373,7 +5005,6 @@ mod trust_binding_tests {
             device_id: Some(arkret_wire::DeviceId::new(device).unwrap()),
             agent_id: None,
             agent_verification_method: None,
-            pairwise_verification_method: None,
             keypackage: "AA".to_owned(),
             capabilities: Vec::new(),
             device_authorize_event_id: None,

@@ -522,7 +522,6 @@ fn claim_request(
         "claim_purpose": "realm_membership",
         "required_capabilities": ["ak.content.v1"],
         "expires_at": arkret_canonical::format_timestamp_canonical(signed_at + lifetime),
-        "timeout_ms": null,
         "service_binding": {"source_id": station, "destination_id": station},
         "requester_authorization": {
             "kind": "device",
@@ -564,6 +563,149 @@ async fn station_state(pool: &PgPool) -> (AppState, Arc<dyn PersistenceStore>) {
 #[inline(never)]
 fn heap_future<F: std::future::Future>(make: impl FnOnce() -> F) -> std::pin::Pin<Box<F>> {
     Box::pin(make())
+}
+
+/// Probe the closed upload contract through the registered production router.
+async fn assert_closed_upload_boundary(
+    client: &Member,
+    state: &AppState,
+    upload: &arkret_models_crypto::KeyPackagesUploadRequestBody,
+    key: &SigningKey,
+    database_url: &str,
+) -> anyhow::Result<arkret_models_crypto::KeyPackagesUploadRequestBody> {
+    let original = serde_json::to_value(upload)?;
+    let before = upload_durable_cut(database_url).await?;
+    let mut negatives = Vec::new();
+    for field in ["pairwise_verification_method", "intended_realm_id"] {
+        for value in [Value::Null, json!("retired")] {
+            let mut candidate = original.clone();
+            candidate[field] = value;
+            negatives.push((field.to_owned(), candidate));
+        }
+    }
+    for field in [
+        "device_id",
+        "agent_verification_method",
+        "agent_key_authorize_event_id",
+        "expires_at",
+        "strand_id",
+        "mls_group_id",
+    ] {
+        let mut candidate = original.clone();
+        candidate[field] = Value::Null;
+        negatives.push((format!("null_{field}"), candidate));
+    }
+    let mut mixed = original.clone();
+    mixed["device_id"] = serde_json::to_value(&client.device)?;
+    mixed["agent_verification_method"] = original["endpoint_signature"]["kid"].clone();
+    mixed["agent_key_authorize_event_id"] =
+        json!("ak:event:ARELvWOpF6BRrks3DlbQy-9XIE6aAQQumDQp7fA4ApeM");
+    negatives.push(("mixed_authority".to_owned(), mixed));
+    let mut no_endpoint = original.clone();
+    for field in [
+        "device_id",
+        "agent_verification_method",
+        "agent_key_authorize_event_id",
+    ] {
+        no_endpoint.as_object_mut().unwrap().remove(field);
+    }
+    negatives.push(("missing_endpoint".to_owned(), no_endpoint));
+    for algorithm in [Value::Null, json!("EdDSA")] {
+        let mut candidate = original.clone();
+        candidate["endpoint_signature"]["signature_algorithm"] = algorithm;
+        negatives.push(("invalid_signature_algorithm".to_owned(), candidate));
+    }
+    let mut candidate = original.clone();
+    candidate["endpoint_signature"]
+        .as_object_mut()
+        .unwrap()
+        .remove("signature_algorithm");
+    negatives.push(("missing_signature_algorithm".to_owned(), candidate));
+    let mut candidate = original.clone();
+    candidate["endpoint_signature"]["sig"] = json!("AA");
+    negatives.push(("invalid_signature_bytes".to_owned(), candidate));
+    let mut signed_optional = upload.unsigned();
+    signed_optional.expires_at = Some(arkret_canonical::normalize_timestamp_canonical(
+        chrono::Utc::now() + chrono::Duration::days(3),
+    ));
+    signed_optional.strand_id = Some(arkret_wire::StrandId::new(
+        "ak:strand:AY6DJbBwavsGTQuBZZiqqw9MVcqPZ8QX8invQ3i2kpi7",
+    )?);
+    signed_optional.mls_group_id = Some(
+        arkret_wire::MlsGroupId::new("_eWozxgdBxDHaOyjY_q0ZstYlzkfbmcnpTqLf9g2aDQ")
+            .map_err(anyhow::Error::msg)?,
+    );
+    signed_optional.keypackages[0].last_resort = Some(false);
+    let signature = arkret_signatures::keypackages::sign_keypackages_upload_request(
+        &signed_optional,
+        upload.endpoint_signature.kid.as_str(),
+        &key.to_bytes(),
+    )?;
+    let full = serde_json::to_value(signed_optional.into_signed(signature))?;
+    for field in ["expires_at", "strand_id", "mls_group_id"] {
+        let mut candidate = full.clone();
+        candidate.as_object_mut().unwrap().remove(field);
+        negatives.push((format!("unsigned_optional_{field}"), candidate));
+    }
+    let mut candidate = full.clone();
+    candidate["keypackages"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("last_resort");
+    negatives.push(("unsigned_entry_last_resort".to_owned(), candidate));
+    let mut reversed = original.clone();
+    reversed["keypackages"].as_array_mut().unwrap().reverse();
+    negatives.push(("reordered_entries".to_owned(), reversed));
+    let mut truncated = original.clone();
+    truncated["keypackages"].as_array_mut().unwrap().pop();
+    negatives.push(("truncated_entries".to_owned(), truncated));
+    let mut wrong_station = upload.unsigned();
+    wrong_station.actor_id = ActorId::account(AccountId::new(
+        upload.principal_id.clone(),
+        arkret_wire::DidCoreId::new("ak:did_core:web:another-station.example")?,
+    ));
+    let signature = arkret_signatures::keypackages::sign_keypackages_upload_request(
+        &wrong_station,
+        upload.endpoint_signature.kid.as_str(),
+        &key.to_bytes(),
+    )?;
+    negatives.push((
+        "signed_wrong_station".to_owned(),
+        serde_json::to_value(wrong_station.into_signed(signature))?,
+    ));
+    for (name, candidate) in negatives {
+        let response = client
+            .post(
+                state,
+                "/_arkret/self/keys/keypackages/upload",
+                arkret_wire::ServiceOperationId::SELF_KEYS_KEYPACKAGES_UPLOAD_CREATE_V1,
+                &candidate,
+            )
+            .await;
+        anyhow::ensure!(
+            matches!(
+                response.status,
+                StatusCode::FORBIDDEN | StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+            ),
+            "{name} was not refused: {:?} {}",
+            response.status,
+            String::from_utf8_lossy(&response.bytes)
+        );
+        anyhow::ensure!(
+            upload_durable_cut(database_url).await? == before,
+            "{name} wrote durable state"
+        );
+    }
+    Ok(serde_json::from_value(full)?)
+}
+
+async fn upload_durable_cut(database_url: &str) -> anyhow::Result<Value> {
+    let (client, connection) = tokio_postgres::connect(database_url, tokio_postgres::NoTls).await?;
+    let driver = tokio::spawn(async move { connection.await });
+    let cut: String = client.query_one("SELECT jsonb_build_object('inventory', (SELECT COALESCE(jsonb_agg(to_jsonb(k) ORDER BY id), '[]'::jsonb) FROM mls_key_packages k), 'claims', (SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY source_id, claim_request_id), '[]'::jsonb) FROM peer_keypackage_claims c), 'bindings', (SELECT COALESCE(jsonb_agg(to_jsonb(b)), '[]'::jsonb) FROM keypackage_claim_welcome_bindings b), 'welcomes', (SELECT COALESCE(jsonb_agg(to_jsonb(w)), '[]'::jsonb) FROM mls_welcome_deliveries w))::text", &[]).await?.get(0);
+    drop(client);
+    driver.await??;
+    Ok(serde_json::from_str(&cut)?)
 }
 
 #[tokio::test]
@@ -623,7 +765,6 @@ async fn mls_lifecycle_body() {
         .signed_key_packages_upload_request(
             &[first.clone(), second.clone(), third],
             bob.method.as_str(),
-            None,
         )
         .unwrap()
         .unsigned();
@@ -637,6 +778,9 @@ async fn mls_lifecycle_body() {
     )
     .unwrap();
     let upload = unsigned.into_signed(signature);
+    let upload = assert_closed_upload_boundary(&bob, &state, &upload, &bob.key, database.url())
+        .await
+        .unwrap();
     let uploaded = bob
         .post(
             &state,
@@ -669,6 +813,29 @@ async fn mls_lifecycle_body() {
         [0x51; 16],
         chrono::Duration::minutes(4),
     );
+    for value in [
+        serde_json::Value::Null,
+        serde_json::json!("did:key:z6Mkretired#z6Mkretired"),
+    ] {
+        let before = upload_durable_cut(database.url()).await.unwrap();
+        let mut retired = serde_json::to_value(&request).unwrap();
+        retired["target_pairwise_verification_method"] = value;
+        let rejected = alice
+            .post(
+                &state,
+                "/_arkret/self/keys/keypackages/claim",
+                arkret_wire::ServiceOperationId::SELF_KEYS_KEYPACKAGES_COMMAND_CLAIM_V1,
+                &retired,
+            )
+            .await;
+        assert_eq!(
+            rejected.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            String::from_utf8_lossy(&rejected.bytes)
+        );
+        assert_eq!(upload_durable_cut(database.url()).await.unwrap(), before);
+    }
     let claimed = alice.claim(&state, &request).await;
     assert_eq!(
         claimed.status,
@@ -788,23 +955,8 @@ async fn mls_lifecycle_body() {
     let add_binding =
         MlsGovernanceBindingPayload::new(scope.clone(), Some(genesis_ref.clone()), 0, 1, 0)
             .unwrap();
-    let claimed_record = arkret_models_crypto::MlsKeyPackageRecord {
-        keypackage_id: format!("ak:mls:kp:{}", uuid::Uuid::now_v7()),
-        actor_id: claim.actor_id.clone(),
-        endpoint: arkret_models_crypto::MlsEndpointIdentity::human_device(
-            bob.account.principal_id.clone(),
-            bob.device.clone(),
-        ),
-        keypackage: claim.keypackage.clone(),
-        keypackage_ref: arkret_wire::Hash::new(claim.keypackage_ref.clone()).unwrap(),
-        cipher_suites: vec![ACTIVE_SUITE.to_owned()],
-        capabilities: claim.capabilities.clone(),
-        state: arkret_models_crypto::MlsKeyPackageState::Claimed,
-        claim_id: Some(claim.claim_id.clone()),
-        created_at: chrono::Utc::now(),
-        expires_at: Some(claim.expires_at),
-        last_resort: false,
-    };
+    let claimed_record = arkret_mls::mls_key_package_record_from_claim(&claim).unwrap();
+    assert_eq!(claimed_record.actor_id, bob.actor);
     let add = alice_group
         .add_member_with_governance_binding(&claimed_record, &add_binding)
         .unwrap();
@@ -1027,6 +1179,29 @@ async fn mls_lifecycle_body() {
             .unwrap()
     };
     let digest = welcome.durable_receipt_digest().unwrap();
+    for value in [
+        serde_json::Value::Null,
+        serde_json::json!("did:key:z6Mkretired#z6Mkretired"),
+    ] {
+        let before = upload_durable_cut(database.url()).await.unwrap();
+        let mut retired = serde_json::to_value(consume(digest.clone(), 1)).unwrap();
+        retired["recipient_durable_receipt"]["recipient_pairwise_verification_method"] = value;
+        let rejected = bob
+            .post(
+                &state,
+                "/_arkret/self/keys/keypackages/consume",
+                arkret_wire::ServiceOperationId::SELF_KEYS_KEYPACKAGES_COMMAND_CONSUME_V1,
+                &retired,
+            )
+            .await;
+        assert_eq!(
+            rejected.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            String::from_utf8_lossy(&rejected.bytes)
+        );
+        assert_eq!(upload_durable_cut(database.url()).await.unwrap(), before);
+    }
     for (name, tampered) in [
         (
             "welcome_digest",

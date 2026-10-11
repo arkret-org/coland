@@ -6,6 +6,7 @@ use arkret_models_collaboration::events_payloads::event_wire::{
     ErasureTrigger, VerificationStub, VerificationStubScope, VerificationStubSubject,
 };
 use arkret_models_collaboration::governance::erasure::*;
+use diesel_async::RunQueryDsl as _;
 use salvo::prelude::*;
 
 use super::*;
@@ -482,10 +483,10 @@ async fn run(departure: Option<&str>) {
             .event,
         audit.authority_commit.event
     );
-    crate::routing::identity::account::lifecycle::enqueue_erasure_receipt_fanout(
+    crate::routing::identity::account::lifecycle::fanout_erasure_receipt(
         &source.state,
-        &[previous.event.realm_id.to_string()],
         &package,
+        None,
     )
     .await
     .unwrap();
@@ -795,10 +796,10 @@ async fn run(departure: Option<&str>) {
         &outstanding,
     ))
     .await;
-    crate::routing::identity::account::lifecycle::enqueue_erasure_receipt_fanout(
+    crate::routing::identity::account::lifecycle::fanout_erasure_receipt(
         &source.state,
-        &[previous.event.realm_id.to_string()],
         &outstanding,
+        None,
     )
     .await
     .unwrap();

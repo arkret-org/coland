@@ -232,10 +232,10 @@ async fn run_execution(
             &execution.account_authority_id,
         )
         .await?;
-        crate::routing::identity::account::lifecycle::fanout_account_status_erasure_receipt(
+        crate::routing::identity::account::lifecycle::fanout_erasure_receipt(
             state,
-            &execution.account_id,
             package,
+            Some(&execution.account_id),
         )
         .await?;
         execution.state = ExecutionState::FanoutEnqueued;

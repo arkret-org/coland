@@ -602,37 +602,28 @@ pub(crate) async fn execute_account_status_erasure(
     Ok(package)
 }
 
-pub(crate) async fn fanout_account_status_erasure_receipt(
+/// The deployment's independent receipt rail. Realm scope uses its durable
+/// destinations; Account erasure without a Realm keeps the exact Actor tuple.
+pub(crate) async fn fanout_erasure_receipt(
     state: &AppState,
-    account_id: &arkret_wire::AccountId,
     package: &ErasureReceiptPackage,
+    account_id: Option<&arkret_wire::AccountId>,
 ) -> Result<(), AppError> {
-    let peers = state
-        .persistence()
-        .historical_content_holders_for_actor(&arkret_wire::ActorId::account(account_id.clone()))
-        .await
-        .map_err(|error| {
-            AppError::internal(format!("historical Account erasure holders: {error}"))
+    let peers = if let Some(realm) = &package.receipt.scope.realm_id {
+        state
+            .persistence()
+            .historical_content_holders(std::slice::from_ref(realm))
+            .await
+    } else {
+        let account = account_id.ok_or_else(|| {
+            AppError::param_invalid("erasure scope lacks an exact Account or Realm")
         })?;
-    enqueue_erasure_receipt_to_targets(state, &peers, package).await
-}
-
-pub(crate) async fn enqueue_erasure_receipt_fanout(
-    state: &AppState,
-    affected_realms: &[String],
-    package: &ErasureReceiptPackage,
-) -> Result<(), AppError> {
-    let affected = affected_realms
-        .iter()
-        .cloned()
-        .map(arkret_wire::RealmId::new)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| AppError::internal(format!("erasure Realm identity: {error}")))?;
-    let peers = state
-        .persistence()
-        .historical_content_holders(&affected)
-        .await
-        .map_err(|error| AppError::internal(format!("historical erasure holders: {error}")))?;
+        state
+            .persistence()
+            .historical_content_holders_for_actor(&arkret_wire::ActorId::account(account.clone()))
+            .await
+    }
+    .map_err(|error| AppError::internal(format!("historical erasure holders: {error}")))?;
     enqueue_erasure_receipt_to_targets(state, &peers, package).await
 }
 

@@ -748,6 +748,145 @@ async fn admit(
 }
 
 #[test]
+fn snapshot_http_retention_preserves_state_and_rejects_oversized_cut_atomically() {
+    run_http_scenario(snapshot_retention_http_scenario);
+}
+
+async fn snapshot_retention_http_scenario() {
+    use diesel_async::RunQueryDsl;
+    let (state, pool) = coland_test_support::app_state_with_pool(AppConfig {
+        development_mode: true,
+        ..coland_test_support::app_config()
+    });
+    let account = ordinary_realm::human_profile::admit_for_station_did(
+        &pool,
+        state.service_did(),
+        "snapshot-retention-http",
+    )
+    .await;
+    let unit = ordinary_realm::bootstrap_unit_for_account(
+        &uuid::Uuid::now_v7().to_string(),
+        &account,
+        &state.service_did(),
+    );
+    let mut unit = ordinary_realm::source_bootstrap(&pool, unit).await;
+    for transaction in &mut unit.transactions {
+        seal_commit(&state, &mut transaction.commit);
+    }
+    state
+        .test_persistence()
+        .authority_commits()
+        .admit_ordinary_realm_bootstrap_unit(&unit, unit.transactions[0].commit.committed_at)
+        .await
+        .unwrap();
+    let parent = unit.transactions.last().unwrap();
+    let realm = parent.event.realm_id.clone();
+    let at = parent.commit.committed_at;
+    let actor = ActorId::account(account.clone());
+    let token = session(&state, &account, "snapshot-retention-http").await;
+    let strand = admit(&state, &pool, ordinary_realm::next_request_for_actor(parent,
+        EventKind::StrandCreate, actor.clone(), json!({"object":{"schema":"ak.schema.strand.v1","realm_id":realm,
+        "tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},"metadata":{"title":"Retention source"},"state":"active","created_by":actor,"created_at":arkret_canonical::format_timestamp_canonical(at)}}), at)).await;
+    let strand_id = arkret_wire::StrandId::from_event_id(&strand.authority_commit.event.event_id);
+    let (status, safe) = snapshot(&state, &token, &realm, None).await;
+    assert_eq!(status, StatusCode::OK, "{safe}");
+    let safe: arkret_wire::RealmStateSnapshot = serde_json::from_value(safe).unwrap();
+    let message = admit(&state, &pool, ordinary_realm::next_request_for_actor(
+        &strand.authority_commit, EventKind::MessageCreate, actor.clone(),
+        json!({"strand_id":strand_id,"track_name":"discussion","content":{"kind":"ak.content.text","body":"expired HTTP content","format":"plain"}}), at)).await;
+    let (status, unsafe_old) = snapshot(&state, &token, &realm, None).await;
+    assert_eq!(status, StatusCode::OK, "{unsafe_old}");
+    let unsafe_old: arkret_wire::RealmStateSnapshot = serde_json::from_value(unsafe_old).unwrap();
+    state
+        .test_persistence()
+        .retention_tombstones()
+        .put(&coland_storage::RetentionTombstoneRecord {
+            event_id: message.authority_commit.event.event_id.to_string(),
+            realm_id: realm.to_string(),
+            reason: "retention_policy.ttl".into(),
+            policy_ttl_seconds: 60,
+            expired_at: chrono::Utc::now(),
+            tombstoned_at: chrono::Utc::now(),
+            sealed: false,
+        })
+        .await
+        .unwrap();
+    let (status, value) = snapshot(&state, &token, &realm, None).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let current: arkret_wire::RealmStateSnapshot = serde_json::from_value(value).unwrap();
+    verify_snapshot(&state, &current);
+    assert_eq!(
+        current.visible_stream_heads,
+        unsafe_old.visible_stream_heads
+    );
+    assert_eq!(
+        current.retention_and_history_floor,
+        unsafe_old.retention_and_history_floor
+    );
+    assert!(!current.current_state_entries.iter().any(|row| matches!(
+        row,
+        arkret_wire::TypedCurrentRow::Value {
+            selector: arkret_wire::CurrentSelector::MessageRevision { .. },
+            ..
+        }
+    )));
+    assert_eq!(
+        current.current_state_entries.len() + 1,
+        unsafe_old.current_state_entries.len()
+    );
+    for old in [&safe, &current] {
+        let (status, value) = snapshot(&state, &token, &realm, Some(&old.snapshot_id)).await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        assert_eq!(
+            serde_json::from_value::<arkret_wire::RealmStateSnapshot>(value).unwrap(),
+            *old
+        );
+    }
+    let (status, refusal) = snapshot(&state, &token, &realm, Some(&unsafe_old.snapshot_id)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refusal}");
+    assert_eq!(
+        refusal["type"],
+        "https://arkret.org/problems/realm_state_snapshot_unavailable"
+    );
+
+    // Corrupt/legacy data can exceed a budget that normal admission rejects.
+    // The read must fail whole before persisting any signed object or issuance.
+    #[derive(diesel::QueryableByName)]
+    struct Count {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        value: i64,
+    }
+    let mut conn = pool.get().await.unwrap();
+    let count_sql = "SELECT (SELECT COUNT(*) FROM realm_state_snapshots) + (SELECT COUNT(*) FROM realm_state_snapshot_issuances) AS value";
+    let count = diesel::sql_query(count_sql)
+        .get_result::<Count>(&mut conn)
+        .await
+        .unwrap()
+        .value;
+    diesel::sql_query("UPDATE realm_bootstrap_current_results SET value=jsonb_set(value,'{title}',to_jsonb($2::text)) WHERE realm_id=$1 AND result_family='realm_profile'")
+        .bind::<diesel::sql_types::Text, _>(realm.as_str())
+        .bind::<diesel::sql_types::Text, _>("x".repeat(8 * 1024 * 1024))
+        .execute(&mut conn).await.unwrap();
+    drop(conn);
+    let (status, refusal) = snapshot(&state, &token, &realm, None).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{refusal}");
+    assert_eq!(
+        refusal["type"],
+        "https://arkret.org/problems/payload_too_large"
+    );
+    assert!(refusal.get("current_state_entries").is_none());
+    let mut conn = pool.get().await.unwrap();
+    assert_eq!(
+        diesel::sql_query(count_sql)
+            .get_result::<Count>(&mut conn)
+            .await
+            .unwrap()
+            .value,
+        count
+    );
+}
+
+#[test]
 fn sidecar_http_snapshot_discovery_and_bidirectional_scan_keep_private_coordinates() {
     run_http_scenario(sidecar_http_scenario);
 }

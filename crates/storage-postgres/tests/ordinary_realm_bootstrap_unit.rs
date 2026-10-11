@@ -3491,9 +3491,8 @@ async fn issued_snapshots_and_window_reservations_stay_within_their_caps() {
 /// disclosure decision. A retention-expired Message and a redacted Message
 /// keep their Commit slot as the withheld branch, so the page is still one
 /// contiguous verifiable chain, while the redaction itself is disclosed in
-/// full. A signed cut can no longer carry the expired content: `/head` and
-/// the window refuse the cut and the earlier issued object is withdrawn
-/// from by-ref reads.
+/// full. A signed cut omits only withdrawn content, preserving state and
+/// stream coordinates; old objects containing withdrawn content are unavailable.
 #[tokio::test]
 async fn account_scan_withholds_expired_and_redacted_messages_on_their_commits() {
     use arkret_wire::StreamScanDirection::After;
@@ -3527,7 +3526,7 @@ async fn account_scan_withholds_expired_and_redacted_messages_on_their_commits()
         .unwrap()
         .service_id;
     let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
-    let method = arkret_wire::DidUrl::new("did:web:station.example#notary-key").unwrap();
+    let method = snapshot_signer_for_issuer(&unit, &issuer);
     let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
         coland_services::authority_commit::build_signed_realm_state_snapshot(
             material,
@@ -3543,6 +3542,11 @@ async fn account_scan_withholds_expired_and_redacted_messages_on_their_commits()
     let strand_id = arkret_wire::StrandId::from_event_id(&strand.authority_commit.event.event_id);
     let default = set_default_strand_request(&strand, &strand_id, None);
     uow.commit_event(default.clone()).await.unwrap();
+    let safe_before = store
+        .issue_realm_state_snapshot_for_account(&realm_id, &creator, &issuer, &sign)
+        .await
+        .unwrap()
+        .unwrap();
     let expired = message_create_request(&default, &strand_id, "expired");
     uow.commit_event(expired.clone()).await.unwrap();
     let redacted = message_create_request(&expired, &strand_id, "redacted");
@@ -3569,17 +3573,24 @@ async fn account_scan_withholds_expired_and_redacted_messages_on_their_commits()
         serde_json::json!({ "message_id": redacted_message }),
     );
     uow.commit_event(redaction.clone()).await.unwrap();
-    let mut conn = pool.get().await.unwrap();
-    diesel::sql_query(
-        "INSERT INTO retention_tombstones \
-         (event_id, realm_id, reason, policy_ttl_seconds, expired_at, tombstoned_at) \
-         SELECT id, realm_id, 'retention_policy.ttl', 60, now(), now() \
-         FROM canonical_events WHERE envelope->>'event_id' = $1",
-    )
-    .bind::<Text, _>(expired.authority_commit.event.event_id.as_str())
-    .execute(&mut conn)
-    .await
-    .unwrap();
+    use coland_storage::RetentionTombstoneStore as _;
+    let tombstones = coland_storage_postgres::PgRetentionTombstoneStore { pool: pool.clone() };
+    // Exercise the real retention store for both a content carrier and a
+    // state carrier. Retention cannot discard the latter's current result.
+    for request in [&expired, &strand] {
+        tombstones
+            .put(&coland_storage::RetentionTombstoneRecord {
+                event_id: request.authority_commit.event.event_id.to_string(),
+                realm_id: realm_id.to_string(),
+                reason: "retention_policy.ttl".into(),
+                policy_ttl_seconds: 60,
+                expired_at: chrono::Utc::now(),
+                tombstoned_at: chrono::Utc::now(),
+                sealed: false,
+            })
+            .await
+            .unwrap();
+    }
 
     let page = scanned_page(
         store
@@ -3601,7 +3612,7 @@ async fn account_scan_withholds_expired_and_redacted_messages_on_their_commits()
                 Some(&page.committed_events[index - 1].commit().commit_id)
             );
         }
-        let withheld = [&expired, &redacted]
+        let withheld = [&expired, &redacted, &strand]
             .iter()
             .any(|request| request.authority_commit.commit.commit_id == item.commit().commit_id);
         match item {
@@ -3619,34 +3630,93 @@ async fn account_scan_withholds_expired_and_redacted_messages_on_their_commits()
         }
     }
 
-    // No signed cut may carry the expired content any more.
-    assert!(
-        store
-            .issue_realm_state_snapshot_for_account(&realm_id, &creator, &issuer, &sign)
-            .await
-            .is_err()
+    let after = store
+        .issue_realm_state_snapshot_for_account(&realm_id, &creator, &issuer, &sign)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.retention_and_history_floor,
+        before.retention_and_history_floor
     );
+    assert_eq!(after.visible_stream_heads[0].stream_position, last);
+    let messages = after
+        .current_state_entries
+        .iter()
+        .filter_map(|row| match row {
+            arkret_wire::TypedCurrentRow::Value {
+                selector: arkret_wire::CurrentSelector::MessageRevision { message_id },
+                ..
+            } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        messages,
+        vec![arkret_wire::MessageId::from_event_id(
+            &kept.authority_commit.event.event_id
+        )]
+    );
+    assert!(after.current_state_entries.iter().any(|row| matches!(row,
+        arkret_wire::TypedCurrentRow::Value { selector: arkret_wire::CurrentSelector::Strand { strand_id: id }, .. } if id == &strand_id)));
+    assert!(after.current_state_entries.iter().any(|row| matches!(row,
+        arkret_wire::TypedCurrentRow::Value { selector: arkret_wire::CurrentSelector::ObjectRedaction { target_ref }, .. } if target_ref == redacted_message.as_str())));
+    for snapshot in [&safe_before, &after] {
+        assert_eq!(
+            store
+                .issued_realm_state_snapshot(&realm_id, &creator, &snapshot.snapshot_id, &issuer)
+                .await
+                .unwrap(),
+            Some(snapshot.clone())
+        );
+    }
     let now_ms = chrono::Utc::now().timestamp_millis();
-    assert!(
+    let window = store
+        .freeze_account_realm_window(
+            &AccountRealmWindowRequest {
+                realm_id: realm_id.clone(),
+                account: creator.clone(),
+                issuer: issuer.clone(),
+                window_limit: 2,
+                window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
+                expires_at_ms: now_ms + 300_000,
+                now_ms,
+                byte_budget: 7 * 1024 * 1024,
+                delivered_heads: Vec::new(),
+                selected_stream_refs: None,
+            },
+            &sign,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(window.committed_events.len(), 2);
+    let backwards = scanned_page(
         store
-            .freeze_account_realm_window(
-                &AccountRealmWindowRequest {
-                    realm_id: realm_id.clone(),
-                    account: creator.clone(),
-                    issuer: issuer.clone(),
-                    window_limit: 2,
-                    window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
-                    expires_at_ms: now_ms + 300_000,
-                    now_ms,
-                    byte_budget: 7 * 1024 * 1024,
-                    delivered_heads: Vec::new(),
-                    selected_stream_refs: None,
-                },
-                &sign,
+            .scan_stream_for_account(
+                &scan_request(
+                    &realm_id,
+                    arkret_wire::StreamScanDirection::Before(None),
+                    100,
+                ),
+                &creator,
+                &issuer,
             )
             .await
-            .is_err()
+            .unwrap(),
     );
+    assert_eq!(
+        backwards.committed_events.len(),
+        page.committed_events.len()
+    );
+    for (actual, expected) in backwards
+        .committed_events
+        .iter()
+        .zip(page.committed_events.iter().rev())
+    {
+        assert_eq!(actual.commit().commit_id, expected.commit().commit_id);
+        assert_eq!(actual.reducer_input(), expected.reducer_input());
+    }
     assert!(matches!(
         store
             .issued_realm_state_snapshot(&realm_id, &creator, &before.snapshot_id, &issuer)

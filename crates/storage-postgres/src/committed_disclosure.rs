@@ -285,14 +285,7 @@ pub(crate) async fn disclose_in_connection(
         .iter()
         .map(|row| row.commit.commit_id.as_str().to_owned())
         .collect::<Vec<_>>();
-    let withheld = sql_query(WITHHELD_COMMITS_SQL)
-        .bind::<Array<Text>, _>(&commit_ids)
-        .load::<WithheldRow>(&mut *conn)
-        .await
-        .map_err(PersistenceError::database)?
-        .into_iter()
-        .map(|row| row.commit_id)
-        .collect::<std::collections::BTreeSet<_>>();
+    let withheld = withheld_commit_ids_in_connection(conn, &commit_ids).await?;
     Ok(rows
         .into_iter()
         .map(|row| {
@@ -307,6 +300,25 @@ pub(crate) async fn disclose_in_connection(
                 CommittedEventView::Full(row)
             }
         })
+        .collect())
+}
+
+/// Reuse the canonical byte withdrawal decision for content current carriers
+/// without fetching or disclosing their Event bytes.
+pub(crate) async fn withheld_commit_ids_in_connection(
+    conn: &mut AsyncPgConnection,
+    commit_ids: &[String],
+) -> PersistenceResult<std::collections::BTreeSet<String>> {
+    if commit_ids.is_empty() {
+        return Ok(Default::default());
+    }
+    Ok(sql_query(WITHHELD_COMMITS_SQL)
+        .bind::<Array<Text>, _>(commit_ids)
+        .load::<WithheldRow>(&mut *conn)
+        .await
+        .map_err(PersistenceError::database)?
+        .into_iter()
+        .map(|row| row.commit_id)
         .collect())
 }
 

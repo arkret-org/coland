@@ -4,13 +4,12 @@
 //! hidden scope objects, member rows, heads and floors are omitted together.
 //! Current rows retain their source stream and revision, including state
 //! below that stream's history floor. Message content is constrained by its
-//! original accepted scope, covering position and redaction overlay.
+//! original accepted scope, covering position, retention and redaction overlay.
 //! Reports and franking proofs additionally require exact target-scope
 //! moderator authority; a Realm-stream proof never broadens a Circle target.
 //!
-//! Every installed current family is audited. Unsupported families,
-//! retention-expired content and imported handoff tenures remain
-//! unproved, so those cuts cannot be signed. Bootstrap changes only its own
+//! Every installed current family is audited. Unsupported families and imported handoff tenures
+//! remain unproved, so those cuts cannot be signed. Bootstrap changes only its own
 //! join stream's history floor (`federation.md` section 4.1.1).
 
 use arkret_wire::{
@@ -227,6 +226,8 @@ struct KindRow {
 /// What one cut says about the Realm and the caller beyond its candidate
 /// material.
 pub(crate) struct DisclosureFacts {
+    /// Content carriers withheld by retention or redaction at this same cut.
+    pub(crate) withheld_content_commits: std::collections::BTreeSet<String>,
     /// Original accepted Message creation scopes, including revised carriers.
     pub(crate) message_streams: std::collections::BTreeMap<arkret_wire::MessageId, CommitStreamRef>,
     pub(crate) call_creations: std::collections::BTreeMap<arkret_wire::CallId, CallCreationFact>,
@@ -247,8 +248,7 @@ pub(crate) struct DisclosureFacts {
     pub(crate) caller_floor: Option<ReadableFloor>,
     /// An accepted Event whose kind is outside [`DISCLOSED_EVENT_KINDS`].
     pub(crate) undisclosed_kind: Option<String>,
-    /// A family without a disclosure rule holds a row of this Realm, or an
-    /// Event of this Realm is retention-expired.
+    /// A family without a disclosure rule holds a row of this Realm.
     pub(crate) undisclosed_family_row: bool,
 }
 
@@ -789,8 +789,7 @@ async fn disclosure_facts_in_connection(
             OR EXISTS(SELECT 1 FROM agent_selector_claim_current_results WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM pcr_device_authorization_current_results WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM pcr_device_revocation_proposals WHERE realm_id=$1) \
-            OR EXISTS(SELECT 1 FROM consent_current_results WHERE realm_id=$1) \
-            OR EXISTS(SELECT 1 FROM retention_tombstones WHERE realm_id=$1)) AS present",
+            OR EXISTS(SELECT 1 FROM consent_current_results WHERE realm_id=$1)) AS present",
     )
     .bind::<Text, _>(realm_id.as_str())
     .get_result::<PresenceRow>(&mut *conn)
@@ -1104,7 +1103,23 @@ async fn disclosure_facts_in_connection(
             }
         }
     }
+    let content_commits = material
+        .current_state_entries
+        .iter()
+        .filter_map(|row| match row {
+            TypedCurrentRow::Value {
+                selector: CurrentSelector::MessageRevision { .. },
+                revision,
+                ..
+            } => Some(revision.commit_id.as_str().to_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let withheld_content_commits =
+        crate::committed_disclosure::withheld_commit_ids_in_connection(conn, &content_commits)
+            .await?;
     Ok(DisclosureFacts {
+        withheld_content_commits,
         message_streams,
         call_creations,
         circle_floors,
@@ -2026,8 +2041,10 @@ pub(crate) fn disclose_to_account(
             row,
             TypedCurrentRow::Value {
                 selector: CurrentSelector::MessageRevision { message_id },
+                revision,
                 ..
             } if redacted.contains(message_id.as_str()) || below_floor.contains(message_id)
+                || facts.withheld_content_commits.contains(revision.commit_id.as_str())
         )
     });
     let mut stream_floors = vec![StreamHistoryFloor {
@@ -2262,6 +2279,7 @@ mod tests {
             },
         };
         let facts = DisclosureFacts {
+            withheld_content_commits: Default::default(),
             message_streams: [(
                 MessageId::from_event_id(&event_id(0x33)),
                 CommitStreamRef::Realm {
@@ -2345,6 +2363,7 @@ mod tests {
         material.visible_stream_heads[0].stream_position = 13;
         material.visible_stream_heads[0].commit_id = RealmCommitId::from_digest([14; 32]);
         let facts = DisclosureFacts {
+            withheld_content_commits: Default::default(),
             message_streams: [
                 (
                     MessageId::from_event_id(&event_id(0x33)),

@@ -431,12 +431,6 @@ struct MemberRevisionRow {
 }
 
 #[derive(QueryableByName)]
-struct PresenceRow {
-    #[diesel(sql_type = super::Bool)]
-    present: bool,
-}
-
-#[derive(QueryableByName)]
 struct CountRow {
     #[diesel(sql_type = super::BigInt)]
     present: i64,
@@ -685,7 +679,7 @@ async fn recheck_disclosure_in_connection(
         ));
     }
     let mut own_membership = None;
-    let mut message_targets = Vec::new();
+    let mut content_commits = Vec::new();
     for row in &snapshot.current_state_entries {
         let TypedCurrentRow::Value {
             selector,
@@ -755,10 +749,8 @@ async fn recheck_disclosure_in_connection(
             {
                 return Err(undisclosable("a Message row lies below the readable floor"));
             }
-            CurrentSelector::MessageRevision { message_id } => {
-                let message_id = message_id.as_str().to_owned();
-                message_targets.push(message_id.replacen("ak:message:", "ak:event:", 1));
-                message_targets.push(message_id);
+            CurrentSelector::MessageRevision { .. } => {
+                content_commits.push(revision.commit_id.as_str().to_owned());
             }
             CurrentSelector::MemberState { actor_id }
                 if actor_id == &actor
@@ -800,20 +792,12 @@ async fn recheck_disclosure_in_connection(
             "the Account membership changed after this object was issued",
         ));
     }
-    // A Message row carries its content, so it stops being disclosable once
-    // retention expires any Event of the Realm or an `object_redaction`
-    // assertion names it: the same decision that withholds its committed Event.
-    let withdrawn = sql_query(
-        "SELECT (EXISTS(SELECT 1 FROM retention_tombstones WHERE realm_id=$1) \
-            OR EXISTS(SELECT 1 FROM object_redaction_current_results redaction \
-                      WHERE redaction.realm_id=$1 AND redaction.target_ref = ANY($2))) AS present",
-    )
-    .bind::<Text, _>(snapshot.realm_id.as_str())
-    .bind::<super::Array<Text>, _>(&message_targets)
-    .get_result::<PresenceRow>(&mut *conn)
-    .await
-    .map_err(PersistenceError::database)?;
-    if withdrawn.present {
+    // A content carrier follows the same exact Commit withdrawal decision as
+    // scan. Expiry elsewhere does not invalidate a still-disclosable object.
+    if !crate::committed_disclosure::withheld_commit_ids_in_connection(conn, &content_commits)
+        .await?
+        .is_empty()
+    {
         return Err(undisclosable(
             "retention or a redaction withdrew a disclosed row",
         ));

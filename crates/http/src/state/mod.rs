@@ -47,7 +47,8 @@ pub use applet_completion::{
 pub(crate) use authority_contact::{commit_contact_event_unit, verify_contact_producer};
 #[cfg(feature = "test-support")]
 pub(crate) use authority_forward::{
-    admit_forwarded_event, forward_self_event, fresh_producer_device_evidence,
+    admit_forwarded_event, forward_self_event, fresh_producer_agent_evidence,
+    fresh_producer_device_evidence,
 };
 pub use authority_franking::spawn_pending_franking_sweeper;
 pub(crate) use authority_producer_validation::{

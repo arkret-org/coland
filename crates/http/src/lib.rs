@@ -286,3 +286,13 @@ pub async fn test_verified_agent_context_fixture(
         "recipient_account_id":recipient_account_id,"root":root,"dependencies":dependencies}),
     )
 }
+
+/// Exercise the real Agent Origin assembler, registered gate client and same-cut retention.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub async fn test_fresh_producer_agent_evidence(
+    state: &crate::state::AppState,
+    event: &arkret_wire::Event,
+) -> coland_services::ServiceResult<Option<arkret_models_identity::AgentProducerEvidence>> {
+    crate::state::fresh_producer_agent_evidence(state, event).await
+}

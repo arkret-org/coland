@@ -452,7 +452,7 @@ async fn request_origin_controller_gate(
 
 /// Assemble, independently verify, then retain a full Origin Agent sibling.
 /// The default storage port refuses until the same-cut PG assembler exists.
-async fn fresh_producer_agent_evidence(
+pub(crate) async fn fresh_producer_agent_evidence(
     state: &AppState,
     event: &Event,
 ) -> ServiceResult<Option<arkret_models_identity::AgentProducerEvidence>> {

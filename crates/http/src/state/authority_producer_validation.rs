@@ -76,8 +76,10 @@ pub(crate) async fn verify_self_event_producer_key(
         .await
         .map_err(|error| rejected(format!("authenticated Account unavailable: {error}")))?;
     if event.actor_id != actor || event.executed_by.is_some() {
-        return Err(rejected(
-            "self Event requires the exact authenticated actor without delegated execution",
+        return Err(ServiceError::protocol(
+            arkret_wire::ErrorCode::CapabilityDenied,
+            "self Event requires the exact authenticated actor without delegated execution"
+                .to_owned(),
         ));
     }
     let account = actor
@@ -193,7 +195,12 @@ pub(crate) async fn verify_self_event_producer_key(
         crate::metrics::SIGNATURE_SCHEME_ACCEPTED_BINDING,
         verified.is_ok(),
     );
-    verified.map_err(|error| rejected(format!("Event producer proof invalid: {error}")))?;
+    verified.map_err(|error| {
+        ServiceError::protocol(
+            arkret_wire::ErrorCode::SignatureInvalid,
+            format!("Event producer proof invalid: {error}"),
+        )
+    })?;
     Ok((guard, key))
 }
 

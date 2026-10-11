@@ -467,7 +467,7 @@ async fn resolve_identity(
         // or an organization governance quorum (identity-did.md §8.1–§8.2).
         // Spec: identity-did.md §3.4 + §4.2.1 + §7 + §8.
         let method_evidence = if did.starts_with("did:webvh:") {
-            run_webvh_resolution_checks(state, did).await?
+            run_webvh_resolution_checks(state, did, &record).await?
         } else {
             None
         };

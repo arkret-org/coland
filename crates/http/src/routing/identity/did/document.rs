@@ -21,6 +21,7 @@ pub(super) fn render_json_bytes(res: &mut Response, content_type: &str, value: &
 pub(super) async fn run_webvh_resolution_checks(
     state: &AppState,
     did: &str,
+    document: &WebvhDocumentRecord,
 ) -> Result<Option<IdentityMethodEvidence>, AppError> {
     let events = state.dids().log_events(did).await.map_err(|error| {
         tracing::error!(%error, %did, "failed to read webvh log during resolution checks");
@@ -86,16 +87,43 @@ pub(super) async fn run_webvh_resolution_checks(
             "durable did:webvh head digest does not match the verified log entry",
         ));
     }
-    let update_key = head
-        .payload
-        .pointer("/parameters/updateKeys/0")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
+    let did = Did::new(did.to_owned()).map_err(|error| {
+        crate::app_error!(
+            CurrentDidAuthorityUnavailable,
+            format!("verified did:webvh subject is invalid: {error}"),
+        )
+    })?;
+    // A valid history can end in deactivation, or its newest signed version
+    // can be later than this resolution. Neither is current control authority.
+    // Take updateKeys from the selected, fully verified native entry.
+    let current = state
+        .dids()
+        .resolve_webvh_state_at(&did, chrono::Utc::now())
+        .await
+        .map_err(|error| {
             crate::app_error!(
                 CurrentDidAuthorityUnavailable,
-                "verified did:webvh head has no active updateKeys[0]",
+                format!("current did:webvh control state is unavailable: {error}"),
             )
         })?;
+    if current.status != coland_services::identity::PinnedDidVersionStatus::Current
+        || current.version_id != version_id.as_str()
+        || current.log_head_digest != log_head_digest
+        || document.key_log_head.as_deref() != Some(log_head_digest.as_str())
+        || document.seq != persisted_head.seq
+        || document.did_document != current.document
+    {
+        return Err(crate::app_error!(
+            CurrentDidAuthorityUnavailable,
+            "did:webvh control state is not the same active verified head",
+        ));
+    }
+    let update_key = current.update_keys.first().ok_or_else(|| {
+        crate::app_error!(
+            CurrentDidAuthorityUnavailable,
+            "verified did:webvh control state has no active updateKeys[0]",
+        )
+    })?;
     let update_key = update_key.strip_prefix("did:key:").unwrap_or(update_key);
     let control_key_bytes =
         arkret_canonical::decode_ed25519_multibase(update_key).map_err(|error| {

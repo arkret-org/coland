@@ -474,8 +474,16 @@ fn agent_recipient_operation(method: &str, path: &str) -> Option<&'static str> {
         ("POST", "/_arkret/self/device_messages/ack") => {
             Some(ServiceOperationId::SELF_DEVICE_MESSAGES_COMMAND_ACK_V1)
         }
-        ("GET", "/_arkret/self/realm-state-snapshot/head") => {
+        ("GET", path) if path_template_matches("/_arkret/self/realm-state-snapshot/head", path) => {
             Some(ServiceOperationId::SELF_REALM_STATE_SNAPSHOT_READ_MANIFEST_HEAD_V1)
+        }
+        ("GET", path) if path_template_matches("/_arkret/self/realms/{realm_id}/streams", path) => {
+            Some(ServiceOperationId::SELF_REALM_READ_STREAMS_V1)
+        }
+        ("GET", path)
+            if path_template_matches("/_arkret/self/realm-state-snapshot/{snapshot_id}", path) =>
+        {
+            Some(ServiceOperationId::SELF_REALM_STATE_SNAPSHOT_READ_BY_REF_V1)
         }
         ("POST", "/_arkret/self/mls/group-state-material/query") => {
             Some(ServiceOperationId::SELF_MLS_READ_GROUP_STATE_MATERIAL_V1)
@@ -965,6 +973,21 @@ mod tests {
                 ServiceOperationId::SELF_REALM_STATE_SNAPSHOT_READ_MANIFEST_HEAD_V1,
             ),
             (
+                "GET",
+                "/_arkret/self/realm-state-snapshot/head/",
+                ServiceOperationId::SELF_REALM_STATE_SNAPSHOT_READ_MANIFEST_HEAD_V1,
+            ),
+            (
+                "GET",
+                "/_arkret/self/realms/ak:realm:example/streams",
+                ServiceOperationId::SELF_REALM_READ_STREAMS_V1,
+            ),
+            (
+                "GET",
+                "/_arkret/self/realm-state-snapshot/ak:realm_snapshot:example",
+                ServiceOperationId::SELF_REALM_STATE_SNAPSHOT_READ_BY_REF_V1,
+            ),
+            (
                 "POST",
                 "/_arkret/self/current-results/exact",
                 ServiceOperationId::SELF_CURRENT_RESULTS_READ_EXACT_V1,
@@ -1036,6 +1059,13 @@ mod tests {
             ("GET", "/_arkret/self/account/stream"),
             ("GET", "/_arkret/self/account/subscribe"),
             ("GET", "/_arkret/self/keys/backups"),
+            ("POST", "/_arkret/self/realms/ak:realm:example/streams"),
+            ("GET", "/_arkret/self/realms/ak:realm:example/streams/extra"),
+            (
+                "POST",
+                "/_arkret/self/realm-state-snapshot/ak:realm_snapshot:example",
+            ),
+            ("GET", "/_arkret/self/realm-state-snapshot/head/extra"),
             ("GET", "/_arkret/self/current-results/exact"),
             ("POST", "/_arkret/self/current-results"),
             ("POST", "/_arkret/self/current-results/exact/extra"),

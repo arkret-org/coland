@@ -390,6 +390,17 @@ async fn pending_agent_handshake_reads(
                 panic!("desired Agent must be able to verify its restricted handshakes before consume")
             };
             assert_eq!(page.committed_events.len(), 3);
+            let coland_storage::AccountRealmStreamList::Listed(streams) = store
+                .list_realm_streams_for_account(realm, agent, &controller.station_id)
+                .await
+                .unwrap()
+            else {
+                panic!("desired Agent must discover its restricted handshake stream")
+            };
+            let discovered = streams.iter().find(|row| row.stream_ref == stream).unwrap();
+            assert_eq!(discovered.readable_floor, page.readable_floor);
+            assert_eq!(discovered.head_commit_ref, context.authority_commit.commit.commit_id);
+            assert_eq!(discovered.next_position, 3);
             assert!(
                 matches!(&page.committed_events[0], CommittedEventView::Full(row) if row.event == genesis.authority_commit.event)
             );
@@ -1053,6 +1064,14 @@ async fn pending_sidecar_handshake_scenario() {
         .await
         .unwrap()
         .unwrap();
+    let coland_storage::AccountRealmStreamList::Listed(streams) = store
+        .list_realm_streams_for_account(realm_id, &agent, &controller.station_id)
+        .await
+        .unwrap()
+    else {
+        panic!("the Realm membership remains current")
+    };
+    assert!(!streams.iter().any(|row| row.stream_ref == stale.stream_ref));
     assert!(
         !snapshot
             .visible_stream_heads

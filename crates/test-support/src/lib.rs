@@ -73,6 +73,7 @@ fn leased_fixture_persistence_with_pool(
     let persistence: Arc<dyn PersistenceStore> = Arc::new(PgPersistenceStore::leased(leased));
     let stored = fixture_stored_service_identity(config, identity, signing_seed);
     let webvh_log = seed_webvh_log.then(|| fixture_service_webvh_log(config, signing_seed));
+    let serve_webvh = config.embedded_webvh_provider_enabled;
     let demo = config.seed_demo_data;
     let store = persistence.clone();
     block_on_lease_runtime(async move {
@@ -82,11 +83,35 @@ fn leased_fixture_persistence_with_pool(
             .await
             .expect("fixture service identity seed");
         if let Some(log) = webvh_log {
-            store
-                .webvh()
-                .append_log_event(log)
-                .await
-                .expect("fixture service WebVH history seed");
+            if serve_webvh {
+                // A serving fixture needs the exact signed inception document
+                // and log in one formal transaction, just like native startup.
+                let now = chrono::Utc::now();
+                let document = coland_storage::WebvhDocumentRecord {
+                    did: log.did.clone(),
+                    did_document: log.operation["state"].clone(),
+                    key_log_head: Some(log.event_digest.clone()),
+                    seq: log.seq,
+                    method_evidence: serde_json::json!({"version_id":log.operation["versionId"]}),
+                    fetched_at: now,
+                    expires_at: now,
+                    updated_at: now,
+                };
+                assert_eq!(
+                    store
+                        .webvh()
+                        .commit_log_operation(None, document, log, None)
+                        .await
+                        .expect("fixture service WebVH inception"),
+                    coland_storage::WebvhLogCommitOutcome::Accepted
+                );
+            } else {
+                store
+                    .webvh()
+                    .append_log_event(log)
+                    .await
+                    .expect("fixture service WebVH history seed");
+            }
         }
         if demo {
             seed_demo_data(store.as_ref()).await;

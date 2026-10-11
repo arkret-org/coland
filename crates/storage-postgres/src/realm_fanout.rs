@@ -778,10 +778,16 @@ pub(crate) async fn plan_realm_fanout_in_connection(
         )
         .map_err(internal)?;
         let id = format!("{idempotency_key}:{station}");
+        let peer_url = crate::service_route::cached_station_base_in_connection(
+            conn,
+            &station,
+            commit.committed_at,
+        )
+        .await?;
         let record = FederationOutboxRecord::realm_fanout(RealmFanoutOutboxInput {
             id: id.clone(),
             peer_id: station,
-            peer_url: None,
+            peer_url,
             endpoint: PEER_EVENTS_ENDPOINT.to_owned(),
             idempotency_key: idempotency_key.clone(),
             payload_json,

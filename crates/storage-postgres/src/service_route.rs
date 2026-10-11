@@ -23,6 +23,57 @@ struct JsonRow {
 }
 
 #[derive(QueryableByName)]
+struct CachedRouteRow {
+    #[diesel(sql_type = Jsonb)]
+    entry: serde_json::Value,
+    #[diesel(sql_type = Jsonb)]
+    method_state: serde_json::Value,
+}
+
+/// Choose only the initial transport state of an atomic Realm fanout intent.
+/// The dispatcher still resolves the current route and revalidates the frozen
+/// membership basis before sending. Cache loss never removes an obligation.
+pub(crate) async fn cached_station_base_in_connection(
+    conn: &mut diesel_async::AsyncPgConnection,
+    service_id: &DidCoreId,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<Option<String>> {
+    let row = sql_query(
+        "SELECT r.entry, m.method_state FROM service_route_cache r \
+         JOIN service_method_states m USING (service_id, service_kind) \
+         WHERE r.service_id=$1 AND r.service_kind='station' \
+           AND r.cache_expires_at > $2 AND NOT EXISTS (\
+             SELECT 1 FROM service_resolution_fork_quarantine q \
+             WHERE q.service_id=r.service_id AND q.service_kind=r.service_kind)",
+    )
+    .bind::<Text, _>(service_id.as_str())
+    .bind::<Timestamptz, _>(at)
+    .get_result::<CachedRouteRow>(&mut *conn)
+    .await
+    .optional()
+    .map_err(PersistenceError::database)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    // An undecodable replaceable cache is a miss, as in route_cache below.
+    let (Ok(route), Ok(floor)) = (
+        decode::<VerifiedServiceRoute>(row.entry),
+        decode::<ServiceMethodState>(row.method_state),
+    ) else {
+        return Ok(None);
+    };
+    Ok((route.service_id() == service_id
+        && route.service_kind() == "station"
+        && route.is_routable_at(at)
+        && floor.service_id == *service_id
+        && floor.service_kind == "station"
+        && route.did() == &floor.did
+        && route.method_history_head() == floor.method_history_head
+        && route.version_id() == floor.version_id)
+        .then(|| route.base_url().to_owned()))
+}
+
+#[derive(QueryableByName)]
 struct ExistsRow {
     #[diesel(sql_type = Bool)]
     found: bool,

@@ -5,6 +5,8 @@
 //! regression futures fit the ordinary test-thread stack in debug builds.
 #[path = "../../../storage-postgres/tests/support/historical_human.rs"]
 mod historical_human;
+#[path = "realm_terminal_fanout_tests.rs"]
+mod realm_terminal_fanout_tests;
 #[path = "realm_terminal_peer_tests.rs"]
 mod realm_terminal_peer_tests;
 
@@ -1132,12 +1134,20 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
 fn station_with_webvh(
     url: String,
 ) -> (AppState, PgPool, Arc<dyn coland_storage::PersistenceStore>) {
+    station_with_webvh_provider(url, false)
+}
+
+fn station_with_webvh_provider(
+    url: String,
+    embedded: bool,
+) -> (AppState, PgPool, Arc<dyn coland_storage::PersistenceStore>) {
     let mut external = coland_test_support::app_config();
     external.public_base_url = url.clone();
     external.notary_signing_key_seed = Some([83; 32]);
     external.seed_demo_data = false;
     external.development_mode = true;
     external.did_resolver_allow_methods.push("webvh".into());
+    external.embedded_webvh_provider_enabled = embedded;
     let (leased, pool) = coland_test_support::app_state_with_pool(external.clone());
     let local = crate::config::AppConfig {
         public_base_url: url,
@@ -1145,6 +1155,7 @@ fn station_with_webvh(
         seed_demo_data: false,
         development_mode: true,
         did_resolver_allow_methods: external.did_resolver_allow_methods.clone(),
+        embedded_webvh_provider_enabled: embedded,
         ..crate::config::AppConfig::test_default()
     };
     assert_eq!(local.trust_domain, external.trust_domain);

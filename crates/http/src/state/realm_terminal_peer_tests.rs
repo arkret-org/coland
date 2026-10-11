@@ -2,7 +2,9 @@
 //! context. Transport signature middleware is outside this test's boundary.
 use super::*;
 
-async fn terminal_persistent_rows(pool: &coland_storage_postgres::PgPool) -> serde_json::Value {
+pub(super) async fn terminal_persistent_rows(
+    pool: &coland_storage_postgres::PgPool,
+) -> serde_json::Value {
     use diesel_async::RunQueryDsl as _;
     #[derive(diesel::QueryableByName)]
     struct Table {
@@ -15,7 +17,7 @@ async fn terminal_persistent_rows(pool: &coland_storage_postgres::PgPool) -> ser
         value: serde_json::Value,
     }
     let mut conn = pool.get().await.unwrap();
-    let tables = diesel::sql_query("SELECT tablename::text AS tablename FROM pg_tables WHERE schemaname='public' AND (tablename LIKE '%current_results' OR tablename IN ('canonical_events','realm_commits','realm_authorities','federation_outbox','event_federation_outbox','replica_stream_anchors','replica_authorization_rows','replica_authorization_cuts','account_summary_current','account_summary_versions','account_summary_clock','current_result_heads','current_result_versions','direct_conversation_founding_slots')) ORDER BY tablename")
+    let tables = diesel::sql_query("SELECT tablename::text AS tablename FROM pg_tables WHERE schemaname='public' AND (tablename LIKE '%current_results' OR tablename IN ('canonical_events','realm_commits','realm_authorities','federation_outbox','event_federation_outbox','replica_stream_anchors','replica_authorization_rows','replica_authorization_cuts','account_summary_current','account_summary_versions','account_summary_clock','current_result_heads','current_result_versions','direct_conversation_founding_slots','agent_producer_signer_keys','account_device_signer_evidence','account_device_committed_evidence','forwarded_producer_device_evidence','forwarded_producer_agent_evidence','governance_unscoped_signer_evidence')) ORDER BY tablename")
         .load::<Table>(&mut *conn).await.unwrap();
     let mut snapshot = serde_json::Map::new();
     for table in tables {

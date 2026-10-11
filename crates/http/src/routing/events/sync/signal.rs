@@ -28,6 +28,9 @@ use super::events_query::ndjson_line;
 use super::subscribe::account_subscribe_session_or_render;
 use crate::state::{AppState, EventNotification};
 
+#[cfg(feature = "conformance-harness")]
+mod emission_probe;
+
 /// Default lifetime of one cursorless Signal connection. Reconnection may lose frames;
 /// the relay never promises catch-up or delivery.
 const SIGNAL_SUBSCRIBE_DEFAULT_WAIT_MS: u64 = 30_000;
@@ -1018,24 +1021,34 @@ pub(crate) async fn admitted_signal_frame(
         .map_err(structural_error)?;
     // A remote directory lookup may have crossed a membership or TTL change.
     // Repeat the session and governance gates at the actual frame boundary.
-    let current_actor =
-        crate::routing::identity::session_actor::validated_session_actor(state, session).await?;
-    admit_signal_outer(
-        state,
-        envelope.sender_actor_id.route_service_id().as_str(),
-        &envelope,
-    )
-    .await?;
-    let current =
-        verify_signal_scope_authority(state, &envelope, &envelope.sender_actor_id).await?;
-    if current_actor.as_account_id() != Some(&authority.recipient_account_id)
-        || !current.recipient_actors.contains(&current_actor)
-    {
-        return Err(crate::app_error!(
-            SignalClassDenied,
-            "Signal recipient is no longer eligible"
-        ));
+    #[cfg(feature = "conformance-harness")]
+    let probe = emission_probe::pause(state, &envelope).await?;
+    let decision = async {
+        let current_actor =
+            crate::routing::identity::session_actor::validated_session_actor(state, session)
+                .await?;
+        admit_signal_outer(
+            state,
+            envelope.sender_actor_id.route_service_id().as_str(),
+            &envelope,
+        )
+        .await?;
+        let current =
+            verify_signal_scope_authority(state, &envelope, &envelope.sender_actor_id).await?;
+        if current_actor.as_account_id() != Some(&authority.recipient_account_id)
+            || !current.recipient_actors.contains(&current_actor)
+        {
+            return Err(crate::app_error!(
+                SignalClassDenied,
+                "Signal recipient is no longer eligible"
+            ));
+        }
+        Ok(())
     }
+    .await;
+    #[cfg(feature = "conformance-harness")]
+    emission_probe::record(probe.as_deref(), &envelope, &decision)?;
+    decision?;
     Ok(SignalStreamFrame::signal(envelope, authority))
 }
 

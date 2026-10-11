@@ -3142,15 +3142,23 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<bool> {
         let mut conn = pg_conn(&self.pool).await?;
-        crate::realm_fanout::fanout_still_owed_in_connection(
-            &mut conn,
-            event,
-            local_service_id,
-            peer,
-            witnesses,
-            at,
-        )
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *conn)
+                .await?;
+            crate::realm_fanout::fanout_still_owed_in_connection(
+                conn,
+                event,
+                local_service_id,
+                peer,
+                witnesses,
+                at,
+            )
+            .await
+            .map_err(Into::into)
+        })
         .await
+        .map_err(PgTransactionError::into_persistence)
     }
 
     async fn install_committed_replica(
@@ -3374,6 +3382,9 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *conn).await?;
+            // The durable opening member proves the Station's prefix, not the
+            // identity of every later hosted submitter. Bind the own leave to
+            // that Account's latest accepted membership predecessor instead.
             let row = sql_query(
                 "SELECT e.envelope,c.commit_json,f.circle_leave_parent_revision,f.original_submission_json AS submission_json, \
                  f.accepted_commit_json AS accepted_json,k.producer_source_fact AS fact_json, \
@@ -3388,25 +3399,34 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                        WHERE source_stream_ref->>'circle_id'=circle_id) m \
                    ON m.realm_id=c.realm_id AND m.member_id=$2 AND m.source_stream_ref=c.stream_ref \
                  JOIN replica_stream_anchors a ON a.realm_id=c.realm_id AND a.stream_key=c.stream_key \
-                 JOIN realm_commits jc ON jc.commit_id=a.join_commit_id \
+                 JOIN realm_commits opening ON opening.commit_id=a.join_commit_id \
+                 JOIN canonical_events oe ON oe.pk=opening.event_pk AND oe.state='committed' \
+                 JOIN LATERAL (SELECT prior.* FROM realm_commits prior \
+                   JOIN canonical_events pe ON pe.pk=prior.event_pk AND pe.state='committed' \
+                   WHERE prior.realm_id=c.realm_id AND prior.stream_key=c.stream_key AND prior.stream_ref=c.stream_ref \
+                     AND prior.stream_position<c.stream_position \
+                     AND ((pe.kind='ak.invite.accept' AND pe.envelope->'actor_id'=$8) \
+                       OR (pe.kind IN ('ak.member.state','ak.circle.member.state') \
+                           AND pe.envelope->'payload'->'member_id'=$8)) \
+                   ORDER BY prior.stream_position DESC LIMIT 1) jc ON true \
                  JOIN canonical_events j ON j.pk=jc.event_pk \
                  JOIN agent_producer_signer_keys k ON k.commit_id=c.commit_id \
                  WHERE e.id=$1 AND e.state='committed' AND j.state='committed' \
                    AND c.commit_id=$3 AND c.realm_id=$4 AND c.stream_ref=$5 AND c.stream_position=$6 \
                    AND m.membership='leave' AND m.current_commit_id=c.commit_id \
                    AND m.current_stream_position=c.stream_position \
-                   AND a.member_account_id=$7 AND a.anchor_commit_id IS NOT NULL \
+                   AND a.member_account_id->>'station_id'=$7::jsonb->>'station_id' AND a.anchor_commit_id IS NOT NULL \
+                   AND opening.realm_id=c.realm_id AND opening.stream_key=c.stream_key AND opening.stream_ref=c.stream_ref \
+                   AND opening.stream_position<=jc.stream_position \
+                   AND oe.envelope->'actor_id'=jsonb_build_object('kind','account','account_id',a.member_account_id) \
+                   AND ((oe.kind='ak.invite.accept' AND c.stream_ref->>'kind'='realm') \
+                     OR (oe.kind IN ('ak.member.state','ak.circle.member.state') \
+                       AND oe.envelope->'payload'->>'membership'='join' \
+                       AND oe.envelope->'payload'->'member_id'=oe.envelope->'actor_id')) \
                    AND jc.realm_id=c.realm_id AND jc.stream_key=c.stream_key AND jc.stream_ref=c.stream_ref \
                    AND jc.stream_position<c.stream_position \
                    AND f.original_submission_json IS NOT NULL AND f.accepted_commit_json IS NOT NULL \
-                   AND k.producer_source_fact IS NOT NULL \
-                   AND NOT EXISTS (SELECT 1 FROM realm_commits later JOIN canonical_events le ON le.pk=later.event_pk \
-                       WHERE later.stream_key=c.stream_key AND later.stream_position>jc.stream_position \
-                         AND later.stream_position<c.stream_position AND le.state='committed' \
-                         AND le.envelope->>'kind' IN ('ak.member.state','ak.invite.accept','ak.circle.member.state') \
-                         AND ((le.envelope->>'kind'='ak.invite.accept' AND le.envelope->'actor_id'=$8) \
-                           OR (le.envelope->>'kind' IN ('ak.member.state','ak.circle.member.state') \
-                               AND le.envelope->'payload'->'member_id'=$8)))"
+                   AND k.producer_source_fact IS NOT NULL"
             ).bind::<Binary,_>(event.event_id.token_bytes().to_vec())
              .bind::<Text,_>(actor.to_string()).bind::<Text,_>(commit.commit_id.as_str())
              .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(&stream).map_err(PersistenceError::database)?)

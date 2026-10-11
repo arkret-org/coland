@@ -1506,8 +1506,8 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
     let scan = StreamScanRequest {
         realm_id: realm.clone(),
         stream_ref: commit.stream_ref.clone(),
-        direction: StreamScanDirection::After(None),
-        limit: 128,
+        direction: StreamScanDirection::Before(Some(commit.stream_position + 1)),
+        limit: 1,
     };
     let coland_storage::PeerStreamScan::Page(page) = source
         .scan_stream_for_peer(
@@ -1723,11 +1723,12 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
     let opening_scan = StreamScanRequest {
         realm_id: realm.clone(),
         stream_ref: commit.stream_ref.clone(),
-        direction: StreamScanDirection::After(None),
-        limit: 128,
+        direction: StreamScanDirection::Before(Some(bob_commit.stream_position + 1)),
+        limit: 1,
     };
     let continuous_scan = StreamScanRequest {
         direction: StreamScanDirection::After(Some(commit.stream_position)),
+        limit: 128,
         ..opening_scan.clone()
     };
     let coland_storage::PeerStreamScan::Page(opening_page) = source
@@ -2217,8 +2218,8 @@ async fn accepted_own_leave_returns_original_bound_result_after_terminal_members
     let scan = StreamScanRequest {
         realm_id: realm.clone(),
         stream_ref: commit.stream_ref.clone(),
-        direction: StreamScanDirection::After(None),
-        limit: 128,
+        direction: StreamScanDirection::Before(Some(commit.stream_position + 1)),
+        limit: 1,
     };
     let coland_storage::PeerStreamScan::Page(page) = source
         .scan_stream_for_peer(
@@ -2856,10 +2857,12 @@ async fn circle_own_leave_bound_result_cases(
         let scan = StreamScanRequest {
             realm_id: event.realm_id.clone(),
             stream_ref: commit.stream_ref.clone(),
-            direction: StreamScanDirection::After(
-                (state == "leave").then_some(previous.commit.stream_position),
-            ),
-            limit: 128,
+            direction: if state == "leave" {
+                StreamScanDirection::After(Some(previous.commit.stream_position))
+            } else {
+                StreamScanDirection::Before(Some(commit.stream_position + 1))
+            },
+            limit: if state == "leave" { 128 } else { 1 },
         };
         let coland_storage::PeerStreamScan::Page(page) = source
             .scan_stream_for_peer(
@@ -3121,10 +3124,12 @@ async fn circle_cleanup_parent_rejoin(
         let scan = StreamScanRequest {
             realm_id: event.realm_id.clone(),
             stream_ref: commit.stream_ref.clone(),
-            direction: StreamScanDirection::After(
-                (membership == "leave").then_some(previous.commit.stream_position),
-            ),
-            limit: 128,
+            direction: if membership == "leave" {
+                StreamScanDirection::After(Some(previous.commit.stream_position))
+            } else {
+                StreamScanDirection::Before(Some(commit.stream_position + 1))
+            },
+            limit: if membership == "leave" { 128 } else { 1 },
         };
         let coland_storage::PeerStreamScan::Page(page) = source
             .scan_stream_for_peer(

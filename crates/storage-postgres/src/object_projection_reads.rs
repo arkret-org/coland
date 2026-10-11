@@ -94,6 +94,29 @@ pub(crate) fn current_source_sql(row: &str, selector: &str) -> String {
     )
 }
 
+/// Restart caches retain their verified snapshot provenance after the live
+/// authorization cut expires. This fallback grants no current read or write
+/// authority and must not be used by the canonical query paths below.
+fn hydration_source_sql(row: &str, selector: &str) -> String {
+    let live = current_source_sql(row, selector);
+    format!(
+        "COALESCE({live}, \
+         (SELECT r.source_stream_ref FROM replica_authorization_rows r \
+          JOIN replica_stream_anchors a ON a.realm_id=r.realm_id \
+          JOIN realm_commits opening ON opening.commit_id=a.join_commit_id \
+            AND opening.realm_id=a.realm_id AND opening.stream_key=a.stream_key \
+            AND opening.stream_ref=r.source_stream_ref \
+          WHERE r.realm_id={row}.realm_id AND r.selector={selector} \
+            AND r.current_commit_id={row}.current_commit_id \
+            AND r.current_stream_position={row}.current_stream_position \
+            AND r.value={row}.value AND r.source_stream_ref->>'realm_id'=r.realm_id \
+            AND a.anchor_commit_id IS NOT NULL \
+            AND r.current_stream_position<=a.anchor_stream_position \
+            AND (r.current_stream_position<a.anchor_stream_position \
+                 OR r.current_commit_id=a.anchor_commit_id)))"
+    )
+}
+
 #[async_trait::async_trait]
 impl ObjectCurrentSnapshotStore for PgObjectCurrentSnapshotStore {
     async fn snapshot(&self) -> PersistenceResult<ObjectCurrentSnapshot> {
@@ -112,9 +135,9 @@ impl ObjectCurrentSnapshotStore for PgObjectCurrentSnapshotStore {
                 return Err(corrupt("Space current has orphan sibling family").into());
             }
             let realm_source = "jsonb_build_object('kind','realm','realm_id',s.realm_id)";
-            let space_source = current_source_sql("s", "jsonb_build_object('kind','space','space_id',s.space_id)");
-            let parent_source = current_source_sql("p", "jsonb_build_object('kind','space_parent','space_id',p.space_id)");
-            let policy_source = current_source_sql("c", "jsonb_build_object('kind','space_child_scope_policy','space_id',c.space_id)");
+            let space_source = hydration_source_sql("s", "jsonb_build_object('kind','space','space_id',s.space_id)");
+            let parent_source = hydration_source_sql("p", "jsonb_build_object('kind','space_parent','space_id',p.space_id)");
+            let policy_source = hydration_source_sql("c", "jsonb_build_object('kind','space_child_scope_policy','space_id',c.space_id)");
             let spaces = diesel::sql_query(format!(
                 "SELECT s.space_id AS id,s.realm_id, \
                  s.value || jsonb_build_object('parent_space_id',p.value->'parent_space_id', \
@@ -130,7 +153,7 @@ impl ObjectCurrentSnapshotStore for PgObjectCurrentSnapshotStore {
                  LEFT JOIN space_child_scope_policy_current_results c ON c.realm_id=s.realm_id AND c.space_id=s.space_id \
                  ORDER BY s.realm_id,s.space_id",
             )).load::<CurrentObjectRow>(&mut *conn).await?;
-            let strand_source = current_source_sql("s", "jsonb_build_object('kind','strand','strand_id',s.strand_id)");
+            let strand_source = hydration_source_sql("s", "jsonb_build_object('kind','strand','strand_id',s.strand_id)");
             let strands = diesel::sql_query(format!(
                 "SELECT s.strand_id AS id,s.realm_id,s.value, \
                  {strand_source} AS source_stream_ref FROM strand_current_results s \
@@ -557,6 +580,81 @@ mod tests {
         assert!(
             store.snapshot().await.is_err(),
             "a current revision above the cut is unproved"
+        );
+
+        // A revoked live cut cannot erase the already verified bootstrap
+        // provenance or prevent the entire Station from restarting.
+        diesel::sql_query("DELETE FROM replica_authorization_cuts WHERE realm_id=$1")
+            .bind::<Text, _>(realm.as_str())
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        let source = serde_json::to_value(&head.stream_ref).unwrap();
+        let opening_id = RealmCommitId::from_digest([9; 32]);
+        let key = crate::authority_commit::stream_key(&head.stream_ref).unwrap();
+        diesel::sql_query("INSERT INTO realm_commits(commit_id,realm_id,stream_key,stream_ref,stream_position,governance_generation,commit_json,committed_at) VALUES($1,$2,$3,$4,0,0,$5,$6)")
+            .bind::<Text,_>(opening_id.as_str()).bind::<Text,_>(realm.as_str())
+            .bind::<Text,_>(&key).bind::<Jsonb,_>(&source)
+            .bind::<Jsonb,_>(serde_json::json!({"stream_ref":source}))
+            .bind::<Timestamptz,_>(chrono::Utc::now())
+            .execute(&mut *conn).await.unwrap();
+        diesel::sql_query("INSERT INTO replica_stream_anchors(stream_key,realm_id,join_commit_id,member_account_id,anchor_commit_id,anchor_stream_position,anchored_at) VALUES($1,$2,$3,'{}'::jsonb,$4,$5,$6)")
+            .bind::<Text,_>(&key).bind::<Text,_>(realm.as_str())
+            .bind::<Text,_>(opening_id.as_str()).bind::<Text,_>(head.commit_id.as_str())
+            .bind::<BigInt,_>(head.stream_position as i64)
+            .bind::<Timestamptz,_>(chrono::Utc::now())
+            .execute(&mut *conn).await.unwrap();
+        assert_eq!(
+            store.snapshot().await.unwrap().strands[0].id.as_ref(),
+            Some(&id)
+        );
+        assert!(
+            crate::replica_authorization::verified_head(&mut conn, &head.stream_ref)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let live = current_source_sql(
+            "s",
+            "jsonb_build_object('kind','strand','strand_id',s.strand_id)",
+        );
+        let live_read: crate::ExistsRow = diesel::sql_query(format!(
+            "SELECT EXISTS(SELECT 1 FROM strand_current_results s WHERE s.realm_id=$1 AND {live} IS NOT NULL) AS present"
+        )).bind::<Text,_>(realm.as_str()).get_result(&mut *conn).await.unwrap();
+        assert!(
+            !live_read.present,
+            "historical cache evidence cannot restore a live cut"
+        );
+
+        diesel::sql_query("UPDATE strand_current_results SET value=jsonb_set(value,'{metadata,title}','\"forged\"') WHERE strand_id=$1")
+            .bind::<Text,_>(id.as_str()).execute(&mut *conn).await.unwrap();
+        assert!(
+            store.snapshot().await.is_err(),
+            "an anchor cannot cover another value"
+        );
+        diesel::sql_query("UPDATE strand_current_results SET value=$2 WHERE strand_id=$1")
+            .bind::<Text, _>(id.as_str())
+            .bind::<Jsonb, _>(&value)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        diesel::sql_query(
+            "UPDATE replica_stream_anchors SET anchor_commit_id=$2 WHERE realm_id=$1",
+        )
+        .bind::<Text, _>(realm.as_str())
+        .bind::<Text, _>(opening_id.as_str())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        assert!(
+            store.snapshot().await.is_err(),
+            "equal-position provenance requires the exact anchored Commit"
+        );
+        diesel::sql_query("UPDATE replica_stream_anchors SET anchor_commit_id=NULL,anchor_stream_position=NULL,anchored_at=NULL WHERE realm_id=$1")
+            .bind::<Text,_>(realm.as_str()).execute(&mut *conn).await.unwrap();
+        assert!(
+            store.snapshot().await.is_err(),
+            "pending bootstrap is not verified cache provenance"
         );
     }
 }

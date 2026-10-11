@@ -225,14 +225,13 @@ pub(crate) async fn require_ordinary_member(
     member: &arkret_wire::ActorId,
 ) -> PersistenceResult<()> {
     require_ordinary_realm(conn, realm_id).await?;
-    if let Some(account) = member.as_account_id() {
-        if crate::realm_authorization_cut::is_owned_agent_in_connection(conn, realm_id, account)
+    if let Some(account) = member.as_account_id()
+        && crate::realm_authorization_cut::is_owned_agent_in_connection(conn, realm_id, account)
             .await?
-        {
-            return Err(unsupported(
-                "Agent membership needs its controller binding admission",
-            ));
-        }
+    {
+        return Err(unsupported(
+            "Agent membership needs its controller binding admission",
+        ));
     }
     Ok(())
 }

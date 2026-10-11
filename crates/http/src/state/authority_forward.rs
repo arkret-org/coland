@@ -661,7 +661,7 @@ async fn require_live_forward(state: &AppState, event: &arkret_wire::Event) -> S
     let parent = arkret_wire::CommitStreamRef::Realm {
         realm_id: event.realm_id.clone(),
     };
-    for checked in std::iter::once(&parent).chain((&stream != &parent).then_some(&stream)) {
+    for checked in std::iter::once(&parent).chain((stream != parent).then_some(&stream)) {
         if state
             .authority_commits()
             .replica_stream_has_hosted_member(checked, &state.service_core_id())

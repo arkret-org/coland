@@ -6144,7 +6144,7 @@ fn relation_snapshot_base(
                     "title": "Private relation", "display":{"short_name":"Private-relation","color_token":"blue","symbol":{"glyph":"lock"}},
                     "directory_visibility":"members", "join_rule":"public", "history_access":"since_join",
                     "state":"active", "created_by":arkret_wire::ActorId::account(creator.clone()),
-                    "created_at":unit.transactions[0].commit.committed_at,
+                    "created_at":arkret_canonical::format_timestamp_canonical(unit.transactions[0].commit.committed_at),
                 }
             }),
         );

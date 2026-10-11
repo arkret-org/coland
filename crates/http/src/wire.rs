@@ -633,6 +633,9 @@ pub fn describe(
             // Exact by-ref read of a Snapshot this Station issued to the
             // caller at `/head`, re-proved for disclosure at the read cut.
             "ak.operation_bundle.station.snapshot_exact_read.v1".to_owned(),
+            // The Station issues this proof independently of a third-party
+            // provider's complete token handoff and delivery capabilities.
+            "ak.operation_bundle.station.third_party_invite_acceptance_attestation.v1".to_owned(),
             "ak.operation_bundle.station.tus_upload.v1".to_owned(),
             ];
             if websocket_binding.is_some() {
@@ -1005,6 +1008,7 @@ mod tests {
             arkret_wire::ServiceOperationId::PeerRealmJoinReadBootstrapV1,
             arkret_wire::ServiceOperationId::SelfRealmStateSnapshotReadManifestHeadV1,
             arkret_wire::ServiceOperationId::SelfRealmStateSnapshotReadByRefV1,
+            arkret_wire::ServiceOperationId::SelfThirdPartyInviteReadAcceptanceAttestationV1,
         ] {
             assert!(
                 description
@@ -1040,6 +1044,9 @@ mod tests {
         assert!(bundles.contains(&json!("ak.operation_bundle.station.describe.v1")));
         assert!(bundles.contains(&json!(
             "ak.operation_bundle.station.device_pairing_handoff.v1"
+        )));
+        assert!(bundles.contains(&json!(
+            "ak.operation_bundle.station.third_party_invite_acceptance_attestation.v1"
         )));
         assert!(!bundles.contains(&json!(
             "ak.operation_bundle.station.third_party_invite_handoff.v1"

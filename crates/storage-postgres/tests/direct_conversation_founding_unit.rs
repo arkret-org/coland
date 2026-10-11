@@ -667,7 +667,7 @@ async fn founding_unit(
             "metadata":{"title":"Direct conversation"},
             "state":"active",
             "created_by":shape.author,
-            "created_at":at
+            "created_at":arkret_canonical::format_timestamp_canonical(at)
         }}),
         Vec::new(),
         at,
@@ -2571,7 +2571,7 @@ async fn profile_admission_table_refuses_in_registered_precedence_with_zero_writ
                     unique_event_id("request"), unique_event_id("response")
                 ]},
                 "initial_exact_pair_group_state_ref":unique_event_id("group-state"),
-                "created_at":at
+                "created_at":arkret_canonical::format_timestamp_canonical(at)
             }),
         ))
         .await,

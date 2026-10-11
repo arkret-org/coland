@@ -1677,13 +1677,7 @@ async fn authorize_capability_gated_event_inner(
     Ok(cut)
 }
 
-pub(crate) fn authorize_message_create_in_connection<'a>(
-    conn: &'a mut AsyncPgConnection,
-    event: &'a arkret_wire::Event,
-    attributed: &'a arkret_wire::Event,
-    commit: &'a arkret_wire::RealmCommit,
-    prepared: Option<&'a coland_storage::EventApprovalCommit>,
-) -> std::pin::Pin<
+type MessageCreateAuthorizationFuture<'a> = std::pin::Pin<
     Box<
         dyn std::future::Future<
                 Output = PersistenceResult<(
@@ -1693,7 +1687,15 @@ pub(crate) fn authorize_message_create_in_connection<'a>(
             > + Send
             + 'a,
     >,
-> {
+>;
+
+pub(crate) fn authorize_message_create_in_connection<'a>(
+    conn: &'a mut AsyncPgConnection,
+    event: &'a arkret_wire::Event,
+    attributed: &'a arkret_wire::Event,
+    commit: &'a arkret_wire::RealmCommit,
+    prepared: Option<&'a coland_storage::EventApprovalCommit>,
+) -> MessageCreateAuthorizationFuture<'a> {
     Box::pin(async move {
         lock_realm_authorization_cut(conn, &event.realm_id).await?;
         let cut = RealmAuthorizationCut::read_for_event(conn, attributed).await?;

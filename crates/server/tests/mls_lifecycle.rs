@@ -701,7 +701,7 @@ async fn assert_closed_upload_boundary(
 
 async fn upload_durable_cut(database_url: &str) -> anyhow::Result<Value> {
     let (client, connection) = tokio_postgres::connect(database_url, tokio_postgres::NoTls).await?;
-    let driver = tokio::spawn(async move { connection.await });
+    let driver = tokio::spawn(connection);
     let cut: String = client.query_one("SELECT jsonb_build_object('inventory', (SELECT COALESCE(jsonb_agg(to_jsonb(k) ORDER BY id), '[]'::jsonb) FROM mls_key_packages k), 'claims', (SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY source_id, claim_request_id), '[]'::jsonb) FROM peer_keypackage_claims c), 'bindings', (SELECT COALESCE(jsonb_agg(to_jsonb(b)), '[]'::jsonb) FROM keypackage_claim_welcome_bindings b), 'welcomes', (SELECT COALESCE(jsonb_agg(to_jsonb(w)), '[]'::jsonb) FROM mls_welcome_deliveries w))::text", &[]).await?.get(0);
     drop(client);
     driver.await??;

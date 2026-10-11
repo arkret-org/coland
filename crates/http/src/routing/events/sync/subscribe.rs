@@ -222,6 +222,58 @@ pub(super) async fn account_response(
             {
                 Ok(true) => {}
                 outcome => {
+                    if matches!(outcome, Ok(false)) {
+                        match current_details::continuation_recoverable(
+                            &state,
+                            account,
+                            &body,
+                            &after_cursor,
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                if !stream_session_current(&state, &session, grant.as_deref()).await
+                                {
+                                    render_error(
+                                        res,
+                                        StatusCode::UNAUTHORIZED,
+                                        "unauthorized",
+                                        "session authority is no longer current",
+                                    );
+                                    return;
+                                }
+                                let wait = depot
+                                    .get_typed::<coland_http::openapi_routes::WaitForSyncToken>()
+                                    .ok()
+                                    .map(|wait| wait.0.as_str());
+                                if let Err(error) =
+                                    account_read_inputs_current(&state, &session, &body, wait).await
+                                {
+                                    render_account_cursor_error(res, error, false);
+                                    return;
+                                }
+                                let details = arkret_wire::AccountRevisionStaleProblem::new(
+                                    body.after
+                                        .clone()
+                                        .expect("validated continuation has after"),
+                                )
+                                .expect("validated cursor satisfies the continuation schema");
+                                crate::error::render_problem_envelope(
+                                    res,
+                                    StatusCode::CONFLICT,
+                                    arkret_wire::Problem::account_revision_stale(
+                                        "verified serving prefix is recovering its accepted head",
+                                        details,
+                                    ),
+                                );
+                                return;
+                            }
+                            Ok(false) => {}
+                            Err(error) => {
+                                tracing::warn!(%error, "Account continuation recovery is unproved");
+                            }
+                        }
+                    }
                     if let Err(error) = outcome {
                         tracing::warn!(%error, "Account continuation minimum head proof unavailable");
                     }

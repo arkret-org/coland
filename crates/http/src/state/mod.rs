@@ -66,8 +66,8 @@ pub(crate) use member_identity::MemberIdentityEventRecord;
 pub use notification::{
     EventBroadcast, EventNotification, EventNotificationKind, EventNotificationRelay, Mutex,
 };
-pub(crate) use replica_anchor::refresh_account_snapshot;
 pub use replica_anchor::spawn_pending_anchor_sweeper;
+pub(crate) use replica_anchor::{account_continuation_recoverable, refresh_account_snapshot};
 pub(crate) use service_route_fetcher::VerifiedBindingRouteFetcher;
 
 mod authority_mimi_unit;

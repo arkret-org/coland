@@ -98,6 +98,76 @@ pub(super) async fn continuation_heads_covered(
     Ok(true)
 }
 
+/// Classify only a completely verified, currently disclosed remote prefix.
+/// The verifier has no installation or issuance side effects.
+pub(super) async fn continuation_recoverable(
+    state: &AppState,
+    account: &arkret_wire::AccountId,
+    body: &SyncRequestBody,
+    after: &SyncCursor,
+) -> Result<bool, String> {
+    let Some(filter) = body.filter.as_ref() else {
+        return Ok(false);
+    };
+    let mut lag = false;
+    let mut covered = Vec::new();
+    let mut disclosures = Vec::new();
+    for realm in filter.realm_ids.iter().flatten() {
+        let Some(progress) = after.detail_positions.get(realm.as_str()) else {
+            continue;
+        };
+        let selection = realm_selection(filter, realm);
+        let (heads, _) = selected_visible_heads(&progress.stream_heads, realm, &selection);
+        if heads.is_empty() {
+            continue;
+        }
+        let material = state
+            .authority_commits()
+            .realm_state_snapshot_material_for_account(realm, account)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or("the continuation has no current Account disclosure")?;
+        disclosures.push((realm, material));
+        if !state
+            .authority_commits()
+            .account_continuation_heads_covered(realm, account, &heads)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            lag |= crate::state::account_continuation_recoverable(state, realm, account, &heads)
+                .await?;
+        } else {
+            covered.push((realm, heads));
+        }
+    }
+    for (realm, heads) in covered {
+        if !state
+            .authority_commits()
+            .account_continuation_heads_covered(realm, account, &heads)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return Err(
+                "a covered Account disclosure changed during continuation verification".into(),
+            );
+        }
+    }
+    // A later Realm's peer verification must not outlive an earlier cut.
+    for (realm, material) in disclosures {
+        if state
+            .authority_commits()
+            .realm_state_snapshot_material_for_account(realm, account)
+            .await
+            .map_err(|error| error.to_string())?
+            .as_ref()
+            != Some(&material)
+        {
+            return Err("an Account disclosure changed during continuation verification".into());
+        }
+    }
+    Ok(lag)
+}
+
 /// Whether a delivered window must be replaced by a newly frozen one.
 fn selected_visible_heads(
     visible: &[arkret_wire::CommitStreamHead],

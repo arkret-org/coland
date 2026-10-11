@@ -182,6 +182,36 @@ pub(crate) async fn refresh_account_snapshot(
     realm_id: &RealmId,
     account: &arkret_wire::AccountId,
 ) -> Result<arkret_wire::RealmStateSnapshot, String> {
+    let (snapshot, ..) = verified_account_snapshot(state, realm_id, account).await?;
+    if let Err(error) = state
+        .authority_commits()
+        .install_verified_account_snapshot(account, &state.service_core_id(), &snapshot)
+        .await
+    {
+        spawn_converge_stream(
+            state,
+            CommitStreamRef::Realm {
+                realm_id: realm_id.clone(),
+            },
+        );
+        return Err(temporary(error));
+    }
+    Ok(snapshot)
+}
+
+/// Verify the current disclosure without archiving or installing its cut.
+async fn verified_account_snapshot(
+    state: &AppState,
+    realm_id: &RealmId,
+    account: &arkret_wire::AccountId,
+) -> Result<
+    (
+        arkret_wire::RealmStateSnapshot,
+        LocatedRealmAuthority,
+        coland_storage::RealmStateSnapshotMaterial,
+    ),
+    String,
+> {
     use arkret_wire::{CurrentSelector, TypedCurrentRow};
 
     if account.station_id != state.service_core_id() {
@@ -282,19 +312,186 @@ pub(crate) async fn refresh_account_snapshot(
             "the governing Snapshot does not bind the hosted Account's current join".to_owned(),
         );
     }
-    if let Err(error) = commits
-        .install_verified_account_snapshot(account, &state.service_core_id(), &snapshot)
-        .await
-    {
-        spawn_converge_stream(
-            state,
-            CommitStreamRef::Realm {
-                realm_id: realm_id.clone(),
-            },
-        );
-        return Err(temporary(error));
+    Ok((snapshot, located, material))
+}
+
+/// Prove recoverable lag through the current governor, without installing a
+/// snapshot, predecessor, notification, or cursor. A low head alone is not proof.
+pub(crate) async fn account_continuation_recoverable(
+    state: &AppState,
+    realm_id: &RealmId,
+    account: &arkret_wire::AccountId,
+    minimum_heads: &[CommitStreamHead],
+) -> Result<bool, String> {
+    const MAX_PAGES: usize = 16;
+    const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+    let (snapshot, mut located, original_material) =
+        verified_account_snapshot(state, realm_id, account).await?;
+    let governance = located.authority.current_service_id().clone();
+    if governance == state.service_core_id() {
+        return Err("a governor cannot prove lost history from its own incomplete store".into());
     }
-    Ok(snapshot)
+    let commits = state.authority_commits();
+    let mut pages_left = MAX_PAGES;
+    let mut total_bytes = 0usize;
+    let mut lag = false;
+    let mut original_heads = Vec::new();
+    for required in minimum_heads {
+        let remote = snapshot
+            .visible_stream_heads
+            .iter()
+            .find(|head| head.stream_ref == required.stream_ref)
+            .ok_or("the required stream is not currently disclosed")?;
+        let floor = snapshot
+            .retention_and_history_floor
+            .stream_floors
+            .iter()
+            .find(|floor| floor.stream_ref == required.stream_ref)
+            .ok_or("the required stream has no authenticated readable floor")?;
+        let mut held = commits
+            .held_stream_head_commit(&required.stream_ref)
+            .await
+            .map_err(temporary)?
+            .ok_or("the required stream has no verified local prefix")?;
+        if required.stream_ref.realm_id() != realm_id
+            || remote.stream_position < required.stream_position
+            || held.stream_position < floor.oldest_position
+            || held.stream_position > remote.stream_position
+            || (held.stream_position == remote.stream_position
+                && held.commit_id != remote.commit_id)
+        {
+            return Err("the continuation is outside a provable recoverable prefix".into());
+        }
+        ensure_historical_method_key(state, &mut located, &held.signature).await?;
+        located
+            .authority
+            .verify_commit(&held, &located.keys)
+            .map_err(temporary)?;
+        original_heads.push(held.clone());
+        if held.stream_position >= required.stream_position {
+            if !commits
+                .account_continuation_heads_covered(
+                    realm_id,
+                    account,
+                    std::slice::from_ref(required),
+                )
+                .await
+                .map_err(temporary)?
+            {
+                return Err("the local continuation identity is missing or inconsistent".into());
+            }
+            continue;
+        }
+        lag = true;
+        let mut target_verified = false;
+        while held.stream_position < remote.stream_position {
+            if pages_left == 0 {
+                return Err("continuation recovery page budget exhausted".into());
+            }
+            pages_left -= 1;
+            let request = StreamScanRequest {
+                realm_id: realm_id.clone(),
+                stream_ref: required.stream_ref.clone(),
+                direction: StreamScanDirection::After(Some(held.stream_position)),
+                limit: SCAN_PAGE_LIMIT,
+            };
+            let body = post_peer(state, &governance, SCAN_PATH, &request, SCAN_MAX_BYTES).await?;
+            total_bytes = total_bytes
+                .checked_add(body.len())
+                .ok_or("continuation recovery byte budget overflow")?;
+            if total_bytes > MAX_TOTAL_BYTES {
+                return Err("continuation recovery byte budget exhausted".into());
+            }
+            let page: arkret_models_collaboration::authority_commit::PeerStreamScanOutcome =
+                serde_json::from_slice(&body).map_err(temporary)?;
+            page.validate_for_request(&request).map_err(temporary)?;
+            if page.committed_events.is_empty() {
+                return Err("the governor did not supply the recoverable tail".into());
+            }
+            for item in &page.committed_events {
+                let commit = item.commit();
+                if commit.stream_position > remote.stream_position {
+                    break;
+                }
+                let fact = page
+                    .producer_signer_facts
+                    .iter()
+                    .find(|entry| entry.target.commit_id == commit.commit_id)
+                    .map(|entry| &entry.producer_signer_fact);
+                ensure_historical_method_key(state, &mut located, &commit.signature).await?;
+                match item {
+                    CommittedEventView::Full(view) => {
+                        verify_committed_event_receipt_with_source(
+                            state.persistence(),
+                            &view.event,
+                            commit,
+                            CommitContinuity::After(&held),
+                            &located.authority,
+                            &located.keys,
+                            &state.service_core_id(),
+                            state.projections().realm_digest_suite(realm_id.as_str()),
+                            fact,
+                        )
+                        .await
+                        .map_err(temporary)?;
+                    }
+                    CommittedEventView::Withheld(_) => {
+                        located
+                            .authority
+                            .verify_commit(commit, &located.keys)
+                            .map_err(temporary)?;
+                        commit.validate_successor_of(&held).map_err(temporary)?;
+                    }
+                }
+                if commit.stream_position == required.stream_position {
+                    if commit.commit_id != required.commit_id {
+                        return Err("the requested position belongs to another Commit".into());
+                    }
+                    target_verified = true;
+                }
+                held = commit.clone();
+            }
+            if !page.truncated && held.stream_position < remote.stream_position {
+                return Err("the recoverable tail ended before the signed disclosure head".into());
+            }
+        }
+        if !target_verified || held.commit_id != remote.commit_id {
+            return Err(
+                "the verified prefix does not reach both continuation and current cut".into(),
+            );
+        }
+    }
+    // Reject a tenure or held-prefix replacement during network verification.
+    if commits
+        .current_authority(realm_id)
+        .await
+        .map_err(temporary)?
+        .as_ref()
+        != Some(&located.current_authority())
+    {
+        return Err("the local authority changed during continuation verification".into());
+    }
+    for original in original_heads {
+        if commits
+            .held_stream_head_commit(&original.stream_ref)
+            .await
+            .map_err(temporary)?
+            .as_ref()
+            != Some(&original)
+        {
+            return Err("the local prefix changed during continuation verification".into());
+        }
+    }
+    if commits
+        .realm_state_snapshot_material_for_account(realm_id, account)
+        .await
+        .map_err(temporary)?
+        .as_ref()
+        != Some(&original_material)
+    {
+        return Err("the Account disclosure cut changed during continuation verification".into());
+    }
+    Ok(lag)
 }
 
 async fn post_peer<T: serde::Serialize>(

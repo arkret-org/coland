@@ -174,6 +174,7 @@ pub(crate) async fn commit_message_create_current_result_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if event.kind != arkret_wire::EventKind::MessageCreate {
         return Ok(());
@@ -253,12 +254,15 @@ pub(crate) async fn commit_message_create_current_result_in_connection(
     // capabilities.md §2.2: joining does not grant writing. The same-cut
     // evaluator admits a joined author holding `ak.message.create`, the root
     // controller through its effective `ak.realm.owner`.
-    let cut = crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-        conn,
-        &attributed,
-        commit.committed_at,
-    )
-    .await?;
+    let (cut, accepted_approvals) =
+        crate::realm_authorization_cut::authorize_message_create_in_connection(
+            conn,
+            event,
+            &attributed,
+            commit,
+            prepared,
+        )
+        .await?;
     if matches!(event.scope_ref, arkret_wire::ScopeRef::Circle { .. }) {
         crate::circle_current_results::require_active_author_in_connection(conn, event, commit)
             .await?;
@@ -312,7 +316,7 @@ pub(crate) async fn commit_message_create_current_result_in_connection(
     if !mls_carrier {
         require_plaintext_message_service(conn, &event.realm_id, commit).await?;
     }
-    if let Some(poll) = poll
+    let response = if let Some(poll) = poll
         && crate::poll_state::admit_poll_in_connection(
             conn,
             event,
@@ -323,9 +327,17 @@ pub(crate) async fn commit_message_create_current_result_in_connection(
         .await?
     {
         // A response is an audit Event and a PollState input, never a MessageState.
-        return Ok(());
+        true
+    } else {
+        false
+    };
+    if !response {
+        insert_message_create_current(conn, event, commit, &payload).await?;
     }
-    insert_message_create_current(conn, event, commit, &payload).await
+    crate::approval_admission::consume_and_audit(
+        conn, event, commit, &accepted_approvals,
+        &serde_json::json!({"message_create_admission":true,"strand_id":typed.strand_id,"scope_ref":event.scope_ref}),
+    ).await
 }
 
 async fn insert_message_create_current(

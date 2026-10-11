@@ -1006,19 +1006,76 @@ impl RealmAuthorizationCut {
         } else {
             CapabilityActionId::PolicyAction
         };
+        Box::pin(self.require_action_with_approvals(
+            conn,
+            event,
+            commit,
+            prepared,
+            action,
+            target,
+            &OperationFacts::default(),
+        ))
+        .await
+    }
+
+    pub(crate) async fn require_message_create_with_approvals(
+        &self,
+        conn: &mut AsyncPgConnection,
+        event: &arkret_wire::Event,
+        attributed: &arkret_wire::Event,
+        commit: &arkret_wire::RealmCommit,
+        prepared: Option<&coland_storage::EventApprovalCommit>,
+    ) -> PersistenceResult<Vec<crate::approval_admission::QualifiedApproval>> {
+        self.require_open_lifecycle(event)?;
+        self.require_governed_member(&event.kind)?;
+        if self.profile_authorized() {
+            self.require_event_in_connection(conn, attributed, commit.committed_at)
+                .await?;
+            return Ok(Vec::new());
+        }
+        let (target, mut facts) = self.event_operation(attributed);
+        self.complete_applet_facts_in_connection(conn, attributed, &mut facts)
+            .await?;
+        // Attribution selects the authorization cut; detached evidence always
+        // binds the original producer-signed Event, including its provenance.
+        Box::pin(self.require_action_with_approvals(
+            conn,
+            event,
+            commit,
+            prepared,
+            CapabilityActionId::MessageCreate,
+            &target,
+            &facts,
+        ))
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Approval admission binds the exact Event and current resource facts on one connection."
+    )]
+    async fn require_action_with_approvals(
+        &self,
+        conn: &mut AsyncPgConnection,
+        event: &arkret_wire::Event,
+        commit: &arkret_wire::RealmCommit,
+        prepared: Option<&coland_storage::EventApprovalCommit>,
+        action: CapabilityActionId,
+        target: &WireResourceSelector,
+        facts: &OperationFacts,
+    ) -> PersistenceResult<Vec<crate::approval_admission::QualifiedApproval>> {
         let actions = Self::unconditional_actions(&event.kind);
         let owner =
             self.actor_is_root_controller() && actions.contains(&CapabilityActionId::REALM_OWNER);
-        let facts = OperationFacts::default();
         if matches!(
-            self.evaluate(&actions, target, &facts, commit.committed_at),
+            self.evaluate(&actions, target, facts, commit.committed_at),
             GrantEvaluation::Denied | GrantEvaluation::Quarantined
         ) {
             self.admit_actions_in_connection(
                 conn,
                 &actions,
                 target,
-                &facts,
+                facts,
                 owner,
                 event.event_id.as_str(),
                 commit.committed_at,
@@ -1026,7 +1083,7 @@ impl RealmAuthorizationCut {
             .await?;
         }
         let (markers, mut accepted) = self
-            .prepare_grant_approvals(conn, event, commit, prepared, action, target, &facts)
+            .prepare_grant_approvals(conn, event, commit, prepared, action, target, facts)
             .await?;
         let evaluation = coland_storage::evaluate_grants_with_verified_approvals(
             &AuthorizationOperation {
@@ -1034,7 +1091,7 @@ impl RealmAuthorizationCut {
                 actions: &actions,
                 target,
                 at: commit.committed_at,
-                facts: &facts,
+                facts,
             },
             self.effective_grants(commit.committed_at)
                 .map(|(_, grant)| grant),
@@ -1058,7 +1115,7 @@ impl RealmAuthorizationCut {
                     actions: &actions,
                     target,
                     at: commit.committed_at,
-                    facts: &facts,
+                    facts,
                 },
                 &markers,
             )
@@ -1066,7 +1123,7 @@ impl RealmAuthorizationCut {
             != ActionAdmission::Admitted
         {
             return Err(capability_denied(
-                "the actor holds no Policy action for this scope",
+                "the actor holds no action for this scope",
             ));
         }
         accepted.extend(
@@ -1077,7 +1134,7 @@ impl RealmAuthorizationCut {
                 prepared,
                 action,
                 target,
-                &facts,
+                facts,
                 &dependencies,
             )
             .await?,
@@ -1618,6 +1675,34 @@ async fn authorize_capability_gated_event_inner(
     let cut = RealmAuthorizationCut::read_for_event(conn, event).await?;
     cut.require_event_in_connection(conn, event, at).await?;
     Ok(cut)
+}
+
+pub(crate) fn authorize_message_create_in_connection<'a>(
+    conn: &'a mut AsyncPgConnection,
+    event: &'a arkret_wire::Event,
+    attributed: &'a arkret_wire::Event,
+    commit: &'a arkret_wire::RealmCommit,
+    prepared: Option<&'a coland_storage::EventApprovalCommit>,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = PersistenceResult<(
+                    RealmAuthorizationCut,
+                    Vec<crate::approval_admission::QualifiedApproval>,
+                )>,
+            > + Send
+            + 'a,
+    >,
+> {
+    Box::pin(async move {
+        lock_realm_authorization_cut(conn, &event.realm_id).await?;
+        let cut = RealmAuthorizationCut::read_for_event(conn, attributed).await?;
+        let approved = Box::pin(
+            cut.require_message_create_with_approvals(conn, event, attributed, commit, prepared),
+        )
+        .await?;
+        Ok((cut, approved))
+    })
 }
 
 pub(crate) async fn authorize_strand_position_in_connection(

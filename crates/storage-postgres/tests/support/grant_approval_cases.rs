@@ -26,6 +26,22 @@ fn proofs(
     seeds: &[u8],
     governance: bool,
 ) -> coland_storage::EventApprovalCommit {
+    proofs_for_action(
+        request,
+        grant_id,
+        seeds,
+        governance,
+        CapabilityActionId::StrandMove,
+    )
+}
+
+fn proofs_for_action(
+    request: &coland_storage::EventCommitRequest,
+    grant_id: &GrantId,
+    seeds: &[u8],
+    governance: bool,
+    action: CapabilityActionId,
+) -> coland_storage::EventApprovalCommit {
     let event = &request.authority_commit.event;
     let station = &request.authority_commit.expected_authority.service_id;
     let digest = arkret_canonical::canonical_sha256(event).unwrap();
@@ -49,7 +65,7 @@ fn proofs(
                     },
                     request_canonical_digest: Hash::new(digest.clone()).unwrap(),
                     operation: "ak.self.events.command.submit.v1".to_owned(),
-                    action: CapabilityActionId::StrandMove,
+                    action,
                     realm_id: event.realm_id.clone(),
                     initiating_actor_id: event.actor_id.clone(),
                     approver_did: did,
@@ -123,6 +139,178 @@ struct GrantSetup {
     list_id: arkret_wire::SpaceId,
     grant_id: GrantId,
     command: coland_storage::EventCommitRequest,
+}
+
+async fn message_write_counts(pool: &PgPool, realm: &arkret_wire::RealmId) -> Vec<i64> {
+    let mut counts = Vec::new();
+    for table in [
+        "canonical_events",
+        "realm_commits",
+        "message_revision_current_results",
+        "event_approval_private_audit",
+    ] {
+        counts.push(count(pool, realm, table).await);
+    }
+    let mut conn = pool.get().await.unwrap();
+    let outbox = diesel::sql_query("SELECT COUNT(*) AS count FROM federation_outbox")
+        .get_result::<Count>(&mut conn)
+        .await
+        .unwrap();
+    counts.push(outbox.count);
+    counts
+}
+
+#[tokio::test]
+async fn message_create_consumes_two_layers_atomically_and_preserves_nonce_on_failure() {
+    let db = TestDatabase::lease().await;
+    let pool = db.pool();
+    let setup = Box::pin(prepare_grant_setup(&pool)).await;
+    Box::pin(message_create_approval_transaction(pool, setup)).await;
+}
+
+async fn message_create_approval_transaction(pool: PgPool, setup: GrantSetup) {
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let mut head = setup.head;
+    let realm = head.event.realm_id.clone();
+    let actor = head.event.actor_id.clone();
+    let at = setup.opened.committed_at() + chrono::TimeDelta::seconds(120);
+    let target =
+        arkret_wire::WireResourceSelector::strand(realm.clone(), setup.opened.strand_id.clone());
+    let mut roster = Vec::new();
+    for seed in [81, 82] {
+        let (approver, ..) = approver(seed, &ordinary_realm::station());
+        roster.push(approver.signing_principal_id().clone());
+        let grant = Box::pin(ordinary_realm::source_request(&pool, next_request(
+            &head, arkret_wire::EventKind::CapabilityGrant, &founder(),
+            json!({"grant":{"schema":"ak.schema.capability.v1","realm_id":realm,
+                "issuer_id":actor,"subject":approver,"actions":["ak.message.create"],"resources":[target],"constraints":[],
+                "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":setup.opened.unit.transactions[0].event.event_id,"authority_generation":0}],
+                "issued_at":arkret_canonical::format_timestamp_canonical(at)}}), at,
+        ))).await;
+        uow.commit_event(grant.clone()).await.unwrap();
+        head = grant.authority_commit;
+    }
+    let requirement = Box::pin(ordinary_realm::source_request(&pool, next_request(
+        &head, arkret_wire::EventKind::CapabilityGrant, &founder(),
+        json!({"grant":{"schema":"ak.schema.capability.v1","realm_id":realm,
+            "issuer_id":actor,"subject":actor,"actions":["ak.message.create"],"resources":[target],
+            "constraints":[{"constraint_kind":"claim_based","constraint_subkind":"approval","effect":"require_review","approval_required":true,
+                "approval_mode":"before_commit","approval_actor_ids":roster,"approval_threshold":"majority","timeout":"PT60S"}],
+            "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":setup.opened.unit.transactions[0].event.event_id,"authority_generation":0}],
+            "issued_at":arkret_canonical::format_timestamp_canonical(at)}}), at,
+    ))).await;
+    let grant_id = GrantId::from_event_id(&requirement.authority_commit.event.event_id);
+    uow.commit_event(requirement.clone()).await.unwrap();
+    head = requirement.authority_commit;
+    let config = Box::pin(ordinary_realm::source_request(&pool, next_request(
+        &head, arkret_wire::EventKind::PolicyAction, &founder(),
+        json!({"action_id":"message_review","value":{"action":"ak.message.create","approval_required":true,"approval_quorum":2,"policy_scope":realm}}), at,
+    ))).await;
+    uow.commit_event(config.clone()).await.unwrap();
+    head = config.authority_commit;
+    let command = Box::pin(ordinary_realm::source_request(
+        &pool,
+        setup.opened.message_after(&head, "approved Message", at),
+    ))
+    .await;
+    let proof = |request: &coland_storage::EventCommitRequest, seeds: &[u8], governance| {
+        proofs_for_action(
+            request,
+            &grant_id,
+            seeds,
+            governance,
+            CapabilityActionId::MessageCreate,
+        )
+    };
+    let before = message_write_counts(&pool, &realm).await;
+    assert_eq!(
+        uow.commit_event(command.clone())
+            .await
+            .unwrap_err()
+            .conflict_code(),
+        Some(ConflictCode::ApprovalRequired)
+    );
+    for (seeds, governance) in [(vec![81], false), (vec![81, 82], true)] {
+        let failure = uow
+            .commit_event_batch(batch(command.clone(), proof(&command, &seeds, governance)))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            failure.conflict_code(),
+            Some(ConflictCode::ApprovalRequired),
+            "{failure:?}"
+        );
+        assert!(!failure.to_string().contains("policy_id"));
+        assert!(!failure.to_string().contains("action_id"));
+        assert_eq!(message_write_counts(&pool, &realm).await, before);
+    }
+    let mut invalid = proof(&command, &[81, 82], false);
+    invalid.methods[0]
+        .signature
+        .input
+        .nonce
+        .push_str("-tampered");
+    assert_eq!(
+        uow.commit_event_batch(batch(command.clone(), invalid))
+            .await
+            .unwrap_err()
+            .conflict_code(),
+        Some(ConflictCode::SignatureInvalid)
+    );
+    assert_eq!(message_write_counts(&pool, &realm).await, before);
+    // Qualification succeeds before a real message business rule fails. Both
+    // canonical admission and private nonces must roll back on this connection.
+    let malformed_reply = Box::pin(ordinary_realm::source_request(&pool, next_request(
+        &head, arkret_wire::EventKind::MessageCreate, &founder(),
+        json!({"strand_id":setup.opened.strand_id,"track_name":"discussion","content":{"kind":"ak.content.text","body":"unavailable reply","format":"plain"},
+            "reply_to_id":arkret_wire::MessageId::from_event_id(&head.event.event_id)}), at,
+    ))).await;
+    let failure = uow
+        .commit_event_batch(batch(
+            malformed_reply.clone(),
+            proof(&malformed_reply, &[81, 82], false),
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        failure
+            .to_string()
+            .contains("Message reference has no accepted creating Event"),
+        "{failure:?}"
+    );
+    assert_eq!(message_write_counts(&pool, &realm).await, before);
+    let accepted = proof(&command, &[81, 82], false);
+    let outcome = uow
+        .commit_event_batch(batch(command.clone(), accepted.clone()))
+        .await
+        .unwrap();
+    assert!(outcome.event_inserted);
+    let after = message_write_counts(&pool, &realm).await;
+    assert_eq!(after[0], before[0] + 1);
+    assert_eq!(after[1], before[1] + 1);
+    assert_eq!(after[2], before[2] + 1);
+    assert_eq!(after[3], before[3] + 2);
+    let replay = uow
+        .commit_event_batch(batch(command.clone(), accepted))
+        .await
+        .unwrap();
+    assert!(!replay.event_inserted);
+    assert_eq!(message_write_counts(&pool, &realm).await, after);
+    let reused = Box::pin(ordinary_realm::source_request(
+        &pool,
+        setup
+            .opened
+            .message_after(&command.authority_commit, "reused approval nonce", at),
+    ))
+    .await;
+    assert_eq!(
+        uow.commit_event_batch(batch(reused.clone(), proof(&reused, &[81, 82], false)))
+            .await
+            .unwrap_err()
+            .conflict_code(),
+        Some(ConflictCode::ApprovalNonceReused)
+    );
+    assert_eq!(message_write_counts(&pool, &realm).await, after);
 }
 
 async fn prepare_grant_setup(pool: &PgPool) -> GrantSetup {

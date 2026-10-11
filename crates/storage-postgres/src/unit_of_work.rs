@@ -3070,7 +3070,12 @@ async fn commit_event_current_results_inner(
     ))
     .await?;
 
-    Box::pin(commit_content_current_results(conn, request)).await?;
+    Box::pin(commit_content_current_results(
+        conn,
+        request,
+        event_approvals,
+    ))
+    .await?;
     Ok(())
 }
 
@@ -3298,14 +3303,20 @@ async fn commit_object_current_results_inner(
 fn commit_content_current_results<'a>(
     conn: &'a mut AsyncPgConnection,
     request: &'a EventCommitRequest,
+    event_approvals: Option<&'a coland_storage::EventApprovalCommit>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PgTransactionError>> + Send + 'a>>
 {
-    Box::pin(commit_content_current_results_inner(conn, request))
+    Box::pin(commit_content_current_results_inner(
+        conn,
+        request,
+        event_approvals,
+    ))
 }
 
 async fn commit_content_current_results_inner(
     conn: &mut AsyncPgConnection,
     request: &EventCommitRequest,
+    event_approvals: Option<&coland_storage::EventApprovalCommit>,
 ) -> Result<(), PgTransactionError> {
     let event = &request.authority_commit.event;
     let commit = &request.authority_commit.commit;
@@ -3315,7 +3326,10 @@ async fn commit_content_current_results_inner(
         .await?;
     Box::pin(
         crate::message_revision_current_results::commit_message_create_current_result_in_connection(
-            conn, event, commit,
+            conn,
+            event,
+            commit,
+            event_approvals,
         ),
     )
     .await?;

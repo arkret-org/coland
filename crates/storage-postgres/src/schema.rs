@@ -889,7 +889,6 @@ diesel::table! {
         actor_id -> Text,
         device_id -> Nullable<Text>,
         endpoint_verification_method -> Nullable<Text>,
-        intended_realm_id -> Nullable<Text>,
         key_package_bytes -> Bytea,
         capabilities -> Jsonb,
         capabilities_digest -> Text,

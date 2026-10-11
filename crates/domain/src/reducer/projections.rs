@@ -158,10 +158,8 @@ pub struct MlsKeyPackageProjection {
     pub owner_account_pk: i64,
     pub actor_id: String,
     pub device_id: Option<String>,
-    /// Exact did:key/Agent verification method used by non-device endpoints.
+    /// Exact Agent runtime verification method used by the non-device endpoint.
     pub endpoint_verification_method: Option<String>,
-    /// Realm affinity is present only for the minimal-metadata pairwise branch.
-    pub intended_realm_id: Option<String>,
     pub lifetime: KeyPackageLifetimeProjection,
     /// Opaque bytes of the MLS KeyPackage (`mls_key_package` per RFC 9420
     /// §11). Server treats this as a black box; only the recipient device

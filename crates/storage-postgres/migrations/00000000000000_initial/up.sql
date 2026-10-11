@@ -2713,7 +2713,6 @@ CREATE TABLE public.mls_key_packages (
     actor_id text NOT NULL,
     device_id text,
     endpoint_verification_method text,
-    intended_realm_id text,
     key_package_bytes bytea NOT NULL,
     capabilities jsonb DEFAULT '[]'::jsonb NOT NULL,
     capabilities_digest text NOT NULL,
@@ -2734,16 +2733,12 @@ CREATE TABLE public.mls_key_packages (
     created_at bigint NOT NULL,
     CONSTRAINT mls_key_packages_endpoint_binding_check CHECK (
         (device_id IS NOT NULL AND device_authorize_event_id IS NOT NULL
-            AND endpoint_verification_method IS NULL AND intended_realm_id IS NULL
+            AND endpoint_verification_method IS NULL
             AND agent_key_authorize_event_id IS NULL)
         OR
         (device_id IS NULL AND device_authorize_event_id IS NULL
-            AND endpoint_verification_method IS NOT NULL AND intended_realm_id IS NULL
+            AND endpoint_verification_method IS NOT NULL
             AND agent_key_authorize_event_id IS NOT NULL)
-        OR
-        (device_id IS NULL AND device_authorize_event_id IS NULL
-            AND endpoint_verification_method IS NOT NULL AND intended_realm_id IS NOT NULL
-            AND agent_key_authorize_event_id IS NULL)
     )
 );
 
@@ -2754,7 +2749,7 @@ ALTER TABLE ONLY public.mls_key_packages
     ADD CONSTRAINT mls_key_packages_owner_account_pk_fkey
     FOREIGN KEY (owner_account_pk) REFERENCES public.accounts(pk);
 
-CREATE INDEX mls_key_packages_by_owner_endpoint ON public.mls_key_packages USING btree (owner_account_pk, actor_id, device_id, endpoint_verification_method, intended_realm_id, claimed_by_mls_group_id);
+CREATE INDEX mls_key_packages_by_owner_endpoint ON public.mls_key_packages USING btree (owner_account_pk, actor_id, device_id, endpoint_verification_method, claimed_by_mls_group_id);
 
 CREATE TABLE public.peer_keypackage_claims (
     source_id text NOT NULL,

@@ -552,7 +552,6 @@ mod tests {
             device_id: None,
             agent_id: None,
             agent_verification_method: Some(method.clone()),
-            pairwise_verification_method: None,
             keypackage: "AQ".to_owned(),
             capabilities: vec!["mls".to_owned()],
             device_authorize_event_id: None,

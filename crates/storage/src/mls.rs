@@ -18,7 +18,6 @@ pub struct MlsKeyPackageRow {
     pub actor_id: String,
     pub device_id: Option<String>,
     pub endpoint_verification_method: Option<String>,
-    pub intended_realm_id: Option<String>,
     pub key_package_bytes: Vec<u8>,
     pub capabilities: Vec<String>,
     pub capabilities_digest: String,
@@ -445,7 +444,6 @@ mod key_package_claim_transition_tests {
             actor_id: "ak:did_core:web:agent.example".to_owned(),
             device_id: Some("ak:device:01904100-0000-7000-8000-000000000001".to_owned()),
             endpoint_verification_method: None,
-            intended_realm_id: None,
             key_package_bytes: vec![1, 2, 3],
             capabilities: vec!["ak.mls.rfc9420".to_owned()],
             capabilities_digest:

@@ -3128,7 +3128,6 @@ fn mls_keypackage_contract_row(
         actor_id: device.principal_id.to_string(),
         device_id: Some(device.device_id.clone()),
         endpoint_verification_method: None,
-        intended_realm_id: None,
         key_package_bytes: vec![1, 2, 3],
         capabilities: vec!["ak.mls.rfc9420".to_owned()],
         capabilities_digest:

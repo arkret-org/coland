@@ -4639,7 +4639,6 @@ async fn claim_human_peer_package(
                 actor_id: pair.peer.principal_id.to_string(),
                 device_id: Some(device.to_string()),
                 endpoint_verification_method: None,
-                intended_realm_id: None,
                 key_package_bytes: arkret_canonical::base64url_decode(&package.keypackage).unwrap(),
                 capabilities: package.capabilities.clone(),
                 capabilities_digest: arkret_canonical::canonical_sha256(&package.capabilities)
@@ -4709,7 +4708,6 @@ async fn claim_human_peer_package(
         device_id: Some(device),
         agent_id: None,
         agent_verification_method: None,
-        pairwise_verification_method: None,
         keypackage: package.keypackage.clone(),
         capabilities: package.capabilities.clone(),
         device_authorize_event_id: Some(guard.authorization_ref.event_id.clone()),

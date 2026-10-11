@@ -66,7 +66,6 @@ pub(super) fn claim_outcome(
         device_id: None,
         agent_id: Some(agent.principal_id.clone()),
         agent_verification_method: Some(method.clone()),
-        pairwise_verification_method: None,
         keypackage: package.keypackage.clone(),
         capabilities: package.capabilities.clone(),
         device_authorize_event_id: None,

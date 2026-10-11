@@ -95,38 +95,6 @@ pub async fn verify_did_controlled_jws_async(
     verify_jws_with_pinned_document(canonical_bytes, jws, verification_method, issuer, &document)
 }
 
-/// Verify the protocol's compact Ed25519 signature carrier (a single
-/// unpadded-base64url signature, not an RFC 7515 detached JWS) against a
-/// DID-controlled method. `ProtocolSignature` uses this representation for
-/// receipts and principal-service binding proofs.
-pub async fn verify_did_controlled_ed25519_signature_async(
-    payload: &[u8],
-    signature_b64url: &str,
-    verification_method: &str,
-    issuer: &str,
-    state: &AppState,
-) -> Result<(), String> {
-    let did = arkret_identity::verification_method_did(verification_method)
-        .map_err(|error| error.to_string())?;
-    validate_verification_method_controller(issuer, verification_method)?;
-    let document = document_for_verification(state, &did, verification_method).await?;
-    let public_key_multibase = document
-        .verification_methods
-        .get(verification_method)
-        .ok_or_else(|| "verification method is absent from DID document".to_owned())?;
-    let public_key = arkret_canonical::decode_ed25519_multibase(public_key_multibase)
-        .map_err(|error| format!("verification method key is invalid: {error}"))?;
-    let public_key = VerifyingKey::from_bytes(&public_key)
-        .map_err(|error| format!("verification method key is invalid: {error}"))?;
-    enforce_selected_key_admission(
-        &did,
-        verification_method,
-        &public_key,
-        Some(&state.config().trust_domain),
-    )?;
-    verify_ed25519_signature_with_public_key(payload, signature_b64url, public_key.as_bytes())
-}
-
 pub fn verify_ed25519_signature_with_public_key(
     payload: &[u8],
     signature_b64url: &str,
@@ -1468,6 +1436,28 @@ mod did_binding_tests {
         let did = Did::new(format!("did:key:{multibase}")).unwrap();
         let verification_method = format!("{did}#{multibase}");
         (did, verification_method)
+    }
+
+    #[tokio::test]
+    async fn did_key_wrong_fragment_cannot_verify_or_install_an_authority_binding() {
+        let state = state_without_any_resolver();
+        let key = SigningKey::from_bytes(&[31; 32]);
+        let (did, method) = did_key_authority(&key);
+        let payload = br#"{"purpose":"did-key-method-binding"}"#;
+        let proof = signed(&key, payload);
+        let document = arkret_identity::DidKeyResolver::new()
+            .resolve_did_document(&did)
+            .unwrap();
+        verify_jws_with_pinned_document(payload, &proof, &method, did.as_str(), &document).unwrap();
+        assert!(state.did_bindings().snapshot().is_empty());
+        let wrong = format!("{did}#wrong");
+        assert!(
+            verify_jws_with_pinned_document(payload, &proof, &wrong, did.as_str(), &document)
+                .is_err()
+        );
+        assert!(resolve_ed25519_pubkey_async(&state, &wrong).await.is_err());
+        assert!(principal_binding_acceptance(&state, &did, &wrong, &document).is_err());
+        assert!(state.did_bindings().snapshot().is_empty());
     }
 
     fn signed(key: &SigningKey, payload: &[u8]) -> String {

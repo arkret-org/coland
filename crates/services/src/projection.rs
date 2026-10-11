@@ -729,7 +729,6 @@ impl ProjectionService {
                 actor_id: row.actor_id,
                 device_id: row.device_id,
                 endpoint_verification_method: row.endpoint_verification_method,
-                intended_realm_id: row.intended_realm_id,
                 key_package_bytes: row.key_package_bytes,
                 capabilities: row.capabilities,
                 capabilities_digest: row.capabilities_digest,

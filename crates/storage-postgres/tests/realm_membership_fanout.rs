@@ -4547,7 +4547,6 @@ fn recipient_roster_witness(
         }),
         agent_id: None,
         agent_verification_method: None,
-        pairwise_verification_method: None,
         keypackage: "AQ".to_owned(),
         capabilities: vec!["mls".to_owned()],
         device_authorize_event_id: Some(authorization_event_ref.clone()),

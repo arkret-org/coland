@@ -40,6 +40,7 @@ struct AuditErasureReceiptItem {
     storage_boundary: Option<ErasureStorageBoundary>,
     scope_realm_id: Option<String>,
     fanout_status: ErasureFanoutStatus,
+    peer_receipts: Vec<arkret_models_collaboration::governance::erasure::ErasurePeerReceipt>,
     recorded_at: String,
     payload: Value,
 }
@@ -82,7 +83,7 @@ async fn audit_erasure_receipts(
     // unauthenticated; we don't restrict cross-actor reads because the
     // receipt list is the auditable surface (see method doc above).
     let _session = admin.session()?;
-    let receipts = state
+    let mut receipts = state
         .event_queries()
         .canonical_events()
         .await
@@ -91,6 +92,14 @@ async fn audit_erasure_receipts(
         .filter(|record| record.kind == arkret_wire::EventKind::AuditErasureReceipt.as_str())
         .map(|record| audit_erasure_receipt_item(&record))
         .collect::<Result<Vec<_>, _>>()?;
+    for receipt in &mut receipts {
+        if receipt.issuer_id.as_ref() == Some(&state.service_core_id())
+            && let Some(id) = &receipt.receipt_id
+        {
+            (receipt.fanout_status, receipt.peer_receipts) =
+                crate::routing::federation::erasure_receipts::fanout_progress(state, id).await?;
+        }
+    }
     json_ok(AuditErasureReceiptsOutcome { receipts })
 }
 
@@ -109,6 +118,7 @@ fn audit_erasure_receipt_item(
         AppError::internal(format!("accepted erasure receipt is invalid: {error}"))
     })?;
     Ok(AuditErasureReceiptItem {
+        peer_receipts: receipt.peer_receipts.clone(),
         receipt_id: Some(receipt.receipt_id),
         issuer_id: Some(receipt.issuer_id),
         subject_kind: Some(receipt.subject.kind),

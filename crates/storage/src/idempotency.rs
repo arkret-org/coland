@@ -36,6 +36,13 @@ pub trait IdempotencyStore: Send + Sync {
     /// concurrent first-writer race keeps the earliest landed row, so a later
     /// racer reads it back as a `Replay` instead of clobbering it.
     async fn record(&self, record: &IdempotencyRecord) -> PersistenceResult<()>;
+    /// Commit a first response and its exact resource lookup together. Return
+    /// the landed response under a race; either digest conflict rolls back both.
+    async fn record_with_lookup(
+        &self,
+        response: &IdempotencyRecord,
+        lookup: &IdempotencyRecord,
+    ) -> PersistenceResult<IdempotencyRecord>;
     /// Atomically replace an exact first-writer reservation with its terminal
     /// response. The compare includes the entire expected row, so a worker can
     /// complete only the reservation token it acquired; a stale or competing

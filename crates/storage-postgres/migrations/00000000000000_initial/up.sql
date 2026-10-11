@@ -2337,6 +2337,9 @@ CREATE INDEX federation_outbox_claim ON public.federation_outbox USING btree (st
 CREATE INDEX federation_outbox_policy_suppressed ON public.federation_outbox USING btree (policy_version) WHERE (state = 'policy_suppressed'::text);
 
 CREATE INDEX federation_outbox_state_peer ON public.federation_outbox USING btree (state, peer_id, created_at);
+CREATE INDEX federation_outbox_erasure_receipt ON public.federation_outbox
+    ((payload_json::jsonb #>> '{package,receipt,receipt_id}'), peer_id)
+    WHERE endpoint = '/_arkret/peer/erasure-receipts';
 
 CREATE TABLE public.federation_outbox_dead_letter (
     id text PRIMARY KEY,

@@ -234,7 +234,7 @@ async fn run_execution(
         .await?;
         crate::routing::identity::account::lifecycle::fanout_account_status_erasure_receipt(
             state,
-            execution.principal_id.as_str(),
+            &execution.account_id,
             package,
         )
         .await?;

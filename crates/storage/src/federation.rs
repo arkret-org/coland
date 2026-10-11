@@ -195,6 +195,29 @@ pub struct FederationOutboxRequeue {
 /// the authoritative delivery state.
 #[async_trait]
 pub trait FederationOutboxStore: Send + Sync {
+    /// Historical content destinations, including transport-uncertain sends.
+    /// Membership loss and later terminal Events do not revoke receipt duties.
+    async fn historical_content_holders(
+        &self,
+        realm_ids: &[arkret_wire::RealmId],
+    ) -> PersistenceResult<Vec<DidCoreId>>;
+    async fn historical_content_holders_for_actor(
+        &self,
+        actor: &arkret_wire::ActorId,
+    ) -> PersistenceResult<Vec<DidCoreId>>;
+    async fn erasure_receipt_deliveries(
+        &self,
+        receipt_id: &str,
+    ) -> PersistenceResult<Vec<FederationOutboxRecord>>;
+    async fn erasure_receipt_feedback(
+        &self,
+        receipt: &arkret_models_collaboration::governance::erasure::ErasureReceipt,
+    ) -> PersistenceResult<
+        Vec<(
+            arkret_models_collaboration::governance::erasure::ErasureReceiptPackage,
+            chrono::DateTime<chrono::Utc>,
+        )>,
+    >;
     /// Insert a new outbox row. Returns `Ok(true)` if a fresh row was
     /// stored, `Ok(false)` if `(peer_id, idempotency_key)` already
     /// exists (callers MUST treat that as "already enqueued" rather

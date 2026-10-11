@@ -270,6 +270,133 @@ pub(crate) async fn enqueue_federation_outbox_in_connection(
 
 #[async_trait]
 impl FederationOutboxStore for PgFederationOutboxStore {
+    async fn historical_content_holders_for_actor(
+        &self,
+        actor: &ActorId,
+    ) -> PersistenceResult<Vec<DidCoreId>> {
+        #[derive(QueryableByName)]
+        struct Peer {
+            #[diesel(sql_type = Text)]
+            peer_id: String,
+        }
+        let mut conn = pg_conn(&self.pool).await?;
+        let peers = sql_query(
+            "SELECT DISTINCT o.peer_id FROM federation_outbox o \
+            JOIN event_federation_outbox link ON link.outbox_id=o.id \
+            JOIN canonical_events e ON e.pk=link.event_pk \
+            WHERE e.actor_id=$1 AND e.state='committed' AND o.realm_fanout IS NOT NULL \
+            AND (o.state='delivered' OR o.attempts>0) ORDER BY o.peer_id",
+        )
+        .bind::<Text, _>(actor.to_string())
+        .load::<Peer>(&mut *conn)
+        .await
+        .map_err(PersistenceError::database)?;
+        peers
+            .into_iter()
+            .map(|peer| DidCoreId::new(peer.peer_id).map_err(PersistenceError::database))
+            .collect()
+    }
+
+    async fn erasure_receipt_feedback(
+        &self,
+        receipt: &arkret_models_collaboration::governance::erasure::ErasureReceipt,
+    ) -> PersistenceResult<
+        Vec<(
+            arkret_models_collaboration::governance::erasure::ErasureReceiptPackage,
+            chrono::DateTime<chrono::Utc>,
+        )>,
+    > {
+        #[derive(QueryableByName)]
+        struct Feedback {
+            #[diesel(sql_type = Jsonb)]
+            package: Value,
+            #[diesel(sql_type = Timestamptz)]
+            received_at: chrono::DateTime<chrono::Utc>,
+        }
+        let mut conn = pg_conn(&self.pool).await?;
+        let rows = sql_query(
+            "SELECT response_body->'package' AS package,created_at AS received_at \
+            FROM idempotency_keys WHERE operation_id='coland://internal/idempotency' \
+            AND idempotency_key LIKE 'erasure-receipt:lookup:%' \
+            AND response_body#>>'{package,receipt,issuer_id}'<>$1 \
+            AND response_body#>'{package,receipt,trigger}'=$2 \
+            AND response_body#>'{package,receipt,subject}'=$3 \
+            AND response_body#>'{package,receipt,scope}'=$4 \
+            AND authenticated_actor=$5 AND response_body#>>'{acceptance,receiver_id}'=$1",
+        )
+        .bind::<Text, _>(receipt.issuer_id.as_str())
+        .bind::<Jsonb, _>(
+            serde_json::to_value(&receipt.trigger).map_err(PersistenceError::database)?,
+        )
+        .bind::<Jsonb, _>(
+            serde_json::to_value(&receipt.subject).map_err(PersistenceError::database)?,
+        )
+        .bind::<Jsonb, _>(serde_json::to_value(&receipt.scope).map_err(PersistenceError::database)?)
+        .bind::<Jsonb, _>(
+            serde_json::to_value(ActorId::service(receipt.issuer_id.clone()))
+                .map_err(PersistenceError::database)?,
+        )
+        .load::<Feedback>(&mut *conn)
+        .await
+        .map_err(PersistenceError::database)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    serde_json::from_value(row.package).map_err(PersistenceError::database)?,
+                    row.received_at,
+                ))
+            })
+            .collect()
+    }
+
+    async fn erasure_receipt_deliveries(
+        &self,
+        receipt_id: &str,
+    ) -> PersistenceResult<Vec<FederationOutboxRecord>> {
+        let mut conn = pg_conn(&self.pool).await?;
+        sql_query(format!(
+            "SELECT {OUTBOX_COLUMNS} FROM federation_outbox \
+            WHERE endpoint='/_arkret/peer/erasure-receipts' \
+              AND payload_json::jsonb#>>'{{package,receipt,receipt_id}}'=$1 ORDER BY peer_id"
+        ))
+        .bind::<Text, _>(receipt_id)
+        .load::<FederationOutboxRow>(&mut *conn)
+        .await
+        .map_err(PersistenceError::database)?
+        .into_iter()
+        .map(FederationOutboxRecord::try_from)
+        .collect()
+    }
+
+    async fn historical_content_holders(
+        &self,
+        realm_ids: &[arkret_wire::RealmId],
+    ) -> PersistenceResult<Vec<DidCoreId>> {
+        #[derive(QueryableByName)]
+        struct Peer {
+            #[diesel(sql_type = Text)]
+            peer_id: String,
+        }
+        let realms: Vec<_> = realm_ids.iter().map(|id| id.as_str().to_owned()).collect();
+        let mut conn = pg_conn(&self.pool).await?;
+        let peers = sql_query(
+            "SELECT DISTINCT o.peer_id FROM federation_outbox o \
+             JOIN event_federation_outbox link ON link.outbox_id=o.id \
+             JOIN canonical_events e ON e.pk=link.event_pk \
+             WHERE e.realm_id=ANY($1) AND e.state='committed' \
+               AND o.realm_fanout IS NOT NULL \
+               AND (o.state='delivered' OR o.attempts>0) ORDER BY o.peer_id",
+        )
+        .bind::<sql_types::Array<Text>, _>(realms)
+        .load::<Peer>(&mut *conn)
+        .await
+        .map_err(PersistenceError::database)?;
+        peers
+            .into_iter()
+            .map(|peer| DidCoreId::new(peer.peer_id).map_err(PersistenceError::database))
+            .collect()
+    }
+
     async fn enqueue(&self, record: &FederationOutboxRecord) -> PersistenceResult<bool> {
         let mut conn = pg_conn(&self.pool)
             .await

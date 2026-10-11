@@ -35,6 +35,27 @@ async fn submit(
         .map_err(|error| AppError::param_invalid(format!("Source-Service-ID invalid: {error}")))?;
     let key = required_header(req, "idempotency-key")?;
     let body = body.into_inner();
+    let raw: serde_json::Value = serde_json::from_slice(
+        req.payload()
+            .await
+            .map_err(|error| AppError::json_invalid(error.to_string()))?,
+    )
+    .map_err(|error| AppError::json_invalid(error.to_string()))?;
+    let raw_stub = raw
+        .get("package")
+        .and_then(|package| package.get("retained_stub"))
+        .ok_or_else(|| AppError::param_invalid("receipt package has no retained stub"))?;
+    let raw_stub_digest = arkret_wire::Hash::new(
+        arkret_canonical::canonical_sha256(raw_stub)
+            .map_err(|error| AppError::param_invalid(error.to_string()))?,
+    )
+    .map_err(|error| AppError::param_invalid(error.to_string()))?;
+    if raw_stub_digest != body.package.receipt.retained_stub_digest {
+        return Err(
+            AppError::param_invalid("exact retained stub digest differs")
+                .with_reason_code("erasure_receipt_stub_digest_mismatch"),
+        );
+    }
     if body.package.receipt.issuer_id.as_str() != source {
         return Err(AppError::capability_denied(
             "erasure receipt issuer must equal Source-Service-ID",
@@ -79,20 +100,39 @@ async fn submit(
             AppError::param_invalid(format!("erasure receipt proof method is invalid: {error}"))
                 .with_reason_code("erasure_receipt_proof_invalid")
         })?;
-        crate::jws_verify::verify_did_controlled_jws_async(
-            &proof_input,
-            &proof.signature,
-            proof.verification_method.as_str(),
+        crate::jws_verify::validate_verification_method_controller(
             proof_signer.as_str(),
+            proof.verification_method.as_str(),
+        )
+        .map_err(|error| {
+            AppError::param_invalid(error).with_reason_code("erasure_receipt_authority_invalid")
+        })?;
+        let proof_key = crate::jws_verify::resolve_ed25519_pubkey_at(
             state,
+            proof.verification_method.as_str(),
+            body.package
+                .receipt
+                .issued_at
+                .unwrap_or(body.package.receipt.completed_at),
         )
         .await
-        .map_err(|reason| {
-            AppError::param_invalid(format!(
-                "erasure receipt proof verification failed: {reason}"
-            ))
-            .with_reason_code("erasure_receipt_proof_invalid")
+        .map_err(|error| {
+            AppError::param_invalid(error).with_reason_code("erasure_receipt_authority_invalid")
         })?;
+        arkret_signatures::Ed25519DetachedJwsVerifier::new()
+            .verify_detached_jws(
+                &proof.signature,
+                &proof_input,
+                &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+                    bytes: proof_key.to_bytes().to_vec(),
+                },
+            )
+            .map_err(|reason| {
+                AppError::param_invalid(format!(
+                    "erasure receipt proof verification failed: {reason}"
+                ))
+                .with_reason_code("erasure_receipt_proof_invalid")
+            })?;
         issuer_signed |= crate::jws_verify::validate_verification_method_controller(
             body.package.receipt.issuer_id.as_str(),
             proof.verification_method.as_str(),
@@ -110,7 +150,11 @@ async fn submit(
         .map_err(|error| AppError::internal(format!("erasure receipt request digest: {error}")))?;
     if let Some(stored) = state
         .jobs()
-        .idempotency_record(&source_id, &key)
+        .scoped_idempotency_record(
+            &arkret_wire::ActorId::service(source_id.clone()),
+            arkret_wire::ServiceOperationId::PEER_ERASURE_RECEIPT_COMMAND_SUBMIT_V1,
+            &key,
+        )
         .await
         .map_err(|error| AppError::internal(error.to_string()))?
     {
@@ -122,7 +166,6 @@ async fn submit(
         }
         let outcome = serde_json::from_value(stored.response_body)
             .map_err(|error| AppError::internal(format!("stored erasure outcome: {error}")))?;
-        persist_lookup(state, &body.package, &outcome, None).await?;
         return json_ok(outcome);
     }
 
@@ -164,23 +207,53 @@ async fn submit(
     };
     let outcome = ErasureReceiptSubmitOutcome::Accepted(acceptance);
     let now = Utc::now();
-    state
-        .jobs()
-        .store_idempotency_record(IdempotencyState {
-            authenticated_actor: arkret_wire::ActorId::service(source_id),
-            operation_id: coland_services::jobs::INTERNAL_IDEMPOTENCY_OPERATION.to_owned(),
-            idempotency_key: key,
-            request_hash,
-            response_status: StatusCode::OK.as_u16() as i32,
-            response_body: serde_json::to_value(&outcome)
-                .map_err(|error| AppError::internal(error.to_string()))?,
-            created_at: now,
-            expires_at: now + Duration::days(3650),
+    let response_record = IdempotencyState {
+        authenticated_actor: arkret_wire::ActorId::service(source_id),
+        operation_id: arkret_wire::ServiceOperationId::PEER_ERASURE_RECEIPT_COMMAND_SUBMIT_V1
+            .to_owned(),
+        idempotency_key: key,
+        request_hash,
+        response_status: StatusCode::OK.as_u16() as i32,
+        response_body: serde_json::to_value(&outcome)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        created_at: now,
+        expires_at: now + Duration::days(3650),
+    };
+    let ErasureReceiptSubmitOutcome::Accepted(acceptance) = &outcome else {
+        unreachable!()
+    };
+    let lookup = IdempotencyState {
+        authenticated_actor: arkret_wire::ActorId::service(state.service_core_id()),
+        operation_id: coland_services::jobs::INTERNAL_IDEMPOTENCY_OPERATION.to_owned(),
+        idempotency_key: lookup_key,
+        request_hash: receipt_digest.to_string(),
+        response_status: StatusCode::OK.as_u16() as i32,
+        response_body: serde_json::to_value(StoredReceipt {
+            package: body.package,
+            acceptance: acceptance.clone(),
+            authorized_requester_id: None,
         })
+        .map_err(|error| AppError::internal(error.to_string()))?,
+        created_at: now,
+        expires_at: now + Duration::days(3650),
+    };
+    let landed = state
+        .persistence()
+        .idempotency_keys()
+        .record_with_lookup(&response_record, &lookup)
         .await
-        .map_err(|error| AppError::internal(error.to_string()))?;
-    persist_lookup(state, &body.package, &outcome, None).await?;
-    json_ok(outcome)
+        .map_err(|error| {
+            if error.conflict_code() == Some(coland_storage::ConflictCode::DuplicateConflict) {
+                AppError::conflict(error.to_string()).with_wire_code("duplicate_conflict")
+            } else {
+                AppError::internal(error.to_string())
+            }
+        })?;
+    json_ok(
+        serde_json::from_value(landed.response_body).map_err(|error| {
+            AppError::internal(format!("landed erasure acknowledgement: {error}"))
+        })?,
+    )
 }
 
 #[salvo::oapi::endpoint(
@@ -267,6 +340,11 @@ pub(crate) async fn persist_issued_package(
     package: &ErasureReceiptPackage,
     authorized_requester_id: &arkret_wire::DidCoreId,
 ) -> Result<(), AppError> {
+    if package.receipt.issuer_id != state.service_core_id() {
+        return Err(AppError::capability_denied(
+            "issued erasure receipt belongs to another Station",
+        ));
+    }
     package
         .validate_bindings()
         .map_err(|error| AppError::internal(format!("issued erasure package invalid: {error}")))?;
@@ -319,6 +397,123 @@ async fn signed_acceptance(
         .map_err(AppError::internal)?;
     acceptance.proof.jws = jws;
     Ok(acceptance)
+}
+
+/// A successful HTTP response is not evidence of receipt acceptance.
+pub(crate) async fn verify_acceptance(
+    state: &AppState,
+    package: &ErasureReceiptPackage,
+    destination: &arkret_wire::DidCoreId,
+    response: &str,
+) -> Result<ErasureReceiptAcceptance, String> {
+    let outcome: ErasureReceiptSubmitOutcome = serde_json::from_str(response)
+        .map_err(|error| format!("erasure acknowledgement shape: {error}"))?;
+    let ErasureReceiptSubmitOutcome::Accepted(acceptance) = outcome else {
+        return Err("erasure receipt was rejected".into());
+    };
+    if acceptance.receipt_id != package.receipt.receipt_id
+        || acceptance.receipt_digest
+            != package
+                .computed_receipt_digest()
+                .map_err(|error| error.to_string())?
+        || acceptance.issuer_id != package.receipt.issuer_id
+        || &acceptance.receiver_id != destination
+    {
+        return Err("erasure acknowledgement differs from the frozen receipt/destination".into());
+    }
+    crate::jws_verify::validate_verification_method_controller(
+        destination.as_str(),
+        acceptance.proof.verification_method.as_str(),
+    )?;
+    let key = crate::jws_verify::resolve_ed25519_pubkey_at(
+        state,
+        acceptance.proof.verification_method.as_str(),
+        acceptance.accepted_at,
+    )
+    .await?;
+    arkret_signatures::Ed25519DetachedJwsVerifier::new()
+        .verify_detached_jws(
+            &acceptance.proof.jws,
+            &acceptance
+                .signing_input_bytes()
+                .map_err(|error| error.to_string())?,
+            &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+                bytes: key.to_bytes().to_vec(),
+            },
+        )
+        .map_err(|error| format!("erasure acknowledgement signature: {error}"))?;
+    Ok(acceptance)
+}
+
+/// Delivery progress is derived from the durable rail, never from today's
+/// membership or by mutating the original signed package sent on retries.
+pub(crate) async fn fanout_progress(
+    state: &AppState,
+    receipt_id: &str,
+) -> Result<
+    (
+        arkret_models_collaboration::governance::erasure::ErasureFanoutStatus,
+        Vec<arkret_models_collaboration::governance::erasure::ErasurePeerReceipt>,
+    ),
+    AppError,
+> {
+    use arkret_models_collaboration::governance::erasure::{
+        ErasureFanoutStatus, ErasureOutcome, ErasurePeerReceipt, ErasurePeerStatus,
+    };
+    let rows = state
+        .persistence()
+        .federation_outbox()
+        .erasure_receipt_deliveries(receipt_id)
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let Some(first) = rows.first() else {
+        return Ok((ErasureFanoutStatus::Complete, Vec::new()));
+    };
+    let body: ErasureReceiptSubmitRequestBody = serde_json::from_str(&first.payload_json)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let feedback = state
+        .persistence()
+        .federation_outbox()
+        .erasure_receipt_feedback(&body.package.receipt)
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let mut status = ErasureFanoutStatus::Complete;
+    let peers = rows
+        .into_iter()
+        .map(|row| {
+            let received = feedback
+                .iter()
+                .filter(|(package, _)| package.receipt.issuer_id == row.peer_id)
+                .max_by_key(|(package, _)| package.receipt.completed_at);
+            let timed_out = received.is_none()
+                && Utc::now().timestamp()
+                    >= row
+                        .created_at
+                        .saturating_add(super::outbox::ERASURE_PROPAGATION_WINDOW_SECS);
+            if timed_out {
+                status = ErasureFanoutStatus::Incomplete;
+            } else if received.is_none() && status != ErasureFanoutStatus::Incomplete {
+                status = ErasureFanoutStatus::Pending;
+            }
+            ErasurePeerReceipt {
+                peer_id: row.peer_id,
+                status: if let Some((package, _)) = received {
+                    if package.receipt.outcome == ErasureOutcome::Completed {
+                        ErasurePeerStatus::Acknowledged
+                    } else {
+                        ErasurePeerStatus::Failed
+                    }
+                } else if timed_out {
+                    ErasurePeerStatus::TimedOut
+                } else {
+                    ErasurePeerStatus::Pending
+                },
+                receipt_id: received.map(|(package, _)| package.receipt.receipt_id.clone()),
+                acknowledged_at: received.map(|(_, at)| *at),
+            }
+        })
+        .collect();
+    Ok((status, peers))
 }
 
 fn required_header(req: &Request, name: &str) -> Result<String, AppError> {

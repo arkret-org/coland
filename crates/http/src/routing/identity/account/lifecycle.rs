@@ -604,35 +604,50 @@ pub(crate) async fn execute_account_status_erasure(
 
 pub(crate) async fn fanout_account_status_erasure_receipt(
     state: &AppState,
-    actor: &str,
+    account_id: &arkret_wire::AccountId,
     package: &ErasureReceiptPackage,
 ) -> Result<(), AppError> {
-    let affected_realms = affected_erasure_realms_for_actor(state, actor).await?;
-    enqueue_erasure_receipt_fanout(state, &affected_realms, package).await
+    let peers = state
+        .persistence()
+        .federation_outbox()
+        .historical_content_holders_for_actor(&arkret_wire::ActorId::account(account_id.clone()))
+        .await
+        .map_err(|error| {
+            AppError::internal(format!("historical Account erasure holders: {error}"))
+        })?;
+    enqueue_erasure_receipt_to_targets(state, &peers, package).await
 }
 
-async fn enqueue_erasure_receipt_fanout(
+pub(crate) async fn enqueue_erasure_receipt_fanout(
     state: &AppState,
     affected_realms: &[String],
     package: &ErasureReceiptPackage,
 ) -> Result<(), AppError> {
     let affected = affected_realms
         .iter()
-        .map(String::as_str)
-        .collect::<std::collections::BTreeSet<_>>();
-    let projection = state.projections().snapshot();
-    let recipient_services = affected
-        .into_iter()
-        .flat_map(|realm_id| projection.members_of_realm(realm_id))
-        .filter(|member| member.state == "join")
-        .filter_map(|member| serde_json::from_str::<arkret_wire::ActorId>(&member.member).ok())
-        .map(|member_id| member_id.route_service_id().to_string())
-        .filter(|service| service != state.service_id())
-        .collect::<std::collections::BTreeSet<_>>();
-    let peers = crate::routing::federation::configured_peer_targets(state)
-        .into_iter()
-        .filter(|peer| recipient_services.contains(peer.service_id.as_str()))
-        .collect::<Vec<_>>();
+        .cloned()
+        .map(arkret_wire::RealmId::new)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| AppError::internal(format!("erasure Realm identity: {error}")))?;
+    let peers = state
+        .persistence()
+        .federation_outbox()
+        .historical_content_holders(&affected)
+        .await
+        .map_err(|error| AppError::internal(format!("historical erasure holders: {error}")))?;
+    enqueue_erasure_receipt_to_targets(state, &peers, package).await
+}
+
+async fn enqueue_erasure_receipt_to_targets(
+    state: &AppState,
+    peers: &[arkret_wire::DidCoreId],
+    package: &ErasureReceiptPackage,
+) -> Result<(), AppError> {
+    if package.receipt.issuer_id != state.service_core_id() {
+        return Err(AppError::capability_denied(
+            "erasure fanout belongs to another issuer",
+        ));
+    }
     package
         .validate_bindings()
         .map_err(|error| AppError::internal(format!("outbound erasure package: {error}")))?;
@@ -641,17 +656,21 @@ async fn enqueue_erasure_receipt_fanout(
     };
     let payload = arkret_canonical::canonical_json_string(&body)
         .map_err(|error| AppError::internal(error.to_string()))?;
-    for peer in &peers {
-        crate::routing::federation::outbox::enqueue_outbound(
+    for peer in peers
+        .iter()
+        .filter(|peer| peer.as_str() != state.service_id())
+    {
+        crate::routing::federation::outbox::enqueue_outbound_with_lane(
             state,
-            &peer.url,
-            peer.service_id.as_str(),
+            None,
+            peer.as_str(),
             "/_arkret/peer/erasure-receipts",
             &format!(
                 "ak:outbox:erasure-receipt:{}",
                 body.package.receipt.receipt_id
             ),
             &payload,
+            None,
         )
         .await
         .map_err(|error| AppError::internal(error.to_string()))?;
@@ -703,34 +722,6 @@ async fn append_audit_redaction_marker(state: &AppState, actor: &str) {
         "accepted",
     )
     .await;
-}
-
-async fn affected_erasure_realms_for_actor(
-    state: &AppState,
-    actor: &str,
-) -> Result<Vec<String>, AppError> {
-    let mut realms = std::collections::BTreeSet::new();
-    for event in state
-        .event_queries()
-        .projected_events_for_actor(actor)
-        .await
-        .map_err(|error| {
-            AppError::internal(format!(
-                "failed to resolve affected erasure realms: {error}"
-            ))
-        })?
-    {
-        realms.insert(event.realm_id);
-    }
-    {
-        let projection = state.projections().snapshot();
-        for message in projection.messages.values() {
-            if message.sender == actor {
-                realms.insert(message.realm_id.clone());
-            }
-        }
-    }
-    Ok(realms.into_iter().collect())
 }
 
 fn build_erasure_receipt_package(

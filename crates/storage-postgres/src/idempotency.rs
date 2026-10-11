@@ -97,6 +97,43 @@ fn actor_value(actor: &arkret_wire::ActorId) -> PersistenceResult<Value> {
 }
 #[async_trait]
 impl IdempotencyStore for PgIdempotencyStore {
+    async fn record_with_lookup(
+        &self,
+        response: &IdempotencyRecord,
+        lookup: &IdempotencyRecord,
+    ) -> PersistenceResult<IdempotencyRecord> {
+        use diesel_async::AsyncConnection as _;
+        let response = response.clone();
+        let lookup = lookup.clone();
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, super::PgTransactionError, _>(async move |conn| {
+            let lookup_actor = actor_key(&lookup.authenticated_actor)?;
+            let lock = format!("{}:{}:{}", lookup_actor, lookup.operation_id, lookup.idempotency_key);
+            sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind::<Text, _>(lock).execute(&mut *conn).await?;
+            record_idempotency_in_connection(conn, &lookup).await?;
+            record_idempotency_in_connection(conn, &response).await?;
+            let mut landed = None;
+            for candidate in [&lookup, &response] {
+                let stored: IdempotencyRecord = sql_query(
+                    "SELECT authenticated_actor,operation_id,idempotency_key,request_hash,response_status, \
+                     response_body,created_at,expires_at FROM idempotency_keys \
+                     WHERE actor_key=$1 AND operation_id=$2 AND idempotency_key=$3",
+                ).bind::<Text, _>(actor_key(&candidate.authenticated_actor)?)
+                    .bind::<Text, _>(&candidate.operation_id)
+                    .bind::<Text, _>(&candidate.idempotency_key)
+                    .get_result::<IdempotencyRow>(&mut *conn).await?.try_into()?;
+                if stored.request_hash != candidate.request_hash {
+                    return Err(PersistenceError::Conflict(
+                        "duplicate_conflict: receipt request or resource binds different bytes".into(),
+                    ).into());
+                }
+                landed = Some(stored);
+            }
+            Ok(landed.expect("response record was read"))
+        }).await.map_err(super::PgTransactionError::into_persistence)
+    }
+
     async fn get(
         &self,
         authenticated_actor: &arkret_wire::ActorId,

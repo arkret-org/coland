@@ -14,6 +14,8 @@ use super::*;
 
 #[path = "realm_departure_fanout_tests.rs"]
 mod departure_tests;
+#[path = "erasure_receipt_live_tests.rs"]
+mod erasure_receipt_tests;
 
 struct LiveStation {
     state: AppState,
@@ -50,6 +52,10 @@ impl Drop for LiveStation {
 
 impl LiveStation {
     async fn start() -> Self {
+        Self::start_with_receipt_fault(None).await
+    }
+
+    async fn start_with_receipt_fault(fault: Option<Arc<std::sync::atomic::AtomicU8>>) -> Self {
         let tls = registered_tls_peer();
         let config = TestTlsConfig((*tls.tls).clone());
         drop(tls);
@@ -62,7 +68,10 @@ impl LiveStation {
             acceptor.holdings()[0].local_addr.as_ipv4().unwrap()
         );
         let (state, pool, lease) = station_with_webvh_provider(url, true);
-        let service = crate::service(state.clone());
+        let mut service = crate::service(state.clone());
+        if let Some(fault) = fault {
+            service = service.hoop(erasure_receipt_tests::ReceiptAckFault(fault));
+        }
         let server = tokio::spawn(async move {
             salvo::Server::new(acceptor).serve(service).await;
         });

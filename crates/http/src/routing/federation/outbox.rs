@@ -70,6 +70,8 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// spec recommendation in `federation.md` §8 (≈ 10 attempts ≈ ~1h wallclock
 /// with the capped exponential backoff below).
 pub const MAX_ATTEMPTS: i32 = 10;
+pub(crate) const ERASURE_PROPAGATION_WINDOW_SECS: i64 = 7 * 24 * 60 * 60;
+pub(crate) const ERASURE_RECEIPT_ENDPOINT: &str = "/_arkret/peer/erasure-receipts";
 /// Maximum semantic resubmissions for one delivery intent chain. Independent
 /// of the transport budget: `federation.md` §4.1 caps automatic re-submission
 /// of a convergent dependency quarantine and requires the sender to stop and
@@ -166,7 +168,7 @@ pub async fn enqueue_coalesced_outbound(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn enqueue_outbound_with_lane(
+pub(crate) async fn enqueue_outbound_with_lane(
     state: &AppState,
     peer_url: Option<&str>,
     peer_id: &str,
@@ -1048,6 +1050,17 @@ impl FederationDispatcher {
             );
             return;
         };
+        if row.delivery.endpoint == ERASURE_RECEIPT_ENDPOINT
+            && now_unix_secs()
+                >= row
+                    .delivery
+                    .created_at
+                    .saturating_add(ERASURE_PROPAGATION_WINDOW_SECS)
+        {
+            self.commit(self.dead_letter(&row, &lease_token, row.attempts, row.last_http_status,
+                "erasure_propagation_timed_out", "historical holder did not provide a verified acknowledgement within the propagation window".into(), now_unix_secs())).await;
+            return;
+        }
         let owed = match realm_fanout_still_owed(&self.state, &row).await {
             Ok(owed) => owed,
             Err(error) => {
@@ -1126,7 +1139,9 @@ impl FederationDispatcher {
                         observed_at: now,
                         outcome: FederationDeliveryOutcome::RouteUnavailable { next_attempt_at },
                     }
-                } else if error.contains("quarantined") || error.contains("fork") {
+                } else if row.delivery.endpoint != ERASURE_RECEIPT_ENDPOINT
+                    && (error.contains("quarantined") || error.contains("fork"))
+                {
                     self.dead_letter(
                         &row,
                         &lease_token,
@@ -1363,6 +1378,19 @@ impl FederationDispatcher {
                     Ok(None)
                 };
                 if (200..300).contains(&status)
+                    && let Err(error) = self.verify_erasure_ack(&row, &body_text).await
+                {
+                    self.transport_retry(
+                        &row,
+                        &lease_token,
+                        attempts,
+                        Some(status),
+                        error_code::TRANSPORT_ERROR,
+                        excerpt(&format!("erasure_acknowledgement_invalid: {error}")),
+                        None,
+                        now,
+                    )
+                } else if (200..300).contains(&status)
                     && let Err(error) = self.capture_contact_outcome(&row, &body_text).await
                 {
                     self.transport_retry(
@@ -1450,6 +1478,26 @@ impl FederationDispatcher {
             }
         };
         self.commit(command).await;
+    }
+
+    async fn verify_erasure_ack(
+        &self,
+        row: &PendingFederationDelivery,
+        response: &str,
+    ) -> Result<(), String> {
+        if row.delivery.endpoint != ERASURE_RECEIPT_ENDPOINT {
+            return Ok(());
+        }
+        let body: arkret_models_collaboration::governance::erasure::ErasureReceiptSubmitRequestBody =
+            serde_json::from_str(&row.delivery.payload_json).map_err(|error| error.to_string())?;
+        super::erasure_receipts::verify_acceptance(
+            &self.state,
+            &body.package,
+            &row.delivery.peer_id,
+            response,
+        )
+        .await?;
+        Ok(())
     }
 
     async fn capture_contact_outcome(
@@ -1884,7 +1932,8 @@ impl FederationDispatcher {
             };
         }
 
-        if row.delivery.realm_fanout.is_some() {
+        if row.delivery.realm_fanout.is_some() || row.delivery.endpoint == ERASURE_RECEIPT_ENDPOINT
+        {
             return self.transport_retry(
                 row,
                 lease_token,
@@ -2061,7 +2110,10 @@ impl FederationDispatcher {
         peer_retry_at: Option<i64>,
         now: i64,
     ) -> RecordFederationAttemptCommand {
-        if row.delivery.realm_fanout.is_none() && attempts >= MAX_ATTEMPTS {
+        if row.delivery.realm_fanout.is_none()
+            && row.delivery.endpoint != ERASURE_RECEIPT_ENDPOINT
+            && attempts >= MAX_ATTEMPTS
+        {
             return self.dead_letter(
                 row,
                 lease_token,
@@ -2086,8 +2138,15 @@ impl FederationDispatcher {
                 "Realm fanout remains pending past the operator alert threshold"
             );
         }
-        let next_attempt_at =
+        let mut next_attempt_at =
             transport_backoff_unix_secs(attempts, now).max(peer_retry_at.unwrap_or(0));
+        if row.delivery.endpoint == ERASURE_RECEIPT_ENDPOINT {
+            next_attempt_at = next_attempt_at.min(
+                row.delivery
+                    .created_at
+                    .saturating_add(ERASURE_PROPAGATION_WINDOW_SECS),
+            );
+        }
         crate::metrics::record_federation_retry_state("retry_scheduled");
         crate::metrics::record_federation_retry_delay(next_attempt_at - now);
         RecordFederationAttemptCommand {

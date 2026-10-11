@@ -234,6 +234,32 @@ impl AuthorityProtocolPort for AppState {
         request
             .validate()
             .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+        let actor = crate::routing::identity::session_actor::validated_session_actor(self, session)
+            .await
+            .map_err(|error| {
+                ServiceError::Conflict(format!("authenticated Account unavailable: {error}"))
+            })?;
+        if request
+            .events
+            .iter()
+            .any(|item| item.event.actor_id != actor || item.event.executed_by.is_some())
+        {
+            return Err(ServiceError::protocol(
+                arkret_wire::ErrorCode::CapabilityDenied,
+                "ordinary bootstrap retry must bind the authenticated Account",
+            ));
+        }
+        if let Some(commits) = self
+            .authority_commits()
+            .ordinary_realm_bootstrap_replay(&request, exact_request_body)
+            .await?
+        {
+            return Ok(OrdinaryRealmBootstrapAcceptanceOutcome {
+                unit_kind: request.unit_kind,
+                status: AggregateAcceptanceStatus::Duplicate,
+                commits,
+            });
+        }
         let genesis = &request.events[0].event;
         let existing = self
             .authority_commits()
@@ -268,7 +294,7 @@ impl AuthorityProtocolPort for AppState {
         )
         .map_err(|error| ServiceError::Internal(error.to_string()))?;
         let committed_at = Utc::now();
-        let unit = self
+        let mut unit = self
             .authority_commits()
             .prepare_ordinary_realm_bootstrap_unit(
                 request.clone(),
@@ -279,6 +305,16 @@ impl AuthorityProtocolPort for AppState {
                 committed_at,
             )
             .await?;
+        for (submitted, transaction) in request.events.iter().zip(&unit.transactions) {
+            unit.event_approvals.push(
+                crate::approval_admission::prepare_event_approvals(
+                    self,
+                    submitted,
+                    transaction.commit.committed_at,
+                )
+                .await?,
+            );
+        }
         #[cfg(feature = "conformance-harness")]
         tracing::warn!(
             phase = "unit_prepared",
@@ -748,6 +784,15 @@ impl AuthorityProtocolPort for AppState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn authority_objects_keep_the_http_canonical_and_signature_contract() {
+        let (commit, handoff) = arkret_test_kit::authority_objects::objects();
+        let commit: arkret_wire::RealmCommit =
+            serde_json::from_slice(&serde_json::to_vec(&commit).unwrap()).unwrap();
+        let handoff: arkret_wire::RealmAuthorityHandoff =
+            serde_json::from_slice(&serde_json::to_vec(&handoff).unwrap()).unwrap();
+        arkret_test_kit::authority_objects::assert_canonical_objects(&commit, &handoff);
+    }
     use arkret_wire::EventKind;
     use coland_services::ServiceError;
 

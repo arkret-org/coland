@@ -52,22 +52,6 @@ const MAX_CONFORMANCE_BATCH: usize = 1_000;
 const MAX_CONFORMANCE_RELATION_DEPTH: u64 = 32;
 const MAX_CONFORMANCE_ENVELOPE_BYTES: usize = 1024 * 1024;
 
-// Spec `realm-state-snapshot.schema.json`: the manifest's own identifier field is `id`
-// (`realm_state_snapshot_ref` only appears at external reference positions).
-const REALM_STATE_SNAPSHOT_SIGNED_TRANSCRIPT_FIELDS: &[&str] = &[
-    "id",
-    "realm_id",
-    "reducer_profile",
-    "schema_profile_refs",
-    "state_digest",
-    "frontier",
-    "event_set_commitment",
-    "chunks",
-    "verification_hints",
-    "created_by",
-    "created_at",
-];
-
 #[derive(Debug, Deserialize, salvo::oapi::ToSchema)]
 pub struct EncodeVectorRequest {
     vector_id: String,
@@ -177,32 +161,6 @@ pub struct EraseReceiptVectorOutcome {
     legal_hold_blocked: bool,
 }
 
-#[derive(Debug, Deserialize, salvo::oapi::ToSchema)]
-pub struct RealmStateSnapshotVectorRequest {
-    vector_id: String,
-
-    manifest: Value,
-
-    chunks: Vec<Value>,
-    #[serde(default)]
-    signature: Option<Value>,
-    #[serde(default)]
-    revoked_signer_dids: Vec<String>,
-}
-
-#[derive(Debug, Serialize, salvo::oapi::ToSchema)]
-pub struct RealmStateSnapshotVectorOutcome {
-    vector_id: String,
-    manifest_digest: String,
-    chunk_hashes: Vec<String>,
-    expected_chunk_count: usize,
-    state_digest: String,
-    event_set_commitment: String,
-    signature_valid: bool,
-    signer_did: String,
-    signed_transcript_fields: Vec<String>,
-}
-
 #[derive(Debug, Serialize, Deserialize, salvo::oapi::ToSchema)]
 pub struct QueryVectorRequest {
     vector_id: String,
@@ -226,7 +184,7 @@ pub struct QueryVectorRequest {
 }
 
 #[derive(Debug, Serialize, salvo::oapi::ToSchema)]
-pub struct QueryVectorFrontier {
+pub struct QueryVectorBarrier {
     barrier_cursor: String,
     row_count: usize,
 }
@@ -239,7 +197,7 @@ pub struct QueryVectorOutcome {
     has_more: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     next_cursor: Option<String>,
-    frontier: QueryVectorFrontier,
+    barrier: QueryVectorBarrier,
 }
 
 #[derive(Debug, Serialize, salvo::oapi::ToSchema)]
@@ -650,104 +608,6 @@ fn projected_event_carries_plaintext(projected: &Value, original: &Value) -> boo
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.coland.conformance.realm_state_snapshot",
-    tags("conformance")
-)]
-#[tracing::instrument(
-    skip_all,
-    fields(op = "org.arkret.coland.conformance.realm_state_snapshot")
-)]
-pub async fn snapshot(
-    body: JsonBody<RealmStateSnapshotVectorRequest>,
-) -> JsonResult<RealmStateSnapshotVectorOutcome> {
-    super::ensure_enabled()?;
-    let body = body.into_inner();
-    let vector = body.vector_id.as_str();
-    let manifest = &body.manifest;
-    let chunks = &body.chunks;
-    if chunks.len() > MAX_CONFORMANCE_BATCH || vector.contains("batch_item_count_over_max") {
-        return Err(limit_error(
-            "snapshot chunks exceed the 1,000 item wire limit",
-        ));
-    }
-
-    let manifest_canonical = canonical_json(manifest).map_err(schema_error)?;
-    if manifest_canonical.len() > MAX_CONFORMANCE_ENVELOPE_BYTES
-        || vector.contains("envelope_over_1mib")
-    {
-        return Err(payload_too_large_error(
-            "snapshot manifest canonical envelope exceeds 1 MiB",
-        ));
-    }
-    let manifest_digest = sha256_digest(manifest_canonical.as_bytes());
-
-    let mut chunk_hashes = Vec::with_capacity(chunks.len());
-    for (index, chunk) in chunks.iter().enumerate() {
-        let material = realm_state_snapshot_chunk_material(chunk)?;
-        let digest = sha256_digest(material.as_bytes());
-        if let Some(declared) = declared_chunk_digest(manifest, chunks, index, chunk)
-            && declared != digest
-        {
-            return Err(crate::app_error!(
-                DigestMismatch,
-                format!("snapshot chunk {index} digest mismatch"),
-            ));
-        }
-        chunk_hashes.push(digest);
-    }
-
-    let state_digest = manifest
-        .get("state_digest")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| digest_json(&json!({ "chunk_hashes": chunk_hashes })));
-    let event_set_commitment = manifest
-        .get("event_set_commitment")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| {
-            digest_json(&json!({
-                "manifest_digest": manifest_digest.clone(),
-                "state_digest": state_digest.clone(),
-            }))
-        });
-
-    let signature = manifest.get("signature").or(body.signature.as_ref());
-    let signer_did = signature
-        .and_then(|sig| sig.get("signer_did"))
-        .and_then(Value::as_str)
-        .or_else(|| manifest.get("created_by").and_then(Value::as_str))
-        .unwrap_or("did:web:coland.conformance");
-    if vector.contains("revoked")
-        || signature
-            .and_then(|sig| sig.get("revoked"))
-            .and_then(Value::as_bool)
-            == Some(true)
-        || body.revoked_signer_dids.iter().any(|did| did == signer_did)
-    {
-        return Err(
-            crate::app_error!(CapabilityDenied, "snapshot issuer is revoked")
-                .with_reason_code("realm_state_snapshot_issuer_revoked"),
-        );
-    }
-
-    json_ok(RealmStateSnapshotVectorOutcome {
-        vector_id: vector.to_owned(),
-        manifest_digest,
-        chunk_hashes,
-        expected_chunk_count: chunks.len(),
-        state_digest,
-        event_set_commitment,
-        signature_valid: signature.is_some(),
-        signer_did: signer_did.to_owned(),
-        signed_transcript_fields: REALM_STATE_SNAPSHOT_SIGNED_TRANSCRIPT_FIELDS
-            .iter()
-            .map(|field| (*field).to_owned())
-            .collect(),
-    })
-}
-
-#[salvo::oapi::endpoint(
     operation_id = "org.arkret.coland.conformance.query",
     tags("conformance")
 )]
@@ -812,7 +672,7 @@ pub async fn query(
         items: page,
         has_more: next_cursor.is_some(),
         next_cursor,
-        frontier: QueryVectorFrontier {
+        barrier: QueryVectorBarrier {
             barrier_cursor,
             row_count: rows.len(),
         },
@@ -875,65 +735,6 @@ fn strip_path(object: &mut Map<String, Value>, path: &str) {
     } else {
         object.remove(path);
     }
-}
-
-fn realm_state_snapshot_chunk_material(chunk: &Value) -> Result<String, AppError> {
-    if let Some(payload) = chunk.get("payload") {
-        return canonical_json(payload).map_err(schema_error);
-    }
-    if let Some(bytes) = chunk.get("bytes").and_then(Value::as_str) {
-        return Ok(bytes.to_owned());
-    }
-    if let Some(data) = chunk.get("data") {
-        return canonical_json(data).map_err(schema_error);
-    }
-    let mut scrubbed = chunk.clone();
-    if let Some(object) = scrubbed.as_object_mut() {
-        for key in [
-            "digest",
-            "chunk_hash",
-            "expected_digest",
-            "expected_chunk_hash",
-        ] {
-            object.remove(key);
-        }
-    }
-    canonical_json(&scrubbed).map_err(schema_error)
-}
-
-fn declared_chunk_digest(
-    manifest: &Value,
-    chunks: &[Value],
-    index: usize,
-    chunk: &Value,
-) -> Option<String> {
-    chunk
-        .get("digest")
-        .or_else(|| chunk.get("chunk_hash"))
-        .or_else(|| chunk.get("expected_digest"))
-        .and_then(Value::as_str)
-        .or_else(|| {
-            manifest
-                .get("chunk_hashes")
-                .and_then(Value::as_array)
-                .and_then(|values| values.get(index))
-                .and_then(Value::as_str)
-        })
-        .or_else(|| {
-            manifest
-                .get("chunks")
-                .and_then(Value::as_array)
-                .and_then(|values| values.get(index))
-                .and_then(|entry| entry.get("digest").or_else(|| entry.get("chunk_hash")))
-                .and_then(Value::as_str)
-        })
-        .or_else(|| {
-            chunks
-                .get(index)
-                .and_then(|entry| entry.get("declared_digest"))
-                .and_then(Value::as_str)
-        })
-        .map(ToOwned::to_owned)
 }
 
 fn validate_query_limits(vector: &str, body: &Value, query_value: &Value) -> Result<(), AppError> {
@@ -1473,21 +1274,6 @@ mod tests {
         assert_eq!(
             err.http_status(),
             coland_http::error::error_http_status(err.code)
-        );
-    }
-
-    #[test]
-    fn realm_state_snapshot_declared_digest_mismatch_is_detected() {
-        let manifest = json!({
-            "chunk_hashes": ["sha256:0000000000000000000000000000000000000000000000000000000000000000"]
-        });
-        let chunks = vec![json!({ "payload": { "body": "hello" } })];
-        let material = realm_state_snapshot_chunk_material(&chunks[0]).unwrap();
-        let actual_digest = sha256_digest(material.as_bytes());
-
-        assert_ne!(
-            declared_chunk_digest(&manifest, &chunks, 0, &chunks[0]).unwrap(),
-            actual_digest
         );
     }
 }

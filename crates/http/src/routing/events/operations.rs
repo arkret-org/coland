@@ -20,7 +20,6 @@
 //! - `canonical_json_digest` — sha256 over canonical-JSON bytes.
 //!
 //! Spec items still pending here are tracked in `_todos.md` (notably
-//! Stream-A19 for B-09 redact `actor_seq` preservation, B-22 for
 //! encrypted-attachment `key_ref` shape, and the operation-schema gaps
 //! around the 100+ event kinds the reducer doesn't cover yet).
 //!

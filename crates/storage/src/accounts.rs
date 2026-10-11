@@ -12,17 +12,6 @@ pub trait AccountStore: Send + Sync {
     async fn put(&self, record: &AccountRecord) -> PersistenceResult<AccountPk>;
     async fn list(&self) -> PersistenceResult<Vec<AccountRecord>>;
     async fn delete(&self, account_id: &AccountId) -> PersistenceResult<()>;
-    /// Whether this Station holds the account's authoring record unbroken since
-    /// its local inception.
-    ///
-    /// `sync/federation.md` section 5.3.4 condition 2. `false` covers both a
-    /// recorded break and a missing anchor, because "no anchor" is undecidable
-    /// rather than continuous. A storage failure stays an error: it is also not
-    /// a decision.
-    async fn authoring_record_is_continuous(
-        &self,
-        account_id: &AccountId,
-    ) -> PersistenceResult<bool>;
 }
 #[async_trait]
 pub trait AccountLocalpartStore: Send + Sync {

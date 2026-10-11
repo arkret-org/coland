@@ -286,33 +286,6 @@ CREATE TABLE public.accounts (
 ALTER TABLE ONLY public.accounts
     ADD CONSTRAINT accounts_station_key UNIQUE (station_id, principal_id);
 
--- Durable evidence that this Station has held one account's authoring record
--- without interruption since that account's local inception.
---
--- `sync/federation.md` section 5.3.4 makes this condition 2 of a decidable
--- empty actor frontier: only a Station that can show the unbroken interval may
--- answer `next_actor_seq = 0`; every other case MUST fail
--- `frontier_unavailable` rather than initialize an actor chain from "the
--- database returned no rows". The interval starts at the account's inception on
--- this Station, which necessarily precedes every device generation of that
--- account, so an unbroken interval covers the complete device generation
--- lineage of any `authoring_device_generation_ref` by construction.
---
--- Backup restore, data import, migration, retention pruning and any interval
--- whose content is undetermined break continuity: whoever performs one MUST
--- stamp `broken_at`/`broken_reason`, and the row then fails the gate forever.
--- Deleting the row has the same effect, because absence is also undecidable.
-CREATE TABLE public.account_authoring_continuity (
-    principal_id text NOT NULL CHECK (principal_id LIKE 'ak:did_core:%'),
-    station_id text NOT NULL CHECK (station_id LIKE 'ak:did_core:%'),
-    inception_at timestamp with time zone NOT NULL,
-    broken_at timestamp with time zone,
-    broken_reason text,
-    PRIMARY KEY (principal_id, station_id),
-    CONSTRAINT account_authoring_continuity_break_check
-        CHECK ((broken_at IS NULL) = (broken_reason IS NULL))
-);
-
 CREATE TABLE public.account_localparts (
     id uuid PRIMARY KEY,
     account_pk bigint NOT NULL,
@@ -777,27 +750,15 @@ CREATE TRIGGER blobs_encryption_immutable
     BEFORE UPDATE OF payload ON public.blobs
     FOR EACH ROW EXECUTE FUNCTION public.enforce_blob_encryption_immutable();
 
--- Live relay for admitted `SignalEnvelope`s (`sync/signal.md` §4). One row per
--- admitted envelope, retained only until `expires_at`. Presence, typing, call
--- signalling and read receipts are all Signals in v1 and share this one table:
--- the exact payload type and target live inside `encrypted_payload`, and §1
--- forbids a service from requiring or inferring a finer classification, so
--- there is deliberately no `signal_kind`, target, sequence or plaintext column.
--- `position` is a monotonic per-Realm deliver-once cursor sourced from
--- Publication evidence per accepted Event canonical digest
--- (`authz/offline-publication.md` 2.1). The client-supplied AuthorizationLease
--- and the IngressReceipt this service signs at ingress are transport evidence
--- ABOUT an Event, not part of it: they never enter the Event digest, so they
--- live here rather than as columns on `canonical_events`. `event_digest` is the
--- primary key so the first receipt for a digest is the one that stands and an
--- idempotent retry cannot re-stamp `received_at`.
+-- Durable publication evidence binds the exact accepted Event to its Commit.
 CREATE TABLE public.publication_evidence (
     event_id text PRIMARY KEY,
     committed_ref jsonb NOT NULL,
     accepted_at timestamp with time zone NOT NULL
 );
 
--- `signal_relay_position`.
+-- Live encrypted Signal relay. Its monotonic deliver-once cursor is sourced
+-- from `signal_relay_position`; expiry bounds retention.
 CREATE TABLE public.signal_relay (
     id uuid PRIMARY KEY,
     realm_id text NOT NULL,
@@ -852,7 +813,6 @@ CREATE TABLE public.canonical_events (
     digest_suite smallint NOT NULL,
     digest bytea NOT NULL,
     actor_id text NOT NULL,
-    actor_seq bigint DEFAULT 0 NOT NULL,
     realm_id text,
     realm_pk bigint REFERENCES public.canonical_realms(pk) ON DELETE RESTRICT,
     scope_ref jsonb NOT NULL,
@@ -899,7 +859,6 @@ BEGIN
         OLD.digest_suite,
         OLD.digest,
         OLD.actor_id,
-        OLD.actor_seq,
         OLD.realm_id,
         OLD.realm_pk,
         OLD.scope_ref,
@@ -913,7 +872,6 @@ BEGIN
         NEW.digest_suite,
         NEW.digest,
         NEW.actor_id,
-        NEW.actor_seq,
         NEW.realm_id,
         NEW.realm_pk,
         NEW.scope_ref,
@@ -1208,25 +1166,9 @@ CREATE TABLE public.membership_compensation_evidence (
     CONSTRAINT membership_compensation_evidence_single_use_key UNIQUE (admission_id, delegation_id)
 );
 
--- Ordinary reads never select from this table. They go through
--- public.committed_events, which subtracts the siblings a committed
--- ak.fork.resolution verdict adjudicated out of the local read surface.
+-- Ordinary shared reads select committed Events through public.committed_events.
 CREATE INDEX canonical_events_realm_pk_idx
     ON public.canonical_events USING btree (realm_pk, received_at, pk);
-
-CREATE INDEX canonical_events_actor_idx ON public.canonical_events USING btree (actor_id, actor_seq DESC);
-
-CREATE INDEX canonical_events_realm_actor_position_idx
-    ON public.canonical_events USING btree (realm_pk, actor_id, actor_seq, id)
-    WHERE state = 'committed';
-
--- Position occupancy for one `(realm_id, actor_id)` in every state.
--- `sync/federation.md` section 5.3.4 condition 3 requires the enumeration behind
--- a decidable empty actor frontier to cover pending outbound, submitted but
--- undecided, accepted, quarantined and fork-resolution voided positions, so it
--- MUST NOT run through the accepted-only partial index above.
-CREATE INDEX canonical_events_realm_actor_occupancy_idx
-    ON public.canonical_events USING btree (realm_id, actor_id);
 
 CREATE INDEX canonical_events_actor_received_idx ON public.canonical_events USING btree (actor_id, received_at, id);
 
@@ -1267,7 +1209,6 @@ CREATE TABLE public.event_collision_variants (
     pk bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     event_pk bigint NOT NULL REFERENCES public.canonical_events(pk) ON DELETE RESTRICT,
     actor_id text NOT NULL,
-    actor_seq bigint NOT NULL,
     realm_id text,
     kind text NOT NULL,
     schema_id text NOT NULL,
@@ -1280,690 +1221,6 @@ CREATE TABLE public.event_collision_variants (
 CREATE INDEX event_collision_variants_event_pk_idx
     ON public.event_collision_variants USING btree (event_pk);
 
--- Pending + sealed control-plane Events. v1 has no standalone Move object: a
--- Control Move is an Event carrying `seal_basis`, so the log is keyed by the
--- canonical control-event digest rather than by a Move id.
-CREATE TABLE public.state_control_events (
-    event_digest text PRIMARY KEY,
-    digest_suite text NOT NULL CHECK (digest_suite IN ('sha256', 'blake3')),
-    realm_id text NOT NULL,
-    event_json jsonb NOT NULL,
-    control_proposal_ack jsonb,
-    -- Durable ingress classification (`event-auth-state-resolution.md` §7.2):
-    -- `{"class":"ack_required"}` or `{"class":"ackless_self_principal", ...}`
-    -- carrying the stable references first admission was proven against.
-    ingress_class jsonb NOT NULL,
-    -- Exact registered command unit in normative member order. Every member
-    -- carries the same array; ordinary commands use a singleton array.
-    command_unit_event_digests jsonb NOT NULL,
-    proposal_decisions jsonb DEFAULT '[]'::jsonb NOT NULL,
-    -- Private admission-derived mirrors; invisible until the exact committed decision.
-    pending_domain_effects jsonb,
-    -- Private Contact transport intent; only committed commands may materialize it.
-    contact_completion_intent jsonb,
-    contact_completion_binding jsonb,
-    contact_completion_result jsonb,
-    contact_delivery_outbox_id text,
-    inserted_at timestamp with time zone DEFAULT now() NOT NULL,
-    is_pending boolean DEFAULT true NOT NULL,
-    UNIQUE (event_digest, realm_id),
-    CONSTRAINT state_control_events_command_unit_array_check
-        CHECK (jsonb_typeof(command_unit_event_digests) = 'array'
-            AND jsonb_array_length(command_unit_event_digests) BETWEEN 1 AND 4096)
-);
-
-CREATE UNIQUE INDEX state_control_events_contact_completion_binding_idx
-    ON public.state_control_events ((contact_completion_binding->'authenticated_actor'), (contact_completion_binding->>'idempotency_key'))
-    WHERE contact_completion_binding IS NOT NULL;
-
-CREATE INDEX state_control_events_contact_completion_idx
-    ON public.state_control_events (inserted_at, event_digest)
-    WHERE contact_completion_intent IS NOT NULL AND NOT is_pending;
-
-CREATE INDEX state_control_events_realm_idx ON public.state_control_events USING btree (realm_id, inserted_at, event_digest);
-CREATE INDEX state_control_events_pending_order_idx
-    ON public.state_control_events (realm_id, inserted_at, event_digest) WHERE is_pending;
-CREATE INDEX state_control_events_pending_due_idx
-    ON public.state_control_events (realm_id, (control_proposal_ack->>'absolute_due_at') ASC NULLS FIRST, event_digest)
-    WHERE is_pending;
-
--- Only a signed Seal command outcome removes pending work. Proposal decisions
--- remain advisory until that atomic decision is accepted with the Seal.
-CREATE FUNCTION public.update_control_event_pending() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-    IF TG_OP = 'UPDATE' AND NOT OLD.is_pending THEN
-        NEW.is_pending := false;
-    END IF;
-    RETURN NEW;
-END;
-$$;
-CREATE TRIGGER state_control_event_pending_decision
-    BEFORE INSERT OR UPDATE ON public.state_control_events
-    FOR EACH ROW EXECUTE FUNCTION public.update_control_event_pending();
-
--- Rebuildable per-Realm scheduling metadata. Pending Control Events remain
--- authoritative; this table only provides fair, fenced attempt ownership.
-CREATE TABLE public.state_control_seal_schedule (
-    realm_id text PRIMARY KEY,
-    generation bigint NOT NULL CHECK (generation > 0),
-    first_pending_at_ms bigint NOT NULL,
-    next_attempt_at_ms bigint NOT NULL,
-    last_attempt_at_ms bigint,
-    claim_holder text,
-    claim_fence bigint DEFAULT 0 NOT NULL CHECK (claim_fence >= 0),
-    claim_until_ms bigint,
-    consecutive_failures integer DEFAULT 0 NOT NULL CHECK (consecutive_failures >= 0),
-    last_outcome text,
-    scan_cursor text,
-    CHECK ((claim_holder IS NULL) = (claim_until_ms IS NULL))
-);
-
-CREATE INDEX state_control_seal_schedule_due_idx
-    ON public.state_control_seal_schedule USING btree (next_attempt_at_ms, first_pending_at_ms, realm_id);
-
-CREATE TABLE public.state_control_seal_repair_cursor (
-    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
-    after_realm_id text,
-    updated_at_ms bigint NOT NULL
-);
-
-CREATE TABLE public.state_seals (
-    id text PRIMARY KEY,
-    digest_suite text NOT NULL CHECK (digest_suite IN ('sha256', 'blake3')),
-    realm_id text NOT NULL,
-    -- Exact canonical preimage used by Seal::canonical_bytes_for_id().
-    seal_id_preimage_bytes bytea NOT NULL,
-    -- Full accepted Seal object, stored separately from its id preimage.
-    accepted_seal_bytes bytea NOT NULL,
-    seal_json jsonb NOT NULL,
-    predecessor_ref text,
-    is_genesis boolean DEFAULT false NOT NULL,
-    inserted_at timestamp with time zone DEFAULT now() NOT NULL,
-    UNIQUE (id, realm_id)
-);
-
-CREATE INDEX state_seals_realm_idx ON public.state_seals USING btree (realm_id, inserted_at, id);
-
-CREATE INDEX state_seals_predecessor_ref_idx ON public.state_seals (predecessor_ref);
-
-CREATE FUNCTION public.reject_state_seal_identity_mutation() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    RAISE EXCEPTION '% rows are immutable', TG_TABLE_NAME;
-END;
-$$;
-
-CREATE TRIGGER state_seals_immutable
-    BEFORE UPDATE ON public.state_seals
-    FOR EACH ROW EXECUTE FUNCTION public.reject_state_seal_identity_mutation();
-
--- Receiver-verified effective state and complete Control Event coverage frozen
--- at the same frontier-CAS boundary as the accepted Seal. The roots remain in
--- the signed Seal; this row is a checkable acceleration index, not authority.
-CREATE TABLE public.state_seal_effective_checkpoints (
-    seal_id text PRIMARY KEY,
-    realm_id text NOT NULL,
-    covered_event_digests text[] NOT NULL,
-    covered_seal_ids text[] NOT NULL,
-    state_json jsonb NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    FOREIGN KEY (seal_id, realm_id)
-        REFERENCES public.state_seals(id, realm_id) ON DELETE RESTRICT
-);
-
-CREATE INDEX state_seal_effective_checkpoints_realm_idx
-    ON public.state_seal_effective_checkpoints (realm_id, seal_id);
-
-CREATE TRIGGER state_seal_effective_checkpoints_immutable
-    BEFORE UPDATE ON public.state_seal_effective_checkpoints
-    FOR EACH ROW EXECUTE FUNCTION public.reject_state_seal_identity_mutation();
-
-CREATE TABLE public.state_seal_collision_variants (
-    variant_id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-    seal_id text NOT NULL REFERENCES public.state_seals(id) ON DELETE RESTRICT,
-    digest_suite text NOT NULL CHECK (digest_suite IN ('sha256', 'blake3')),
-    seal_id_preimage_bytes bytea NOT NULL,
-    accepted_seal_bytes bytea NOT NULL,
-    realm_id text NOT NULL,
-    seal_json jsonb NOT NULL,
-    observed_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-CREATE INDEX state_seal_collision_variants_seal_idx
-    ON public.state_seal_collision_variants (seal_id, variant_id);
-
-CREATE TRIGGER state_seal_collision_variants_immutable
-    BEFORE UPDATE ON public.state_seal_collision_variants
-    FOR EACH ROW EXECUTE FUNCTION public.reject_state_seal_identity_mutation();
-
-CREATE TABLE public.state_seal_quarantine (
-    seal_id text PRIMARY KEY REFERENCES public.state_seals(id) ON DELETE RESTRICT,
-    reason_code text NOT NULL,
-    quarantined_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT state_seal_quarantine_reason_check CHECK (reason_code IN (
-        'seal_hash_collision',
-        'seal_wrapper_conflict'
-    ))
-);
-
-CREATE TABLE public.state_seal_quarantine_realms (
-    seal_id text NOT NULL REFERENCES public.state_seal_quarantine(seal_id) ON DELETE RESTRICT,
-    realm_id text NOT NULL,
-    PRIMARY KEY (seal_id, realm_id)
-);
-
-CREATE INDEX state_seal_quarantine_realms_realm_idx
-    ON public.state_seal_quarantine_realms (realm_id, seal_id);
-
-CREATE TABLE public.state_seal_control_events (
-    seal_id text NOT NULL,
-    realm_id text NOT NULL,
-    event_digest text NOT NULL,
-    command_index bigint NOT NULL,
-    member_index bigint NOT NULL,
-    outcome text NOT NULL,
-    reason_code text,
-    -- SHA-256 over the AvailabilityReceipt event-bytes domain preimage.
-    accepted_event_bytes_digest text NOT NULL,
-    -- Full accepted Event canonical bytes with only `unsigned` removed.
-    accepted_event_bytes bytea NOT NULL,
-    sealed_at timestamp with time zone NOT NULL,
-    decision_overdue boolean DEFAULT false NOT NULL,
-    PRIMARY KEY (seal_id, event_digest),
-    UNIQUE (event_digest),
-    UNIQUE (seal_id, command_index, member_index),
-    FOREIGN KEY (seal_id, realm_id)
-        REFERENCES public.state_seals(id, realm_id) ON DELETE RESTRICT,
-    FOREIGN KEY (event_digest, realm_id)
-        REFERENCES public.state_control_events(event_digest, realm_id) ON DELETE RESTRICT,
-    CONSTRAINT state_seal_control_events_command_index_check CHECK (command_index >= 0),
-    CONSTRAINT state_seal_control_events_member_index_check CHECK (member_index >= 0),
-    CONSTRAINT state_seal_control_events_outcome_check CHECK (outcome IN ('committed', 'rejected')),
-    CONSTRAINT state_seal_control_events_reason_check CHECK (
-        (outcome = 'committed' AND reason_code IS NULL)
-        OR (outcome = 'rejected' AND reason_code IS NOT NULL)
-    )
-);
-
-CREATE INDEX state_seal_control_events_event_idx
-    ON public.state_seal_control_events USING btree (event_digest, sealed_at, seal_id);
-
-CREATE FUNCTION public.complete_control_event_pending() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-    UPDATE public.state_control_events SET is_pending = false
-        WHERE event_digest = NEW.event_digest AND is_pending;
-    RETURN NEW;
-END;
-$$;
-CREATE TRIGGER state_control_event_pending_coverage
-    AFTER INSERT ON public.state_seal_control_events
-    FOR EACH ROW EXECUTE FUNCTION public.complete_control_event_pending();
-
-CREATE TRIGGER state_seal_control_events_immutable
-    BEFORE UPDATE ON public.state_seal_control_events
-    FOR EACH ROW EXECUTE FUNCTION public.reject_state_seal_identity_mutation();
-
-CREATE TABLE public.governance_dependency_objects (
-    realm_id text NOT NULL,
-    dependency_kind text NOT NULL,
-    object_digest text NOT NULL,
-    canonical_bytes bytea NOT NULL,
-    object_json jsonb NOT NULL,
-    inserted_at timestamp with time zone DEFAULT now() NOT NULL,
-    PRIMARY KEY (realm_id, dependency_kind, object_digest),
-    CONSTRAINT governance_dependency_objects_kind_check CHECK (dependency_kind IN (
-        'applet_installation_authority',
-        'availability_receipt',
-        'authenticated_signer_resolution_evidence',
-        'minimal_metadata_mls_leaf_signer_evidence',
-        'collision_variant_record'
-    )),
-    CONSTRAINT governance_dependency_objects_size_check CHECK (octet_length(canonical_bytes) <= 8388608)
-);
-
-COMMENT ON COLUMN public.governance_dependency_objects.object_digest IS
-    'Legacy column name: exact selector value; collision_variant_record stores collision_variant_record_id, not a digest';
-
--- Keys verified during delegated Agent PCR Seal admission, retained before the
--- frontier commit. A retained row is usable only with its exact accepted Seal.
-CREATE TABLE public.agent_accepted_seal_signers (
-    seal_id text PRIMARY KEY,
-    signer jsonb NOT NULL
-);
-
-CREATE TABLE public.governance_unscoped_signer_evidence (
-    dependency_kind text NOT NULL,
-    object_digest text NOT NULL,
-    canonical_bytes bytea NOT NULL,
-    object_json jsonb NOT NULL,
-    inserted_at timestamp with time zone DEFAULT now() NOT NULL,
-    PRIMARY KEY (dependency_kind, object_digest),
-    CONSTRAINT governance_unscoped_signer_evidence_kind_check CHECK (dependency_kind IN (
-        'authenticated_signer_resolution_evidence',
-        'minimal_metadata_mls_leaf_signer_evidence'
-    )),
-    CONSTRAINT governance_unscoped_signer_evidence_size_check CHECK (octet_length(canonical_bytes) <= 1048576)
-);
-
-CREATE TABLE public.governance_dependency_edges (
-    edge_id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-    realm_id text NOT NULL,
-    seal_id text,
-    event_digest text,
-    event_pk bigint REFERENCES public.canonical_events(pk) ON DELETE RESTRICT,
-    dependency_kind text NOT NULL,
-    object_digest text NOT NULL,
-    edge_index bigint NOT NULL,
-    inserted_at timestamp with time zone DEFAULT now() NOT NULL,
-    FOREIGN KEY (realm_id, dependency_kind, object_digest)
-        REFERENCES public.governance_dependency_objects(realm_id, dependency_kind, object_digest)
-        ON DELETE RESTRICT,
-    -- Event edges retain their canonical source, including ordinary Events.
-    -- Seal evidence may be staged before its candidate Seal is published.
-    CONSTRAINT governance_dependency_edges_event_source_check CHECK ((event_digest IS NULL) = (event_pk IS NULL)),
-    CONSTRAINT governance_dependency_edges_source_check CHECK (num_nonnulls(seal_id, event_digest) = 1),
-    CONSTRAINT governance_dependency_edges_index_check CHECK (edge_index >= 0)
-);
-
-CREATE UNIQUE INDEX governance_dependency_edges_seal_unique
-    ON public.governance_dependency_edges (realm_id, seal_id, dependency_kind, object_digest)
-    WHERE seal_id IS NOT NULL;
-
-CREATE UNIQUE INDEX governance_dependency_edges_event_unique
-    ON public.governance_dependency_edges (realm_id, event_digest, dependency_kind, object_digest)
-    WHERE event_digest IS NOT NULL;
-
-CREATE UNIQUE INDEX governance_dependency_edges_seal_index_unique
-    ON public.governance_dependency_edges (realm_id, seal_id, edge_index)
-    WHERE seal_id IS NOT NULL;
-
-CREATE UNIQUE INDEX governance_dependency_edges_event_index_unique
-    ON public.governance_dependency_edges (realm_id, event_digest, edge_index)
-    WHERE event_digest IS NOT NULL;
-
-CREATE INDEX governance_dependency_edges_object_idx
-    ON public.governance_dependency_edges (realm_id, dependency_kind, object_digest);
-
-CREATE TABLE public.history_traversal_retentions (
-    retention_digest text PRIMARY KEY,
-    realm_id text NOT NULL,
-    access_kind text NOT NULL,
-    retention_kind text NOT NULL,
-    access_digest text NOT NULL,
-    traversal_intent jsonb NOT NULL,
-    trusted_history_base_basis jsonb NOT NULL,
-    trusted_current_basis jsonb NOT NULL,
-    target_basis jsonb NOT NULL,
-    expires_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    UNIQUE (access_kind, access_digest),
-    CONSTRAINT history_traversal_retentions_access_kind_check CHECK (access_kind IN (
-        'request_receipt',
-        'archive_replica',
-        'pending_archive_replica'
-    )),
-    CONSTRAINT history_traversal_retentions_kind_check CHECK (retention_kind IN (
-        'request_expiring',
-        'archive_lifetime'
-    )),
-    CONSTRAINT history_traversal_retentions_kind_access_check CHECK (
-        (access_kind = 'request_receipt' AND retention_kind = 'request_expiring') OR
-        (access_kind IN ('archive_replica', 'pending_archive_replica') AND retention_kind = 'archive_lifetime')
-    ),
-    CONSTRAINT history_traversal_retentions_expiry_check CHECK (
-        (retention_kind = 'request_expiring' AND expires_at IS NOT NULL AND expires_at > created_at) OR
-        (retention_kind = 'archive_lifetime' AND expires_at IS NULL)
-    )
-);
-
-CREATE INDEX history_traversal_retentions_realm_expiry_idx
-    ON public.history_traversal_retentions (realm_id, expires_at, retention_digest);
-
-CREATE TABLE public.history_traversal_retained_objects (
-    object_kind text NOT NULL,
-    object_digest text NOT NULL,
-    object_ref text NOT NULL,
-    canonical_bytes bytea NOT NULL,
-    object_json jsonb NOT NULL,
-    reference_count bigint NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    PRIMARY KEY (object_kind, object_digest),
-    CONSTRAINT history_traversal_retained_objects_kind_check CHECK (object_kind IN (
-        'seal',
-        'control_event',
-        'governance_dependency'
-    )),
-    CONSTRAINT history_traversal_retained_objects_size_check CHECK (
-        octet_length(canonical_bytes) <= 8388608
-    ),
-    CONSTRAINT history_traversal_retained_objects_reference_count_check CHECK (
-        reference_count > 0
-    )
-);
-
-CREATE TABLE public.history_traversal_pins (
-    retention_digest text NOT NULL,
-    object_kind text NOT NULL,
-    object_ref text NOT NULL,
-    object_digest text NOT NULL,
-    pin_index bigint NOT NULL,
-    pinned_at timestamp with time zone DEFAULT now() NOT NULL,
-    PRIMARY KEY (retention_digest, object_kind, object_ref, object_digest),
-    UNIQUE (retention_digest, pin_index),
-    FOREIGN KEY (retention_digest)
-        REFERENCES public.history_traversal_retentions(retention_digest) ON DELETE RESTRICT,
-    FOREIGN KEY (object_kind, object_digest)
-        REFERENCES public.history_traversal_retained_objects(object_kind, object_digest)
-        ON DELETE RESTRICT,
-    CONSTRAINT history_traversal_pins_kind_check CHECK (object_kind IN (
-        'seal',
-        'control_event',
-        'governance_dependency'
-    )),
-    CONSTRAINT history_traversal_pins_index_check CHECK (pin_index >= 0)
-);
-
-CREATE INDEX history_traversal_pins_object_idx
-    ON public.history_traversal_pins (object_kind, object_ref, object_digest, retention_digest);
-
-CREATE TABLE public.history_key_requests (
-    request_sequence bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-    request_id text NOT NULL UNIQUE,
-    request_digest text NOT NULL UNIQUE,
-    request_receipt_digest text NOT NULL UNIQUE,
-    effective_scope_kind text NOT NULL,
-    realm_id text NOT NULL,
-    circle_id text,
-    requester_actor_id text NOT NULL,
-    requester_sender_domain text NOT NULL,
-    release_id text NOT NULL,
-    traversal_retention_digest text REFERENCES public.history_traversal_retentions(retention_digest) ON DELETE RESTRICT,
-    request_json jsonb NOT NULL,
-    request_receipt_json jsonb NOT NULL,
-    sealed_history_response_capability_json jsonb,
-    request_replica_digest text UNIQUE,
-    request_replica_json jsonb,
-    stored_at timestamp with time zone NOT NULL,
-    expires_at timestamp with time zone NOT NULL,
-    CONSTRAINT history_key_requests_scope_check CHECK (
-        (effective_scope_kind = 'realm' AND circle_id IS NULL) OR
-        (effective_scope_kind = 'circle' AND circle_id IS NOT NULL)
-    ),
-    CONSTRAINT history_key_requests_local_replica_check CHECK (
-        (sealed_history_response_capability_json IS NOT NULL AND traversal_retention_digest IS NOT NULL
-            AND request_replica_digest IS NULL AND request_replica_json IS NULL) OR
-        (sealed_history_response_capability_json IS NULL AND traversal_retention_digest IS NULL
-            AND request_replica_digest IS NOT NULL AND request_replica_json IS NOT NULL)
-    ),
-    CONSTRAINT history_key_requests_expiry_check CHECK (expires_at >= stored_at)
-);
-
-CREATE INDEX history_key_requests_scope_sequence_idx
-    ON public.history_key_requests (
-        effective_scope_kind,
-        realm_id,
-        circle_id,
-        request_sequence
-    );
-
-CREATE INDEX history_key_requests_local_sequence_idx
-    ON public.history_key_requests (request_sequence)
-    WHERE request_replica_digest IS NULL;
-
-CREATE TABLE public.history_key_response_streams (
-    request_id text PRIMARY KEY REFERENCES public.history_key_requests(request_id) ON DELETE CASCADE,
-    response_capability_commitment text NOT NULL UNIQUE,
-    next_sequence bigint DEFAULT 0 NOT NULL,
-    acked_sequence bigint,
-    acked_cursor text,
-    active_bytes bigint DEFAULT 0 NOT NULL,
-    compact_receipt_bytes bigint DEFAULT 0 NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    CONSTRAINT history_key_response_streams_next_sequence_check CHECK (next_sequence >= 0),
-    CONSTRAINT history_key_response_streams_acked_sequence_check CHECK (acked_sequence IS NULL OR acked_sequence >= 0),
-    CONSTRAINT history_key_response_streams_ack_pair_check CHECK ((acked_sequence IS NULL) = (acked_cursor IS NULL)),
-    CONSTRAINT history_key_response_streams_active_bytes_check CHECK (active_bytes >= 0 AND active_bytes <= 16777216),
-    CONSTRAINT history_key_response_streams_compact_receipt_bytes_check CHECK (compact_receipt_bytes >= 0 AND compact_receipt_bytes <= 67108864)
-);
-
-CREATE TABLE public.history_key_responses (
-    response_id text PRIMARY KEY,
-    request_id text NOT NULL REFERENCES public.history_key_response_streams(request_id) ON DELETE CASCADE,
-    source_sender_domain text NOT NULL,
-    source_record_digest text NOT NULL,
-    source_record_json jsonb NOT NULL,
-    source_signer_result_json jsonb NOT NULL,
-    cipher_suite text NOT NULL,
-    manifest_admission_json jsonb,
-    manifest_digest text,
-    manifest_admission_digest text,
-    release_attestation_json jsonb,
-    release_service_signer_evidence_json jsonb NOT NULL,
-    sequence bigint NOT NULL,
-    cursor text,
-    sent_at timestamp with time zone NOT NULL,
-    reserved_at timestamp with time zone NOT NULL,
-    expires_at timestamp with time zone NOT NULL,
-    state text DEFAULT 'reserved'::text NOT NULL,
-    record_digest text,
-    record_json jsonb,
-    lost_record_digest text,
-    lost_record_json jsonb,
-    send_receipt_json jsonb,
-    active_bytes bigint DEFAULT 0 NOT NULL,
-    compact_receipt_bytes bigint DEFAULT 0 NOT NULL,
-    accepted_at timestamp with time zone,
-    acked_at timestamp with time zone,
-    UNIQUE (request_id, sequence),
-    UNIQUE (request_id, cursor),
-    UNIQUE (request_id, manifest_digest, manifest_admission_digest),
-    CONSTRAINT history_key_responses_sequence_check CHECK (sequence >= 0),
-    CONSTRAINT history_key_responses_active_bytes_check CHECK (active_bytes >= 0),
-    CONSTRAINT history_key_responses_compact_receipt_bytes_check CHECK (compact_receipt_bytes >= 0),
-    CONSTRAINT history_key_responses_branch_check CHECK (num_nonnulls(manifest_admission_json, release_attestation_json) = 1),
-    CONSTRAINT history_key_responses_manifest_binding_check CHECK (
-        (manifest_admission_json IS NULL AND manifest_digest IS NULL AND manifest_admission_digest IS NULL) OR
-        (manifest_admission_json IS NOT NULL AND manifest_digest IS NOT NULL AND manifest_admission_digest IS NOT NULL)
-    ),
-    CONSTRAINT history_key_responses_state_check CHECK (state IN ('reserved', 'accepted', 'lost', 'acked')),
-    CONSTRAINT history_key_responses_material_check CHECK (
-        (state = 'reserved' AND cursor IS NULL AND record_digest IS NULL AND record_json IS NULL
-            AND lost_record_digest IS NULL AND lost_record_json IS NULL
-            AND send_receipt_json IS NULL AND active_bytes = 0 AND compact_receipt_bytes = 0
-            AND accepted_at IS NULL AND acked_at IS NULL) OR
-        (state = 'accepted' AND cursor IS NOT NULL AND record_digest IS NOT NULL AND record_json IS NOT NULL
-            AND lost_record_digest IS NULL AND lost_record_json IS NULL
-            AND send_receipt_json IS NOT NULL AND active_bytes > 0 AND compact_receipt_bytes > 0
-            AND accepted_at IS NOT NULL AND acked_at IS NULL) OR
-        (state = 'lost' AND cursor IS NOT NULL AND record_digest IS NOT NULL AND record_json IS NULL
-            AND lost_record_digest IS NOT NULL AND lost_record_json IS NOT NULL
-            AND send_receipt_json IS NOT NULL AND active_bytes > 0 AND compact_receipt_bytes > 0
-            AND accepted_at IS NOT NULL AND acked_at IS NULL) OR
-        (state = 'acked' AND cursor IS NOT NULL AND record_digest IS NOT NULL AND record_json IS NULL
-            AND lost_record_json IS NULL AND send_receipt_json IS NOT NULL
-            AND active_bytes = 0 AND compact_receipt_bytes > 0
-            AND accepted_at IS NOT NULL AND acked_at IS NOT NULL)
-    )
-);
-
-CREATE INDEX history_key_responses_request_stream_idx
-    ON public.history_key_responses (request_id, sequence)
-    WHERE state IN ('accepted', 'lost');
-
-CREATE INDEX history_key_responses_pending_sequence_idx
-    ON public.history_key_responses (request_id, sequence)
-    WHERE state = 'reserved';
-
-CREATE INDEX history_key_responses_accepted_manifest_idx
-    ON public.history_key_responses (request_id, manifest_digest, manifest_admission_digest)
-    WHERE manifest_admission_json IS NOT NULL AND state IN ('accepted', 'lost', 'acked');
-
-CREATE TABLE public.history_key_response_ack_tokens (
-    ack_token text PRIMARY KEY,
-    request_id text NOT NULL REFERENCES public.history_key_response_streams(request_id) ON DELETE CASCADE,
-    claims_json jsonb NOT NULL,
-    consumed_request_json jsonb,
-    issued_at timestamp with time zone NOT NULL,
-    consumed_at timestamp with time zone,
-    CONSTRAINT history_key_response_ack_tokens_consumed_check CHECK ((consumed_request_json IS NULL) = (consumed_at IS NULL))
-);
-
-CREATE TABLE public.history_key_response_dispositions (
-    request_id text NOT NULL REFERENCES public.history_key_response_streams(request_id) ON DELETE CASCADE,
-    sequence bigint NOT NULL,
-    response_id text NOT NULL UNIQUE,
-    entry_kind text NOT NULL,
-    entry_digest text NOT NULL,
-    status text NOT NULL,
-    acked_at timestamp with time zone NOT NULL,
-    PRIMARY KEY (request_id, sequence),
-    CONSTRAINT history_key_response_dispositions_kind_check CHECK (entry_kind IN ('record', 'lost')),
-    CONSTRAINT history_key_response_dispositions_status_check CHECK (
-        (entry_kind = 'record' AND status IN ('installed', 'cryptographically_rejected', 'superseded_duplicate')) OR
-        (entry_kind = 'lost' AND status = 'service_record_lost')
-    )
-);
-
-CREATE TABLE public.history_key_response_tombstones (
-    response_id text PRIMARY KEY,
-    source_record_digest text NOT NULL,
-    terminal_status text NOT NULL,
-    expired_at timestamp with time zone NOT NULL,
-    retain_until timestamp with time zone NOT NULL,
-    CONSTRAINT history_key_response_tombstones_retention_check CHECK (retain_until > expired_at)
-);
-
-CREATE INDEX history_key_response_tombstones_retention_idx
-    ON public.history_key_response_tombstones (retain_until, response_id);
-
-CREATE SEQUENCE public.history_rhrk_archive_sequence AS bigint MINVALUE 1;
-
-CREATE TABLE public.pending_rhrk_acquisitions (
-    acquisition_digest text PRIMARY KEY,
-    realm_id text NOT NULL,
-    effective_scope jsonb NOT NULL,
-    mls_group_id text NOT NULL,
-    epoch bigint NOT NULL,
-    recovery_key_id text NOT NULL,
-    method_controller_principal_id text NOT NULL CHECK (method_controller_principal_id LIKE 'ak:did_core:%'),
-    holder_service_id text NOT NULL,
-    container_event_ref text NOT NULL,
-    archive_tuple_digest text NOT NULL,
-    archive_replica_digest text NOT NULL,
-    archive_replica_bytes bytea NOT NULL,
-    archive_replica_json jsonb NOT NULL,
-    retention_digest text NOT NULL,
-    state text DEFAULT 'pending'::text NOT NULL,
-    attempt_count bigint DEFAULT 0 NOT NULL,
-    next_attempt_at timestamp with time zone NOT NULL,
-    claim_token text,
-    claim_until timestamp with time zone,
-    ready_at timestamp with time zone,
-    accepted_at timestamp with time zone,
-    archive_sequence bigint,
-    accepted_outcome_bytes bytea,
-    accepted_outcome_json jsonb,
-    last_error_code text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    UNIQUE (
-        effective_scope,
-        mls_group_id,
-        epoch,
-        container_event_ref,
-        archive_tuple_digest
-    ),
-    CONSTRAINT pending_rhrk_acquisitions_epoch_check CHECK (epoch >= 0),
-    CONSTRAINT pending_rhrk_acquisitions_attempt_count_check CHECK (attempt_count >= 0),
-    CONSTRAINT pending_rhrk_acquisitions_archive_sequence_check CHECK (archive_sequence >= 0),
-    CONSTRAINT pending_rhrk_acquisitions_state_check CHECK (state IN ('pending', 'ready', 'accepted')),
-    CONSTRAINT pending_rhrk_acquisitions_claim_check CHECK (
-        (claim_token IS NULL AND claim_until IS NULL) OR
-        (claim_token IS NOT NULL AND claim_until IS NOT NULL)
-    ),
-    CONSTRAINT pending_rhrk_acquisitions_terminal_check CHECK (
-        (state = 'pending' AND ready_at IS NULL AND accepted_at IS NULL
-            AND archive_sequence IS NULL AND accepted_outcome_bytes IS NULL
-            AND accepted_outcome_json IS NULL) OR
-        (state = 'ready' AND ready_at IS NOT NULL AND accepted_at IS NULL
-            AND archive_sequence IS NOT NULL AND accepted_outcome_bytes IS NULL
-            AND accepted_outcome_json IS NULL) OR
-        (state = 'accepted' AND ready_at IS NOT NULL AND accepted_at IS NOT NULL
-            AND accepted_at >= ready_at AND archive_sequence IS NOT NULL
-            AND accepted_outcome_bytes IS NOT NULL AND accepted_outcome_json IS NOT NULL
-            AND claim_token IS NULL AND claim_until IS NULL)
-    )
-);
-
-CREATE INDEX pending_rhrk_acquisitions_due_idx
-    ON public.pending_rhrk_acquisitions (state, next_attempt_at, claim_until, acquisition_digest)
-    WHERE state IN ('pending', 'ready');
-
-CREATE INDEX pending_rhrk_acquisitions_authority_epoch_idx
-    ON public.pending_rhrk_acquisitions (
-        effective_scope,
-        method_controller_principal_id,
-        holder_service_id,
-        epoch,
-        container_event_ref,
-        archive_replica_digest
-    )
-    WHERE state = 'accepted';
-
-CREATE INDEX pending_rhrk_acquisitions_archive_list_idx
-    ON public.pending_rhrk_acquisitions (
-        method_controller_principal_id,
-        effective_scope,
-        recovery_key_id,
-        archive_sequence
-    )
-    WHERE state = 'accepted';
-
--- Private, immutable signing reservations. They grant no accepted authority.
-CREATE TABLE public.state_seal_signing_positions (
-    realm_id text NOT NULL,
-    configuration_ref text NOT NULL,
-    notary_seq bigint NOT NULL CHECK (notary_seq >= 0),
-    predecessor_ref text,
-    digest_suite text NOT NULL,
-    body_digest text NOT NULL,
-    exact_body bytea NOT NULL,
-    PRIMARY KEY (realm_id, notary_seq),
-    CHECK ((notary_seq = 0) = (predecessor_ref IS NULL))
-);
-CREATE TRIGGER state_seal_signing_positions_immutable
-    BEFORE UPDATE OR DELETE ON public.state_seal_signing_positions
-    FOR EACH ROW EXECUTE FUNCTION public.reject_state_seal_identity_mutation();
-
-CREATE TABLE public.state_seal_signing_leases (
-    realm_id text NOT NULL,
-    signer_slot text NOT NULL,
-    holder text NOT NULL,
-    lease_until_ms bigint NOT NULL,
-    fence bigint NOT NULL,
-    CONSTRAINT state_seal_signing_leases_pkey PRIMARY KEY (realm_id, signer_slot)
-);
-
-CREATE TABLE public.state_cell_ops (
-    seq bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-    realm_id text NOT NULL,
-    seal_id text NOT NULL,
-    op_index bigint NOT NULL,
-    cell_id text NOT NULL,
-    event_id text NOT NULL,
-    op_json jsonb NOT NULL,
-    appended_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-ALTER TABLE ONLY public.state_cell_ops
-    ADD CONSTRAINT state_cell_ops_seal_op_index_key UNIQUE (seal_id, op_index);
-
-CREATE INDEX state_cell_ops_cell_idx ON public.state_cell_ops USING btree (realm_id, cell_id, seq);
-
-CREATE INDEX state_cell_ops_seal_idx ON public.state_cell_ops USING btree (realm_id, seal_id);
-
--- Holder-private Consent current and immutable accepted versions.
 CREATE TABLE public.consent_current_results (
     holder_account_id jsonb NOT NULL,
     consent_id text NOT NULL,
@@ -2047,7 +1304,6 @@ ALTER TABLE ONLY public.contacts
 CREATE INDEX contacts_target_idx ON public.contacts USING btree (target_id);
 
 -- Principal-private verified carrier mirrors are deliberately isolated from
--- canonical_events: they drive no reducer, Seal, frontier, or state root.
 CREATE TABLE public.contact_verified_mirrors (
     target_holder_principal_id text NOT NULL,
     request_event_id text NOT NULL,
@@ -2112,14 +1368,6 @@ $$;
 CREATE TRIGGER device_inventory_station_immutable BEFORE UPDATE ON device_inventory_station FOR EACH ROW EXECUTE FUNCTION immutable_device_inventory_station();
 -- Private reconstruction progress. Only an authenticated complete history may
 -- install this marker in the same transaction as the local device mirror.
-CREATE TABLE public.device_history_projections (
-    principal_id text NOT NULL,
-    station_id text NOT NULL REFERENCES public.device_inventory_station(station_id),
-    realm_id text NOT NULL,
-    confirmed_head text NOT NULL REFERENCES public.state_seals(id),
-    PRIMARY KEY (principal_id, station_id)
-);
-
 CREATE TABLE public.devices (
     station_id TEXT NOT NULL DEFAULT current_device_inventory_station() REFERENCES device_inventory_station(station_id),
     id uuid PRIMARY KEY,
@@ -2367,161 +1615,8 @@ CREATE INDEX federation_outbox_dead_letter_outbox_id_idx
 ALTER TABLE ONLY public.federation_outbox_dead_letter
     ADD CONSTRAINT federation_outbox_dead_letter_outbox_id_fkey FOREIGN KEY (outbox_id) REFERENCES public.federation_outbox(id) ON DELETE CASCADE;
 
-CREATE TABLE public.federation_frontier_exchange (
-    realm_id text NOT NULL,
-    peer_id text NOT NULL CHECK (peer_id LIKE 'ak:did_core:%'),
-    status text NOT NULL,
-    consecutive_failures integer DEFAULT 0 NOT NULL,
-    last_success_at bigint,
-    last_failure_at bigint,
-    last_frontier_root text,
-    last_error text,
-    updated_at bigint NOT NULL,
-    CONSTRAINT federation_frontier_exchange_pkey PRIMARY KEY (realm_id, peer_id)
-);
-
-CREATE INDEX federation_frontier_exchange_status_idx ON public.federation_frontier_exchange USING btree (status, updated_at);
-
-CREATE TABLE public.federation_frontier_confirmed_evidence (
-    realm_id text NOT NULL,
-    peer_id text NOT NULL CHECK (peer_id LIKE 'ak:did_core:%'),
-    evidence_scope_key text NOT NULL,
-    reason text NOT NULL CHECK (reason IN ('witness_disagreement', 'fork_quarantine')),
-    evidence_scope jsonb NOT NULL,
-    observed_at bigint NOT NULL,
-    local_resolution_kind text CHECK (local_resolution_kind IN ('fork_resolution_event')),
-    local_resolution_digest text,
-    local_normalized_at bigint,
-    peer_alignment_digest text,
-    peer_aligned_at bigint,
-    CHECK ((local_resolution_kind IS NULL) = (local_resolution_digest IS NULL)),
-    CHECK ((local_resolution_digest IS NULL) = (local_normalized_at IS NULL)),
-    CHECK ((peer_alignment_digest IS NULL) = (peer_aligned_at IS NULL)),
-    CONSTRAINT federation_frontier_confirmed_evidence_pkey
-        PRIMARY KEY (realm_id, peer_id, evidence_scope_key),
-    CONSTRAINT federation_frontier_confirmed_evidence_exchange_fkey
-        FOREIGN KEY (realm_id, peer_id)
-        REFERENCES public.federation_frontier_exchange(realm_id, peer_id) ON DELETE CASCADE
-);
-
-CREATE INDEX federation_frontier_confirmed_evidence_unresolved_idx
-    ON public.federation_frontier_confirmed_evidence
-    (realm_id, peer_id, evidence_scope_key)
-    WHERE peer_alignment_digest IS NULL;
-
--- First phase of clearing confirmed fork evidence. One accepted
--- ak.fork.resolution normalizes the local disputed scope; it does not clear any
--- peer. Rows are keyed by the resolution cell subject alone, so single-bucket
--- and cross-bucket over-fork at one position land on one verdict.
-CREATE TABLE public.federation_frontier_resolution (
-    realm_id text NOT NULL,
-    cell_subject_key text NOT NULL,
-    subject jsonb NOT NULL,
-    verdict jsonb NOT NULL,
-    conflict_evidence_digest text NOT NULL,
-    resolution_event_digest text NOT NULL,
-    normalized_at bigint NOT NULL,
-    CONSTRAINT federation_frontier_resolution_pkey
-        PRIMARY KEY (realm_id, cell_subject_key)
-);
-
--- What the verdict on one adjudicated subject subtracts from the local read
--- surface. Written in the same transaction as its federation_frontier_resolution
--- row, and the only thing that makes an accepted verdict visible to a reader:
--- public.committed_events subtracts everything at the subject the verdict did
--- not name. Nothing is deleted here — the canonical bytes a Seal pinned and the
--- reducer output it produced stay exactly where they are — because a verdict
--- governs what is read, not what is retained.
---
--- Exactly one subject shape is populated per row. An event_sibling_position
--- subject names (actor_id, actor_seq) and, for canonical_winner, the winning
--- Event id; an event_id_collision subject names the disputed Event id and, for
--- canonical_winner, the winning canonical preimage. A NULL winner in either
--- shape is void_all, whose exclusion is total. Because the position shape keys
--- on the position rather than on the losing ids, a sibling that arrives after
--- the verdict is excluded on arrival instead of reopening the subject.
-CREATE TABLE public.federation_fork_normalization (
-    realm_id text NOT NULL,
-    cell_subject_key text NOT NULL,
-    actor_id text,
-    actor_seq bigint,
-    winner_event_id bytea,
-    collision_event_id bytea,
-    winner_canonical_bytes bytea,
-    -- The covering Seal's `sealed_at`, in epoch milliseconds. Spec section 6.3.3
-    -- point 3 makes it the admitted winner's local receipt timestamp so that a
-    -- receiver which only ever held the loser ends up byte-identical to one that
-    -- always held the winner. `normalized_at` above is local bookkeeping and
-    -- deliberately is not that value.
-    winner_sealed_at bigint,
-    normalized_at bigint NOT NULL,
-    CONSTRAINT federation_fork_normalization_pkey
-        PRIMARY KEY (realm_id, cell_subject_key),
-    CONSTRAINT federation_fork_normalization_subject_check CHECK (
-        (actor_id IS NOT NULL AND actor_seq IS NOT NULL
-             AND collision_event_id IS NULL AND winner_canonical_bytes IS NULL)
-        OR (actor_id IS NULL AND actor_seq IS NULL
-             AND collision_event_id IS NOT NULL AND winner_event_id IS NULL)
-    ),
-    CONSTRAINT federation_fork_normalization_winner_id_length_check CHECK (
-        winner_event_id IS NULL OR octet_length(winner_event_id) = 33
-    ),
-    CONSTRAINT federation_fork_normalization_collision_id_length_check CHECK (
-        collision_event_id IS NULL OR octet_length(collision_event_id) = 33
-    ),
-    -- A winner to admit and the timestamp to admit it under travel together.
-    CONSTRAINT federation_fork_normalization_winner_sealed_at_check CHECK (
-        (winner_canonical_bytes IS NULL) = (winner_sealed_at IS NULL)
-    )
-);
-
-CREATE INDEX federation_fork_normalization_position_idx
-    ON public.federation_fork_normalization USING btree (realm_id, actor_id, actor_seq)
-    WHERE actor_id IS NOT NULL;
-
-CREATE INDEX federation_fork_normalization_collision_idx
-    ON public.federation_fork_normalization USING btree (collision_event_id)
-    WHERE collision_event_id IS NOT NULL;
-
--- The committed read surface, and the only one. Ordinary Event reads, the
--- frontier this Station publishes, the reducer's rebuild input and the
--- federation sibling-position disclosure all read through this view, so a
--- fork-resolution verdict cannot reach one of them and miss another. Writers,
--- identity preflight and collision forensics keep reading canonical_events
--- directly: an adjudicated loser still occupies its identity and still has to
--- be retained.
 CREATE VIEW public.committed_events AS
-SELECT event.*
-FROM public.canonical_events event
-WHERE event.state = 'committed'
-  AND NOT EXISTS (
-      SELECT 1 FROM public.federation_fork_normalization norm
-      WHERE norm.realm_id = event.realm_id
-        AND norm.actor_id = event.actor_id
-        AND norm.actor_seq = event.actor_seq
-        AND (norm.winner_event_id IS NULL OR norm.winner_event_id <> event.id)
-  )
-  AND NOT EXISTS (
-      -- A collision group can span Realms, and each Realm's recovery authority
-      -- adjudicates only its own projection: a verdict from one Realm must not
-      -- rewrite another Realm's variant of the same identity.
-      SELECT 1 FROM public.federation_fork_normalization norm
-      WHERE norm.collision_event_id = event.id
-        AND norm.realm_id = event.realm_id
-        AND (norm.winner_canonical_bytes IS NULL
-             OR norm.winner_canonical_bytes <> event.canonical_bytes)
-  );
-
-CREATE TABLE public.federation_frontier_reduction_checkpoint (
-    realm_id text NOT NULL,
-    peer_id text NOT NULL CHECK (peer_id LIKE 'ak:did_core:%'),
-    remote_snapshot_digest text NOT NULL,
-    actor_set_digest text NOT NULL,
-    actor_id text NOT NULL,
-    cursor text,
-    updated_at bigint NOT NULL,
-    CONSTRAINT federation_frontier_reduction_checkpoint_pkey PRIMARY KEY (realm_id, peer_id)
-);
+SELECT event.* FROM public.canonical_events event WHERE event.state = 'committed';
 
 CREATE TABLE public.invite_receive_policies (
     account_pk bigint PRIMARY KEY REFERENCES public.accounts(pk) ON DELETE CASCADE,
@@ -3654,17 +2749,6 @@ CREATE TABLE public.idempotency_keys (
 
 CREATE INDEX idempotency_keys_expiry_idx ON public.idempotency_keys USING btree (expires_at);
 
-CREATE TABLE public.seal_prepare_signing_fences (
-    realm_id text NOT NULL,
-    signer_slot text NOT NULL,
-    predecessor_basis text NOT NULL,
-    request_hash text NOT NULL,
-    response_body jsonb NOT NULL,
-    body_digest text NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    CONSTRAINT seal_prepare_signing_fences_pkey PRIMARY KEY (realm_id, signer_slot, predecessor_basis)
-);
-
 CREATE TABLE public.moderation_franking_replay_nonces (
     realm_id text NOT NULL,
     received_by text NOT NULL CHECK (received_by LIKE 'ak:did_core:%'),
@@ -3732,7 +2816,6 @@ $$;
 CREATE TRIGGER service_identity_device_station BEFORE INSERT OR UPDATE ON service_identity FOR EACH ROW EXECUTE FUNCTION bind_device_inventory_station();
 
 -- Rebuildable owner-side PCR resolution projection. Canonical Events and
--- Seals remain protocol truth; these rows provide a crash-safe account-local
 -- current/history read index keyed by the public account authority pair.
 CREATE TABLE public.principal_resolutions (
     principal_id text NOT NULL CHECK (principal_id LIKE 'ak:did_core:%'),
@@ -5459,14 +4542,6 @@ CREATE TABLE agent_selector_claim_current_results (
 
 -- Irreversible composite subjects need an accepted origin association. This
 -- records selector/target identity, never a second copy of a current value.
-CREATE TABLE current_selector_origins (
- realm_id TEXT NOT NULL, cell_id TEXT NOT NULL, scope_key TEXT NOT NULL,
- selector JSONB NOT NULL, target JSONB NOT NULL,
- source_event_id BYTEA NOT NULL CHECK(octet_length(source_event_id)=33),
- PRIMARY KEY(realm_id,cell_id,scope_key)
-);
-CREATE INDEX current_selector_origin_event ON current_selector_origins(source_event_id);
-
 -- Governance result completeness is separate from account summary visibility.
 CREATE TABLE governance_current_ready (
  realm_id TEXT PRIMARY KEY, ready BOOLEAN NOT NULL,
@@ -5498,7 +4573,7 @@ CREATE TABLE agent_pairing_receipts (
     request_digest TEXT NOT NULL,
     raw_key_digest TEXT NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
-    activation_state TEXT NOT NULL CHECK (activation_state IN ('awaiting_accepted_frontier','active','cancelled')),
+    activation_state TEXT NOT NULL CHECK (activation_state IN ('awaiting_source_commit','active','cancelled')),
     UNIQUE(agent_id, raw_key_digest)
 );
 CREATE FUNCTION preserve_agent_pairing_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -5508,20 +4583,20 @@ BEGIN
     IF TG_OP = 'UPDATE' THEN old_pending := OLD.pending_pairing_commit_intent; END IF;
     IF pending IS NOT NULL AND (old_pending IS NULL OR pending IS DISTINCT FROM old_pending) THEN
         INSERT INTO agent_pairing_receipts(authorize_event_ref,agent_id,controller_principal_id,pairing_request_id,request_digest,raw_key_digest,expires_at,activation_state)
-        VALUES(pending->>'authorize_event_id',NEW.id,NEW.controller_principal_id,NEW.pairing_request_id,pending->>'request_digest',NEW.runtime_key_material->>'public_key_digest',NEW.pairing_expires_at,'awaiting_accepted_frontier')
+        VALUES(pending->>'authorize_event_id',NEW.id,NEW.controller_principal_id,NEW.pairing_request_id,pending->>'request_digest',NEW.runtime_key_material->>'public_key_digest',NEW.pairing_expires_at,'awaiting_source_commit')
         ON CONFLICT (authorize_event_ref) DO NOTHING;
-        IF NOT EXISTS (SELECT 1 FROM agent_pairing_receipts WHERE authorize_event_ref=pending->>'authorize_event_id' AND agent_id=NEW.id AND request_digest=pending->>'request_digest' AND activation_state='awaiting_accepted_frontier') THEN
+        IF NOT EXISTS (SELECT 1 FROM agent_pairing_receipts WHERE authorize_event_ref=pending->>'authorize_event_id' AND agent_id=NEW.id AND request_digest=pending->>'request_digest' AND activation_state='awaiting_source_commit') THEN
             RAISE EXCEPTION 'Agent authorize command is already terminal or conflicts';
         END IF;
     END IF;
     IF old_pending IS NOT NULL THEN
         IF NEW.authorized_event_ref = old_pending->>'authorize_event_id' AND pending IS NULL THEN
             UPDATE agent_pairing_receipts SET activation_state='active'
-            WHERE authorize_event_ref=old_pending->>'authorize_event_id' AND activation_state='awaiting_accepted_frontier' AND expires_at > NOW();
+            WHERE authorize_event_ref=old_pending->>'authorize_event_id' AND activation_state='awaiting_source_commit' AND expires_at > NOW();
             IF NOT FOUND THEN RAISE EXCEPTION 'Agent authorize command was cancelled or expired'; END IF;
         ELSIF pending IS DISTINCT FROM old_pending OR NEW.state='deactivated' OR NEW.approval_request_id IS NULL OR NEW.pairing_expires_at <= NOW() THEN
             UPDATE agent_pairing_receipts SET activation_state='cancelled'
-            WHERE authorize_event_ref=old_pending->>'authorize_event_id' AND activation_state='awaiting_accepted_frontier';
+            WHERE authorize_event_ref=old_pending->>'authorize_event_id' AND activation_state='awaiting_source_commit';
         END IF;
     END IF;
     RETURN NEW;

@@ -292,6 +292,7 @@ impl GovernedRealm {
                 .collect(),
         };
         let unit = OrdinaryRealmBootstrapCommitUnit {
+            event_approvals: Vec::new(),
             exact_request_body: serde_json::to_vec(
                 &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(submission.clone()),
             )

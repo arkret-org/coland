@@ -267,7 +267,7 @@ fn profile_limitations() -> Vec<Value> {
                 "RFC 9421 HTTP Message Signatures header emission",
                 "automatic retry worker"
             ],
-            "reason": "outbound Move/Seal fanout persists a signed intent and retry boundary per peer; actual RFC 9421 HTTP delivery is still not claimed"
+            "reason": "outbound Event/Commit fanout persists a signed intent and retry boundary per peer; actual RFC 9421 HTTP delivery is still not claimed"
         }),
         json!({
             "area": "authz.capability_engine_depth",
@@ -359,7 +359,7 @@ fn full_station_gap_summary() -> Vec<Value> {
         "first_batch_landed": [
             "artifact-derived supported operation advertisement",
             "SDK-backed state model family/kind/bottom registry bindings",
-            "outbound Move/Seal fanout signed intent evidence",
+            "outbound Event/Commit fanout signed intent evidence",
             "per-peer retry/durability transcript metadata"
         ],
         "remaining_gaps": [

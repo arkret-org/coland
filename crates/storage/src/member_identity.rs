@@ -1,7 +1,7 @@
 use super::{PersistenceResult, Value, async_trait};
 
-/// Cell subject key for the member-identity registry. Mirrors the composite
-/// `(payload.realm_id, payload.member_id, payload.segment)` cell subject from
+/// Projection subject key for the member-identity registry. Mirrors the composite
+/// `(payload.realm_id, payload.member_id, payload.segment)` subject from
 /// `event-kind-registry.json`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MemberIdentitySubjectKey {

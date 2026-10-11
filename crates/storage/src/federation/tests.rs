@@ -3,55 +3,6 @@ use super::{
     classify_federation_outbox_completion,
 };
 
-#[test]
-fn frontier_failure_window_and_confirmed_evidence_are_distinct() {
-    use super::*;
-    let peer = DidCoreId::new("ak:did_core:web:peer.example").unwrap();
-    let mut record = None;
-    for attempt in 1..=3 {
-        let next =
-            frontier_exchange_failure_record(record, "realm", &peer, "network_error", attempt);
-        assert_eq!(next.consecutive_failures, attempt as i32);
-        assert_eq!(
-            next.status,
-            if attempt == 3 {
-                "peer_stale"
-            } else {
-                "healthy"
-            }
-        );
-        record = Some(next);
-    }
-    let success = frontier_exchange_success_record(record, "realm", &peer, "remote-scope-root", 4);
-    assert_eq!(success.status, "healthy");
-    assert_eq!(success.consecutive_failures, 0);
-    assert_eq!(
-        success.last_frontier_root.as_deref(),
-        Some("remote-scope-root")
-    );
-    for reason in ["witness_disagreement", "fork_quarantine"] {
-        let evidence =
-            frontier_exchange_failure_record(Some(success.clone()), "realm", &peer, reason, 5);
-        assert_eq!(evidence.status, "peer_stale");
-        assert_eq!(evidence.consecutive_failures, 0);
-        let ordinary =
-            frontier_exchange_failure_record(Some(evidence), "realm", &peer, "network_error", 6);
-        assert_eq!(ordinary.last_error.as_deref(), Some(reason));
-        let success =
-            frontier_exchange_success_record(Some(ordinary), "realm", &peer, "equal-root", 7);
-        assert_eq!(
-            success.status, "peer_stale",
-            "root equality cannot resolve evidence"
-        );
-        assert_eq!(success.last_error.as_deref(), Some(reason));
-        assert_eq!(success.consecutive_failures, 0);
-    }
-    let forged =
-        frontier_exchange_failure_record(None, "realm", &peer, "event_id_digest_mismatch", 8);
-    assert_eq!(forged.status, "healthy");
-    assert_eq!(forged.consecutive_failures, 1);
-}
-
 fn transition(outcome: FederationOutboxOutcome) -> FederationOutboxTransition {
     FederationOutboxTransition {
         id: "outbox-1".to_owned(),

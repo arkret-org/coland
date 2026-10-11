@@ -654,6 +654,17 @@ impl AuthorityCommitApplication {
         Ok(self.store().commit_transaction(&transaction).await?)
     }
 
+    pub async fn ordinary_realm_bootstrap_replay(
+        &self,
+        submission: &OrdinaryRealmBootstrapUnitSubmission,
+        exact_request_body: &[u8],
+    ) -> ServiceResult<Option<Vec<arkret_wire::RealmCommit>>> {
+        Ok(self
+            .store()
+            .ordinary_realm_bootstrap_replay(submission, exact_request_body)
+            .await?)
+    }
+
     /// Install an ordinary Realm genesis unit through one durable authority
     /// transaction. The caller must first perform session, producer-proof,
     /// policy and MLS validation and construct every signed Commit; the store
@@ -977,6 +988,7 @@ impl AuthorityCommitApplication {
             });
         }
         let unit = OrdinaryRealmBootstrapCommitUnit {
+            event_approvals: Vec::new(),
             submission,
             exact_request_body,
             transactions,
@@ -1691,7 +1703,7 @@ impl AuthorityCommitApplication {
     pub async fn realm_stream_heads(
         &self,
         realm_id: &arkret_wire::RealmId,
-    ) -> ServiceResult<Option<coland_storage::RealmStreamFrontier>> {
+    ) -> ServiceResult<Option<coland_storage::RealmStreamCut>> {
         Ok(self.store().realm_stream_heads(realm_id).await?)
     }
 

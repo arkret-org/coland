@@ -54,6 +54,8 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+rand.workspace = true
+arkret-test-kit.workspace = true
 salvo = { workspace = true, features = ["test"] }
 url.workspace = true
 coland-test-support.workspace = true

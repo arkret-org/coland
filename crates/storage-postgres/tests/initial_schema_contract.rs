@@ -2,6 +2,33 @@ const INITIAL_UP: &str = include_str!("../migrations/00000000000000_initial/up.s
 const INITIAL_DOWN: &str = include_str!("../migrations/00000000000000_initial/down.sql");
 
 #[test]
+fn retired_authority_storage_cannot_return_to_the_initial_migration() {
+    for token in [
+        "actor_seq",
+        "state_seals",
+        "state_cell_ops",
+        "state_control_events",
+        "federation_frontier_exchange",
+        "federation_frontier_resolution",
+        "federation_fork_normalization",
+        "current_selector_origins",
+        "history_key_responses",
+        "seal_prepare_signing_fences",
+        "awaiting_accepted_frontier",
+    ] {
+        assert!(
+            !INITIAL_UP.contains(token),
+            "retired authority storage: {token}"
+        );
+        assert!(
+            !INITIAL_DOWN.contains(token),
+            "retired down migration: {token}"
+        );
+    }
+    assert!(INITIAL_UP.contains("awaiting_source_commit"));
+}
+
+#[test]
 fn capability_authority_root_is_durable_and_distinct_from_station_tenure() {
     assert!(INITIAL_UP.contains("CREATE TABLE realm_authority_root_current_results"));
     for column in [
@@ -39,7 +66,9 @@ fn parent_membership_inputs_are_authoritative_typed_current_results() {
 fn agent_draft_pending_intent_is_a_separate_private_state_machine() {
     assert!(INITIAL_UP.contains("CREATE TABLE public.agent_draft_pending_intents"));
     assert!(
-        INITIAL_UP.contains("PRIMARY KEY\n        (controller_account_key, agent_id, draft_id)")
+        INITIAL_UP
+            .replace('\r', "")
+            .contains("PRIMARY KEY\n        (controller_account_key, agent_id, draft_id)")
     );
     assert!(INITIAL_UP.contains("state IN ('available', 'consumed', 'expired')"));
     assert!(INITIAL_UP.contains("agent_draft_pending_intents_terminal_shape_check"));
@@ -76,23 +105,6 @@ fn actor_private_effects_share_one_exact_retry_ledger_outside_realm_history() {
     assert!(INITIAL_DOWN.contains("DROP TABLE IF EXISTS read_cursor_winners CASCADE"));
     assert!(!INITIAL_UP.contains("canonical_account_data_source_id"));
     assert!(INITIAL_UP.contains("OR NOT EXISTS(SELECT 1 FROM actor_private_events e"));
-}
-
-#[test]
-fn history_response_stream_tables_are_created_and_dropped_symmetrically() {
-    for table in [
-        "history_key_response_streams",
-        "history_key_responses",
-        "history_key_response_ack_tokens",
-        "history_key_response_dispositions",
-        "history_key_response_tombstones",
-    ] {
-        assert!(INITIAL_UP.contains(&format!("CREATE TABLE public.{table}")));
-        assert!(INITIAL_DOWN.contains(&format!("DROP TABLE IF EXISTS public.{table}")));
-    }
-
-    assert!(INITIAL_UP.contains("CREATE INDEX history_key_requests_local_sequence_idx"));
-    assert!(INITIAL_UP.contains("WHERE request_replica_digest IS NULL"));
 }
 
 #[test]
@@ -134,39 +146,6 @@ fn applet_identity_winner_is_independent_from_exact_scope_installations() {
 }
 
 #[test]
-fn seal_effective_state_checkpoint_is_created_and_dropped_symmetrically() {
-    assert!(INITIAL_UP.contains("CREATE TABLE public.state_seal_effective_checkpoints"));
-    assert!(INITIAL_UP.contains("covered_event_digests text[] NOT NULL"));
-    assert!(INITIAL_UP.contains("covered_seal_ids text[] NOT NULL"));
-    assert!(INITIAL_UP.contains("state_seal_effective_checkpoints_immutable"));
-    assert!(INITIAL_DOWN.contains("DROP TABLE IF EXISTS state_seal_effective_checkpoints CASCADE"));
-}
-
-#[test]
-fn frontier_confirmed_evidence_has_closed_resolution_authority() {
-    assert!(INITIAL_UP.contains("CREATE TABLE public.federation_frontier_confirmed_evidence"));
-    // `federation.md` §4.5.3 leaves current-v1 with exactly one clearing
-    // authority: an accepted ak.fork.resolution. There is no historical-range
-    // attestation branch and no same-scope witness re-agreement branch, so the
-    // column enum is a single value rather than an open list.
-    assert!(INITIAL_UP.contains(
-        "local_resolution_kind text CHECK (local_resolution_kind IN ('fork_resolution_event'))"
-    ));
-    assert!(
-        INITIAL_UP.contains(
-            "CHECK ((local_resolution_kind IS NULL) = (local_resolution_digest IS NULL))"
-        )
-    );
-    assert!(
-        INITIAL_UP.contains("CHECK ((peer_alignment_digest IS NULL) = (peer_aligned_at IS NULL))")
-    );
-    assert!(
-        INITIAL_DOWN
-            .contains("DROP TABLE IF EXISTS federation_frontier_confirmed_evidence CASCADE")
-    );
-}
-
-#[test]
 fn franking_replay_nonce_ledger_has_bounded_expiry_contract() {
     assert!(INITIAL_UP.contains("CREATE TABLE public.moderation_franking_replay_nonces"));
     assert!(INITIAL_UP.contains("expires_at timestamp with time zone NOT NULL"));
@@ -175,24 +154,6 @@ fn franking_replay_nonce_ledger_has_bounded_expiry_contract() {
     assert!(
         INITIAL_DOWN.contains("DROP TABLE IF EXISTS moderation_franking_replay_nonces CASCADE")
     );
-}
-
-/// A collision verdict is not only a subtraction: it admits a winner.
-///
-/// `event-auth-state-resolution.md` section 6.3.3 point 3 makes the admitted
-/// Event's local receipt timestamp the covering Seal's `sealed_at`, so the
-/// verdict row has to carry that timestamp, and it has to be present exactly
-/// when there is a winner to admit. Without the CHECK, a `canonical_winner`
-/// verdict could persist with nothing to admit it under, and the admission
-/// would silently fall back to a local clock — which is what makes two
-/// Stations diverge.
-#[test]
-fn fork_normalization_carries_the_timestamp_its_winner_is_admitted_under() {
-    assert!(INITIAL_UP.contains("CREATE TABLE public.federation_fork_normalization"));
-    assert!(INITIAL_UP.contains("winner_sealed_at bigint"));
-    assert!(INITIAL_UP.contains("CONSTRAINT federation_fork_normalization_winner_sealed_at_check"));
-    assert!(INITIAL_UP.contains("(winner_canonical_bytes IS NULL) = (winner_sealed_at IS NULL)"));
-    assert!(INITIAL_DOWN.contains("DROP TABLE IF EXISTS federation_fork_normalization"));
 }
 
 /// A directed Invite's live slot is the typed current target register. The
@@ -219,7 +180,9 @@ fn canonical_event_surfaces_use_the_committed_terminal_state() {
     assert!(INITIAL_UP.contains("WHERE event.state = 'committed'"));
     assert!(INITIAL_UP.contains("CREATE VIEW public.committed_events AS"));
     assert!(!INITIAL_UP.contains("CREATE VIEW public.accepted_events AS"));
-    assert!(INITIAL_UP.contains("WHERE state = 'committed';"));
+    assert!(INITIAL_UP.contains(
+        "SELECT event.* FROM public.canonical_events event WHERE event.state = 'committed';"
+    ));
     assert!(
         INITIAL_UP.contains("WHERE (kind = 'ak.realm.create'::text AND state = 'committed'::text)")
     );
@@ -230,7 +193,6 @@ fn canonical_event_surfaces_use_the_committed_terminal_state() {
         "OLD.digest_suite",
         "OLD.digest",
         "OLD.actor_id",
-        "OLD.actor_seq",
         "OLD.realm_id",
         "OLD.realm_pk",
         "OLD.scope_ref",
@@ -298,7 +260,7 @@ fn recovery_policy_uses_the_protocol_acceptance_basis_name_at_creation() {
 
 #[test]
 fn actor_private_ledger_admits_only_the_six_actor_private_kinds() {
-    assert!(INITIAL_UP.contains(
+    assert!(INITIAL_UP.replace('\r', "").contains(
         "kind IN ('ak.account_data.set', 'ak.agent.action_reject', 'ak.agent.action_request',\n            'ak.agent.draft.propose', 'ak.device.push_route', 'ak.read_cursor.advance')"
     ));
     assert!(!INITIAL_UP.contains("'ak.account.blocklist'"));

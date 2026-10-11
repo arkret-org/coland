@@ -322,7 +322,6 @@ diesel::table! {
         digest_suite -> Int2,
         digest -> Bytea,
         actor_id -> Text,
-        actor_seq -> Int8,
         realm_id -> Nullable<Text>,
         realm_pk -> Nullable<Int8>,
         scope_ref -> Jsonb,
@@ -436,7 +435,6 @@ diesel::table! {
         pk -> Int8,
         event_pk -> Int8,
         actor_id -> Text,
-        actor_seq -> Int8,
         realm_id -> Nullable<Text>,
         kind -> Text,
         schema_id -> Text,
@@ -566,15 +564,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    device_history_projections (principal_id, station_id) {
-        principal_id -> Text,
-        station_id -> Text,
-        realm_id -> Text,
-        confirmed_head -> Text,
-    }
-}
-
-diesel::table! {
     devices (id) {
         station_id -> Text,
         id -> Uuid,
@@ -641,60 +630,6 @@ diesel::table! {
         created_at -> Timestamptz,
         material_cleanup_completed_at -> Nullable<Timestamptz>,
         mls_obligation_completed_at -> Nullable<Timestamptz>,
-    }
-}
-
-diesel::table! {
-    federation_frontier_exchange (realm_id, peer_id) {
-        realm_id -> Text,
-        peer_id -> Text,
-        status -> Text,
-        consecutive_failures -> Int4,
-        last_success_at -> Nullable<Int8>,
-        last_failure_at -> Nullable<Int8>,
-        last_frontier_root -> Nullable<Text>,
-        last_error -> Nullable<Text>,
-        updated_at -> Int8,
-    }
-}
-
-diesel::table! {
-    federation_frontier_confirmed_evidence (realm_id, peer_id, evidence_scope_key) {
-        realm_id -> Text,
-        peer_id -> Text,
-        evidence_scope_key -> Text,
-        reason -> Text,
-        evidence_scope -> Jsonb,
-        observed_at -> Int8,
-        local_resolution_kind -> Nullable<Text>,
-        local_resolution_digest -> Nullable<Text>,
-        local_normalized_at -> Nullable<Int8>,
-        peer_alignment_digest -> Nullable<Text>,
-        peer_aligned_at -> Nullable<Int8>,
-    }
-}
-
-diesel::table! {
-    federation_frontier_resolution (realm_id, cell_subject_key) {
-        realm_id -> Text,
-        cell_subject_key -> Text,
-        subject -> Jsonb,
-        verdict -> Jsonb,
-        conflict_evidence_digest -> Text,
-        resolution_event_digest -> Text,
-        normalized_at -> Int8,
-    }
-}
-
-diesel::table! {
-    federation_frontier_reduction_checkpoint (realm_id, peer_id) {
-        realm_id -> Text,
-        peer_id -> Text,
-        remote_snapshot_digest -> Text,
-        actor_set_digest -> Text,
-        actor_id -> Text,
-        cursor -> Nullable<Text>,
-        updated_at -> Int8,
     }
 }
 
@@ -1438,366 +1373,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    state_cell_ops (seq) {
-        seq -> Int8,
-        realm_id -> Text,
-        seal_id -> Text,
-        op_index -> Int8,
-        cell_id -> Text,
-        event_id -> Text,
-        op_json -> Jsonb,
-        appended_at -> Timestamptz,
-    }
-}
-
-diesel::table! {
-    state_control_events (event_digest) {
-        event_digest -> Text,
-        digest_suite -> Text,
-        realm_id -> Text,
-        event_json -> Jsonb,
-        control_proposal_ack -> Nullable<Jsonb>,
-        ingress_class -> Jsonb,
-        command_unit_event_digests -> Jsonb,
-        proposal_decisions -> Jsonb,
-        pending_domain_effects -> Nullable<Jsonb>,
-        inserted_at -> Timestamptz,
-        is_pending -> Bool,
-    }
-}
-
-diesel::table! {
-    state_control_seal_schedule (realm_id) {
-        realm_id -> Text,
-        generation -> Int8,
-        first_pending_at_ms -> Int8,
-        next_attempt_at_ms -> Int8,
-        last_attempt_at_ms -> Nullable<Int8>,
-        claim_holder -> Nullable<Text>,
-        claim_fence -> Int8,
-        claim_until_ms -> Nullable<Int8>,
-        consecutive_failures -> Int4,
-        last_outcome -> Nullable<Text>,
-        scan_cursor -> Nullable<Text>,
-    }
-}
-
-diesel::table! {
-    state_control_seal_repair_cursor (singleton) {
-        singleton -> Bool,
-        after_realm_id -> Nullable<Text>,
-        updated_at_ms -> Int8,
-    }
-}
-
-diesel::table! {
-    state_seals (id) {
-        id -> Text,
-        digest_suite -> Text,
-        realm_id -> Text,
-        seal_id_preimage_bytes -> Bytea,
-        accepted_seal_bytes -> Bytea,
-        seal_json -> Jsonb,
-        predecessor_ref -> Nullable<Text>,
-        is_genesis -> Bool,
-        inserted_at -> Timestamptz,
-    }
-}
-
-diesel::table! {
-    state_seal_effective_checkpoints (seal_id) {
-        seal_id -> Text,
-        realm_id -> Text,
-        covered_event_digests -> Array<Text>,
-        covered_seal_ids -> Array<Text>,
-        state_json -> Jsonb,
-        created_at -> Timestamptz,
-    }
-}
-
-diesel::table! {
-    state_seal_collision_variants (variant_id) {
-        variant_id -> Int8,
-        seal_id -> Text,
-        digest_suite -> Text,
-        seal_id_preimage_bytes -> Bytea,
-        accepted_seal_bytes -> Bytea,
-        realm_id -> Text,
-        seal_json -> Jsonb,
-        observed_at -> Timestamptz,
-    }
-}
-
-diesel::table! {
-    state_seal_quarantine_realms (seal_id, realm_id) {
-        seal_id -> Text,
-        realm_id -> Text,
-    }
-}
-
-diesel::table! {
-    state_seal_quarantine (seal_id) {
-        seal_id -> Text,
-        reason_code -> Text,
-        quarantined_at -> Timestamptz,
-    }
-}
-
-diesel::table! {
-    state_seal_control_events (seal_id, event_digest) {
-        seal_id -> Text,
-        realm_id -> Text,
-        event_digest -> Text,
-        command_index -> Int8,
-        member_index -> Int8,
-        outcome -> Text,
-        reason_code -> Nullable<Text>,
-        accepted_event_bytes_digest -> Text,
-        accepted_event_bytes -> Bytea,
-        sealed_at -> Timestamptz,
-        decision_overdue -> Bool,
-    }
-}
-
-diesel::table! {
-    governance_dependency_objects (realm_id, dependency_kind, object_digest) {
-        realm_id -> Text,
-        dependency_kind -> Text,
-        object_digest -> Text,
-        canonical_bytes -> Bytea,
-        object_json -> Jsonb,
-        inserted_at -> Timestamptz,
-    }
-}
-
-diesel::table! {
-    governance_unscoped_signer_evidence (dependency_kind, object_digest) {
-        dependency_kind -> Text,
-        object_digest -> Text,
-        canonical_bytes -> Bytea,
-        object_json -> Jsonb,
-        inserted_at -> Timestamptz,
-    }
-}
-
-diesel::table! {
-    governance_dependency_edges (edge_id) {
-        edge_id -> Int8,
-        realm_id -> Text,
-        seal_id -> Nullable<Text>,
-        event_digest -> Nullable<Text>,
-        dependency_kind -> Text,
-        object_digest -> Text,
-        edge_index -> Int8,
-        inserted_at -> Timestamptz,
-    }
-}
-
-diesel::table! {
-    history_traversal_retentions (retention_digest) {
-        retention_digest -> Text,
-        realm_id -> Text,
-        access_kind -> Text,
-        retention_kind -> Text,
-        access_digest -> Text,
-        traversal_intent -> Jsonb,
-        trusted_history_base_basis -> Jsonb,
-        trusted_current_basis -> Jsonb,
-        target_basis -> Jsonb,
-        expires_at -> Nullable<Timestamptz>,
-        created_at -> Timestamptz,
-    }
-}
-
-diesel::table! {
-    history_traversal_retained_objects (object_kind, object_digest) {
-        object_kind -> Text,
-        object_digest -> Text,
-        object_ref -> Text,
-        canonical_bytes -> Bytea,
-        object_json -> Jsonb,
-        reference_count -> Int8,
-        created_at -> Timestamptz,
-    }
-}
-
-diesel::table! {
-    history_traversal_pins (retention_digest, object_kind, object_ref, object_digest) {
-        retention_digest -> Text,
-        object_kind -> Text,
-        object_ref -> Text,
-        object_digest -> Text,
-        pin_index -> Int8,
-        pinned_at -> Timestamptz,
-    }
-}
-
-diesel::table! {
-    history_key_requests (request_sequence) {
-        request_sequence -> Int8,
-        request_id -> Text,
-        request_digest -> Text,
-        request_receipt_digest -> Text,
-        effective_scope_kind -> Text,
-        realm_id -> Text,
-        circle_id -> Nullable<Text>,
-        requester_actor_id -> Text,
-        requester_sender_domain -> Text,
-        release_id -> Text,
-        traversal_retention_digest -> Nullable<Text>,
-        request_json -> Jsonb,
-        request_receipt_json -> Jsonb,
-        sealed_history_response_capability_json -> Nullable<Jsonb>,
-        request_replica_digest -> Nullable<Text>,
-        request_replica_json -> Nullable<Jsonb>,
-        stored_at -> Timestamptz,
-        expires_at -> Timestamptz,
-    }
-}
-
-diesel::table! {
-    history_key_response_streams (request_id) {
-        request_id -> Text,
-        response_capability_commitment -> Text,
-        next_sequence -> Int8,
-        acked_sequence -> Nullable<Int8>,
-        acked_cursor -> Nullable<Text>,
-        active_bytes -> Int8,
-        compact_receipt_bytes -> Int8,
-        created_at -> Timestamptz,
-    }
-}
-
-diesel::table! {
-    history_key_responses (response_id) {
-        response_id -> Text,
-        request_id -> Text,
-        source_sender_domain -> Text,
-        source_record_digest -> Text,
-        source_record_json -> Jsonb,
-        manifest_admission_json -> Nullable<Jsonb>,
-        manifest_digest -> Nullable<Text>,
-        manifest_admission_digest -> Nullable<Text>,
-        release_attestation_json -> Nullable<Jsonb>,
-        release_service_signer_evidence_json -> Jsonb,
-        sequence -> Int8,
-        cursor -> Nullable<Text>,
-        sent_at -> Timestamptz,
-        reserved_at -> Timestamptz,
-        expires_at -> Timestamptz,
-        state -> Text,
-        record_digest -> Nullable<Text>,
-        record_json -> Nullable<Jsonb>,
-        lost_record_digest -> Nullable<Text>,
-        lost_record_json -> Nullable<Jsonb>,
-        send_receipt_json -> Nullable<Jsonb>,
-        active_bytes -> Int8,
-        compact_receipt_bytes -> Int8,
-        accepted_at -> Nullable<Timestamptz>,
-        acked_at -> Nullable<Timestamptz>,
-    }
-}
-
-diesel::table! {
-    history_key_response_ack_tokens (ack_token) {
-        ack_token -> Text,
-        request_id -> Text,
-        claims_json -> Jsonb,
-        consumed_request_json -> Nullable<Jsonb>,
-        issued_at -> Timestamptz,
-        consumed_at -> Nullable<Timestamptz>,
-    }
-}
-
-diesel::table! {
-    history_key_response_dispositions (request_id, sequence) {
-        request_id -> Text,
-        sequence -> Int8,
-        response_id -> Text,
-        entry_kind -> Text,
-        entry_digest -> Text,
-        status -> Text,
-        acked_at -> Timestamptz,
-    }
-}
-
-diesel::table! {
-    history_key_response_tombstones (response_id) {
-        response_id -> Text,
-        source_record_digest -> Text,
-        terminal_status -> Text,
-        expired_at -> Timestamptz,
-        retain_until -> Timestamptz,
-    }
-}
-
-diesel::table! {
-    pending_rhrk_acquisitions (acquisition_digest) {
-        acquisition_digest -> Text,
-        realm_id -> Text,
-        effective_scope -> Jsonb,
-        mls_group_id -> Text,
-        epoch -> Int8,
-        recovery_key_id -> Text,
-        method_controller_principal_id -> Text,
-        holder_service_id -> Text,
-        container_event_ref -> Text,
-        archive_tuple_digest -> Text,
-        archive_replica_digest -> Text,
-        archive_replica_bytes -> Bytea,
-        archive_replica_json -> Jsonb,
-        retention_digest -> Text,
-        state -> Text,
-        attempt_count -> Int8,
-        next_attempt_at -> Timestamptz,
-        claim_token -> Nullable<Text>,
-        claim_until -> Nullable<Timestamptz>,
-        ready_at -> Nullable<Timestamptz>,
-        accepted_at -> Nullable<Timestamptz>,
-        archive_sequence -> Nullable<Int8>,
-        accepted_outcome_bytes -> Nullable<Bytea>,
-        accepted_outcome_json -> Nullable<Jsonb>,
-        last_error_code -> Nullable<Text>,
-        created_at -> Timestamptz,
-        updated_at -> Timestamptz,
-    }
-}
-
-diesel::table! {
-    state_seal_signing_positions (realm_id, notary_seq) {
-        realm_id -> Text,
-        configuration_ref -> Text,
-        notary_seq -> Int8,
-        predecessor_ref -> Nullable<Text>,
-        digest_suite -> Text,
-        body_digest -> Text,
-        exact_body -> Bytea,
-    }
-}
-
-diesel::table! {
-    state_seal_signing_leases (realm_id, signer_slot) {
-        realm_id -> Text,
-        signer_slot -> Text,
-        holder -> Text,
-        lease_until_ms -> Int8,
-        fence -> Int8,
-    }
-}
-
-diesel::table! {
-    seal_prepare_signing_fences (realm_id, signer_slot, predecessor_basis) {
-        realm_id -> Text,
-        signer_slot -> Text,
-        predecessor_basis -> Text,
-        request_hash -> Text,
-        response_body -> Jsonb,
-        body_digest -> Text,
-        created_at -> Timestamptz,
-    }
-}
-
-diesel::table! {
     sync_cursor_handles (id) {
         id -> Text,
         binding_subject -> Nullable<Text>,
@@ -1909,16 +1484,11 @@ diesel::allow_tables_to_appear_in_same_query!(
     device_keys,
     event_collision_variants,
     event_federation_outbox,
-    federation_frontier_confirmed_evidence,
-    federation_frontier_exchange,
-    federation_frontier_reduction_checkpoint,
-    federation_frontier_resolution,
     federation_operations,
     federation_outbox,
     federation_outbox_dead_letter,
     handle_releases,
     idempotency_keys,
-    seal_prepare_signing_fences,
     invite_locators,
     invite_receive_policies,
     key_backups,
@@ -1964,31 +1534,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     signal_relay,
     signal_relay_position,
     signal_relay_watermark,
-    governance_dependency_edges,
-    governance_dependency_objects,
-    governance_unscoped_signer_evidence,
-    history_traversal_pins,
-    history_traversal_retained_objects,
-    history_traversal_retentions,
-    history_key_response_ack_tokens,
-    history_key_response_dispositions,
-    history_key_response_streams,
-    history_key_requests,
-    history_key_response_tombstones,
-    history_key_responses,
-    pending_rhrk_acquisitions,
-    state_cell_ops,
-    state_control_events,
-    state_control_seal_repair_cursor,
-    state_control_seal_schedule,
-    state_seal_effective_checkpoints,
-    state_seal_collision_variants,
-    state_seal_control_events,
-    state_seal_quarantine,
-    state_seal_quarantine_realms,
-    state_seal_signing_leases,
-    state_seal_signing_positions,
-    state_seals,
     sync_cursor_handles,
     sync_cursor_revocations,
     websocket_auth_challenges,

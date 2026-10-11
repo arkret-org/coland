@@ -28,7 +28,7 @@ pub struct AccountDetailProgress {
 
 /// One consistent durable cut used to decide whether a detail window changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RealmStreamFrontier {
+pub struct RealmStreamCut {
     pub governance_generation: u64,
     pub stream_heads: Vec<CommitStreamHead>,
 }

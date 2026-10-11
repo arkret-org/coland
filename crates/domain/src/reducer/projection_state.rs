@@ -172,10 +172,9 @@ pub struct ProjectionState {
     /// `realm_id` (the envelope `realm_id` of a `ak.realm.link` event);
     /// the inner Vec accumulates every directed link the Realm has
     /// declared, including non-`active` status entries (so admin tooling
-    /// can render `rejected` / `tombstoned` history). Cell-canonical
-    /// values live in `cells` under
-    /// `ak.component.realm.link.v1` keyed by `(realm, target, link_kind)`;
-    /// this is the structured side-band cache used by the query API.
+    /// can render `rejected` / `tombstoned` history). The committed
+    /// source is indexed by `(realm, target, link_kind)`; this local cache
+    /// supports the query API.
     pub realm_links: BTreeMap<String, Vec<RealmLinkState>>,
     /// R3.1 — inverse index of [`Self::realm_links`] keyed by the
     /// target `realm_id`. Lets the query API answer
@@ -183,14 +182,12 @@ pub struct ProjectionState {
     pub realm_links_inbound: BTreeMap<String, Vec<RealmLinkState>>,
     /// SOL-ORG-02 — `ak.realm.organization` relationship-statement
     /// projection, keyed by `(realm_id, organization_id, relationship)`.
-    /// Registered state-model semantics per `(organization_id, relationship)` cell
+    /// Committed statement semantics per `(organization_id, relationship)`
     /// subject — the latest statement (active or revoked) wins. Multiple
     /// owner / governance / sponsor / directory_certifier relationships for
-    /// the same Realm coexist as independent rows. Cell-canonical values
-    /// live in `cells` under `ak.component.realm.organization.v1` keyed by
-    /// the composite `{organization_id}::{relationship}` subject; this is
-    /// the structured side-band cache the verified-relationship and
-    /// effective-policy reads consult.
+    /// the same Realm coexist as independent rows. Committed statements
+    /// use the composite `{organization_id}::{relationship}` subject; this
+    /// local cache supports verified-relationship and effective-policy reads.
     pub realm_organization_statements:
         BTreeMap<(String, arkret_wire::DidCoreId, String), RealmOrganizationStatementState>,
     /// G3.S1 — published MLS KeyPackages keyed by `keypackage_id`. Each
@@ -423,11 +420,8 @@ impl ProjectionState {
     /// explicit service-effect dispatch below and may not enter this shared
     /// projection path as a successful no-op.
     ///
-    /// All cell-state events (ak.realm.policy / ak.realm.read_receipt_policy /
-    /// ak.consent.* / ak.member.state / ak.realm.* facets) are routed via
-    /// the Move/Seal pipeline through `StateModelKind` impls in
-    /// `state_model_kinds.rs`; the structured ProjectionState fields don't
-    /// mirror them; reads consume only the confirmed state-model projection.
+    /// Shared current is installed from accepted RealmCommit projections.
+    /// These local caches do not independently establish protocol authority.
     fn apply_once(&mut self, operation: &Operation, hlc: &ServerHlc) -> ProjectionEffect {
         let Some(kind) = crate::kinds::canonical_kind_for_operation(operation) else {
             return ProjectionEffect::Rejected {

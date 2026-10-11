@@ -139,7 +139,7 @@ pub(crate) mod test_event {
         kind: impl Into<String>,
         scope_ref: ScopeRef,
         actor_id: DidCoreId,
-        _actor_seq: u64,
+        _fixture_index: u64,
         _hlc: Hlc,
         payload: Value,
     ) -> Result<Event> {
@@ -151,7 +151,7 @@ pub(crate) mod test_event {
         kind: impl Into<String>,
         scope_ref: ScopeRef,
         actor_id: DidCoreId,
-        _actor_seq: u64,
+        _fixture_index: u64,
         _hlc: Hlc,
         payload: Value,
         created_at: DateTime<Utc>,

@@ -980,7 +980,7 @@ async fn verify_mimi_consent_correlation(
         }
         arkret_models_collaboration::mimi_operations::MimiConsentDecision::Deny
         | arkret_models_collaboration::mimi_operations::MimiConsentDecision::Revoke => {
-            // The old Consent Cell is retired. Until this branch can resolve
+            // The old Consent carrier is retired. Until this branch can resolve
             // an exact authority-committed current consent result, a stale or
             // caller-supplied observed dot cannot authorize a mutation.
             return Err(mimi_consent_correlation_unavailable());

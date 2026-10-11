@@ -8,12 +8,16 @@ mod device_authorization_history;
 mod human_profile;
 #[path = "support/hydration.rs"]
 mod hydration;
+#[path = "support/ordinary_bootstrap_fault_cases.rs"]
+mod ordinary_bootstrap_fault_cases;
 #[path = "support/ordinary_realm.rs"]
 #[allow(dead_code)]
 mod ordinary_realm;
 #[path = "../../test-support/src/pcr_genesis.rs"]
 #[allow(dead_code)]
 mod pcr_genesis;
+#[path = "support/sql_fault_matrix.rs"]
+mod sql_fault_matrix;
 
 use arkret_models_collaboration::authority_commit::{
     OrdinaryRealmBootstrapUnitKind, OrdinaryRealmBootstrapUnitSubmission,
@@ -1115,6 +1119,7 @@ fn legacy_unit() -> OrdinaryRealmBootstrapCommitUnit {
     )
     .unwrap();
     OrdinaryRealmBootstrapCommitUnit {
+        event_approvals: Vec::new(),
         submission,
         exact_request_body,
         transactions,

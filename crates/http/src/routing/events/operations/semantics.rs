@@ -182,14 +182,7 @@ fn validate_typed_payload_shapes(
         // The complete canonical typed shape is required; validating only
         // observed_dot_ids would allow malformed identifiers.
         arkret_wire::EventKind::ConsentRevoke => {
-            let mut wire_payload = operation.payload.clone();
-            // Event-to-projection conversion adds actor_seq so the consent
-            // reducer can derive its OR-set dot. It is projection context,
-            // not part of the closed consent-revoke wire payload.
-            if let Some(object) = wire_payload.as_object_mut() {
-                object.remove("actor_seq");
-            }
-            validate_consent_revoke_payload(&wire_payload)
+            validate_consent_revoke_payload(&operation.payload)
                 .map(|_| ())
                 .map_err(|_| "ak.consent.revoke payload violates its canonical typed shape")
         }

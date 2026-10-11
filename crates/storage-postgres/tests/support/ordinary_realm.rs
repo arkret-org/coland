@@ -364,6 +364,7 @@ fn bootstrap_unit_with_join_rule_for_station(
     )
     .unwrap();
     OrdinaryRealmBootstrapCommitUnit {
+        event_approvals: Vec::new(),
         submission,
         exact_request_body,
         transactions,

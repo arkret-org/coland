@@ -174,7 +174,7 @@ pub(crate) fn projection_operation_from_canonical_record(
     record: &AcceptedEvent,
 ) -> Option<Operation> {
     // The stored envelope is the accepted Event verbatim, so every typed
-    // field it carries (`realm_id`, `actor_id`, `prev_refs`, …) is revalidated
+    // field it carries (`realm_id`, `actor_id`, `semantic_refs`, …) is revalidated
     // by the SDK `Event` decode inside the shared mapper. Rebuilding an
     // admission-shaped DTO here would only reintroduce request context that
     // replay does not have.

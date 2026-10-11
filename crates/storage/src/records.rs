@@ -4,7 +4,7 @@ use arkret_identifiers::{BlobRef, Hash};
 use arkret_models_collaboration::objects::blob::{BlobStorageEncryption, BlobVisibility};
 use arkret_models_crypto::RecoveryIdentityModel;
 use arkret_wire::{
-    ActorId, CommitStreamHead, DidCoreId, EventId, FreshnessState, PlaintextDataClassKind,
+    CommitStreamHead, DidCoreId, EventId, FreshnessState, PlaintextDataClassKind,
     RealmCommitAuthorityRef, RealmId,
 };
 use serde::{Deserialize, Serialize};
@@ -1016,116 +1016,6 @@ pub struct FederationOutboxDeadLetterRecord {
     pub requeue_reason: Option<String>,
     pub requeue_request_digest: Option<String>,
     pub requeued_at: Option<i64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FederationFrontierExchangeRecord {
-    pub realm_id: String,
-    pub peer_id: DidCoreId,
-    pub status: String,
-    pub consecutive_failures: i32,
-    pub last_success_at: Option<i64>,
-    pub last_failure_at: Option<i64>,
-    pub last_frontier_root: Option<String>,
-    pub last_error: Option<String>,
-    pub updated_at: i64,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct FederationFrontierConfirmedEvidenceRecord {
-    pub realm_id: String,
-    pub peer_id: DidCoreId,
-    pub evidence_scope_key: String,
-    pub reason: String,
-    pub evidence_scope: Value,
-    pub observed_at: i64,
-    /// Accepted resolution used only to normalize this node's local state.
-    pub local_resolution_kind: Option<String>,
-    pub local_resolution_digest: Option<String>,
-    pub local_normalized_at: Option<i64>,
-    /// Independent evidence that this exact peer aligned on this exact scope.
-    pub peer_alignment_digest: Option<String>,
-    pub peer_aligned_at: Option<i64>,
-}
-
-/// Local normalization of one disputed scope — the first of the two phases
-/// that clear confirmed fork evidence.
-///
-/// It is projected only from an accepted `ak.fork.resolution` Control Move and
-/// says nothing about any peer: a peer clears only after its own exact-scope
-/// challenge shows a canonical sibling set equal to this verdict. The key is
-/// the resolution cell subject alone, so single-bucket and cross-bucket
-/// over-fork at one position can never produce two verdicts that disagree.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FederationFrontierResolutionRecord {
-    pub realm_id: String,
-    pub cell_subject_key: String,
-    pub subject: Value,
-    pub verdict: Value,
-    pub conflict_evidence_digest: String,
-    pub resolution_event_digest: String,
-    pub normalized_at: i64,
-}
-
-/// What one accepted verdict subtracts from the local accepted read surface.
-///
-/// This is the executable half of local normalization: the resolution record
-/// says what was adjudicated, this says which Events stop being readable. Both
-/// are written in one transaction, because a verdict that is durable while its
-/// read-surface effect is not would let this Station disclose a sibling set
-/// that contradicts a resolution it has already accepted.
-///
-/// The subtraction is by subject, not by a list of losing ids, so a sibling
-/// that arrives after the verdict is excluded on arrival — `void_all` is final
-/// for the position and `canonical_winner` cannot be reopened by a later
-/// variant. Nothing is deleted: canonical bytes a Seal pinned, and the reducer
-/// output it produced, are retained exactly as they were — a loser displaced by
-/// a collision verdict moves to the collision bucket rather than disappearing.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FederationForkNormalizationScope {
-    /// `subject.kind=event_sibling_position`. Every Event at this exact
-    /// `(realm_id, actor_id, actor_seq)` leaves the accepted read surface
-    /// except `winner_event_id`; `None` is `void_all` and empties the position.
-    SiblingPosition {
-        actor_id: String,
-        actor_seq: u64,
-        winner_event_id: Option<String>,
-    },
-    /// `subject.kind=event_id_collision`. The local row for this identity stays
-    /// readable only while its canonical preimage is byte-identical to the
-    /// winning variant, which is the only way to tell two variants of one hash
-    /// apart; `None` is `void_all`.
-    EventIdCollision {
-        event_id: String,
-        winner_canonical_bytes: Option<Vec<u8>>,
-        /// The covering Seal's `sealed_at`, in epoch milliseconds, or `None`
-        /// for `void_all`.
-        ///
-        /// Spec section 6.3.3 point 3: an accepted `canonical_winner` is itself
-        /// the admission authority for the winner's bytes, so a receiver that
-        /// holds only the loser adopts the winner instead of staying unable to
-        /// answer for that identity. That admission is required to be a pure
-        /// function of `(winner bytes, resolution Seal)`, so the admitted
-        /// Event's local receipt timestamp comes from the Seal rather than from
-        /// a local clock — two receivers with different histories must end up
-        /// byte-identical.
-        winner_sealed_at_ms: Option<i64>,
-    },
-}
-
-/// Durable progress through one immutable remote frontier observation.
-///
-/// The actor is the complete closed `ActorId`; a principal-only projection is
-/// insufficient because Account actors at different Stations are distinct.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FederationFrontierReductionCheckpoint {
-    pub realm_id: String,
-    pub peer_id: DidCoreId,
-    pub remote_snapshot_digest: String,
-    pub actor_set_digest: String,
-    pub actor_id: ActorId,
-    pub cursor: Option<String>,
-    pub updated_at: i64,
 }
 
 /// One admitted `SignalEnvelope` held for its TTL so subscribed devices in the

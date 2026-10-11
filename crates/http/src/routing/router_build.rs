@@ -439,7 +439,6 @@ fn coland_local_router() -> Router {
             Router::with_path("self")
                 .hoop(identity::session_pop::verify_session_pop)
                 .push(identity::account::local_router())
-                .push(spaces::local_router())
                 // Product-private projection reads: single-Strand object
                 // (`/_coland/self/strands/{strand_id}`) + relation edge list
                 // (`/_coland/self/relations`). See `events::local_router`.

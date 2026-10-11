@@ -1110,19 +1110,6 @@ impl PersistenceHandle {
         Ok(())
     }
 
-    /// `sync/federation.md` section 5.3.4 condition 2: whether this Station
-    /// holds the account's authoring record unbroken since its local inception.
-    pub async fn account_authoring_record_is_continuous(
-        &self,
-        account_id: &arkret_wire::AccountId,
-    ) -> crate::ServiceResult<bool> {
-        Ok(self
-            .persistence
-            .accounts()
-            .authoring_record_is_continuous(account_id)
-            .await?)
-    }
-
     pub async fn principal_resolution_by_account_id(
         &self,
         account_id: &arkret_wire::AccountId,

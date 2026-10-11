@@ -8,7 +8,7 @@ use super::{PersistenceResult, Utc, Value, async_trait};
 
 /// Principal-private, non-canonical mirror of one fully verified inbound
 /// `ak.contact.requested` carrier. It never participates in Realm reduction,
-/// Seal construction, CBS frontiers, or state roots.
+/// authority signing or current materialization.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ContactVerifiedMirrorRecord {
     pub target_holder_principal_id: String,

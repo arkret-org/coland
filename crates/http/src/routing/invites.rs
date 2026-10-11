@@ -20,6 +20,10 @@ use arkret_models_collaboration::governance::peer_contact::ContactIntroductionEv
 use arkret_models_collaboration::governance::realm_join_intake::{
     AuthorityLocatorSource, RealmJoinCandidate, RealmJoinCandidateServiceKind,
 };
+use arkret_models_collaboration::governance::third_party_invite::{
+    ThirdPartyInviteAcceptanceAttestation, ThirdPartyInviteAcceptanceAttestationOutcome,
+    ThirdPartyInviteAcceptanceAttestationRequestBody,
+};
 use arkret_models_identity::handle::Handle;
 use arkret_models_identity::proof::DetachedPayloadProof;
 use arkret_models_identity::{HandleClaim, HandleClaimStatus, ServiceResolutionCarrier};
@@ -80,10 +84,82 @@ pub(crate) fn open_router() -> Router {
 
 pub(crate) fn self_router() -> Router {
     Router::new()
+        .push(
+            Router::with_path("third-party-invites/acceptance-attestation")
+                .post(third_party_invite_acceptance_attestation),
+        )
         .push(Router::with_path("invite-locators").post(issue_invite_locator))
         .push(Router::with_path("invite-locators/rotate").post(rotate_invite_locator))
         .push(Router::with_path("invite-locators/revoke").post(revoke_invite_locator))
         .push(Router::with_path("invites/dispatch").post(self_invites_dispatch))
+}
+
+#[handler]
+#[tracing::instrument(
+    skip_all,
+    fields(op = "ak.self.third_party_invite.read.acceptance_attestation.v1")
+)]
+async fn third_party_invite_acceptance_attestation(
+    aa: AuthArgs,
+    body: JsonBody<ThirdPartyInviteAcceptanceAttestationRequestBody>,
+    depot: &mut Depot,
+    req: &mut Request,
+    res: &mut Response,
+) -> JsonResult<ThirdPartyInviteAcceptanceAttestationOutcome> {
+    use coland_storage::PersistenceError;
+    let state = depot.get_typed::<AppState>().expect("state injected");
+    let session = aa.authenticated_session(state, req).await?;
+    let caller = crate::routing::identity::auth_grant_dpop::authenticated_session_account_id(
+        state, &session,
+    )
+    .await?;
+    let station = DidCoreId::new(state.service_id())
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let (_, method) = state.current_service_receipt_binding().await.map_err(|_| {
+        crate::app_error!(RevisionUnavailable, "Station assertion method unavailable")
+    })?;
+    let sign = |attestation: &ThirdPartyInviteAcceptanceAttestation| {
+        let internal =
+            |error: arkret_wire::WireError| PersistenceError::Internal(error.to_string());
+        let mut proof = attestation.signature.unsigned();
+        proof.payload_digest = attestation.payload_digest().map_err(internal)?;
+        proof.domain = Some(
+            arkret_wire::ProofContextId::THIRD_PARTY_INVITE_ACCEPTANCE_ATTESTATION_PROOF_V1.into(),
+        );
+        let bytes = attestation
+            .unsigned_proof_binding_bytes(&proof)
+            .map_err(internal)?;
+        let jws =
+            arkret_signatures::jws::sign_jws_ed25519(&bytes, state.notary_signing_key().as_ref())
+                .map_err(|error| PersistenceError::Internal(error.to_string()))?;
+        proof.finalize(jws).map_err(internal)
+    };
+    let outcome = state
+        .persistence()
+        .third_party_invite_acceptance_attestation(
+            &body.into_inner(),
+            &caller,
+            &station,
+            &method,
+            &now,
+            &sign,
+        )
+        .await
+        .map_err(|error| match error {
+            PersistenceError::NotFound(_) => AppError::not_found("third-party invite unavailable"),
+            PersistenceError::Conflict(_) => crate::app_error!(
+                RevisionUnavailable,
+                "accepted invite checkpoint unavailable"
+            ),
+            _ => AppError::internal("acceptance attestation unavailable"),
+        })?;
+    outcome
+        .acceptance_attestation
+        .validate_freshness(now())
+        .map_err(|_| crate::app_error!(RevisionUnavailable, "acceptance observation expired"))?;
+    res.add_header("Cache-Control", "private, no-store", true)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    json_ok(outcome)
 }
 
 fn new_invite_locator(

@@ -5204,6 +5204,8 @@ fn bootstrap_tail(unit: &OrdinaryRealmBootstrapCommitUnit) -> EventCommitRequest
 #[derive(Debug, PartialEq, Eq)]
 struct InviteFamilies {
     events: i64,
+    commits: i64,
+    outbox: i64,
     lifecycle: Vec<(String, String, String)>,
     directed: Vec<(String, serde_json::Value)>,
     live_target: Vec<(String, serde_json::Value, String)>,
@@ -5230,6 +5232,21 @@ async fn invite_families(
             .await
             .unwrap()
             .count;
+    let commits =
+        diesel::sql_query("SELECT COUNT(*) AS count FROM realm_commits WHERE realm_id=$1")
+            .bind::<Text, _>(realm_id.as_str())
+            .get_result::<CountRow>(&mut *conn)
+            .await
+            .unwrap()
+            .count;
+    let outbox = diesel::sql_query(
+        "SELECT COUNT(*) AS count FROM event_federation_outbox o JOIN canonical_events e ON e.pk=o.event_pk WHERE e.realm_id=$1",
+    )
+    .bind::<Text, _>(realm_id.as_str())
+    .get_result::<CountRow>(&mut *conn)
+    .await
+    .unwrap()
+    .count;
     let mut rows = Vec::new();
     for sql in [
         "SELECT invite_id AS subject, value, current_commit_id \
@@ -5252,6 +5269,8 @@ async fn invite_families(
     let lifecycle = rows.pop().unwrap();
     InviteFamilies {
         events,
+        commits,
+        outbox,
         lifecycle: lifecycle
             .into_iter()
             .map(|row| {
@@ -5720,7 +5739,10 @@ async fn third_party_invite_create_reads_from_committed_event_and_lifecycle() {
         arkret_wire::InviteId::from_event_id(&create.authority_commit.event.event_id)
     );
     assert_eq!(invite.state, arkret_wire::InviteState::Pending);
-    assert_eq!(invite.inviter, arkret_wire::ActorId::account(creator));
+    assert_eq!(
+        invite.inviter,
+        arkret_wire::ActorId::account(creator.clone())
+    );
     assert!(invite.invitee_account_id.is_none());
     assert!(invite.accepted_claim.is_none());
     assert_eq!(
@@ -5749,6 +5771,223 @@ async fn third_party_invite_create_reads_from_committed_event_and_lifecycle() {
     .await
     .unwrap();
     assert_eq!(index_after.count, 1);
+    drop(conn);
+
+    // Portable Station evidence comes from the admitted create and the current
+    // allowlist under one lock, never from the caller's material or an Event id.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use arkret_models_collaboration::governance::third_party_invite::{
+        ThirdPartyInviteAcceptanceAttestation, ThirdPartyInviteAcceptanceAttestationRequestBody,
+        ThirdPartyInviteProvisioningId,
+    };
+    let request = ThirdPartyInviteAcceptanceAttestationRequestBody {
+        realm_id: realm_id.clone(),
+        invite_id: invite.invite_id.clone(),
+        provisioning_id: ThirdPartyInviteProvisioningId::new(format!(
+            "third_party_invite_provisioning:{}",
+            "A".repeat(43)
+        ))
+        .unwrap(),
+        verification_id: "ak:did_core:web:verifier.example".parse().unwrap(),
+    };
+    let method = snapshot_signer_for_issuer(&unit, &creator.station_id);
+    let key = ed25519_dalek::SigningKey::from_bytes(
+        &device_authorization_history::STATION_AUTHORITY_SEED,
+    );
+    let signed = AtomicUsize::new(0);
+    let sign = |attestation: &ThirdPartyInviteAcceptanceAttestation| {
+        signed.fetch_add(1, Ordering::SeqCst);
+        let mut proof = attestation.signature.unsigned();
+        proof.payload_digest = attestation.payload_digest().unwrap();
+        proof.domain = Some(
+            arkret_wire::ProofContextId::THIRD_PARTY_INVITE_ACCEPTANCE_ATTESTATION_PROOF_V1.into(),
+        );
+        let bytes = attestation.unsigned_proof_binding_bytes(&proof).unwrap();
+        Ok(proof
+            .finalize(arkret_signatures::jws::sign_jws_ed25519(&bytes, &key).unwrap())
+            .unwrap())
+    };
+    let observed = create.authority_commit.commit.committed_at + chrono::TimeDelta::milliseconds(1);
+    let before_attestation = invite_families(&pool, &realm_id).await;
+    // The observer runs inside the held cut. Natural expiry is decided by its
+    // current time rather than an earlier request-arrival timestamp.
+    assert!(matches!(
+        current
+            .third_party_invite_acceptance_attestation(
+                &request,
+                &creator,
+                &creator.station_id,
+                &method,
+                &|| invite.expires_at,
+                &sign,
+            )
+            .await,
+        Err(coland_storage::PersistenceError::NotFound(_))
+    ));
+    assert_eq!(AtomicUsize::load(&signed, Ordering::SeqCst), 0);
+    assert_eq!(invite_families(&pool, &realm_id).await, before_attestation);
+
+    let outcome = current
+        .third_party_invite_acceptance_attestation(
+            &request,
+            &creator,
+            &creator.station_id,
+            &method,
+            &|| observed,
+            &sign,
+        )
+        .await
+        .unwrap();
+    outcome.validate_for_request(&request).unwrap();
+    let attestation = &outcome.acceptance_attestation;
+    assert_eq!(
+        attestation.accepted_commit_ref.commit_id,
+        create.authority_commit.commit.commit_id
+    );
+    assert_eq!(
+        attestation.accepted_commit_ref.event_id,
+        create.authority_commit.event.event_id
+    );
+    assert_eq!(
+        attestation.third_party_invite,
+        invite.third_party_invite.clone().unwrap()
+    );
+    assert_eq!(
+        attestation.expires_at,
+        observed + chrono::TimeDelta::seconds(60)
+    );
+    arkret_signatures::verify_ed25519_detached_jws_payload_proof(
+        &attestation.signature,
+        &attestation.proof_binding_bytes().unwrap(),
+        &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+            bytes: key.verifying_key().to_bytes().to_vec(),
+        },
+    )
+    .unwrap();
+    assert_eq!(invite_families(&pool, &realm_id).await, before_attestation);
+    assert_eq!(AtomicUsize::load(&signed, Ordering::SeqCst), 1);
+    let wrong_author = invite_account("outsider.example", "other-station.example");
+    let mut wrong_verifier = request.clone();
+    wrong_verifier.verification_id = "ak:did_core:web:other-verifier.example".parse().unwrap();
+    for (request, caller) in [(&request, &wrong_author), (&wrong_verifier, &creator)] {
+        assert!(matches!(
+            current
+                .third_party_invite_acceptance_attestation(
+                    request,
+                    caller,
+                    &creator.station_id,
+                    &method,
+                    &|| observed,
+                    &sign,
+                )
+                .await,
+            Err(coland_storage::PersistenceError::NotFound(_))
+        ));
+    }
+    let remote: arkret_wire::DidCoreId = "ak:did_core:web:replica.example".parse().unwrap();
+    assert!(
+        current
+            .third_party_invite_acceptance_attestation(
+                &request,
+                &creator,
+                &remote,
+                &method,
+                &|| observed,
+                &sign,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("revision_unavailable")
+    );
+    assert_eq!(AtomicUsize::load(&signed, Ordering::SeqCst), 1);
+    // A stale projection cannot stand in for the newest accepted checkpoint.
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query(
+        "UPDATE realm_policy_bundle_current_results SET current_stream_position=current_stream_position+1 WHERE realm_id=$1",
+    )
+    .bind::<Text, _>(realm_id.as_str())
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+    assert!(
+        current
+            .third_party_invite_acceptance_attestation(
+                &request,
+                &creator,
+                &creator.station_id,
+                &method,
+                &|| observed,
+                &sign,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("revision_unavailable")
+    );
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query(
+        "UPDATE realm_policy_bundle_current_results SET current_stream_position=current_stream_position-1 WHERE realm_id=$1",
+    )
+    .bind::<Text, _>(realm_id.as_str())
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+    assert_eq!(AtomicUsize::load(&signed, Ordering::SeqCst), 1);
+    assert_eq!(invite_families(&pool, &realm_id).await, before_attestation);
+    let removed = realm_event_request_as(
+        &create,
+        &creator,
+        arkret_wire::EventKind::RealmPolicyBundle,
+        serde_json::json!({"policy_revision":3,"federation_policy":"closed",
+            "allowed_third_party_invite_verification_ids":[]}),
+    );
+    uow.commit_event(removed.clone()).await.unwrap();
+    assert!(matches!(
+        current
+            .third_party_invite_acceptance_attestation(
+                &request,
+                &creator,
+                &creator.station_id,
+                &method,
+                &|| removed.authority_commit.commit.committed_at,
+                &sign,
+            )
+            .await,
+        Err(coland_storage::PersistenceError::NotFound(_))
+    ));
+    // Revocation stops new evidence; it does not rewrite a previously issued
+    // object's explicitly signed validity window.
+    attestation.validate_freshness(observed).unwrap();
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query(
+        "DELETE FROM invite_lifecycle_current_results WHERE realm_id=$1 AND invite_id=$2",
+    )
+    .bind::<Text, _>(realm_id.as_str())
+    .bind::<Text, _>(request.invite_id.as_str())
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+    assert!(
+        current
+            .third_party_invite_acceptance_attestation(
+                &request,
+                &creator,
+                &creator.station_id,
+                &method,
+                &|| observed,
+                &sign,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("revision_unavailable")
+    );
+    assert_eq!(AtomicUsize::load(&signed, Ordering::SeqCst), 1);
 }
 
 fn circle_self_member_request(

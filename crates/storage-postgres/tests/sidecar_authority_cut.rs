@@ -2199,6 +2199,15 @@ async fn provision_owned_agent_with_did(
 /// verification and publication signatures are covered by HTTP/MLS suites.
 #[tokio::test]
 async fn ordinary_member_can_join_own_agent_without_permission_to_add_humans() {
+    boxed_ordinary_member_owned_agent_join().await;
+}
+
+// Keep the expanded real-transaction scenario outside the harness poll frame.
+fn boxed_ordinary_member_owned_agent_join() -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    Box::pin(ordinary_member_owned_agent_join_scenario())
+}
+
+async fn ordinary_member_owned_agent_join_scenario() {
     use diesel::sql_types::{Bool, Text};
     use diesel_async::RunQueryDsl;
 
@@ -2273,7 +2282,103 @@ async fn ordinary_member_can_join_own_agent_without_permission_to_add_humans() {
             + chrono::TimeDelta::milliseconds(1),
     );
     let agent_join = ordinary_realm::source_request(&pool, agent_join).await;
-    uow.commit_event(agent_join).await.unwrap();
+    uow.commit_event(agent_join.clone()).await.unwrap();
+
+    // Exercise admitted Policy writes, not imported management projections.
+    // The all-target join rule is the default for new Agents only; an explicit
+    // higher-priority controller exception must not relax another operation.
+    let realm_id = &agent_join.authority_commit.event.realm_id;
+    let policy_id = "ak:policy:0198ff00-0000-7000-8000-000000000001";
+    let make_policy = |previous: &coland_storage::AuthorityCommitTransaction,
+                       revision: Option<arkret_wire::CurrentRevision>,
+                       exception: bool| {
+        let mut rules = vec![serde_json::json!({
+            "rule_id":"new_agents", "kind":"agent", "effect":"deny",
+            "agent_target":{"kind":"all"}, "agent_operations":["join"]
+        })];
+        if exception {
+            rules.push(serde_json::json!({
+                "rule_id":"controller_exception", "kind":"agent", "priority":10,
+                "effect":"allow", "agent_target":{"kind":"controller", "controller_account_id":controller},
+                "agent_operations":["join"]
+            }));
+        }
+        ordinary_realm::next_request_for_actor(
+            previous,
+            EventKind::PolicySet,
+            arkret_wire::ActorId::account(founder.clone()),
+            serde_json::json!({"policy_id":policy_id, "expected_revision":revision,
+                "value":{"schema":"ak.schema.policy.v1", "id":policy_id, "realm_id":realm_id,
+                    "policy_kind":"agent", "rules":rules, "default_effect":"allow",
+                    "created_by":arkret_wire::ActorId::account(founder.clone()),
+                    "created_at":previous.commit.committed_at}}),
+            previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
+        )
+    };
+    let ban = ordinary_realm::source_request(
+        &pool,
+        make_policy(&agent_join.authority_commit, None, false),
+    )
+    .await;
+    let before_ban = agent_mode_footprint(&pool, realm_id).await;
+    uow.commit_event(ban.clone()).await.unwrap();
+    let revision = arkret_wire::CurrentRevision {
+        commit_id: ban.authority_commit.commit.commit_id.clone(),
+        stream_position: ban.authority_commit.commit.stream_position,
+    };
+    // Accepted retries retain their exact outcome rather than repeating CAS.
+    let before_retry = agent_mode_footprint(&pool, realm_id).await;
+    assert_eq!(before_retry["membership"], before_ban["membership"]);
+    uow.commit_event(ban.clone()).await.unwrap();
+    assert_eq!(agent_mode_footprint(&pool, realm_id).await, before_retry);
+    uow.commit_event(agent_join.clone()).await.unwrap();
+    assert_eq!(agent_mode_footprint(&pool, realm_id).await, before_retry);
+    let removal = ordinary_realm::next_request_for_actor(
+        &ban.authority_commit,
+        EventKind::MemberState,
+        arkret_wire::ActorId::account(founder.clone()),
+        serde_json::json!({"member_id":arkret_wire::ActorId::account(agent.clone()),"membership":"leave"}),
+        ban.authority_commit.commit.committed_at + chrono::TimeDelta::milliseconds(1),
+    );
+    let removal = ordinary_realm::source_request(&pool, removal).await;
+    uow.commit_event(removal.clone()).await.unwrap();
+    let make_rejoin = |previous: &coland_storage::AuthorityCommitTransaction| {
+        ordinary_realm::next_request_for_actor(
+            previous,
+            EventKind::MemberState,
+            arkret_wire::ActorId::account(controller.clone()),
+            serde_json::json!({"member_id":arkret_wire::ActorId::account(agent.clone()),"membership":"join",
+                "agent_controller_binding":{"controller_account_id":controller,
+                "controller_membership_generation_ref":member_join.authority_commit.event.event_id}}),
+            previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
+        )
+    };
+    let rejected =
+        ordinary_realm::source_request(&pool, make_rejoin(&removal.authority_commit)).await;
+    let before_rejection = agent_mode_footprint(&pool, realm_id).await;
+    let error = uow.commit_event(rejected).await.unwrap_err();
+    assert!(error.to_string().contains("forbids joining"), "{error}");
+    assert_eq!(
+        agent_mode_footprint(&pool, realm_id).await,
+        before_rejection
+    );
+    let stale =
+        ordinary_realm::source_request(&pool, make_policy(&removal.authority_commit, None, true))
+            .await;
+    assert!(uow.commit_event(stale).await.is_err());
+    assert_eq!(
+        agent_mode_footprint(&pool, realm_id).await,
+        before_rejection
+    );
+    let exception = ordinary_realm::source_request(
+        &pool,
+        make_policy(&removal.authority_commit, Some(revision), true),
+    )
+    .await;
+    uow.commit_event(exception.clone()).await.unwrap();
+    let rejoin =
+        ordinary_realm::source_request(&pool, make_rejoin(&exception.authority_commit)).await;
+    uow.commit_event(rejoin).await.unwrap();
     #[derive(diesel::QueryableByName)]
     struct ResultRow {
         #[diesel(sql_type = Bool)]
@@ -2742,6 +2847,8 @@ async fn agent_mode_footprint(
          'facts', (SELECT COUNT(*) FROM agent_producer_signer_keys f JOIN realm_commits c ON c.commit_id=f.commit_id WHERE c.realm_id=$1), \
          'outbox', (SELECT COUNT(*) FROM event_federation_outbox o JOIN canonical_events e ON e.pk=o.event_pk WHERE e.realm_id=$1), \
          'authority', (SELECT to_jsonb(a) FROM realm_authorities a WHERE realm_id=$1), \
+         'membership', (SELECT COALESCE(jsonb_agg(to_jsonb(m) ORDER BY to_jsonb(m)::text),'[]'::jsonb) FROM member_state_current_results m WHERE realm_id=$1), \
+         'policy', (SELECT COALESCE(jsonb_agg(to_jsonb(p) ORDER BY to_jsonb(p)::text),'[]'::jsonb) FROM policy_current_results p WHERE realm_id=$1), \
          'interaction', (SELECT COALESCE(jsonb_agg(to_jsonb(i) ORDER BY to_jsonb(i)::text),'[]'::jsonb) FROM agent_interaction_current_results i WHERE realm_id=$1), \
          'sidecar', (SELECT COALESCE(jsonb_agg(to_jsonb(s) ORDER BY to_jsonb(s)::text),'[]'::jsonb) FROM sidecar_current_results s WHERE realm_id=$1), \
          'message_revision', (SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text),'[]'::jsonb) FROM message_revision_current_results r WHERE realm_id=$1), \

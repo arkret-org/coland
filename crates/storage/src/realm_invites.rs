@@ -1,4 +1,7 @@
-use arkret_models_collaboration::governance::third_party_invite::ThirdPartyInvite;
+use arkret_models_collaboration::governance::third_party_invite::{
+    ThirdPartyInvite, ThirdPartyInviteAcceptanceAttestation,
+    ThirdPartyInviteAcceptanceAttestationOutcome, ThirdPartyInviteAcceptanceAttestationRequestBody,
+};
 
 use super::{PersistenceResult, async_trait};
 
@@ -45,9 +48,29 @@ pub struct AcceptedThirdPartyClaim {
     pub claimed_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Local signing capability invoked before releasing the accepted Realm cut.
+pub type InviteAcceptanceAttestationSigner<'a> = dyn Fn(&ThirdPartyInviteAcceptanceAttestation) -> PersistenceResult<arkret_wire::PayloadProof>
+    + Send
+    + Sync
+    + 'a;
+
 /// Reads over the Invite typed current results.
 #[async_trait]
 pub trait InviteCurrentResultStore: Send + Sync {
+    /// Sign only while the local governing Realm cut still holds the accepted
+    /// pending invite, its exact author and the current verifier allowlist.
+    /// The callback returns a proof over the SDK attestation; it executes before
+    /// releasing that cut. No private provisioning material is read here.
+    async fn third_party_invite_acceptance_attestation(
+        &self,
+        request: &ThirdPartyInviteAcceptanceAttestationRequestBody,
+        caller: &arkret_wire::AccountId,
+        station: &arkret_wire::DidCoreId,
+        verification_method: &arkret_wire::DidUrl,
+        observe: &(dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync),
+        sign: &InviteAcceptanceAttestationSigner<'_>,
+    ) -> PersistenceResult<ThirdPartyInviteAcceptanceAttestationOutcome>;
+
     /// Invite results, optionally filtered to one Realm, completed from
     /// committed create and claim Events under one repeatable-read snapshot.
     async fn invites_in_realm(

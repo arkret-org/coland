@@ -2156,6 +2156,17 @@ impl PgAuthorityCommitStore {
         queued_at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<OrdinaryRealmBootstrapCommitOutcome> {
         unit.validate().map_err(invalid)?;
+        if unit.event_approvals.is_empty()
+            && unit
+                .submission
+                .events
+                .iter()
+                .any(|item| item.approval_signatures.is_some())
+        {
+            return Err(invalid(
+                "ordinary Realm bootstrap approval history is incomplete",
+            ));
+        }
         if producer_guards.is_some_and(|guards| guards.len() != unit.transactions.len()) {
             return Err(invalid(
                 "ordinary Realm bootstrap needs one producer guard per Event",
@@ -2240,6 +2251,10 @@ impl PgAuthorityCommitStore {
                 return Err(PersistenceError::Conflict("realm_already_exists".to_owned()).into());
             }
             for (index, transaction) in unit.transactions.iter().enumerate() {
+                let approvals = crate::approval_admission::validate_candidate(
+                    &transaction.event, &transaction.commit,
+                    unit.event_approvals.get(index).and_then(Option::as_ref),
+                )?;
                 if let Some(guards) = producer_guards {
                     check_self_producer_guard_in_connection(
                         conn,
@@ -2302,6 +2317,15 @@ impl PgAuthorityCommitStore {
                     &transaction.commit,
                 )
                 .await?;
+                // This closed founding unit has no pre-existing Realm grants
+                // or governance Policy. Evidence is still verified and its
+                // nonce consumed at the successful target's accepting cut.
+                let approved = approvals.iter().map(|method| crate::approval_admission::QualifiedApproval {
+                    method: method.clone(),
+                    qualification_basis: serde_json::json!({"ordinary_realm_bootstrap":true,"quorum_required":false}),
+                }).collect::<Vec<_>>();
+                crate::approval_admission::consume_and_audit(conn, &transaction.event, &transaction.commit,
+                    &approved, &serde_json::json!({"unit_kind":"ordinary_realm_bootstrap","idempotency_key":key})).await?;
             }
             crate::account_summary::publish_realm_account_summary_in_connection(
                 conn,
@@ -2479,6 +2503,58 @@ async fn accepted_realm_roster_in_connection(
 
 #[async_trait]
 impl AuthorityCommitStore for PgAuthorityCommitStore {
+    async fn ordinary_realm_bootstrap_replay(
+        &self,
+        submission: &arkret_models_collaboration::authority_commit::OrdinaryRealmBootstrapUnitSubmission,
+        exact_request_body: &[u8],
+    ) -> PersistenceResult<Option<Vec<arkret_wire::RealmCommit>>> {
+        submission.validate().map_err(invalid)?;
+        match serde_json::from_slice::<arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest>(exact_request_body) {
+            Ok(arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(parsed)) if parsed == *submission => {},
+            _ => return Err(invalid("ordinary Realm bootstrap exact body differs")),
+        }
+        let mut conn = pg_conn(&self.pool).await?;
+        let existing = sql_query("SELECT idempotency_key,exact_request_body,commits_json FROM ordinary_realm_bootstrap_units WHERE realm_id=$1 OR idempotency_key=$2")
+            .bind::<Text,_>(submission.events[0].event.realm_id.as_str())
+            .bind::<Text,_>(submission.idempotency_key.as_uuid().to_string())
+            .load::<OrdinaryBootstrapUnitRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+        if existing.is_empty() {
+            return Ok(None);
+        }
+        if existing.len() != 1
+            || existing[0].idempotency_key != submission.idempotency_key.as_uuid().to_string()
+            || existing[0].exact_request_body != exact_request_body
+        {
+            return Err(PersistenceError::Conflict("duplicate_conflict".to_owned()));
+        }
+        let commits: Vec<arkret_wire::RealmCommit> = decode_json(
+            existing[0].commits_json.clone(),
+            "ordinary bootstrap exact replay",
+        )?;
+        if commits.len() != submission.events.len()
+            || commits
+                .iter()
+                .zip(&submission.events)
+                .any(|(commit, item)| {
+                    commit.event_ref != item.event.event_id
+                        || commit.realm_id != item.event.realm_id
+                })
+        {
+            return Err(PersistenceError::Internal(
+                "stored ordinary bootstrap outcome differs from its exact unit".to_owned(),
+            ));
+        }
+        arkret_models_collaboration::authority_commit::OrdinaryRealmBootstrapAcceptanceOutcome {
+            unit_kind: submission.unit_kind,
+            status:
+                arkret_models_collaboration::authority_commit::AggregateAcceptanceStatus::Duplicate,
+            commits: commits.clone(),
+        }
+        .validate()
+        .map_err(invalid)?;
+        Ok(Some(commits))
+    }
+
     async fn stage_agent_control_source(
         &self,
         full: &arkret_wire::CommittedEventFullView,
@@ -4465,7 +4541,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     async fn realm_stream_heads(
         &self,
         realm_id: &arkret_wire::RealmId,
-    ) -> PersistenceResult<Option<coland_storage::RealmStreamFrontier>> {
+    ) -> PersistenceResult<Option<coland_storage::RealmStreamCut>> {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -4495,7 +4571,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 })
                 .collect::<PersistenceResult<Vec<_>>>()?;
             stream_heads.sort_by(|left, right| left.stream_ref.cmp(&right.stream_ref));
-            Ok(Some(coland_storage::RealmStreamFrontier {
+            Ok(Some(coland_storage::RealmStreamCut {
                 governance_generation: to_u64(generation.generation, "governance generation")?,
                 stream_heads,
             }))

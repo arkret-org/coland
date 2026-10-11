@@ -126,11 +126,6 @@ pub(super) async fn verify_ordinary_realm_bootstrap(
     let mut guards = Vec::with_capacity(submission.events.len());
     let mut operations = Vec::with_capacity(submission.events.len());
     for submitted in &submission.events {
-        if submitted.approval_signatures.is_some() {
-            return Err(ServiceError::Conflict(
-                "ordinary Realm bootstrap approval signatures are not yet verified".to_owned(),
-            ));
-        }
         let event = &submitted.event;
         guards.push(
             super::authority_producer_validation::verify_self_event_producer(state, session, event)

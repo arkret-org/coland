@@ -474,7 +474,7 @@ impl ProjectionService {
     ) -> Result<(), RealmBootstrapProjectionError> {
         let mut live = self.write_state();
         // A bootstrap becomes visible through two paths after its durable
-        // commit: this synchronous install and the genesis Seal coordinator.
+        // commit: this synchronous install and the Commit projection coordinator.
         // Realm ids are derived from the create Event id, so an already
         // projected create for the staged Realm is the same immutable genesis,
         // never a first-writer-wins alias. Treat that state as an idempotent
@@ -486,7 +486,7 @@ impl ProjectionService {
                 && live.realm_create_log(operation.realm_id.as_str()).is_some()
         }) {
             if staged.direct_conversation_founding {
-                // The genesis Seal can win the race against the local four
+                // The genesis Commit can win the race against the local four
                 // Event install. A visible genesis alone does not prove the
                 // founder/peer joins and main Strand were projected. Force
                 // durable hydration in that case, while preserving any

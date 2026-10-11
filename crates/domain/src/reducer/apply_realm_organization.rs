@@ -44,7 +44,7 @@ use super::{ProjectionEffect, ProjectionState, RealmOrganizationStatementState};
 impl ProjectionState {
     /// Project a `ak.realm.organization` relationship statement.
     ///
-    /// Cell family: `ak.component.realm.organization.v1` (registered state model,
+    /// Projection facet: `ak.component.realm.organization.v1` (registered state model,
     /// composite subject `(organization_id, relationship)`).
     ///
     /// On an `active` statement that passes the organization-side verifier the
@@ -117,10 +117,7 @@ impl ProjectionState {
             "revoked"
         };
 
-        // Cell write — registered state model keyed by the composite
-        // `{organization_id}::{relationship}` subject. This mirrors the SDK
-        // `RealmOrganization::subject_for_effect` form exactly so the inline
-        // cache and the Move/Seal cell store agree.
+        // Index the committed statement by its composite relationship subject.
         {
             let value = serde_json::json!({
                 "statement_id": payload.statement_id,

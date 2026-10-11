@@ -436,8 +436,8 @@ fn create_position_spaces(state: &mut ProjectionState, hlc: &ServerHlc, realm_id
 }
 
 /// `ak.strand.move` / `ak.strand.reorder` touch the Strand projection's
-/// `updated_at` / `updated_by` but do NOT change state. Cell-write
-/// happens on the Move/Seal pipeline (out of scope here).
+/// `updated_at` / `updated_by` but do NOT change state. Position current
+/// is installed by the Commit projection (out of scope here).
 #[test]
 fn strand_position_events_touch_projection_without_changing_state() {
     let mut state = ProjectionState::new();

@@ -179,7 +179,7 @@ impl ProjectionState {
         // third-party-invites.md 3PID claim is only in v1 base scope for
         // `invite` / `restricted` Realms. The authority is the Realm's own
         // effective default_join_rule, not a copy materialized on the Invite:
-        // governance-objects.md 5.3 makes the create Event's CBS basis the
+        // governance-objects.md 5.3 makes the create Event's typed current basis the
         // admission basis and forbids a materialized snapshot.
         if let Err(reason) = validate_claim_join_rule(
             self.realm_join_rules

@@ -283,7 +283,7 @@ impl ProjectionState {
             .map(ToOwned::to_owned)
     }
 
-    // ── Cell-keyed query helpers ──
+    // ── Facet query helpers ──
 
     /// Settled value of a Realm-singleton facet.
     pub fn realm_facet_value(&self, realm_id: &str, facet: &str) -> Option<&Value> {
@@ -296,7 +296,7 @@ impl ProjectionState {
         self.realm_facet_value(realm_id, facet::REALM_READ_RECEIPT_POLICY)
     }
 
-    // ── Realm lifecycle cell helpers ──
+    // ── Realm lifecycle facet helpers ──
 
     /// Effective display profile of the Realm.
     pub fn realm_profile_value(&self, realm_id: &str) -> Option<&Value> {

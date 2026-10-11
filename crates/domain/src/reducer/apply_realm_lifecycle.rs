@@ -631,18 +631,8 @@ impl ProjectionState {
         }
     }
 
-    /// The registered cell family that backs `ak.realm.profile` display state
-    /// and its registered state model / bottom mechanics. Its
-    /// wire subject is the literal `null`; `realm_id` is the enclosing
-    /// CellStore namespace and remains a side-band map key.
-    ///
-    /// This is deliberately NOT `ak.component.realm.organization.v1`: that
-    /// cell family is the organization-authorized relationship statement
-    /// surface (`ak.realm.organization`, cell subject
-    /// `(organization_id, relationship)`) and must not be overwritten by
-    /// Realm profile writes. The accepted SDK CellStore projection is the
-    /// source of truth for conflict state; this service-local mirror must not
-    /// infer concurrency from incomparable operation and Seal identifiers.
+    /// Apply display and lifecycle caches from accepted Realm Events.
+    /// Protocol conflict and current selection remain bound to RealmCommit.
     /// Apply a `ak.realm.*` lifecycle event. Stream-F (Wave 1B) rewrite
     /// of the former Realm lifecycle reducer: the function is now
     /// restricted to the canonical Realm lifecycle kinds

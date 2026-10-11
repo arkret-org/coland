@@ -446,6 +446,7 @@ fn bootstrap(
     )
     .unwrap();
     OrdinaryRealmBootstrapCommitUnit {
+        event_approvals: Vec::new(),
         submission,
         exact_request_body,
         transactions,

@@ -1044,6 +1044,7 @@ impl CommittedRealm {
                 .collect(),
         };
         let unit = coland_storage::OrdinaryRealmBootstrapCommitUnit {
+            event_approvals: Vec::new(),
             exact_request_body: serde_json::to_vec(
                 &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(submission.clone()),
             )

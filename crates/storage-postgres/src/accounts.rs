@@ -69,21 +69,6 @@ impl AccountStore for PgAccountStore {
         .await
         .map_err(PersistenceError::database)?;
 
-        // The account's inception on this Station is the only moment at which
-        // an unbroken authoring interval can start, so the anchor is written
-        // here and never refreshed: a later profile update is not a new
-        // inception, and re-stamping one would erase a recorded break.
-        sql_query(
-            "INSERT INTO account_authoring_continuity (principal_id, station_id, inception_at) \
-             VALUES ($1, $2, $3) ON CONFLICT (principal_id, station_id) DO NOTHING",
-        )
-        .bind::<Text, _>(record.principal_id.as_str())
-        .bind::<Text, _>(record.station_id.as_str())
-        .bind::<Timestamptz, _>(record.created_at)
-        .execute(&mut *conn)
-        .await
-        .map_err(PersistenceError::database)?;
-
         if record.localpart.trim().is_empty() {
             sql_query("DELETE FROM account_localparts WHERE account_pk = $1")
                 .bind::<BigInt, _>(row.pk)
@@ -152,28 +137,6 @@ impl AccountStore for PgAccountStore {
             .await
             .map(|_| ())
             .map_err(PersistenceError::database)
-    }
-
-    async fn authoring_record_is_continuous(
-        &self,
-        account_id: &arkret_wire::AccountId,
-    ) -> PersistenceResult<bool> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
-        let row = sql_query(
-            "SELECT (broken_at IS NULL) AS continuous FROM account_authoring_continuity \
-             WHERE principal_id = $1 AND station_id = $2",
-        )
-        .bind::<Text, _>(account_id.principal_id.as_str())
-        .bind::<Text, _>(account_id.station_id.as_str())
-        .get_result::<ContinuityRow>(&mut *conn)
-        .await
-        .optional()
-        .map_err(PersistenceError::database)?;
-        // A missing anchor is not continuity: it is the case this Station
-        // cannot decide, and section 5.3.4 fails those closed.
-        Ok(row.is_some_and(|row| row.continuous))
     }
 }
 pub struct PgAccountLocalpartStore {
@@ -745,11 +708,6 @@ struct AccountRow {
 struct AccountIdRow {
     #[diesel(sql_type = BigInt)]
     pk: i64,
-}
-#[derive(QueryableByName)]
-struct ContinuityRow {
-    #[diesel(sql_type = Bool)]
-    continuous: bool,
 }
 #[derive(QueryableByName)]
 struct AccountLocalpartRow {

@@ -1,10 +1,8 @@
-//! Realm lifecycle read surface and Space-container cell read surface.
+//! Realm lifecycle read and export surfaces.
 //!
 //! Surfaces that remain:
 //! - `GET    /_arkret/self/realms/{realm_id}` — read a Realm lifecycle response.
 //! - `GET    /_arkret/self/realms/{realm_id}/export` — full event log + projection dump.
-//! - `GET    /_coland/self/spaces/{space_id}/cells/{cell_family}` — projected Space-container
-//!   child-order cell.
 //!
 //! Everything else in this module is the visibility / membership
 //! query helper surface that every other domain (federation, message, blob,
@@ -24,7 +22,6 @@ use coland_http::error::AppError;
 use coland_services::identity::SessionIdentityState as SessionRecord;
 use salvo::oapi::extract::PathParam;
 use salvo::prelude::*;
-use serde::Serialize;
 use serde_json::Value;
 
 use super::AuthArgs;
@@ -43,25 +40,6 @@ pub(super) fn protocol_router() -> Router {
     )
 }
 
-/// Coland-local Space-container child-order cell read surface
-/// (`org.arkret.coland.spaces.cells.get`); no canonical operation, stays on the
-/// `/_coland` product surface.
-pub(super) fn local_router() -> Router {
-    Router::new()
-        .push(Router::with_path("spaces/{space_id}/cells/{cell_family}").get(get_space_cell))
-}
-
-#[derive(Clone, Debug, Serialize, salvo::oapi::ToSchema)]
-struct SpaceCellOutcome {
-    cell_id: String,
-    cell_family: String,
-    space_id: String,
-    state: String,
-    state_model: String,
-    value: Value,
-    total: usize,
-}
-
 #[salvo::oapi::endpoint(operation_id = "ak.self.realm.resource.get", tags("spaces"))]
 #[tracing::instrument(skip_all, fields(op = "ak.self.realm.resource.get.v1"))]
 async fn get_realm(
@@ -78,23 +56,6 @@ async fn get_realm(
         .map(salvo::prelude::Json)
 }
 
-#[salvo::oapi::endpoint(operation_id = "org.arkret.coland.spaces.cells.get", tags("spaces"))]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.spaces.cells.get"))]
-async fn get_space_cell(
-    aa: AuthArgs,
-    depot: &mut Depot,
-    req: &mut Request,
-    _space_id: PathParam<String>,
-    _cell_family: PathParam<String>,
-) -> JsonResult<SpaceCellOutcome> {
-    let state = depot.get_typed::<AppState>().expect("state injected");
-    let _session = aa.authenticated_session(state, req).await?;
-    Err(AppError::from_rejection(
-        coland_http::error::ErrorCode::ServiceUnavailable,
-        "Space child order requires a committed Event projection",
-    )
-    .with_rejection_code("service_unavailable"))
-}
 #[salvo::oapi::endpoint(operation_id = "ak.self.realm.read.export", tags("spaces"))]
 #[tracing::instrument(skip_all, fields(op = "ak.self.realm.read.export.v1"))]
 async fn export_realm(
@@ -304,7 +265,7 @@ fn projection_member_is_joined(
 
     // Membership authority is the Realm-scoped sealed transition cell. The
     // structured `members` map is a side-band cache and can legitimately be
-    // absent after cold hydration or during the narrow Seal publish window.
+    // absent after cold hydration or during the narrow Commit projection window.
     // Falling back to the confirmed cell preserves the exact ActorId subject
     // and never grants access from an unsealed Event or a principal-only row.
     let Ok(actor_key) = actor.canonical_key() else {
@@ -390,10 +351,10 @@ pub async fn realm_meta_deleted(state: &AppState, realm_id: &str) -> bool {
 
 pub async fn realm_discoverability_for_id(state: &AppState, realm_id: &str) -> String {
     // The accepted control projection is authoritative. Live semantic apply
-    // stores Realm create entries as `{object: Realm}`, while canonical Seal
+    // stores Realm create entries as `{object: Realm}`, while canonical Commit
     // replay stores the ordered-log value as `{value: Realm + entry_id}`.
     // Resolve both before consulting the service-local metadata mirror, which
-    // may legitimately lag a freshly materialized Seal.
+    // may legitimately lag a freshly materialized Commit.
     let projected = {
         let projection = state.projections().snapshot();
         projection

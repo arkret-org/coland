@@ -238,7 +238,50 @@ fn ordinary_realm_bootstrap_and_event_admission_fit_default_worker_stack() {
         .unwrap();
     let (state, pool, _lease) = station("https://bootstrap-default-stack.internal/".into());
     let (human, session) = runtime.block_on(async {
-        let human = historical_human::HumanFixture::new(&pool, state.service_did()).await;
+        let mut human = historical_human::HumanFixture::new(&pool, state.service_did()).await;
+        let event = &human.unit.submission.events[1].event;
+        let provisional =
+            arkret_signatures::Ed25519DetachedJwsSigner::from_seed([95; 32], "approval");
+        let key = arkret_canonical::ed25519_pubkey_to_did_key_multibase(
+            provisional.verifying_key().as_bytes(),
+        );
+        let did = arkret_wire::Did::new(format!("did:key:{key}")).unwrap();
+        let method = DidUrl::new(format!("{did}#{key}")).unwrap();
+        let signer =
+            arkret_signatures::Ed25519DetachedJwsSigner::from_seed([95; 32], method.as_str());
+        let mut approval = arkret_wire::ApprovalSignature {
+            input: arkret_wire::ApprovalSignatureInput {
+                approval_context: arkret_wire::ApprovalContext::RealmGovernance {},
+                approval_target: arkret_wire::ApprovalTarget::Event {
+                    event_id: event.event_id.clone(),
+                },
+                request_canonical_digest: arkret_wire::Hash::new(
+                    arkret_canonical::canonical_sha256(event).unwrap(),
+                )
+                .unwrap(),
+                operation: "ak.self.events.command.submit.v1".into(),
+                action: arkret_wire::CapabilityActionId::RealmProfile,
+                realm_id: event.realm_id.clone(),
+                initiating_actor_id: event.actor_id.clone(),
+                approver_did: did,
+                approved_at: arkret_canonical::normalize_timestamp_canonical(Utc::now()),
+                nonce: arkret_canonical::base64url_encode(rand::random::<[u8; 32]>()),
+            },
+            proof: arkret_wire::ApprovalSignatureProof {
+                kind: arkret_wire::ApprovalSignatureProofKind::DetachedJws,
+                verification_method: method,
+                jws: String::new(),
+            },
+        };
+        approval.proof.jws = signer.sign_detached_jws(
+            &arkret_signatures::approval_signature::approval_signature_signing_bytes(&approval)
+                .unwrap(),
+        );
+        human.unit.submission.events[1].approval_signatures = Some(vec![approval]);
+        human.unit.exact_request_body = serde_json::to_vec(
+            &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(human.unit.submission.clone()),
+        )
+        .unwrap();
         let session = authenticated_context(&pool, &human).await;
         (human, session)
     });
@@ -260,12 +303,25 @@ fn ordinary_realm_bootstrap_and_event_admission_fit_default_worker_stack() {
                 response.status_code,
                 Some(salvo::http::StatusCode::UNAUTHORIZED)
             );
+            let mut wrong = human.unit.submission.clone();
+            wrong.events[1].approval_signatures.as_mut().unwrap()[0].proof.jws = "eyJhbGciOiJFZDI1NTE5In0..bad".into();
+            let wrong_request = SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(wrong);
+            let wrong_body = serde_json::to_vec(&wrong_request).unwrap();
+            assert!(state.authority().submit_self(&session, wrong_request, &wrong_body).await.unwrap_err().to_string().contains("signature_invalid"));
+            for item in &human.unit.submission.events {
+                assert!(state.authority_commits().committed_event(&item.event.event_id).await.unwrap().is_none());
+            }
             let outcome = state
                 .authority()
                 .submit_self(&session, request.clone(), &human.unit.exact_request_body)
                 .await
                 .unwrap();
             outcome.validate_for_request(&request).unwrap();
+            let replay = state.authority().submit_self(&session, request.clone(), &human.unit.exact_request_body).await.unwrap();
+            let arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::OrdinaryRealmBootstrap(first) = outcome else {panic!("bootstrap outcome");};
+            let arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::OrdinaryRealmBootstrap(replay) = replay else {panic!("bootstrap replay");};
+            assert_eq!(first.commits, replay.commits);
+            assert_eq!(replay.status, arkret_models_collaboration::authority_commit::AggregateAcceptanceStatus::Duplicate);
             let committed = state
                 .authority_commits()
                 .committed_event(&human.unit.transactions.last().unwrap().event.event_id)

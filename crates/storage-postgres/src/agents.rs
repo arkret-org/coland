@@ -281,13 +281,13 @@ impl AgentStore for PgAgentStore {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
-        sql_query("UPDATE agent_pairing_receipts SET activation_state = 'cancelled' WHERE authorize_event_ref = $1 AND activation_state = 'awaiting_accepted_frontier' AND expires_at <= NOW()")
+        sql_query("UPDATE agent_pairing_receipts SET activation_state = 'cancelled' WHERE authorize_event_ref = $1 AND activation_state = 'awaiting_source_commit' AND expires_at <= NOW()")
             .bind::<Text,_>(event_id).execute(&mut *conn).await.map_err(PersistenceError::database)?;
         let row = sql_query("SELECT agent_id, controller_principal_id, request_digest, authorize_event_ref, activation_state FROM agent_pairing_receipts WHERE authorize_event_ref = $1")
             .bind::<Text,_>(event_id).get_result::<Receipt>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
         row.map(|row| {
             let activation_state = match row.activation_state.as_str() {
-                "awaiting_accepted_frontier" => arkret_models_collaboration::agent_operations::AgentKeyPairActivationState::AwaitingSourceCommit,
+                "awaiting_source_commit" => arkret_models_collaboration::agent_operations::AgentKeyPairActivationState::AwaitingSourceCommit,
                 "active" => arkret_models_collaboration::agent_operations::AgentKeyPairActivationState::Active,
                 "cancelled" => arkret_models_collaboration::agent_operations::AgentKeyPairActivationState::Cancelled,
                 value => return Err(PersistenceError::Internal(format!("invalid Agent pairing receipt activation state: {value}"))),

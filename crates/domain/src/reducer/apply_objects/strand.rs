@@ -314,9 +314,8 @@ impl ProjectionState {
     }
 
     /// Apply `ak.strand.move` / `ak.strand.reorder`. These events
-    /// don't affect Strand lifecycle state — they write to the
-    /// `ak.component.strand.position.v1` cell family on the Move/Seal
-    /// pipeline. The Event-Envelope reducer just bumps `updated_at` /
+    /// update the registered position current without changing Strand lifecycle
+    /// state. This local reducer bumps `updated_at` /
     /// `updated_by` on the Strand projection so read-after-write sees the
     /// touch. Unknown Strand is queued for pending replay.
     pub(crate) fn apply_strand_position_touch(

@@ -20,10 +20,7 @@ use tokio::sync::broadcast;
 ///
 /// added control-frame variants alongside the original `Event`
 /// (mid-stream control frames per spec):
-///   - `EpochRotation` — emitted when `ak.component.mls.epoch.v1` cell changes (E2EE epoch shift;
-///     clients MUST re-fetch keys)
-///   - `Frontier` — seal frontier advanced (Snapshot of cursor / state_root after `apply_seal`);
-///     clients use this as a resync waypoint
+///   - `EpochRotation` — committed public MLS epoch changed.
 ///   - `ResyncRequired` — server detected per-subscriber drift; client MUST drop local cache and
 ///     re-subscribe with `from=null`
 ///   - `Unauthorized` — subscriber's session token revoked / expired mid-stream; client MUST close
@@ -45,21 +42,12 @@ pub enum EventNotificationKind {
         /// Projection-event JSON (same shape as `projection_event_json`).
         event_payload: Value,
     },
-    /// MLS epoch shift detected on `ak.component.mls.epoch.v1` cell.
+    /// Public MLS epoch shift after a committed transition.
     EpochRotation {
-        /// Old epoch value (the previous ResolvedCellState::Value if known).
+        /// Previous public epoch, when known.
         previous_epoch: Option<Value>,
-        /// New epoch value (current ResolvedCellState::Value after the
-        /// triggering apply_seal).
+        /// Current public epoch after acceptance.
         new_epoch: Value,
-    },
-    /// Seal frontier advanced. Emitted post-`apply_seal` so clients
-    /// can update their resume cursor without waiting for the next event.
-    Frontier {
-        /// `apply_seal`'s `post_state_root` (canonical Merkle).
-        state_root: String,
-        /// The Seal's id, useful for clients tracking the Seal chain.
-        seal_id: String,
     },
     /// Per-subscriber drift / corrupted-cursor signal. Clients SHOULD
     /// drop local cache + restart subscription with no `from`.
@@ -165,16 +153,6 @@ impl EventNotification {
             kind: EventNotificationKind::EpochRotation {
                 previous_epoch,
                 new_epoch,
-            },
-        }
-    }
-
-    pub fn frontier(realm_id: String, seal_id: String, state_root: String) -> Self {
-        Self {
-            realm_id,
-            kind: EventNotificationKind::Frontier {
-                state_root,
-                seal_id,
             },
         }
     }

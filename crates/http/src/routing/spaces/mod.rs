@@ -32,10 +32,6 @@ pub fn protocol_router() -> Router {
         )
 }
 
-pub fn local_router() -> Router {
-    Router::new().push(space::local_router())
-}
-
 /// `find`-segment directory discovery surface (`/_arkret/find/directory/*`).
 ///
 /// The historical `/_coland/find/directory/*` mirror has been retired;

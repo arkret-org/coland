@@ -457,11 +457,6 @@ pub struct AppConfig {
     /// propagation projection becomes `incomplete`.
     /// Env: `COLAND_DEACTIVATION_PROPAGATION_WINDOW_MS` (default 86_400_000).
     pub deactivation_propagation_window_ms: u64,
-    /// Operator-triggered federation frontier diagnostic cadence in seconds.
-    /// Zero disables the full-history worker, which is the production
-    /// default until its probe and fallback paths are incrementally bounded.
-    /// Env: `COLAND_FEDERATION_FRONTIER_INTERVAL_SECONDS` (default `0`).
-    pub federation_frontier_interval_seconds: u64,
     /// Cadence of the durable SecurityRotation worker sweep in seconds.
     /// Env: `COLAND_SECURITY_ROTATION_WORKER_INTERVAL_SECONDS` (default `5`,
     /// `1..=3600`).
@@ -956,7 +951,6 @@ impl AppConfig {
             // traffic; the in-process enqueue path still writes outbox rows.
             federation_outbound_enabled: false,
             deactivation_propagation_window_ms: 86_400_000,
-            federation_frontier_interval_seconds: 0,
             security_rotation_worker_interval_seconds: 5,
             admin_default_page_limit: 100,
             admin_max_page_limit: 1000,
@@ -1189,11 +1183,11 @@ impl AppConfig {
         validate_persistence_key_store(database_url.as_deref(), &key_store)?;
         // T2 — without a persistent notary seed (env or KeyStore) the worker
         // mints a fresh ephemeral ed25519 identity on every restart, which
-        // breaks the Seal signature chain. Match the `agent_audit_binding`
+        // breaks the authority signature chain. Match the `agent_audit_binding`
         // fail-fast posture; the notary key is at least as critical.
         if !development_mode && notary_signing_key_seed.is_none() && !key_store.is_durable() {
             anyhow::bail!(
-                "COLAND_NOTARY_SIGNING_KEY (or a durable COLAND_KEYSTORE_BACKEND) is required when COLAND_DEVELOPMENT_MODE is false; an ephemeral notary key breaks the Seal signature chain across restarts"
+                "COLAND_NOTARY_SIGNING_KEY (or a durable COLAND_KEYSTORE_BACKEND) is required when COLAND_DEVELOPMENT_MODE is false; an ephemeral notary key breaks the authority signature chain across restarts"
             );
         }
         let federation_fanout_topology = lookup(values, "COLAND_FEDERATION_FANOUT_TOPOLOGY")
@@ -1242,12 +1236,6 @@ impl AppConfig {
                 i64::MAX
             );
         }
-        let federation_frontier_interval_seconds =
-            lookup(values, "COLAND_FEDERATION_FRONTIER_INTERVAL_SECONDS")
-                .ok()
-                .and_then(|value| value.trim().parse::<u64>().ok())
-                .filter(|seconds| *seconds <= 3_600)
-                .unwrap_or(0);
         let security_rotation_worker_interval_seconds =
             match env_non_empty(values, "COLAND_SECURITY_ROTATION_WORKER_INTERVAL_SECONDS") {
                 None => 5,
@@ -1458,7 +1446,6 @@ impl AppConfig {
             trusted_push_gateways,
             federation_outbound_enabled,
             deactivation_propagation_window_ms,
-            federation_frontier_interval_seconds,
             security_rotation_worker_interval_seconds,
             admin_default_page_limit,
             admin_max_page_limit,

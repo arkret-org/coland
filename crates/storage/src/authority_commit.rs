@@ -399,12 +399,15 @@ impl SelfProducerCommitGuard {
 /// A complete ordinary Realm bootstrap, including the exact HTTP request
 /// bytes used for durable idempotency comparison. Every proposed Commit is
 /// prepared and verified by the service before this storage boundary.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct OrdinaryRealmBootstrapCommitUnit {
     pub submission:
         arkret_models_collaboration::authority_commit::OrdinaryRealmBootstrapUnitSubmission,
     pub exact_request_body: Vec<u8>,
     pub transactions: Vec<AuthorityCommitTransaction>,
+    /// Signing-time authority prepared by ingress, in the submitted slot order.
+    /// Empty only when no slot carries detached approval evidence.
+    pub event_approvals: Vec<Option<crate::EventApprovalCommit>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -773,7 +776,33 @@ impl OrdinaryRealmBootstrapCommitUnit {
             )),
         }
         let first = &self.transactions[0];
-        for (submitted, transaction) in self.submission.events.iter().zip(&self.transactions) {
+        if !self.event_approvals.is_empty() && self.event_approvals.len() != self.transactions.len()
+        {
+            return Err(arkret_wire::WireError::Protocol(
+                "ordinary Realm bootstrap approval history is incomplete".to_owned(),
+            ));
+        }
+        for (index, (submitted, transaction)) in self
+            .submission
+            .events
+            .iter()
+            .zip(&self.transactions)
+            .enumerate()
+        {
+            if let Some(prepared) = self.event_approvals.get(index) {
+                let signatures = prepared.as_ref().map(|evidence| {
+                    evidence
+                        .methods
+                        .iter()
+                        .map(|method| method.signature.clone())
+                        .collect::<Vec<_>>()
+                });
+                if signatures != submitted.approval_signatures {
+                    return Err(arkret_wire::WireError::Protocol(
+                        "ordinary Realm bootstrap approval history differs from its submitted evidence".to_owned(),
+                    ));
+                }
+            }
             transaction.validate()?;
             if submitted.event != transaction.event
                 || transaction.expected_authority != first.expected_authority
@@ -1993,6 +2022,14 @@ pub trait AuthorityCommitStore: Send + Sync {
         queued_at: DateTime<Utc>,
     ) -> PersistenceResult<AuthorityCommitWriteOutcome>;
 
+    /// Read an exact durable outcome before resolving live producer or approval
+    /// history again. Reuse of either unit identity with other bytes conflicts.
+    async fn ordinary_realm_bootstrap_replay(
+        &self,
+        submission: &arkret_models_collaboration::authority_commit::OrdinaryRealmBootstrapUnitSubmission,
+        exact_request_body: &[u8],
+    ) -> PersistenceResult<Option<Vec<arkret_wire::RealmCommit>>>;
+
     /// Install the entire registered ordinary Realm bootstrap in one DB
     /// transaction, including genesis authority, every Event/Commit and all
     /// current projections. Failed units leave no queued or committed Event.
@@ -2147,7 +2184,7 @@ pub trait AuthorityCommitStore: Send + Sync {
     async fn realm_stream_heads(
         &self,
         realm_id: &arkret_wire::RealmId,
-    ) -> PersistenceResult<Option<crate::RealmStreamFrontier>>;
+    ) -> PersistenceResult<Option<crate::RealmStreamCut>>;
 
     /// Freeze one controller-owned context's exact current for a signed attach draft.
     async fn sidecar_context_prepare_current(

@@ -211,7 +211,7 @@ pub enum ConflictCode {
     /// The Event producer holds no capability, at the accepting cut, for the
     /// transition it requests, or is not a joined member of its Realm.
     CapabilityDenied,
-    /// `actor_seq` is older than the accepted actor frontier.
+    /// The expected typed current revision differs from the accepting cut.
     CasConflict,
     /// An exact source needed for a current reducer result is unavailable.
     DependencyMissing,
@@ -219,7 +219,7 @@ pub enum ConflictCode {
     DeviceGenerationFenced,
     /// The exact device generation has an unresolved revoke proposal.
     DeviceRevocationPending,
-    /// The exact device generation has a covering revoke Seal.
+    /// The exact device generation has a covering revoke Commit.
     DeviceRevoked,
     /// The device is not authorized at the admission instant, or its
     /// forwarded authorization evidence has expired.

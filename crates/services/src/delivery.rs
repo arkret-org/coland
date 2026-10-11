@@ -121,7 +121,7 @@ pub trait BlobPort: Send + Sync {
 
 /// Live Signal relay (`sync/signal.md` §4).
 ///
-/// A Signal is not durable: it produces no Event id, advances no `actor_seq`
+/// A Signal is not durable: it produces no Event id, advances no commit position
 /// and enters no Seal coverage, so this port only holds admitted envelopes
 /// until `expires_at` and tracks a per-subscriber-device deliver-once
 /// watermark.

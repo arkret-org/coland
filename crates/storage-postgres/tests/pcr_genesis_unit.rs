@@ -10,6 +10,8 @@ mod device_history_fixture;
     reason = "This integration binary uses only its subset of the shared control source fixture."
 )]
 mod historical_control_source;
+#[path = "support/sql_fault_matrix.rs"]
+mod sql_fault_matrix;
 mod support;
 
 use arkret_models_collaboration::events_payloads::{
@@ -595,6 +597,50 @@ async fn founding_device_conflict_rolls_back_both_commits_and_exact_replay_is_st
 
 fn is_duplicate_conflict<T>(outcome: &Result<T, PersistenceError>) -> bool {
     matches!(outcome, Err(PersistenceError::Conflict(code)) if code == "duplicate_conflict")
+}
+
+#[tokio::test]
+async fn every_pcr_genesis_write_rolls_back_and_restart_preserves_the_first_outcome() {
+    let (pool, station) = contract_store().await;
+    let unit = unit(station);
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let at = unit.transactions[0].commit.committed_at;
+    let accepted = sql_fault_matrix::exhaust_writes(&pool, "pcr_genesis", || {
+        store.admit_pcr_genesis_unit(&unit, at)
+    })
+    .await;
+    let PcrGenesisCommitOutcome::Committed(result) = accepted else {
+        panic!("fresh PCR unit");
+    };
+    result.validate_against(&unit.submission).unwrap();
+    assert_eq!(unit_footprint(&pool, &unit).await, ACCEPTED_FOOTPRINT);
+    let before = sql_fault_matrix::snapshot(&pool).await;
+    let restarted = Db::connect(Some(&support::contract_database_url()), Default::default())
+        .await
+        .unwrap();
+    let reopened = PgAuthorityCommitStore {
+        pool: restarted.pool.unwrap(),
+    };
+    assert_eq!(
+        reopened.admit_pcr_genesis_unit(&unit, at).await.unwrap(),
+        PcrGenesisCommitOutcome::Duplicate(result.clone())
+    );
+    assert_eq!(
+        reopened
+            .pcr_genesis_replay(&unit.submission, &unit.exact_request_body)
+            .await
+            .unwrap(),
+        Some(result)
+    );
+    let mut different = unit.clone();
+    different.submission.idempotency_key =
+        IdempotencyKey::new(uuid::Uuid::now_v7().to_string()).unwrap();
+    different.exact_request_body =
+        arkret_canonical::canonical_json_bytes(&different.submission).unwrap();
+    assert!(is_duplicate_conflict(
+        &reopened.admit_pcr_genesis_unit(&different, at).await
+    ));
+    assert_eq!(sql_fault_matrix::snapshot(&pool).await, before);
 }
 
 fn unrelated_commit_id() -> RealmCommitId {
@@ -1190,16 +1236,38 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
         "rejected proposal leaked its immutable dot"
     );
     assert_eq!(
-        transactions
+        sql_fault_matrix::exhaust_writes(&pool, "revoke_proposal", || transactions
+            .commit_revoke_proposal(write.clone()))
+        .await,
+        covering
+    );
+    let restarted_pool = Db::connect(Some(&support::contract_database_url()), Default::default())
+        .await
+        .unwrap()
+        .pool
+        .unwrap();
+    let reopened_transactions = PgSecurityTransactionStore {
+        pool: restarted_pool,
+    };
+    let before_replay = sql_fault_matrix::snapshot(&pool).await;
+    assert_eq!(
+        reopened_transactions
             .commit_revoke_proposal(write.clone())
             .await
             .unwrap(),
         covering
     );
+    let mut changed_proposal = write;
+    changed_proposal.transaction.resource.created_at += chrono::TimeDelta::seconds(1);
     assert_eq!(
-        transactions.commit_revoke_proposal(write).await.unwrap(),
-        covering
+        reopened_transactions
+            .commit_revoke_proposal(changed_proposal)
+            .await
+            .unwrap_err()
+            .conflict_code(),
+        Some(ConflictCode::DuplicateConflict)
     );
+    assert_eq!(sql_fault_matrix::snapshot(&pool).await, before_replay);
     assert!(
         awaiting(transactions.rotations_awaiting_worker(1000).await.unwrap()),
         "a pending proposal still awaits its terminal decision"
@@ -1264,10 +1332,10 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
         .bind::<Uuid,_>(uuid::Uuid::parse_str(transaction_id.as_str().strip_prefix("ak:transaction:").unwrap()).unwrap())
         .get_result::<CountRow>(&mut *conn).await.unwrap();
     assert_eq!(before_terminal.count, 0);
-    let decided = transactions
-        .commit_revoke_command_terminal(terminal.clone())
-        .await
-        .unwrap();
+    let decided = sql_fault_matrix::exhaust_writes(&pool, "revoke_terminal_accepted", || {
+        transactions.commit_revoke_command_terminal(terminal.clone())
+    })
+    .await;
     assert!(
         awaiting(transactions.rotations_awaiting_worker(1000).await.unwrap()),
         "an accepted revoke stays queued for the worker-owned upload step"
@@ -1283,12 +1351,46 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
     );
     assert_eq!(
         transactions
-            .commit_revoke_command_terminal(terminal)
+            .commit_revoke_command_terminal(terminal.clone())
             .await
             .unwrap()
             .resource,
         decided.resource,
     );
+    let reopened = Db::connect(Some(&support::contract_database_url()), Default::default())
+        .await
+        .unwrap()
+        .pool
+        .unwrap();
+    let restarted = PgSecurityTransactionStore { pool: reopened };
+    let before_replay = sql_fault_matrix::snapshot(&pool).await;
+    assert_eq!(
+        restarted
+            .commit_revoke_command_terminal(terminal.clone())
+            .await
+            .unwrap()
+            .resource,
+        decided.resource
+    );
+    let mut changed = terminal;
+    changed
+        .transaction
+        .resource
+        .revoke_command_outcome
+        .as_mut()
+        .unwrap()
+        .decided_at += chrono::TimeDelta::seconds(1);
+    changed.step_outcome.as_mut().unwrap().response =
+        serde_json::to_value(&changed.transaction.resource).unwrap();
+    assert_eq!(
+        restarted
+            .commit_revoke_command_terminal(changed)
+            .await
+            .unwrap_err()
+            .conflict_code(),
+        Some(ConflictCode::DuplicateConflict)
+    );
+    assert_eq!(sql_fault_matrix::snapshot(&pool).await, before_replay);
     let terminal_rows = diesel::sql_query("SELECT COUNT(*) AS count FROM security_transaction_step_outcomes WHERE transaction_id=$1 AND step='revoke'")
         .bind::<Uuid,_>(uuid::Uuid::parse_str(transaction_id.as_str().strip_prefix("ak:transaction:").unwrap()).unwrap())
         .get_result::<CountRow>(&mut *conn).await.unwrap();
@@ -1415,10 +1517,11 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
         step_outcome: None,
     };
     let before_rejected_list = device_list_position(&pool, &account, &account).await;
-    let rejected_result = transactions
-        .commit_revoke_command_terminal(rejected_write.clone())
-        .await
-        .unwrap();
+    let rejected_result =
+        sql_fault_matrix::exhaust_writes(&pool, "revoke_terminal_rejected", || {
+            transactions.commit_revoke_command_terminal(rejected_write.clone())
+        })
+        .await;
     assert_eq!(
         device_list_position(&pool, &account, &account).await,
         before_rejected_list,
@@ -1446,6 +1549,21 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
         before_rejected_list,
         "rejected terminal replay does not publish a device-list change"
     );
+    let reopened = Db::connect(Some(&support::contract_database_url()), Default::default())
+        .await
+        .unwrap()
+        .pool
+        .unwrap();
+    let restarted = PgSecurityTransactionStore { pool: reopened };
+    let before_replay = sql_fault_matrix::snapshot(&pool).await;
+    assert_eq!(
+        restarted
+            .commit_revoke_command_terminal(rejected_write.clone())
+            .await
+            .unwrap()
+            .resource,
+        rejected_result.resource
+    );
     let mut changed_terminal = rejected_write;
     changed_terminal
         .transaction
@@ -1463,6 +1581,7 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
         Some(coland_storage::ConflictCode::DuplicateConflict),
         "a different terminal for the same proposal is a duplicate conflict"
     );
+    assert_eq!(sql_fault_matrix::snapshot(&pool).await, before_replay);
     assert_eq!(
         transactions
             .get(reject_id.as_str())

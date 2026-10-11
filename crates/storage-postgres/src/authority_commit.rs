@@ -3655,8 +3655,36 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             };
             Ok(Some(
                 anchor.anchored_head.is_some()
-                    && replica::hosts_joined_member(conn, stream, local_service_id).await?,
+                    && replica::hosts_joined_member_in_snapshot(conn, stream, local_service_id)
+                        .await?,
             ))
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn require_held_replica_write_lifecycle(
+        &self,
+        event: &arkret_wire::Event,
+    ) -> PersistenceResult<()> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                .execute(conn)
+                .await?;
+            let parent = arkret_wire::CommitStreamRef::Realm {
+                realm_id: event.realm_id.clone(),
+            };
+            if replica::replica_anchor_for_stream_in_connection(conn, &parent)
+                .await?
+                .is_some()
+            {
+                crate::realm_lifecycle_current_results::require_replica_live_in_connection(
+                    conn, event,
+                )
+                .await?;
+            }
+            Ok(())
         })
         .await
         .map_err(PgTransactionError::into_persistence)

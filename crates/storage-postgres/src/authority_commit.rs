@@ -3639,6 +3639,29 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         accepted_current_member_joined_in_connection(&mut conn, realm_id, member).await
     }
 
+    async fn replica_stream_has_hosted_member(
+        &self,
+        stream: &arkret_wire::CommitStreamRef,
+        local_service_id: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Option<bool>> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                .execute(conn)
+                .await?;
+            let anchor = replica::replica_anchor_for_stream_in_connection(conn, stream).await?;
+            let Some(anchor) = anchor else {
+                return Ok(None);
+            };
+            Ok(Some(
+                anchor.anchored_head.is_some()
+                    && replica::hosts_joined_member(conn, stream, local_service_id).await?,
+            ))
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
     async fn accepted_ordinary_realm(
         &self,
         realm_id: &arkret_wire::RealmId,

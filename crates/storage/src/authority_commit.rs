@@ -1826,6 +1826,15 @@ pub trait AuthorityCommitStore: Send + Sync {
         member: &arkret_wire::ActorId,
     ) -> PersistenceResult<bool>;
 
+    /// The held stream's current hosted-member basis, read in one durable cut.
+    /// None means this Station has no replica anchor for this stream; a
+    /// retained anchor alone never restores live authority after departure.
+    async fn replica_stream_has_hosted_member(
+        &self,
+        stream: &arkret_wire::CommitStreamRef,
+        local_service_id: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Option<bool>>;
+
     /// A collaboration or Direct Realm genesis backed by a held Commit or a
     /// verified replica bootstrap anchor, including below the since_join floor.
     async fn accepted_ordinary_realm(

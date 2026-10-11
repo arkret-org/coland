@@ -85,6 +85,14 @@ pub(super) fn hosted_member_join(
     {
         return None;
     }
+    hosted_member_join_event(state, event)
+}
+
+/// Classify an opening join without granting admission or replica authority.
+pub(super) fn hosted_member_join_event(
+    state: &AppState,
+    event: &arkret_wire::Event,
+) -> Option<arkret_wire::AccountId> {
     let member = match event.kind {
         arkret_wire::EventKind::MemberState => {
             let payload = serde_json::to_value(&event.payload)

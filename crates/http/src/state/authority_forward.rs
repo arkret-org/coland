@@ -626,12 +626,60 @@ pub(crate) async fn forward_self_event_with_session(
     forward_self_event_inner(state, governance, submission, Some(session)).await
 }
 
+async fn require_live_forward(state: &AppState, event: &arkret_wire::Event) -> ServiceResult<()> {
+    // Joining and a bound invite claim acquire authority through their own
+    // registered admission. They never reuse a departed replica's old basis.
+    if super::committed_replication::hosted_member_join_event(state, event)
+        .is_some_and(|member| event.actor_id.as_account_id() == Some(&member))
+        || event.kind == arkret_wire::EventKind::InviteClaim
+    {
+        return Ok(());
+    }
+    // circle.md section 9.1 permits the member's explicit cleanup of a stale
+    // parent-bound Circle join; governing admission still verifies that cut.
+    if event.kind == arkret_wire::EventKind::CircleMemberState {
+        let payload: arkret_models_collaboration::events_payloads::CircleMemberStatePayload =
+            serde_json::from_value(
+                serde_json::to_value(&event.payload)
+                    .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?,
+            )
+            .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+        if payload.membership
+            == arkret_models_collaboration::governance::circle::CircleMembership::Leave
+            && payload.member_id == event.actor_id
+        {
+            return Ok(());
+        }
+    }
+    let stream =
+        arkret_wire::CommitStreamRef::from_scope(&event.scope_ref, Some(event.realm_id.clone()))
+            .map_err(wire_refusal)?;
+    let parent = arkret_wire::CommitStreamRef::Realm {
+        realm_id: event.realm_id.clone(),
+    };
+    for checked in std::iter::once(&parent).chain((&stream != &parent).then_some(&stream)) {
+        if state
+            .authority_commits()
+            .replica_stream_has_hosted_member(checked, &state.service_core_id())
+            .await?
+            == Some(false)
+        {
+            return Err(ServiceError::protocol(
+                ErrorCode::FailedPrecondition,
+                "held stream has no live hosted-member authority",
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn forward_self_event_inner(
     state: &AppState,
     governance: &DidCoreId,
     submission: EventAdmissionSubmission,
     session: Option<&coland_services::identity::SessionIdentityState>,
 ) -> ServiceResult<AuthoritySubmitOutcome> {
+    require_live_forward(state, &submission.event).await?;
     // Device admission and Genesis material are preflight gates.  In
     // particular, a revoked/pending/fenced producer must leave no queued
     // Event behind at the forwarding Station.
@@ -659,6 +707,7 @@ async fn forward_self_event_inner(
         )
     })?;
     validate_recovery_caller(state, session, &submission.event).await?;
+    require_live_forward(state, &submission.event).await?;
     // Retain the producer's exact signed Event before any forwarding attempt.
     // A transport failure leaves this row queued for an exact replay or a
     // later committed replica; neither path makes it visible as accepted.
@@ -692,6 +741,7 @@ pub(super) async fn forward_self_mls(
     submission: MlsCommitSubmission,
     session: &coland_services::identity::SessionIdentityState,
 ) -> ServiceResult<AuthoritySubmitOutcome> {
+    require_live_forward(state, &submission.commit_event).await?;
     // Match ordinary forwarding: the live device gate precedes every durable
     // forwarding effect, including the local queued Event.
     let mut request = PeerAuthorityForwardMlsRequest {
@@ -710,6 +760,7 @@ pub(super) async fn forward_self_mls(
         fresh_producer_device_evidence(state, &submission.commit_event, governance, &body_digest)
             .await?;
     request.validate().map_err(wire_refusal)?;
+    require_live_forward(state, &submission.commit_event).await?;
     state
         .authority_commits()
         .queue_event(&submission.commit_event, crate::wire::now())
@@ -904,6 +955,7 @@ async fn send_forward(
         let body = arkret_canonical::canonical_json_bytes(&request)
             .map_err(|error| ServiceError::internal(error.to_string()))?;
         validate_recovery_caller(state, session, event).await?;
+        require_live_forward(state, event).await?;
         let response = crate::routing::federation::outbox::submit_authority_forward(
             state,
             governance.as_str(),

@@ -20,6 +20,7 @@ arkret-event-draft = { workspace = true, features = ["test-support"] }
 arkret-identifiers.workspace = true
 arkret-identity.workspace = true
 arkret-models-collaboration.workspace = true
+arkret-models-crypto.workspace = true
 arkret-models-identity.workspace = true
 arkret-policy.workspace = true
 arkret-schema.workspace = true

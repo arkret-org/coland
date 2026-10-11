@@ -1516,7 +1516,13 @@ async fn verify_peer_claim_source_attestation(
     let body = req
         .parse_json::<PeerKeyPackagesClaimRequestBody>()
         .await
-        .map_err(|_| AppError::json_invalid("invalid peer KeyPackage claim request body"))?;
+        .map_err(|error| {
+            if matches!(&error, salvo::http::ParseError::SerdeJson(error) if error.is_data()) {
+                peer_claim_schema_violation("peer KeyPackage claim body violates its schema")
+            } else {
+                AppError::json_invalid("invalid peer KeyPackage claim request body")
+            }
+        })?;
     let transport = peer_claim_transport_binding(state, req)?;
     if body.service_binding.source_id != transport.source_id
         || body.service_binding.destination_id != transport.destination_id

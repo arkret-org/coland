@@ -1559,6 +1559,7 @@ dependencies = [
  "arkret-identifiers",
  "arkret-identity",
  "arkret-models-collaboration",
+ "arkret-models-crypto",
  "arkret-models-identity",
  "arkret-policy",
  "arkret-schema",

@@ -395,6 +395,99 @@ fn broad_authorization_cannot_hide_a_narrow_management_restriction() {
 }
 
 #[test]
+fn join_only_policy_keeps_existing_scoped_and_aggregate_authorization_open() {
+    let policies = [policy(None, vec!["join"], "deny")];
+    let mut subtree = WireResourceSelector::realm(realm());
+    subtree.match_scope = Some(arkret_wire::ResourceMatchScope::Subtree);
+    for resource in [
+        WireResourceSelector::strand(
+            realm(),
+            "ak:strand:AT47eNekH0_aKZyIMsXq_s1FAWdYXC71_CUxQ5O478t-"
+                .parse()
+                .unwrap(),
+        ),
+        WireResourceSelector::space(
+            realm(),
+            "ak:space:AT47eNekH0_aKZyIMsXq_s1FAWdYXC71_CUxQ5O478t-"
+                .parse()
+                .unwrap(),
+        ),
+        subtree,
+    ] {
+        for actions in [
+            vec!["ak.message.create".to_owned()],
+            vec!["ak.realm.owner".to_owned()],
+        ] {
+            assert!(
+                require_authorization(
+                    &policies,
+                    &realm(),
+                    &account("controller"),
+                    &account("agent"),
+                    &actions,
+                    std::slice::from_ref(&resource),
+                    chrono::Utc::now(),
+                )
+                .is_ok()
+            );
+            let restriction = [policy(None, vec!["authorize"], "deny")];
+            assert!(
+                require_authorization(
+                    &restriction,
+                    &realm(),
+                    &account("controller"),
+                    &account("agent"),
+                    &actions,
+                    std::slice::from_ref(&resource),
+                    chrono::Utc::now(),
+                )
+                .is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn unrestricted_authorization_still_validates_complete_policy_and_identity() {
+    let valid = policy(None, vec!["join"], "deny");
+    let resource = WireResourceSelector::strand(
+        realm(),
+        "ak:strand:AT47eNekH0_aKZyIMsXq_s1FAWdYXC71_CUxQ5O478t-"
+            .parse()
+            .unwrap(),
+    );
+    let actions = ["ak.message.create".to_owned()];
+    let mut invalid = valid.clone();
+    invalid.policy_kind = arkret_wire::PolicyKind::Access;
+    for policies in [vec![invalid], vec![valid.clone(), valid.clone()]] {
+        assert!(
+            require_authorization(
+                &policies,
+                &realm(),
+                &account("controller"),
+                &account("agent"),
+                &actions,
+                std::slice::from_ref(&resource),
+                chrono::Utc::now(),
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        require_authorization(
+            &[valid],
+            &realm(),
+            &account("agent"),
+            &account("agent"),
+            &actions,
+            &[resource],
+            chrono::Utc::now(),
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn join_default_requires_distinct_accounts_and_join_ban_does_not_stop_execute() {
     let at = chrono::Utc::now();
     assert!(require_join(&[], &realm(), &account("controller"), &account("agent"), at).is_ok());

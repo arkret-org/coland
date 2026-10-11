@@ -26,6 +26,8 @@ mod ordinary_realm;
 #[path = "../../test-support/src/pcr_genesis.rs"]
 #[allow(dead_code)]
 mod pcr_genesis;
+#[path = "support/realm_fanout_authority_cases.rs"]
+mod realm_fanout_authority_cases;
 #[path = "support/realm_terminal_replica_cases.rs"]
 mod realm_terminal_replica_cases;
 #[path = "support/space_parent_replica_cases.rs"]
@@ -5659,8 +5661,8 @@ fn rows_of_circle_scan(scan: coland_storage::AccountStreamScan) -> Vec<bool> {
     }
 }
 
-/// Exercise the real same-cut recipient query, not confirmation admission:
-/// joined membership never proves entitlement to a private source's bytes.
+/// Private source candidates never establish peer obligations. Shared candidates
+/// also require an exact accepted source Event before sender revalidation.
 #[tokio::test]
 async fn private_confirmation_and_policy_ref_sources_are_never_owed_to_ordinary_peers() {
     let database = TestDatabase::lease().await;
@@ -5706,21 +5708,30 @@ async fn private_confirmation_and_policy_ref_sources_are_never_owed_to_ordinary_
         ),
     ] {
         let request = next_request(&join.authority_commit, kind, &founder(), payload, at);
-        assert_eq!(
-            store
-                .realm_fanout_still_owed(
-                    &request.authority_commit.event,
-                    &ordinary_realm::station(),
-                    &member_station(),
-                    &witnesses,
-                    at
-                )
-                .await
-                .unwrap(),
-            expected,
-            "{}",
-            request.authority_commit.event.kind.as_str()
-        );
+        let owed = store
+            .realm_fanout_still_owed(
+                &request.authority_commit.event,
+                &ordinary_realm::station(),
+                &member_station(),
+                &witnesses,
+                at,
+            )
+            .await;
+        if expected {
+            assert!(
+                owed.is_err(),
+                "an unaccepted candidate cannot establish fanout"
+            );
+            assert!(
+                store
+                    .committed_event(&request.authority_commit.event.event_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        } else {
+            assert!(!owed.unwrap(), "private sources never establish fanout");
+        }
     }
 }
 

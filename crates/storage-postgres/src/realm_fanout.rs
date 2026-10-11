@@ -407,8 +407,118 @@ async fn departing_member_target(
     )))
 }
 
-/// Every remote Station owed this Event, with the bases that authorize it.
+/// Propose exact current membership witnesses. Complete-byte disclosure is
+/// intersected below on each witness, never on the Station as a whole.
 async fn remote_targets(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    authority_station: &arkret_wire::DidCoreId,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<BTreeMap<arkret_wire::DidCoreId, Vec<RealmFanoutAuthorityWitness>>> {
+    let proposed = membership_targets(conn, event, authority_station, at).await?;
+    if proposed.is_empty() {
+        return Ok(proposed);
+    }
+    #[derive(diesel::QueryableByName)]
+    struct AcceptedRow {
+        #[diesel(sql_type = Jsonb)]
+        envelope: Value,
+        #[diesel(sql_type = Jsonb)]
+        commit_json: Value,
+    }
+    let token = ids::parse_event_id(event.event_id.as_str())
+        .ok_or_else(|| internal("fanout Event id is not canonical"))?;
+    let accepted = sql_query(
+        "SELECT e.envelope,c.commit_json FROM canonical_events e \
+        JOIN realm_commits c ON c.event_pk=e.pk AND c.realm_id=e.realm_id \
+        WHERE e.id=$1 AND e.realm_id=$2 AND e.state='committed'",
+    )
+    .bind::<Binary, _>(token.to_vec())
+    .bind::<Text, _>(event.realm_id.as_str())
+    .get_result::<AcceptedRow>(&mut *conn)
+    .await
+    .map_err(PersistenceError::database)?;
+    let row = arkret_wire::CommittedEventFullView {
+        event: serde_json::from_value(accepted.envelope).map_err(internal)?,
+        commit: serde_json::from_value(accepted.commit_json).map_err(internal)?,
+    };
+    if row.event != *event || row.commit.event_ref != event.event_id {
+        return Err(internal("fanout differs from its exact accepted Event"));
+    }
+    if !crate::committed_disclosure::withheld_commit_ids_in_connection(
+        conn,
+        &[row.commit.commit_id.to_string()],
+    )
+    .await?
+    .is_empty()
+    {
+        return Ok(BTreeMap::new());
+    }
+    let mut targets = BTreeMap::new();
+    for (station, witnesses) in proposed {
+        let mut qualified = Vec::new();
+        for witness in witnesses {
+            // The explicit terminating membership exception proves the old
+            // interval in membership_targets. Its post-leave floor is absent;
+            // byte withdrawal still applies above to the termination itself.
+            let departing = witness.membership_event_ref == event.event_id.as_str()
+                && event.kind == arkret_wire::EventKind::MemberState
+                && matches!(
+                    event.payload.get("membership").and_then(Value::as_str),
+                    Some("leave" | "ban")
+                )
+                || witness.circle_membership_event_ref.as_ref() == Some(&event.event_id)
+                    && event.kind == arkret_wire::EventKind::CircleMemberState
+                    && matches!(
+                        event.payload.get("membership").and_then(Value::as_str),
+                        Some("leave" | "ban")
+                    );
+            if !departing {
+                if matches!(
+                    row.commit.stream_ref,
+                    arkret_wire::CommitStreamRef::Realm { .. }
+                ) {
+                    let Some(floor) = crate::account_stream_scan::caller_realm_floor_in_connection(
+                        conn,
+                        &event.realm_id,
+                        &witness.member_id,
+                    )
+                    .await?
+                    else {
+                        continue;
+                    };
+                    if row.commit.stream_position < floor.oldest_position {
+                        continue;
+                    }
+                }
+                match crate::committed_disclosure::full_event_for_member_in_connection(
+                    conn,
+                    &row,
+                    &witness.member_id,
+                    at,
+                )
+                .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(PersistenceError::Conflict(detail))
+                        if detail.starts_with("capability_denied:") =>
+                    {
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            qualified.push(witness);
+        }
+        if !qualified.is_empty() {
+            targets.insert(station, qualified);
+        }
+    }
+    Ok(targets)
+}
+
+async fn membership_targets(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     authority_station: &arkret_wire::DidCoreId,

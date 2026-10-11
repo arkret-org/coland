@@ -1111,15 +1111,26 @@ async fn open_forwarded_join(
         require_forward_source(state, session, event, located).await?;
         anchor
     } else {
-        let mut direction = StreamScanDirection::After(None);
+        // A rejoin can follow an interval this peer could never read. Seek the
+        // exact accepted join through the registered authorized scan; this
+        // selector is not a replay floor. The locked installer still decides
+        // whether it may open a new interval or requires direct succession.
+        if *pages_left == 0 {
+            return Err("forward recovery page budget exhausted".into());
+        }
+        *pages_left -= 1;
         let mut original = None;
-        while *pages_left > 0 {
-            *pages_left -= 1;
+        {
             let request = StreamScanRequest {
                 realm_id: event.realm_id.clone(),
                 stream_ref: commit.stream_ref.clone(),
-                direction,
-                limit: SCAN_PAGE_LIMIT,
+                direction: StreamScanDirection::Before(Some(
+                    commit
+                        .stream_position
+                        .checked_add(1)
+                        .ok_or("opening target position overflow")?,
+                )),
+                limit: 1,
             };
             let body = post_peer(state, governance, SCAN_PATH, &request, SCAN_MAX_BYTES).await?;
             require_forward_source(state, session, event, located).await?;
@@ -1167,21 +1178,8 @@ async fn open_forwarded_join(
                     break;
                 }
             }
-            if original.is_some() {
-                break;
-            }
-            if !page.truncated || page.committed_events.is_empty() {
-                return Err("opening target is absent from the authorized page".into());
-            }
-            direction = StreamScanDirection::After(Some(
-                page.committed_events
-                    .last()
-                    .expect("nonempty page")
-                    .commit()
-                    .stream_position,
-            ));
         }
-        let (full, fact) = original.ok_or("forward recovery page budget exhausted")?;
+        let (full, fact) = original.ok_or("opening target is absent from the authorized page")?;
         require_forward_source(state, session, event, located).await?;
         let installed = commits
             .install_committed_replica(&CommittedReplica {

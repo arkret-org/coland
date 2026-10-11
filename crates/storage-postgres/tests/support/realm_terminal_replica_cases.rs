@@ -24,11 +24,6 @@ async fn terminal_replication_respects_last_member_departure_after_restart() {
         ))
         .await;
         let mut previous = join.authority_commit.clone();
-        let mut basis = vec![RealmFanoutAuthorityWitness {
-            member_id: alice.clone(),
-            circle_membership_event_ref: None,
-            membership_event_ref: join.authority_commit.event.event_id.to_string(),
-        }];
         if another_member_remains {
             let bob = remote_member("terminal-departure-bob");
             let bob_join = membership_request(&previous, bob.clone(), &bob, "join");
@@ -36,11 +31,6 @@ async fn terminal_replication_respects_last_member_departure_after_restart() {
                 .install_committed_replica(&replica(&unit, &bob_join, false))
                 .await
                 .unwrap();
-            basis.push(RealmFanoutAuthorityWitness {
-                member_id: bob,
-                circle_membership_event_ref: None,
-                membership_event_ref: bob_join.authority_commit.event.event_id.to_string(),
-            });
             previous = bob_join.authority_commit;
         }
         let leave = membership_request(&previous, alice.clone(), &alice, "leave");
@@ -73,20 +63,17 @@ async fn terminal_replication_respects_last_member_departure_after_restart() {
         ));
         // Recreate the store so authorization must come from durable facts.
         let restarted = PgAuthorityCommitStore { pool: pool.clone() };
-        // This is the sender's production target/basis revalidation function,
-        // evaluated against durable membership facts, not a synthetic oracle.
+        // The terminal is still a candidate here. Check the recipient's durable
+        // hosted-member gate; sender obligations require an accepted source Event.
         assert_eq!(
             restarted
-                .realm_fanout_still_owed(
-                    &terminal.authority_commit.event,
-                    &arkret_wire::DidCoreId::new(STATION).unwrap(),
+                .replica_stream_has_hosted_member(
+                    &terminal.authority_commit.commit.stream_ref,
                     &member_station(),
-                    &basis,
-                    last.commit.committed_at,
                 )
                 .await
                 .unwrap(),
-            another_member_remains,
+            Some(another_member_remains),
         );
         if another_member_remains {
             assert_eq!(

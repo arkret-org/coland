@@ -1,8 +1,10 @@
 //! Immutable controller confirmations, distinct from detached grant votes.
-use arkret_models_collaboration::events_payloads::agent::AgentActionApprovePayload;
+use arkret_models_collaboration::events_payloads::agent::{
+    AgentActionApprovePayload, AgentActionRequestPayload,
+};
 use arkret_wire::{ActorId, Event, EventKind, RealmCommit};
 use coland_storage::{PersistenceError, PersistenceResult};
-use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
+use diesel::sql_types::{BigInt, Jsonb, Nullable, Text, Timestamptz};
 use diesel::{OptionalExtension, QueryableByName, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 
@@ -15,6 +17,20 @@ struct Controller {
 struct Confirmation {
     #[diesel(sql_type=Jsonb)]
     value: serde_json::Value,
+    #[diesel(sql_type=Timestamptz)]
+    committed_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(QueryableByName)]
+struct RequestSource {
+    #[diesel(sql_type=Text)]
+    controller_account_key: String,
+    #[diesel(sql_type=Jsonb)]
+    request: serde_json::Value,
+    #[diesel(sql_type=Text)]
+    workflow_state: String,
+    #[diesel(sql_type=Nullable<Jsonb>)]
+    source: Option<serde_json::Value>,
 }
 fn invalid(detail: &str) -> PersistenceError {
     PersistenceError::Conflict(format!("failed_precondition: {detail}"))
@@ -91,88 +107,189 @@ pub(crate) async fn commit_confirmation(
     Ok(())
 }
 
-/// Unwired draft-publication implementation. A caller must first prove the
-/// registered draft selection fact; executed_by alone is insufficient. Owner
-/// 0228 retains this missing integration and its real conformance verification.
-#[allow(dead_code)]
+/// An accepted private action request selects its complete pre-signed Event.
+/// Ordinary delegated writes with no such source retain their own admission.
+/// Draft-only encrypted Account Data cannot supply a Station-visible selection.
 pub(crate) async fn require_publication(
     conn: &mut AsyncPgConnection,
     event: &Event,
     commit: &RealmCommit,
 ) -> PersistenceResult<()> {
-    let Some(executor) = event
-        .executed_by
-        .as_ref()
-        .filter(|executor| *executor != &event.actor_id)
-    else {
-        return Ok(());
-    };
-    let Some(agent) = executor.as_account_id() else {
-        return Ok(());
-    };
-    #[derive(QueryableByName)]
-    struct Present {
-        #[diesel(sql_type=diesel::sql_types::Bool)]
-        present: bool,
-    }
-    let present = sql_query("SELECT EXISTS(SELECT 1 FROM agent_principals WHERE id=$1) AS present")
-        .bind::<Text, _>(agent.principal_id.as_str())
-        .get_result::<Present>(&mut *conn)
-        .await
-        .map_err(PersistenceError::database)?;
-    if !present.present {
+    if event.kind == EventKind::AgentActionApprove {
         return Ok(());
     }
-    if controller(conn, &agent.principal_id).await? != event.actor_id {
-        return Err(required());
+    let actor = event.actor_id.as_account_id();
+    let producer = event.actual_signer().as_account_id();
+    let digest = arkret_canonical::canonical_sha256(event).map_err(PersistenceError::database)?;
+    // The left join distinguishes a missing private source from no request.
+    // Accepted private Events are immutable; only the workflow row is locked.
+    let requests = sql_query("SELECT r.controller_account_key,r.request,r.workflow_state,e.envelope AS source FROM agent_action_requests r LEFT JOIN actor_private_events e ON e.event_id=r.accepted_event_id AND e.kind='ak.agent.action_request' WHERE (r.agent_id=$1 OR r.agent_id=$2) AND r.request->>'request_canonical_digest'=$3 FOR SHARE OF r")
+        .bind::<Nullable<Text>,_>(actor.map(|account| account.principal_id.as_str()))
+        .bind::<Nullable<Text>,_>(producer.map(|account| account.principal_id.as_str()))
+        .bind::<Text,_>(&digest)
+        .load::<RequestSource>(&mut *conn).await.map_err(PersistenceError::database)?;
+    if requests.is_empty() {
+        #[derive(QueryableByName)]
+        struct Present {
+            #[diesel(sql_type=diesel::sql_types::Bool)]
+            present: bool,
+        }
+        let selected = sql_query("SELECT EXISTS(SELECT 1 FROM agent_action_approval_current_results WHERE realm_id=$1 AND approved_event_id=$2) AS present")
+            .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(event.event_id.as_str())
+            .get_result::<Present>(&mut *conn).await.map_err(PersistenceError::database)?;
+        if selected.present {
+            // EventId excludes producer proof. A changed proof cannot turn a
+            // selected publication into an ordinary write with the same id.
+            return Err(required());
+        }
+        return Ok(());
     }
-    let rows=sql_query("SELECT a.value FROM agent_action_approval_current_results a JOIN realm_commits c ON c.commit_id=a.current_commit_id AND c.realm_id=a.realm_id AND c.stream_position=a.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk WHERE a.realm_id=$1 AND a.approved_event_id=$2 AND a.controller_actor_key=$3 AND e.state='committed' AND e.envelope->>'kind'='ak.agent.action_approve' FOR SHARE OF a")
-        .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(event.event_id.as_str()).bind::<Text,_>(event.actor_id.to_string())
-        .load::<Confirmation>(&mut *conn).await.map_err(PersistenceError::database)?;
-    for row in rows {
-        let payload: AgentActionApprovePayload =
-            serde_json::from_value(row.value).map_err(|_| required())?;
-        if payload.agent_id != agent.principal_id
-            || payload.approved_event_id != event.event_id
-            || !payload.admits_commit_at(commit.committed_at)
+    for source in requests {
+        let request: AgentActionRequestPayload =
+            serde_json::from_value(source.request.clone()).map_err(|_| required())?;
+        let accepted: Event =
+            serde_json::from_value(source.source.ok_or_else(required)?).map_err(|_| required())?;
+        // Agent identity belongs to the immutable private request, rather than
+        // whichever actor happened to produce the selected publication.
+        let Some(agent) = accepted.actor_id.as_account_id() else {
+            continue;
+        };
+        if source.workflow_state != "requested"
+            || request.agent_id != agent.principal_id
+            || request.request_canonical_digest.as_str() != digest
+            || accepted.kind != EventKind::AgentActionRequest
+            || accepted.executed_by.is_some()
+            || serde_json::to_value(&accepted.payload).map_err(PersistenceError::database)?
+                != source.request
         {
             continue;
         }
-        let action = arkret_wire::CapabilityActionId::from_wire(&payload.proposed_action)
-            .ok_or_else(required)?;
-        if !arkret_schema::capability_action_descriptor(action)
-            .target_event_kinds
-            .contains(&event.kind.as_str())
+        let current_controller = controller(conn, &agent.principal_id).await?;
+        let Some(controller_account) = current_controller.as_account_id() else {
+            continue;
+        };
+        let agent_actor = ActorId::account(agent.clone());
+        let agent_owned = event.actor_id == agent_actor
+            && (event.executed_by.is_none()
+                || event.executed_by.as_ref() == Some(&current_controller));
+        let controller_owned = event.actor_id == current_controller
+            && event.executed_by.as_ref() == Some(&agent_actor);
+        if agent.station_id != controller_account.station_id
+            || source.controller_account_key != controller_account.to_string()
+            || request.controller_account_id != *controller_account
+            || !(agent_owned || controller_owned)
         {
             continue;
         }
-        let target = &payload.target;
-        let matches = match target.kind.as_str() {
-            "realm" => target.realm_id.as_ref() == Some(&event.realm_id),
-            "strand" | "space" | "message" | "object" => {
-                target.object_ref.as_ref().is_some_and(|expected| {
-                    [
-                        "strand_id",
-                        "space_id",
-                        "message_id",
-                        "target_ref",
-                        "object_ref",
-                    ]
-                    .iter()
-                    .any(|field| {
+        let rows=sql_query("SELECT a.value,c.committed_at FROM agent_action_approval_current_results a JOIN realm_commits c ON c.commit_id=a.current_commit_id AND c.realm_id=a.realm_id AND c.stream_position=a.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk WHERE a.realm_id=$1 AND a.approved_event_id=$2 AND a.controller_actor_key=$3 AND e.state='committed' AND e.kind='ak.agent.action_approve' AND e.envelope->>'event_id'=a.current_event_id AND e.envelope->'payload'=a.value AND e.envelope->'actor_id'=$4 FOR SHARE OF a")
+            .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(event.event_id.as_str()).bind::<Text,_>(current_controller.to_string())
+            .bind::<Jsonb,_>(serde_json::to_value(&current_controller).map_err(PersistenceError::database)?)
+            .load::<Confirmation>(&mut *conn).await.map_err(PersistenceError::database)?;
+        for row in &rows {
+            let payload: AgentActionApprovePayload =
+                serde_json::from_value(row.value.clone()).map_err(|_| required())?;
+            if payload.agent_id != agent.principal_id
+                || payload.approved_event_id != event.event_id
+                || !payload.admits_commit_at(commit.committed_at)
+                || !payload.admits_commit_at(row.committed_at)
+                || match payload.request_id.as_deref() {
+                    Some(id) => id != request.request_id,
+                    None => payload.draft_id.is_none() || payload.draft_id != request.draft_id,
+                }
+                || payload
+                    .draft_id
+                    .as_ref()
+                    .is_some_and(|draft| request.draft_id.as_ref() != Some(draft))
+                || payload.proposed_action != request.proposed_action
+                || serde_json::to_value(&payload.target).map_err(PersistenceError::database)?
+                    != serde_json::to_value(&request.target).map_err(PersistenceError::database)?
+            {
+                continue;
+            }
+            let action = arkret_wire::CapabilityActionId::from_wire(&payload.proposed_action)
+                .ok_or_else(required)?;
+            if !arkret_schema::capability_action_descriptor(action)
+                .target_event_kinds
+                .contains(&event.kind.as_str())
+            {
+                continue;
+            }
+            let target = &payload.target;
+            if target
+                .realm_id
+                .as_ref()
+                .is_some_and(|realm| realm != &event.realm_id)
+                || target.operation_id.is_some()
+                || target.account_data_key.is_some()
+            {
+                continue;
+            }
+            let matches = match target.kind.as_str() {
+                "realm" => target.realm_id.as_ref() == Some(&event.realm_id),
+                "strand" => target.object_ref.as_ref().is_some_and(|expected| {
+                    arkret_wire::StrandId::new(expected.as_str()).is_ok()
+                        && (event
+                            .payload
+                            .get("strand_id")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(expected.as_str())
+                            || (matches!(
+                                event.kind,
+                                EventKind::StrandArchive
+                                    | EventKind::StrandRestore
+                                    | EventKind::StrandStageSet
+                                    | EventKind::StrandTracksUpdate
+                            ) && event
+                                .payload
+                                .get("target_ref")
+                                .and_then(serde_json::Value::as_str)
+                                == Some(expected.as_str()))
+                            || (event.kind == EventKind::StrandCreate
+                                && arkret_wire::StrandId::from_event_id(&event.event_id).as_str()
+                                    == expected.as_str()))
+                }),
+                "space" => target.object_ref.as_ref().is_some_and(|expected| {
+                    arkret_wire::SpaceId::new(expected.as_str()).is_ok()
+                        && (event
+                            .payload
+                            .get("space_id")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(expected.as_str())
+                            || (event.kind == EventKind::SpaceCreate
+                                && arkret_wire::SpaceId::from_event_id(&event.event_id).as_str()
+                                    == expected.as_str()))
+                }),
+                "message" => target.object_ref.as_ref().is_some_and(|expected| {
+                    arkret_wire::MessageId::new(expected.as_str()).is_ok()
+                        && (event
+                            .payload
+                            .get("message_id")
+                            .or_else(|| event.payload.get("target_ref"))
+                            .and_then(serde_json::Value::as_str)
+                            == Some(expected.as_str())
+                            || (event.kind == EventKind::MessageCreate
+                                && arkret_wire::MessageId::from_event_id(&event.event_id).as_str()
+                                    == expected.as_str()))
+                }),
+                "object" => target.object_ref.as_ref().is_some_and(|expected| {
+                    ["target_ref", "object_ref"].iter().any(|field| {
                         event
                             .payload
                             .get(*field)
                             .and_then(serde_json::Value::as_str)
                             == Some(expected.as_str())
                     })
-                })
+                }),
+                _ => false,
+            };
+            if matches {
+                return Ok(());
             }
-            _ => false,
-        };
-        if matches {
-            return Ok(());
         }
     }
     Err(required())
 }
+
+#[cfg(test)]
+#[path = "agent_confirmation_admission/pg_tests.rs"]
+mod pg_tests;

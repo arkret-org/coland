@@ -223,6 +223,9 @@ CREATE TABLE public.agent_action_requests (
     )
 );
 
+CREATE INDEX agent_action_requests_candidate_idx
+    ON public.agent_action_requests (agent_id, (request->>'request_canonical_digest'));
+
 -- ak.private.agent.rejection.v1: one controller rejection per (controller
 -- AccountId, agent_id, rejection_id), written in the transaction that turns
 -- its one target request `rejected`.

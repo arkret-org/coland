@@ -2835,9 +2835,6 @@ async fn commit_prepared_event_inner(
         &request.authority_commit.commit,
     )
     .await?;
-    // The draft publication gate needs its registered draft selection fact.
-    // executed_by alone selects ordinary delegated Agent Events as well, and
-    // must not introduce a confirmation requirement for all such Events.
 
     let policy_approvals = if let Some(target) = crate::policy_current_results::admit_in_connection(
         conn,
@@ -2888,6 +2885,7 @@ async fn commit_prepared_event_inner(
     let commit = &request.authority_commit.commit;
     crate::approval_admission::validate_candidate(event, commit, event_approvals)?;
     if matches!(authority_write, AuthorityCommitWriteOutcome::Committed) {
+        crate::agent_confirmation_admission::require_publication(conn, event, commit).await?;
         if let Some(prepared) = self_pcr_outcome {
             crate::agent_producer_signer_keys::retain_self_outcome_in_connection(
                 conn, event, commit, prepared,

@@ -138,8 +138,10 @@ pub(crate) async fn read_in_connection(
     agent: &AccountId,
 ) -> PersistenceResult<Option<ModeRow>> {
     let key = arkret_wire::derive_agent_interaction_current_key(agent).map_err(invalid)?;
-    sql_query("SELECT r.current_commit_id,r.current_stream_position,r.value FROM agent_interaction_current_results r JOIN realm_commits c ON c.realm_id=r.realm_id AND c.commit_id=r.current_commit_id AND c.stream_position=r.current_stream_position WHERE r.realm_id=$1 AND r.current_key=$2 AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',$1)")
-        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(key).get_result(&mut *conn).await.optional().map_err(PersistenceError::database)
+    // A projection cannot establish an already-public transition by itself.
+    // Bind the whole value to the last accepted mode Event for this account.
+    sql_query("SELECT r.current_commit_id,r.current_stream_position,r.value FROM agent_interaction_current_results r JOIN realm_commits c ON c.realm_id=r.realm_id AND c.commit_id=r.current_commit_id AND c.stream_position=r.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.realm_id=c.realm_id AND e.state='committed' AND e.kind='ak.agent.interaction.set' WHERE r.realm_id=$1 AND r.current_key=$2 AND r.agent_account_id=$3 AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',$1) AND e.scope_ref=c.stream_ref AND e.envelope->'payload'->'agent_account_id'=$3 AND r.value=jsonb_build_object('controller_account_id',e.envelope->'payload'->'controller_account_id','interaction_mode',e.envelope->'payload'->'interaction_mode') AND NOT EXISTS(SELECT 1 FROM realm_commits newer JOIN canonical_events ne ON ne.pk=newer.event_pk AND ne.realm_id=newer.realm_id AND ne.state='committed' AND ne.kind='ak.agent.interaction.set' WHERE newer.realm_id=$1 AND newer.stream_ref=c.stream_ref AND newer.stream_position>c.stream_position AND ne.envelope->'payload'->'agent_account_id'=$3)")
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(key).bind::<Jsonb,_>(json!(agent)).get_result(&mut *conn).await.optional().map_err(PersistenceError::database)
 }
 
 pub(crate) async fn known_never_written(
@@ -219,6 +221,7 @@ pub(crate) async fn admit_in_connection(
         ));
     }
     let current = prior
+        .as_ref()
         .map(|row| -> PersistenceResult<CurrentRevision> {
             Ok(CurrentRevision {
                 commit_id: row.current_commit_id.parse().map_err(invalid)?,
@@ -230,6 +233,27 @@ pub(crate) async fn admit_in_connection(
         return Err(precondition(
             "Agent mode expected_revision differs from current",
         ));
+    }
+    if payload.interaction_mode == AgentInteractionMode::Public {
+        let already_public = prior
+            .as_ref()
+            .map(|row| serde_json::from_value::<AgentInteractionCurrentValue>(row.value.clone()))
+            .transpose()
+            .map_err(invalid)?
+            .is_some_and(|value| {
+                value.controller_account_id == payload.controller_account_id
+                    && value.interaction_mode == AgentInteractionMode::Public
+            });
+        if !already_public {
+            crate::agent_management_admission::require_publish_in_connection(
+                conn,
+                &event.realm_id,
+                &payload.controller_account_id,
+                &payload.agent_account_id,
+                commit.committed_at,
+            )
+            .await?;
+        }
     }
     Ok(())
 }

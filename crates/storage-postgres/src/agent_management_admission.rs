@@ -107,7 +107,58 @@ fn require_join(
     agent: &AccountId,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
-    // Realm membership does not establish an actual Strand/object action.
+    require_realm_intent(
+        policies,
+        realm,
+        controller,
+        agent,
+        at,
+        AgentPolicyOperation::Join,
+    )
+}
+
+/// Opening public intent is distinct from continuous public serving. Ownership,
+/// the signed mode transition and its exact CAS are verified by the caller.
+pub(crate) fn require_publish_in_connection<'a>(
+    conn: &'a mut diesel_async::AsyncPgConnection,
+    realm: &'a RealmId,
+    controller: &'a AccountId,
+    agent: &'a AccountId,
+    at: chrono::DateTime<chrono::Utc>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = PersistenceResult<()>> + Send + 'a>> {
+    // Keep the complete Policy reader's state out of the enclosing mode/UOW
+    // future, which already contains the other same-cut admission consumers.
+    Box::pin(async move {
+        let policies =
+            crate::policy_current_results::read_scoped_agent_management_policies_in_connection(
+                conn, realm, None,
+            )
+            .await?;
+        require_realm_intent(
+            &policies,
+            realm,
+            controller,
+            agent,
+            at,
+            AgentPolicyOperation::Publish,
+        )
+    })
+}
+
+fn require_realm_intent(
+    policies: &[Policy],
+    realm: &RealmId,
+    controller: &AccountId,
+    agent: &AccountId,
+    at: chrono::DateTime<chrono::Utc>,
+    operation: AgentPolicyOperation,
+) -> PersistenceResult<()> {
+    let intent = match operation {
+        AgentPolicyOperation::Join => "joining",
+        AgentPolicyOperation::Publish => "publishing",
+        _ => return Err(unavailable("Agent Realm intent operation is unsupported")),
+    };
+    // Realm membership/public intent does not establish a Strand/object action.
     // Unsupported scoped evidence must not be treated as a nonmatching ban.
     if policies
         .iter()
@@ -120,7 +171,9 @@ fn require_join(
             })
         })
     {
-        return Err(unavailable("Agent join resource evidence is unavailable"));
+        return Err(unavailable(format!(
+            "Agent {intent} resource evidence is unavailable"
+        )));
     }
     let resources = [PolicyResourceSelector {
         kind: PolicyResourceKind::Realm,
@@ -132,7 +185,7 @@ fn require_join(
         &AgentManagementContext {
             realm_id: realm,
             ownership: Some((controller, agent)),
-            operation: AgentPolicyOperation::Join,
+            operation,
             content_action: None,
             resources: Some(&resources),
             at,
@@ -141,12 +194,12 @@ fn require_join(
     .map_err(unavailable)?;
     match effect {
         PolicyEffect::Allow => Ok(()),
-        PolicyEffect::Deny => Err(PersistenceError::Conflict(
-            "capability_denied: Agent management forbids joining".to_owned(),
-        )),
-        PolicyEffect::Quarantine | PolicyEffect::RequireReview => Err(unavailable(
-            "Agent join requires unresolved quarantine or review evidence",
-        )),
+        PolicyEffect::Deny => Err(PersistenceError::Conflict(format!(
+            "capability_denied: Agent management forbids {intent}"
+        ))),
+        PolicyEffect::Quarantine | PolicyEffect::RequireReview => Err(unavailable(format!(
+            "Agent {intent} requires unresolved quarantine or review evidence"
+        ))),
     }
 }
 

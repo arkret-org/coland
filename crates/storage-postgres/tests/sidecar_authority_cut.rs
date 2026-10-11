@@ -2649,48 +2649,115 @@ async fn encrypted_agent_join_rechecks_claimability_and_writes_nothing_on_refusa
     assert_eq!(after.epoch, before.epoch);
 }
 
+type AgentModeScenario = (
+    TestDatabase,
+    pcr_genesis::PcrGenesisFixture,
+    AccountId,
+    coland_storage::AuthorityCommitTransaction,
+    arkret_wire::CurrentRevision,
+    coland_storage::DeviceRevocationGateSelector,
+);
+
+fn agent_mode_request(
+    previous: &coland_storage::AuthorityCommitTransaction,
+    mode: &str,
+    expected: Option<arkret_wire::CurrentRevision>,
+    principal: &pcr_genesis::PcrGenesisFixture,
+    agent: &AccountId,
+    guard: &coland_storage::DeviceRevocationGateSelector,
+) -> coland_storage::EventCommitRequest {
+    let controller = &principal.history.account;
+    let payload = arkret_models_collaboration::agent_interaction::AgentInteractionSetPayload {
+        agent_account_id: agent.clone(),
+        controller_account_id: controller.clone(),
+        interaction_mode: if mode == "public" {
+            arkret_models_collaboration::agent_interaction::AgentInteractionMode::Public
+        } else {
+            arkret_models_collaboration::agent_interaction::AgentInteractionMode::Private
+        },
+        expected_revision: expected,
+    };
+    let mut request = ordinary_realm::next_request(
+        previous,
+        EventKind::AgentInteractionSet,
+        &controller.principal_id,
+        serde_json::to_value(payload).unwrap(),
+        previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
+    );
+    request.authority_commit.event = device_authorization_history::sign_event(
+        request.authority_commit.event,
+        principal.history.device_verification_method.clone(),
+        principal.history.founding_device_signing_seed,
+    );
+    request = ordinary_realm::request_for_event(
+        previous,
+        request.authority_commit.event,
+        previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
+    );
+    request.self_producer_guard = Some(coland_storage::SelfProducerCommitGuard::HumanDevice(
+        guard.clone(),
+    ));
+    request
+}
+
 #[tokio::test]
 async fn agent_mode_controller_cas_preserves_derived_sidecar_roster() {
-    boxed_agent_mode_controller_cas().await;
+    let (database, principal, agent, initial, revision, guard) =
+        boxed_agent_mode_controller_cas().await;
+    let pool = database.pool();
+    let make_mode = |previous: &coland_storage::AuthorityCommitTransaction,
+                     mode: &str,
+                     expected: Option<arkret_wire::CurrentRevision>| {
+        agent_mode_request(previous, mode, expected, &principal, &agent, &guard)
+    };
+    Box::pin(agent_publish_policy_scenario(
+        &pool,
+        &principal.history.account,
+        &agent,
+        &initial,
+        revision,
+        &make_mode,
+    ))
+    .await;
 }
 
 // Construct the large scenario outside the harness Future's poll frame.
-fn boxed_agent_mode_controller_cas() -> Pin<Box<dyn Future<Output = ()> + Send>> {
+fn boxed_agent_mode_controller_cas() -> Pin<Box<dyn Future<Output = AgentModeScenario> + Send>> {
     Box::pin(agent_mode_controller_cas_scenario())
 }
 
-async fn agent_mode_controller_cas_scenario() {
-    async fn footprint(
-        pool: &coland_storage_postgres::PgPool,
-        realm: &arkret_wire::RealmId,
-    ) -> serde_json::Value {
-        use diesel::sql_types::{Jsonb, Text};
-        use diesel_async::RunQueryDsl;
-        #[derive(diesel::QueryableByName)]
-        struct Row {
-            #[diesel(sql_type = Jsonb)]
-            value: serde_json::Value,
-        }
-        let mut conn = pool.get().await.unwrap();
-        diesel::sql_query(
-            "SELECT jsonb_build_object( \
-             'events', (SELECT COUNT(*) FROM canonical_events WHERE realm_id=$1), \
-             'commits', (SELECT COUNT(*) FROM realm_commits WHERE realm_id=$1), \
-             'facts', (SELECT COUNT(*) FROM agent_producer_signer_keys f JOIN realm_commits c ON c.commit_id=f.commit_id WHERE c.realm_id=$1), \
-             'outbox', (SELECT COUNT(*) FROM event_federation_outbox o JOIN canonical_events e ON e.pk=o.event_pk WHERE e.realm_id=$1), \
-             'authority', (SELECT to_jsonb(a) FROM realm_authorities a WHERE realm_id=$1), \
-             'interaction', (SELECT COALESCE(jsonb_agg(to_jsonb(i) ORDER BY to_jsonb(i)::text),'[]'::jsonb) FROM agent_interaction_current_results i WHERE realm_id=$1), \
-             'sidecar', (SELECT COALESCE(jsonb_agg(to_jsonb(s) ORDER BY to_jsonb(s)::text),'[]'::jsonb) FROM sidecar_current_results s WHERE realm_id=$1), \
-             'message_revision', (SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text),'[]'::jsonb) FROM message_revision_current_results r WHERE realm_id=$1), \
-             'mls', (SELECT COALESCE(jsonb_agg(to_jsonb(m) ORDER BY to_jsonb(m)::text),'[]'::jsonb) FROM mls_group_current_results m WHERE realm_id=$1) \
-             ) AS value",
-        )
-        .bind::<Text, _>(realm.as_str())
-        .get_result::<Row>(&mut *conn)
-        .await
-        .unwrap()
-        .value
+async fn agent_mode_footprint(
+    pool: &coland_storage_postgres::PgPool,
+    realm: &arkret_wire::RealmId,
+) -> serde_json::Value {
+    use diesel::sql_types::{Jsonb, Text};
+    use diesel_async::RunQueryDsl;
+    #[derive(diesel::QueryableByName)]
+    struct Row {
+        #[diesel(sql_type = Jsonb)]
+        value: serde_json::Value,
     }
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query(
+        "SELECT jsonb_build_object( \
+         'events', (SELECT COUNT(*) FROM canonical_events WHERE realm_id=$1), \
+         'commits', (SELECT COUNT(*) FROM realm_commits WHERE realm_id=$1), \
+         'facts', (SELECT COUNT(*) FROM agent_producer_signer_keys f JOIN realm_commits c ON c.commit_id=f.commit_id WHERE c.realm_id=$1), \
+         'outbox', (SELECT COUNT(*) FROM event_federation_outbox o JOIN canonical_events e ON e.pk=o.event_pk WHERE e.realm_id=$1), \
+         'authority', (SELECT to_jsonb(a) FROM realm_authorities a WHERE realm_id=$1), \
+         'interaction', (SELECT COALESCE(jsonb_agg(to_jsonb(i) ORDER BY to_jsonb(i)::text),'[]'::jsonb) FROM agent_interaction_current_results i WHERE realm_id=$1), \
+         'sidecar', (SELECT COALESCE(jsonb_agg(to_jsonb(s) ORDER BY to_jsonb(s)::text),'[]'::jsonb) FROM sidecar_current_results s WHERE realm_id=$1), \
+         'message_revision', (SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text),'[]'::jsonb) FROM message_revision_current_results r WHERE realm_id=$1), \
+         'mls', (SELECT COALESCE(jsonb_agg(to_jsonb(m) ORDER BY to_jsonb(m)::text),'[]'::jsonb) FROM mls_group_current_results m WHERE realm_id=$1) \
+         ) AS value",
+    )
+    .bind::<Text, _>(realm.as_str())
+    .get_result::<Row>(&mut *conn)
+    .await
+    .unwrap()
+    .value
+}
+async fn agent_mode_controller_cas_scenario() -> AgentModeScenario {
     use coland_storage::AgentControlAdmissionWrite;
     let database = TestDatabase::lease().await;
     let pool = database.pool();
@@ -2827,37 +2894,7 @@ async fn agent_mode_controller_cas_scenario() {
     let make_mode = |previous: &coland_storage::AuthorityCommitTransaction,
                      mode: &str,
                      expected: Option<arkret_wire::CurrentRevision>| {
-        let payload = arkret_models_collaboration::agent_interaction::AgentInteractionSetPayload {
-            agent_account_id: agent.clone(),
-            controller_account_id: controller.clone(),
-            interaction_mode: if mode == "public" {
-                arkret_models_collaboration::agent_interaction::AgentInteractionMode::Public
-            } else {
-                arkret_models_collaboration::agent_interaction::AgentInteractionMode::Private
-            },
-            expected_revision: expected,
-        };
-        let mut request = ordinary_realm::next_request(
-            previous,
-            EventKind::AgentInteractionSet,
-            &controller.principal_id,
-            serde_json::to_value(payload).unwrap(),
-            previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
-        );
-        request.authority_commit.event = device_authorization_history::sign_event(
-            request.authority_commit.event,
-            principal.history.device_verification_method.clone(),
-            principal.history.founding_device_signing_seed,
-        );
-        request = ordinary_realm::request_for_event(
-            previous,
-            request.authority_commit.event,
-            previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
-        );
-        request.self_producer_guard = Some(coland_storage::SelfProducerCommitGuard::HumanDevice(
-            guard.clone(),
-        ));
-        request
+        agent_mode_request(previous, mode, expected, &principal, &agent, &guard)
     };
     let mut public = make_mode(&join.authority_commit, "public", None);
     source_candidate(&pool, &mut public).await;
@@ -3039,7 +3076,7 @@ async fn agent_mode_controller_cas_scenario() {
     .unwrap();
     commit.verify_commit_id_matches_content().unwrap();
 
-    let private_write_before = footprint(&pool, realm_id).await;
+    let private_write_before = agent_mode_footprint(&pool, realm_id).await;
     assert!(
         uow.commit_event(private_write)
             .await
@@ -3047,7 +3084,10 @@ async fn agent_mode_controller_cas_scenario() {
             .to_string()
             .contains("shared Agent authority is unavailable")
     );
-    assert_eq!(footprint(&pool, realm_id).await, private_write_before);
+    assert_eq!(
+        agent_mode_footprint(&pool, realm_id).await,
+        private_write_before
+    );
     let arkret_wire::TypedCurrentRow::Value {
         revision: private_revision,
         ..
@@ -3085,6 +3125,194 @@ async fn agent_mode_controller_cas_scenario() {
         .unwrap()
         .unwrap();
     assert!(snapshot.current_state_entries.iter().any(|row| matches!(row, arkret_wire::TypedCurrentRow::Value { selector: arkret_wire::CurrentSelector::AgentInteraction { agent_account_id }, value, .. } if agent_account_id == &agent && value["interaction_mode"] == "private")));
+
+    (
+        database,
+        principal,
+        agent,
+        same_value.authority_commit,
+        advanced,
+        guard,
+    )
+}
+
+async fn agent_publish_policy_scenario<F>(
+    pool: &coland_storage_postgres::PgPool,
+    controller: &AccountId,
+    agent: &AccountId,
+    initial: &coland_storage::AuthorityCommitTransaction,
+    mut mode_revision: arkret_wire::CurrentRevision,
+    make_mode: &F,
+) where
+    F: Fn(
+            &coland_storage::AuthorityCommitTransaction,
+            &str,
+            Option<arkret_wire::CurrentRevision>,
+        ) -> coland_storage::EventCommitRequest
+        + Sync,
+{
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let realm_id = &initial.event.realm_id;
+    let selector = arkret_wire::CurrentSelector::AgentInteraction {
+        agent_account_id: agent.clone(),
+    };
+    // Management writes remain guarded. Import complete accepted policy history
+    // to exercise the real mode UOW consumer without claiming HTTP enablement.
+    async fn import_publish_policy(
+        pool: &coland_storage_postgres::PgPool,
+        previous: &coland_storage::AuthorityCommitTransaction,
+        controller: &AccountId,
+        expected: Option<arkret_wire::CurrentRevision>,
+        effect: &str,
+    ) -> coland_storage::AuthorityCommitTransaction {
+        use diesel::sql_types::{BigInt, Binary, Jsonb, Nullable, Text, Timestamptz};
+        use diesel_async::{AsyncConnection, RunQueryDsl};
+        let mut payload: arkret_models_collaboration::governance::operation_wire::PolicySetStatePayload =
+            serde_json::from_value(serde_json::json!({
+                "policy_id":"ak:policy:0198ff00-0000-7000-8000-000000000001",
+                "expected_revision":expected,
+                "value":{
+                    "schema":"ak.schema.policy.v1",
+                    "id":"ak:policy:0198ff00-0000-7000-8000-000000000001",
+                    "realm_id":previous.event.realm_id, "policy_kind":"agent",
+                    "rules":[{"rule_id":"publish", "kind":"agent", "effect":effect,
+                        "agent_target":{"kind":"controller","controller_account_id":controller},
+                        "agent_operations":["publish"]}],
+                    "default_effect":"allow", "created_by":arkret_wire::ActorId::account(controller.clone()),
+                    "created_at":previous.commit.committed_at
+                }
+            })).unwrap();
+        if effect == "require_review" {
+            let arkret_models_collaboration::governance::operation_wire::PolicySetValue::Governance(
+                document,
+            ) = &mut payload.value
+            else {
+                unreachable!()
+            };
+            document.rules[0].review_requirement = Some(arkret_models_collaboration::governance::operation_wire::ManagementReviewRequirement {
+                approver_actor_ids: vec![arkret_wire::ActorId::account(controller.clone())],
+                threshold: 1,
+                max_age_seconds: 60,
+            });
+        }
+        payload.validate().unwrap();
+        let request = ordinary_realm::next_request(
+            previous,
+            EventKind::PolicySet,
+            &controller.principal_id,
+            serde_json::to_value(&payload).unwrap(),
+            previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
+        );
+        let request = ordinary_realm::source_request(pool, request).await;
+        let tx = request.authority_commit;
+        let event = &tx.event;
+        let commit = &tx.commit;
+        let mut conn = pool.get().await.unwrap();
+        (&mut *conn).transaction::<(), diesel::result::Error, _>(async move |conn| {
+            diesel::sql_query("INSERT INTO canonical_events(id,digest_suite,digest,actor_id,realm_id,scope_ref,kind,canonical_bytes,envelope,state,committed_at) VALUES($1,1,$2,$3,$4,$5,$6,$7,$8,'committed',$9)")
+                .bind::<Binary,_>(event.event_id.token_bytes().to_vec()).bind::<Binary,_>(event.event_id.digest_bytes().to_vec())
+                .bind::<Text,_>(event.actor_id.to_string()).bind::<Text,_>(event.realm_id.as_str())
+                .bind::<Jsonb,_>(serde_json::json!(event.scope_ref)).bind::<Text,_>(event.kind.as_str())
+                .bind::<Binary,_>(arkret_canonical::canonical_json_bytes(event).unwrap()).bind::<Jsonb,_>(serde_json::json!(event))
+                .bind::<Timestamptz,_>(commit.committed_at).execute(&mut *conn).await?;
+            diesel::sql_query("INSERT INTO realm_commits(commit_id,realm_id,stream_key,stream_ref,stream_position,previous_commit_ref,event_pk,governance_generation,commit_json,committed_at) SELECT $1,$2,$3,$4,$5,$6,pk,0,$7,$8 FROM canonical_events WHERE id=$9")
+                .bind::<Text,_>(commit.commit_id.as_str()).bind::<Text,_>(commit.realm_id.as_str())
+                .bind::<Text,_>(arkret_canonical::canonical_json_string(&commit.stream_ref).unwrap())
+                .bind::<Jsonb,_>(serde_json::json!(commit.stream_ref)).bind::<BigInt,_>(commit.stream_position as i64)
+                .bind::<Nullable<Text>,_>(commit.previous_commit_ref.as_ref().map(|id| id.as_str()))
+                .bind::<Jsonb,_>(serde_json::json!(commit)).bind::<Timestamptz,_>(commit.committed_at)
+                .bind::<Binary,_>(event.event_id.token_bytes().to_vec()).execute(&mut *conn).await?;
+            diesel::sql_query("INSERT INTO policy_current_results(realm_id,policy_id,current_commit_id,current_stream_position,current_event_id,value,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(policy_id) DO UPDATE SET current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,current_event_id=EXCLUDED.current_event_id,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at")
+                .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(payload.policy_id.as_str())
+                .bind::<Text,_>(commit.commit_id.as_str()).bind::<BigInt,_>(commit.stream_position as i64)
+                .bind::<Text,_>(event.event_id.as_str()).bind::<Jsonb,_>(serde_json::json!(payload.value))
+                .bind::<Timestamptz,_>(commit.committed_at).execute(&mut *conn).await?;
+            Ok(())
+        }).await.unwrap();
+        tx
+    }
+    let mut previous = initial.clone();
+    let mut policy_revision = None;
+    for effect in ["deny", "require_review", "allow"] {
+        previous =
+            import_publish_policy(&pool, &previous, controller, policy_revision, effect).await;
+        policy_revision = Some(arkret_wire::CurrentRevision {
+            commit_id: previous.commit.commit_id.clone(),
+            stream_position: previous.commit.stream_position,
+        });
+        let mut opening = make_mode(&previous, "public", Some(mode_revision.clone()));
+        source_candidate(&pool, &mut opening).await;
+        let before = agent_mode_footprint(&pool, realm_id).await;
+        if effect != "allow" {
+            let error = uow.commit_event(opening).await.unwrap_err();
+            let expected = if effect == "deny" {
+                "forbids publishing"
+            } else {
+                "unresolved quarantine or review evidence"
+            };
+            assert!(error.to_string().contains(expected), "{error}");
+            assert_eq!(agent_mode_footprint(&pool, realm_id).await, before);
+        } else {
+            let opening = ordinary_realm::source_request(&pool, opening).await;
+            uow.commit_event(opening.clone()).await.unwrap();
+            previous = opening.authority_commit.clone();
+            mode_revision = arkret_wire::CurrentRevision {
+                commit_id: previous.commit.commit_id.clone(),
+                stream_position: previous.commit.stream_position,
+            };
+            previous =
+                import_publish_policy(&pool, &previous, controller, policy_revision.take(), "deny")
+                    .await;
+            let before_replay = agent_mode_footprint(&pool, realm_id).await;
+            uow.commit_event(opening).await.unwrap();
+            assert_eq!(agent_mode_footprint(&pool, realm_id).await, before_replay);
+            let mut unchanged = make_mode(&previous, "public", Some(mode_revision));
+            source_candidate(&pool, &mut unchanged).await;
+            let unchanged = ordinary_realm::source_request(&pool, unchanged).await;
+            uow.commit_event(unchanged.clone()).await.unwrap();
+            previous = unchanged.authority_commit;
+            mode_revision = arkret_wire::CurrentRevision {
+                commit_id: previous.commit.commit_id.clone(),
+                stream_position: previous.commit.stream_position,
+            };
+        }
+        // With a deny/review policy present, private remains an unreviewed
+        // controller choice; switching off never needs publish permission.
+        let mut private = make_mode(&previous, "private", Some(mode_revision));
+        source_candidate(&pool, &mut private).await;
+        let private = ordinary_realm::source_request(&pool, private).await;
+        uow.commit_event(private.clone()).await.unwrap();
+        previous = private.authority_commit;
+        mode_revision = arkret_wire::CurrentRevision {
+            commit_id: previous.commit.commit_id.clone(),
+            stream_position: previous.commit.stream_position,
+        };
+        let arkret_wire::TypedCurrentRow::Value { value, .. } = store
+            .current_agent_result(realm_id, &selector)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(value["interaction_mode"], "private");
+    }
+    // A corrupt projection must not turn the last accepted private intent into
+    // an already-public exception to the publish gate.
+    {
+        use diesel::sql_types::{Jsonb, Text};
+        use diesel_async::RunQueryDsl;
+        let mut conn = pool.get().await.unwrap();
+        diesel::sql_query("UPDATE agent_interaction_current_results SET value=jsonb_set(value,'{interaction_mode}','\"public\"'::jsonb) WHERE realm_id=$1 AND agent_account_id=$2")
+            .bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(serde_json::json!(agent)).execute(&mut *conn).await.unwrap();
+    }
+    let mut opening = make_mode(&previous, "public", Some(mode_revision));
+    source_candidate(&pool, &mut opening).await;
+    let before = agent_mode_footprint(&pool, realm_id).await;
+    let error = uow.commit_event(opening).await.unwrap_err();
+    assert!(
+        error.to_string().contains("revision_unavailable"),
+        "{error}"
+    );
+    assert_eq!(agent_mode_footprint(&pool, realm_id).await, before);
 }
 
 /// Real RFC transitions, accepted ownership/key/membership and real PostgreSQL

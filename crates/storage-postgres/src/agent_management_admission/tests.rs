@@ -4,6 +4,64 @@ use serde_json::json;
 
 use super::*;
 
+#[test]
+fn publish_uses_exact_controller_exceptions_and_is_independent_of_serve() {
+    let publish = |policies: &[Policy], controller: &AccountId, agent: &AccountId| {
+        require_realm_intent(
+            policies,
+            &realm(),
+            controller,
+            agent,
+            chrono::Utc::now(),
+            AgentPolicyOperation::Publish,
+        )
+    };
+    assert!(publish(&[], &account("controller"), &account("agent")).is_ok());
+    let restriction = policy(None, vec!["publish"], "deny");
+    assert!(
+        publish(
+            &[restriction.clone()],
+            &account("controller"),
+            &account("agent")
+        )
+        .is_err()
+    );
+    assert!(publish(&[restriction], &account("other"), &account("agent")).is_ok());
+    let mut exception = policy(None, vec!["publish"], "allow");
+    exception.default_effect = PolicyEffect::Deny;
+    assert!(
+        publish(
+            &[exception.clone()],
+            &account("controller"),
+            &account("agent")
+        )
+        .is_ok()
+    );
+    let mut foreign = account("controller");
+    foreign.station_id = "ak:did_core:web:other-station.example".parse().unwrap();
+    assert!(publish(&[exception], &foreign, &account("agent")).is_err());
+    assert!(
+        publish(
+            &[policy(None, vec!["serve", "join"], "deny")],
+            &account("controller"),
+            &account("agent")
+        )
+        .is_ok()
+    );
+    for effect in ["require_review", "quarantine"] {
+        let mut restriction = policy(None, vec!["publish"], effect);
+        if effect == "require_review" {
+            restriction.rules[0].review_requirement = Some(arkret_models_collaboration::governance::operation_wire::ManagementReviewRequirement {
+                approver_actor_ids: vec![ActorId::account(account("controller"))],
+                threshold: 1,
+                max_age_seconds: 60,
+            });
+        }
+        restriction.validate().unwrap();
+        assert!(publish(&[restriction], &account("controller"), &account("agent")).is_err());
+    }
+}
+
 fn account(name: &str) -> AccountId {
     AccountId::new(
         format!("ak:did_core:web:{name}.example").parse().unwrap(),

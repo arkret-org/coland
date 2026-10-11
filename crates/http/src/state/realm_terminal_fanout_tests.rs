@@ -264,6 +264,10 @@ fn owner_candidate(
 ) -> coland_storage::EventCommitRequest {
     let at = (previous.commit.committed_at + Duration::seconds(1))
         .max(arkret_canonical::normalize_timestamp_canonical(Utc::now()));
+    if kind == EventKind::StrandCreate {
+        payload["object"]["created_at"] =
+            serde_json::json!(arkret_canonical::format_timestamp_canonical(at));
+    }
     let event = historical_human::signed_ordinary_event(owner, previous, kind, payload, at);
     let mut request = historical_human::request_for_event(owner, previous, event, at);
     seal_service_commit(&mut request.authority_commit.commit, source);

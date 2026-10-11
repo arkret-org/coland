@@ -1550,6 +1550,16 @@ impl AuthorityCommitApplication {
             .await?)
     }
 
+    pub async fn require_held_replica_write_lifecycle(
+        &self,
+        event: &arkret_wire::Event,
+    ) -> ServiceResult<()> {
+        Ok(self
+            .store()
+            .require_held_replica_write_lifecycle(event)
+            .await?)
+    }
+
     pub async fn replica_anchor_for_stream(
         &self,
         stream: &arkret_wire::CommitStreamRef,

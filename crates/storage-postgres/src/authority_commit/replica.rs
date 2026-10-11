@@ -415,12 +415,32 @@ pub(super) async fn hosts_joined_member(
     stream: &arkret_wire::CommitStreamRef,
     local_service_id: &arkret_wire::DidCoreId,
 ) -> Result<bool, PgTransactionError> {
+    hosted_member_basis(conn, stream, local_service_id, true).await
+}
+
+/// Repeatable-read callers already own a consistent snapshot. Row locks here
+/// would turn concurrent snapshot installation into a serialization failure.
+pub(super) async fn hosts_joined_member_in_snapshot(
+    conn: &mut AsyncPgConnection,
+    stream: &arkret_wire::CommitStreamRef,
+    local_service_id: &arkret_wire::DidCoreId,
+) -> Result<bool, PgTransactionError> {
+    hosted_member_basis(conn, stream, local_service_id, false).await
+}
+
+async fn hosted_member_basis(
+    conn: &mut AsyncPgConnection,
+    stream: &arkret_wire::CommitStreamRef,
+    local_service_id: &arkret_wire::DidCoreId,
+    lock_rows: bool,
+) -> Result<bool, PgTransactionError> {
+    let lock = if lock_rows { " FOR SHARE" } else { "" };
     let rows = match stream {
-        arkret_wire::CommitStreamRef::Realm { realm_id } => sql_query("SELECT member_id FROM member_state_current_results WHERE realm_id=$1 AND membership='join' FOR SHARE")
+        arkret_wire::CommitStreamRef::Realm { realm_id } => sql_query(format!("SELECT member_id FROM member_state_current_results WHERE realm_id=$1 AND membership='join'{lock}"))
             .bind::<Text, _>(realm_id.as_str()).load::<MemberIdRow>(&mut *conn).await?,
-        arkret_wire::CommitStreamRef::Circle { realm_id, circle_id } => sql_query("SELECT cm.member_id FROM circle_member_state_current_results cm JOIN member_state_current_results rm ON rm.realm_id=cm.realm_id AND rm.member_id=cm.member_id JOIN circle_current_results circle ON circle.circle_id=cm.circle_id AND circle.realm_id=cm.realm_id WHERE cm.realm_id=$1 AND cm.circle_id=$2 AND cm.membership='join' AND rm.membership='join' AND circle_member_parent_join_current(cm.realm_id,cm.member_id,cm.value) AND circle.value->>'state'='active' FOR SHARE")
+        arkret_wire::CommitStreamRef::Circle { realm_id, circle_id } => sql_query(format!("SELECT cm.member_id FROM circle_member_state_current_results cm JOIN member_state_current_results rm ON rm.realm_id=cm.realm_id AND rm.member_id=cm.member_id JOIN circle_current_results circle ON circle.circle_id=cm.circle_id AND circle.realm_id=cm.realm_id WHERE cm.realm_id=$1 AND cm.circle_id=$2 AND cm.membership='join' AND rm.membership='join' AND circle_member_parent_join_current(cm.realm_id,cm.member_id,cm.value) AND circle.value->>'state'='active'{lock}"))
             .bind::<Text, _>(realm_id.as_str()).bind::<Text, _>(circle_id.as_str()).load::<MemberIdRow>(&mut *conn).await?,
-        arkret_wire::CommitStreamRef::Sidecar {realm_id,sidecar_id} => return crate::sidecar_replica_authority::holds_source_in_connection(conn,realm_id,sidecar_id,local_service_id).await.map_err(Into::into),
+        arkret_wire::CommitStreamRef::Sidecar {realm_id,sidecar_id} => return crate::sidecar_replica_authority::holds_source_at_cut(conn,realm_id,sidecar_id,local_service_id,lock_rows).await.map_err(Into::into),
         _ => return Ok(false),
     };
     for row in rows {
@@ -433,6 +453,69 @@ pub(super) async fn hosts_joined_member(
         }
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod hosted_basis_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn snapshot_basis_survives_concurrent_membership_update_without_row_locks() {
+        let database = crate::TestDatabase::lease().await;
+        let pool = database.pool();
+        let mut reader = pool.get().await.unwrap();
+        let mut writer = pool.get().await.unwrap();
+        let realm: arkret_wire::RealmId = "ak:realm:AY6DJbBwavsGTQuBZZiqqw9MVcqPZ8QX8invQ3i2kpi7"
+            .parse()
+            .unwrap();
+        let station: arkret_wire::DidCoreId = "ak:did_core:web:holder.example".parse().unwrap();
+        let actor = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+            "ak:did_core:web:member.example".parse().unwrap(),
+            station.clone(),
+        ));
+        let stream = arkret_wire::CommitStreamRef::Realm {
+            realm_id: realm.clone(),
+        };
+        sql_query("INSERT INTO member_state_current_results(realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,'join','snapshot-read-fixture',0,'{\"membership\":\"join\"}',now())")
+            .bind::<Text,_>(realm.as_str()).bind::<Text,_>(actor.to_string())
+            .execute(&mut *writer).await.unwrap();
+        sql_query("BEGIN ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *reader)
+            .await
+            .unwrap();
+        assert!(
+            hosts_joined_member_in_snapshot(&mut reader, &stream, &station)
+                .await
+                .map_err(PgTransactionError::into_persistence)
+                .unwrap()
+        );
+        sql_query("UPDATE member_state_current_results SET membership='leave',value='{\"membership\":\"leave\"}' WHERE realm_id=$1")
+            .bind::<Text,_>(realm.as_str()).execute(&mut *writer).await.unwrap();
+        assert!(
+            hosts_joined_member_in_snapshot(&mut reader, &stream, &station)
+                .await
+                .map_err(PgTransactionError::into_persistence)
+                .unwrap()
+        );
+        // The installing path retains its row-lock contract. Using that path
+        // in this old snapshot reproduces the exact observed SQLSTATE 40001.
+        assert!(matches!(
+            hosts_joined_member(&mut reader, &stream, &station).await,
+            Err(PgTransactionError::Diesel(
+                diesel::result::Error::DatabaseError(
+                    diesel::result::DatabaseErrorKind::SerializationFailure,
+                    _
+                )
+            ))
+        ));
+        sql_query("ROLLBACK").execute(&mut *reader).await.unwrap();
+        assert!(
+            !hosts_joined_member_in_snapshot(&mut reader, &stream, &station)
+                .await
+                .map_err(PgTransactionError::into_persistence)
+                .unwrap()
+        );
+    }
 }
 
 /// The Commit held at the head of `key`, locked for this transaction.

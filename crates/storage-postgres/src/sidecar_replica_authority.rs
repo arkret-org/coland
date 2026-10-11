@@ -39,10 +39,21 @@ pub(crate) async fn holds_source_in_connection(
     sidecar_id: &arkret_wire::SidecarId,
     local_station: &DidCoreId,
 ) -> PersistenceResult<bool> {
-    let owner = diesel::sql_query(
+    holds_source_at_cut(conn, realm_id, sidecar_id, local_station, true).await
+}
+
+pub(crate) async fn holds_source_at_cut(
+    conn: &mut crate::AsyncPgConnection,
+    realm_id: &arkret_wire::RealmId,
+    sidecar_id: &arkret_wire::SidecarId,
+    local_station: &DidCoreId,
+    lock_rows: bool,
+) -> PersistenceResult<bool> {
+    let lock = if lock_rows { " FOR SHARE" } else { "" };
+    let owner = diesel::sql_query(format!(
         "SELECT controller_account_id AS controller FROM sidecar_current_results \
-        WHERE realm_id=$1 AND sidecar_id=$2 AND value->>'state'='active' FOR SHARE",
-    )
+        WHERE realm_id=$1 AND sidecar_id=$2 AND value->>'state'='active'{lock}",
+    ))
     .bind::<diesel::sql_types::Text, _>(realm_id.as_str())
     .bind::<diesel::sql_types::Text, _>(sidecar_id.as_str())
     .get_result::<Owner>(&mut *conn)

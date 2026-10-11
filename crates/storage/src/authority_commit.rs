@@ -1835,6 +1835,14 @@ pub trait AuthorityCommitStore: Send + Sync {
         local_service_id: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<Option<bool>>;
 
+    /// Refuse fresh forwarding through a held Realm's verified lifecycle cut.
+    /// Exact accepted replay is resolved before this gate. Missing replicas
+    /// still use the ordinary governing admission and join/bootstrap contract.
+    async fn require_held_replica_write_lifecycle(
+        &self,
+        event: &arkret_wire::Event,
+    ) -> PersistenceResult<()>;
+
     /// A collaboration or Direct Realm genesis backed by a held Commit or a
     /// verified replica bootstrap anchor, including below the since_join floor.
     async fn accepted_ordinary_realm(

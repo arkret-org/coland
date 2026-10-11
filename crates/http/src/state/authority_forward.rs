@@ -627,6 +627,10 @@ pub(crate) async fn forward_self_event_with_session(
 }
 
 async fn require_live_forward(state: &AppState, event: &arkret_wire::Event) -> ServiceResult<()> {
+    state
+        .authority_commits()
+        .require_held_replica_write_lifecycle(event)
+        .await?;
     // Joining and a bound invite claim acquire authority through their own
     // registered admission. They never reuse a departed replica's old basis.
     if super::committed_replication::hosted_member_join_event(state, event)

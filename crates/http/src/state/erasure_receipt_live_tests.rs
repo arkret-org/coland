@@ -655,14 +655,14 @@ async fn run(departure: Option<&str>) {
     let mut stub = serde_json::to_value(&request).unwrap();
     stub["package"]["retained_stub"]["receipt_id"] =
         serde_json::json!(format!("ak:receipt:{}", uuid::Uuid::now_v7()));
-    invalids.push(stub);
+    invalids.push((stub, 400));
     let mut proof = serde_json::to_value(&request).unwrap();
     proof["package"]["receipt"]["proofs"][0]["signature"] = serde_json::json!("forged");
-    invalids.push(proof);
+    invalids.push((proof, 400));
     let mut extra = serde_json::to_value(&request).unwrap();
     extra["package"]["receipt"]["undocumented"] = serde_json::json!(true);
-    invalids.push(extra);
-    for (index, invalid) in invalids.into_iter().enumerate() {
+    invalids.push((extra, 422));
+    for (index, (invalid, expected_status)) in invalids.into_iter().enumerate() {
         let bytes = arkret_canonical::canonical_json_bytes(&invalid).unwrap();
         let (status, answer) = signed_request(
             &source.state,
@@ -673,7 +673,12 @@ async fn run(departure: Option<&str>) {
             &format!("invalid-receipt-{index}"),
         )
         .await;
-        assert_eq!(status, 400, "{}", String::from_utf8_lossy(&answer));
+        assert_eq!(
+            status,
+            expected_status,
+            "{}",
+            String::from_utf8_lossy(&answer)
+        );
         assert_eq!(snapshot(&receiver.pool).await, accepted);
     }
     let (status, _) = signed_request(

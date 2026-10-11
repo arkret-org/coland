@@ -195,6 +195,160 @@ fn management_policy(revision: Option<CurrentRevision>, effect: &str) -> PolicyS
     payload
 }
 
+/// Imported accepted current rows isolate reference matching at a fixed cut.
+/// Missing/expired references are non-matches; malformed current is not absence.
+#[tokio::test]
+async fn governance_approval_reference_matching_distinguishes_absence_from_corruption() {
+    let database = TestDatabase::lease().await;
+    let mut conn = database.pool().get().await.unwrap();
+    seed_genesis(&mut conn).await;
+    let config = event(
+        EventKind::PolicyAction,
+        json!({
+            "policy_id":"ak:policy:0198ff00-0000-7000-8000-000000000001",
+            "value":{"action":"ak.message.create","approval_required":true,
+                "approval_quorum":7,"policy_scope":realm()}
+        }),
+        1,
+    );
+    insert_history(&mut conn, &config, &commit(&config, 1)).await;
+    commit_in_connection(&mut conn, &config, &commit(&config, 1))
+        .await
+        .unwrap();
+    let candidate = event(EventKind::MessageCreate, json!({}), 10);
+    let target: WireResourceSelector = serde_json::from_value(json!({
+        "kind":"realm", "realm_id":realm()
+    }))
+    .unwrap();
+    let facts = coland_storage::OperationFacts::default();
+    let at = candidate.created_at;
+    assert_eq!(
+        crate::policy_action_admission::current_quorum(
+            &mut conn,
+            &candidate,
+            CapabilityActionId::MessageCreate,
+            &target,
+            &facts,
+            at,
+        )
+        .await
+        .unwrap(),
+        None
+    );
+
+    let mut payload = policy(None, false);
+    let PolicySetValue::Governance(document) = &mut payload.value else {
+        unreachable!()
+    };
+    document.not_before = Some(at);
+    document.expires_at = Some(at + chrono::TimeDelta::seconds(1));
+    let accepted = event(EventKind::PolicySet, json!(payload), 2);
+    insert_history(&mut conn, &accepted, &commit(&accepted, 2)).await;
+    commit_in_connection(&mut conn, &accepted, &commit(&accepted, 2))
+        .await
+        .unwrap();
+    for (time, expected) in [
+        (at - chrono::TimeDelta::seconds(1), None),
+        (at, Some(7)),
+        (at + chrono::TimeDelta::seconds(1), None),
+    ] {
+        assert_eq!(
+            crate::policy_action_admission::current_quorum(
+                &mut conn,
+                &candidate,
+                CapabilityActionId::MessageCreate,
+                &target,
+                &facts,
+                time,
+            )
+            .await
+            .unwrap(),
+            expected
+        );
+    }
+    assert_eq!(
+        crate::policy_action_admission::current_quorum(
+            &mut conn,
+            &candidate,
+            CapabilityActionId::StrandMove,
+            &target,
+            &facts,
+            at,
+        )
+        .await
+        .unwrap(),
+        None
+    );
+
+    // A Realm-local row remains applicable when the Policy reference expires.
+    let independent = event(
+        EventKind::PolicyAction,
+        json!({
+            "action_id":"independent_review", "value":{"action":"ak.message.create",
+                "approval_required":true,"approval_quorum":2,"policy_scope":realm()}
+        }),
+        3,
+    );
+    insert_history(&mut conn, &independent, &commit(&independent, 3)).await;
+    commit_in_connection(&mut conn, &independent, &commit(&independent, 3))
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::policy_action_admission::current_quorum(
+            &mut conn,
+            &candidate,
+            CapabilityActionId::MessageCreate,
+            &target,
+            &facts,
+            at + chrono::TimeDelta::seconds(1),
+        )
+        .await
+        .unwrap(),
+        Some(2)
+    );
+    sql_query("UPDATE policy_current_results SET value='{}'::jsonb WHERE realm_id=$1")
+        .bind::<Text, _>(realm().as_str())
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    let error = crate::policy_action_admission::current_quorum(
+        &mut conn,
+        &candidate,
+        CapabilityActionId::MessageCreate,
+        &target,
+        &facts,
+        at,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.conflict_code(),
+        Some(coland_storage::ConflictCode::FailedPrecondition)
+    );
+    assert!(!error.to_string().contains("ak:policy:"));
+    sql_query("DELETE FROM policy_current_results WHERE realm_id=$1")
+        .bind::<Text, _>(realm().as_str())
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    sql_query("UPDATE policy_action_current_results SET value=value-'approval_required' WHERE realm_id=$1")
+        .bind::<Text,_>(realm().as_str()).execute(&mut conn).await.unwrap();
+    assert_eq!(
+        crate::policy_action_admission::current_quorum(
+            &mut conn,
+            &candidate,
+            CapabilityActionId::MessageCreate,
+            &target,
+            &facts,
+            at,
+        )
+        .await
+        .unwrap_err()
+        .conflict_code(),
+        Some(coland_storage::ConflictCode::FailedPrecondition)
+    );
+}
+
 #[tokio::test]
 async fn management_absence_requires_authoritative_complete_history() {
     let database = TestDatabase::lease().await;

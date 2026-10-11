@@ -121,7 +121,7 @@ pub(crate) async fn current_quorum(
             continue;
         }
         if row.subject_kind == "policy_ref" {
-            let policy = diesel::sql_query(
+            let Some(policy) = diesel::sql_query(
                 "SELECT value FROM policy_current_results WHERE realm_id=$1 AND policy_id=$2",
             )
             .bind::<Text, _>(event.realm_id.as_str())
@@ -130,18 +130,22 @@ pub(crate) async fn current_quorum(
             .await
             .optional()
             .map_err(PersistenceError::database)?
-            .ok_or_else(|| {
-                PersistenceError::Conflict(
-                    "failed_precondition: applicable governance Policy cannot be resolved"
-                        .to_owned(),
-                )
-            })?;
+            else {
+                // An unresolved reference is not a matching Policy. The caller
+                // must still establish a complete current authorization cut.
+                continue;
+            };
             let policy: arkret_models_collaboration::governance::operation_wire::PolicySetValue =
                 serde_json::from_value(policy.value).map_err(|_| {
                     PersistenceError::Conflict(
                         "failed_precondition: applicable governance Policy is invalid".to_owned(),
                     )
                 })?;
+            policy.validate().map_err(|_| {
+                PersistenceError::Conflict(
+                    "failed_precondition: applicable governance Policy is invalid".to_owned(),
+                )
+            })?;
             let arkret_models_collaboration::governance::operation_wire::PolicySetValue::Governance(
                 policy,
             ) = policy
@@ -151,6 +155,17 @@ pub(crate) async fn current_quorum(
                         .to_owned(),
                 ));
             };
+            if policy
+                .realm_id
+                .as_ref()
+                .is_some_and(|realm| realm != &event.realm_id)
+                || policy.id.as_str() != row.subject_id
+            {
+                return Err(PersistenceError::Conflict(
+                    "failed_precondition: governance Policy does not bind the current selector"
+                        .to_owned(),
+                ));
+            }
             if policy.not_before.is_some_and(|start| at < start)
                 || policy.expires_at.is_some_and(|end| at >= end)
             {

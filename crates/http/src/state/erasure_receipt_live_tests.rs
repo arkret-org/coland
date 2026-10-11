@@ -6,7 +6,6 @@ use arkret_models_collaboration::events_payloads::event_wire::{
     ErasureTrigger, VerificationStub, VerificationStubScope, VerificationStubSubject,
 };
 use arkret_models_collaboration::governance::erasure::*;
-use diesel_async::RunQueryDsl as _;
 use salvo::prelude::*;
 
 use super::*;
@@ -24,7 +23,7 @@ impl ReceiptAckFault {
         ctrl: &mut FlowCtrl,
     ) {
         ctrl.call_next(req, depot, res).await;
-        let mode = self.0.load(Ordering::SeqCst);
+        let mode = self.0.as_ref().load(Ordering::SeqCst);
         if mode == 0
             || req.uri().path() != outbox::ERASURE_RECEIPT_ENDPOINT
             || res.status_code.unwrap_or(StatusCode::OK) != StatusCode::OK

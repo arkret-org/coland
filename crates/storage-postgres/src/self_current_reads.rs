@@ -349,7 +349,7 @@ async fn list_streams_in_connection(
             }
             CommitStreamRef::Realm { .. } => continue,
             CommitStreamRef::Sidecar { sidecar_id, .. } => {
-                crate::sidecar_authority_cut::caller_floor_in_connection(
+                crate::sidecar_authority_cut::public_material_floor_in_connection(
                     conn, realm_id, sidecar_id, caller,
                 )
                 .await?

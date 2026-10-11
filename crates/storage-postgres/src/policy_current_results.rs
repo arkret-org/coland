@@ -417,13 +417,54 @@ fn schema(e: impl std::fmt::Display) -> PersistenceError {
 fn refused(e: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Conflict(format!("failed_precondition: {e}"))
 }
-fn require_supported_policy_kind(kind: arkret_wire::PolicyKind) -> PersistenceResult<()> {
-    if matches!(
-        kind,
-        arkret_wire::PolicyKind::Agent | arkret_wire::PolicyKind::Applet
-    ) {
+fn require_supported_policy(
+    document: &arkret_models_collaboration::governance::operation_wire::Policy,
+    scope: &arkret_wire::ScopeRef,
+) -> PersistenceResult<()> {
+    use arkret_models_collaboration::governance::operation_wire::{
+        AgentPolicyOperation, PolicyResourceKind, PolicyRuleKind,
+    };
+    use arkret_wire::PolicyEffect;
+
+    if document.policy_kind == PolicyKind::Applet {
         return Err(refused(
-            "Management execution and delivery gates are not established",
+            "Applet management execution and delivery gates are not established",
+        ));
+    }
+    if document.policy_kind != PolicyKind::Agent {
+        return Ok(());
+    }
+    document.validate().map_err(schema)?;
+    // This production boundary changes only new Realm Agent entry. A default
+    // deny/review also governs every unmatched operation, so it cannot be
+    // enabled until continuous read/delivery and review consumers are closed.
+    if document.default_effect != PolicyEffect::Allow
+        || !matches!(scope, arkret_wire::ScopeRef::Realm { realm_id }
+            if document.realm_id.as_ref() == Some(realm_id))
+        || document.rules.iter().any(|rule| {
+            rule.kind != PolicyRuleKind::Agent
+                || rule.agent_operations.as_deref() != Some(&[AgentPolicyOperation::Join])
+                || !matches!(rule.effect, PolicyEffect::Allow | PolicyEffect::Deny)
+                || rule.actions.is_some()
+                || rule.resources.as_ref().is_some_and(|resources| {
+                    resources.iter().any(|resource| {
+                        resource.kind != PolicyResourceKind::Realm
+                            || resource
+                                .realm_id
+                                .as_ref()
+                                .is_some_and(|realm| document.realm_id.as_ref() != Some(realm))
+                            || resource.resource_ref.as_ref().is_some_and(|id| {
+                                document
+                                    .realm_id
+                                    .as_ref()
+                                    .is_none_or(|realm| realm.as_str() != id)
+                            })
+                    })
+                })
+        })
+    {
+        return Err(refused(
+            "Agent management configuration needs unresolved scoped, continuous or review gates",
         ));
     }
     Ok(())
@@ -456,18 +497,149 @@ mod admission_tests {
         let PolicySetValue::Governance(document) = payload.value else {
             panic!("expected governance policy");
         };
-        assert!(require_supported_policy_kind(document.policy_kind).is_err());
+        assert!(
+            require_supported_policy(
+                &document,
+                &arkret_wire::ScopeRef::Realm {
+                    realm_id: document.realm_id.clone().unwrap()
+                }
+            )
+            .is_err()
+        );
+    }
+
+    fn join_policy() -> arkret_models_collaboration::governance::operation_wire::Policy {
+        serde_json::from_value(serde_json::json!({
+            "schema":"ak.schema.policy.v1",
+            "id":"ak:policy:0198ff00-0000-7000-8000-000000000001",
+            "realm_id":"ak:realm:AT47eNekH0_aKZyIMsXq_s1FAWdYXC71_CUxQ5O478t-",
+            "policy_kind":"agent",
+            "rules":[{"rule_id":"new_agents","kind":"agent","effect":"deny",
+                "agent_target":{"kind":"all"},"agent_operations":["join"]}],
+            "default_effect":"allow",
+            "created_by":{"kind":"account","account_id":{
+                "principal_id":"ak:did_core:web:controller.example",
+                "station_id":"ak:did_core:web:station.example"}},
+            "created_at":"2026-10-11T12:00:00.000Z"
+        }))
+        .unwrap()
     }
 
     #[test]
-    fn applet_policy_is_refused_until_execution_gates_are_established() {
-        assert!(require_supported_policy_kind(arkret_wire::PolicyKind::Applet).is_err());
+    fn realm_join_only_policy_is_enabled_without_enabling_continuous_gates() {
+        use arkret_models_collaboration::governance::operation_wire::AgentPolicyOperation;
+        let policy = join_policy();
+        let scope = arkret_wire::ScopeRef::Realm {
+            realm_id: policy.realm_id.clone().unwrap(),
+        };
+        assert!(require_supported_policy(&policy, &scope).is_ok());
+        for operation in [
+            AgentPolicyOperation::Authorize,
+            AgentPolicyOperation::Execute,
+            AgentPolicyOperation::Read,
+            AgentPolicyOperation::Deliver,
+            AgentPolicyOperation::Publish,
+            AgentPolicyOperation::Serve,
+        ] {
+            let mut other = policy.clone();
+            other.rules[0].agent_operations = Some(vec![operation]);
+            assert!(require_supported_policy(&other, &scope).is_err());
+        }
+        for effect in [
+            arkret_wire::PolicyEffect::Deny,
+            arkret_wire::PolicyEffect::Quarantine,
+        ] {
+            let mut other = policy.clone();
+            other.default_effect = effect;
+            assert!(require_supported_policy(&other, &scope).is_err());
+        }
+        let mut review = policy.clone();
+        review.rules[0].effect = arkret_wire::PolicyEffect::Quarantine;
+        assert!(require_supported_policy(&review, &scope).is_err());
+        let mut actions = policy.clone();
+        actions.rules[0].actions = Some(vec!["ak.message.create".into()]);
+        assert!(require_supported_policy(&actions, &scope).is_err());
+        let circle = arkret_wire::ScopeRef::Circle {
+            realm_id: policy.realm_id.clone().unwrap(),
+            circle_id: "ak:circle:AT47eNekH0_aKZyIMsXq_s1FAWdYXC71_CUxQ5O478t-"
+                .parse()
+                .unwrap(),
+        };
+        assert!(require_supported_policy(&policy, &circle).is_err());
+        let mut applet = policy;
+        applet.policy_kind = arkret_wire::PolicyKind::Applet;
+        assert!(require_supported_policy(&applet, &scope).is_err());
+    }
+
+    #[test]
+    fn join_only_ban_leaves_continuous_operations_allowed_and_binds_realm_resources() {
+        use arkret_models_collaboration::governance::operation_wire::{
+            AgentPolicyOperation, PolicyResourceKind, PolicyResourceSelector,
+        };
+        use arkret_policy::agent_management::{AgentManagementContext, evaluate_agent_management};
+        let mut policy = join_policy();
+        let realm = policy.realm_id.clone().unwrap();
+        let scope = arkret_wire::ScopeRef::Realm {
+            realm_id: realm.clone(),
+        };
+        let controller = policy.created_by.as_account_id().unwrap().clone();
+        let agent = arkret_wire::AccountId::new(
+            "ak:did_core:web:agent.example".parse().unwrap(),
+            controller.station_id.clone(),
+        );
+        let resources = [PolicyResourceSelector {
+            kind: PolicyResourceKind::Realm,
+            realm_id: Some(realm.clone()),
+            resource_ref: Some(realm.to_string()),
+        }];
+        policy.rules[0].resources = Some(resources.to_vec());
+        assert!(require_supported_policy(&policy, &scope).is_ok());
+        for operation in [
+            AgentPolicyOperation::Read,
+            AgentPolicyOperation::Execute,
+            AgentPolicyOperation::Deliver,
+            AgentPolicyOperation::Serve,
+        ] {
+            let effect = evaluate_agent_management(
+                Some(std::slice::from_ref(&policy)),
+                &AgentManagementContext {
+                    realm_id: &realm,
+                    ownership: Some((&controller, &agent)),
+                    operation,
+                    content_action: Some(
+                        arkret_wire::CapabilityActionId::from_wire("ak.event.read").unwrap(),
+                    ),
+                    resources: Some(&resources),
+                    at: policy.created_at,
+                },
+            )
+            .unwrap();
+            assert_eq!(effect, arkret_wire::PolicyEffect::Allow);
+        }
+        let wrong = arkret_wire::RealmId::from_event_id(&arkret_wire::EventId::from_digest(
+            arkret_canonical::DigestSuite::Sha256,
+            [0x42; 32],
+        ));
+        policy.rules[0].resources.as_mut().unwrap()[0].realm_id = Some(wrong.clone());
+        assert!(require_supported_policy(&policy, &scope).is_err());
+        policy.rules[0].resources.as_mut().unwrap()[0].realm_id = Some(realm);
+        policy.rules[0].resources.as_mut().unwrap()[0].resource_ref = Some(wrong.to_string());
+        assert!(require_supported_policy(&policy, &scope).is_err());
     }
 
     #[test]
     fn ordinary_policy_kinds_keep_their_existing_admission() {
-        assert!(require_supported_policy_kind(arkret_wire::PolicyKind::Access).is_ok());
-        assert!(require_supported_policy_kind(arkret_wire::PolicyKind::Join).is_ok());
+        for kind in [
+            arkret_wire::PolicyKind::Access,
+            arkret_wire::PolicyKind::Join,
+        ] {
+            let mut policy = join_policy();
+            policy.policy_kind = kind;
+            let scope = arkret_wire::ScopeRef::Realm {
+                realm_id: policy.realm_id.clone().unwrap(),
+            };
+            assert!(require_supported_policy(&policy, &scope).is_ok());
+        }
     }
 }
 fn payload<T: serde::de::DeserializeOwned>(event: &Event) -> PersistenceResult<T> {
@@ -595,7 +767,7 @@ pub(crate) async fn admit_in_connection(
             if let PolicySetValue::Governance(document) = value.value {
                 // Do not acknowledge a restriction that the current read and
                 // delivery paths cannot yet enforce at their actual cut.
-                require_supported_policy_kind(document.policy_kind)?;
+                require_supported_policy(&document, &event.scope_ref)?;
                 if document
                     .realm_id
                     .as_ref()

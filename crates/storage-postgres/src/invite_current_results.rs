@@ -20,6 +20,7 @@
 //! evaluator in [`crate::realm_authorization_cut`]; the in-process reducer
 //! projection and the retired `realm_invites` mirror are never read.
 
+mod acceptance_attestation;
 mod claim_admission;
 
 use arkret_event_draft::EventPayloadExt;
@@ -29,6 +30,9 @@ use arkret_models_collaboration::governance::membership_invite::{
     InviteCreatePayload, InviteDirectedInviteeValue, InviteLiveTargetOccupant,
     InviteLiveTargetValue, InvitePreviousState, InviteRevokePayload, InviteRevokePreviousState,
     InviteRevokeTargetState, InviteThirdPartyCreatePayload, validate_invite_create_wire_keys,
+};
+use arkret_models_collaboration::governance::third_party_invite::{
+    ThirdPartyInviteAcceptanceAttestationOutcome, ThirdPartyInviteAcceptanceAttestationRequestBody,
 };
 use arkret_wire::{AccountId, ActorId, EventKind, InviteId, InviteState, SecurityClass};
 use coland_storage::{ConflictCode, PersistenceError, PersistenceResult};
@@ -830,6 +834,33 @@ pub struct PgInviteCurrentResultStore {
 
 #[async_trait::async_trait]
 impl coland_storage::InviteCurrentResultStore for PgInviteCurrentResultStore {
+    async fn third_party_invite_acceptance_attestation(
+        &self,
+        request: &ThirdPartyInviteAcceptanceAttestationRequestBody,
+        caller: &AccountId,
+        station: &arkret_wire::DidCoreId,
+        verification_method: &arkret_wire::DidUrl,
+        observe: &(dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync),
+        sign: &coland_storage::InviteAcceptanceAttestationSigner<'_>,
+    ) -> PersistenceResult<ThirdPartyInviteAcceptanceAttestationOutcome> {
+        use diesel_async::AsyncConnection as _;
+        let mut conn = crate::pg_conn(&self.pool).await?;
+        conn.transaction::<_, crate::PgTransactionError, _>(async |conn| {
+            Ok(acceptance_attestation::issue(
+                conn,
+                request,
+                caller,
+                station,
+                verification_method,
+                observe,
+                sign,
+            )
+            .await?)
+        })
+        .await
+        .map_err(crate::PgTransactionError::into_persistence)
+    }
+
     async fn invites_in_realm(
         &self,
         realm_id: Option<&arkret_wire::RealmId>,

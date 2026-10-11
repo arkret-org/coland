@@ -2,6 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use arkret_identifiers::RealmId;
+use arkret_models_collaboration::governance::third_party_invite::{
+    ThirdPartyInviteAcceptanceAttestationOutcome, ThirdPartyInviteAcceptanceAttestationRequestBody,
+};
 use coland_storage::{PersistenceResult, PersistenceStore};
 
 use crate::delivery::{DeliveryService, ObjectStoragePort};
@@ -333,6 +336,29 @@ impl PersistenceHandle {
         self.persistence
             .invite_current_results()
             .open_directed_invites_for_invitee(invitee, realm_id)
+            .await
+    }
+
+    /// Sign portable third-party Invite evidence while holding its current cut.
+    pub async fn third_party_invite_acceptance_attestation(
+        &self,
+        request: &ThirdPartyInviteAcceptanceAttestationRequestBody,
+        caller: &arkret_wire::AccountId,
+        station: &arkret_wire::DidCoreId,
+        verification_method: &arkret_wire::DidUrl,
+        observe: &(dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync),
+        sign: &coland_storage::InviteAcceptanceAttestationSigner<'_>,
+    ) -> PersistenceResult<ThirdPartyInviteAcceptanceAttestationOutcome> {
+        self.persistence
+            .invite_current_results()
+            .third_party_invite_acceptance_attestation(
+                request,
+                caller,
+                station,
+                verification_method,
+                observe,
+                sign,
+            )
             .await
     }
 

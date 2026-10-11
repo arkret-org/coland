@@ -609,7 +609,6 @@ pub(crate) async fn fanout_account_status_erasure_receipt(
 ) -> Result<(), AppError> {
     let peers = state
         .persistence()
-        .federation_outbox()
         .historical_content_holders_for_actor(&arkret_wire::ActorId::account(account_id.clone()))
         .await
         .map_err(|error| {
@@ -631,7 +630,6 @@ pub(crate) async fn enqueue_erasure_receipt_fanout(
         .map_err(|error| AppError::internal(format!("erasure Realm identity: {error}")))?;
     let peers = state
         .persistence()
-        .federation_outbox()
         .historical_content_holders(&affected)
         .await
         .map_err(|error| AppError::internal(format!("historical erasure holders: {error}")))?;

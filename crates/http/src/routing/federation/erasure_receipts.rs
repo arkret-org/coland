@@ -239,8 +239,7 @@ async fn submit(
     };
     let landed = state
         .persistence()
-        .idempotency_keys()
-        .record_with_lookup(&response_record, &lookup)
+        .record_idempotency_with_lookup(&response_record, &lookup)
         .await
         .map_err(|error| {
             if error.conflict_code() == Some(coland_storage::ConflictCode::DuplicateConflict) {
@@ -462,7 +461,6 @@ pub(crate) async fn fanout_progress(
     };
     let rows = state
         .persistence()
-        .federation_outbox()
         .erasure_receipt_deliveries(receipt_id)
         .await
         .map_err(|error| AppError::internal(error.to_string()))?;
@@ -473,7 +471,6 @@ pub(crate) async fn fanout_progress(
         .map_err(|error| AppError::internal(error.to_string()))?;
     let feedback = state
         .persistence()
-        .federation_outbox()
         .erasure_receipt_feedback(&body.package.receipt)
         .await
         .map_err(|error| AppError::internal(error.to_string()))?;

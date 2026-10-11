@@ -37,6 +37,62 @@ pub struct PersistenceHandle {
 }
 
 impl PersistenceHandle {
+    pub async fn historical_content_holders(
+        &self,
+        realm_ids: &[arkret_wire::RealmId],
+    ) -> PersistenceResult<Vec<arkret_wire::DidCoreId>> {
+        self.persistence
+            .federation_outbox()
+            .historical_content_holders(realm_ids)
+            .await
+    }
+
+    pub async fn historical_content_holders_for_actor(
+        &self,
+        actor: &arkret_wire::ActorId,
+    ) -> PersistenceResult<Vec<arkret_wire::DidCoreId>> {
+        self.persistence
+            .federation_outbox()
+            .historical_content_holders_for_actor(actor)
+            .await
+    }
+
+    pub async fn erasure_receipt_deliveries(
+        &self,
+        receipt_id: &str,
+    ) -> PersistenceResult<Vec<coland_storage::FederationOutboxRecord>> {
+        self.persistence
+            .federation_outbox()
+            .erasure_receipt_deliveries(receipt_id)
+            .await
+    }
+
+    pub async fn erasure_receipt_feedback(
+        &self,
+        receipt: &arkret_models_collaboration::governance::erasure::ErasureReceipt,
+    ) -> PersistenceResult<
+        Vec<(
+            arkret_models_collaboration::governance::erasure::ErasureReceiptPackage,
+            chrono::DateTime<chrono::Utc>,
+        )>,
+    > {
+        self.persistence
+            .federation_outbox()
+            .erasure_receipt_feedback(receipt)
+            .await
+    }
+
+    pub async fn record_idempotency_with_lookup(
+        &self,
+        response: &coland_storage::IdempotencyRecord,
+        lookup: &coland_storage::IdempotencyRecord,
+    ) -> PersistenceResult<coland_storage::IdempotencyRecord> {
+        self.persistence
+            .idempotency_keys()
+            .record_with_lookup(response, lookup)
+            .await
+    }
+
     pub async fn applet_authority_material(
         &self,
         applet: &arkret_wire::AppletId,

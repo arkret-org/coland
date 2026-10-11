@@ -270,7 +270,6 @@ async fn receipt_delivery(
     let rows = source
         .state
         .persistence()
-        .federation_outbox()
         .erasure_receipt_deliveries(id)
         .await
         .unwrap();
@@ -494,7 +493,6 @@ async fn run(departure: Option<&str>) {
     let holders = source
         .state
         .persistence()
-        .federation_outbox()
         .historical_content_holders_for_actor(&ActorId::account(owner.pcr.history.account.clone()))
         .await
         .unwrap();
@@ -507,7 +505,6 @@ async fn run(departure: Option<&str>) {
         source
             .state
             .persistence()
-            .federation_outbox()
             .historical_content_holders_for_actor(&ActorId::account(same_principal_elsewhere))
             .await
             .unwrap()

@@ -141,8 +141,31 @@ async fn converge(state: &AppState, stream: &CommitStreamRef) -> Result<(), Stri
         .map_err(temporary)?
         .is_none()
     {
-        let refreshed = anchor_stream(state, &anchor, &governance, &mut located).await?;
-        fill_to_head(state, realm_id, &governance, &refreshed, &mut located).await?;
+        let readers = commits
+            .replica_bootstrap_readers(stream, &state.service_core_id())
+            .await
+            .map_err(temporary)?;
+        // The original anchor is durable prefix evidence, not a permanent
+        // reader lease. Another hosted current join can authorize refresh.
+        let mut failure = None;
+        for (member_account_id, join_commit) in readers {
+            let reader = ReplicaStreamAnchor {
+                realm_id: realm_id.clone(),
+                member_account_id,
+                join_commit,
+                anchored_head: anchor.anchored_head.clone(),
+            };
+            match anchor_stream(state, &reader, &governance, &mut located).await {
+                Ok(refreshed) => {
+                    return fill_to_head(state, realm_id, &governance, &refreshed, &mut located)
+                        .await;
+                }
+                Err(error) => failure = Some(error),
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
     }
     Ok(())
 }

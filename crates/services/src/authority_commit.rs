@@ -1620,6 +1620,17 @@ impl AuthorityCommitApplication {
         Ok(self.store().replica_authorization_head(stream).await?)
     }
 
+    pub async fn replica_bootstrap_readers(
+        &self,
+        stream: &arkret_wire::CommitStreamRef,
+        local_service: &arkret_wire::DidCoreId,
+    ) -> ServiceResult<Vec<(arkret_wire::AccountId, arkret_wire::RealmCommit)>> {
+        Ok(self
+            .store()
+            .replica_bootstrap_readers(stream, local_service)
+            .await?)
+    }
+
     pub async fn pending_replica_streams(
         &self,
     ) -> ServiceResult<Vec<arkret_wire::CommitStreamRef>> {

@@ -8,6 +8,7 @@ use super::{AppError, AppState, SignalEnvelope, signal_rail_unavailable};
 pub(super) async fn pause(
     state: &AppState,
     envelope: &SignalEnvelope,
+    recipient: &arkret_wire::AccountId,
 ) -> Result<Option<PathBuf>, AppError> {
     if !state.config().development_mode {
         return Ok(None);
@@ -16,13 +17,33 @@ pub(super) async fn pause(
         return Ok(None);
     };
     let path = PathBuf::from(path);
-    let selected = match tokio::fs::read_to_string(&path).await {
+    let selected = match tokio::fs::read(&path).await {
         Ok(selected) => selected,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(signal_rail_unavailable("read emission scheduling probe")),
     };
-    if selected.trim() != envelope.proof.envelope_digest.as_str() {
+    // Local scheduling input reuses SDK identifiers; it is not a wire carrier.
+    let selected: Vec<(arkret_wire::AccountId, arkret_wire::Hash)> =
+        serde_json::from_slice(&selected)
+            .map_err(|_| signal_rail_unavailable("decode emission scheduling probe"))?;
+    let Some(index) = selected.iter().position(|(account, digest)| {
+        account == recipient && digest == &envelope.proof.envelope_digest
+    }) else {
         return Ok(None);
+    };
+    let path = path.with_extension(format!("{index}.pause"));
+    if !tokio::fs::try_exists(&path)
+        .await
+        .map_err(|_| signal_rail_unavailable("read recipient emission scheduling probe"))?
+    {
+        return Ok(None);
+    }
+    // A WebSocket frame enters this gate once before queueing and again at
+    // physical output. A local one-shot marker selects the latter pass.
+    match tokio::fs::remove_file(path.with_extension("skip")).await {
+        Ok(()) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(signal_rail_unavailable("select physical emission probe")),
     }
     let bytes = arkret_canonical::canonical_json_bytes(envelope)
         .map_err(|_| signal_rail_unavailable("encode emission scheduling probe"))?;

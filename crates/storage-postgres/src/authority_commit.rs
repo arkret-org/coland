@@ -3515,6 +3515,17 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         crate::replica_authorization::verified_head(&mut conn, stream).await
     }
 
+    async fn replica_bootstrap_readers(
+        &self,
+        stream: &arkret_wire::CommitStreamRef,
+        local_service: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Vec<(arkret_wire::AccountId, arkret_wire::RealmCommit)>> {
+        let mut conn = pg_conn(&self.pool).await?;
+        replica::bootstrap_readers_in_connection(&mut conn, stream, local_service, false)
+            .await
+            .map_err(PgTransactionError::into_persistence)
+    }
+
     async fn pending_replica_streams(
         &self,
     ) -> PersistenceResult<Vec<arkret_wire::CommitStreamRef>> {

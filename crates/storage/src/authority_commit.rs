@@ -1329,6 +1329,8 @@ pub struct ReplicaStreamAnchor {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReplicaAnchorInstall {
     pub realm_id: arkret_wire::RealmId,
+    /// Exact current bootstrap reader join. A pending anchor requires its
+    /// original opening; refresh may use another proved hosted current join.
     pub join_commit_id: arkret_wire::RealmCommitId,
     /// Generation authenticated by the signed bootstrap snapshot.
     pub governance_generation: u64,
@@ -1775,6 +1777,17 @@ pub trait AuthorityCommitStore: Send + Sync {
         Ok(None)
     }
 
+    /// Current hosted opening joins eligible to request an independently
+    /// verified bootstrap refresh. The original durable prefix stays intact.
+    async fn replica_bootstrap_readers(
+        &self,
+        stream: &CommitStreamRef,
+        local_service: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Vec<(arkret_wire::AccountId, arkret_wire::RealmCommit)>> {
+        let _ = (stream, local_service);
+        Ok(Vec::new())
+    }
+
     async fn pending_replica_streams(&self) -> PersistenceResult<Vec<CommitStreamRef>> {
         Ok(self
             .pending_replica_stream_anchors()
@@ -1787,8 +1800,8 @@ pub trait AuthorityCommitStore: Send + Sync {
     /// Every Realm whose replica stream is still pending anchor.
     async fn pending_replica_stream_anchors(&self) -> PersistenceResult<Vec<arkret_wire::RealmId>>;
 
-    /// Atomically install a verified bootstrap snapshot as the typed current
-    /// of a pending replica stream and mark it anchored at the snapshot head.
+    /// Atomically install a verified bootstrap snapshot as replica current.
+    /// Refreshing via another current hosted join retains the original prefix.
     async fn install_replica_anchor(&self, install: &ReplicaAnchorInstall)
     -> PersistenceResult<()>;
 

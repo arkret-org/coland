@@ -1022,7 +1022,7 @@ pub(crate) async fn admitted_signal_frame(
     // A remote directory lookup may have crossed a membership or TTL change.
     // Repeat the session and governance gates at the actual frame boundary.
     #[cfg(feature = "conformance-harness")]
-    let probe = emission_probe::pause(state, &envelope).await?;
+    let probe = emission_probe::pause(state, &envelope, &authority.recipient_account_id).await?;
     let decision = async {
         let current_actor =
             crate::routing::identity::session_actor::validated_session_actor(state, session)

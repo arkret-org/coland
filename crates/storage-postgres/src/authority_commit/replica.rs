@@ -455,6 +455,87 @@ async fn hosted_member_basis(
     Ok(false)
 }
 
+/// Choose only exact accepted current joins. This read grants no authority:
+/// the governing bootstrap must still prove complete disclosure and its cut.
+pub(super) async fn bootstrap_readers_in_connection(
+    conn: &mut AsyncPgConnection,
+    stream: &arkret_wire::CommitStreamRef,
+    local_service: &arkret_wire::DidCoreId,
+    lock_rows: bool,
+) -> Result<Vec<(arkret_wire::AccountId, arkret_wire::RealmCommit)>, PgTransactionError> {
+    #[derive(QueryableByName)]
+    struct ReaderRow {
+        #[diesel(sql_type = Text)]
+        member_id: String,
+        #[diesel(sql_type = Jsonb)]
+        commit_json: Value,
+        #[diesel(sql_type = Jsonb)]
+        envelope: Value,
+    }
+    let scope = serde_json::to_value(stream).map_err(PersistenceError::database)?;
+    let lock = if lock_rows { " FOR SHARE OF m" } else { "" };
+    let rows = match stream {
+        arkret_wire::CommitStreamRef::Realm { realm_id } => sql_query(format!(
+            "SELECT m.member_id,c.commit_json,e.envelope FROM member_state_current_results m \
+             JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id \
+                AND c.stream_position=m.current_stream_position AND c.stream_ref=$2 \
+             JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
+             WHERE m.realm_id=$1 AND m.membership='join' ORDER BY m.member_id{lock}"
+        )).bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(&scope)
+            .load::<ReaderRow>(&mut *conn).await?,
+        arkret_wire::CommitStreamRef::Circle { realm_id, circle_id } => sql_query(format!(
+            "SELECT m.member_id,c.commit_json,e.envelope FROM circle_member_state_current_results m \
+             JOIN member_state_current_results rm ON rm.realm_id=m.realm_id AND rm.member_id=m.member_id \
+             JOIN circle_current_results circle ON circle.circle_id=m.circle_id AND circle.realm_id=m.realm_id \
+             JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id \
+                AND c.stream_position=m.current_stream_position AND c.stream_ref=$2 \
+             JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
+             WHERE m.realm_id=$1 AND m.circle_id=$3 AND m.membership='join' AND rm.membership='join' \
+                AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) \
+                AND circle.value->>'state'='active' ORDER BY m.member_id{lock}"
+        )).bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(&scope).bind::<Text,_>(circle_id.as_str())
+            .load::<ReaderRow>(&mut *conn).await?,
+        _ => return Ok(Vec::new()),
+    };
+    let mut readers = Vec::new();
+    for row in rows {
+        let actor: arkret_wire::ActorId = serde_json::from_str(&row.member_id).map_err(invalid)?;
+        let Some(account) = actor
+            .as_account_id()
+            .filter(|account| &account.station_id == local_service)
+        else {
+            continue;
+        };
+        let event: arkret_wire::Event = serde_json::from_value(row.envelope).map_err(invalid)?;
+        let commit: arkret_wire::RealmCommit =
+            serde_json::from_value(row.commit_json).map_err(invalid)?;
+        let own_join = event.actor_id == actor && match event.kind {
+            arkret_wire::EventKind::InviteAccept => matches!(stream, arkret_wire::CommitStreamRef::Realm { .. }),
+            arkret_wire::EventKind::MemberState => serde_json::from_value::<arkret_models_collaboration::governance::membership_invite::MembershipPayload>(serde_json::to_value(&event.payload).map_err(invalid)?)
+                .map_err(invalid).map(|payload| payload.member_id == actor && payload.membership == arkret_models_collaboration::governance::membership_invite::MembershipPayloadState::Join)?,
+            arkret_wire::EventKind::CircleMemberState => event.payload.get("membership").and_then(Value::as_str) == Some("join")
+                && event.payload.get("member_id").and_then(|value| serde_json::from_value::<arkret_wire::ActorId>(value.clone()).ok()).as_ref() == Some(&actor),
+            _ => false,
+        };
+        if !own_join
+            || commit.event_ref != event.event_id
+            || &commit.stream_ref != stream
+            || &commit.realm_id != stream.realm_id()
+            || event.realm_id != commit.realm_id
+            || arkret_wire::CommitStreamRef::from_scope(
+                &event.scope_ref,
+                Some(event.realm_id.clone()),
+            )
+            .map_err(invalid)?
+                != *stream
+        {
+            return Err(invalid("bootstrap reader has no exact accepted own join").into());
+        }
+        readers.push((account.clone(), commit));
+    }
+    Ok(readers)
+}
+
 #[cfg(test)]
 mod hosted_basis_tests {
     use super::*;
@@ -1414,9 +1495,9 @@ pub(super) async fn replica_anchor_for_stream_in_connection(
         .transpose()
 }
 
-/// Install a verified bootstrap snapshot as the typed current of a pending
-/// replica stream and anchor it at the snapshot head. The held head must
-/// still be the join that opened the stream.
+/// Install a verified bootstrap snapshot and its typed current atomically.
+/// A pending stream requires its original opening join. An anchored refresh
+/// may use another exact current hosted join, preserving the opening prefix.
 pub(super) async fn install_replica_anchor_in_connection(
     conn: &mut AsyncPgConnection,
     install: &ReplicaAnchorInstall,
@@ -1434,7 +1515,6 @@ pub(super) async fn install_replica_anchor_in_connection(
                 "this Station holds no replica of the Realm stream",
             )
         })?;
-    let join = &anchor.join_commit;
     let current = locked_authority(conn, &install.realm_id)
         .await?
         .ok_or_else(|| {
@@ -1449,6 +1529,29 @@ pub(super) async fn install_replica_anchor_in_connection(
             "bootstrap snapshot is outside the current governance tenure",
         ));
     }
+    let refresh = if anchor.join_commit.commit_id == install.join_commit_id {
+        None
+    } else {
+        if anchor.anchored_head.is_none() {
+            return Err(invalid("a pending anchor names another opening join").into());
+        }
+        Some(
+            bootstrap_readers_in_connection(
+                conn,
+                &realm_stream,
+                &anchor.member_account_id.station_id,
+                true,
+            )
+            .await?
+            .into_iter()
+            .find(|(_, join)| join.commit_id == install.join_commit_id)
+            .ok_or_else(|| invalid("bootstrap refresh has no current hosted opening join"))?,
+        )
+    };
+    let (member_account_id, join) = refresh
+        .as_ref()
+        .map(|(member, join)| (member, join))
+        .unwrap_or((&anchor.member_account_id, &anchor.join_commit));
     if join.commit_id != install.join_commit_id {
         return Err(invalid("the anchor names another opening join").into());
     }
@@ -1489,7 +1592,7 @@ pub(super) async fn install_replica_anchor_in_connection(
             "a refreshed snapshot regresses its verified anchor",
         ));
     }
-    let member = arkret_wire::ActorId::account(anchor.member_account_id.clone());
+    let member = arkret_wire::ActorId::account(member_account_id.clone());
     let opening_selector = match &realm_stream {
         arkret_wire::CommitStreamRef::Realm { .. } => arkret_wire::CurrentSelector::MemberState {
             actor_id: member.clone(),
@@ -1571,7 +1674,7 @@ pub(super) async fn install_replica_anchor_in_connection(
     }
     crate::issued_realm_snapshots::issue_head_in_connection(
         conn,
-        &anchor.member_account_id,
+        member_account_id,
         &coland_storage::RealmStateSnapshotMaterial {
             realm_id: snapshot.realm_id.clone(),
             governance_generation: snapshot.governance_generation,

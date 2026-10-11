@@ -866,6 +866,92 @@ async fn management_authorization_uses_accepted_current_and_refuses_missing_proj
     sql_query("ROLLBACK").execute(&mut conn).await.unwrap();
 }
 
+/// Imported accepted history exercises the actual grant-admission management
+/// hook and current lookup, not the full signed grant HTTP consumer.
+#[tokio::test]
+async fn join_only_current_preserves_scoped_authorization_and_missing_current_refuses() {
+    let database = TestDatabase::lease().await;
+    let mut conn = database.pool().get().await.unwrap();
+    sql_query("BEGIN").execute(&mut conn).await.unwrap();
+    seed_genesis(&mut conn).await;
+    let controller = arkret_wire::AccountId::new(
+        "ak:did_core:web:controller.example".parse().unwrap(),
+        "ak:did_core:web:station.example".parse().unwrap(),
+    );
+    let agent = arkret_wire::AccountId::new(
+        "ak:did_core:web:agent.example".parse().unwrap(),
+        controller.station_id.clone(),
+    );
+    let resources = [
+        arkret_wire::WireResourceSelector::strand(
+            realm(),
+            "ak:strand:AT47eNekH0_aKZyIMsXq_s1FAWdYXC71_CUxQ5O478t-"
+                .parse()
+                .unwrap(),
+        ),
+        arkret_wire::WireResourceSelector::space(
+            realm(),
+            "ak:space:AT47eNekH0_aKZyIMsXq_s1FAWdYXC71_CUxQ5O478t-"
+                .parse()
+                .unwrap(),
+        ),
+    ];
+    for install_ban in [false, true] {
+        if install_ban {
+            let mut payload = json!(policy(None, true));
+            payload["value"]["rules"] = json!([{
+                "rule_id":"new_agents", "kind":"agent", "agent_target":{"kind":"all"},
+                "agent_operations":["join"], "effect":"deny"
+            }]);
+            let accepted = event(EventKind::PolicySet, payload, 1);
+            let basis = commit(&accepted, 1);
+            insert_history(&mut conn, &accepted, &basis).await;
+            commit_in_connection(&mut conn, &accepted, &basis)
+                .await
+                .unwrap();
+        }
+        for resource in &resources {
+            for action in ["ak.message.create", "ak.realm.owner"] {
+                crate::agent_management_admission::require_authorization_in_connection(
+                    &mut conn,
+                    &realm(),
+                    &controller,
+                    &agent,
+                    &[action.to_owned()],
+                    std::slice::from_ref(resource),
+                    chrono::Utc::now(),
+                )
+                .await
+                .unwrap();
+            }
+        }
+    }
+    sql_query("DELETE FROM policy_current_results")
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    assert!(
+        crate::agent_management_admission::require_authorization_in_connection(
+            &mut conn,
+            &realm(),
+            &controller,
+            &agent,
+            &["ak.message.create".to_owned()],
+            &resources,
+            chrono::Utc::now(),
+        )
+        .await
+        .is_err()
+    );
+    let empty =
+        sql_query("SELECT NOT EXISTS(SELECT 1 FROM capability_grant_current_results) AS present")
+            .get_result::<Present>(&mut conn)
+            .await
+            .unwrap();
+    assert!(empty.present);
+    sql_query("ROLLBACK").execute(&mut conn).await.unwrap();
+}
+
 #[tokio::test]
 async fn management_join_rechecks_current_ban_and_explicit_lifting_without_membership_effects() {
     let database = TestDatabase::lease().await;

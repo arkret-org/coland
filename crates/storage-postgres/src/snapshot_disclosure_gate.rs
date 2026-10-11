@@ -1,15 +1,15 @@
 //! Caller-aware snapshots from one REPEATABLE READ authority cut.
 //!
-//! Realm membership and exact Circle membership determine visible streams;
-//! hidden Circle objects, member rows, heads and floors are omitted together.
+//! Realm, Circle membership and exact Sidecar authority determine visible streams;
+//! hidden scope objects, member rows, heads and floors are omitted together.
 //! Current rows retain their source stream and revision, including state
 //! below that stream's history floor. Message content is constrained by its
 //! original accepted scope, covering position and redaction overlay.
 //! Reports and franking proofs additionally require exact target-scope
 //! moderator authority; a Realm-stream proof never broadens a Circle target.
 //!
-//! Every installed current family is audited. Unsupported families, Sidecar
-//! streams, retention-expired content and imported handoff tenures remain
+//! Every installed current family is audited. Unsupported families,
+//! retention-expired content and imported handoff tenures remain
 //! unproved, so those cuts cannot be signed. Bootstrap changes only its own
 //! join stream's history floor (`federation.md` section 4.1.1).
 
@@ -127,7 +127,7 @@ const AUDITED_FAMILIES: &[&str] = &[
     "member_state_current_results",
     "member_identity_updates_current_results",
     "applet_registration_current_results",
-    // Circle rows are classified by exact membership; Sidecar is unproved.
+    // Circle membership and Sidecar authority classify their private rows.
     "circle_current_results",
     "circle_member_state_current_results",
     "call_state_current_results",

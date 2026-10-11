@@ -2118,14 +2118,7 @@ impl AuthorityCommitApplication {
             .list_realm_streams_for_account(realm_id, account, issuer)
             .await?;
         if let coland_storage::AccountRealmStreamList::Listed(streams) = &listing {
-            arkret_wire::RealmStreamList {
-                realm_id: realm_id.clone(),
-                streams: streams.clone(),
-                next_cursor: None,
-                has_more: false,
-            }
-            .validate()
-            .map_err(|error| {
+            arkret_wire::RealmStreamList::validate_rows(realm_id, streams).map_err(|error| {
                 crate::ServiceError::Internal(format!("invalid realm stream list: {error}"))
             })?;
         }
@@ -2143,14 +2136,8 @@ impl AuthorityCommitApplication {
             .realm_stream_subscription_cut(realm_id, account, issuer)
             .await?;
         if let coland_storage::AccountRealmStreamList::Listed(streams) = &cut.listing {
-            arkret_wire::RealmStreamList {
-                realm_id: realm_id.clone(),
-                streams: streams.clone(),
-                next_cursor: None,
-                has_more: false,
-            }
-            .validate()
-            .map_err(|e| crate::ServiceError::Internal(e.to_string()))?;
+            arkret_wire::RealmStreamList::validate_rows(realm_id, streams)
+                .map_err(|e| crate::ServiceError::Internal(e.to_string()))?;
             if cut
                 .history_digest
                 .as_ref()

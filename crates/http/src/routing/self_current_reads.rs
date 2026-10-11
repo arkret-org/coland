@@ -15,16 +15,18 @@
 use arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadRequestBody;
 use arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentRequestBody;
 use arkret_models_identity::service_binding_results::MediaServiceBindingRequestBody;
-use arkret_wire::{AccountId, ErrorCode, RealmId, RealmStreamList, ServiceOperationId};
-use coland_storage::{AccountRealmStreamList, MediaServiceAnchorRead, SelfExactCurrentRead};
+use arkret_wire::{AccountId, ErrorCode, ServiceOperationId};
+use coland_storage::{MediaServiceAnchorRead, SelfExactCurrentRead};
 use salvo::prelude::*;
 
 use super::authority_commit::{no_store, parse_closed_body, render_service_error};
 use crate::state::AppState;
 
+mod stream_listing;
+
 pub(super) fn router() -> Router {
     Router::new()
-        .push(Router::with_path("realms/{realm_id}/streams").get(realm_streams))
+        .push(Router::with_path("realms/{realm_id}/streams").get(stream_listing::realm_streams))
         .push(Router::with_path("current-results/exact").post(exact_current_results))
         .push(Router::with_path("strands/watch/current").post(strand_watch_current))
         .push(Router::with_path("media-service-bindings/query").post(media_service_binding))
@@ -57,6 +59,17 @@ async fn authenticated_account(
     res: &mut Response,
     operation: &'static str,
 ) -> Option<AccountId> {
+    authenticated_reader(state, req, res, operation)
+        .await
+        .map(|(_, account)| account)
+}
+
+async fn authenticated_reader(
+    state: &AppState,
+    req: &mut Request,
+    res: &mut Response,
+    operation: &'static str,
+) -> Option<(coland_services::identity::SessionIdentityState, AccountId)> {
     let session = crate::routing::auth_or_render(state, req, res).await?;
     let actor =
         match crate::routing::identity::session_actor::validated_session_actor(state, &session)
@@ -81,7 +94,7 @@ async fn authenticated_account(
         not_found(res);
         return None;
     };
-    Some(account.clone())
+    Some((session, account.clone()))
 }
 
 fn render_unresolved(res: &mut Response, code: ErrorCode, operation: &str, reason: &str) {
@@ -95,104 +108,6 @@ fn render_unresolved(res: &mut Response, code: ErrorCode, operation: &str, reaso
         res,
         "the current governing basis cannot be confirmed at this cut",
     );
-}
-
-/// `ak.self.realm.read.streams.v1`. Pages come from one fixed server-side
-/// generation; this Station serves every provable listing as a single page,
-/// so it never issues a continuation cursor and rejects any presented one.
-#[handler]
-async fn realm_streams(req: &mut Request, depot: &Depot, res: &mut Response) {
-    let Some(state) = app_state(depot, res) else {
-        return;
-    };
-    let Some(account) = authenticated_account(
-        state,
-        req,
-        res,
-        ServiceOperationId::SELF_REALM_READ_STREAMS_V1,
-    )
-    .await
-    else {
-        return;
-    };
-    let Some(realm_id) = req
-        .param::<String>("realm_id")
-        .and_then(|value| RealmId::new(value).ok())
-    else {
-        return crate::error::render_error_code(
-            ErrorCode::SchemaViolation,
-            res,
-            "realm_id is not a Realm id",
-        );
-    };
-    if let Some(limit) = req.query::<String>("limit")
-        && !limit
-            .parse::<u16>()
-            .is_ok_and(|parsed| (1..=500).contains(&parsed) && parsed.to_string() == limit)
-    {
-        return crate::error::render_error_code(
-            ErrorCode::SchemaViolation,
-            res,
-            "limit must be an integer in 1..=500",
-        );
-    }
-    if let Some(token) = req.query::<String>("cursor") {
-        if let Err(error) = arkret_server::CursorAuthority::decode_stream(&token) {
-            match error {
-                arkret_server::CursorAuthorityError::ParamInvalid(message) => {
-                    crate::error::render_error_with_reason_code(
-                        res,
-                        crate::error::error_http_status(ErrorCode::ParamInvalid),
-                        ErrorCode::ParamInvalid.as_str(),
-                        &message,
-                        arkret_wire::ReasonCode::INVALID_CURSOR,
-                        None,
-                    )
-                }
-                arkret_server::CursorAuthorityError::Expired => crate::error::render_error_code(
-                    ErrorCode::CursorExpired,
-                    res,
-                    "cursor has expired",
-                ),
-                arkret_server::CursorAuthorityError::IntegrityInvalid => {
-                    crate::error::render_error_code(
-                        ErrorCode::CursorIntegrityInvalid,
-                        res,
-                        "cursor issuance cannot be proved",
-                    )
-                }
-            }
-            return;
-        }
-        return crate::error::render_error_code(
-            ErrorCode::CursorIntegrityInvalid,
-            res,
-            "the cursor was not issued for this enumeration; restart it",
-        );
-    }
-    let result = state
-        .authority_commits()
-        .list_realm_streams_for_account(&realm_id, &account, &state.service_core_id())
-        .await;
-    match result {
-        Ok(AccountRealmStreamList::Listed(streams)) => {
-            no_store(res);
-            res.render(Json(RealmStreamList {
-                realm_id,
-                streams,
-                next_cursor: None,
-                has_more: false,
-            }));
-        }
-        Ok(AccountRealmStreamList::NotVisible) => not_found(res),
-        Ok(AccountRealmStreamList::Unproved(reason)) => render_unresolved(
-            res,
-            ErrorCode::TemporarilyUnavailable,
-            ServiceOperationId::SELF_REALM_READ_STREAMS_V1,
-            reason,
-        ),
-        Err(error) => render_service_error(res, error),
-    }
 }
 
 /// `ak.self.current_results.read.exact.v1`.

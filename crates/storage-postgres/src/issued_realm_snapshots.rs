@@ -720,6 +720,7 @@ async fn recheck_disclosure_in_connection(
             | CurrentSelector::RealmAlias
             | CurrentSelector::RealmPlaintextVisibleServices
             | CurrentSelector::Circle { .. }
+            | CurrentSelector::Sidecar { .. }
             | CurrentSelector::Strand { .. }
             | CurrentSelector::CalendarScheduleSource { .. }
             | CurrentSelector::Space { .. }

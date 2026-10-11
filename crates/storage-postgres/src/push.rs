@@ -33,7 +33,7 @@ pub(crate) fn push_device_lock_key(account: &arkret_wire::AccountId, device_id: 
 /// explicit rather than silently taking the route lock first.
 pub(crate) async fn write_push_device_route_in_transaction(
     conn: &mut AsyncPgConnection,
-    authorization: &soland_storage::DeviceRevocationGateSelector,
+    authorization: &coland_storage::DeviceRevocationGateSelector,
     mut registration: arkret_models_integration::PushRegistrationRecord,
     at: chrono::DateTime<chrono::Utc>,
     mode: PushDeviceRouteWriteMode,
@@ -154,7 +154,7 @@ pub(crate) async fn write_push_device_route_in_transaction(
 impl PushDeviceStore for PgPushDeviceStore {
     async fn register(
         &self,
-        authorization: &soland_storage::DeviceRevocationGateSelector,
+        authorization: &coland_storage::DeviceRevocationGateSelector,
         device: Value,
     ) -> PersistenceResult<()> {
         use diesel_async::AsyncConnection;
@@ -249,7 +249,7 @@ impl PushDeviceStore for PgPushDeviceStore {
             let bindings = sources
                 .iter()
                 .map(|row| {
-                    serde_json::from_value::<soland_storage::DeviceRevocationGateSelector>(
+                    serde_json::from_value::<coland_storage::DeviceRevocationGateSelector>(
                         row.device_authorization.clone(),
                     )
                 })
@@ -263,7 +263,7 @@ impl PushDeviceStore for PgPushDeviceStore {
             let mut visible = Vec::new();
             for (source, binding) in sources.into_iter().zip(bindings) {
                 if crate::gate_status_in_transaction(conn, &binding).await?
-                    != soland_storage::DeviceRevocationGateStatus::Active
+                    != coland_storage::DeviceRevocationGateStatus::Active
                 {
                     continue;
                 }

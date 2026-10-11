@@ -1,8 +1,8 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use coland_http::config::AppConfig;
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
-use soland_http::config::AppConfig;
 
 fn ed25519_detached_jws(signature: &[u8]) -> String {
     let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"Ed25519"}"#);
@@ -15,9 +15,9 @@ fn ed25519_detached_jws(signature: &[u8]) -> String {
 /// verifies, so no shape-only acceptance path exists.
 #[test]
 fn development_mode_rejects_unsigned_well_formed_detached_jws() {
-    let state = soland_test_support::app_state(AppConfig {
+    let state = coland_test_support::app_state(AppConfig {
         development_mode: true,
-        ..soland_test_support::app_config()
+        ..coland_test_support::app_config()
     });
     let mut runner = TestRunner::new(Config {
         cases: 64,
@@ -32,7 +32,7 @@ fn development_mode_rejects_unsigned_well_formed_detached_jws() {
             |(payload, signature)| {
                 let jws = ed25519_detached_jws(&signature);
                 prop_assert!(
-                    soland_http::jws_verify::verify_did_controlled_jws(
+                    coland_http::jws_verify::verify_did_controlled_jws(
                         &payload,
                         &jws,
                         "did:web:alice.example#k1",

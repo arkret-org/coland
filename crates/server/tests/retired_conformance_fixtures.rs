@@ -5,18 +5,18 @@
 
 #![cfg(feature = "conformance-harness")]
 
+use coland_http::config::AppConfig;
+use coland_http::service;
 use salvo::http::StatusCode;
 use salvo::test::{ResponseExt, TestClient};
 use serde_json::Value;
-use soland_http::config::AppConfig;
-use soland_http::service;
 
 #[tokio::test]
 async fn retired_injection_routes_are_unknown_even_with_the_development_harness() {
     for development_mode in [true, false] {
-        let app = service(soland_test_support::app_state(AppConfig {
+        let app = service(coland_test_support::app_state(AppConfig {
             development_mode,
-            ..soland_test_support::app_config()
+            ..coland_test_support::app_config()
         }));
         for path in ["realm-basis", "signal-mls-basis", "realm-fixture/install"] {
             let mut response =

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail when Soland runtime environment literals and deployment docs drift."""
+"""Fail when Coland runtime environment literals and deployment docs drift."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ENV_PATTERN = re.compile(r"\bSOLAND_[A-Z0-9_]+\b")
-STRING_ENV_PATTERN = re.compile(r'"(SOLAND_[A-Z0-9_]+)"')
+ENV_PATTERN = re.compile(r"\bCOLAND_[A-Z0-9_]+\b")
+STRING_ENV_PATTERN = re.compile(r'"(COLAND_[A-Z0-9_]+)"')
 
 def rust_environment_names() -> set[str]:
     names: set[str] = set()
@@ -22,7 +22,7 @@ def rust_environment_names() -> set[str]:
     return {
         name
         for name in names
-        if not name.startswith(("SOLAND_TEST_", "SOLAND_TEST_CHAOS_"))
+        if not name.startswith(("COLAND_TEST_", "COLAND_TEST_CHAOS_"))
     }
 
 

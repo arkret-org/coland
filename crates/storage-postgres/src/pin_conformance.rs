@@ -4,11 +4,11 @@
 #[path = "../tests/support/ordinary_realm.rs"]
 #[allow(dead_code)]
 mod ordinary_realm;
+use coland_storage::EventCommitUnitOfWork;
 use diesel::sql_types::{BigInt, Text};
 use diesel_async::RunQueryDsl;
 use ordinary_realm::{next_request, open_discussion};
 use serde_json::{Value, json};
-use soland_storage::EventCommitUnitOfWork;
 
 use crate::{PgEventCommitUnitOfWork, PgPool, TestDatabase};
 
@@ -211,7 +211,7 @@ pub async fn run_pin_admission_fixture() -> Vec<(&'static str, usize)> {
             .as_i64()
             .unwrap()
     );
-    let snapshot = soland_storage_postgres::account_snapshot_material(
+    let snapshot = coland_storage_postgres::account_snapshot_material(
         &pool,
         &realm,
         &arkret_wire::AccountId::new(founder(), ordinary_realm::station()),
@@ -254,7 +254,7 @@ pub async fn run_pin_admission_fixture() -> Vec<(&'static str, usize)> {
     );
     assert!(matches!(
         uow.commit_event(forbidden).await.unwrap_err(),
-        soland_storage::PersistenceError::NotFound(_)
+        coland_storage::PersistenceError::NotFound(_)
     ));
     assert_eq!(
         count(&pool, "realm_commits", &realm).await - baseline,

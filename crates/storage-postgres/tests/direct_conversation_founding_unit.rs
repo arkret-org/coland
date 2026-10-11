@@ -33,19 +33,19 @@ use arkret_models_collaboration::contact_operations::{
     RequestAcceptanceReceiptCore,
 };
 use arkret_wire::{AccountId, ActorId, DidCoreId, DidUrl, EventKind, Hash, RealmId};
-use diesel::sql_types::{BigInt, Text};
-use diesel_async::RunQueryDsl;
-use soland_storage::{
+use coland_storage::{
     AuthorityCommitStore, AuthorityCommitTransaction, ConflictCode, ContactStore,
     CurrentRealmAuthority, DirectConversationAdmissionCut, DirectConversationFoundingCommitOutcome,
     DirectConversationFoundingCommitUnit, EventCommitUnitOfWork, EventStore, PersistenceError,
     SelfProducerCommitGuard,
 };
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{
     FoundingProfileAdmissionSpy, PgAuthorityCommitStore, PgContactStore, PgEventCommitUnitOfWork,
     PgEventStore, PgPersistenceStore, PgPool,
 };
+use diesel::sql_types::{BigInt, Text};
+use diesel_async::RunQueryDsl;
 
 #[derive(diesel::QueryableByName)]
 struct StationRow {
@@ -71,10 +71,10 @@ const TRUST_DOMAIN: &str = "ak:trust_domain:direct-conversation.example";
 
 struct CanonicalHydrationAdapter;
 
-impl soland_services::hydration::HydrationProjectionAdapter for CanonicalHydrationAdapter {
+impl coland_services::hydration::HydrationProjectionAdapter for CanonicalHydrationAdapter {
     fn operation_from_canonical_record(
         &self,
-        record: &soland_services::events::AcceptedEvent,
+        record: &coland_services::events::AcceptedEvent,
     ) -> Option<arkret_event_draft::ProjectedEventOperation> {
         let event = serde_json::from_value::<arkret_wire::Event>(record.envelope.clone()).ok()?;
         let operation_id =
@@ -106,7 +106,7 @@ struct Pair {
     peer: AccountId,
     peer_method: DidUrl,
     peer_signing_seed: [u8; 32],
-    peer_guard: Option<soland_storage::DeviceRevocationGateSelector>,
+    peer_guard: Option<coland_storage::DeviceRevocationGateSelector>,
     contact_round_id: Hash,
 }
 
@@ -437,7 +437,7 @@ async fn accept_contact(
     );
     let contact_round_id = evidence.contact_round_id.clone();
     PgContactStore { pool: pool.clone() }
-        .put(&soland_domain::identity::ContactRecord {
+        .put(&coland_domain::identity::ContactRecord {
             requester_id: ActorId::account(requester.clone()),
             target_id: ActorId::account(responder.clone()),
             contact_round_id: Some(contact_round_id.clone()),
@@ -818,7 +818,7 @@ async fn exact_genesis_scan(
     account: &AccountId,
     station: &DidCoreId,
 ) -> arkret_wire::StreamScanOutcome {
-    use soland_storage::AccountStreamScan;
+    use coland_storage::AccountStreamScan;
     let scan = store
         .scan_stream_for_account(
             &arkret_wire::StreamScanRequest {
@@ -878,7 +878,7 @@ async fn direct_founding_members_read_exact_genesis_and_unmatched_slot_keeps_joi
     // members. The old join-position override changes the original snapshot
     // even though every current row and stream head is already complete.
     for (account, join) in [(&pair.founder, &commits[1]), (&pair.peer, &commits[2])] {
-        let canonical = soland_storage_postgres::account_snapshot_material(&pool, &realm, account)
+        let canonical = coland_storage_postgres::account_snapshot_material(&pool, &realm, account)
             .await
             .unwrap()
             .unwrap();
@@ -897,17 +897,17 @@ async fn direct_founding_members_read_exact_genesis_and_unmatched_slot_keeps_joi
         );
         let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
         let method = DidUrl::new(format!("{}#authority", pair.station_did)).unwrap();
-        let snapshot = soland_services::authority_commit::build_signed_realm_state_snapshot(
+        let snapshot = coland_services::authority_commit::build_signed_realm_state_snapshot(
             &bootstrap, method, &key, at,
         )
         .unwrap();
-        assert!(soland_storage::signed_snapshot_matches_material(
+        assert!(coland_storage::signed_snapshot_matches_material(
             &snapshot, &canonical
         ));
         let mut old_bootstrap = bootstrap.clone();
         old_bootstrap.retention_and_history_floor.stream_floors[0].oldest_position =
             join.stream_position;
-        assert!(!soland_storage::signed_snapshot_matches_material(
+        assert!(!coland_storage::signed_snapshot_matches_material(
             &snapshot,
             &old_bootstrap
         ));
@@ -999,8 +999,8 @@ async fn direct_founding_members_read_exact_genesis_and_unmatched_slot_keeps_joi
 
 #[tokio::test]
 async fn direct_participation_inherits_accepted_fixed_baseline_without_a_policy_event() {
-    use soland_storage::AgentParticipationStore;
-    use soland_storage_postgres::PgAgentParticipationStore;
+    use coland_storage::AgentParticipationStore;
+    use coland_storage_postgres::PgAgentParticipationStore;
 
     let (_database, pool) = contract_pool().await;
     let pair = pair(&pool).await;
@@ -1141,7 +1141,7 @@ async fn founding_unit_commits_four_consecutive_commits_and_exact_retry_replays_
         limit: 4,
     };
     for account in [&pair.founder, &pair.peer] {
-        let soland_storage::AccountStreamScan::Page(page) = store
+        let coland_storage::AccountStreamScan::Page(page) = store
             .scan_stream_for_account(&request, account, &pair.station)
             .await
             .unwrap()
@@ -1165,7 +1165,7 @@ async fn founding_unit_commits_four_consecutive_commits_and_exact_retry_replays_
             );
         }
         let snapshot =
-            soland_storage_postgres::account_snapshot_material(&pool, &realm_id, account)
+            coland_storage_postgres::account_snapshot_material(&pool, &realm_id, account)
                 .await
                 .unwrap()
                 .expect("founding member snapshot");
@@ -1304,7 +1304,7 @@ async fn committed_direct_conversation_founding_rebuilds_resolver_projection_aft
     let at = now();
     let unit = founding_unit(&pair, &UnitShape::exact(&pair), key(), at).await;
     let realm = realm_of(&unit);
-    let live = soland_services::projection::ProjectionService::new("dm-live-test");
+    let live = coland_services::projection::ProjectionService::new("dm-live-test");
     let operations = unit
         .transactions
         .iter()
@@ -1338,7 +1338,7 @@ async fn committed_direct_conversation_founding_rebuilds_resolver_projection_aft
             .is_some()
     );
     for _ in 0..2 {
-        let projection = soland_services::projection::ProjectionService::new("dm-restart-test");
+        let projection = coland_services::projection::ProjectionService::new("dm-restart-test");
         let persistence = PgPersistenceStore::new(pool.clone());
         projection
             .hydrate_from_persistence(&persistence, &CanonicalHydrationAdapter, [realm.clone()])
@@ -1578,7 +1578,7 @@ async fn peer_founding_missing_contact_dependency_writes_nothing() {
         direction: arkret_wire::StreamScanDirection::After(None),
         limit: 4,
     };
-    let soland_storage::AccountStreamScan::Page(page) = peer_store
+    let coland_storage::AccountStreamScan::Page(page) = peer_store
         .scan_stream_for_account(&request, &pair.peer, &peer_station)
         .await
         .unwrap()
@@ -1603,7 +1603,7 @@ async fn peer_founding_missing_contact_dependency_writes_nothing() {
     assert_eq!(founder_join.commit.stream_position, 1);
     assert_eq!(unit.transactions[2].commit.stream_position, 2);
     assert!(founder_join.commit.stream_position < unit.transactions[2].commit.stream_position);
-    let soland_storage::MemberCommittedEventRead::Read(view) = peer_store
+    let coland_storage::MemberCommittedEventRead::Read(view) = peer_store
         .committed_event_for_member(
             &founder_join.event.event_id,
             &pair.peer_actor(),
@@ -1652,7 +1652,7 @@ async fn peer_founding_missing_contact_dependency_writes_nothing() {
     historical.validate(&realm_id).unwrap();
 
     let snapshot =
-        soland_storage_postgres::account_snapshot_material(&peer_pool, &realm_id, &pair.peer)
+        coland_storage_postgres::account_snapshot_material(&peer_pool, &realm_id, &pair.peer)
             .await
             .unwrap()
             .expect("hosted peer snapshot");
@@ -1687,7 +1687,7 @@ async fn peer_founding_missing_contact_dependency_writes_nothing() {
         Some(0)
     );
     let snapshot_key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
-    let original = soland_services::authority_commit::build_signed_realm_state_snapshot(
+    let original = coland_services::authority_commit::build_signed_realm_state_snapshot(
         &origin_bootstrap,
         DidUrl::new(format!("{}#authority", pair.station_did)).unwrap(),
         &snapshot_key,
@@ -1725,14 +1725,14 @@ async fn peer_founding_missing_contact_dependency_writes_nothing() {
         .retention_and_history_floor
         .stream_floors[0]
         .oldest_position = 1;
-    let changed = soland_services::authority_commit::build_signed_realm_state_snapshot(
+    let changed = coland_services::authority_commit::build_signed_realm_state_snapshot(
         &mismatched_material,
         DidUrl::new(format!("{}#authority", pair.station_did)).unwrap(),
         &snapshot_key,
         at,
     )
     .unwrap();
-    assert!(!soland_storage::signed_snapshot_matches_material(
+    assert!(!coland_storage::signed_snapshot_matches_material(
         &changed, &snapshot
     ));
     assert!(
@@ -1794,7 +1794,7 @@ async fn peer_founding_missing_contact_dependency_writes_nothing() {
             )
             .await
             .unwrap(),
-        soland_storage::MemberCommittedEventRead::NotVisible
+        coland_storage::MemberCommittedEventRead::NotVisible
     ));
 }
 
@@ -1902,12 +1902,12 @@ async fn founding_refusals_decide_authority_at_the_slot_cut_with_zero_writes() {
 
 #[tokio::test]
 async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_slot_cut() {
-    use soland_storage::{
+    use coland_storage::{
         ActorProfileStore, AgentControlAdmissionOutcome, AgentControlAdmissionWrite,
         AgentPcrGenesisAdmissionWrite, AgentProvisionAdmissionWrite,
     };
 
-    let database = soland_storage_postgres::test_database::TestDatabase::lease().await;
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     let pool = database.pool();
     let historical_station = historical_control_source::HistoricalControlStation::new(
         "direct-agent-controller",
@@ -1946,7 +1946,7 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
         .device_verification_method
         .clone();
     let controller_seed = controller_fixture.history.founding_device_signing_seed;
-    let profiles = soland_storage_postgres::PgActorProfileStore { pool: pool.clone() };
+    let profiles = coland_storage_postgres::PgActorProfileStore { pool: pool.clone() };
     let store = PgAuthorityCommitStore { pool: pool.clone() };
 
     let agent_did = historical_control_source::managed_agent_did(
@@ -2232,7 +2232,7 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
                 .direct_conversation_admission(&request.authority_commit.event)
                 .await
                 .unwrap(),
-            soland_storage::DirectConversationAdmissionCut::Passed
+            coland_storage::DirectConversationAdmissionCut::Passed
         );
     }
     // The same owned-Agent branch must admit encrypted Session Signals in a
@@ -2268,7 +2268,7 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
     };
     let signal_at = bound.authority_commit.commit.committed_at + chrono::TimeDelta::seconds(1);
     let signal = store
-        .signal_scope_authority(soland_storage::SignalScopeAuthorityQuery {
+        .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
             scope: &signal_scope,
             authority_commit_id: &bound.authority_commit.commit.commit_id,
             parent_realm_authority_commit_id: None,
@@ -2298,13 +2298,13 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
             .direct_conversation_admission(&message.authority_commit.event)
             .await
             .unwrap(),
-        soland_storage::DirectConversationAdmissionCut::Refused(
+        coland_storage::DirectConversationAdmissionCut::Refused(
             ConflictCode::DirectConversationParticipantAuthorityDenied
         )
     );
     assert!(
         store
-            .signal_scope_authority(soland_storage::SignalScopeAuthorityQuery {
+            .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
                 scope: &signal_scope,
                 authority_commit_id: &bound.authority_commit.commit.commit_id,
                 parent_realm_authority_commit_id: None,
@@ -2333,7 +2333,7 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
     drop(conn);
     assert!(
         store
-            .signal_scope_authority(soland_storage::SignalScopeAuthorityQuery {
+            .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
                 scope: &signal_scope,
                 authority_commit_id: &bound.authority_commit.commit.commit_id,
                 parent_realm_authority_commit_id: None,
@@ -2348,7 +2348,7 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
     );
 }
 
-async fn terminal_persistent_rows(pool: &soland_storage_postgres::PgPool) -> serde_json::Value {
+async fn terminal_persistent_rows(pool: &coland_storage_postgres::PgPool) -> serde_json::Value {
     use diesel_async::RunQueryDsl as _;
     #[derive(diesel::QueryableByName)]
     struct Table {
@@ -2657,7 +2657,7 @@ fn cited(
     actor: ActorId,
     payload: serde_json::Value,
     cites: Cites<'_>,
-) -> soland_storage::EventCommitRequest {
+) -> coland_storage::EventCommitRequest {
     let at = previous.commit.committed_at;
     let mut event = ordinary_realm::event_for_actor(
         kind,
@@ -2720,7 +2720,7 @@ async fn sourced_cited(
     actor: ActorId,
     payload: serde_json::Value,
     cites: Cites<'_>,
-) -> soland_storage::EventCommitRequest {
+) -> coland_storage::EventCommitRequest {
     sourced_cited_at(
         pair,
         previous,
@@ -2741,7 +2741,7 @@ async fn sourced_cited_at(
     payload: serde_json::Value,
     cites: Cites<'_>,
     at: chrono::DateTime<chrono::Utc>,
-) -> soland_storage::EventCommitRequest {
+) -> coland_storage::EventCommitRequest {
     let mut request = cited(previous, kind, actor.clone(), payload, cites);
     request.authority_commit.event.created_at = at;
     let (method, seed) = if actor == pair.founder_actor() {
@@ -2798,14 +2798,14 @@ async fn sourced_cited_at(
 
 /// Attach the verified public MLS transition whose roster holds `principals`.
 fn with_group(
-    mut request: soland_storage::EventCommitRequest,
+    mut request: coland_storage::EventCommitRequest,
     base: Option<(&arkret_wire::EventId, u64)>,
     epoch: u64,
     principals: &[&ActorId],
-) -> soland_storage::EventCommitRequest {
-    request.authority_commit.mls_state = Some(soland_storage::MlsStateInstallation {
+) -> coland_storage::EventCommitRequest {
+    request.authority_commit.mls_state = Some(coland_storage::MlsStateInstallation {
         effective_scope: request.authority_commit.event.scope_ref.clone(),
-        base: base.map(|(reference, epoch)| soland_storage::MlsInstalledBase {
+        base: base.map(|(reference, epoch)| coland_storage::MlsInstalledBase {
             current_mls_commit_event_ref: reference.clone(),
             epoch,
         }),
@@ -2815,7 +2815,7 @@ fn with_group(
         consumed_proposals: Vec::new(),
         public_blobs: if base.is_some() {
             let sha256 = format!("{epoch:064x}");
-            vec![soland_storage::MlsPublicBlob {
+            vec![coland_storage::MlsPublicBlob {
                 blob_ref: arkret_wire::BlobRef::new(format!("ak:blob:sha256:{sha256}")).unwrap(),
                 sha256: sha256.clone(),
                 size_bytes: 11,
@@ -2831,7 +2831,7 @@ fn with_group(
 
 fn founder_leaf_authority(
     fixture: &pcr_genesis::PcrGenesisFixture,
-    selector: &soland_storage::DeviceRevocationGateSelector,
+    selector: &coland_storage::DeviceRevocationGateSelector,
 ) -> arkret_models_collaboration::events_payloads::MlsGenesisCreatorLeafAuthority {
     arkret_models_collaboration::events_payloads::MlsGenesisCreatorLeafAuthority {
         leaf_signature_key_b64u: arkret_wire::Base64UrlString::new(
@@ -2922,7 +2922,7 @@ fn ciphertext(
 async fn consume_peer_welcome(
     pool: &PgPool,
     station: &DidCoreId,
-    commit: &soland_storage::EventCommitRequest,
+    commit: &coland_storage::EventCommitRequest,
     peer: &ActorId,
 ) {
     let mut conn = pool.get().await.unwrap();
@@ -2938,7 +2938,7 @@ async fn consume_peer_welcome(
 async fn record_peer_welcome(
     pool: &PgPool,
     station: &DidCoreId,
-    commit: &soland_storage::EventCommitRequest,
+    commit: &coland_storage::EventCommitRequest,
     peer: &ActorId,
     state: &str,
     ordinal: i64,
@@ -3136,7 +3136,7 @@ async fn participant_authority_scenario() {
     let founder = pair.founder_actor();
     let peer = pair.peer_actor();
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
-    let refused = async |request: &soland_storage::EventCommitRequest| {
+    let refused = async |request: &coland_storage::EventCommitRequest| {
         let before = dc_footprint(&pool, &realm_id).await;
         let code = refusal_code(uow.commit_event(request.clone()).await);
         assert_eq!(dc_footprint(&pool, &realm_id).await, before);
@@ -3220,7 +3220,7 @@ async fn participant_authority_scenario() {
                 .strip_prefix("sha256:")
                 .unwrap()
                 .to_owned();
-            soland_storage::MlsPublicBlob {
+            coland_storage::MlsPublicBlob {
                 blob_ref: blob_ref(bytes),
                 sha256: sha256.clone(),
                 size_bytes: i64::try_from(bytes.len()).unwrap(),
@@ -3341,8 +3341,8 @@ async fn participant_authority_scenario() {
                 &arkret_canonical::base64url_decode(&real_add.commit.commit).unwrap(),
             )
             .unwrap();
-        let groups = soland_storage_postgres::PgMlsGroupCurrentStore { pool: pool.clone() };
-        let accepted_base = soland_storage::MlsGroupCurrentStore::current(&groups, &scope)
+        let groups = coland_storage_postgres::PgMlsGroupCurrentStore { pool: pool.clone() };
+        let accepted_base = coland_storage::MlsGroupCurrentStore::current(&groups, &scope)
             .await
             .unwrap()
             .unwrap()
@@ -3598,7 +3598,7 @@ async fn participant_authority_scenario() {
     boxed_source(|| async {
     for participant in [&pair.founder, &pair.peer] {
         let snapshot =
-            soland_storage_postgres::account_snapshot_material(&pool, &realm_id, participant)
+            coland_storage_postgres::account_snapshot_material(&pool, &realm_id, participant)
                 .await
                 .unwrap()
                 .expect("accepted Direct Conversation participant has a complete Snapshot cut");
@@ -3633,8 +3633,8 @@ async fn participant_authority_scenario() {
     );
     assert!(
         matches!(
-            soland_storage_postgres::account_snapshot_material(&pool, &realm_id, &stranger).await,
-            Err(soland_storage::PersistenceError::SchemaViolation(_))
+            coland_storage_postgres::account_snapshot_material(&pool, &realm_id, &stranger).await,
+            Err(coland_storage::PersistenceError::SchemaViolation(_))
         ),
         "a nonparticipant must fail closed on Direct Conversation Snapshot disclosure"
     );
@@ -3642,7 +3642,7 @@ async fn participant_authority_scenario() {
     // a REPEATABLE READ, READ ONLY transaction. A row lock here caused 503.
     let signal_at = head.commit.committed_at + chrono::TimeDelta::seconds(1);
     let signal_cut = store
-        .signal_scope_authority(soland_storage::SignalScopeAuthorityQuery {
+        .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
             scope: &arkret_wire::ScopeRef::Realm {
                 realm_id: realm_id.clone(),
             },
@@ -3917,7 +3917,7 @@ async fn participant_authority_scenario() {
                 )
                 .await
                 .unwrap(),
-            soland_storage::MemberCommittedEventRead::NotVisible
+            coland_storage::MemberCommittedEventRead::NotVisible
         ));
         assert_eq!(
             rejoin_floor.floor_reason,
@@ -4016,11 +4016,11 @@ async fn participant_authority_scenario() {
         // even though this fixture gives many Commit positions equal timestamps.
         let persistence = PgPersistenceStore::new(pool.clone());
         let canonical =
-            soland_storage::EventProjectionStoreRegistry::object_current_snapshot(&persistence)
+            coland_storage::EventProjectionStoreRegistry::object_current_snapshot(&persistence)
                 .snapshot()
                 .await
                 .unwrap();
-        let projection = soland_services::projection::ProjectionService::new("topic-watch-restart");
+        let projection = coland_services::projection::ProjectionService::new("topic-watch-restart");
         projection
             .hydrate_from_persistence(&persistence, &CanonicalHydrationAdapter, [realm_id.clone()])
             .await
@@ -4037,13 +4037,13 @@ async fn participant_authority_scenario() {
             let cached = &state.strands[id.as_str()];
             let lifecycle = match strand.state.as_ref().unwrap() {
                 arkret_wire::ObjectState::Active => {
-                    soland_domain::reducer::ObjectLifecycleState::Active
+                    coland_domain::reducer::ObjectLifecycleState::Active
                 }
                 arkret_wire::ObjectState::Archived => {
-                    soland_domain::reducer::ObjectLifecycleState::Archived
+                    coland_domain::reducer::ObjectLifecycleState::Archived
                 }
                 arkret_wire::ObjectState::Redacted => {
-                    soland_domain::reducer::ObjectLifecycleState::Redacted
+                    coland_domain::reducer::ObjectLifecycleState::Redacted
                 }
             };
             assert_eq!(cached.state, lifecycle);
@@ -4227,7 +4227,7 @@ async fn terminal_founding_claim_repairs_the_same_group_and_keeps_the_first_bind
 
 async fn seed_peer_remove(
     pool: &PgPool,
-    commit: &soland_storage::EventCommitRequest,
+    commit: &coland_storage::EventCommitRequest,
     peer: &ActorId,
 ) {
     let event = &commit.authority_commit.event;
@@ -4606,7 +4606,7 @@ async fn claim_human_peer_package(
         KeyPackageClaimRecord, PeerKeyPackageClaimReceipt, PeerKeyPackageRequesterAuthorization,
         PeerKeyPackagesClaimOutcome, PeerKeyPackagesClaimRequestBody,
     };
-    use soland_storage::MlsKeyPackageStore;
+    use coland_storage::MlsKeyPackageStore;
     let guard = pair
         .peer_guard
         .as_ref()
@@ -4626,16 +4626,16 @@ async fn claim_human_peer_package(
         .bind::<Text,_>(pair.peer.principal_id.as_str()).bind::<Text,_>(pair.peer.station_id.as_str())
         .get_result::<Owner>(&mut conn).await.unwrap().pk;
     drop(conn);
-    let store = soland_storage_postgres::PgMlsKeyPackageStore {
+    let store = coland_storage_postgres::PgMlsKeyPackageStore {
         pool: pair.pool.clone(),
     };
     assert!(
         store
-            .put(&soland_storage::MlsKeyPackageRow {
+            .put(&coland_storage::MlsKeyPackageRow {
                 id: package.keypackage_id.clone(),
                 keypackage_ref: package.keypackage_ref.to_string(),
                 keypackage_digest: package.keypackage_ref.to_string(),
-                owner_account_pk: soland_storage::AccountPk(owner),
+                owner_account_pk: coland_storage::AccountPk(owner),
                 actor_id: pair.peer.principal_id.to_string(),
                 device_id: Some(device.to_string()),
                 endpoint_verification_method: None,
@@ -4747,7 +4747,7 @@ async fn claim_human_peer_package(
         claim_receipt: receipt,
     };
     outcome.validate_shape().unwrap();
-    let ledger = soland_storage::PeerKeyPackageClaimLedgerRecord {
+    let ledger = coland_storage::PeerKeyPackageClaimLedgerRecord {
         source_id: pair.station.to_string(),
         claim_request_id: request_id.to_string(),
         request_digest: digest,
@@ -4763,7 +4763,7 @@ async fn claim_human_peer_package(
     };
     let group = scope.canonical_mls_group_id().unwrap();
     let result = store
-        .try_claim_peer(soland_storage::PeerKeyPackageClaimAttempt {
+        .try_claim_peer(coland_storage::PeerKeyPackageClaimAttempt {
             keypackage_id: &package.keypackage_id,
             mls_group_id: group.as_str(),
             device_authorize_event_id: Some(guard.authorization_ref.event_id.as_str()),
@@ -4775,7 +4775,7 @@ async fn claim_human_peer_package(
         })
         .await
         .unwrap();
-    let soland_storage::PeerKeyPackageClaimAttemptResult::Claimed(row) = result else {
+    let coland_storage::PeerKeyPackageClaimAttemptResult::Claimed(row) = result else {
         panic!("actual claim must win");
     };
     assert_eq!(row.claimed_by_mls_group_id.as_deref(), Some(group.as_str()));

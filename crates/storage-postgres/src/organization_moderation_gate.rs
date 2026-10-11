@@ -9,11 +9,11 @@ use arkret_models_collaboration::{
     RealmOrganizationControlScope, RealmOrganizationIssuerRole, RealmOrganizationPayload,
     RealmOrganizationStatus, SignatureMaterial,
 };
+use coland_storage::{PersistenceError, PersistenceResult, RealmOrganizationProofCommit};
 use diesel::OptionalExtension as _;
 use diesel::sql_types::{BigInt, Binary, Jsonb, Text, Timestamptz};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::Value;
-use soland_storage::{PersistenceError, PersistenceResult, RealmOrganizationProofCommit};
 
 #[derive(diesel::QueryableByName)]
 struct RelationshipRow {

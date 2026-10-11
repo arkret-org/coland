@@ -23,12 +23,12 @@ use arkret_wire::{
     AppletRevokeMode, CommittedEventRef, CurrentRevision, EventId, EventKind, Hash,
     ProtocolOperationId,
 };
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
 use salvo::http::StatusCode;
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
 use serde_json::{Value, json};
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
 
 use super::ghost::{
     ensure_formal_ghost_provision_allowed, ghost_provision_authorization_ref,
@@ -49,7 +49,7 @@ use super::signature::{
     require_inbound_transaction_signature,
 };
 use super::transaction::process_verified_transaction;
-use super::types::{AppletRecord, GhostActorRecord, SOLAND_EDGE_APPLET_ID};
+use super::types::{AppletRecord, COLAND_EDGE_APPLET_ID, GhostActorRecord};
 use crate::routing::system::extract::AuthArgs;
 use crate::state::AppState;
 
@@ -130,7 +130,7 @@ async fn protocol_ping_endpoint(depot: &mut Depot) -> JsonResult<AppletPingOutco
             AppError::internal(format!("configured service_id is invalid: {error}"))
         })?;
     json_ok(AppletPingOutcome {
-        applet_id: arkret_identifiers::AppletId::new(SOLAND_EDGE_APPLET_ID.to_owned()).map_err(
+        applet_id: arkret_identifiers::AppletId::new(COLAND_EDGE_APPLET_ID.to_owned()).map_err(
             |error| AppError::internal(format!("configured applet_id is invalid: {error}")),
         )?,
         service_id,
@@ -367,7 +367,7 @@ pub(super) async fn issue_applet_authoring_preview(
     })?;
     let stored = state
         .event_queries()
-        .issue_applet_authoring_preview(soland_services::events::AppletAuthoringPreviewState {
+        .issue_applet_authoring_preview(coland_services::events::AppletAuthoringPreviewState {
             subject_key,
             basis_digest,
             request_digest,
@@ -1076,7 +1076,7 @@ pub(super) async fn durable_ghost_event_ref(
         .map_err(|error| AppError::internal(format!("Ghost Commit lookup failed: {error}")))?
         .ok_or_else(|| {
             AppError::from_rejection(
-                soland_http::error::ErrorCode::ServiceUnavailable,
+                coland_http::error::ErrorCode::ServiceUnavailable,
                 "Ghost atomic Event/RealmCommit result construction is unavailable",
             )
             .with_rejection_code("service_unavailable")
@@ -1114,8 +1114,8 @@ fn deduplicate_revoke_effect_refs(refs: &mut Vec<AppletRevokeEffectRef>) -> Resu
     Ok(())
 }
 
-fn widget_install_selector(record: &AppletRecord) -> soland_storage::AppletWidgetInstallSelector {
-    soland_storage::AppletWidgetInstallSelector {
+fn widget_install_selector(record: &AppletRecord) -> coland_storage::AppletWidgetInstallSelector {
+    coland_storage::AppletWidgetInstallSelector {
         applet_id: record.applet_id.clone(),
         effective_scope: record.effective_scope.clone(),
         registration_event_ref: record.install_response.registration_event_ref.clone(),
@@ -1202,7 +1202,7 @@ async fn build_revoke_plan(
 }
 
 fn active_applet_grant_revisions(
-    snapshot: Vec<soland_storage::CapabilityGrantCurrentResultRecord>,
+    snapshot: Vec<coland_storage::CapabilityGrantCurrentResultRecord>,
     realm_id: &arkret_wire::RealmId,
     applet_service_id: &arkret_wire::DidCoreId,
     target_station_id: &arkret_wire::DidCoreId,
@@ -1217,7 +1217,7 @@ fn active_applet_grant_revisions(
     let mut active = std::collections::BTreeMap::new();
     for row in snapshot {
         if !installed.contains(&row.grant_id)
-            || row.status != soland_storage::CapabilityGrantCurrentStatus::Active
+            || row.status != coland_storage::CapabilityGrantCurrentStatus::Active
         {
             continue;
         }
@@ -2023,8 +2023,8 @@ async fn provision_ghost_actor_endpoint(
     let identity_value = encode_applet_identity(&record.identity)?;
     record.ghosts.push(ghost);
     let applet_record_value = encode_applet_record(&record)?;
-    let input = soland_storage::AppletAuthoringUnitWrite {
-        request: soland_storage::AppletAdmissionRequest::Managed(
+    let input = coland_storage::AppletAuthoringUnitWrite {
+        request: coland_storage::AppletAdmissionRequest::Managed(
             arkret_models_integration::AppletManagedActorCommittedRequest::Ghost(Box::new(
                 provision.clone(),
             )),
@@ -2062,9 +2062,9 @@ async fn provision_ghost_actor_endpoint(
     let outcome_service = service_id.clone();
     let outcome_authorization = authorization_ref.clone();
     let outcome_display = authoring_basis.display_name.clone();
-    let finalizer: soland_storage::AppletUnitFinalizer = std::sync::Arc::new(move |references| {
+    let finalizer: coland_storage::AppletUnitFinalizer = std::sync::Arc::new(move |references| {
         let bundle = provision.managed_actor_bundle.as_ref().ok_or_else(|| {
-            soland_storage::PersistenceError::Conflict("creation bundle absent".to_owned())
+            coland_storage::PersistenceError::Conflict("creation bundle absent".to_owned())
         })?;
         let outcome = GhostActorProvisionOutcome {
             ghost_actor_id: outcome_actor.clone(),
@@ -2090,11 +2090,11 @@ async fn provision_ghost_actor_endpoint(
             display_name: outcome_display.clone(),
         };
         let response_body = serde_json::to_value(outcome)
-            .map_err(|error| soland_storage::PersistenceError::Internal(error.to_string()))?;
-        Ok(soland_storage::AppletUnitFinalization {
-            applet_record: soland_storage::AppletRecordCommit {
+            .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))?;
+        Ok(coland_storage::AppletUnitFinalization {
+            applet_record: coland_storage::AppletRecordCommit {
                 applet_id: typed_path_applet_id.clone(),
-                identity: soland_storage::AppletIdentityCommit {
+                identity: coland_storage::AppletIdentityCommit {
                     target_station_id: target_station_id.clone(),
                     expected_record: Some(identity_value.clone()),
                     record: identity_value.clone(),
@@ -2102,7 +2102,7 @@ async fn provision_ghost_actor_endpoint(
                 expected_record: Some(expected_applet_record.clone()),
                 record: applet_record_value.clone(),
             },
-            idempotency_record: soland_storage::IdempotencyRecord {
+            idempotency_record: coland_storage::IdempotencyRecord {
                 authenticated_actor: arkret_wire::ActorId::service(outcome_service.clone()),
                 operation_id: "ak.self.applet.ghost.command.provision".to_owned(),
                 idempotency_key: idempotency_key.clone(),
@@ -2820,7 +2820,7 @@ mod revoke_saga_tests {
             .unwrap_err();
         assert_eq!(
             expired.http_status(),
-            soland_http::error::error_http_status(expired.code)
+            coland_http::error::error_http_status(expired.code)
         );
         assert_eq!(expired.wire_code(), "authoring_request_expired");
         assert!(

@@ -197,7 +197,7 @@ pub(crate) async fn enqueue_mls_welcome_in_connection(
     {
         return Err(PersistenceError::Conflict(format!(
             "{}: the KeyPackage claim already serves another accepted Welcome",
-            soland_storage::ConflictCode::DuplicateConflict
+            coland_storage::ConflictCode::DuplicateConflict
         ))
         .into());
     }
@@ -267,7 +267,7 @@ pub(crate) async fn enqueue_mls_welcome_in_connection(
     if outstanding.count >= i64::try_from(recipient_queue_capacity).unwrap_or(i64::MAX) {
         return Err(PersistenceError::Conflict(format!(
             "{}: recipient queue is at capacity",
-            soland_storage::ConflictCode::RecipientQueueAtCapacity
+            coland_storage::ConflictCode::RecipientQueueAtCapacity
         ))
         .into());
     }

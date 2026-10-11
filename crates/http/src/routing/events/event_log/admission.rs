@@ -50,7 +50,7 @@ pub fn realm_policy_bundle_check(
     media_plaintext_service_present: bool,
 ) -> Result<(), (ErrorCode, String)> {
     if let Some(join_policy) = payload.get("join_policy") {
-        soland_services::operation_semantics::validate_join_policy_payload(join_policy).map_err(
+        coland_services::operation_semantics::validate_join_policy_payload(join_policy).map_err(
             |reason| {
                 (
                     ErrorCode::SchemaViolation,

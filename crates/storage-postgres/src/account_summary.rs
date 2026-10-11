@@ -8,11 +8,11 @@
 //! Commit leaves no summary behind.
 
 use arkret_models_collaboration::events_payloads::realm::RealmProfile;
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::OptionalExtension as _;
 use diesel::sql_types::{BigInt, Bool, Jsonb, Nullable, Text};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::Value;
-use soland_storage::{PersistenceError, PersistenceResult};
 
 #[derive(diesel::QueryableByName)]
 struct MemberRow {

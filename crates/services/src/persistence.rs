@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use arkret_identifiers::RealmId;
-use soland_storage::{PersistenceResult, PersistenceStore};
+use coland_storage::{PersistenceResult, PersistenceStore};
 
 use crate::delivery::{DeliveryService, ObjectStoragePort};
 use crate::events::{RealmDirectoryEntry, RealmDirectoryIndex};
@@ -69,15 +69,15 @@ impl PersistenceHandle {
 
     pub async fn admit_consent(
         &self,
-        write: soland_storage::ConsentAdmissionWrite,
-    ) -> PersistenceResult<soland_storage::ConsentAdmissionOutcome> {
+        write: coland_storage::ConsentAdmissionWrite,
+    ) -> PersistenceResult<coland_storage::ConsentAdmissionOutcome> {
         self.persistence.consent_current().admit(write).await
     }
 
     pub async fn admit_consented_invite_delivery(
         &self,
-        write: soland_storage::ConsentDeliveryWrite,
-    ) -> PersistenceResult<Option<soland_storage::AccountDataCasResult>> {
+        write: coland_storage::ConsentDeliveryWrite,
+    ) -> PersistenceResult<Option<coland_storage::AccountDataCasResult>> {
         self.persistence
             .consent_current()
             .admit_invite_delivery(write)
@@ -87,7 +87,7 @@ impl PersistenceHandle {
     pub async fn consent_current(
         &self,
         holder: &arkret_wire::AccountId,
-    ) -> PersistenceResult<Vec<soland_storage::ConsentCurrentRecord>> {
+    ) -> PersistenceResult<Vec<coland_storage::ConsentCurrentRecord>> {
         self.persistence.consent_current().list(holder).await
     }
     pub async fn retain_forward_current_signer_evidence(
@@ -142,8 +142,8 @@ impl PersistenceHandle {
     /// account-private winner (`ak.private.read_cursor.v1`).
     pub async fn advance_read_cursor(
         &self,
-        advance: &soland_storage::ReadCursorAdvance,
-    ) -> PersistenceResult<soland_storage::ReadCursorAdvanceOutcome> {
+        advance: &coland_storage::ReadCursorAdvance,
+    ) -> PersistenceResult<coland_storage::ReadCursorAdvanceOutcome> {
         self.persistence.read_cursors().advance(advance).await
     }
 
@@ -151,8 +151,8 @@ impl PersistenceHandle {
     /// holder CAS in one private transaction.
     pub async fn admit_actor_private_account_data(
         &self,
-        admission: &soland_storage::ActorPrivateAccountDataAdmission,
-    ) -> PersistenceResult<soland_storage::ActorPrivateAccountDataOutcome> {
+        admission: &coland_storage::ActorPrivateAccountDataAdmission,
+    ) -> PersistenceResult<coland_storage::ActorPrivateAccountDataOutcome> {
         self.persistence
             .account_data()
             .admit_actor_private_event(admission)
@@ -163,8 +163,8 @@ impl PersistenceHandle {
     /// operation into its owner's private store with the exact-retry ledger.
     pub async fn submit_actor_private_event(
         &self,
-        submission: &soland_storage::ActorPrivateEventSubmission,
-    ) -> PersistenceResult<soland_storage::ActorPrivateEventSubmitResult> {
+        submission: &coland_storage::ActorPrivateEventSubmission,
+    ) -> PersistenceResult<coland_storage::ActorPrivateEventSubmitResult> {
         self.persistence
             .actor_private_events()
             .submit(submission)
@@ -185,8 +185,8 @@ impl PersistenceHandle {
     /// Admit one holder-signed Actor Profile Event through its PCR unit.
     pub async fn admit_actor_profile(
         &self,
-        write: soland_storage::ActorProfileAdmissionWrite,
-    ) -> PersistenceResult<soland_storage::ActorProfileAdmissionOutcome> {
+        write: coland_storage::ActorProfileAdmissionWrite,
+    ) -> PersistenceResult<coland_storage::ActorProfileAdmissionOutcome> {
         self.persistence.actor_profiles().admit_profile(write).await
     }
 
@@ -194,8 +194,8 @@ impl PersistenceHandle {
     /// controller-PCR unit.
     pub async fn admit_agent_provision(
         &self,
-        write: soland_storage::AgentProvisionAdmissionWrite,
-    ) -> PersistenceResult<soland_storage::AgentProvisionAdmissionOutcome> {
+        write: coland_storage::AgentProvisionAdmissionWrite,
+    ) -> PersistenceResult<coland_storage::AgentProvisionAdmissionOutcome> {
         self.persistence
             .actor_profiles()
             .admit_agent_provision(write)
@@ -205,8 +205,8 @@ impl PersistenceHandle {
     /// Admit one controller-executed Agent PCR genesis through its unit.
     pub async fn admit_agent_pcr_genesis(
         &self,
-        write: soland_storage::AgentPcrGenesisAdmissionWrite,
-    ) -> PersistenceResult<soland_storage::AgentPcrGenesisAdmissionOutcome> {
+        write: coland_storage::AgentPcrGenesisAdmissionWrite,
+    ) -> PersistenceResult<coland_storage::AgentPcrGenesisAdmissionOutcome> {
         self.persistence
             .actor_profiles()
             .admit_agent_pcr_genesis(write)
@@ -216,8 +216,8 @@ impl PersistenceHandle {
     /// Admit one controller-executed Agent PCR control Event through its unit.
     pub async fn admit_agent_control_event(
         &self,
-        write: soland_storage::AgentControlAdmissionWrite,
-    ) -> PersistenceResult<soland_storage::AgentControlAdmissionOutcome> {
+        write: coland_storage::AgentControlAdmissionWrite,
+    ) -> PersistenceResult<coland_storage::AgentControlAdmissionOutcome> {
         self.persistence
             .actor_profiles()
             .admit_agent_control_event(write)
@@ -227,8 +227,8 @@ impl PersistenceHandle {
     /// Admit one issuer-signed accountability grant through its PCR unit.
     pub async fn admit_accountability_grant(
         &self,
-        write: soland_storage::AccountabilityGrantAdmissionWrite,
-    ) -> PersistenceResult<soland_storage::AccountabilityGrantAdmissionOutcome> {
+        write: coland_storage::AccountabilityGrantAdmissionWrite,
+    ) -> PersistenceResult<coland_storage::AccountabilityGrantAdmissionOutcome> {
         self.persistence
             .actor_profiles()
             .admit_accountability_grant(write)
@@ -239,7 +239,7 @@ impl PersistenceHandle {
     pub async fn current_actor_profile(
         &self,
         account: &arkret_wire::AccountId,
-    ) -> PersistenceResult<Option<soland_storage::ActorProfileResultRecord>> {
+    ) -> PersistenceResult<Option<coland_storage::ActorProfileResultRecord>> {
         self.persistence
             .actor_profiles()
             .current_profile(account)
@@ -260,14 +260,14 @@ impl PersistenceHandle {
             .await
     }
 
-    pub(crate) fn authority_commit_store(&self) -> &dyn soland_storage::AuthorityCommitStore {
+    pub(crate) fn authority_commit_store(&self) -> &dyn coland_storage::AuthorityCommitStore {
         self.persistence.authority_commits()
     }
 
     pub async fn committed_event(
         &self,
         event_id: &arkret_wire::EventId,
-    ) -> PersistenceResult<Option<soland_storage::CommittedEventRecord>> {
+    ) -> PersistenceResult<Option<coland_storage::CommittedEventRecord>> {
         self.persistence
             .authority_commits()
             .committed_event(event_id)
@@ -282,7 +282,7 @@ impl PersistenceHandle {
     /// durable truth as admission without exposing the storage registry.
     pub async fn relation_current_results(
         &self,
-    ) -> PersistenceResult<Vec<soland_storage::RelationCurrentResultRecord>> {
+    ) -> PersistenceResult<Vec<coland_storage::RelationCurrentResultRecord>> {
         self.persistence
             .relation_current_results()
             .snapshot_all()
@@ -295,7 +295,7 @@ impl PersistenceHandle {
     pub async fn capability_grant_current_results(
         &self,
         realm_id: &arkret_wire::RealmId,
-    ) -> PersistenceResult<Vec<soland_storage::CapabilityGrantCurrentResultRecord>> {
+    ) -> PersistenceResult<Vec<coland_storage::CapabilityGrantCurrentResultRecord>> {
         self.persistence
             .capability_grant_current_results()
             .snapshot_for_realm(realm_id)
@@ -305,7 +305,7 @@ impl PersistenceHandle {
     /// Every current Capability Grant of every Realm.
     pub async fn all_capability_grant_current_results(
         &self,
-    ) -> PersistenceResult<Vec<soland_storage::CapabilityGrantCurrentResultRecord>> {
+    ) -> PersistenceResult<Vec<coland_storage::CapabilityGrantCurrentResultRecord>> {
         self.persistence
             .capability_grant_current_results()
             .snapshot_all()
@@ -316,7 +316,7 @@ impl PersistenceHandle {
     pub async fn active_capability_grants_for_subject(
         &self,
         subject: &arkret_wire::ActorId,
-    ) -> PersistenceResult<Vec<soland_storage::CapabilityGrantCurrentResultRecord>> {
+    ) -> PersistenceResult<Vec<coland_storage::CapabilityGrantCurrentResultRecord>> {
         self.persistence
             .capability_grant_current_results()
             .active_for_subject(subject)
@@ -329,7 +329,7 @@ impl PersistenceHandle {
         &self,
         invitee: &arkret_wire::AccountId,
         realm_id: Option<&arkret_wire::RealmId>,
-    ) -> PersistenceResult<Vec<soland_storage::DirectedInviteCurrent>> {
+    ) -> PersistenceResult<Vec<coland_storage::DirectedInviteCurrent>> {
         self.persistence
             .invite_current_results()
             .open_directed_invites_for_invitee(invitee, realm_id)
@@ -340,7 +340,7 @@ impl PersistenceHandle {
     pub async fn invites_in_realm(
         &self,
         realm_id: Option<&arkret_wire::RealmId>,
-    ) -> PersistenceResult<Vec<soland_storage::InviteCurrent>> {
+    ) -> PersistenceResult<Vec<coland_storage::InviteCurrent>> {
         self.persistence
             .invite_current_results()
             .invites_in_realm(realm_id)
@@ -354,7 +354,7 @@ impl PersistenceHandle {
         realm_id: &arkret_wire::RealmId,
         actor: &arkret_wire::ActorId,
         at: chrono::DateTime<chrono::Utc>,
-    ) -> PersistenceResult<soland_storage::ActorRealmAuthorization> {
+    ) -> PersistenceResult<coland_storage::ActorRealmAuthorization> {
         self.persistence
             .capability_grant_current_results()
             .actor_authorization(realm_id, actor, at)
@@ -365,7 +365,7 @@ impl PersistenceHandle {
         &self,
         record: &arkret_models_collaboration::account_status::AccountStatusRecord,
         receipt: &arkret_models_collaboration::account_status::AccountStatusReceipt,
-    ) -> crate::ServiceResult<soland_storage::AccountStatusReplicaAppend> {
+    ) -> crate::ServiceResult<coland_storage::AccountStatusReplicaAppend> {
         Ok(self
             .persistence
             .account_status_replicas()
@@ -432,7 +432,7 @@ impl PersistenceHandle {
     pub async fn merge_account_status_affected_services(
         &self,
         account_id: &arkret_wire::AccountId,
-        observations: &[soland_storage::AccountStatusAffectedServiceObservation],
+        observations: &[coland_storage::AccountStatusAffectedServiceObservation],
         max_services: usize,
     ) -> crate::ServiceResult<Vec<arkret_wire::DidCoreId>> {
         Ok(self
@@ -447,7 +447,7 @@ impl PersistenceHandle {
         account_id: &arkret_wire::AccountId,
         holder_service_id: &arkret_wire::DidCoreId,
         observed_at: chrono::DateTime<chrono::Utc>,
-    ) -> crate::ServiceResult<Vec<soland_storage::AccountStatusAffectedServiceObservation>> {
+    ) -> crate::ServiceResult<Vec<coland_storage::AccountStatusAffectedServiceObservation>> {
         Ok(self
             .persistence
             .account_status_replicas()
@@ -473,7 +473,7 @@ impl PersistenceHandle {
         destinations: &[arkret_wire::DidCoreId],
         deadline_at: chrono::DateTime<chrono::Utc>,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> crate::ServiceResult<soland_storage::AccountStatusPropagationProjection> {
+    ) -> crate::ServiceResult<coland_storage::AccountStatusPropagationProjection> {
         Ok(self
             .persistence
             .account_status_replicas()
@@ -486,7 +486,7 @@ impl PersistenceHandle {
         account_status_record_id: &arkret_wire::AccountStatusRecordId,
         destination_id: &arkret_wire::DidCoreId,
         acknowledged_at: chrono::DateTime<chrono::Utc>,
-    ) -> crate::ServiceResult<Option<soland_storage::AccountStatusPropagationProjectionTransition>>
+    ) -> crate::ServiceResult<Option<coland_storage::AccountStatusPropagationProjectionTransition>>
     {
         Ok(self
             .persistence
@@ -503,7 +503,7 @@ impl PersistenceHandle {
         &self,
         account_id: &arkret_wire::AccountId,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> crate::ServiceResult<Option<soland_storage::AccountStatusPropagationProjectionTransition>>
+    ) -> crate::ServiceResult<Option<coland_storage::AccountStatusPropagationProjectionTransition>>
     {
         Ok(self
             .persistence
@@ -517,7 +517,7 @@ impl PersistenceHandle {
         actor: &arkret_wire::ActorId,
         key: &str,
         request_hash: &str,
-    ) -> crate::ServiceResult<Option<soland_storage::ContactCompletionState>> {
+    ) -> crate::ServiceResult<Option<coland_storage::ContactCompletionState>> {
         Ok(self
             .persistence
             .contacts()
@@ -528,7 +528,7 @@ impl PersistenceHandle {
         &self,
         limit: u16,
         after: Option<&arkret_wire::Hash>,
-    ) -> crate::ServiceResult<Vec<soland_storage::CommittedContactCompletionIntent>> {
+    ) -> crate::ServiceResult<Vec<coland_storage::CommittedContactCompletionIntent>> {
         Ok(self
             .persistence
             .contacts()
@@ -537,9 +537,9 @@ impl PersistenceHandle {
     }
     pub async fn finalize_contact_completion_intent(
         &self,
-        ready: &soland_storage::CommittedContactCompletionIntent,
-        result: &soland_storage::ContactCompletionResult,
-        delivery: Option<&soland_storage::FederationOutboxRecord>,
+        ready: &coland_storage::CommittedContactCompletionIntent,
+        result: &coland_storage::ContactCompletionResult,
+        delivery: Option<&coland_storage::FederationOutboxRecord>,
         counterpart_proof: Option<
             &arkret_models_collaboration::contact_operations::ContactCurrentProof,
         >,
@@ -555,7 +555,7 @@ impl PersistenceHandle {
         &self,
         target_holder_principal_id: &str,
         request_event_id: &str,
-    ) -> crate::ServiceResult<Option<soland_storage::ContactVerifiedMirrorRecord>> {
+    ) -> crate::ServiceResult<Option<coland_storage::ContactVerifiedMirrorRecord>> {
         Ok(self
             .persistence
             .contact_verified_mirrors()
@@ -565,7 +565,7 @@ impl PersistenceHandle {
 
     pub async fn put_contact_verified_mirror(
         &self,
-        record: &soland_storage::ContactVerifiedMirrorRecord,
+        record: &coland_storage::ContactVerifiedMirrorRecord,
     ) -> crate::ServiceResult<()> {
         Ok(self
             .persistence
@@ -577,7 +577,7 @@ impl PersistenceHandle {
     pub async fn agent_cleanup_intent(
         &self,
         cleanup_intent_digest: &arkret_wire::Hash,
-    ) -> crate::ServiceResult<Option<soland_storage::AgentCleanupRecord>> {
+    ) -> crate::ServiceResult<Option<coland_storage::AgentCleanupRecord>> {
         Ok(self
             .persistence
             .agent_membership_cascades()
@@ -588,7 +588,7 @@ impl PersistenceHandle {
     pub async fn agent_cleanup_intent_for_terminal_event(
         &self,
         controller_terminal_event_id: &arkret_wire::EventId,
-    ) -> crate::ServiceResult<Option<soland_storage::AgentCleanupRecord>> {
+    ) -> crate::ServiceResult<Option<coland_storage::AgentCleanupRecord>> {
         Ok(self
             .persistence
             .agent_membership_cascades()
@@ -600,7 +600,7 @@ impl PersistenceHandle {
         &self,
         now: chrono::DateTime<chrono::Utc>,
         limit: usize,
-    ) -> crate::ServiceResult<Vec<soland_storage::AgentCleanupRecord>> {
+    ) -> crate::ServiceResult<Vec<coland_storage::AgentCleanupRecord>> {
         Ok(self
             .persistence
             .agent_membership_cascades()
@@ -610,8 +610,8 @@ impl PersistenceHandle {
 
     pub async fn device_revocation_gate_status(
         &self,
-        selector: &soland_storage::DeviceRevocationGateSelector,
-    ) -> crate::ServiceResult<soland_storage::DeviceRevocationGateStatus> {
+        selector: &coland_storage::DeviceRevocationGateSelector,
+    ) -> crate::ServiceResult<coland_storage::DeviceRevocationGateStatus> {
         Ok(self
             .persistence
             .device_revocations()
@@ -622,7 +622,7 @@ impl PersistenceHandle {
     pub async fn pcr_device_generation(
         &self,
         account: &arkret_wire::AccountId,
-    ) -> crate::ServiceResult<Option<soland_storage::PcrDeviceGeneration>> {
+    ) -> crate::ServiceResult<Option<coland_storage::PcrDeviceGeneration>> {
         Ok(self
             .persistence
             .device_revocations()
@@ -658,8 +658,8 @@ impl PersistenceHandle {
     pub async fn push_registration_handoff_for_local_route(
         &self,
         source_station_id: &arkret_wire::DidCoreId,
-        local_route: &soland_storage::PushRegistrationHandoffRouteLocator,
-    ) -> crate::ServiceResult<Option<soland_storage::PushRegistrationHandoffIntentRecord>> {
+        local_route: &coland_storage::PushRegistrationHandoffRouteLocator,
+    ) -> crate::ServiceResult<Option<coland_storage::PushRegistrationHandoffIntentRecord>> {
         Ok(self
             .persistence
             .push_registration_handoffs()
@@ -669,8 +669,8 @@ impl PersistenceHandle {
 
     pub async fn reserve_push_hard_logout_journal(
         &self,
-        record: &soland_storage::PushHardLogoutJournalRecord,
-    ) -> crate::ServiceResult<soland_storage::PushHardLogoutJournalRecord> {
+        record: &coland_storage::PushHardLogoutJournalRecord,
+    ) -> crate::ServiceResult<coland_storage::PushHardLogoutJournalRecord> {
         Ok(self
             .persistence
             .push_registration_handoffs()
@@ -681,7 +681,7 @@ impl PersistenceHandle {
     pub async fn push_hard_logout_journal(
         &self,
         grant_token_digest: &str,
-    ) -> crate::ServiceResult<Option<soland_storage::PushHardLogoutJournalRecord>> {
+    ) -> crate::ServiceResult<Option<coland_storage::PushHardLogoutJournalRecord>> {
         Ok(self
             .persistence
             .push_registration_handoffs()
@@ -693,7 +693,7 @@ impl PersistenceHandle {
         &self,
         after_digest: Option<&str>,
         limit: usize,
-    ) -> crate::ServiceResult<Vec<soland_storage::PushHardLogoutJournalRecord>> {
+    ) -> crate::ServiceResult<Vec<coland_storage::PushHardLogoutJournalRecord>> {
         Ok(self
             .persistence
             .push_registration_handoffs()
@@ -731,13 +731,13 @@ impl PersistenceHandle {
     pub async fn ensure_push_registration_handoff_intent(
         &self,
         source_station_id: &arkret_wire::DidCoreId,
-        local_route: &soland_storage::PushRegistrationHandoffRouteLocator,
-        device_authorization: &soland_storage::DeviceRevocationGateSelector,
+        local_route: &coland_storage::PushRegistrationHandoffRouteLocator,
+        device_authorization: &coland_storage::DeviceRevocationGateSelector,
         client_input_digest: &arkret_wire::Hash,
         request: &arkret::PushRegistrationHandoffRequestBody,
         session_revocation_ref: Option<&str>,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> crate::ServiceResult<soland_storage::PushRegistrationHandoffIntentWrite> {
+    ) -> crate::ServiceResult<coland_storage::PushRegistrationHandoffIntentWrite> {
         Ok(self
             .persistence
             .push_registration_handoffs()
@@ -760,7 +760,7 @@ impl PersistenceHandle {
         push_key: Option<&str>,
         app_id: Option<&str>,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> crate::ServiceResult<Vec<soland_storage::PushRegistrationHandoffIntentRecord>> {
+    ) -> crate::ServiceResult<Vec<coland_storage::PushRegistrationHandoffIntentRecord>> {
         Ok(self
             .persistence
             .push_registration_handoffs()
@@ -783,9 +783,9 @@ impl PersistenceHandle {
     pub async fn awaiting_public_push_revocations(
         &self,
         source_station_id: &arkret_wire::DidCoreId,
-        after: Option<&soland_storage::PushRegistrationHandoffRetryCursor>,
+        after: Option<&coland_storage::PushRegistrationHandoffRetryCursor>,
         limit: usize,
-    ) -> crate::ServiceResult<Vec<soland_storage::PushRegistrationHandoffIntentRecord>> {
+    ) -> crate::ServiceResult<Vec<coland_storage::PushRegistrationHandoffIntentRecord>> {
         Ok(self
             .persistence
             .push_registration_handoffs()
@@ -797,9 +797,9 @@ impl PersistenceHandle {
         &self,
         source_station_id: &arkret_wire::DidCoreId,
         now: chrono::DateTime<chrono::Utc>,
-        after: Option<&soland_storage::PushRegistrationHandoffExpiryCursor>,
+        after: Option<&coland_storage::PushRegistrationHandoffExpiryCursor>,
         limit: usize,
-    ) -> crate::ServiceResult<soland_storage::PushRegistrationHandoffExpiryPage> {
+    ) -> crate::ServiceResult<coland_storage::PushRegistrationHandoffExpiryPage> {
         Ok(self
             .persistence
             .push_registration_handoffs()
@@ -814,7 +814,7 @@ impl PersistenceHandle {
         expected_request_digest: &arkret_wire::Hash,
         receipt: &arkret::PushRegistrationInstallationReceipt,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> crate::ServiceResult<soland_storage::PushRegistrationHandoffReceiptWrite> {
+    ) -> crate::ServiceResult<coland_storage::PushRegistrationHandoffReceiptWrite> {
         Ok(self
             .persistence
             .push_registration_handoffs()
@@ -832,15 +832,15 @@ impl PersistenceHandle {
     pub async fn commit_verified_push_registration_handoff(
         &self,
         source_station_id: &arkret_wire::DidCoreId,
-        local_route: &soland_storage::PushRegistrationHandoffRouteLocator,
+        local_route: &coland_storage::PushRegistrationHandoffRouteLocator,
         registration_id: &arkret::PushRegistrationId,
         expected_request_digest: &arkret_wire::Hash,
         receipt: &arkret::PushRegistrationInstallationReceipt,
-        authorization: &soland_storage::DeviceRevocationGateSelector,
+        authorization: &coland_storage::DeviceRevocationGateSelector,
         registration: &arkret::PushRegistrationRecord,
         session_revocation_ref: Option<&str>,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> crate::ServiceResult<soland_storage::PushRegistrationHandoffReceiptWrite> {
+    ) -> crate::ServiceResult<coland_storage::PushRegistrationHandoffReceiptWrite> {
         Ok(self
             .persistence
             .push_registration_handoffs()
@@ -860,8 +860,8 @@ impl PersistenceHandle {
 
     pub async fn device_revocation_targets(
         &self,
-        selector: &soland_storage::DeviceRevocationGateSelector,
-    ) -> crate::ServiceResult<Vec<soland_storage::DeviceRevocationTargetRecord>> {
+        selector: &coland_storage::DeviceRevocationGateSelector,
+    ) -> crate::ServiceResult<Vec<coland_storage::DeviceRevocationTargetRecord>> {
         Ok(self
             .persistence
             .device_revocations()
@@ -871,8 +871,8 @@ impl PersistenceHandle {
 
     pub async fn linearize_device_revocation_gate(
         &self,
-        request: soland_storage::DeviceRevocationGateLinearizationRequest,
-    ) -> crate::ServiceResult<soland_storage::DeviceRevocationGateLinearization> {
+        request: coland_storage::DeviceRevocationGateLinearizationRequest,
+    ) -> crate::ServiceResult<coland_storage::DeviceRevocationGateLinearization> {
         Ok(self
             .persistence
             .device_revocations()
@@ -883,7 +883,7 @@ impl PersistenceHandle {
     pub async fn pending_device_revocation_cleanup_intents(
         &self,
         limit: usize,
-    ) -> crate::ServiceResult<Vec<soland_storage::DeviceRevocationCleanupIntent>> {
+    ) -> crate::ServiceResult<Vec<coland_storage::DeviceRevocationCleanupIntent>> {
         Ok(self
             .persistence
             .device_revocations()
@@ -919,7 +919,7 @@ impl PersistenceHandle {
         &self,
         principal_id: &arkret_identifiers::DidCoreId,
         idempotency_key: &str,
-    ) -> crate::ServiceResult<Option<soland_storage::IdempotencyRecord>> {
+    ) -> crate::ServiceResult<Option<coland_storage::IdempotencyRecord>> {
         Ok(self
             .persistence
             .idempotency_keys()
@@ -936,7 +936,7 @@ impl PersistenceHandle {
         authenticated_actor: &arkret_wire::ActorId,
         operation_id: &str,
         idempotency_key: &str,
-    ) -> crate::ServiceResult<Option<soland_storage::IdempotencyRecord>> {
+    ) -> crate::ServiceResult<Option<coland_storage::IdempotencyRecord>> {
         Ok(self
             .persistence
             .idempotency_keys()
@@ -946,7 +946,7 @@ impl PersistenceHandle {
 
     pub async fn record_idempotency(
         &self,
-        record: &soland_storage::IdempotencyRecord,
+        record: &coland_storage::IdempotencyRecord,
     ) -> crate::ServiceResult<()> {
         self.persistence.idempotency_keys().record(record).await?;
         Ok(())
@@ -954,8 +954,8 @@ impl PersistenceHandle {
 
     pub async fn complete_idempotency_reservation(
         &self,
-        expected: &soland_storage::IdempotencyRecord,
-        completed: &soland_storage::IdempotencyRecord,
+        expected: &coland_storage::IdempotencyRecord,
+        completed: &coland_storage::IdempotencyRecord,
     ) -> crate::ServiceResult<bool> {
         Ok(self
             .persistence
@@ -966,9 +966,9 @@ impl PersistenceHandle {
 
     pub async fn stored_service_route_keys(
         &self,
-        after: Option<&soland_storage::ServiceRouteStoredKey>,
+        after: Option<&coland_storage::ServiceRouteStoredKey>,
         limit: usize,
-    ) -> crate::ServiceResult<Vec<soland_storage::ServiceRouteStoredKey>> {
+    ) -> crate::ServiceResult<Vec<coland_storage::ServiceRouteStoredKey>> {
         Ok(self
             .persistence
             .service_routes()
@@ -981,7 +981,7 @@ impl PersistenceHandle {
         service_id: &arkret_wire::DidCoreId,
         service_kind: &str,
         limit: usize,
-    ) -> crate::ServiceResult<Vec<soland_storage::ServiceResolutionForkEvidence>> {
+    ) -> crate::ServiceResult<Vec<coland_storage::ServiceResolutionForkEvidence>> {
         Ok(self
             .persistence
             .service_routes()
@@ -1044,7 +1044,7 @@ impl PersistenceHandle {
     pub async fn principal_resolution_by_account_id(
         &self,
         account_id: &arkret_wire::AccountId,
-    ) -> crate::ServiceResult<Option<soland_storage::PrincipalResolutionRecord>> {
+    ) -> crate::ServiceResult<Option<coland_storage::PrincipalResolutionRecord>> {
         Ok(self
             .persistence
             .principal_resolutions()
@@ -1055,7 +1055,7 @@ impl PersistenceHandle {
     pub async fn current_principal(
         &self,
         account_id: &arkret_wire::AccountId,
-    ) -> crate::ServiceResult<soland_storage::CurrentPrincipalRead> {
+    ) -> crate::ServiceResult<coland_storage::CurrentPrincipalRead> {
         Ok(self
             .persistence
             .principal_resolutions()
@@ -1066,7 +1066,7 @@ impl PersistenceHandle {
     pub async fn principal_resolution_for_realm(
         &self,
         pcr_realm_id: &arkret_wire::RealmId,
-    ) -> crate::ServiceResult<Option<soland_storage::PrincipalResolutionRecord>> {
+    ) -> crate::ServiceResult<Option<coland_storage::PrincipalResolutionRecord>> {
         Ok(self
             .persistence
             .principal_resolutions()
@@ -1077,8 +1077,8 @@ impl PersistenceHandle {
     pub async fn compare_and_set_principal_resolution(
         &self,
         expected_current_event_ref: Option<&str>,
-        next: soland_storage::PrincipalResolutionRecord,
-    ) -> crate::ServiceResult<soland_storage::PrincipalResolutionCasResult> {
+        next: coland_storage::PrincipalResolutionRecord,
+    ) -> crate::ServiceResult<coland_storage::PrincipalResolutionCasResult> {
         Ok(self
             .persistence
             .principal_resolutions()
@@ -1140,9 +1140,9 @@ impl PersistenceHandle {
         expected_current_head: Option<String>,
         document: DidDocumentState,
         event: DidLogEvent,
-        service_identity: Option<soland_storage::ServiceIdentitySuccessor>,
-    ) -> crate::ServiceResult<soland_storage::WebvhLogCommitOutcome> {
-        let document = soland_storage::WebvhDocumentRecord {
+        service_identity: Option<coland_storage::ServiceIdentitySuccessor>,
+    ) -> crate::ServiceResult<coland_storage::WebvhLogCommitOutcome> {
+        let document = coland_storage::WebvhDocumentRecord {
             did: document.did,
             did_document: document.did_document,
             key_log_head: document.key_log_head,
@@ -1152,7 +1152,7 @@ impl PersistenceHandle {
             expires_at: document.expires_at,
             updated_at: document.updated_at,
         };
-        let event = soland_storage::WebvhLogRecord {
+        let event = coland_storage::WebvhLogRecord {
             event_digest: event.event_digest,
             did: event.did,
             seq: event.seq,
@@ -1173,7 +1173,7 @@ impl PersistenceHandle {
         document: DidDocumentState,
         event: DidLogEvent,
     ) -> crate::ServiceResult<ServiceRegistrationCommitResult> {
-        let document = soland_storage::WebvhDocumentRecord {
+        let document = coland_storage::WebvhDocumentRecord {
             did: document.did,
             did_document: document.did_document,
             key_log_head: document.key_log_head,
@@ -1183,7 +1183,7 @@ impl PersistenceHandle {
             expires_at: document.expires_at,
             updated_at: document.updated_at,
         };
-        let event = soland_storage::WebvhLogRecord {
+        let event = coland_storage::WebvhLogRecord {
             event_digest: event.event_digest,
             did: event.did,
             seq: event.seq,
@@ -1197,13 +1197,13 @@ impl PersistenceHandle {
                 .commit_service_registration(key, outcome, document, event)
                 .await?
             {
-                soland_storage::ServiceRegistrationCommitOutcome::Created(outcome) => {
+                coland_storage::ServiceRegistrationCommitOutcome::Created(outcome) => {
                     ServiceRegistrationCommitResult::Created(outcome)
                 }
-                soland_storage::ServiceRegistrationCommitOutcome::Existing(outcome) => {
+                coland_storage::ServiceRegistrationCommitOutcome::Existing(outcome) => {
                     ServiceRegistrationCommitResult::Existing(outcome)
                 }
-                soland_storage::ServiceRegistrationCommitOutcome::Conflict => {
+                coland_storage::ServiceRegistrationCommitOutcome::Conflict => {
                     ServiceRegistrationCommitResult::Conflict
                 }
             },
@@ -1212,8 +1212,8 @@ impl PersistenceHandle {
 
     pub async fn seed_demo_identity(&self) -> crate::ServiceResult<()> {
         let now = chrono::Utc::now();
-        let account = soland_storage::AccountRecord {
-            pk: soland_storage::AccountPk(0),
+        let account = coland_storage::AccountRecord {
+            pk: coland_storage::AccountPk(0),
             principal_id: arkret_wire::DidCoreId::new("ak:did_core:web:alice.example".to_owned())
                 .expect("demo principal id is canonical"),
             station_id: arkret_wire::DidCoreId::new("ak:did_core:web:server.example".to_owned())
@@ -1229,7 +1229,7 @@ impl PersistenceHandle {
             .realm_meta()
             .put(
                 "ak:realm:AezgkQb6OtCT0VrUyihcuY6ih8wmyafofZG6EmHBpM7e",
-                &soland_storage::RealmMetaRecord {
+                &coland_storage::RealmMetaRecord {
                     owner: arkret_wire::ActorId::account(arkret_wire::AccountId::new(
                         account.principal_id,
                         account.station_id,
@@ -1270,7 +1270,7 @@ impl PersistenceHandle {
     pub async fn session_device_authorization(
         &self,
         token: &str,
-    ) -> PersistenceResult<Option<soland_storage::DeviceRevocationGateSelector>> {
+    ) -> PersistenceResult<Option<coland_storage::DeviceRevocationGateSelector>> {
         self.persistence
             .sessions()
             .device_authorization(token)
@@ -1285,7 +1285,7 @@ impl PersistenceHandle {
         self.persistence.devices().revoke_actor(actor, at).await
     }
 
-    pub fn member_identity_store(&self) -> &dyn soland_storage::MemberIdentityStore {
+    pub fn member_identity_store(&self) -> &dyn coland_storage::MemberIdentityStore {
         self.persistence.member_identity()
     }
 
@@ -1299,7 +1299,7 @@ impl PersistenceHandle {
     /// wire.
     pub fn invite_new_source_ledger_store(
         &self,
-    ) -> &dyn soland_storage::InviteNewSourceLedgerStore {
+    ) -> &dyn coland_storage::InviteNewSourceLedgerStore {
         self.persistence.invite_new_source_ledger()
     }
 
@@ -1307,8 +1307,8 @@ impl PersistenceHandle {
     /// Consent request entry in the same durable transaction.
     pub async fn admit_consent_request_quarantine(
         &self,
-        input: soland_storage::ConsentRequestQuarantineInput,
-    ) -> PersistenceResult<soland_storage::ConsentRequestQuarantineOutcome> {
+        input: coland_storage::ConsentRequestQuarantineInput,
+    ) -> PersistenceResult<coland_storage::ConsentRequestQuarantineOutcome> {
         self.persistence
             .consent_request_quarantine()
             .admit(input)
@@ -1385,11 +1385,11 @@ impl PersistenceHandle {
 }
 
 #[async_trait::async_trait]
-impl soland_storage::DeviceRevocationStore for PersistenceHandle {
+impl coland_storage::DeviceRevocationStore for PersistenceHandle {
     async fn pcr_device_generation(
         &self,
         account: &arkret_wire::AccountId,
-    ) -> PersistenceResult<Option<soland_storage::PcrDeviceGeneration>> {
+    ) -> PersistenceResult<Option<coland_storage::PcrDeviceGeneration>> {
         self.persistence
             .device_revocations()
             .pcr_device_generation(account)
@@ -1418,8 +1418,8 @@ impl soland_storage::DeviceRevocationStore for PersistenceHandle {
     }
     async fn gate_status(
         &self,
-        selector: &soland_storage::DeviceRevocationGateSelector,
-    ) -> PersistenceResult<soland_storage::DeviceRevocationGateStatus> {
+        selector: &coland_storage::DeviceRevocationGateSelector,
+    ) -> PersistenceResult<coland_storage::DeviceRevocationGateStatus> {
         self.persistence
             .device_revocations()
             .gate_status(selector)
@@ -1428,8 +1428,8 @@ impl soland_storage::DeviceRevocationStore for PersistenceHandle {
 
     async fn list_targets(
         &self,
-        selector: &soland_storage::DeviceRevocationGateSelector,
-    ) -> PersistenceResult<Vec<soland_storage::DeviceRevocationTargetRecord>> {
+        selector: &coland_storage::DeviceRevocationGateSelector,
+    ) -> PersistenceResult<Vec<coland_storage::DeviceRevocationTargetRecord>> {
         self.persistence
             .device_revocations()
             .list_targets(selector)
@@ -1439,7 +1439,7 @@ impl soland_storage::DeviceRevocationStore for PersistenceHandle {
     async fn target_for_event(
         &self,
         event_id: &arkret_wire::EventId,
-    ) -> PersistenceResult<Option<soland_storage::DeviceRevocationTargetRecord>> {
+    ) -> PersistenceResult<Option<coland_storage::DeviceRevocationTargetRecord>> {
         self.persistence
             .device_revocations()
             .target_for_event(event_id)
@@ -1448,8 +1448,8 @@ impl soland_storage::DeviceRevocationStore for PersistenceHandle {
 
     async fn linearize_gate(
         &self,
-        request: soland_storage::DeviceRevocationGateLinearizationRequest,
-    ) -> PersistenceResult<soland_storage::DeviceRevocationGateLinearization> {
+        request: coland_storage::DeviceRevocationGateLinearizationRequest,
+    ) -> PersistenceResult<coland_storage::DeviceRevocationGateLinearization> {
         self.persistence
             .device_revocations()
             .linearize_gate(request)
@@ -1458,8 +1458,8 @@ impl soland_storage::DeviceRevocationStore for PersistenceHandle {
 
     async fn commit_revocation(
         &self,
-        transition: &soland_storage::DeviceRevocationTransition,
-    ) -> PersistenceResult<soland_storage::DeviceRevocationTransitionDecision> {
+        transition: &coland_storage::DeviceRevocationTransition,
+    ) -> PersistenceResult<coland_storage::DeviceRevocationTransitionDecision> {
         self.persistence
             .device_revocations()
             .commit_revocation(transition)
@@ -1469,7 +1469,7 @@ impl soland_storage::DeviceRevocationStore for PersistenceHandle {
     async fn pending_cleanup_intents(
         &self,
         limit: usize,
-    ) -> PersistenceResult<Vec<soland_storage::DeviceRevocationCleanupIntent>> {
+    ) -> PersistenceResult<Vec<coland_storage::DeviceRevocationCleanupIntent>> {
         self.persistence
             .device_revocations()
             .pending_cleanup_intents(limit)
@@ -1503,12 +1503,12 @@ impl soland_storage::DeviceRevocationStore for PersistenceHandle {
 /// persistence registry as the rest of the application. No route-safety
 /// state is copied into an HTTP-local adapter.
 #[async_trait::async_trait]
-impl soland_storage::ServiceRouteStore for PersistenceHandle {
+impl coland_storage::ServiceRouteStore for PersistenceHandle {
     async fn list_stored_route_keys(
         &self,
-        after: Option<&soland_storage::ServiceRouteStoredKey>,
+        after: Option<&coland_storage::ServiceRouteStoredKey>,
         limit: usize,
-    ) -> PersistenceResult<Vec<soland_storage::ServiceRouteStoredKey>> {
+    ) -> PersistenceResult<Vec<coland_storage::ServiceRouteStoredKey>> {
         self.persistence
             .service_routes()
             .list_stored_route_keys(after, limit)
@@ -1520,7 +1520,7 @@ impl soland_storage::ServiceRouteStore for PersistenceHandle {
         service_id: &arkret_wire::DidCoreId,
         service_kind: &str,
         limit: usize,
-    ) -> PersistenceResult<Vec<soland_storage::ServiceResolutionForkEvidence>> {
+    ) -> PersistenceResult<Vec<coland_storage::ServiceResolutionForkEvidence>> {
         self.persistence
             .service_routes()
             .quarantine_evidence(service_id, service_kind, limit)
@@ -1542,7 +1542,7 @@ impl soland_storage::ServiceRouteStore for PersistenceHandle {
         &self,
         evidence: arkret_models_identity::AuthenticatedServiceResolution,
         route: arkret_models_identity::VerifiedServiceRoute,
-    ) -> PersistenceResult<soland_storage::MonotonicRouteWrite> {
+    ) -> PersistenceResult<coland_storage::MonotonicRouteWrite> {
         self.persistence
             .service_routes()
             .publish_route_cache(evidence, route)
@@ -1551,7 +1551,7 @@ impl soland_storage::ServiceRouteStore for PersistenceHandle {
 
     async fn quarantine_fork(
         &self,
-        evidence: soland_storage::ServiceResolutionForkEvidence,
+        evidence: coland_storage::ServiceResolutionForkEvidence,
     ) -> PersistenceResult<()> {
         self.persistence
             .service_routes()

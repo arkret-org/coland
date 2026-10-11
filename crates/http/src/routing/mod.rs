@@ -33,6 +33,14 @@ mod self_current_reads;
 
 use access::policy::policy_document_to_response;
 pub(crate) use admin::audit::append_audit_log;
+#[cfg(test)]
+use coland_http::util::validate_space_id;
+use coland_http::util::{
+    bearer_token, dpop_token, is_valid_sha256_hex, query_param, render_error, sha256_hex,
+    validate_device_id, validate_did,
+};
+#[cfg(any(test, feature = "conformance-harness"))]
+use coland_http::util::{handle_for_did, normalize_localpart};
 use events::operations::validate_canonical_json_value;
 #[cfg(test)]
 use events::operations::validate_operation_semantics;
@@ -43,14 +51,6 @@ use events::strand::{
 };
 use events::sync::SyncCursorError;
 use identity::auth::{auth_or_render, authenticated_session};
-#[cfg(test)]
-use soland_http::util::validate_space_id;
-use soland_http::util::{
-    bearer_token, dpop_token, is_valid_sha256_hex, query_param, render_error, sha256_hex,
-    validate_device_id, validate_did,
-};
-#[cfg(any(test, feature = "conformance-harness"))]
-use soland_http::util::{handle_for_did, normalize_localpart};
 #[cfg(test)]
 use spaces::space::realm_allows_plaintext_service_for_data_class;
 use spaces::space::{
@@ -63,7 +63,7 @@ const ARKRET_OPERATION_HEADER: &str = "Arkret-Operation";
 
 /// Select the exact canonical operation on outbound Arkret HTTP calls.
 ///
-/// Coauth validates this header before its handlers run, so every Soland ->
+/// Coauth validates this header before its handlers run, so every Coland ->
 /// Account Authority request must use the same generated operation id that
 /// selected the route locally.
 pub(crate) fn with_arkret_operation(
@@ -75,7 +75,7 @@ pub(crate) fn with_arkret_operation(
 
 // Router construction (router builders, CORS handler, root/preflight handlers).
 mod router_build;
-// OpenAPI document construction + the soland-extension operation table.
+// OpenAPI document construction + the coland-extension operation table.
 // 404/405 disambiguation, framework error catcher, sync-token guard, and the
 // `ArkretOpenApiDoc` depot type.
 // Snapshot manifest builders + small inventory/token helpers.
@@ -83,6 +83,16 @@ mod realm_state_snapshot;
 
 // Public router entry points (`crate::routing::router` and the rate-limiter /
 // request-size variants stay reachable at the same paths for `lib.rs`).
+// OpenAPI internals + 404/405 helpers shared across the routing children. The
+// glob re-exports keep these reachable from `super::*` in the child modules
+// (and from `wire.rs` via `crate::routing::coland_extension_operation_ids`).
+pub(crate) use coland_http::openapi::coland_extension_operation_ids;
+use coland_http::openapi::{arkret_openapi_json, arkret_openapi_yaml, cached_arkret_openapi_doc};
+// Framework error catcher + OpenAPI doc depot type consumed by `crate::service`
+// and `crate::routing` children.
+pub use coland_http::openapi_routes::ArkretOpenApiDoc;
+pub(crate) use coland_http::openapi_routes::error_catcher;
+use coland_http::openapi_routes::{api_not_found, wait_for_sync_token};
 /// Boot-time worker re-export (`events` is crate-private; `main` only needs
 /// this one entry point from it).
 pub use events::sync::{
@@ -98,16 +108,6 @@ pub(crate) use router_build::{cors_handler_for_origin_spec, openapi_surface_rout
 pub use router_build::{
     router, router_with_rate_limiter_and_request_size_config, router_with_rate_limiter_config,
 };
-// OpenAPI internals + 404/405 helpers shared across the routing children. The
-// glob re-exports keep these reachable from `super::*` in the child modules
-// (and from `wire.rs` via `crate::routing::soland_extension_operation_ids`).
-pub(crate) use soland_http::openapi::soland_extension_operation_ids;
-use soland_http::openapi::{arkret_openapi_json, arkret_openapi_yaml, cached_arkret_openapi_doc};
-// Framework error catcher + OpenAPI doc depot type consumed by `crate::service`
-// and `crate::routing` children.
-pub use soland_http::openapi_routes::ArkretOpenApiDoc;
-pub(crate) use soland_http::openapi_routes::error_catcher;
-use soland_http::openapi_routes::{api_not_found, wait_for_sync_token};
 
 #[cfg(test)]
 mod outbound_operation_selector_tests {

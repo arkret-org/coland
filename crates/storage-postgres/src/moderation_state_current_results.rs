@@ -10,11 +10,11 @@
 //! the exact scope's moderation action at the accepting cut; a Realm root
 //! identity alone does not authorize a Circle decision.
 
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::OptionalExtension as _;
 use diesel::sql_types::{BigInt, Bool, Jsonb, Text, Timestamptz};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::{Value, json};
-use soland_storage::{PersistenceError, PersistenceResult};
 
 #[derive(diesel::QueryableByName)]
 struct StateRow {

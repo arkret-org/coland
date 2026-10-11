@@ -66,8 +66,8 @@ pub(crate) fn verify_call_state_participant_bindings(
         .map_err(|_| "participant_binding_invalid: enclosing device_id is invalid")?;
     let participant_id = required_string(participant, "participant_id")?;
     let focus_id = required_string(participant, "focus_id")?;
-    let focus_facet = soland_domain::reducer::FacetRef::new(
-        soland_domain::reducer::facet::CALL_FOCUS,
+    let focus_facet = coland_domain::reducer::FacetRef::new(
+        coland_domain::reducer::facet::CALL_FOCUS,
         call_id.as_str(),
     );
     let projection = state.projections().snapshot();
@@ -87,7 +87,7 @@ pub(crate) fn verify_call_state_participant_bindings(
     let media = projection
         .realm_facet_value(
             operation.realm_id.as_str(),
-            soland_domain::reducer::facet::REALM_MEDIA_SERVICE,
+            coland_domain::reducer::facet::REALM_MEDIA_SERVICE,
         )
         .ok_or("token_issuer_unauthorised: current media service is missing")?;
     let service_id = DidCoreId::new(

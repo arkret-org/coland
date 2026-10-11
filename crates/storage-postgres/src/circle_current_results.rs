@@ -13,11 +13,11 @@ use arkret_wire::{
     CircleId, CircleMemberStateCurrent, CommitStreamRef, Event, EventKind, MembershipState,
     RealmCommit, SchemaId, ScopeRef, WirePresence,
 };
+use coland_storage::{ConflictCode, PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Bool, Jsonb, Text, Timestamptz};
 use diesel::{OptionalExtension as _, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::{Value, json};
-use soland_storage::{ConflictCode, PersistenceError, PersistenceResult};
 
 #[derive(diesel::QueryableByName)]
 struct CircleRow {

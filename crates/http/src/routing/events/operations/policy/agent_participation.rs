@@ -177,7 +177,7 @@ async fn agent_grant_covers_operation(
         .unwrap_or_else(|| operation.realm_id.as_str());
     let target =
         crate::authz::resource_selector(&operation.realm_id, resource).ok_or(reasons.scope)?;
-    if !soland_storage::grant_names_target(&grant.grant, &[action], &target) {
+    if !coland_storage::grant_names_target(&grant.grant, &[action], &target) {
         return Err(reasons.scope);
     }
     Ok(())
@@ -582,7 +582,7 @@ pub(super) async fn validate_agent_context(
 }
 
 /// AKP-0016 §5.2 / AKP-0008 §4.10 + architecture §7 enforcement
-/// (soland-native): every agent-originated Event carries auditable
+/// (coland-native): every agent-originated Event carries auditable
 /// `agent_context`. Reply-as-agent uses the `reply` bit; act-on-behalf uses
 /// envelope-derived `executed_by`, requires a referenced active grant, and
 /// uses the `act_on_behalf` bit. Non-agent actors fall through to standard

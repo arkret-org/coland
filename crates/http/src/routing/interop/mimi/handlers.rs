@@ -2,10 +2,10 @@ use salvo::oapi::endpoint;
 
 use super::*;
 
-#[endpoint(operation_id = "org.arkret.soland.interop.mimi.protocol_directory")]
+#[endpoint(operation_id = "org.arkret.coland.interop.mimi.protocol_directory")]
 #[tracing::instrument(
     skip_all,
-    fields(op = "org.arkret.soland.interop.mimi.protocol_directory")
+    fields(op = "org.arkret.coland.interop.mimi.protocol_directory")
 )]
 pub(super) async fn mimi_protocol_directory(
     depot: &mut Depot,
@@ -350,7 +350,7 @@ pub(super) async fn mimi_room_message(
         arkret_models_collaboration::events_payloads::message::MessageCreatePayload,
     >(event_payload)
     .map_err(|error| {
-        mimi_admission_error(soland_services::ServiceError::SchemaViolation(
+        mimi_admission_error(coland_services::ServiceError::SchemaViolation(
             error.to_string(),
         ))
     })?;
@@ -513,7 +513,7 @@ pub(super) async fn verify_mimi_consent_write_authority(
 ) -> Result<
     (
         Option<String>,
-        Option<soland_services::identity::SessionIdentityState>,
+        Option<coland_services::identity::SessionIdentityState>,
     ),
     AppError,
 > {
@@ -685,7 +685,7 @@ async fn verify_mimi_key_material_request_proofs(
 async fn verify_mimi_request_consent_proofs(
     state: &AppState,
     body: &MimiRequestConsentRequestBody,
-    session: Option<&soland_services::identity::SessionIdentityState>,
+    session: Option<&coland_services::identity::SessionIdentityState>,
 ) -> Result<(), AppError> {
     if body.proofs.is_empty() {
         return Err(mimi_consent_proof_invalid());
@@ -719,7 +719,7 @@ async fn verify_mimi_consent_requester_proof(
     binding: &[u8],
     proof: &arkret_wire::PayloadProof,
     actor: &arkret_wire::ActorId,
-    session: Option<&soland_services::identity::SessionIdentityState>,
+    session: Option<&coland_services::identity::SessionIdentityState>,
 ) -> Result<(), AppError> {
     // This operation has no authorized remote PCR disclosure carrier. Check
     // the exact Station before any local principal or private PCR lookup.
@@ -877,7 +877,7 @@ async fn verify_mimi_consent_update_authority(
     body: &MimiUpdateConsentRequestBody,
 ) -> Result<
     (
-        Option<soland_services::identity::SessionIdentityState>,
+        Option<coland_services::identity::SessionIdentityState>,
         Option<String>,
     ),
     AppError,
@@ -1206,7 +1206,7 @@ pub(super) async fn mimi_report_abuse(
         arkret_models_collaboration::events_payloads::moderation::ModerationReportPayload,
     >(payload)
     .map_err(|e| {
-        mimi_admission_error(soland_services::ServiceError::SchemaViolation(
+        mimi_admission_error(coland_services::ServiceError::SchemaViolation(
             e.to_string(),
         ))
     })?;
@@ -1222,7 +1222,7 @@ pub(super) async fn mimi_report_abuse(
         routed_to_ids: Vec::new(),
     };
     let at = chrono::Utc::now();
-    let guard = soland_storage::SelfProducerCommitGuard::MimiFacade {
+    let guard = coland_storage::SelfProducerCommitGuard::MimiFacade {
         service_id: state.service_core_id(),
         verification_method: event
             .producer_proof
@@ -1250,7 +1250,7 @@ pub(super) async fn mimi_report_abuse(
         mapping_receipt: None,
         reporter_device_guard: Some(Box::new(selector)),
     };
-    let idempotency = soland_services::events::IdempotentResponse {
+    let idempotency = coland_services::events::IdempotentResponse {
         authenticated_actor: authenticated_actor.clone(),
         operation_id: operation.into(),
         key: key.clone(),
@@ -1410,8 +1410,8 @@ mod consent_proof_tests {
     use arkret_wire::{
         Audience, EventAdmissionSubmission, EventKind, PayloadProof, ScopeRef, proof_kind,
     };
-    use soland_http::error::ErrorCode;
-    use soland_storage_postgres::Db;
+    use coland_http::error::ErrorCode;
+    use coland_storage_postgres::Db;
 
     use super::*;
 

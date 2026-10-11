@@ -34,7 +34,7 @@ fn rust_sources(root: &Path, out: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn no_soland_source_hand_rolls_the_event_digest_preimage() {
+fn no_coland_source_hand_rolls_the_event_digest_preimage() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut sources = Vec::new();
     for tree in [

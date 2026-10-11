@@ -12,7 +12,7 @@ pub(super) struct EmbeddedWebvhLocation {
 
 pub(super) fn identity_trust_roots(state: &AppState) -> Vec<Value> {
     let mut trust_roots = vec![json!({
-        "id": "soland.local_identity_store",
+        "id": "coland.local_identity_store",
         "kind": "local_identity_store",
         "profile": arkret_wire::ProfileId::IDENTITY_REGISTRY_V1,
         "service_id": state.service_id(),
@@ -21,7 +21,7 @@ pub(super) fn identity_trust_roots(state: &AppState) -> Vec<Value> {
             "controller_proof": "eddsa-jcs-2022",
             "webvh_log_chain": "required",
             "webvh_scid": "required",
-            // Fail-closed today: soland cannot verify witness evidence, so a
+            // Fail-closed today: coland cannot verify witness evidence, so a
             // log declaring a witness policy is always rejected with
             // WitnessQuorumNotMet (`webvh_validation::validate_witness_policy_for_log`).
             "webvh_witness_quorum": "unsupported"
@@ -40,7 +40,7 @@ pub(super) fn identity_trust_roots(state: &AppState) -> Vec<Value> {
 }
 
 pub(super) fn did_webvh_descriptor(state: &AppState) -> Value {
-    let embedded_id = "soland.embedded";
+    let embedded_id = "coland.embedded";
     let external_id = "external.webvh";
     let embedded_enabled = state.config().embedded_webvh_provider_enabled;
     let embedded_registration_auth_configured = state
@@ -92,19 +92,19 @@ pub(super) fn did_webvh_descriptor(state: &AppState) -> Value {
         providers.push(json!({
             "id": embedded_id,
             "kind": "embedded",
-            "label": "Soland embedded did:webvh",
+            "label": "Coland embedded did:webvh",
             "method": "did:webvh",
             "adapter_version": arkret_models_identity::DID_WEBVH_V1_METHOD,
             "default": default_provider_id.as_deref() == Some(embedded_id),
             "active": active,
-            // The embedded webvh provider is a soland *deployment* facility, so
+            // The embedded webvh provider is a coland *deployment* facility, so
             // its registration entrypoint intentionally lives on the product
-            // face (`/_soland/...`), not the protocol face — webvh registration
+            // face (`/_coland/...`), not the protocol face — webvh registration
             // is not a `ak.*` protocol operation (only resolution is). Flag it
             // as deployment-local so clients can distinguish the product-face
             // registration URL from the protocol-face `resolver_url` below.
             "provider_local": true,
-            "registration_url": format!("{}/_soland/root/identity/webvh/register", state.config().public_base_url.trim_end_matches('/')),
+            "registration_url": format!("{}/_coland/root/identity/webvh/register", state.config().public_base_url.trim_end_matches('/')),
             "resolver_url": format!("{}/_arkret/root/identity", state.config().public_base_url.trim_end_matches('/')),
             "document_url_template": document_url_template,
             "log_url_template": log_url_template,
@@ -181,7 +181,7 @@ pub(in crate::routing::identity) fn require_embedded_webvh_registration_bearer(
     else {
         return Err(crate::app_error!(
             TemporarilyUnavailable,
-            "embedded did:webvh registration requires SOLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER",
+            "embedded did:webvh registration requires COLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER",
         ));
     };
     let Some(provided) = bearer_token(req)
@@ -277,12 +277,12 @@ pub(super) fn embedded_webvh_did(method_authority: &str, scid: &str, local_id: &
 
 pub(super) fn embedded_webvh_authority(public_base_url: &str) -> Result<(String, String), String> {
     let parsed = reqwest::Url::parse(public_base_url)
-        .map_err(|e| format!("SOLAND_PUBLIC_BASE_URL is not a valid URL: {e}"))?;
+        .map_err(|e| format!("COLAND_PUBLIC_BASE_URL is not a valid URL: {e}"))?;
     let host = parsed
         .host_str()
-        .ok_or_else(|| "SOLAND_PUBLIC_BASE_URL must include a host".to_owned())?;
+        .ok_or_else(|| "COLAND_PUBLIC_BASE_URL must include a host".to_owned())?;
     if !host.contains('.') {
-        return Err("SOLAND_PUBLIC_BASE_URL host must contain a dot for did:webvh".to_owned());
+        return Err("COLAND_PUBLIC_BASE_URL host must contain a dot for did:webvh".to_owned());
     }
     Ok(arkret_signatures::webvh::webvh_authority_pair(
         host,
@@ -300,10 +300,10 @@ pub(super) fn embedded_webvh_document_value(
     // The service array order + entry shape MUST match the registering client's
     // document byte-for-byte (canonical JSON does not sort array elements), or
     // the SCID / entry hash / log proof recomputed here will not verify. coauth's
-    // embedded_webvh provider (coauth services/soland_webvh.rs) emits the same
+    // embedded_webvh provider (coauth services/coland_webvh.rs) emits the same
     // station service entry; mirror that exactly.
     let service = vec![json!({
-        "id": format!("{did}#soland"),
+        "id": format!("{did}#coland"),
         "type": "ArkretStation",
         "serviceEndpoint": service_endpoint,
     })];

@@ -24,12 +24,12 @@ use arkret_models_collaboration::governance::membership_invite::{
     MembershipPayload, MembershipPayloadState,
 };
 use arkret_wire::{CommitStreamRef, ErrorCode, RealmId};
-use soland_services::authority_commit::AuthenticatedPeerContext;
-use soland_services::committed_receipt::{
+use coland_services::authority_commit::AuthenticatedPeerContext;
+use coland_services::committed_receipt::{
     CommitContinuity, verify_committed_event_receipt_with_source,
 };
-use soland_services::{ServiceError, ServiceResult};
-use soland_storage::{
+use coland_services::{ServiceError, ServiceResult};
+use coland_storage::{
     CommittedReplica, CommittedReplicaOutcome, CommittedReplicaRole, ConflictCode,
     VerifiedMlsWelcome,
 };

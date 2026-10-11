@@ -26,7 +26,7 @@ mod profile_admission_spy {
     use std::sync::{LazyLock, Mutex};
 
     use arkret_wire::RealmId;
-    use soland_storage::{PersistenceError, PersistenceResult};
+    use coland_storage::{PersistenceError, PersistenceResult};
 
     static WATCHED_REALMS: LazyLock<Mutex<HashMap<String, u64>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -87,14 +87,14 @@ use arkret_models_collaboration::objects::direct_conversation::{
     DirectConversationAuthorizationBasis, DirectConversationFoundingAuthorityEvidence,
 };
 use arkret_wire::{ActorId, EventId};
-#[cfg(feature = "test-support")]
-pub use profile_admission_spy::FoundingProfileAdmissionSpy;
-use soland_storage::{
+use coland_storage::{
     AuthorityCommitWriteOutcome, ConflictCode, ContactRecord,
     DirectConversationFoundingAuthorityRef, DirectConversationFoundingCommitOutcome,
     DirectConversationFoundingCommitUnit, DirectConversationFoundingFacts, FederationOutboxRecord,
     SelfProducerCommitGuard,
 };
+#[cfg(feature = "test-support")]
+pub use profile_admission_spy::FoundingProfileAdmissionSpy;
 
 use super::{
     AsyncConnection, BigInt, Binary, Jsonb, OptionalExtension, PersistenceError, PersistenceResult,

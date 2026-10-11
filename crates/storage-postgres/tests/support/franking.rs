@@ -2,19 +2,19 @@
 use std::sync::Arc;
 
 use arkret_wire::{ActorId, EventKind, ScopeRef};
-use ed25519_dalek::{Signer as _, SigningKey};
-use soland_storage::{AuthorityCommitStore, EventCommitUnitOfWork};
-use soland_storage_postgres::{
+use coland_storage::{AuthorityCommitStore, EventCommitUnitOfWork};
+use coland_storage_postgres::{
     PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPersistenceStore, PgPool,
 };
+use ed25519_dalek::{Signer as _, SigningKey};
 
 use super::ordinary_realm::human_profile;
 use super::{device_authorization_history, ordinary_realm};
 
 pub struct FrankingFixture {
-    pub accepted_target: soland_storage::EventCommitRequest,
-    pub prefix: soland_storage::EventCommitRequest,
-    pub proof: soland_storage::EventCommitRequest,
+    pub accepted_target: coland_storage::EventCommitRequest,
+    pub prefix: coland_storage::EventCommitRequest,
+    pub proof: coland_storage::EventCommitRequest,
     pub proof_payload: arkret_models_collaboration::events_payloads::moderation::FrankingProof,
     pub service_signing_key: SigningKey,
 }
@@ -30,11 +30,11 @@ pub async fn prepare(pool: &PgPool, label: &str) -> FrankingFixture {
 }
 
 fn prepared(
-    job: &soland_storage::PendingFrankingProof,
+    job: &coland_storage::PendingFrankingProof,
     nonce: u8,
     method: arkret_wire::DidUrl,
     key: &SigningKey,
-) -> soland_storage::PreparedFrankingProof {
+) -> coland_storage::PreparedFrankingProof {
     let mut proof = arkret_models_collaboration::events_payloads::moderation::FrankingProof {
         realm_id: job.realm_id.clone(),
         event_id: job.target_event_id.clone(),
@@ -71,7 +71,7 @@ fn prepared(
         arkret_signatures::SignEventOptions::new().with_created_at(job.received_at),
     )
     .unwrap();
-    soland_storage::PreparedFrankingProof {
+    coland_storage::PreparedFrankingProof {
         realm_id: job.realm_id.clone(),
         target_event_id: job.target_event_id.clone(),
         received_by: job.received_by.clone(),
@@ -100,8 +100,8 @@ async fn prepare_inner(pool: &PgPool, label: &str) -> FrankingFixture {
     let did = human_profile::station_did(&ordinary_realm::station());
     let method = arkret_wire::DidUrl::new(format!("{did}#authority")).unwrap();
     let key = SigningKey::from_bytes(&device_authorization_history::STATION_AUTHORITY_SEED);
-    let app = soland_services::authority_commit::AuthorityCommitApplication::new(
-        soland_services::persistence::PersistenceHandle::new(Arc::new(PgPersistenceStore::new(
+    let app = coland_services::authority_commit::AuthorityCommitApplication::new(
+        coland_services::persistence::PersistenceHandle::new(Arc::new(PgPersistenceStore::new(
             pool.clone(),
         ))),
         0,
@@ -223,7 +223,7 @@ async fn prepare_inner(pool: &PgPool, label: &str) -> FrankingFixture {
     request.authority_commit = app
         .prepare_self_mls_transaction(
             &genesis,
-            soland_storage::MlsStateInstallation {
+            coland_storage::MlsStateInstallation {
                 effective_scope: scope.clone(),
                 base: None,
                 epoch: 0,

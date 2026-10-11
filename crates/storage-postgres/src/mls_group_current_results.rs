@@ -19,12 +19,12 @@ use arkret_models_collaboration::events_payloads::MlsGenesisPayload;
 use arkret_models_collaboration::mls_roster_authority::MlsAttestAddRequestBody;
 use arkret_models_crypto::MlsCommitPayload;
 use arkret_wire::{EventKind, MlsGroupCurrent, ScopeRef};
-use diesel::sql_types::{BigInt, Binary, Integer, Jsonb, Nullable, Text, Timestamptz};
-use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
-use soland_storage::{
+use coland_storage::{
     AuthorityCommitTransaction, ConflictCode, MlsGroupCurrentRecord, MlsGroupCurrentStore,
     PersistenceError, PersistenceResult,
 };
+use diesel::sql_types::{BigInt, Binary, Integer, Jsonb, Nullable, Text, Timestamptz};
+use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 
 use crate::{OptionalExtension, PgPool, QueryableByName, async_trait, ids, pg_conn, sql_query};
 
@@ -352,7 +352,7 @@ pub(crate) async fn commit_mls_group_current_result_in_connection(
         && circle_holds_invalid_owner(conn, &event.scope_ref, &installation.member_principals)
             .await?
     {
-        return Err(soland_storage::MlsSendGateRefusal::EpochUpdateRequired.into_conflict());
+        return Err(coland_storage::MlsSendGateRefusal::EpochUpdateRequired.into_conflict());
     }
     write_group(
         conn,
@@ -463,7 +463,7 @@ pub(crate) async fn commit_mls_group_current_result_in_connection(
         )
         .await
         .map_err(crate::PgTransactionError::into_persistence)?;
-        let verified = soland_storage::VerifiedMlsAddAuthorityAttestation {
+        let verified = coland_storage::VerifiedMlsAddAuthorityAttestation {
             source_station_id: transaction.expected_authority.service_id.clone(),
             request,
             attestor_resolution: resolution.clone(),
@@ -481,7 +481,7 @@ pub(crate) async fn commit_mls_group_current_result_in_connection(
 async fn freeze_consumed_proposals(
     conn: &mut AsyncPgConnection,
     transaction: &AuthorityCommitTransaction,
-    installation: &soland_storage::MlsStateInstallation,
+    installation: &coland_storage::MlsStateInstallation,
     key: &str,
 ) -> PersistenceResult<()> {
     let event = &transaction.event;
@@ -547,7 +547,7 @@ pub(crate) async fn queue_replicated_welcomes_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
-    welcomes: &[soland_storage::VerifiedMlsWelcome],
+    welcomes: &[coland_storage::VerifiedMlsWelcome],
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
     if welcomes.is_empty() {
@@ -602,7 +602,7 @@ async fn queue_one_replicated_welcome(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     event_pk: i64,
-    welcome: &soland_storage::VerifiedMlsWelcome,
+    welcome: &coland_storage::VerifiedMlsWelcome,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
     let delivery = &welcome.delivery;
@@ -640,7 +640,7 @@ async fn store_recipient_roster_outbox(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
-    welcome: &soland_storage::VerifiedMlsWelcome,
+    welcome: &coland_storage::VerifiedMlsWelcome,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
     let Some(witness) = &welcome.roster_witness else {
@@ -833,7 +833,7 @@ async fn claim_welcome_binding_in_connection(
 /// is `duplicate_conflict`.
 pub(crate) async fn bind_claim_welcome_in_connection(
     conn: &mut AsyncPgConnection,
-    claim: &soland_storage::MlsWelcomeClaimLedgerKey,
+    claim: &coland_storage::MlsWelcomeClaimLedgerKey,
     welcome: &arkret_wire::MlsWelcomeDelivery,
 ) -> PersistenceResult<()> {
     #[derive(QueryableByName)]
@@ -897,7 +897,7 @@ pub(crate) async fn bind_claim_welcome_in_connection(
 async fn store_public_blobs(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
-    blobs: &[soland_storage::MlsPublicBlob],
+    blobs: &[coland_storage::MlsPublicBlob],
     commit: &arkret_wire::RealmCommit,
 ) -> PersistenceResult<()> {
     for blob in blobs {
@@ -994,7 +994,7 @@ async fn require_joined_recipient(
 /// same request and a live claim (device-lifecycle.md, claim ledger rules).
 async fn require_live_claim(
     conn: &mut AsyncPgConnection,
-    claim: &soland_storage::MlsWelcomeClaimLedgerKey,
+    claim: &coland_storage::MlsWelcomeClaimLedgerKey,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
     let row = sql_query(
@@ -1110,7 +1110,7 @@ pub(crate) async fn require_mls_send_gate_in_connection(
     .transpose()?;
     if let ScopeRef::Sidecar { sidecar_id, .. } = &event.scope_ref {
         let Some(current) = &current else {
-            return Err(soland_storage::MlsSendGateRefusal::EpochUpdateRequired.into_conflict());
+            return Err(coland_storage::MlsSendGateRefusal::EpochUpdateRequired.into_conflict());
         };
         let cut = crate::sidecar_access::cut_in_connection(conn, &event.realm_id, sidecar_id)
             .await?
@@ -1154,30 +1154,30 @@ pub(crate) async fn require_mls_send_gate_in_connection(
         )
         .await?
         {
-            return Err(soland_storage::MlsSendGateRefusal::EpochUpdateRequired.into_conflict());
+            return Err(coland_storage::MlsSendGateRefusal::EpochUpdateRequired.into_conflict());
         }
         if binding.sidecar_binding().is_none_or(|binding| {
             binding.participant_authority_digest != current_cut.participant_authority_digest
                 || binding.authority_stream_head != current_cut.authority_stream_head
         }) {
-            return Err(soland_storage::MlsSendGateRefusal::EpochUpdateRequired.into_conflict());
+            return Err(coland_storage::MlsSendGateRefusal::EpochUpdateRequired.into_conflict());
         }
     }
     if envelopes.is_some()
         && let Some(current) = &current
         && circle_tree_holds_invalid_leaf(conn, &event.scope_ref, current).await?
     {
-        return Err(soland_storage::MlsSendGateRefusal::EpochUpdateRequired.into_conflict());
+        return Err(coland_storage::MlsSendGateRefusal::EpochUpdateRequired.into_conflict());
     }
     let envelopes = envelopes
         .as_ref()
         .map(|envelopes| envelopes.iter().collect::<Vec<_>>());
-    soland_storage::decide_mls_send_gate(
+    coland_storage::decide_mls_send_gate(
         current.as_ref().map(|current| &current.value),
         &event.scope_ref,
         envelopes.as_deref(),
     )
-    .map_err(soland_storage::MlsSendGateRefusal::into_conflict)
+    .map_err(coland_storage::MlsSendGateRefusal::into_conflict)
 }
 
 /// encryption-and-audit.md section 2.4.1: an activated Circle whose current

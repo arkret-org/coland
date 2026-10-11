@@ -1,7 +1,7 @@
 //! Bounded current-pointer discovery and indexed metadata pages.
 use arkret_models_crypto::{BackupActiveSeriesState, KeyBackupsListQuery};
 use arkret_server::{CursorAuthority, CursorBindingContext};
-use soland_services::identity::{KeyBackupListPosition, KeyBackupListQuery as StorageQuery};
+use coland_services::identity::{KeyBackupListPosition, KeyBackupListQuery as StorageQuery};
 
 use super::*;
 
@@ -39,7 +39,7 @@ pub(crate) async fn list_key_backups(
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.key_backups.query.list",
+    operation_id = "org.arkret.coland.admin.key_backups.query.list",
     tags("admin")
 )]
 pub(crate) async fn list_key_backups_admin(
@@ -58,7 +58,7 @@ pub(crate) async fn list_key_backups_admin(
         backup_kind,
         limit,
         depot,
-        "org.arkret.soland.admin.key_backups.query.list",
+        "org.arkret.coland.admin.key_backups.query.list",
     )
     .await
 }
@@ -67,7 +67,7 @@ pub(crate) async fn list_key_backups_admin(
 /// `session` is the caller already authenticated by the wrapping endpoint
 /// (the self bearer path or the `RequireAdmin` gate).
 async fn list(
-    session: soland_services::identity::SessionIdentityState,
+    session: coland_services::identity::SessionIdentityState,
     cursor: QueryParam<String, false>,
     series_id: QueryParam<String, false>,
     backup_kind: QueryParam<String, false>,
@@ -142,7 +142,7 @@ async fn list(
         let stored = state.sync().cursor(&decoded.h).await.map_err(internal)?;
         let record = stored
             .clone()
-            .map(soland_http::util::cursor_binding_record_from_state)
+            .map(coland_http::util::cursor_binding_record_from_state)
             .transpose()
             .map_err(cursor_authority_error)?;
         let position = CursorAuthority::resolve_stream(decoded, &context, record.as_ref())
@@ -231,7 +231,7 @@ async fn list(
         .map_err(internal)?;
         state
             .sync()
-            .upsert_cursor(&soland_services::sync::CursorState {
+            .upsert_cursor(&coland_services::sync::CursorState {
                 handle: record.handle,
                 binding_subject: Some(record.context.binding_subject),
                 device_id: record.context.device_id,

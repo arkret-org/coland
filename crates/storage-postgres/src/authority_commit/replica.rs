@@ -18,7 +18,7 @@
 //! continuity-only chain node without Event bytes.
 
 use arkret_models_crypto::MlsCommitPayload;
-use soland_storage::{
+use coland_storage::{
     CommittedChainNode, CommittedReplica, CommittedReplicaOutcome, CommittedReplicaRole,
     ConflictCode, ReplicaAnchorInstall, ReplicaStreamAnchor,
 };
@@ -305,7 +305,7 @@ pub(super) async fn record_remote_authority_in_connection(
 /// authority; all writes stay in the caller's transaction.
 pub(crate) async fn materialize_founding_in_connection(
     conn: &mut AsyncPgConnection,
-    unit: &soland_storage::DirectConversationFoundingCommitUnit,
+    unit: &coland_storage::DirectConversationFoundingCommitUnit,
     local_service_id: &arkret_wire::DidCoreId,
     received_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), PgTransactionError> {
@@ -835,7 +835,7 @@ pub(super) async fn queue_welcomes_of_held_replica_in_connection(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     genesis_event_ref: Option<&arkret_wire::EventId>,
-    welcomes: &[soland_storage::VerifiedMlsWelcome],
+    welcomes: &[coland_storage::VerifiedMlsWelcome],
     at: chrono::DateTime<chrono::Utc>,
 ) -> Result<CommittedReplicaOutcome, PgTransactionError> {
     if held_duplicate(conn, commit, Some(event)).await? != Some(CommittedReplicaOutcome::Duplicate)
@@ -1489,7 +1489,7 @@ pub(super) async fn install_replica_anchor_in_connection(
     crate::issued_realm_snapshots::issue_head_in_connection(
         conn,
         &anchor.member_account_id,
-        &soland_storage::RealmStateSnapshotMaterial {
+        &coland_storage::RealmStateSnapshotMaterial {
             realm_id: snapshot.realm_id.clone(),
             governance_generation: snapshot.governance_generation,
             visible_stream_heads: snapshot.visible_stream_heads.clone(),

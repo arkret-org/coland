@@ -24,10 +24,10 @@ jobs:
           - sources
 
     steps:
-      - name: Checkout soland
+      - name: Checkout coland
         uses: actions/checkout@v6
         with:
-          path: soland
+          path: coland
 
       - name: Checkout Arkret Rust SDK
         uses: actions/checkout@v6
@@ -46,6 +46,6 @@ jobs:
       - name: cargo-deny check ${{ matrix.checks }}
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          manifest-path: soland/Cargo.toml
+          manifest-path: coland/Cargo.toml
           command: check ${{ matrix.checks }}
           arguments: --all-features

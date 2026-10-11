@@ -9,7 +9,7 @@ fn retired_self_frontier_routes_are_not_mounted() {
 }
 
 async fn retired_self_frontier_routes_are_not_mounted_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let token = dev_token(state.clone()).await;
     for (path, body) in [
         (

@@ -2,38 +2,38 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 
 const GUARDED_PACKAGES: &[&str] = &[
-    "soland",
-    "soland-http",
-    "soland-services",
-    "soland-storage-postgres",
-    "soland-storage",
-    "soland-domain",
-    "soland-contracts",
+    "coland",
+    "coland-http",
+    "coland-services",
+    "coland-storage-postgres",
+    "coland-storage",
+    "coland-domain",
+    "coland-contracts",
 ];
 
 const ALLOWED: &[(&str, &str)] = &[
-    ("soland", "soland-http"),
-    ("soland", "soland-services"),
-    ("soland", "soland-storage"),
-    ("soland", "soland-storage-postgres"),
-    ("soland-http", "soland-domain"),
-    ("soland-http", "soland-services"),
-    ("soland-http", "soland-storage"),
-    ("soland-http", "soland-contracts"),
-    ("soland-http", "arkret-sdk"),
-    ("soland-services", "soland-domain"),
-    ("soland-services", "soland-storage"),
-    ("soland-services", "arkret-sdk"),
-    ("soland-storage-postgres", "soland-storage"),
-    ("soland-storage", "soland-domain"),
-    ("soland-storage", "arkret-sdk"),
-    ("soland-domain", "arkret-sdk"),
-    ("soland-contracts", "arkret-sdk"),
+    ("coland", "coland-http"),
+    ("coland", "coland-services"),
+    ("coland", "coland-storage"),
+    ("coland", "coland-storage-postgres"),
+    ("coland-http", "coland-domain"),
+    ("coland-http", "coland-services"),
+    ("coland-http", "coland-storage"),
+    ("coland-http", "coland-contracts"),
+    ("coland-http", "arkret-sdk"),
+    ("coland-services", "coland-domain"),
+    ("coland-services", "coland-storage"),
+    ("coland-services", "arkret-sdk"),
+    ("coland-storage-postgres", "coland-storage"),
+    ("coland-storage", "coland-domain"),
+    ("coland-storage", "arkret-sdk"),
+    ("coland-domain", "arkret-sdk"),
+    ("coland-contracts", "arkret-sdk"),
 ];
 
 const BANNED: &[(&str, &[&str])] = &[
     (
-        "soland-domain",
+        "coland-domain",
         &[
             "salvo",
             "diesel",
@@ -44,7 +44,7 @@ const BANNED: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "soland-storage",
+        "coland-storage",
         &[
             "salvo",
             "diesel",
@@ -58,7 +58,7 @@ const BANNED: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "soland-services",
+        "coland-services",
         &[
             "salvo",
             "diesel",
@@ -68,7 +68,7 @@ const BANNED: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "soland-http",
+        "coland-http",
         &["diesel", "diesel-async", "tokio-postgres", "object_store"],
     ),
 ];

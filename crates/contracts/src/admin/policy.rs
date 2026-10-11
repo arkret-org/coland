@@ -1,5 +1,5 @@
 //! Deployment-local policy document contract
-//! (`GET`/`POST`/`DELETE /_soland/self/policies`).
+//! (`GET`/`POST`/`DELETE /_coland/self/policies`).
 //!
 //! Both sides of this endpoint used to hand-write their own shape. The
 //! producer emitted `owner` and a required canonical `updated_at`; the

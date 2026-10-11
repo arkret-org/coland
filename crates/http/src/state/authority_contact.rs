@@ -12,9 +12,9 @@
 
 use arkret_models_collaboration::contact_operations::ContactProducerSigner;
 use arkret_wire::{AuthorityCommitStatus, AuthoritySubmitOutcome, Event, EventAdmissionSubmission};
-use soland_services::identity::SessionIdentityState;
-use soland_services::{ServiceError, ServiceResult};
-use soland_storage::SelfProducerCommitGuard;
+use coland_services::identity::SessionIdentityState;
+use coland_services::{ServiceError, ServiceResult};
+use coland_storage::SelfProducerCommitGuard;
 
 use super::AppState;
 
@@ -80,7 +80,7 @@ pub(crate) async fn commit_contact_event_unit(
     state: &AppState,
     submission: &EventAdmissionSubmission,
     guard: SelfProducerCommitGuard,
-    projection: soland_services::events::CommitContactProjection,
+    projection: coland_services::events::CommitContactProjection,
     accepted_at: chrono::DateTime<chrono::Utc>,
 ) -> ServiceResult<AuthoritySubmitOutcome> {
     submission
@@ -135,7 +135,7 @@ pub(crate) async fn commit_contact_event_unit(
     let canonical_digest = event
         .event_digest_with_digest_suite(arkret_canonical::DigestSuite::Sha256)
         .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
-    let command = soland_services::events::CommitAcceptedEventCommand {
+    let command = coland_services::events::CommitAcceptedEventCommand {
         authority_commit: transaction.clone(),
         self_producer_guard: Some(guard),
         applet_producer_guard: None,
@@ -144,7 +144,7 @@ pub(crate) async fn commit_contact_event_unit(
         forwarded_agent_producer: None,
         agent_deployment_ceiling:
             arkret_models_collaboration::governance::agent_participation::ParticipationBits::ALL,
-        event: soland_storage::CanonicalEventRecord {
+        event: coland_storage::CanonicalEventRecord {
             event_id: event.event_id.to_string(),
             actor_id: event.actor_id.to_string(),
             realm_id: Some(event.realm_id.to_string()),

@@ -407,7 +407,7 @@ mod tests {
             [0x61; 32],
         ));
         let now = Utc::now().timestamp_millis();
-        let progress = soland_storage::AccountDetailProgress {
+        let progress = coland_storage::AccountDetailProgress {
             window_cursor: arkret_wire::Cursor::new("ak:cursor:window".to_owned()).unwrap(),
             expires_at_ms: now + 3_600_000,
             retained_revision,

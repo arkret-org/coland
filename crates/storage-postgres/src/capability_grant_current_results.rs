@@ -9,7 +9,7 @@ use arkret_wire::{
     ActorId, CommitStreamRef, CommittedEventRef, CurrentRevision, EventId, GrantId, RealmCommitId,
     RealmId, WireResourceSelector,
 };
-use soland_storage::{ActorRealmAuthorization, resource_selector_covers};
+use coland_storage::{ActorRealmAuthorization, resource_selector_covers};
 
 use super::{
     AsyncConnection, AsyncPgConnection, BigInt, CapabilityGrantCurrentResultRecord,
@@ -78,12 +78,12 @@ fn schema_violation(detail: impl Into<String>) -> PersistenceError {
 /// `failed_precondition` carrying that reason only as diagnostic text.
 fn conflict(detail: impl Into<String>) -> PersistenceError {
     let detail = detail.into();
-    if soland_storage::ConflictCode::from_detail(&detail).is_some() {
+    if coland_storage::ConflictCode::from_detail(&detail).is_some() {
         PersistenceError::Conflict(detail)
     } else {
         PersistenceError::Conflict(format!(
             "{}: {detail}",
-            soland_storage::ConflictCode::FailedPrecondition
+            coland_storage::ConflictCode::FailedPrecondition
         ))
     }
 }
@@ -328,7 +328,7 @@ pub(crate) fn grant_is_active_at(
 ) -> bool {
     grant.status == CapabilityGrantStatus::Active
         && effective_not_before(grant).is_none_or(|value| value <= accepted_at)
-        && soland_storage::capability_grant_expires_at(grant)
+        && coland_storage::capability_grant_expires_at(grant)
             .is_none_or(|value| value > accepted_at)
 }
 
@@ -459,7 +459,7 @@ fn validate_parent_constraints(
     {
         return Err(conflict("authority_depth_exceeded"));
     }
-    if let Some(parent_expiry) = soland_storage::capability_grant_expires_at(parent) {
+    if let Some(parent_expiry) = coland_storage::capability_grant_expires_at(parent) {
         let child_expiry = child
             .constraints
             .iter()
@@ -854,7 +854,7 @@ fn validate_managed_parent(
         return Err(conflict("managed Service child exceeds its parent"));
     }
     let binding=child.constraints.iter().find(|c|c.constraint_subkind==Some(arkret_models_collaboration::governance::grant_constraint::GrantConstraintSubkind::AppletAuthority)).ok_or_else(||conflict("managed child Applet authority absent"))?;
-    let facts = soland_storage::OperationFacts {
+    let facts = coland_storage::OperationFacts {
         applet_id: binding.applet_id.as_ref().map(ToString::to_string),
         executed_by: Some(child.issuer_id.clone()),
         registration_epoch: binding.registration_epoch.as_ref().map(ToString::to_string),
@@ -862,8 +862,8 @@ fn validate_managed_parent(
     };
     let actions = child.actions.iter().map(String::as_str).collect::<Vec<_>>();
     for target in &child.resources {
-        if soland_storage::evaluate_grants(
-            &soland_storage::AuthorizationOperation {
+        if coland_storage::evaluate_grants(
+            &coland_storage::AuthorizationOperation {
                 actor: &child.issuer_id,
                 actions: &actions,
                 target,
@@ -1110,7 +1110,7 @@ async fn materialize_capability_grant_inner(
             1,
         )
         .map_err(|error| {
-            if error.conflict_code() == Some(soland_storage::ConflictCode::AuthorityCycle) {
+            if error.conflict_code() == Some(coland_storage::ConflictCode::AuthorityCycle) {
                 error
             } else {
                 conflict("grant_exceeds_issuer_authority")
@@ -1543,7 +1543,7 @@ impl CapabilityGrantCurrentResultStore for PgCapabilityGrantCurrentResultStore {
     #[cfg(any(test, feature = "test-support"))]
     async fn seed_test_grant(
         &self,
-        grant: &soland_storage::TestCapabilityGrant,
+        grant: &coland_storage::TestCapabilityGrant,
     ) -> PersistenceResult<GrantId> {
         let mut conn = pg_conn(&self.pool).await?;
         let root = sql_query(

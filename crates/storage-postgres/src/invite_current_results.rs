@@ -31,11 +31,11 @@ use arkret_models_collaboration::governance::membership_invite::{
     InviteRevokeTargetState, InviteThirdPartyCreatePayload, validate_invite_create_wire_keys,
 };
 use arkret_wire::{AccountId, ActorId, EventKind, InviteId, InviteState, SecurityClass};
+use coland_storage::{ConflictCode, PersistenceError, PersistenceResult};
 use diesel::OptionalExtension as _;
 use diesel::sql_types::{BigInt, Jsonb, Nullable, Text, Timestamptz};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::Value;
-use soland_storage::{ConflictCode, PersistenceError, PersistenceResult};
 
 use crate::realm_authorization_cut::{
     RealmAuthorizationCut, authorize_capability_gated_event_in_connection,
@@ -762,7 +762,7 @@ pub(crate) async fn commit_invite_current_results_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
-    claim_proof: Option<&soland_storage::InviteClaimProofCommit>,
+    claim_proof: Option<&coland_storage::InviteClaimProofCommit>,
 ) -> PersistenceResult<()> {
     if !matches!(
         event.kind,
@@ -829,11 +829,11 @@ pub struct PgInviteCurrentResultStore {
 }
 
 #[async_trait::async_trait]
-impl soland_storage::InviteCurrentResultStore for PgInviteCurrentResultStore {
+impl coland_storage::InviteCurrentResultStore for PgInviteCurrentResultStore {
     async fn invites_in_realm(
         &self,
         realm_id: Option<&arkret_wire::RealmId>,
-    ) -> PersistenceResult<Vec<soland_storage::InviteCurrent>> {
+    ) -> PersistenceResult<Vec<coland_storage::InviteCurrent>> {
         use diesel_async::AsyncConnection as _;
 
         let mut conn = crate::pg_conn(&self.pool).await?;
@@ -867,7 +867,7 @@ impl soland_storage::InviteCurrentResultStore for PgInviteCurrentResultStore {
         &self,
         invitee: &AccountId,
         realm_id: Option<&arkret_wire::RealmId>,
-    ) -> PersistenceResult<Vec<soland_storage::DirectedInviteCurrent>> {
+    ) -> PersistenceResult<Vec<coland_storage::DirectedInviteCurrent>> {
         use diesel_async::AsyncConnection as _;
 
         let invitee_value = serde_json::to_value(invitee).map_err(schema_violation)?;
@@ -906,7 +906,7 @@ impl soland_storage::InviteCurrentResultStore for PgInviteCurrentResultStore {
 async fn invite_current(
     conn: &mut AsyncPgConnection,
     row: InviteCurrentRow,
-) -> PersistenceResult<soland_storage::InviteCurrent> {
+) -> PersistenceResult<coland_storage::InviteCurrent> {
     let realm_id = row
         .realm_id
         .parse::<arkret_wire::RealmId>()
@@ -984,7 +984,7 @@ async fn invite_current(
                 let event =
                     serde_json::from_value::<arkret_wire::Event>(row.envelope).map_err(corrupt)?;
                 let claim = typed_payload::<InviteClaimPayload>(&event)?;
-                Ok(soland_storage::AcceptedThirdPartyClaim {
+                Ok(coland_storage::AcceptedThirdPartyClaim {
                     event_id: event.event_id,
                     subject_account_id: claim.subject_account_id,
                     claim_nonce: claim.claim_nonce,
@@ -1002,7 +1002,7 @@ async fn invite_current(
             "claimed third-party Invite has no committed claim Event",
         ));
     }
-    Ok(soland_storage::InviteCurrent {
+    Ok(coland_storage::InviteCurrent {
         realm_id,
         invite_id,
         state,
@@ -1020,7 +1020,7 @@ async fn invite_current(
 async fn open_directed_invite(
     conn: &mut AsyncPgConnection,
     row: OpenDirectedInviteRow,
-) -> PersistenceResult<soland_storage::DirectedInviteCurrent> {
+) -> PersistenceResult<coland_storage::DirectedInviteCurrent> {
     let realm_id = row
         .realm_id
         .parse::<arkret_wire::RealmId>()
@@ -1055,7 +1055,7 @@ async fn open_directed_invite(
             "invite_directed_invitee disagrees with its ak.invite.create",
         ));
     }
-    Ok(soland_storage::DirectedInviteCurrent {
+    Ok(coland_storage::DirectedInviteCurrent {
         realm_id,
         invite_id,
         state,

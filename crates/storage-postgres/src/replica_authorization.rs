@@ -9,10 +9,10 @@ use arkret_models_collaboration::governance::grant_constraint::{
     AuthorityRootRef, CapabilityGrant, CapabilitySubject, IssuerAuthorityRef,
 };
 use arkret_wire::{ActorId, CurrentSelector, GrantId, RealmId, ScopeRef, TypedCurrentRow};
+use coland_storage::{AuthorizationOperation, OperationFacts, PersistenceError, PersistenceResult};
 use diesel::OptionalExtension as _;
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
-use soland_storage::{AuthorizationOperation, OperationFacts, PersistenceError, PersistenceResult};
 
 fn invalid(detail: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::SchemaViolation(format!("replica authorization row: {detail}"))
@@ -232,7 +232,7 @@ pub(crate) async fn scope_moderator(
         .then_some(grant)
     });
     let facts = OperationFacts::default();
-    Ok(!soland_storage::evaluate_grants(
+    Ok(!coland_storage::evaluate_grants(
         &AuthorizationOperation {
             actor,
             actions,
@@ -531,8 +531,8 @@ mod direct_evidence_tests {
             .unwrap()
             .unwrap();
         assert_eq!(original.len(), 4);
-        let original_cut = soland_storage::DirectConversationReplicaCut {
-            authority: soland_storage::CurrentRealmAuthority {
+        let original_cut = coland_storage::DirectConversationReplicaCut {
+            authority: coland_storage::CurrentRealmAuthority {
                 realm_id: realm.clone(),
                 generation: 0,
                 service_id: station.clone(),
@@ -567,7 +567,7 @@ mod direct_evidence_tests {
         head.commit_id = next_commit;
         head.stream_position = 1;
         install_verified_head(&mut conn, &head, at).await.unwrap();
-        let advanced_cut = soland_storage::DirectConversationReplicaCut {
+        let advanced_cut = coland_storage::DirectConversationReplicaCut {
             head: head.clone(),
             ..original_cut.clone()
         };
@@ -663,7 +663,7 @@ mod direct_evidence_tests {
         let store = crate::authority_commit::PgAuthorityCommitStore {
             pool: database.pool(),
         };
-        use soland_storage::AuthorityCommitStore as _;
+        use coland_storage::AuthorityCommitStore as _;
         assert!(
             store
                 .direct_conversation_replica_cut(

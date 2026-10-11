@@ -1,5 +1,5 @@
 use arkret_wire::Hash;
-use soland_storage::AgentCleanupRecord;
+use coland_storage::AgentCleanupRecord;
 
 use super::*;
 
@@ -29,7 +29,7 @@ fn decode_record(row: CleanupIntentRow) -> PersistenceResult<AgentCleanupRecord>
 }
 
 #[async_trait]
-impl soland_storage::AgentMembershipCascadeStore for PgAgentMembershipCascadeStore {
+impl coland_storage::AgentMembershipCascadeStore for PgAgentMembershipCascadeStore {
     async fn agent_cleanup_intent(
         &self,
         cleanup_intent_digest: &Hash,

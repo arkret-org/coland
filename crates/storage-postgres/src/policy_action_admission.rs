@@ -1,7 +1,7 @@
 //! Registry-backed governance approval configuration, never an authority grant.
 use arkret_models_collaboration::events_payloads::PolicyActionDocument;
 use arkret_wire::CapabilityActionId;
-use soland_storage::{PersistenceError, PersistenceResult};
+use coland_storage::{PersistenceError, PersistenceResult};
 
 pub(crate) fn require_registered_carrier(action: CapabilityActionId) -> PersistenceResult<()> {
     let descriptor = arkret_schema::capability_action_descriptor(action);
@@ -86,7 +86,7 @@ pub(crate) async fn current_quorum(
     event: &arkret_wire::Event,
     action: CapabilityActionId,
     target: &arkret_wire::WireResourceSelector,
-    facts: &soland_storage::OperationFacts,
+    facts: &coland_storage::OperationFacts,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<Option<u64>> {
     use diesel::OptionalExtension;
@@ -171,7 +171,7 @@ async fn scope_contains(
     realm: &arkret_wire::RealmId,
     scope: &arkret_wire::WireResourceSelector,
     target: &arkret_wire::WireResourceSelector,
-    facts: &soland_storage::OperationFacts,
+    facts: &coland_storage::OperationFacts,
 ) -> PersistenceResult<bool> {
     use arkret_wire::ResourceSelectorKind;
     use diesel::sql_types::Text;
@@ -185,7 +185,7 @@ async fn scope_contains(
     if scope.kind == ResourceSelectorKind::Actor {
         return Ok(scope.actor_id == target.actor_id && target.kind == ResourceSelectorKind::Actor);
     }
-    if soland_storage::resource_selector_covers(scope, target) {
+    if coland_storage::resource_selector_covers(scope, target) {
         return Ok(true);
     }
     let Some(space) = &scope.space_id else {

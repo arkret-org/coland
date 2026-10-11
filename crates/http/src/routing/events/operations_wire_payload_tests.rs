@@ -10,7 +10,7 @@ const TEST_RELATION: &str = "ak:relation:AZEvldDJcWI9IRHqP2BMibDDfc59Ax_LwrbsrQm
 const TEST_CIRCLE: &str = "ak:circle:AQk4t8f1mPAFEQjKNzmTl_TZMxmpSbc_1ldQlxRUZBZ7";
 const TEST_ISSUER: &str = "ak:did_core:web:alice.example";
 const TEST_SUBJECT: &str = "ak:did_core:web:bob.example";
-const TEST_STATION: &str = "ak:did_core:web:soland.example";
+const TEST_STATION: &str = "ak:did_core:web:coland.example";
 
 fn wire_operation(kind: arkret_wire::EventKind, payload: Value) -> Operation {
     arkret_event_draft::test_support::raw_projected_operation(

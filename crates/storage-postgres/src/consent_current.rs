@@ -4,14 +4,14 @@ use arkret_models_collaboration::consent_operations::{ConsentState, ConsentValue
 use arkret_models_collaboration::events_payloads::consent::{ConsentGrantPayload, ConsentPeer};
 use arkret_models_collaboration::governance_payloads::ConsentRevokePayload;
 use arkret_wire::{AccountId, ActorId, CurrentRevision, EventKind};
+use coland_storage::{
+    AuthorityCommitWriteOutcome, ConflictCode, ConsentAdmissionOutcome, ConsentAdmissionWrite,
+    ConsentCurrentRecord, ConsentCurrentStore, PersistenceError, PersistenceResult,
+};
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
 use diesel::{OptionalExtension, QueryableByName, sql_query};
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use serde_json::Value;
-use soland_storage::{
-    AuthorityCommitWriteOutcome, ConflictCode, ConsentAdmissionOutcome, ConsentAdmissionWrite,
-    ConsentCurrentRecord, ConsentCurrentStore, PersistenceError, PersistenceResult,
-};
 
 use crate::actor_profiles::{PcrSelfEventCut, corrupt, rejected, verify_pcr_self_event};
 use crate::{AsyncPgConnection, PgPool, PgTransactionError, pg_conn};
@@ -227,12 +227,12 @@ async fn invalidate_quarantine(
     holder: &AccountId,
     value: &ConsentValue,
     at: chrono::DateTime<chrono::Utc>,
-) -> Result<Option<soland_storage::AccountDataRecord>, PgTransactionError> {
+) -> Result<Option<coland_storage::AccountDataRecord>, PgTransactionError> {
     use arkret_models_collaboration::governance::holder_quarantine::{
         HolderQuarantine, HolderQuarantineInvalidation, HolderQuarantineInvalidationReason,
         HolderQuarantineInvalidationScope,
     };
-    use soland_storage::{AccountDataCasResult, AccountDataRecord};
+    use coland_storage::{AccountDataCasResult, AccountDataRecord};
     #[derive(QueryableByName)]
     struct Cell {
         #[diesel(sql_type=BigInt)]
@@ -317,8 +317,8 @@ impl ConsentCurrentStore for PgConsentCurrentStore {
     }
     async fn admit_invite_delivery(
         &self,
-        write: soland_storage::ConsentDeliveryWrite,
-    ) -> PersistenceResult<Option<soland_storage::AccountDataCasResult>> {
+        write: coland_storage::ConsentDeliveryWrite,
+    ) -> PersistenceResult<Option<coland_storage::AccountDataCasResult>> {
         if write.record.actor != ActorId::account(write.holder.clone()).to_string()
             || write.record.account_data_key != arkret_wire::AccountDataKey::ACCOUNT_INVITE_DELIVERY
             || write.record.tombstone

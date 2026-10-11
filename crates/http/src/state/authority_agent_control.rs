@@ -9,9 +9,9 @@
 
 use arkret_wire::{AuthorityCommitStatus, AuthoritySubmitOutcome, EventAdmissionSubmission};
 use chrono::Utc;
-use soland_services::identity::SessionIdentityState;
-use soland_services::{ServiceError, ServiceResult};
-use soland_storage::{AgentControlAdmissionOutcome, AgentControlAdmissionWrite};
+use coland_services::identity::SessionIdentityState;
+use coland_services::{ServiceError, ServiceResult};
+use coland_storage::{AgentControlAdmissionOutcome, AgentControlAdmissionWrite};
 
 use super::AppState;
 

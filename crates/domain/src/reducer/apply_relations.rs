@@ -78,7 +78,7 @@ impl ProjectionState {
         let source_event_id = Some(operation.context.event_id.to_string());
         let source_event_digest = Some(relation_event_digest(operation));
 
-        let state = SolandRelationState {
+        let state = ColandRelationState {
             relation_id: relation_id.clone(),
             realm_id: operation.realm_id.to_string(),
             relation_kind,
@@ -486,7 +486,7 @@ fn validate_relation_endpoint_shape(relation: &Value, kind: &str) -> Result<(), 
 /// Identity paths are excluded by the typed payload. Only
 /// `scope_circle_id`, `rank`, and edge metadata under `fields` are mutable.
 fn apply_relation_patch(
-    relation: &mut SolandRelationState,
+    relation: &mut ColandRelationState,
     patch: &serde_json::Map<String, Value>,
 ) {
     if let Some(scope_circle_id) = patch_string_value(patch, "scope_circle_id") {
@@ -505,7 +505,7 @@ fn relation_primary_domain_key(domain: &RelationPrimaryConflictDomain) -> String
 
 fn relation_primary_domain_matches(
     domain: &RelationPrimaryConflictDomain,
-    relation: &SolandRelationState,
+    relation: &ColandRelationState,
 ) -> bool {
     domain.relation_kind.as_str() == relation.relation_kind
         && Some(&domain.from_ref) == relation.from_ref.as_ref()
@@ -522,7 +522,7 @@ fn relation_primary_domain_matches(
 /// Render a materialized Relation into the `{from_ref, to_ref,
 /// scope_circle_id}` object shape `check_relation_effective_scope` reads, so
 /// the create path and the post-patch update path share one scope check.
-fn relation_scope_check_object(relation: &SolandRelationState) -> Value {
+fn relation_scope_check_object(relation: &ColandRelationState) -> Value {
     let mut object = serde_json::Map::new();
     if let Some(from_ref) = &relation.from_ref {
         object.insert(

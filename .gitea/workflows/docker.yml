@@ -136,10 +136,10 @@ jobs:
       packages: write
 
     steps:
-      - name: Check out soland
+      - name: Check out coland
         uses: actions/checkout@v4
         with:
-          path: soland
+          path: coland
 
       - name: Check out Arkret Rust SDK
         uses: actions/checkout@v4
@@ -219,8 +219,8 @@ jobs:
             --build-context arkret-rust-sdk=arkret-rust-sdk \
             --build-context arkret-spec=arkret-spec \
             "${tag_args[@]}" \
-            -f soland/Dockerfile \
-            soland
+            -f coland/Dockerfile \
+            coland
 
       - name: Push ARM64 image tags
         if: needs.prepare.outputs.push_images == 'true'

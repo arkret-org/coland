@@ -4,7 +4,7 @@
 //!
 //! Priority order (first resolver that `supports()` a DID wins):
 //!
-//! 1. [`LocalIdentityResolver`] — resolves DID documents stored in soland's durable identity store.
+//! 1. [`LocalIdentityResolver`] — resolves DID documents stored in coland's durable identity store.
 //!    This is what makes the embedded `did:webvh` provider usable without an external `did:webvh`
 //!    provider service.
 //! 2. [`DidWebvhResolver`] — inserted when the external provider boot probe succeeds. The SDK
@@ -40,8 +40,8 @@ use serde_json::Value;
 use crate::config::AppConfig;
 
 /// Build the async-native resolver service used by `AppState`.
-pub fn build_soland_did_resolver(config: &AppConfig) -> SolandDidResolver {
-    SolandDidResolver::new(config)
+pub fn build_coland_did_resolver(config: &AppConfig) -> ColandDidResolver {
+    ColandDidResolver::new(config)
 }
 
 /// This deployment's DID resolution policy in the SDK's shared shape.
@@ -76,14 +76,14 @@ fn build_fallback_did_resolver_chain(config: &AppConfig) -> CompositeDidResolver
     resolver
 }
 
-/// Soland DID resolver boundary.
+/// Coland DID resolver boundary.
 ///
 /// Async callers use [`Self::resolve_did_async`], which awaits the durable
 /// local DID store directly before falling back to the SDK resolver chain. The
 /// sync [`DidResolver`] implementation exists only for SDK APIs that still
 /// require a synchronous resolver; it reads the in-process document snapshot
 /// and the no-IO SDK fallback chain, so it never blocks an async runtime.
-pub struct SolandDidResolver {
+pub struct ColandDidResolver {
     fallback: CompositeDidResolver,
     external: Option<Arc<HttpDidResolver>>,
     allowed_methods: Vec<String>,
@@ -103,7 +103,7 @@ struct CachedDidDocument {
     document: DidDocument,
 }
 
-impl SolandDidResolver {
+impl ColandDidResolver {
     fn new(config: &AppConfig) -> Self {
         let external_allowed_methods = config
             .did_resolver_allow_methods
@@ -207,7 +207,7 @@ impl SolandDidResolver {
 
     pub(crate) fn cache_application_webvh_record(
         &self,
-        record: soland_services::identity::DidDocumentState,
+        record: coland_services::identity::DidDocumentState,
     ) -> Result<DidDocument, IdentityError> {
         let did = Did::new(record.did).map_err(IdentityError::from)?;
         self.document_from_parts(&did, record.did_document, record.seq)
@@ -227,7 +227,7 @@ impl SolandDidResolver {
         if matches!(did.method(), "web" | "webvh")
             && let Some(external) = &self.external
         {
-            // The only outbound DID resolution in soland. This is what the
+            // The only outbound DID resolution in coland. This is what the
             // joint call-count contract reads as `authority_network_call_count`.
             crate::metrics::record_did_resolve(
                 did.method(),
@@ -383,7 +383,7 @@ impl SolandDidResolver {
     }
 }
 
-impl DidResolver for SolandDidResolver {
+impl DidResolver for ColandDidResolver {
     fn supports(&self, did: &Did) -> bool {
         self.cached_document(did).is_some() || self.fallback.supports(did)
     }
@@ -401,13 +401,13 @@ impl DidResolver for SolandDidResolver {
 }
 
 #[async_trait::async_trait]
-impl soland_services::identity::DidResolverPort for SolandDidResolver {
+impl coland_services::identity::DidResolverPort for ColandDidResolver {
     fn discard_cached_document(&self, did: &Did) {
         self.local_snapshot.write().remove(did);
     }
 
     async fn resolve_did_async(&self, did: &Did) -> Result<DidDocument, String> {
-        SolandDidResolver::resolve_did_async(self, did)
+        ColandDidResolver::resolve_did_async(self, did)
             .await
             .map_err(|error| error.to_string())
     }
@@ -439,10 +439,10 @@ impl soland_services::identity::DidResolverPort for SolandDidResolver {
         &self,
         did: &Did,
     ) -> Result<
-        soland_services::identity::PinnedDidDocumentState,
-        soland_services::identity::PinnedDidResolutionError,
+        coland_services::identity::PinnedDidDocumentState,
+        coland_services::identity::PinnedDidResolutionError,
     > {
-        use soland_services::identity::{PinnedDidResolutionError, select_pinned_did_webvh_state};
+        use coland_services::identity::{PinnedDidResolutionError, select_pinned_did_webvh_state};
         if did.method() != "webvh" {
             return Err(PinnedDidResolutionError::UnsupportedMethod);
         }
@@ -473,10 +473,10 @@ impl soland_services::identity::DidResolverPort for SolandDidResolver {
         version_id: &str,
         log_head_digest: &Hash,
     ) -> Result<
-        soland_services::identity::PinnedDidDocumentState,
-        soland_services::identity::PinnedDidResolutionError,
+        coland_services::identity::PinnedDidDocumentState,
+        coland_services::identity::PinnedDidResolutionError,
     > {
-        use soland_services::identity::{PinnedDidResolutionError, select_pinned_did_webvh_state};
+        use coland_services::identity::{PinnedDidResolutionError, select_pinned_did_webvh_state};
         if did.method() != "webvh" {
             return Err(PinnedDidResolutionError::UnsupportedMethod);
         }
@@ -495,10 +495,10 @@ impl soland_services::identity::DidResolverPort for SolandDidResolver {
         did: &Did,
         at: chrono::DateTime<chrono::Utc>,
     ) -> Result<
-        soland_services::identity::PinnedDidDocumentState,
-        soland_services::identity::PinnedDidResolutionError,
+        coland_services::identity::PinnedDidDocumentState,
+        coland_services::identity::PinnedDidResolutionError,
     > {
-        use soland_services::identity::{PinnedDidResolutionError, select_did_webvh_state_at};
+        use coland_services::identity::{PinnedDidResolutionError, select_did_webvh_state_at};
         if did.method() != "webvh" {
             return Err(PinnedDidResolutionError::UnsupportedMethod);
         }
@@ -514,7 +514,7 @@ impl soland_services::identity::DidResolverPort for SolandDidResolver {
 
     fn cache_document_state(
         &self,
-        document: soland_services::identity::DidDocumentState,
+        document: coland_services::identity::DidDocumentState,
     ) -> Result<DidDocument, String> {
         self.cache_application_webvh_record(document)
             .map_err(|error| error.to_string())
@@ -636,10 +636,10 @@ mod tests {
     use arkret_identifiers::Did;
     use arkret_identity::{DidResolver, VerifiedDidWebvhLog};
     use arkret_wire::{Hash, PayloadSigner};
-    use serde_json::json;
-    use soland_services::identity::{
+    use coland_services::identity::{
         DidDocumentState, PinnedDidVersionStatus, select_pinned_did_webvh_state,
     };
+    use serde_json::json;
 
     use super::*;
     use crate::config::ObjectStorageConfig;
@@ -647,7 +647,7 @@ mod tests {
     fn base_config() -> AppConfig {
         AppConfig {
             public_base_url: "http://127.0.0.1:0".to_owned(),
-            object_storage: ObjectStorageConfig::local(std::env::temp_dir().join("soland-blobs")),
+            object_storage: ObjectStorageConfig::local(std::env::temp_dir().join("coland-blobs")),
             did_resolver_allow_methods: vec![
                 "web".to_owned(),
                 "key".to_owned(),
@@ -677,7 +677,7 @@ mod tests {
         let loopback = "https://127.0.0.1:55400/webvh/service/did.jsonl".to_owned();
         let public = "https://webvh.example/users/alice/did.jsonl".to_owned();
         let resolver = |public_base_url: &str, development_mode: bool| {
-            SolandDidResolver::new(&AppConfig {
+            ColandDidResolver::new(&AppConfig {
                 public_base_url: public_base_url.to_owned(),
                 development_mode,
                 ..base_config()
@@ -910,7 +910,7 @@ mod tests {
     #[test]
     fn resolver_snapshot_does_not_regress_to_an_older_did_sequence() {
         let config = base_config();
-        let resolver = build_soland_did_resolver(&config);
+        let resolver = build_coland_did_resolver(&config);
         let did = Did::new("did:web:cache.example".to_owned()).expect("valid DID");
         let verification_method = format!("{did}#key-1");
         let record = |seq: u64, key_byte: u8| {
@@ -955,7 +955,7 @@ mod tests {
 
     #[test]
     fn formal_test_material_never_enters_the_resolution_snapshot() {
-        let resolver = build_soland_did_resolver(&base_config());
+        let resolver = build_coland_did_resolver(&base_config());
         let did = Did::new("did:web:real-deployment.company".to_owned()).unwrap();
         let verification_method = format!("{did}#renamed-production-key");
         let safe_key = ed25519_dalek::SigningKey::from_bytes(&[91; 32]).verifying_key();
@@ -1021,7 +1021,7 @@ mod tests {
 
     #[test]
     fn each_reserved_identifier_rule_blocks_snapshot_admission_independently() {
-        let resolver = build_soland_did_resolver(&base_config());
+        let resolver = build_coland_did_resolver(&base_config());
         let now = chrono::Utc::now();
         let cases = [
             (
@@ -1071,7 +1071,7 @@ mod tests {
     #[test]
     fn resolver_snapshot_has_a_hard_capacity() {
         let config = base_config();
-        let resolver = build_soland_did_resolver(&config);
+        let resolver = build_coland_did_resolver(&config);
         let now = chrono::Utc::now();
         let public_key = arkret_canonical::ed25519_pubkey_to_did_key_multibase(&[7u8; 32]);
         for index in 0..=LOCAL_DID_SNAPSHOT_CAPACITY {

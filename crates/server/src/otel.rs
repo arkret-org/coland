@@ -1,4 +1,4 @@
-use soland_http::config::OtelConfig;
+use coland_http::config::OtelConfig;
 use tracing_subscriber::{Layer, Registry};
 
 pub type OtelLayer = Box<dyn Layer<Registry> + Send + Sync>;
@@ -81,7 +81,7 @@ pub fn init_layer(
 ) -> anyhow::Result<(OtelGuard, Option<OtelLayer>)> {
     if config.exporter_enabled {
         anyhow::bail!(
-            "SOLAND_OTEL_EXPORTER is set, but this binary was built without the `otel` feature"
+            "COLAND_OTEL_EXPORTER is set, but this binary was built without the `otel` feature"
         );
     }
     Ok((OtelGuard, None))

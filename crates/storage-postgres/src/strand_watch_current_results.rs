@@ -4,11 +4,11 @@ use arkret_wire::{
     ActorId, CommitStreamRef, CurrentRevision, Event, EventKind, RealmCommit, RealmId, ScopeRef,
     StrandId,
 };
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
 use diesel::{OptionalExtension, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::{Value, json};
-use soland_storage::{PersistenceError, PersistenceResult};
 
 pub(crate) const WATCH_HISTORY_SQL: &str = "SELECT EXISTS(SELECT 1 FROM canonical_events WHERE realm_id=$1 AND kind='ak.strand.watch.set' AND state='committed' AND envelope->'payload'->>'strand_id'=$2 AND actor_id=$3 AND envelope->>'event_id'<>$4) AS present";
 

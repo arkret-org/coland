@@ -7,18 +7,18 @@
 #[allow(dead_code)]
 mod ordinary_realm;
 
+use coland_storage::{AuthorityCommitStore, EventCommitUnitOfWork};
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
 use diesel::sql_types::{BigInt, Jsonb, Text};
 use diesel_async::RunQueryDsl;
 use ordinary_realm::{next_request, open_discussion};
 use serde_json::{Value, json};
-use soland_storage::{AuthorityCommitStore, EventCommitUnitOfWork};
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
 
 #[tokio::test]
 async fn pin_grants_are_explicit_and_assertions_preserve_removals_with_atomic_cas() {
     let cases =
-        Box::pin(soland_storage_postgres::pin_conformance::run_pin_admission_fixture()).await;
+        Box::pin(coland_storage_postgres::pin_conformance::run_pin_admission_fixture()).await;
     assert_eq!(cases.len(), 6);
     assert!(cases.iter().all(|(_, assertions)| *assertions > 0));
 }
@@ -81,7 +81,7 @@ fn intruder() -> arkret_wire::DidCoreId {
 async fn bootstrap_unit(
     pool: &PgPool,
     seed: &str,
-) -> soland_storage::OrdinaryRealmBootstrapCommitUnit {
+) -> coland_storage::OrdinaryRealmBootstrapCommitUnit {
     let account = Box::pin(ordinary_realm::human_profile::admit(
         pool,
         &ordinary_realm::station(),
@@ -263,7 +263,7 @@ struct SpaceLifecycleBasis {
     pool: PgPool,
     realm_id: arkret_wire::RealmId,
     at: chrono::DateTime<chrono::Utc>,
-    root: soland_storage::EventCommitRequest,
+    root: coland_storage::EventCommitRequest,
     root_id: arkret_wire::SpaceId,
     created: Value,
 }
@@ -311,7 +311,7 @@ async fn space_lifecycle_basis(pool: PgPool) -> SpaceLifecycleBasis {
     }
 }
 
-async fn space_restore_cases(basis: &SpaceLifecycleBasis) -> soland_storage::EventCommitRequest {
+async fn space_restore_cases(basis: &SpaceLifecycleBasis) -> coland_storage::EventCommitRequest {
     let pool = basis.pool.clone();
     let realm_id = basis.realm_id.clone();
     let at = basis.at;
@@ -320,7 +320,7 @@ async fn space_restore_cases(basis: &SpaceLifecycleBasis) -> soland_storage::Eve
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let root = basis.root.clone();
     let created = &basis.created;
-    let transition = |previous: &soland_storage::AuthorityCommitTransaction,
+    let transition = |previous: &coland_storage::AuthorityCommitTransaction,
                       kind: arkret_wire::EventKind,
                       actor: &arkret_wire::DidCoreId| {
         next_request(previous, kind, actor, json!({"space_id": root_id}), at)
@@ -443,7 +443,7 @@ async fn space_restore_cases(basis: &SpaceLifecycleBasis) -> soland_storage::Eve
 
 async fn space_terminal_cases(
     basis: &SpaceLifecycleBasis,
-    child: soland_storage::EventCommitRequest,
+    child: coland_storage::EventCommitRequest,
 ) {
     let pool = basis.pool.clone();
     let realm_id = basis.realm_id.clone();
@@ -451,7 +451,7 @@ async fn space_terminal_cases(
     let root_id = basis.root_id.clone();
     let space_query = "SELECT value FROM space_current_results WHERE space_id=$1";
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
-    let terminal = |previous: &soland_storage::AuthorityCommitTransaction,
+    let terminal = |previous: &coland_storage::AuthorityCommitTransaction,
                     space: &arkret_wire::SpaceId| {
         next_request(
             previous,
@@ -631,7 +631,7 @@ async fn reactions_join_one_keyed_set_per_target_message() {
     // carries it keyed by its target, with the stored dot set verbatim.
     let founder_account = arkret_wire::AccountId::new(founder(), ordinary_realm::station());
     let material =
-        soland_storage_postgres::account_snapshot_material(&pool, &realm_id, &founder_account)
+        coland_storage_postgres::account_snapshot_material(&pool, &realm_id, &founder_account)
             .await
             .unwrap()
             .expect("the founder's snapshot is disclosable");

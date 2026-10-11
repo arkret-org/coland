@@ -1,5 +1,5 @@
 #[cfg(any(test, feature = "conformance-harness"))]
-use soland_services::identity::{
+use coland_services::identity::{
     DeviceIdentity, FindAccountByActorQuery, RegisterAccountCommand, SaveDeviceCommand,
     SessionIdentityState,
 };
@@ -16,7 +16,7 @@ use super::*;
 /// every revocation-gate read then has to reject as an internal fault.
 #[cfg(any(test, feature = "conformance-harness"))]
 fn initial_session_device_verification_state<'a>(
-    existing_devices: &'a [soland_services::identity::DeviceIdentity],
+    existing_devices: &'a [coland_services::identity::DeviceIdentity],
     device_id: &str,
 ) -> &'a str {
     if existing_devices
@@ -110,8 +110,8 @@ pub(crate) fn account_existing_session_error(
 }
 
 #[cfg(any(test, feature = "conformance-harness"))]
-#[salvo::oapi::endpoint(operation_id = "org.arkret.soland.auth.dev_login", tags("identity"))]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.auth.dev_login"))]
+#[salvo::oapi::endpoint(operation_id = "org.arkret.coland.auth.dev_login", tags("identity"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.auth.dev_login"))]
 pub(super) async fn dev_login(
     depot: &mut Depot,
     body: JsonBody<DevLoginRequestBody>,
@@ -194,7 +194,7 @@ pub(super) async fn dev_login(
         token_hash,
         account_pk: Some(account_pk),
         actor: actor_str.to_owned(),
-        endpoint: soland_services::identity::SessionEndpointState::HumanDevice {
+        endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
             device_id: device_id_str.to_owned(),
         },
         audience: state.service_id().clone(),
@@ -447,7 +447,7 @@ mod tests {
                 &refreshed,
             );
         assert!(
-            matches!(gate, Err(soland_services::ServiceError::SchemaViolation(_))),
+            matches!(gate, Err(coland_services::ServiceError::SchemaViolation(_))),
             "gate must fail closed on the corrupted row: {gate:?}"
         );
     }

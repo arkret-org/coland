@@ -1,6 +1,6 @@
 //! Durable service-identity bootstrap (identity-did.md §3.7).
 //!
-//! Soland is a class-B Service Identity Provider for its own identity. The
+//! Coland is a class-B Service Identity Provider for its own identity. The
 //! database stores the SDK `StoredDidCoreIdentity` plus public WebVH evidence;
 //! signing and control secrets remain in a durable SDK `KeyStore`. Configuration
 //! never supplies or pins the resulting DID.
@@ -22,22 +22,22 @@ use arkret_models_identity::service_identity::{
     ServiceRegistrationReceipt,
 };
 use arkret_wire::{PayloadProof, ServiceKind, project_did_to_core_id, proof_kind};
-use ed25519_dalek::SigningKey;
-use rand_chacha::rand_core::SeedableRng;
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use soland_http::config::{AppConfig, CONFIGURED_SIGNING_KEY_REF, SERVICE_IDENTITY_KEYSTORE_APP};
-use soland_http::webvh_validation::{
+use coland_http::config::{AppConfig, CONFIGURED_SIGNING_KEY_REF, SERVICE_IDENTITY_KEYSTORE_APP};
+use coland_http::webvh_validation::{
     WebvhLogEntry, validate_log_chain, validate_rotation_authorization_for_log,
     validate_witness_policy_for_log, verify_log_subject, verify_scid_against_did,
     verify_webvh_log_proof,
 };
-use soland_services::identity::{
+use coland_services::identity::{
     DidDocumentState as WebvhDocumentRecord, DidLogEvent as WebvhLogRecord,
     ServiceRegistrationCommitResult as ServiceRegistrationCommitOutcome,
 };
-use soland_services::persistence::PersistenceHandle;
-use soland_storage_postgres::{Db, PgPersistenceStore};
+use coland_services::persistence::PersistenceHandle;
+use coland_storage_postgres::{Db, PgPersistenceStore};
+use ed25519_dalek::SigningKey;
+use rand_chacha::rand_core::SeedableRng;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 /// Runtime values resolved before AppState is constructed. The service DID is
 /// deliberately absent from [`AppConfig`].
@@ -64,7 +64,7 @@ pub async fn resolve_and_build_persistence(
     db: &Db,
 ) -> anyhow::Result<ServiceIdentityBootstrap> {
     let pool = db.pool.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("DATABASE_URL is required: the Soland runtime persists through PostgreSQL")
+        anyhow::anyhow!("DATABASE_URL is required: the Coland runtime persists through PostgreSQL")
     })?;
     let persistence = PersistenceHandle::new(Arc::new(PgPersistenceStore::new(pool.clone())));
     let key_store: Option<Arc<dyn KeyStore>> = config
@@ -225,7 +225,7 @@ async fn resolve_service_identity(
             anyhow::bail!(
                 "service_identity_first_provisioning_required: no durable service identity, local \
                  registration, or identity bundle was found; if this is a genuinely new class-B \
-                 deployment set SOLAND_FIRST_PROVISIONING=1 once, otherwise verify DATABASE_URL \
+                 deployment set COLAND_FIRST_PROVISIONING=1 once, otherwise verify DATABASE_URL \
                  and restore the identity bundle"
             );
         }
@@ -373,7 +373,7 @@ async fn resolve_external_service_identity(
                     Err(lookup_error) => Ok(DidCoreIdentityState::Faulted {
                         diagnostic: DidCoreIdentityDiagnostic::RestoreFailed,
                         next_action: format!(
-                            "verify SOLAND_EXTERNAL_WEBVH_PROVIDER_URL, its registration bearer, and the retained KeyStore; Provider rejected ensure ({ensure_error}) and lookup failed ({lookup_error})"
+                            "verify COLAND_EXTERNAL_WEBVH_PROVIDER_URL, its registration bearer, and the retained KeyStore; Provider rejected ensure ({ensure_error}) and lookup failed ({lookup_error})"
                         ),
                     }),
                 },
@@ -397,7 +397,7 @@ async fn resolve_external_service_identity(
         Err(error) => Ok(DidCoreIdentityState::Faulted {
             diagnostic: DidCoreIdentityDiagnostic::RestoreFailed,
             next_action: format!(
-                "verify SOLAND_EXTERNAL_WEBVH_PROVIDER_URL, its registration bearer, and the retained KeyStore; Provider lookup failed: {error}"
+                "verify COLAND_EXTERNAL_WEBVH_PROVIDER_URL, its registration bearer, and the retained KeyStore; Provider lookup failed: {error}"
             ),
         }),
     }
@@ -504,7 +504,7 @@ fn external_identity_material(
         DidCoreIdentityKeyRef::new(CONFIGURED_SIGNING_KEY_REF.to_owned())
             .map_err(|error| anyhow::anyhow!(error.to_string()))?
     } else {
-        DidCoreIdentityKeyRef::new(format!("arkret:signer:soland-notary:external:{suffix}"))
+        DidCoreIdentityKeyRef::new(format!("arkret:signer:coland-notary:external:{suffix}"))
             .map_err(|error| anyhow::anyhow!(error.to_string()))?
     };
     let signing_seed = match config.notary_signing_key_seed {
@@ -512,7 +512,7 @@ fn external_identity_material(
         None => load_or_create_seed(key_store, &signing_key_ref, allow_create)?,
     };
     let inception_seed_ref = DidCoreIdentityKeyRef::new(format!(
-        "arkret:control:soland-webvh:external:{suffix}:inception"
+        "arkret:control:coland-webvh:external:{suffix}:inception"
     ))
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let inception_seed = load_or_create_seed(key_store, &inception_seed_ref, allow_create)?;
@@ -535,10 +535,10 @@ fn external_identity_material(
         )
         .map_err(|error| anyhow::anyhow!("service DID inception failed: {error}"))?;
     let control_key_ref =
-        DidCoreIdentityKeyRef::new(format!("arkret:control:soland-webvh:external:{suffix}:1"))
+        DidCoreIdentityKeyRef::new(format!("arkret:control:coland-webvh:external:{suffix}:1"))
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let next_control_key_ref =
-        DidCoreIdentityKeyRef::new(format!("arkret:control:soland-webvh:external:{suffix}:2"))
+        DidCoreIdentityKeyRef::new(format!("arkret:control:coland-webvh:external:{suffix}:2"))
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     store_or_verify_seed(
         key_store,
@@ -683,7 +683,7 @@ fn load_or_create_seed(
         Ok(bytes) => key_bytes_to_seed(key_ref, bytes.as_slice()),
         Err(error) if error.is_not_found() && allow_create => {
             let mut seed = [0u8; 32];
-            soland_http::state::getrandom_seed(&mut seed);
+            coland_http::state::getrandom_seed(&mut seed);
             key_store.store(key_ref.as_str(), &seed).map_err(|error| {
                 anyhow::anyhow!("persisting {} failed: {error}", key_ref.as_str())
             })?;
@@ -963,9 +963,9 @@ async fn restore_identity_bundle(
             .await
             .map_err(|error| anyhow::anyhow!("replaying service WebVH history failed: {error}"))?
         {
-            soland_storage::WebvhLogCommitOutcome::Accepted
-            | soland_storage::WebvhLogCommitOutcome::Duplicate => {}
-            soland_storage::WebvhLogCommitOutcome::Conflict => anyhow::bail!(
+            coland_storage::WebvhLogCommitOutcome::Accepted
+            | coland_storage::WebvhLogCommitOutcome::Duplicate => {}
+            coland_storage::WebvhLogCommitOutcome::Conflict => anyhow::bail!(
                 "service_identity_conflict: identity bundle history conflicts with local state"
             ),
         }
@@ -1095,7 +1095,7 @@ fn validate_registration_receipt_signature(stored: &StoredDidCoreIdentity) -> an
 
 fn registration_key(config: &AppConfig) -> anyhow::Result<ServiceRegistrationKey> {
     let public_base_url = CanonicalServiceUrl::canonicalize(&config.public_base_url)
-        .map_err(|error| anyhow::anyhow!("invalid SOLAND_PUBLIC_BASE_URL: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("invalid COLAND_PUBLIC_BASE_URL: {error}"))?;
     ServiceRegistrationKey::new(ServiceKind::Station, public_base_url)
         .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
@@ -1487,11 +1487,11 @@ const ACCOUNT_AUTHORITY_JWK_KID: &str = "coauth-account-authority-v1";
 ///
 /// Two sources, in order:
 ///
-/// 1. `SOLAND_ACCOUNT_AUTHORITY_PUBLIC_KEY_MULTIBASE`, used verbatim. An operator who wants to name
+/// 1. `COLAND_ACCOUNT_AUTHORITY_PUBLIC_KEY_MULTIBASE`, used verbatim. An operator who wants to name
 ///    the exact key still can, and that pin keeps being enforced against the stored DID history on
 ///    every later boot.
 /// 2. Otherwise the Account Authority's own published keyset, read on every startup from the
-///    operator-configured `SOLAND_ACCOUNT_AUTHORITY_URL`.
+///    operator-configured `COLAND_ACCOUNT_AUTHORITY_URL`.
 ///
 /// Reading from the service that owns the key removes a transcription step;
 /// the URL is operator configuration and TLS authenticates it. Repeating that
@@ -1509,7 +1509,7 @@ async fn account_authority_assertion_key(config: &AppConfig) -> anyhow::Result<O
         return Ok(None);
     };
     let issuer = url::Url::parse(authority_url)
-        .map_err(|error| anyhow::anyhow!("SOLAND_ACCOUNT_AUTHORITY_URL is not a URL: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("COLAND_ACCOUNT_AUTHORITY_URL is not a URL: {error}"))?;
     // Plain GETs, deliberately not the typed Arkret client: these are the
     // Account Authority's standard OIDC discovery and keyset documents, not
     // Arkret operations, and the typed client rejects any path the operation
@@ -1517,16 +1517,16 @@ async fn account_authority_assertion_key(config: &AppConfig) -> anyhow::Result<O
     let unreachable = |what: &str, error: String| {
         anyhow::anyhow!(
             "reading the Account Authority {what} at {authority_url} failed: {error}. The \
-             Account Authority is a required startup dependency, so Soland stops rather than \
+             Account Authority is a required startup dependency, so Coland stops rather than \
              serving with unverified trust. Start the Account Authority first, or set \
-             SOLAND_ACCOUNT_AUTHORITY_PUBLIC_KEY_MULTIBASE."
+             COLAND_ACCOUNT_AUTHORITY_PUBLIC_KEY_MULTIBASE."
         )
     };
     let fetch = async |url: url::Url, what: &str| -> anyhow::Result<serde_json::Value> {
         // Discovery establishes the initial trust key. Validate each exact URL
         // and certificate against the operator CA store; signing with a fetched
         // key cannot authenticate an otherwise untrusted discovery connection.
-        let (url, client) = soland_http::security::validate_http_url_for_egress_with_pinned_client(
+        let (url, client) = coland_http::security::validate_http_url_for_egress_with_pinned_client(
             url.as_str(),
             what,
             config.development_mode,
@@ -1564,7 +1564,7 @@ async fn account_authority_assertion_key(config: &AppConfig) -> anyhow::Result<O
         })?;
     // A discovery document that points the keyset somewhere else would move
     // the trust decision to a host the operator never named. The issuer origin
-    // is what `SOLAND_ACCOUNT_AUTHORITY_URL` authorizes, and it is where the
+    // is what `COLAND_ACCOUNT_AUTHORITY_URL` authorizes, and it is where the
     // key has to come from.
     if keyset_url.origin() != issuer.origin() {
         anyhow::bail!(
@@ -1606,7 +1606,7 @@ fn account_authority_key_from_keyset(keyset: &serde_json::Value) -> Option<Strin
 ///
 /// Two sources of the key are deliberately not equal in authority:
 ///
-/// - `SOLAND_ACCOUNT_AUTHORITY_PUBLIC_KEY_MULTIBASE` is the operator naming a key. It authorizes
+/// - `COLAND_ACCOUNT_AUTHORITY_PUBLIC_KEY_MULTIBASE` is the operator naming a key. It authorizes
 ///   both filling an absent method and replacing one that names a different key, because editing it
 ///   is a deliberate act.
 /// - A key read from the Authority's published keyset only ever fills an *absent* method. Letting a
@@ -1647,7 +1647,7 @@ async fn ensure_account_authority_authorization(
         anyhow::bail!(
             "Account Authority published key does not match the key authorized by this Station; \
              refusing automatic replacement. Set \
-             SOLAND_ACCOUNT_AUTHORITY_PUBLIC_KEY_MULTIBASE explicitly to approve a key rotation"
+             COLAND_ACCOUNT_AUTHORITY_PUBLIC_KEY_MULTIBASE explicitly to approve a key rotation"
         );
     }
     authorize_account_authority_key(persistence, config, key_store, stored, key).await
@@ -1892,7 +1892,7 @@ async fn publish_service_document_successor(
     let signing_seed = load_seed(key_store, &signing_control_ref)?;
     let following_control_ref = next_control_key_ref(&signing_control_ref)?;
     let mut following_seed = [0u8; 32];
-    soland_http::state::getrandom_seed(&mut following_seed);
+    coland_http::state::getrandom_seed(&mut following_seed);
     let following_candidate_ref =
         candidate_control_key_ref(&following_control_ref, &following_seed)?;
     key_store
@@ -2009,7 +2009,7 @@ async fn publish_service_document_successor(
             Some(head.event_digest.clone()),
             document,
             event,
-            Some(soland_storage::ServiceIdentitySuccessor {
+            Some(coland_storage::ServiceIdentitySuccessor {
                 expected: stored,
                 next: updated.clone(),
             }),
@@ -2017,9 +2017,9 @@ async fn publish_service_document_successor(
         .await
         .map_err(|error| anyhow::anyhow!("publishing the Station DID successor failed: {error}"))?
     {
-        soland_storage::WebvhLogCommitOutcome::Accepted
-        | soland_storage::WebvhLogCommitOutcome::Duplicate => {}
-        soland_storage::WebvhLogCommitOutcome::Conflict => {
+        coland_storage::WebvhLogCommitOutcome::Accepted
+        | coland_storage::WebvhLogCommitOutcome::Duplicate => {}
+        coland_storage::WebvhLogCommitOutcome::Conflict => {
             anyhow::bail!(
                 "the Station WebVH head moved while authorizing the Account Authority key"
             )
@@ -2046,11 +2046,11 @@ async fn mint_local_service_identity(
     let provider_endpoint = url::Url::parse(registration_key.public_base_url().as_str())
         .map_err(|error| anyhow::anyhow!("invalid service Provider endpoint: {error}"))?;
     let mut rng_seed = [0u8; 32];
-    soland_http::state::getrandom_seed(&mut rng_seed);
+    coland_http::state::getrandom_seed(&mut rng_seed);
     let mut rng = rand_chacha::ChaCha20Rng::from_seed(rng_seed);
     let service_signing_seed = config.notary_signing_key_seed.unwrap_or_else(|| {
         let mut seed = [0u8; 32];
-        soland_http::state::getrandom_seed(&mut seed);
+        coland_http::state::getrandom_seed(&mut seed);
         seed
     });
     let assertion_keys = account_authority_key
@@ -2230,7 +2230,7 @@ fn signing_key_ref(
     if let Some(seed) = config.notary_signing_key_seed {
         return retained_signing_key_ref(service_did, &seed);
     }
-    DidCoreIdentityKeyRef::new(format!("arkret:signer:soland-notary:{service_did}"))
+    DidCoreIdentityKeyRef::new(format!("arkret:signer:coland-notary:{service_did}"))
         .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
@@ -2244,14 +2244,14 @@ fn retained_signing_key_ref(
     let digest = Sha256::digest(public.as_bytes());
     let suffix: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
     DidCoreIdentityKeyRef::new(format!(
-        "arkret:signer:soland-notary:{service_did}:{suffix}"
+        "arkret:signer:coland-notary:{service_did}:{suffix}"
     ))
     .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
 fn control_key_ref(service_did: &Did, generation: u64) -> anyhow::Result<DidCoreIdentityKeyRef> {
     DidCoreIdentityKeyRef::new(format!(
-        "arkret:control:soland-webvh:{service_did}:{generation}"
+        "arkret:control:coland-webvh:{service_did}:{generation}"
     ))
     .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
@@ -2282,7 +2282,7 @@ fn required_key_store(key_store: Option<&dyn KeyStore>) -> anyhow::Result<&dyn K
     key_store.ok_or_else(|| {
         anyhow::anyhow!(
             "service identity requires a durable Secrets/KeyStore backend for WebVH control keys; \
-             configure SOLAND_KEYSTORE_BACKEND with a durable backend"
+             configure COLAND_KEYSTORE_BACKEND with a durable backend"
         )
     })
 }
@@ -2295,7 +2295,7 @@ fn load_signing_seed(
     if key_ref.as_str() == CONFIGURED_SIGNING_KEY_REF {
         return config.notary_signing_key_seed.ok_or_else(|| {
             anyhow::anyhow!(
-                "service signing KeyRef points to SOLAND_NOTARY_SIGNING_KEY but the secret is unavailable"
+                "service signing KeyRef points to COLAND_NOTARY_SIGNING_KEY but the secret is unavailable"
             )
         });
     }
@@ -2336,12 +2336,12 @@ mod tests {
     use std::sync::Mutex;
 
     use arkret_keystore::{KeyBytes, KeyStore, KeyStoreError};
-    use soland_storage::{
+    use coland_storage::{
         DeliveryPolicyStoreRegistry, ResolutionStoreRegistry, ServiceIdentitySuccessor,
         WebvhLogCommitOutcome,
     };
-    use soland_storage_postgres::PgPersistenceStore;
-    use soland_storage_postgres::test_database::TestDatabase;
+    use coland_storage_postgres::PgPersistenceStore;
+    use coland_storage_postgres::test_database::TestDatabase;
 
     use super::*;
 
@@ -2391,7 +2391,7 @@ mod tests {
 
     fn bootstrap_config() -> AppConfig {
         AppConfig {
-            public_base_url: "https://soland.example/".to_owned(),
+            public_base_url: "https://coland.example/".to_owned(),
             notary_signing_key_seed: Some([0x39u8; 32]),
             ..AppConfig::test_default()
         }
@@ -2629,7 +2629,7 @@ mod tests {
             .commit_log_operation(
                 Some(first_head[0].event_digest.clone()),
                 document,
-                soland_storage::WebvhLogRecord {
+                coland_storage::WebvhLogRecord {
                     event_digest: history[1].event_digest.clone(),
                     did: history[1].did.clone(),
                     seq: history[1].seq,
@@ -2779,7 +2779,7 @@ mod tests {
         let persistence = PersistenceHandle::new(persistence_store.clone());
         let key_store = TestKeyStore::default();
         let bundle_dir = std::env::temp_dir().join(format!(
-            "soland-signing-rotation-bundle-{}",
+            "coland-signing-rotation-bundle-{}",
             uuid::Uuid::new_v4()
         ));
         let bundle_backend = FileIdentityBundleBackend::new(&bundle_dir);
@@ -3197,7 +3197,7 @@ mod tests {
                 .publish_route_cache(latest.clone(), cache_from(&latest, chrono::Utc::now()))
                 .await
                 .unwrap(),
-            soland_storage::MonotonicRouteWrite::Applied
+            coland_storage::MonotonicRouteWrite::Applied
         ));
         let retained = store
             .service_routes()
@@ -3213,7 +3213,7 @@ mod tests {
                     .publish_route_cache(latest.clone(), cache_from(&latest, earlier))
                     .await
                     .unwrap(),
-                soland_storage::MonotonicRouteWrite::Replay
+                coland_storage::MonotonicRouteWrite::Replay
             ),
             "an identical authenticated route finishing later replays without rollback"
         );
@@ -3243,7 +3243,7 @@ mod tests {
                 )
                 .await
                 .unwrap(),
-            soland_storage::MonotonicRouteWrite::Stale
+            coland_storage::MonotonicRouteWrite::Stale
         ));
         assert_eq!(
             store
@@ -3500,9 +3500,9 @@ mod tests {
     #[tokio::test]
     async fn keystore_backed_key_authorization_event_survives_restart() {
         let config = AppConfig {
-            public_base_url: "https://soland.example/".to_owned(),
+            public_base_url: "https://coland.example/".to_owned(),
             notary_signing_key_seed: None,
-            key_store: soland_http::config::KeyStoreConfig::Platform,
+            key_store: coland_http::config::KeyStoreConfig::Platform,
             ..AppConfig::test_default()
         };
         let persistence_store = leased_store().await;
@@ -3540,7 +3540,7 @@ mod tests {
         assert_eq!(restarted_seed, first_seed);
         assert_eq!(
             restarted_identity.active_signing_key_ref.as_str(),
-            format!("arkret:signer:soland-notary:{}", restarted_identity.did)
+            format!("arkret:signer:coland-notary:{}", restarted_identity.did)
         );
     }
 
@@ -3601,7 +3601,7 @@ mod tests {
         let persistence = PersistenceHandle::new(persistence_store);
         let key_store = TestKeyStore::default();
         let bundle_dir = std::env::temp_dir().join(format!(
-            "soland-service-identity-bundle-{}",
+            "coland-service-identity-bundle-{}",
             uuid::Uuid::new_v4()
         ));
         let bundle_backend = FileIdentityBundleBackend::new(&bundle_dir);
@@ -3646,7 +3646,7 @@ mod tests {
         let persistence = PersistenceHandle::new(persistence_store);
         let key_store = TestKeyStore::default();
         let bundle_dir = std::env::temp_dir().join(format!(
-            "soland-rotated-identity-bundle-{}",
+            "coland-rotated-identity-bundle-{}",
             uuid::Uuid::new_v4()
         ));
         let bundle_backend = FileIdentityBundleBackend::new(&bundle_dir);
@@ -3754,7 +3754,7 @@ mod tests {
         let persistence = PersistenceHandle::new(persistence_store);
         let key_store = TestKeyStore::default();
         let bundle_dir = std::env::temp_dir().join(format!(
-            "soland-forged-identity-bundle-{}",
+            "coland-forged-identity-bundle-{}",
             uuid::Uuid::new_v4()
         ));
         let bundle_backend = FileIdentityBundleBackend::new(&bundle_dir);
@@ -4025,7 +4025,7 @@ mod account_authority_keyset_tests {
         let mut config = AppConfig {
             development_mode: true,
             account_authority_url: Some(format!("https://localhost:{port}")),
-            ..soland_test_support::app_config()
+            ..coland_test_support::app_config()
         };
         assert!(account_authority_assertion_key(&config).await.is_err());
         config.account_authority_url = Some(authority);

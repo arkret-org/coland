@@ -1,7 +1,7 @@
 //! Media aggregation and Realm `media_service` admin projections.
 //!
-//! Shared by the soland producer
-//! (`soland/crates/http/src/routing/admin/media.rs`) and the sodmin
+//! Shared by the coland producer
+//! (`coland/crates/http/src/routing/admin/media.rs`) and the codmin
 //! operator console, so a field rename breaks both sides at compile time.
 
 use std::collections::BTreeMap;
@@ -29,7 +29,7 @@ pub struct AdminMediaByActorRow {
     pub total_size: u64,
 }
 
-/// `GET /_soland/admin/media/statistics` response.
+/// `GET /_coland/admin/media/statistics` response.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(salvo_oapi::ToSchema))]
 #[serde(deny_unknown_fields)]
@@ -37,7 +37,7 @@ pub struct AdminMediaStatistics {
     pub total_blobs: u64,
     pub total_size: u64,
     pub encrypted_count: u64,
-    /// Always `0` today: soland has no quarantine store for blobs, so the
+    /// Always `0` today: coland has no quarantine store for blobs, so the
     /// counter is reported rather than invented.
     pub quarantined_count: u64,
     pub by_media_type: BTreeMap<String, AdminMediaBucket>,
@@ -45,7 +45,7 @@ pub struct AdminMediaStatistics {
     pub by_actor: Vec<AdminMediaByActorRow>,
 }
 
-/// `GET /_soland/admin/media/by-actor` response.
+/// `GET /_coland/admin/media/by-actor` response.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(salvo_oapi::ToSchema))]
 #[serde(deny_unknown_fields)]

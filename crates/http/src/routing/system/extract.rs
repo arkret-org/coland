@@ -1,10 +1,10 @@
 //! Authentication extraction shared by protected HTTP handlers.
 
+use coland_http::error::AppError;
+use coland_services::identity::SessionIdentityState as SessionRecord;
 use salvo::extract::{Extractible, Metadata};
 use salvo::http::ParseError;
 use salvo::prelude::{Depot, Request};
-use soland_http::error::AppError;
-use soland_services::identity::SessionIdentityState as SessionRecord;
 
 use super::auth::authenticated_session as authenticated_session_inner;
 use crate::state::AppState;
@@ -59,9 +59,9 @@ impl AuthArgs {
         match authenticated_session_inner(state, req).await {
             Ok(session) => Ok(session),
             Err((_status, code, message)) => {
-                let typed = soland_http::error::ErrorCode::from_wire(code);
+                let typed = coland_http::error::ErrorCode::from_wire(code);
                 let mut error = AppError::from_rejection(
-                    typed.unwrap_or(soland_http::error::ErrorCode::Unauthenticated),
+                    typed.unwrap_or(coland_http::error::ErrorCode::Unauthenticated),
                     message,
                 );
                 if typed.is_none() {

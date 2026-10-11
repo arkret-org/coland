@@ -1,9 +1,9 @@
+use coland_storage_postgres::test_database::TestDatabase;
 use diesel::prelude::QueryableByName;
 use diesel::sql_query;
 use diesel::sql_types::{BigInt, Binary, Jsonb, Text};
 use diesel_async::RunQueryDsl;
 use serde_json::json;
-use soland_storage_postgres::test_database::TestDatabase;
 
 #[derive(QueryableByName)]
 struct CountRow {

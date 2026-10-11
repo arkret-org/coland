@@ -15,10 +15,10 @@ use arkret_models_collaboration::authority_commit::{
 use arkret_models_collaboration::objects::direct_conversation::DirectConversationFoundingAuthorityEvidence;
 use arkret_wire::{AuthorityRejectionStatus, AuthoritySubmitOutcome, Event};
 use chrono::Utc;
-use soland_services::identity::SessionIdentityState;
-use soland_services::projection::StagedRealmBootstrap;
-use soland_services::{ServiceError, ServiceResult};
-use soland_storage::{
+use coland_services::identity::SessionIdentityState;
+use coland_services::projection::StagedRealmBootstrap;
+use coland_services::{ServiceError, ServiceResult};
+use coland_storage::{
     AuthorityCommitTransaction, ConflictCode, CurrentRealmAuthority,
     DirectConversationAdmissionCut, DirectConversationFoundingCommitUnit, SelfProducerCommitGuard,
 };
@@ -202,7 +202,7 @@ pub(super) async fn submit_self_direct_conversation_founding(
     let genesis = &request.events[0].event;
     let staged =
         stage_founding_projection(state, &request.events.each_ref().map(|item| &item.event));
-    let authority = soland_storage::CurrentRealmAuthority {
+    let authority = coland_storage::CurrentRealmAuthority {
         realm_id: arkret_wire::RealmId::from_event_id(&genesis.event_id),
         generation: 0,
         service_id: state.service_core_id(),
@@ -233,10 +233,10 @@ pub(super) async fn submit_self_direct_conversation_founding(
         .admit_self_direct_conversation_founding_unit(&unit, &guards, committed_at)
         .await?
     {
-        soland_storage::DirectConversationFoundingCommitOutcome::Committed(commits) => {
+        coland_storage::DirectConversationFoundingCommitOutcome::Committed(commits) => {
             (AggregateAcceptanceStatus::Committed, commits)
         }
-        soland_storage::DirectConversationFoundingCommitOutcome::Duplicate(commits) => {
+        coland_storage::DirectConversationFoundingCommitOutcome::Duplicate(commits) => {
             (AggregateAcceptanceStatus::Duplicate, commits)
         }
     };
@@ -257,7 +257,7 @@ pub(super) async fn submit_self_direct_conversation_founding(
 /// the peer does not run profile admission or sign a second Commit chain.
 pub(super) async fn submit_peer_direct_conversation_founding(
     state: &AppState,
-    peer: &soland_services::authority_commit::AuthenticatedPeerContext,
+    peer: &coland_services::authority_commit::AuthenticatedPeerContext,
     request: DirectConversationFoundingFederationSubmission,
 ) -> ServiceResult<DirectConversationFoundingAcceptanceOutcome> {
     request
@@ -328,10 +328,10 @@ pub(super) async fn submit_peer_direct_conversation_founding(
     }
     if request.founding_authority_evidence.founding_ref().id
         != match &facts.authority_ref {
-            soland_storage::DirectConversationFoundingAuthorityRef::ContactRound(id) => {
+            coland_storage::DirectConversationFoundingAuthorityRef::ContactRound(id) => {
                 id.to_string()
             }
-            soland_storage::DirectConversationFoundingAuthorityRef::AgentProvision(id) => {
+            coland_storage::DirectConversationFoundingAuthorityRef::AgentProvision(id) => {
                 id.to_string()
             }
         }
@@ -388,13 +388,13 @@ pub(super) async fn submit_peer_direct_conversation_founding(
             })?;
         }
         let continuity = if index == 0 {
-            soland_services::committed_receipt::CommitContinuity::StreamStart
+            coland_services::committed_receipt::CommitContinuity::StreamStart
         } else {
-            soland_services::committed_receipt::CommitContinuity::After(
+            coland_services::committed_receipt::CommitContinuity::After(
                 &request.committed_events[index - 1].source_commit,
             )
         };
-        soland_services::committed_receipt::verify_committed_event_receipt_with_source(
+        coland_services::committed_receipt::verify_committed_event_receipt_with_source(
             state.persistence(),
             &item.event_submission.event,
             commit,

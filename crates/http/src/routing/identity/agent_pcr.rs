@@ -4,11 +4,11 @@ use arkret_models_collaboration::agent_scope::agent_requested_scope_digest;
 use arkret_models_collaboration::events_payloads::agent::AgentKeyScope;
 use arkret_wire::{AccountId, ActorId, DidCoreId, DidUrl};
 use chrono::{DateTime, Utc};
-use serde_json::Value;
-use soland_http::error::AppError;
-use soland_services::identity::{
+use coland_http::error::AppError;
+use coland_services::identity::{
     AgentPairingState as AgentPrincipalRecord, PinnedDidVersionStatus,
 };
+use serde_json::Value;
 
 use crate::state::AppState;
 
@@ -673,7 +673,7 @@ mod tests {
     async fn agent_account_binding_rejects_same_principal_at_another_station() {
         let state = crate::state::AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let local = super::AccountId::new(
             super::DidCoreId::new(CONTROLLER).unwrap(),
@@ -686,9 +686,9 @@ mod tests {
         for (label, account_id) in [("local", local.clone()), ("foreign", foreign.clone())] {
             state
                 .identities()
-                .save_account(soland_services::identity::AccountProfileState {
+                .save_account(coland_services::identity::AccountProfileState {
                     // The store assigns the primary key.
-                    pk: soland_storage::AccountPk(0),
+                    pk: coland_storage::AccountPk(0),
                     principal_id: account_id.principal_id.clone(),
                     account_id,
                     localpart: format!("controller-{label}"),
@@ -800,7 +800,7 @@ mod tests {
             "alsoKnownAs": [],
             "service": [
                 {
-                    "id": format!("{AGENT_DID}#soland"),
+                    "id": format!("{AGENT_DID}#coland"),
                     "type": "ArkretStation",
                     "serviceEndpoint": "https://agent.example"
                 },

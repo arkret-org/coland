@@ -3,17 +3,17 @@
 //! Surfaces:
 //! - `GET /_arkret/self/realms/{realm_id}/links?direction=outbound|inbound|both&link_kind_allow=...
 //!   ` — list the typed cross-Realm links projected from `ak.realm.link` events. Powered by
-//!   [`soland_domain::reducer::ProjectionState::realm_links_query`].
+//!   [`coland_domain::reducer::ProjectionState::realm_links_query`].
 use arkret_identifiers::RealmId;
 use arkret_models_collaboration::governance::realm_governance::{
     RealmLinkDirection, RealmLinkEntry, RealmLinkKind, RealmLinkList, RealmLinkStatus,
 };
+use coland_domain::reducer::RealmLinkState;
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
 use salvo::oapi::endpoint;
 use salvo::oapi::extract::{PathParam, QueryParam};
 use salvo::prelude::*;
-use soland_domain::reducer::RealmLinkState;
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
 
 use super::AuthArgs;
 use crate::state::AppState;
@@ -75,11 +75,11 @@ pub(crate) async fn list_realm_links(
 }
 
 #[endpoint(
-    operation_id = "org.arkret.soland.admin.realm_link.query.list",
+    operation_id = "org.arkret.coland.admin.realm_link.query.list",
     summary = "List typed cross-Realm links for administration",
     tags("admin", "realm_links")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.realm_link.query.list"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.realm_link.query.list"))]
 pub(crate) async fn admin_list_realm_links(
     admin: super::admin::AdminAuth,
     realm_id: PathParam<String>,
@@ -94,7 +94,7 @@ pub(crate) async fn admin_list_realm_links(
 /// `_session` is the caller already authenticated by the wrapping endpoint
 /// (the self bearer path or the `RequireAdmin` gate).
 async fn list_realm_links_impl(
-    _session: soland_services::identity::SessionIdentityState,
+    _session: coland_services::identity::SessionIdentityState,
     realm_id: PathParam<String>,
     direction: QueryParam<String, false>,
     link_kind_allow: QueryParam<String, false>,

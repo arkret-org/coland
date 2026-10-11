@@ -1101,7 +1101,7 @@ impl FederationFrontierExchangeStore for PgFederationFrontierExchangeStore {
         )
         .bind::<Text, _>(realm_id)
         .bind::<Text, _>(peer_id.as_str())
-        .bind::<Integer, _>(soland_storage::FEDERATION_FRONTIER_STALE_FAILURES)
+        .bind::<Integer, _>(coland_storage::FEDERATION_FRONTIER_STALE_FAILURES)
         .bind::<BigInt, _>(aligned_at)
         .execute(&mut conn)
         .await

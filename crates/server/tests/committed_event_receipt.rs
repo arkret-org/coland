@@ -10,15 +10,15 @@
 use arkret_canonical::DigestSuite;
 use arkret_wire::{DidCoreId, DidUrl, Event, EventKind, RealmCommit, ScopeRef};
 use chrono::{Duration, Utc};
-use soland_http::state::AppState;
-use soland_services::ServiceError;
-use soland_services::committed_receipt::{
+use coland_http::state::AppState;
+use coland_services::ServiceError;
+use coland_services::committed_receipt::{
     CommitContinuity, ReceivedProducer, verify_committed_event_receipt_with_fact,
 };
-use soland_test_support::AppStateTestExt as _;
-use soland_test_support::device_authorization_history::sign_event;
-use soland_test_support::governance_authority::{GovernanceChain, GovernanceSigner};
-use soland_test_support::pcr_genesis::PcrGenesisFixture;
+use coland_test_support::AppStateTestExt as _;
+use coland_test_support::device_authorization_history::sign_event;
+use coland_test_support::governance_authority::{GovernanceChain, GovernanceSigner};
+use coland_test_support::pcr_genesis::PcrGenesisFixture;
 
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()
@@ -126,8 +126,8 @@ fn non_governance_service_receipt_verifies_frozen_source_and_fails_closed_withou
         use arkret_models_collaboration::authority_commit::{
             HistoricalProducerSignerFact, ServiceHistoricalSignerFact,
         };
-        let receiver = soland_test_support::app_state_with_postgres_governance(
-            soland_test_support::app_config(),
+        let receiver = coland_test_support::app_state_with_postgres_governance(
+            coland_test_support::app_config(),
         );
         let chain = GovernanceChain::new();
         let suite = DigestSuite::Sha256;
@@ -276,12 +276,12 @@ fn non_governance_service_receipt_verifies_frozen_source_and_fails_closed_withou
 #[test]
 fn non_governance_receiver_verifies_original_human_fact_and_legacy_is_unavailable() {
     runtime().block_on(async {
-        let receiver = soland_test_support::app_state_with_postgres_governance(
-            soland_test_support::app_config(),
+        let receiver = coland_test_support::app_state_with_postgres_governance(
+            coland_test_support::app_config(),
         );
-        let mut origin_config = soland_test_support::app_config();
+        let mut origin_config = coland_test_support::app_config();
         origin_config.public_base_url = "https://remote-station.example".to_owned();
-        let origin = soland_test_support::app_state_with_postgres_governance(origin_config);
+        let origin = coland_test_support::app_state_with_postgres_governance(origin_config);
         assert_ne!(origin.service_core_id(), receiver.service_core_id());
         let foreign_pcr = PcrGenesisFixture::new(origin.service_did());
         foreign_pcr

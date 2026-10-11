@@ -42,8 +42,8 @@ use arkret_wire::{
     AuthoritySubmitOutcome, Base64UrlString, DetachedSignatureContext, Event,
     EventAdmissionSubmission, EventKind, MlsWelcomeDelivery, MlsWelcomeRecipientEndpoint, ScopeRef,
 };
-use soland_services::{ServiceError, ServiceResult};
-use soland_storage::{
+use coland_services::{ServiceError, ServiceResult};
+use coland_storage::{
     ConflictCode, MlsConsumedProposalInstallation, MlsInstalledBase, MlsProposalLeafProvenance,
     MlsPublicBlob, MlsStateInstallation, MlsWelcomeClaimLedgerKey,
     VerifiedMlsRecipientRosterWitness, VerifiedMlsWelcome,
@@ -184,7 +184,7 @@ async fn admit_mls_event_inner(
 /// The transaction rechecks all selectors against its locked accepted cut.
 pub(super) async fn attach_local_roster_witnesses(
     state: &AppState,
-    transaction: &mut soland_storage::AuthorityCommitTransaction,
+    transaction: &mut coland_storage::AuthorityCommitTransaction,
 ) -> ServiceResult<()> {
     if transaction.event.kind != EventKind::MlsCommit {
         return Ok(());
@@ -970,7 +970,7 @@ mod tests {
     use arkret_mls::{ArkretMlsGroup, ArkretMlsIdentity};
     use arkret_models_crypto::{MlsGovernanceBindingPayload, MlsKeyPackageState};
     use arkret_wire::{AccountId, ActorId, DeviceId, DidCoreId, EventId, MlsGroupCurrent, RealmId};
-    use soland_storage::MlsGroupCurrentRecord;
+    use coland_storage::MlsGroupCurrentRecord;
 
     use super::*;
 
@@ -1002,7 +1002,7 @@ mod tests {
                 seed_demo_data: false,
                 ..crate::config::AppConfig::test_default()
             },
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         )
     }
 

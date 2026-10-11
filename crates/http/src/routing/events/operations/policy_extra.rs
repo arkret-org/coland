@@ -79,7 +79,7 @@ pub(crate) async fn validate_audience_mention_operation_policy(
                 tracing::error!(?error, %realm_id, "capability authorization read failed");
                 arkret_wire::ErrorCode::INTERNAL_ERROR
             })?;
-    let facts = soland_storage::OperationFacts {
+    let facts = coland_storage::OperationFacts {
         strand_id: operation
             .payload
             .get("strand_id")
@@ -87,18 +87,18 @@ pub(crate) async fn validate_audience_mention_operation_policy(
             .map(str::to_owned),
         object_kind: Some("message".to_owned()),
         track: Some("discussion".to_owned()),
-        ..soland_storage::OperationFacts::default()
+        ..coland_storage::OperationFacts::default()
     };
     match authorization.evaluate(
         &[arkret_wire::CapabilityActionId::MESSAGE_MENTION_BROADCAST],
         &target.1,
         &facts,
     ) {
-        soland_storage::GrantEvaluation::Allowed(satisfied)
+        coland_storage::GrantEvaluation::Allowed(satisfied)
             if satisfied.iter().any(|grant| {
-                soland_storage::capability_grant_expires_at(grant.grant).is_some()
+                coland_storage::capability_grant_expires_at(grant.grant).is_some()
             }) => {}
-        soland_storage::GrantEvaluation::Unnamed => {
+        coland_storage::GrantEvaluation::Unnamed => {
             return Err("ak.message.mention.broadcast required for audience_mention");
         }
         _ => {
@@ -338,7 +338,7 @@ mod actor_membership_context_tests {
                 seed_demo_data: false,
                 ..crate::config::AppConfig::test_default()
             },
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let realm_id = "ak:realm:AQcksDTzb8Sxrn1BUVVlHtH4vBOy99RKUB4EwOq_413b";
         let principal = arkret_wire::DidCoreId::new("ak:did_core:web:alice.example").unwrap();
@@ -346,10 +346,10 @@ mod actor_membership_context_tests {
             principal.clone(),
             state.service_core_id(),
         ));
-        let mut directory = soland_services::events::RealmDirectoryEntry::new(
+        let mut directory = coland_services::events::RealmDirectoryEntry::new(
             arkret_wire::RealmId::new(realm_id).unwrap(),
             "discovery",
-            soland_services::events::DirectoryProvenance::LocalOnly,
+            coland_services::events::DirectoryProvenance::LocalOnly,
         );
         directory.members.insert(principal);
         state.realm_directory().upsert(directory);
@@ -357,7 +357,7 @@ mod actor_membership_context_tests {
         let now = chrono::Utc::now();
         state.test_projection().lock().members.insert(
             (realm_id.to_owned(), actor.to_string()),
-            soland_domain::reducer::SolandMembershipState {
+            coland_domain::reducer::ColandMembershipState {
                 member: actor.to_string(),
                 realm_id: realm_id.to_owned(),
                 state: "join".to_owned(),

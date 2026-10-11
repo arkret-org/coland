@@ -7,24 +7,24 @@ mod ordinary_realm;
 
 use arkret_models_collaboration::{RealmOrganizationPayload, SignatureMaterial};
 use base64::Engine as _;
-use diesel_async::RunQueryDsl;
-use ed25519_dalek::Signer as _;
-use soland_storage::{
+use coland_storage::{
     AuthorityCommitStore, EventCommitUnitOfWork, RealmOrganizationStatementStore,
 };
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{
     PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool, PgRealmOrganizationStatementStore,
 };
+use diesel_async::RunQueryDsl;
+use ed25519_dalek::Signer as _;
 
 fn organization_request(
-    previous: &soland_storage::AuthorityCommitTransaction,
+    previous: &coland_storage::AuthorityCommitTransaction,
     status: &str,
     scopes: serde_json::Value,
     reference: Option<&str>,
 ) -> (
-    soland_storage::EventCommitRequest,
-    soland_storage::RealmOrganizationProofCommit,
+    coland_storage::EventCommitRequest,
+    coland_storage::RealmOrganizationProofCommit,
 ) {
     let at = previous.commit.committed_at;
     let key = ed25519_dalek::SigningKey::from_bytes(&[81; 32]);
@@ -63,7 +63,7 @@ fn organization_request(
         serde_json::to_value(payload).unwrap(),
         at,
     );
-    let proof = soland_storage::RealmOrganizationProofCommit {
+    let proof = coland_storage::RealmOrganizationProofCommit {
         event_id: request.authority_commit.event.event_id.clone(),
         verification_method: method,
         signed_at: at,
@@ -73,10 +73,10 @@ fn organization_request(
 }
 
 fn batch(
-    request: soland_storage::EventCommitRequest,
-    proof: soland_storage::RealmOrganizationProofCommit,
-) -> soland_storage::EventBatchCommitRequest {
-    soland_storage::EventBatchCommitRequest {
+    request: coland_storage::EventCommitRequest,
+    proof: coland_storage::RealmOrganizationProofCommit,
+) -> coland_storage::EventBatchCommitRequest {
+    coland_storage::EventBatchCommitRequest {
         events: vec![request],
         realm_organization_proof: Some(proof),
         invite_claim_proof: None,
@@ -158,7 +158,7 @@ async fn accepted_organization_scope_refuses_real_member_and_invite_join_with_ze
         None,
     );
     let relationship = ordinary_realm::source_request(&pool, relationship).await;
-    let proof = soland_storage::RealmOrganizationProofCommit {
+    let proof = coland_storage::RealmOrganizationProofCommit {
         event_id: relationship.authority_commit.event.event_id.clone(),
         ..proof
     };
@@ -235,7 +235,7 @@ async fn accepted_organization_scope_refuses_real_member_and_invite_join_with_ze
         Some(statement),
     );
     let revocation = ordinary_realm::source_request(&pool, revocation).await;
-    let proof = soland_storage::RealmOrganizationProofCommit {
+    let proof = coland_storage::RealmOrganizationProofCommit {
         event_id: revocation.authority_commit.event.event_id.clone(),
         ..proof
     };
@@ -300,7 +300,7 @@ async fn organization_writer_refuses_missing_or_false_proof_and_wrong_statement_
     let (relationship, proof) =
         organization_request(head, "active", serde_json::json!(["official_badge"]), None);
     let relationship = ordinary_realm::source_request(&pool, relationship).await;
-    let proof = soland_storage::RealmOrganizationProofCommit {
+    let proof = coland_storage::RealmOrganizationProofCommit {
         event_id: relationship.authority_commit.event.event_id.clone(),
         ..proof
     };
@@ -327,7 +327,7 @@ async fn organization_writer_refuses_missing_or_false_proof_and_wrong_statement_
         Some("not-the-accepted-statement"),
     );
     let wrong_ref = ordinary_realm::source_request(&pool, wrong_ref).await;
-    let proof = soland_storage::RealmOrganizationProofCommit {
+    let proof = coland_storage::RealmOrganizationProofCommit {
         event_id: wrong_ref.authority_commit.event.event_id.clone(),
         ..proof
     };

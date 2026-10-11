@@ -3,12 +3,12 @@
 #[allow(dead_code)]
 mod ordinary_realm;
 
+use coland_storage::{EventCommitRequest, EventCommitUnitOfWork};
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{PgEventCommitUnitOfWork, PgPool};
 use diesel::sql_types::{BigInt, Jsonb, Text};
 use diesel_async::{RunQueryDsl, SimpleAsyncConnection};
 use serde_json::{Value, json};
-use soland_storage::{EventCommitRequest, EventCommitUnitOfWork};
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{PgEventCommitUnitOfWork, PgPool};
 
 #[derive(diesel::QueryableByName)]
 struct Footprint {
@@ -176,7 +176,7 @@ async fn semantic_refusals_and_poll_projection_fault_roll_back_the_whole_commit(
         let request = ordinary_realm::source_request(&pool, request).await;
         let error = uow.commit_event(request).await.unwrap_err();
         assert!(
-            matches!(error, soland_storage::PersistenceError::Conflict(_)),
+            matches!(error, coland_storage::PersistenceError::Conflict(_)),
             "{error}"
         );
         assert_eq!(

@@ -3,7 +3,7 @@ use arkret_models_collaboration::session_grants::{
     SessionGrantValidationByJwt,
 };
 use chrono::{DateTime, Utc};
-use soland_http::error::AppError;
+use coland_http::error::AppError;
 
 use crate::state::AppState;
 use crate::wire::{SessionGrantValidationInput, SessionGrantValidationOutcome};
@@ -28,12 +28,12 @@ impl<'a> AccountAuthorityClient<'a> {
             .as_deref()
             .ok_or_else(|| {
                 AppError::unsupported_feature(
-                    "session grant introspection requires SOLAND_SESSION_GRANT_INTROSPECTION_URL outside development mode",
+                    "session grant introspection requires COLAND_SESSION_GRANT_INTROSPECTION_URL outside development mode",
                 )
             })?;
         let logout_url = config.auth_session_logout_url.as_deref().ok_or_else(|| {
             AppError::unsupported_feature(
-                "Auth-side session logout requires SOLAND_AUTH_SESSION_LOGOUT_URL",
+                "Auth-side session logout requires COLAND_AUTH_SESSION_LOGOUT_URL",
             )
         })?;
         let channel = config.internal_authority_channel.as_ref().ok_or_else(|| {

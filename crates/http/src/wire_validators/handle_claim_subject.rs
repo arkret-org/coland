@@ -2,7 +2,7 @@
 //!
 //! The claim `subject_id` MUST be a holder/principal `DidCoreId`, not a
 //! server-local `account_id` (`ak:account:`), a DID, or a generic
-//!   resource id. We delegate to the SDK `validate_handle_claim_subject` so soland / coauth /
+//!   resource id. We delegate to the SDK `validate_handle_claim_subject` so coland / coauth /
 //!   cotest agree on the exact rejection surface.
 
 use serde_json::Value;

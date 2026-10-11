@@ -17,20 +17,20 @@ use arkret_models_collaboration::consent_operations::ConsentState;
 use arkret_wire::{
     ActorId, DetachedSignatureContext, Did, DidUrl, EventKind, RealmCommit, RealmCommitId,
 };
-use diesel::sql_types::{Jsonb, Text};
-use diesel_async::RunQueryDsl;
-use ed25519_dalek::SigningKey;
-use soland_storage::{
+use coland_storage::{
     AuthorityCommitStore, AuthorityCommitTransaction, ConsentAdmissionOutcome,
     ConsentAdmissionWrite, ConsentCurrentStore,
 };
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{
     PgAuthorityCommitStore, PgConsentCurrentStore, PgPersistenceStore, PgPool,
 };
+use diesel::sql_types::{Jsonb, Text};
+use diesel_async::RunQueryDsl;
+use ed25519_dalek::SigningKey;
 
 async fn fixture(pool: &PgPool) -> pcr_genesis::PcrGenesisFixture {
-    let fixture = pcr_genesis::PcrGenesisFixture::new(Did::new("did:web:soland.example").unwrap());
+    let fixture = pcr_genesis::PcrGenesisFixture::new(Did::new("did:web:coland.example").unwrap());
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query("INSERT INTO device_inventory_station(singleton,station_id) VALUES(TRUE,$1) ON CONFLICT(singleton) DO NOTHING")
         .bind::<Text,_>(fixture.history.account.station_id.as_str()).execute(&mut conn).await.unwrap();
@@ -80,7 +80,7 @@ fn write(
     commit.signature = arkret_signatures::detached_object::sign_detached_object(
         &unsigned,
         DetachedSignatureContext::RealmCommit,
-        DidUrl::new("did:web:soland.example#authority").unwrap(),
+        DidUrl::new("did:web:coland.example#authority").unwrap(),
         at,
         &SigningKey::from_bytes(&device_authorization_history::STATION_AUTHORITY_SEED),
     )
@@ -274,7 +274,7 @@ async fn consent_current_rejects_wrong_root_and_concurrent_head_loser_without_wr
     wrong.transaction.commit.signature = arkret_signatures::detached_object::sign_detached_object(
         &unsigned,
         DetachedSignatureContext::RealmCommit,
-        DidUrl::new("did:web:soland.example#authority").unwrap(),
+        DidUrl::new("did:web:coland.example#authority").unwrap(),
         wrong.transaction.commit.committed_at,
         &SigningKey::from_bytes(&device_authorization_history::STATION_AUTHORITY_SEED),
     )
@@ -310,7 +310,7 @@ async fn consent_any_revoke_preserves_concrete_grant_and_invalidates_quarantine_
     use arkret_wire::{
         AccountDataKey, AccountId, ConsentRequestScope, ConsentScope, DidCoreId, Hash,
     };
-    use soland_storage::{AccountDataRecord, AccountDataStore};
+    use coland_storage::{AccountDataRecord, AccountDataStore};
     let db = TestDatabase::lease().await;
     let pool = db.pool();
     let f = fixture(&pool).await;
@@ -355,7 +355,7 @@ async fn consent_any_revoke_preserves_concrete_grant_and_invalidates_quarantine_
         expires_at: concrete.commit.committed_at + chrono::TimeDelta::days(1),
     };
     cell.quarantine_entries.push(entry);
-    let accounts = soland_storage_postgres::PgAccountDataStore { pool: pool.clone() };
+    let accounts = coland_storage_postgres::PgAccountDataStore { pool: pool.clone() };
     accounts
         .compare_and_set(
             &AccountDataRecord {
@@ -422,7 +422,7 @@ async fn consent_any_revoke_preserves_concrete_grant_and_invalidates_quarantine_
 #[tokio::test]
 async fn consent_current_guards_invite_delivery_cas_and_rejects_a_pre_revoke_proof() {
     use arkret_models_collaboration::governance::invite_addressing::InviteDelivery;
-    use soland_storage::{AccountDataCasResult, AccountDataRecord, ConsentDeliveryWrite};
+    use coland_storage::{AccountDataCasResult, AccountDataRecord, ConsentDeliveryWrite};
     let db = TestDatabase::lease().await;
     let pool = db.pool();
     let f = fixture(&pool).await;

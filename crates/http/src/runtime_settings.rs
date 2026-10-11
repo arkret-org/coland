@@ -14,13 +14,13 @@
 //! swapped atomically by the admin settings endpoint.
 //!
 //! It is stored behind an [`arc_swap::ArcSwap`] on `AppState` so every
-//! request observes a consistent snapshot and a `PUT /_soland/admin/settings`
+//! request observes a consistent snapshot and a `PUT /_coland/admin/settings`
 //! takes effect on the very next request with no lock contention.
 
 use arkret_identifiers::DidCoreId;
+use coland_http::ratelimit::RateLimiterConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use soland_http::ratelimit::RateLimiterConfig;
 
 use crate::config::{AppConfig, FederationFanoutTopology};
 
@@ -43,7 +43,7 @@ pub struct RateLimitSettings {
 
 impl RateLimitSettings {
     /// Snapshot the effective ceilings out of a [`RateLimiterConfig`]
-    /// (already resolved for dev/prod posture + `SOLAND_RATE_LIMIT_*`).
+    /// (already resolved for dev/prod posture + `COLAND_RATE_LIMIT_*`).
     pub fn from_limiter_config(config: &RateLimiterConfig) -> Self {
         Self {
             window_seconds: u32::try_from(config.window.as_secs())

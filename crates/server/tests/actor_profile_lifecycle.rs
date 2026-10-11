@@ -10,20 +10,20 @@ use arkret_identifiers::RealmId;
 use arkret_models_collaboration::events_payloads::ActorProfileUpdatePayload;
 use arkret_models_identity::actor_profile::ActorProfile;
 use arkret_wire::{ActorProfileId, EventKind, ScopeRef};
+use coland_http::config::AppConfig;
+use coland_http::service;
+use coland_http::state::AppState;
+use coland_test_support::AppStateTestExt as _;
+use coland_test_support::pcr_genesis::PcrGenesisFixture;
 use salvo::http::StatusCode;
 use salvo::test::{ResponseExt, TestClient};
 use serde_json::{Value, json};
-use soland_http::config::AppConfig;
-use soland_http::service;
-use soland_http::state::AppState;
-use soland_test_support::AppStateTestExt as _;
-use soland_test_support::pcr_genesis::PcrGenesisFixture;
 
 fn test_config() -> AppConfig {
     AppConfig {
         development_mode: true,
         embedded_webvh_registration_bearer: Some("fixture-registration".to_owned()),
-        ..soland_test_support::app_config()
+        ..coland_test_support::app_config()
     }
 }
 
@@ -38,7 +38,7 @@ fn problem_code(body: &Value) -> &str {
 async fn account_session(state: &AppState, fixture: &PcrGenesisFixture) -> String {
     fixture.admit(state).await.expect("durable PCR genesis");
     let app = service(state.clone());
-    let mut registration = TestClient::post("http://server/_soland/gate/account/project")
+    let mut registration = TestClient::post("http://server/_coland/gate/account/project")
         .add_header("authorization", "Bearer fixture-registration", true)
         .json(&json!({
             "principal_id": fixture.history.account.principal_id,
@@ -53,7 +53,7 @@ async fn account_session(state: &AppState, fixture: &PcrGenesisFixture) -> Strin
         matches!(status, Some(StatusCode::OK | StatusCode::CONFLICT)),
         "account projection: {body:?}"
     );
-    let mut login = TestClient::post("http://server/_soland/gate/auth/dev-login")
+    let mut login = TestClient::post("http://server/_coland/gate/auth/dev-login")
         .json(&json!({
             "actor": fixture.history.account.principal_id,
             "device_id": fixture.history.founding_device_id,
@@ -92,7 +92,7 @@ fn profile_event(
         chrono::Utc::now(),
     )
     .expect("typed profile Event");
-    soland_test_support::signed_event::sign_fixture_event(
+    coland_test_support::signed_event::sign_fixture_event(
         event,
         fixture.history.did.as_str(),
         fixture.history.founding_device_id.as_str(),
@@ -151,7 +151,7 @@ async fn viewer(state: &AppState, token: &str) -> (StatusCode, Value) {
 
 #[tokio::test]
 async fn create_and_update_share_one_profile_and_a_patch_is_a_delta() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let fixture = PcrGenesisFixture::new(state.service_did());
     let token = account_session(&state, &fixture).await;
 
@@ -225,7 +225,7 @@ async fn create_and_update_share_one_profile_and_a_patch_is_a_delta() {
 
 #[tokio::test]
 async fn a_stale_expected_state_digest_refuses_the_profile_update() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let fixture = PcrGenesisFixture::new(state.service_did());
     let token = account_session(&state, &fixture).await;
     let create = create_event(&state, &fixture, "Bob");
@@ -271,7 +271,7 @@ async fn a_stale_expected_state_digest_refuses_the_profile_update() {
 
 #[tokio::test]
 async fn an_authorized_co_member_resolves_the_exact_signed_profile_event() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let owner = PcrGenesisFixture::new(state.service_did());
     let reader = PcrGenesisFixture::new(state.service_did());
     let owner_token = account_session(&state, &owner).await;
@@ -290,7 +290,7 @@ async fn an_authorized_co_member_resolves_the_exact_signed_profile_event() {
         for actor in [&owner_actor, &reader_actor] {
             projection.members.insert(
                 (shared.to_string(), actor.to_string()),
-                soland_domain::reducer::SolandMembershipState {
+                coland_domain::reducer::ColandMembershipState {
                     member: actor.to_string(),
                     realm_id: shared.to_string(),
                     state: "join".to_owned(),
@@ -340,7 +340,7 @@ async fn an_authorized_co_member_resolves_the_exact_signed_profile_event() {
 
 #[tokio::test]
 async fn pcr_cannot_be_used_as_actor_profile_relationship_selector() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let fixture = PcrGenesisFixture::new(state.service_did());
     let token = account_session(&state, &fixture).await;
     let actor = arkret_wire::ActorId::account(fixture.history.account.clone());

@@ -33,7 +33,7 @@ pub(super) async fn controller_service_session(
         token_hash: format!("agent-pair-commit:{}", controller_account.principal_id),
         account_pk: Some(account.pk),
         actor: controller_account.principal_id.to_string(),
-        endpoint: soland_services::identity::SessionEndpointState::HumanDevice {
+        endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
             device_id: device_id.to_owned(),
         },
         audience: state.service_id().clone(),
@@ -576,7 +576,7 @@ mod requested_scope_tests {
 /// Project a persisted agent_principal JSON record into the spec
 /// `agent_projection` shape (`agent-operations.schema.json#/$defs/agent_projection`):
 /// `{agent_id, display_name?, slug, avatar_blob_ref?, status, created_at?, updated_at?}`.
-/// Soland-internal columns (`controller_principal_id`, `pairing_*`) are NOT
+/// Coland-internal columns (`controller_principal_id`, `pairing_*`) are NOT
 /// part of the protocol projection and are dropped at the wire boundary; the
 /// persistence `state` column carries the `agent_status` enum value verbatim.
 /// The controller lifecycle intent axis (`status`, key-management.md §3.6.1).

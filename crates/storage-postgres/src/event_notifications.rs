@@ -27,7 +27,7 @@ pub async fn publish_event_notification(
             .bind::<Text, _>(payload)
             .execute(&mut *conn)
             .await?;
-        sql_query("SELECT pg_notify('soland_event_notifications', $1)")
+        sql_query("SELECT pg_notify('coland_event_notifications', $1)")
             .bind::<Text, _>(id.to_string())
             .execute(&mut *conn)
             .await?;

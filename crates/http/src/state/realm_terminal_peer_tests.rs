@@ -2,7 +2,7 @@
 //! context. Transport signature middleware is outside this test's boundary.
 use super::*;
 
-async fn terminal_persistent_rows(pool: &soland_storage_postgres::PgPool) -> serde_json::Value {
+async fn terminal_persistent_rows(pool: &coland_storage_postgres::PgPool) -> serde_json::Value {
     use diesel_async::RunQueryDsl as _;
     #[derive(diesel::QueryableByName)]
     struct Table {
@@ -102,7 +102,7 @@ async fn peer_forwarded_destroy_reaches_the_shared_cut_and_leaves_zero_writes() 
         mls_genesis_material: None,
     };
     request.validate().unwrap();
-    let peer = soland_services::authority_commit::AuthenticatedPeerContext {
+    let peer = coland_services::authority_commit::AuthenticatedPeerContext {
         source_service_id: origin.service_core_id(),
     };
 

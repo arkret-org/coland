@@ -5,13 +5,13 @@
 #[allow(dead_code)]
 mod ordinary_realm;
 
+use coland_storage::{AuthorityCommitStore, ConflictCode, EventCommitUnitOfWork};
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
 use diesel::sql_types::{BigInt, Jsonb, Text};
 use diesel_async::RunQueryDsl;
 use ordinary_realm::{next_request, open_discussion};
 use serde_json::{Value, json};
-use soland_storage::{AuthorityCommitStore, ConflictCode, EventCommitUnitOfWork};
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
 
 fn founder() -> arkret_wire::DidCoreId {
     ordinary_realm::human_profile::account(&ordinary_realm::station(), "ordinary-founder")
@@ -26,7 +26,7 @@ fn native_approval_method(
     signature: arkret_wire::ApprovalSignature,
     seed: u8,
     station: &arkret_wire::DidCoreId,
-) -> soland_storage::ApprovalHistoricalMethod {
+) -> coland_storage::ApprovalHistoricalMethod {
     let fixture = ordinary_realm::human_profile::fixture(station, &approval_account_label(seed));
     let arkret_models_identity::principal_registration_anchor::PrincipalRegistrationAnchor::WebvhRegistration { log_entries, .. } =
         &fixture.history.registration_anchor;
@@ -36,7 +36,7 @@ fn native_approval_method(
         .collect::<Vec<_>>();
     let history =
         arkret_identity::verify_did_webvh_v1_chain(&fixture.history.did, &log_entries).unwrap();
-    let selected = soland_services::identity::select_did_webvh_state_at(
+    let selected = coland_services::identity::select_did_webvh_state_at(
         &fixture.history.did,
         &history,
         signature.input.approved_at,
@@ -51,7 +51,7 @@ fn native_approval_method(
             arkret_identity::principal_control::DirectIdentityControlPurpose::ApprovalSignature,
         )
         .unwrap();
-    soland_storage::ApprovalHistoricalMethod {
+    coland_storage::ApprovalHistoricalMethod {
         public_key: *control.public_key(),
         control_history: Some(json!({
             "did":selected.did,"version_id":selected.version_id,"log_head_digest":selected.log_head_digest,
@@ -122,7 +122,7 @@ struct PlacementSetup {
     board_id: arkret_wire::SpaceId,
     list_a_id: arkret_wire::SpaceId,
     list_b_id: arkret_wire::SpaceId,
-    list_b: soland_storage::EventCommitRequest,
+    list_b: coland_storage::EventCommitRequest,
 }
 
 async fn prepare_placement_setup(pool: &PgPool) -> PlacementSetup {
@@ -206,7 +206,7 @@ async fn prepare_placement_setup(pool: &PgPool) -> PlacementSetup {
 async fn exercise_placement_cas_and_reorder(
     pool: &PgPool,
     setup: &PlacementSetup,
-) -> soland_storage::EventCommitRequest {
+) -> coland_storage::EventCommitRequest {
     let opened = &setup.opened;
     let board_id = setup.board_id.clone();
     let list_a_id = setup.list_a_id.clone();
@@ -417,7 +417,7 @@ async fn exercise_placement_cas_and_reorder(
 async fn exercise_placement_wip_postimage(
     pool: &PgPool,
     setup: &PlacementSetup,
-    reordered: soland_storage::EventCommitRequest,
+    reordered: coland_storage::EventCommitRequest,
 ) {
     let opened = &setup.opened;
     let board_id = setup.board_id.clone();
@@ -543,7 +543,7 @@ struct WipWarnSetup {
     warn_id: arkret_wire::SpaceId,
     review_id: arkret_wire::SpaceId,
     second_id: arkret_wire::StrandId,
-    second_strand: soland_storage::EventCommitRequest,
+    second_strand: coland_storage::EventCommitRequest,
 }
 
 async fn prepare_wip_warn_setup(pool: &PgPool) -> WipWarnSetup {
@@ -782,7 +782,7 @@ struct WipOverrideSetup {
     list_a_id: arkret_wire::SpaceId,
     list_b_id: arkret_wire::SpaceId,
     second_id: arkret_wire::StrandId,
-    second_placed: soland_storage::EventCommitRequest,
+    second_placed: coland_storage::EventCommitRequest,
 }
 
 async fn prepare_wip_override_setup(pool: &PgPool) -> WipOverrideSetup {
@@ -933,7 +933,7 @@ async fn prepare_wip_override_setup(pool: &PgPool) -> WipOverrideSetup {
 async fn exercise_wip_override_resource_grants(
     pool: &PgPool,
     setup: &WipOverrideSetup,
-) -> soland_storage::EventCommitRequest {
+) -> coland_storage::EventCommitRequest {
     let opened = &setup.opened;
     let board_id = setup.board_id.clone();
     let list_a_id = setup.list_a_id.clone();
@@ -1087,8 +1087,8 @@ async fn exercise_wip_override_resource_grants(
 async fn exercise_wip_override_global_deny(
     pool: &PgPool,
     setup: &WipOverrideSetup,
-    override_grant: &soland_storage::EventCommitRequest,
-) -> soland_storage::EventCommitRequest {
+    override_grant: &coland_storage::EventCommitRequest,
+) -> coland_storage::EventCommitRequest {
     let opened = &setup.opened;
     let board_id = setup.board_id.clone();
     let list_a_id = setup.list_a_id.clone();
@@ -1230,8 +1230,8 @@ async fn exercise_wip_override_global_deny(
 async fn exercise_wip_after_override_revocation(
     pool: &PgPool,
     setup: &WipOverrideSetup,
-    override_grant: &soland_storage::EventCommitRequest,
-    override_move: &soland_storage::EventCommitRequest,
+    override_grant: &coland_storage::EventCommitRequest,
+    override_move: &coland_storage::EventCommitRequest,
 ) {
     let opened = &setup.opened;
     let board_id = setup.board_id.clone();

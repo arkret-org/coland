@@ -394,7 +394,7 @@ async fn insert_singleton(
 
 #[cfg(test)]
 mod tests {
-    use soland_storage::{AuthorityCommitStore, EventCommitUnitOfWork, EventStore};
+    use coland_storage::{AuthorityCommitStore, EventCommitUnitOfWork, EventStore};
 
     use super::*;
 
@@ -491,7 +491,7 @@ mod tests {
         let denied_error = uow.commit_event(denied.clone()).await.unwrap_err();
         assert_eq!(
             denied_error.conflict_code(),
-            Some(soland_storage::ConflictCode::CapabilityDenied),
+            Some(coland_storage::ConflictCode::CapabilityDenied),
             "accepted human without Realm authorization: {denied_error:?}"
         );
         assert!(

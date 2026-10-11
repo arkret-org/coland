@@ -106,11 +106,11 @@ impl ServiceError {
     ///
     /// Routing layers `match` on this. They must not inspect [`Self::detail`]
     /// to decide a status, a wire reason, or a signed decision -- see
-    /// [`soland_storage::ConflictCode`].
+    /// [`coland_storage::ConflictCode`].
     #[must_use]
-    pub fn conflict_code(&self) -> Option<soland_storage::ConflictCode> {
+    pub fn conflict_code(&self) -> Option<coland_storage::ConflictCode> {
         match self {
-            Self::Conflict(detail) => soland_storage::ConflictCode::from_detail(detail),
+            Self::Conflict(detail) => coland_storage::ConflictCode::from_detail(detail),
             _ => None,
         }
     }
@@ -141,20 +141,20 @@ impl ServiceError {
 
     #[must_use]
     pub fn is_realm_already_exists(&self) -> bool {
-        self.conflict_code() == Some(soland_storage::ConflictCode::RealmAlreadyExists)
+        self.conflict_code() == Some(coland_storage::ConflictCode::RealmAlreadyExists)
     }
 }
 
-impl From<soland_storage::PersistenceError> for ServiceError {
-    fn from(error: soland_storage::PersistenceError) -> Self {
+impl From<coland_storage::PersistenceError> for ServiceError {
+    fn from(error: coland_storage::PersistenceError) -> Self {
         match error {
-            soland_storage::PersistenceError::NotFound(detail) => Self::NotFound(detail),
-            soland_storage::PersistenceError::Conflict(detail) => Self::Conflict(detail),
-            soland_storage::PersistenceError::Database(detail) => Self::Database(detail),
-            soland_storage::PersistenceError::SchemaViolation(detail) => {
+            coland_storage::PersistenceError::NotFound(detail) => Self::NotFound(detail),
+            coland_storage::PersistenceError::Conflict(detail) => Self::Conflict(detail),
+            coland_storage::PersistenceError::Database(detail) => Self::Database(detail),
+            coland_storage::PersistenceError::SchemaViolation(detail) => {
                 Self::SchemaViolation(detail)
             }
-            soland_storage::PersistenceError::Internal(detail) => Self::Internal(detail),
+            coland_storage::PersistenceError::Internal(detail) => Self::Internal(detail),
         }
     }
 }

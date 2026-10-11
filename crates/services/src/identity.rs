@@ -11,10 +11,10 @@ use arkret_models_identity::{DeviceSummaryVerificationSource, DeviceSummaryVerif
 use arkret_wire::{AccountId, DidUrl, OpaqueLocalId, TrustDomainId};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use coland_storage::{AccountPk, AgentRuntimeEnqueueOutcome, EnqueueAgentRuntimeMessage};
 use ed25519_dalek::Signer as _;
 use parking_lot::Mutex;
 use serde_json::Value;
-use soland_storage::{AccountPk, AgentRuntimeEnqueueOutcome, EnqueueAgentRuntimeMessage};
 
 use crate::ServiceError;
 
@@ -90,8 +90,8 @@ impl arkret_wire::PayloadSigner for Ed25519PayloadSigner {
     }
 }
 
-pub use soland_domain::identity::{ContactRecord, ContactRequestSlotState};
-pub use soland_storage::MimiConsentCorrelationRecord as MimiConsentCorrelation;
+pub use coland_domain::identity::{ContactRecord, ContactRequestSlotState};
+pub use coland_storage::MimiConsentCorrelationRecord as MimiConsentCorrelation;
 
 /// The coordinates one `ak.direct_conversation.bound` endorsement settles.
 ///
@@ -157,7 +157,7 @@ impl AccountProfileState {
     }
 }
 
-pub use soland_storage::{
+pub use coland_storage::{
     AccountLifecycleRecord as AccountLifecycleState,
     AccountLocalpartRecord as AccountLocalpartState,
 };
@@ -343,7 +343,7 @@ impl ContactService {
         account_id: &AccountId,
         policy: arkret_models_collaboration::governance::invite_addressing::InviteReceivePolicy,
     ) -> ServiceResult<()> {
-        soland_storage::validate_invite_policy_account(account_id, &policy)?;
+        coland_storage::validate_invite_policy_account(account_id, &policy)?;
         let _reload = self.runtime_policy_reload.lock().await;
         self.invite_policies
             .save_policy(account_id, policy.clone())
@@ -617,7 +617,7 @@ fn exact_present_match(checkpoint: Option<&str>, current: Option<&str>) -> bool 
 pub trait DeviceKeyPort: Send + Sync {
     async fn save_bundle(
         &self,
-        authorization: &soland_storage::DeviceRevocationGateSelector,
+        authorization: &coland_storage::DeviceRevocationGateSelector,
         payload: Value,
     ) -> ServiceResult<()>;
     async fn bundle(&self, actor_id: &str, device_id: &str) -> ServiceResult<Option<Value>>;
@@ -627,7 +627,7 @@ pub trait DeviceKeyPort: Send + Sync {
 pub trait OneTimeKeyPort: Send + Sync {
     async fn save_keys(
         &self,
-        authorization: &soland_storage::DeviceRevocationGateSelector,
+        authorization: &coland_storage::DeviceRevocationGateSelector,
         keys: Vec<Value>,
     ) -> ServiceResult<()>;
     async fn claim_key(&self, actor_id: &str, device_id: &str) -> ServiceResult<Option<Value>>;
@@ -652,7 +652,7 @@ impl KeyMaterialService {
 
     pub async fn save_bundle(
         &self,
-        authorization: &soland_storage::DeviceRevocationGateSelector,
+        authorization: &coland_storage::DeviceRevocationGateSelector,
         payload: Value,
     ) -> ServiceResult<()> {
         self.device_keys.save_bundle(authorization, payload).await
@@ -664,7 +664,7 @@ impl KeyMaterialService {
 
     pub async fn save_one_time_keys(
         &self,
-        authorization: &soland_storage::DeviceRevocationGateSelector,
+        authorization: &coland_storage::DeviceRevocationGateSelector,
         keys: Vec<Value>,
     ) -> ServiceResult<()> {
         self.one_time_keys.save_keys(authorization, keys).await
@@ -818,7 +818,7 @@ pub struct RecordAgentPairingCommitIntentCommand {
     pub key_authorization_event: arkret_wire::Event,
 }
 
-pub use soland_storage::PendingAgentPairingCommitIntent as AgentPairingCommitIntentState;
+pub use coland_storage::PendingAgentPairingCommitIntent as AgentPairingCommitIntentState;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentPairingState {
@@ -1110,7 +1110,7 @@ pub trait AgentPairingPort: Send + Sync {
     async fn pairing_receipt(
         &self,
         event_id: &str,
-    ) -> ServiceResult<Option<soland_storage::AgentPairingReceipt>>;
+    ) -> ServiceResult<Option<coland_storage::AgentPairingReceipt>>;
     async fn pending_pairings_after(
         &self,
         after_id: &str,
@@ -1149,7 +1149,7 @@ pub trait AgentPairingPort: Send + Sync {
     ) -> ServiceResult<AgentRuntimeEnqueueOutcome>;
 }
 
-pub use soland_storage::{
+pub use coland_storage::{
     AgentSidecarContextRecord as AgentSidecarContextState, AgentSidecarRecord as AgentSidecarState,
 };
 
@@ -1184,7 +1184,7 @@ pub struct AgentPairingService {
     sidecars: Arc<dyn SidecarPort>,
 }
 
-pub use soland_storage::RecoveryPolicyRecord as RecoveryPolicyState;
+pub use coland_storage::RecoveryPolicyRecord as RecoveryPolicyState;
 
 #[async_trait]
 pub trait RecoveryPolicyPort: Send + Sync {
@@ -1198,8 +1198,8 @@ pub trait RecoveryPolicyPort: Send + Sync {
     ) -> ServiceResult<Vec<RecoveryPolicyState>>;
     async fn commit_publication(
         &self,
-        write: soland_storage::RecoveryPolicyPublicationWrite,
-    ) -> ServiceResult<soland_storage::RecoveryPolicyPublicationOutcome>;
+        write: coland_storage::RecoveryPolicyPublicationWrite,
+    ) -> ServiceResult<coland_storage::RecoveryPolicyPublicationOutcome>;
 }
 
 #[derive(Clone)]
@@ -1230,13 +1230,13 @@ impl RecoveryPolicyService {
     /// registered PCR unit (key-management.md §8.1).
     pub async fn commit_publication(
         &self,
-        write: soland_storage::RecoveryPolicyPublicationWrite,
-    ) -> ServiceResult<soland_storage::RecoveryPolicyPublicationOutcome> {
+        write: coland_storage::RecoveryPolicyPublicationWrite,
+    ) -> ServiceResult<coland_storage::RecoveryPolicyPublicationOutcome> {
         self.policies.commit_publication(write).await
     }
 }
 
-pub use soland_storage::RecoverySessionRecord as RecoverySessionState;
+pub use coland_storage::RecoverySessionRecord as RecoverySessionState;
 
 #[async_trait]
 pub trait RecoverySessionPort: Send + Sync {
@@ -1314,7 +1314,7 @@ impl RecoverySessionService {
     }
 }
 
-pub use soland_storage::{
+pub use coland_storage::{
     BackupSeriesEraseProgressRecord as BackupSeriesEraseProgressState, RecoveryUnitCommitWrite,
     RevokeCommandTerminalWrite, RevokeProposalCommitWrite, RotationLocalCommitWrite,
     RotationPointerSwitchWrite, RotationUploadCommitWrite, SecurityTransactionRecord,
@@ -1565,9 +1565,9 @@ impl AgentParticipationService {
 }
 
 /// Re-exported so the HTTP layer can name a delete challenge without depending
-/// on `soland-storage` directly (it is a dev-dependency there): the service
+/// on `coland-storage` directly (it is a dev-dependency there): the service
 /// facade is the only boundary the routing code crosses.
-pub use soland_storage::{
+pub use coland_storage::{
     ConfirmedKeyBackupAuthorityBasis, KeyBackupDeleteChallengeRecord, KeyBackupListPage,
     KeyBackupListPosition, KeyBackupListQuery,
 };
@@ -1578,14 +1578,14 @@ pub trait KeyBackupPort: Send + Sync {
         &self,
         account_id: &AccountId,
         query: &KeyBackupListQuery,
-    ) -> ServiceResult<soland_storage::ConfirmedKeyBackupListPage>;
+    ) -> ServiceResult<coland_storage::ConfirmedKeyBackupListPage>;
     async fn confirmed_list_page_for_device(
         &self,
         account_id: &AccountId,
         device_id: &arkret_wire::DeviceId,
         now: DateTime<Utc>,
         query: &KeyBackupListQuery,
-    ) -> ServiceResult<soland_storage::ConfirmedKeyBackupListPage>;
+    ) -> ServiceResult<coland_storage::ConfirmedKeyBackupListPage>;
     async fn confirmed_active_series_for_device(
         &self,
         account_id: &AccountId,
@@ -1594,8 +1594,8 @@ pub trait KeyBackupPort: Send + Sync {
     ) -> ServiceResult<Option<arkret_models_crypto::BackupActiveSeriesState>>;
     async fn commit_active_series_pointer(
         &self,
-        write: soland_storage::KeyBackupActiveSeriesCommitWrite,
-    ) -> ServiceResult<soland_storage::KeyBackupActiveSeriesCommitOutcome>;
+        write: coland_storage::KeyBackupActiveSeriesCommitWrite,
+    ) -> ServiceResult<coland_storage::KeyBackupActiveSeriesCommitOutcome>;
     async fn confirmed_active_series(
         &self,
         account_id: &AccountId,
@@ -1619,7 +1619,7 @@ pub trait KeyBackupPort: Send + Sync {
     async fn unlock_challenge(&self, authority_id: &str) -> ServiceResult<Option<Value>>;
     async fn consume_unlock(
         &self,
-        command: soland_storage::KeyBackupUnlockCommand<'_>,
+        command: coland_storage::KeyBackupUnlockCommand<'_>,
     ) -> ServiceResult<Value>;
     async fn backup(&self, backup_id: &str) -> ServiceResult<Option<Value>>;
     async fn backups_for_actor(&self, actor_id: &str) -> ServiceResult<Vec<Value>>;
@@ -1628,16 +1628,16 @@ pub trait KeyBackupPort: Send + Sync {
     async fn delete_backup(&self, backup_id: &str) -> ServiceResult<bool>;
     async fn issue_delete_challenge(
         &self,
-        record: soland_storage::KeyBackupDeleteChallengeRecord,
+        record: coland_storage::KeyBackupDeleteChallengeRecord,
         now: DateTime<Utc>,
-    ) -> ServiceResult<soland_storage::KeyBackupDeleteChallengeRecord>;
+    ) -> ServiceResult<coland_storage::KeyBackupDeleteChallengeRecord>;
     async fn delete_challenge(
         &self,
         challenge_id: &str,
-    ) -> ServiceResult<Option<soland_storage::KeyBackupDeleteChallengeRecord>>;
+    ) -> ServiceResult<Option<coland_storage::KeyBackupDeleteChallengeRecord>>;
     async fn consume_delete_challenge(
         &self,
-        gate: &soland_storage::KeyBackupDeleteGate,
+        gate: &coland_storage::KeyBackupDeleteGate,
         challenge_id: &str,
         backup: Value,
         recovery_session_id: Option<&str>,
@@ -1836,8 +1836,8 @@ impl KeyBackupService {
     /// same-cut PCR unit. The storage unit is the only admission authority.
     pub async fn commit_active_series_pointer(
         &self,
-        write: soland_storage::KeyBackupActiveSeriesCommitWrite,
-    ) -> ServiceResult<soland_storage::KeyBackupActiveSeriesCommitOutcome> {
+        write: coland_storage::KeyBackupActiveSeriesCommitWrite,
+    ) -> ServiceResult<coland_storage::KeyBackupActiveSeriesCommitOutcome> {
         self.backups.commit_active_series_pointer(write).await
     }
 
@@ -1845,7 +1845,7 @@ impl KeyBackupService {
         &self,
         account_id: &AccountId,
         query: &KeyBackupListQuery,
-    ) -> ServiceResult<soland_storage::ConfirmedKeyBackupListPage> {
+    ) -> ServiceResult<coland_storage::ConfirmedKeyBackupListPage> {
         self.backups
             .confirmed_list_page_for_account(account_id, query)
             .await
@@ -1857,7 +1857,7 @@ impl KeyBackupService {
         device_id: &arkret_wire::DeviceId,
         now: DateTime<Utc>,
         query: &KeyBackupListQuery,
-    ) -> ServiceResult<soland_storage::ConfirmedKeyBackupListPage> {
+    ) -> ServiceResult<coland_storage::ConfirmedKeyBackupListPage> {
         self.backups
             .confirmed_list_page_for_device(account_id, device_id, now, query)
             .await
@@ -1904,22 +1904,22 @@ impl KeyBackupService {
     }
     pub async fn consume_unlock(
         &self,
-        command: soland_storage::KeyBackupUnlockCommand<'_>,
+        command: coland_storage::KeyBackupUnlockCommand<'_>,
     ) -> ServiceResult<Value> {
         self.backups.consume_unlock(command).await
     }
     pub async fn issue_delete_challenge(
         &self,
-        record: soland_storage::KeyBackupDeleteChallengeRecord,
+        record: coland_storage::KeyBackupDeleteChallengeRecord,
         now: DateTime<Utc>,
-    ) -> ServiceResult<soland_storage::KeyBackupDeleteChallengeRecord> {
+    ) -> ServiceResult<coland_storage::KeyBackupDeleteChallengeRecord> {
         self.backups.issue_delete_challenge(record, now).await
     }
 
     pub async fn delete_challenge(
         &self,
         challenge_id: &str,
-    ) -> ServiceResult<Option<soland_storage::KeyBackupDeleteChallengeRecord>> {
+    ) -> ServiceResult<Option<coland_storage::KeyBackupDeleteChallengeRecord>> {
         self.backups.delete_challenge(challenge_id).await
     }
 
@@ -1927,7 +1927,7 @@ impl KeyBackupService {
     /// `false` means the challenge is no longer available.
     pub async fn consume_delete_challenge(
         &self,
-        gate: &soland_storage::KeyBackupDeleteGate,
+        gate: &coland_storage::KeyBackupDeleteGate,
         challenge_id: &str,
         backup: Value,
         recovery_session_id: Option<&str>,
@@ -1954,7 +1954,7 @@ impl AgentPairingService {
     pub async fn pairing_receipt(
         &self,
         event_id: &str,
-    ) -> ServiceResult<Option<soland_storage::AgentPairingReceipt>> {
+    ) -> ServiceResult<Option<coland_storage::AgentPairingReceipt>> {
         self.pairing.pairing_receipt(event_id).await
     }
     pub async fn pending_pairings_after(
@@ -2312,7 +2312,7 @@ impl IdentityService {
     }
 }
 
-pub use soland_storage::WebvhDocumentRecord as DidDocumentState;
+pub use coland_storage::WebvhDocumentRecord as DidDocumentState;
 
 pub const DID_DOCUMENT_HIGH_RISK_TTL_SECS: i64 = 15 * 60;
 
@@ -2334,7 +2334,7 @@ pub fn evaluate_did_document_freshness(
     }
 }
 
-pub use soland_storage::WebvhLogRecord as DidLogEvent;
+pub use coland_storage::WebvhLogRecord as DidLogEvent;
 
 /// Relationship between a verified pinned did:webvh version and the verified
 /// head observed during the same history resolution.

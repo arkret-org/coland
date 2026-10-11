@@ -17,12 +17,12 @@ use arkret_models_collaboration::governance::invite_addressing::InviteDelivery;
 use arkret_models_collaboration::governance::operation_wire::Invite;
 use arkret_wire::{AccountDataKey, AccountId, ActorId, AuthzDecision, DidCoreId, InviteState};
 use chrono::{DateTime, Utc};
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
 use salvo::oapi::endpoint;
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
 use serde_json::json;
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
 
 use super::{now, query_param};
 use crate::authz::CapabilityVerdict;
@@ -67,11 +67,11 @@ async fn authz_check(
                 let authorization =
                     crate::authz::actor_realm_authorization(state, realm_id, &body.actor_id, now)
                         .await?;
-                Some(soland_services::authorization::evaluate(
+                Some(coland_services::authorization::evaluate(
                     &authorization,
                     &[body.action.as_str()],
                     target,
-                    &soland_storage::OperationFacts::default(),
+                    &coland_storage::OperationFacts::default(),
                 ))
             }
             None => None,
@@ -261,7 +261,7 @@ async fn effective_grants(
     aa: AuthArgs,
     depot: &mut Depot,
     req: &mut Request,
-) -> soland_http::result::JsonResult<GrantList> {
+) -> coland_http::result::JsonResult<GrantList> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let session_actor =
@@ -305,9 +305,9 @@ async fn effective_grants(
         .into_iter()
         .map(EffectiveCapabilityGrantRow::from)
         .collect::<Vec<_>>();
-    let state_digest = soland_storage::effective_capability_grant_state_digest(&grants)
+    let state_digest = coland_storage::effective_capability_grant_state_digest(&grants)
         .map_err(|error| AppError::internal(format!("effective grant digest failed: {error}")))?;
-    soland_http::result::json_ok(GrantList {
+    coland_http::result::json_ok(GrantList {
         grants,
         state_digest,
         evaluated_at,
@@ -380,7 +380,7 @@ async fn invites(
     aa: crate::routing::system::extract::AuthArgs,
     depot: &mut Depot,
     req: &mut Request,
-) -> soland_http::result::JsonResult<AuthzInviteList> {
+) -> coland_http::result::JsonResult<AuthzInviteList> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let session_actor =
@@ -448,7 +448,7 @@ async fn invites(
         })
         .map(directed_invite_to_sdk)
         .collect::<Result<Vec<_>, _>>()?;
-    soland_http::result::json_ok(AuthzInviteList {
+    coland_http::result::json_ok(AuthzInviteList {
         invites: invite_list,
         next_cursor: None,
         has_more: false,
@@ -456,7 +456,7 @@ async fn invites(
 }
 
 fn directed_invite_to_sdk(
-    invite: soland_storage::DirectedInviteCurrent,
+    invite: coland_storage::DirectedInviteCurrent,
 ) -> Result<Invite, AppError> {
     let inviter_account_id = invite
         .inviter

@@ -1,5 +1,5 @@
 //! Source projection signatures are issued only for durable committed Events.
-use soland_storage::{
+use coland_storage::{
     CommittedContactCompletionIntent, ContactCompletionBinding, ContactCompletionIntent,
     ContactCompletionResult,
 };
@@ -117,7 +117,7 @@ async fn materialize_one(
         )
         .await?
         .ok_or_else(|| AppError::internal("remote Contact completion has no delivery"))?;
-        Some(soland_storage::FederationOutboxRecord::pending(
+        Some(coland_storage::FederationOutboxRecord::pending(
             row.id,
             row.peer_id,
             row.peer_url
@@ -148,7 +148,7 @@ async fn sign_outcome(
     state: &AppState,
     intent: &ContactCompletionIntent,
 ) -> Result<ContactAcceptedOutcome, AppError> {
-    use soland_storage::ContactCompletionAction;
+    use coland_storage::ContactCompletionAction;
     let error = |error: arkret_wire::WireError| AppError::internal(error.to_string());
     let accepted_at = intent
         .accepted_at()

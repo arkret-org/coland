@@ -109,7 +109,7 @@ pub(super) async fn validate_member_state_policy(
                 )
                 .await
             {
-                return Err(soland_services::operation_semantics::REASON_KEYPACKAGE_NOT_FOUND);
+                return Err(coland_services::operation_semantics::REASON_KEYPACKAGE_NOT_FOUND);
             }
             return Ok(());
         }
@@ -203,7 +203,7 @@ async fn agent_controlled_by_record(
     state: &AppState,
     agent_id: &arkret_wire::ActorId,
     controller_actor_id: &arkret_wire::ActorId,
-) -> Option<soland_services::identity::AgentPairingState> {
+) -> Option<coland_services::identity::AgentPairingState> {
     state
         .agent_pairings()
         .agent(agent_id.signing_principal_id().as_str())
@@ -308,7 +308,7 @@ pub(super) async fn validate_set_default_strand_policy(
 /// the organization's OWN DID document.
 ///
 /// The signing key MUST be a verification method controlled by `organization_id`
-/// (`authorization.verification_method`); soland resolves that document from its
+/// (`authorization.verification_method`); coland resolves that document from its
 /// own DID store and verifies the detached Ed25519 signature over the
 /// SDK-canonical statement transcript
 /// ([`arkret_models_collaboration::realm_organization_statement_signing_bytes`]). This is
@@ -591,7 +591,7 @@ pub(super) fn moderation_actor<'a>(
 pub(super) async fn active_direct_conversation_binding_for_realm(
     state: &AppState,
     realm_id: &str,
-) -> Result<Option<soland_services::identity::DirectConversationBindingRecord>, &'static str> {
+) -> Result<Option<coland_services::identity::DirectConversationBindingRecord>, &'static str> {
     let Some(facts) = state
         .event_queries()
         .direct_conversation_durable_state_for_realm(realm_id)

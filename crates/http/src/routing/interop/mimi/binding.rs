@@ -430,7 +430,7 @@ pub(super) async fn admit_mimi_room_binding_event(
 }
 
 fn validate_mimi_binding_transition_preflight(
-    current: Option<&soland_storage::MimiRoomBindingCurrentRecord>,
+    current: Option<&coland_storage::MimiRoomBindingCurrentRecord>,
     next: &arkret_models_collaboration::events_payloads::mimi::MimiRoomBindingPayload,
 ) -> Result<(), AppError> {
     use arkret_models_collaboration::events_payloads::mimi::MimiRoomBindingStatus as Status;

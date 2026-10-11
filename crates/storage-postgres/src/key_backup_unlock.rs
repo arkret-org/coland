@@ -144,9 +144,9 @@ impl crate::key_backup::PgKeyBackupStore {
 
     pub(crate) async fn consume_unlock_entry(
         &self,
-        command: soland_storage::KeyBackupUnlockCommand<'_>,
+        command: coland_storage::KeyBackupUnlockCommand<'_>,
     ) -> PersistenceResult<Value> {
-        let soland_storage::KeyBackupUnlockCommand {
+        let coland_storage::KeyBackupUnlockCommand {
             basis,
             authority_id: id,
             backup,
@@ -166,11 +166,11 @@ impl crate::key_backup::PgKeyBackupStore {
             .map_err(PersistenceError::database)?;
         conn.transaction::<_,PgTransactionError,_>(async move |conn| {
             let current_device = match basis {
-                soland_storage::KeyBackupUnlockBasis::CurrentDevice { basis, device_id } => {
+                coland_storage::KeyBackupUnlockBasis::CurrentDevice { basis, device_id } => {
                     recheck_pointer_basis(conn, basis, std::slice::from_ref(device_id), Some(&backup)).await?;
                     true
                 }
-                soland_storage::KeyBackupUnlockBasis::RecoverySession => false,
+                coland_storage::KeyBackupUnlockBasis::RecoverySession => false,
             };
             // Shared lock order serializes account counters and each authority's byte budget.
             let account=arkret_canonical::canonical_json_string(&backup["actor_id"]["account_id"]).map_err(PersistenceError::database)?;
@@ -452,12 +452,12 @@ struct GenerationRow {
 /// current one. A later unrelated PCR Commit does not by itself stale it.
 pub(crate) async fn recheck_pointer_basis(
     conn: &mut crate::AsyncPgConnection,
-    basis: &soland_storage::KeyBackupPointerBasis,
+    basis: &coland_storage::KeyBackupPointerBasis,
     devices: &[arkret_wire::DeviceId],
     released: Option<&Value>,
 ) -> Result<(), PgTransactionError> {
     use arkret_models_crypto::BackupActiveSeriesPointer;
-    use soland_storage::ConflictCode;
+    use coland_storage::ConflictCode;
 
     let refused = |code: ConflictCode, reason: &str| -> PgTransactionError {
         PersistenceError::Conflict(format!("{code}: {reason}")).into()

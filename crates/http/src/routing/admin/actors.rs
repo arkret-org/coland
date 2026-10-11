@@ -1,13 +1,13 @@
 //! Actor admin surface (production, D14).
 //!
-//! `GET /_soland/admin/actors` — typed cursor-paginated list (see
-//! [`super::queries`]); `GET /_soland/admin/actors/{actor_id}` — one
-//! [`AdminActor`] row with the account lifecycle linkage sodmin needs.
+//! `GET /_coland/admin/actors` — typed cursor-paginated list (see
+//! [`super::queries`]); `GET /_coland/admin/actors/{actor_id}` — one
+//! [`AdminActor`] row with the account lifecycle linkage codmin needs.
 
+use coland_contracts::admin::AdminActor;
 use salvo::oapi::extract::PathParam;
 use salvo::prelude::*;
 use serde_json::json;
-use soland_contracts::admin::AdminActor;
 
 use super::{AdminAuth, append_audit_log, queries, require_admin_principal};
 use crate::state::AppState;
@@ -20,10 +20,10 @@ pub(super) fn router() -> Router {
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.actors.get",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.actors.get",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.actors.get"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.actors.get"))]
 async fn get_actor(
     admin: AdminAuth,
     actor_id: PathParam<String>,
@@ -34,7 +34,7 @@ async fn get_actor(
     let session = require_admin_principal(state, session)?;
     let actor_id = actor_id.into_inner();
     let principal_id = arkret_wire::DidCoreId::new(actor_id.clone()).map_err(|_| {
-        soland_http::error::AppError::param_invalid("invalid local account principal")
+        coland_http::error::AppError::param_invalid("invalid local account principal")
     })?;
     let account_id = arkret_wire::AccountId::new(principal_id, state.service_core_id());
 
@@ -44,9 +44,9 @@ async fn get_actor(
         .await
         .map_err(|error| {
             tracing::error!(%error, "failed to load local account");
-            soland_http::error::AppError::internal("account store unavailable")
+            coland_http::error::AppError::internal("account store unavailable")
         })?
-        .ok_or_else(|| soland_http::error::AppError::not_found("actor not found"))?;
+        .ok_or_else(|| coland_http::error::AppError::not_found("actor not found"))?;
     let (device_counts, realm_counts) = queries::actor_count_maps(state).await;
     let deactivated = state.account_lifecycle_status(account.principal_id.as_str())
         == arkret_models_collaboration::objects::account_status::AccountStatus::Deactivated;
@@ -63,7 +63,7 @@ async fn get_actor(
         &realm_counts,
         propagation_state,
     )
-    .ok_or_else(|| soland_http::error::AppError::not_found("actor not found"))?;
+    .ok_or_else(|| coland_http::error::AppError::not_found("actor not found"))?;
 
     append_audit_log(
         state,

@@ -9,9 +9,9 @@
 //! - `GET /health` — liveness + database/events health
 //! - `GET /readyz` — readiness gate for deploy orchestrators
 //! - `GET /_arkret/describe`
-//! - `GET /_soland/describe`
-//! - `GET /_soland/gate/auth/bridge/describe`
-//! - `GET /_soland/self/integration/describe`
+//! - `GET /_coland/describe`
+//! - `GET /_coland/gate/auth/bridge/describe`
+//! - `GET /_coland/self/integration/describe`
 //!
 //! `sync_describe` is still in `mod.rs` pending sync-module extraction.
 
@@ -27,8 +27,8 @@ use serde_json::{Value, json};
 use crate::state::AppState;
 use crate::wire::{
     AuthBridgeAuthDescriptor, AuthBridgeDescribeOutcome, AuthBridgeExamples,
-    AuthBridgePushDescriptor, HealthOutcome, IntegrationDependencyDescriptor,
-    IntegrationDescribeOutcome, IntegrationSurfaceDescriptor, SolandServerDescribeOutcome,
+    AuthBridgePushDescriptor, ColandServerDescribeOutcome, HealthOutcome,
+    IntegrationDependencyDescriptor, IntegrationDescribeOutcome, IntegrationSurfaceDescriptor,
     UnsupportedProfileDescriptor, describe,
 };
 use crate::{JsonResult, json_ok};
@@ -91,13 +91,13 @@ pub(super) fn protocol_router() -> Router {
 
 pub(super) fn local_router() -> Router {
     Router::new()
-        .push(Router::with_path("describe").get(soland_describe))
-        // soland-local integration describe → self-scoped.
+        .push(Router::with_path("describe").get(coland_describe))
+        // coland-local integration describe → self-scoped.
         .push(Router::with_path("self/integration/describe").get(integration_describe))
 }
 
-#[endpoint(operation_id = "org.arkret.soland.system.health")]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.system.health"))]
+#[endpoint(operation_id = "org.arkret.coland.system.health")]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.system.health"))]
 async fn health(depot: &mut Depot, res: &mut Response) -> JsonResult<HealthOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let database_ok = database_ready(state).await;
@@ -109,7 +109,7 @@ async fn health(depot: &mut Depot, res: &mut Response) -> JsonResult<HealthOutco
     }
     json_ok(HealthOutcome {
         ok,
-        service: "soland",
+        service: "coland",
         storage: state.jobs().storage_mode(),
         checks: json!({
             "database": {
@@ -128,8 +128,8 @@ async fn health(depot: &mut Depot, res: &mut Response) -> JsonResult<HealthOutco
     })
 }
 
-#[endpoint(operation_id = "org.arkret.soland.system.readyz")]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.system.readyz"))]
+#[endpoint(operation_id = "org.arkret.coland.system.readyz")]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.system.readyz"))]
 async fn readyz(depot: &mut Depot, res: &mut Response) -> JsonResult<ReadyzOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let database_ok = database_ready(state).await;
@@ -181,7 +181,7 @@ async fn readyz(depot: &mut Depot, res: &mut Response) -> JsonResult<ReadyzOutco
     };
     json_ok(ReadyzOutcome {
         ok,
-        service: "soland".to_owned(),
+        service: "coland".to_owned(),
         storage: state.jobs().storage_mode().to_owned(),
         reason,
         checks: ReadyzChecks {
@@ -258,7 +258,7 @@ fn service_identity_health(state: &DidCoreIdentityState) -> Value {
             "computed_key": computed_key,
             "last_verified_at": identity.last_verified_at,
             "retry_at": null,
-            "next_action": "run `soland service-identity migrate-base` after verifying the computed registration key",
+            "next_action": "run `coland service-identity migrate-base` after verifying the computed registration key",
         }),
         DidCoreIdentityState::Conflict {
             stored_service_id,
@@ -270,7 +270,7 @@ fn service_identity_health(state: &DidCoreIdentityState) -> Value {
             "provider_endpoint": null,
             "last_verified_at": null,
             "retry_at": null,
-            "next_action": "run `soland service-identity doctor` and restore the authoritative identity",
+            "next_action": "run `coland service-identity doctor` and restore the authoritative identity",
         }),
         DidCoreIdentityState::Faulted {
             diagnostic,
@@ -301,7 +301,7 @@ async fn server_describe(
     if let Some(service_kind) = service_kind.into_inner()
         && service_kind != arkret_wire::ServiceKind::Station.as_str()
     {
-        return Err(soland_http::error::AppError::param_invalid(format!(
+        return Err(coland_http::error::AppError::param_invalid(format!(
             "service_kind {service_kind:?} is not available on this binding"
         )));
     }
@@ -310,13 +310,13 @@ async fn server_describe(
     ))
 }
 
-#[endpoint(operation_id = "org.arkret.soland.system.describe")]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.system.describe"))]
-async fn soland_describe(depot: &mut Depot) -> JsonResult<SolandServerDescribeOutcome> {
+#[endpoint(operation_id = "org.arkret.coland.system.describe")]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.system.describe"))]
+async fn coland_describe(depot: &mut Depot) -> JsonResult<ColandServerDescribeOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let service = build_server_description_resolved(state).await?;
     let unsupported_profiles = unsupported_profiles_from_limits(&service.limits);
-    json_ok(SolandServerDescribeOutcome {
+    json_ok(ColandServerDescribeOutcome {
         service,
         unsupported_profiles,
         proof_verifier_mode: state.config().proof_verifier_mode().to_owned(),
@@ -382,7 +382,7 @@ pub(crate) fn build_server_description(state: &AppState) -> ServiceDescribe {
 
 async fn build_server_description_resolved(
     state: &AppState,
-) -> Result<ServiceDescribe, soland_http::error::AppError> {
+) -> Result<ServiceDescribe, coland_http::error::AppError> {
     let description = build_server_description(state);
     Ok(description)
 }
@@ -393,7 +393,7 @@ async fn build_server_description_resolved(
 /// - `verified_profiles` MUST be empty when `development_mode=true`. The loader
 ///   [`crate::verified_profiles::load_from_env`] already returns an empty vec when the env var is
 ///   unset, but we additionally enforce the dev-mode rule below: even if an operator points
-///   `SOLAND_VERIFIED_PROFILES_ARTIFACT` at a real file while running with `development_mode=true`,
+///   `COLAND_VERIFIED_PROFILES_ARTIFACT` at a real file while running with `development_mode=true`,
 ///   the wire surface emits `[]`.
 /// - Verified evidence must refer to a profile in `supported_profiles`.
 pub(crate) fn apply_conformance_evidence(
@@ -477,16 +477,16 @@ pub(crate) fn apply_conformance_evidence(
     description.interop_surfaces.clear();
 }
 
-#[endpoint(operation_id = "org.arkret.soland.auth.bridge.describe")]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.auth.bridge.describe"))]
+#[endpoint(operation_id = "org.arkret.coland.auth.bridge.describe")]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.auth.bridge.describe"))]
 pub(in crate::routing) async fn auth_bridge_describe() -> JsonResult<AuthBridgeDescribeOutcome> {
     json_ok(AuthBridgeDescribeOutcome {
         contract: "arkret.rest.principal_bridge.v1".to_owned(),
         version: "2026-06-21-session-grant-direct".to_owned(),
-        api_base_path: "/_soland".to_owned(),
+        api_base_path: "/_coland".to_owned(),
         auth: AuthBridgeAuthDescriptor {
             #[cfg(any(test, feature = "conformance-harness"))]
-            dev_login_path: "/_soland/gate/auth/dev-login".to_owned(),
+            dev_login_path: "/_coland/gate/auth/dev-login".to_owned(),
             session_grant_issuance_path: "/_arkret/gate/account/session-grants".to_owned(),
             session_grant_presentation:
                 "Authorization: DPoP <ak.session.grant> with a DPoP proof on /_arkret/self/*"
@@ -507,7 +507,7 @@ pub(in crate::routing) async fn auth_bridge_describe() -> JsonResult<AuthBridgeD
                     "proof_kind": "did_bound_signature",
                     "challenge": "challenge-01js0000000000000000000000",
                     "request_canonical_digest": "sha256:7e4f3a0b6f0d0f3d9f8c3a2b1e0d9c8b7a6f5e4d3c2b1a009988776655443322",
-                    "audience": "did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:soland.local:webvh:service",
+                    "audience": "did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:coland.local:webvh:service",
                     "signature": "eyJhbGciOiJFZDI1NTE5Iiwia2lkIjoiZGlkOndlYjphbGljZS5leGFtcGxlI2RldmljZS1rZXkifQ.example"
                 }
             }),
@@ -528,16 +528,16 @@ pub(in crate::routing) async fn auth_bridge_describe() -> JsonResult<AuthBridgeD
     })
 }
 
-#[endpoint(operation_id = "org.arkret.soland.integration.describe")]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.integration.describe"))]
+#[endpoint(operation_id = "org.arkret.coland.integration.describe")]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.integration.describe"))]
 async fn integration_describe() -> JsonResult<IntegrationDescribeOutcome> {
     json_ok(IntegrationDescribeOutcome {
         contract: "arkret.rest.integration_manifest.v1".to_owned(),
         version: "2026-05-04-scaffold".to_owned(),
-        service: "soland".to_owned(),
+        service: "coland".to_owned(),
         service_kind: "station".to_owned(),
         api_base_path: "/_arkret".to_owned(),
-        describe_path: "/_soland/self/integration/describe".to_owned(),
+        describe_path: "/_coland/self/integration/describe".to_owned(),
         dependencies: vec![IntegrationDependencyDescriptor {
                 service: "floria".to_owned(),
                 purpose: "push_gateway_delivery".to_owned(),
@@ -550,7 +550,7 @@ async fn integration_describe() -> JsonResult<IntegrationDescribeOutcome> {
             IntegrationSurfaceDescriptor {
                 name: "auth_bridge".to_owned(),
                 method: "GET".to_owned(),
-                path: "/_soland/gate/auth/bridge/describe".to_owned(),
+                path: "/_coland/gate/auth/bridge/describe".to_owned(),
                 contract: "arkret.rest.principal_bridge.v1".to_owned(),
                 stability: "scaffold".to_owned(),
                 todo: "publish the same session-grant presentation requirements in the registry artifact.".to_owned(),
@@ -593,14 +593,14 @@ async fn integration_describe() -> JsonResult<IntegrationDescribeOutcome> {
                 path: "/_arkret/self/blob/presign".to_owned(),
                 contract: arkret_wire::ServiceOperationId::SELF_BLOB_COMMAND_PRESIGN_V1.to_owned(),
                 stability: "local_direct_serve".to_owned(),
-                todo: "issues soland-signed local /blob/get URLs; backend-native object-store presign is not claimed.".to_owned(),
+                todo: "issues coland-signed local /blob/get URLs; backend-native object-store presign is not claimed.".to_owned(),
             },
         ],
         examples: json!({
             "compose_strand": {
                 "step_1": {"service": "coauth", "path": "/_arkret/gate/account/session-grants", "method": "POST"},
-                "step_2": {"service": "soland", "path": "protected route", "method": "Authorization: DPoP <ak.session.grant> + DPoP"},
-                "step_3": {"service": "soland", "path": "/_arkret/edge/push/register-device", "method": "POST"}
+                "step_2": {"service": "coland", "path": "protected route", "method": "Authorization: DPoP <ak.session.grant> + DPoP"},
+                "step_3": {"service": "coland", "path": "/_arkret/edge/push/register-device", "method": "POST"}
             }
         }),
         todos: vec![
@@ -619,7 +619,7 @@ mod tests {
     #[test]
     fn conformance_discovery_tokens_are_not_wire_features() {
         let mut description = ServiceDescribe::development(
-            Did::new("did:web:soland.example".to_owned()).unwrap(),
+            Did::new("did:web:coland.example".to_owned()).unwrap(),
             TrustDomainId::new("ak:trust_domain:example.net").unwrap(),
             ServiceKind::Station,
             vec![
@@ -627,7 +627,7 @@ mod tests {
                 "ak.operation_bundle.station.http_core_current.v1".to_owned(),
             ],
             vec![arkret_models_discovery::TransportBinding::HttpJson {
-                base_url: "https://soland.example/".to_owned(),
+                base_url: "https://coland.example/".to_owned(),
                 extension_profile_required: (),
             }],
         );
@@ -652,7 +652,7 @@ mod tests {
     #[test]
     fn sovereign_security_posture_is_not_a_conformance_claim() {
         let mut description = ServiceDescribe::development(
-            Did::new("did:web:soland.example".to_owned()).unwrap(),
+            Did::new("did:web:coland.example".to_owned()).unwrap(),
             TrustDomainId::new("ak:trust_domain:example.net").unwrap(),
             ServiceKind::Station,
             vec![
@@ -660,7 +660,7 @@ mod tests {
                 "ak.operation_bundle.station.http_core_current.v1".to_owned(),
             ],
             vec![arkret_models_discovery::TransportBinding::HttpJson {
-                base_url: "https://soland.example/".to_owned(),
+                base_url: "https://coland.example/".to_owned(),
                 extension_profile_required: (),
             }],
         );

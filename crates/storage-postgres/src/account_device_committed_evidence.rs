@@ -6,11 +6,11 @@ use arkret_models_crypto::{
 };
 use arkret_models_identity::AccountDeviceSignerEvidence;
 use arkret_wire::{DidCoreId, DidKey, Event, RealmCommit};
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{Jsonb, Text, Timestamptz};
 use diesel::{OptionalExtension, QueryableByName, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::Value;
-use soland_storage::{PersistenceError, PersistenceResult};
 
 fn rejected(message: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Conflict(format!(
@@ -215,9 +215,9 @@ pub(crate) async fn retain_from_guard(
     event: &Event,
     commit: &RealmCommit,
     fact: &HumanHistoricalSignerFact,
-    guard: Option<&soland_storage::SelfProducerCommitGuard>,
+    guard: Option<&coland_storage::SelfProducerCommitGuard>,
 ) -> PersistenceResult<()> {
-    if let Some(soland_storage::SelfProducerCommitGuard::HumanDeviceEvidence {
+    if let Some(coland_storage::SelfProducerCommitGuard::HumanDeviceEvidence {
         selector,
         evidence,
     }) = guard

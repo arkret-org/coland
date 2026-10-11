@@ -4,13 +4,13 @@
 
 use arkret_models_collaboration::events_payloads::{DeviceOrPrincipalRef, DeviceRevokePayload};
 use arkret_wire::RealmCommit;
-use diesel::sql_types::{Jsonb, Text};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::RunQueryDsl;
-use soland_storage::{
+use coland_storage::{
     AuthorityCommitWriteOutcome, ConflictCode, PersistenceError, RevokeCommandTerminalWrite,
     RevokeProposalCommitWrite, SecurityTransactionRecord,
 };
+use diesel::sql_types::{Jsonb, Text};
+use diesel::{OptionalExtension, QueryableByName, sql_query};
+use diesel_async::RunQueryDsl;
 
 use super::{
     AsyncPgConnection, PgTransactionError, StepAttemptSource, accept_step_in_transaction, ids,
@@ -173,7 +173,7 @@ pub(super) async fn commit_revoke_command_terminal_in_connection(
             .await?;
         }
         SecurityRotationRevokeCommandDecision::Rejected => {
-            soland_storage::validate_security_transaction_update(&existing, &write.transaction)?;
+            coland_storage::validate_security_transaction_update(&existing, &write.transaction)?;
             update_mutable_fields(conn, &write.transaction).await?;
         }
     }

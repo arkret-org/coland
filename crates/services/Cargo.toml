@@ -1,5 +1,5 @@
 [package]
-name = "soland-services"
+name = "coland-services"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,11 +7,11 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "Transport- and adapter-independent Soland application use cases."
+description = "Transport- and adapter-independent Coland application use cases."
 
 [features]
 default = []
-test-support = ["soland-storage/test-support"]
+test-support = ["coland-storage/test-support"]
 
 [dependencies]
 arkret.workspace = true
@@ -38,8 +38,8 @@ parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-soland-domain.workspace = true
-soland-storage.workspace = true
+coland-domain.workspace = true
+coland-storage.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 tracing.workspace = true
@@ -48,7 +48,7 @@ uuid = { workspace = true, features = ["v7"] }
 [dev-dependencies]
 arkret-schema-conformance = { workspace = true }
 arkret-event-draft = { workspace = true, features = ["test-support"] }
-soland-storage-postgres = { workspace = true, features = ["test-support"] }
+coland-storage-postgres = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros"] }
 
 [lints]

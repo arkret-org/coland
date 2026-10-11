@@ -6,7 +6,7 @@ fn retired_seal_pending_control_and_command_routes_are_not_registered() {
 }
 
 async fn current_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let token = dev_token(state.clone()).await;
     let app = app_from_state(state);
     let pending = TestClient::query("http://server/_arkret/self/seals/pending-control")

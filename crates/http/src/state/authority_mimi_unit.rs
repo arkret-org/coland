@@ -1,7 +1,7 @@
 //! Service-authored MIMI Events, using the durable Service identity and native unit.
 use arkret_wire::{ActorId, Event, EventAdmissionSubmission, EventKind, ScopeRef};
-use soland_services::{ServiceError, ServiceResult};
-use soland_storage::SelfProducerCommitGuard;
+use coland_services::{ServiceError, ServiceResult};
+use coland_storage::SelfProducerCommitGuard;
 
 use super::AppState;
 use super::authority_self_event_unit::{
@@ -48,7 +48,7 @@ pub(crate) async fn author_mimi_event<K: arkret_event_draft::EventSpec>(
 pub(crate) async fn mimi_reporter_device_guard(
     state: &AppState,
     body: &arkret_models_collaboration::mimi_operations::MimiReportAbuseRequestBody,
-) -> ServiceResult<soland_storage::DeviceRevocationGateSelector> {
+) -> ServiceResult<coland_storage::DeviceRevocationGateSelector> {
     let account = body
         .reporter_authority
         .actor_id
@@ -108,7 +108,7 @@ pub(crate) async fn commit_mimi_event(
     state: &AppState,
     event: Event,
     guard: SelfProducerCommitGuard,
-    idempotency: Option<soland_services::events::IdempotentResponse>,
+    idempotency: Option<coland_services::events::IdempotentResponse>,
 ) -> ServiceResult<arkret_wire::AuthoritySubmitOutcome> {
     let payload: serde_json::Value = serde_json::to_value(&event.payload)
         .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
@@ -117,7 +117,7 @@ pub(crate) async fn commit_mimi_event(
             serde_json::from_value(payload).map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
         payload
             .franking_proof
-            .map(|proof| soland_storage::FrankingReplayNonceCommit {
+            .map(|proof| coland_storage::FrankingReplayNonceCommit {
                 realm_id: event.realm_id.to_string(),
                 received_by: proof.received_by,
                 replay_nonce: proof.replay_nonce,

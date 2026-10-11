@@ -13,10 +13,10 @@ mod service_routes;
 mod settings;
 
 use audit::append_audit_log;
+use coland_http::error::AppError;
+use coland_http::util;
+use coland_services::identity::SessionIdentityState as SessionRecord;
 pub(super) use introspect::{introspect_admin_scopes, require_admin_scope};
-use soland_http::error::AppError;
-use soland_http::util;
-use soland_services::identity::SessionIdentityState as SessionRecord;
 
 use super::{
     AuthArgs, discussion_track_for_projection_event, now, policy_document_to_response,
@@ -157,7 +157,7 @@ impl AdminAuth {
 ///
 /// In an explicitly compiled development harness, any harness session is allowed. Otherwise
 /// the session actor MUST appear in `AppConfig::admin_principal_ids`
-/// (env `SOLAND_ADMIN_PRINCIPAL_IDS`). Returns the original session on
+/// (env `COLAND_ADMIN_PRINCIPAL_IDS`). Returns the original session on
 /// success or an `AppError` with `capability_denied` on failure.
 pub(super) fn require_admin_principal(
     state: &AppState,
@@ -168,7 +168,7 @@ pub(super) fn require_admin_principal(
     } else {
         Err(crate::app_error!(
             CapabilityDenied,
-            "admin API requires the caller principal ID to be listed in SOLAND_ADMIN_PRINCIPAL_IDS"
+            "admin API requires the caller principal ID to be listed in COLAND_ADMIN_PRINCIPAL_IDS"
                 .to_owned(),
         ))
     }
@@ -237,10 +237,10 @@ pub fn admin_router() -> Router {
         .push(Router::with_path("devices").get(queries::admin_list_devices))
         .push(media::router())
         .push(service_routes::router())
-        // Operator audit queries (`/_soland/admin/audit/events`,
-        // `/_soland/admin/audit/erasure-receipts`) under the shared
+        // Operator audit queries (`/_coland/admin/audit/events`,
+        // `/_coland/admin/audit/erasure-receipts`) under the shared
         // `RequireAdmin` gate (SOL-NAME-02 — client ingest lives at
-        // `/_soland/self/audit/*` instead of a second mount of this tree).
+        // `/_coland/self/audit/*` instead of a second mount of this tree).
         .push(audit::ops_router())
 }
 
@@ -257,7 +257,7 @@ mod gate_tests {
     fn state() -> AppState {
         AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         )
     }
 
@@ -337,7 +337,7 @@ mod gate_tests {
                 token_hash: "gate".into(),
                 account_pk: None,
                 actor: "ak:did_core:web:op.example".into(),
-                endpoint: soland_services::identity::SessionEndpointState::HumanDevice {
+                endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
                     device_id: "ak:device:0196419b-0000-7000-8000-000000000001".into(),
                 },
                 audience: "ak:did_core:web:server.example".into(),
@@ -373,7 +373,7 @@ mod gate_tests {
                     token_hash: "outer-gate".into(),
                     account_pk: None,
                     actor: "ak:did_core:web:op.example".into(),
-                    endpoint: soland_services::identity::SessionEndpointState::HumanDevice {
+                    endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
                         device_id: "ak:device:0196419b-0000-7000-8000-000000000001".into(),
                     },
                     audience: "ak:did_core:web:server.example".into(),
@@ -394,7 +394,7 @@ mod gate_tests {
     async fn concrete_admin_routes_take_precedence_over_the_collection_wildcard() {
         let mut config = crate::config::AppConfig::test_default();
         config.development_mode = true;
-        let state = AppState::new(config, soland_storage_postgres::Db { pool: None });
+        let state = AppState::new(config, coland_storage_postgres::Db { pool: None });
         let expected = serde_json::to_value(&*state.settings()).expect("settings JSON");
         let service = Service::new(
             Router::new()

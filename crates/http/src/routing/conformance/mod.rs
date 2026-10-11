@@ -4,7 +4,7 @@
 //! (canonical JSON, signature binding, HLC ordering, opaque cursor, envelope
 //! digest, redaction projection) as HTTP endpoints so the cotest e2e suite
 //! at `cotest/e2e/tests/conformance/encoding-vectors.spec.ts` can drive the
-//! same vectors against a running soland.
+//! same vectors against a running coland.
 //!
 //! Routes (all `POST /_arkret/_conformance/...`):
 //!   - `encode`
@@ -49,7 +49,7 @@ use salvo::prelude::*;
 pub(crate) mod handlers;
 pub(crate) mod util;
 
-use soland_http::error::AppError;
+use coland_http::error::AppError;
 
 use crate::config::AppConfig;
 

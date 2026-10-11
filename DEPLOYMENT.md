@@ -1,7 +1,7 @@
-# Deploying soland
+# Deploying coland
 
-Production guidance for running soland as a single-process Arkret v1 reference
-server. soland is pre-1.0 — the push outbound bridge, the MIMI provider
+Production guidance for running coland as a single-process Arkret v1 reference
+server. coland is pre-1.0 — the push outbound bridge, the MIMI provider
 directory and most of the directory surface are still scaffold endpoints that
 return placeholder shapes. Review them before serving real users.
 
@@ -11,7 +11,7 @@ return placeholder shapes. Review them before serving real users.
 | --- | --- | --- |
 | OS | Linux (Debian/Ubuntu LTS) | Other targets are CI-tested but less battle-hardened |
 | PostgreSQL | 16+ | `pq-src` builds libpq inline; the runtime image only needs the network reachability |
-| Reverse proxy | nginx, Caddy, or Traefik | TLS termination is **expected** to live in the reverse proxy, not soland itself |
+| Reverse proxy | nginx, Caddy, or Traefik | TLS termination is **expected** to live in the reverse proxy, not coland itself |
 | Object storage | local volume or S3-compatible bucket | Local disk is fine for one node; production should prefer S3/MinIO/R2-style object storage |
 | Key custody | encrypted file + external 32-byte master key | Ciphertext and master key must have separate backup and access-control boundaries |
 | Container runtime | Docker / containerd / Podman | Build or load the image locally; this readiness workflow does not push registry images or tags |
@@ -19,19 +19,19 @@ return placeholder shapes. Review them before serving real users.
 ## 1. Provision PostgreSQL
 
 ```sql
-CREATE ROLE soland WITH LOGIN PASSWORD '<strong-random-password>';
-CREATE DATABASE soland OWNER soland;
-GRANT ALL PRIVILEGES ON DATABASE soland TO soland;
+CREATE ROLE coland WITH LOGIN PASSWORD '<strong-random-password>';
+CREATE DATABASE coland OWNER coland;
+GRANT ALL PRIVILEGES ON DATABASE coland TO coland;
 ```
 
-soland runs Diesel migrations on startup; no manual DDL is required.
+coland runs Diesel migrations on startup; no manual DDL is required.
 
 ## 2. Configure environment
 
 ### Provision the KeyStore master key
 
 Generate the encrypted-file KeyStore master key exactly once, outside the
-server startup path. `soland-keystore-keygen` obtains 32 bytes from the
+server startup path. `coland-keystore-keygen` obtains 32 bytes from the
 operating-system CSPRNG, writes the Base64 value with create-new semantics,
 validates the result, and refuses to overwrite an existing file. The
 `--if-missing` option is reserved for idempotent automation such as
@@ -40,13 +40,13 @@ validates the result, and refuses to overwrite an existing file. The
 Installed-binary usage:
 
 ```text
-soland-keystore-keygen --output <path>
+coland-keystore-keygen --output <path>
 ```
 
 From a source checkout, the command is cross-platform:
 
 ```text
-cargo run --locked --release -p soland-keystore-keygen -- --output <path>
+cargo run --locked --release -p coland-keystore-keygen -- --output <path>
 ```
 
 For a Linux Docker host, the release image contains the helper. Create a
@@ -54,30 +54,30 @@ host directory writable by the image's UID `10001`, run the helper as an
 explicit one-shot operation, and then make the result read-only:
 
 ```bash
-sudo install -d -m 0700 -o 10001 -g 10001 /secure/soland
+sudo install -d -m 0700 -o 10001 -g 10001 /secure/coland
 docker run --rm \
-  --entrypoint /usr/local/bin/soland-keystore-keygen \
-  --mount type=bind,source=/secure/soland,target=/secrets \
-  ghcr.io/arkret/soland:<tag> \
-  --output /secrets/soland-keystore-master-key
-sudo chmod 0400 /secure/soland/soland-keystore-master-key
+  --entrypoint /usr/local/bin/coland-keystore-keygen \
+  --mount type=bind,source=/secure/coland,target=/secrets \
+  ghcr.io/arkret/coland:<tag> \
+  --output /secrets/coland-keystore-master-key
+sudo chmod 0400 /secure/coland/coland-keystore-master-key
 ```
 
 On Windows or Windows Docker Desktop, use the same image and protect the host
 file with an ACL. Run these commands from PowerShell:
 
 ```powershell
-$keyDir = 'D:\soland\secrets'
+$keyDir = 'D:\coland\secrets'
 New-Item -ItemType Directory -Force -Path $keyDir | Out-Null
 $keyDir = (Resolve-Path -LiteralPath $keyDir).Path
 
 docker run --rm `
-  --entrypoint /usr/local/bin/soland-keystore-keygen `
+  --entrypoint /usr/local/bin/coland-keystore-keygen `
   --mount "type=bind,source=$keyDir,target=/secrets" `
-  ghcr.io/arkret/soland:<tag> `
-  --output /secrets/soland-keystore-master-key
+  ghcr.io/arkret/coland:<tag> `
+  --output /secrets/coland-keystore-master-key
 
-$keyFile = Join-Path $keyDir 'soland-keystore-master-key'
+$keyFile = Join-Path $keyDir 'coland-keystore-master-key'
 $account = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 icacls $keyFile /inheritance:r /grant:r "${account}:(R)"
 ```
@@ -85,7 +85,7 @@ icacls $keyFile /inheritance:r /grant:r "${account}:(R)"
 If Docker runs under a dedicated Windows service account, grant that account
 read access instead of the interactive user. Do not place the key in the image,
 the source tree, an environment file committed to Git, or the same backup as
-`SOLAND_KEYSTORE_PATH`. Preserve the original key for every restart and
+`COLAND_KEYSTORE_PATH`. Preserve the original key for every restart and
 restore; losing or replacing it makes the encrypted KeyStore unreadable.
 
 ### Configure runtime values
@@ -93,57 +93,57 @@ restore; losing or replacing it makes the encrypted KeyStore unreadable.
 Create a deploy-time `.env` (or a Kubernetes Secret / systemd EnvironmentFile):
 
 ```dotenv
-SOLAND_BIND=0.0.0.0:8698
-SOLAND_PUBLIC_BASE_URL=https://soland.example
-SOLAND_TLS_CERT_PATH=/etc/soland/tls/fullchain.pem
-SOLAND_TLS_KEY_PATH=/etc/soland/tls/privkey.pem
-SOLAND_PQ_TLS_DEPLOYMENT_PROBE=verified
+COLAND_BIND=0.0.0.0:8698
+COLAND_PUBLIC_BASE_URL=https://coland.example
+COLAND_TLS_CERT_PATH=/etc/coland/tls/fullchain.pem
+COLAND_TLS_KEY_PATH=/etc/coland/tls/privkey.pem
+COLAND_PQ_TLS_DEPLOYMENT_PROBE=verified
 # One-time only on the first production boot; remove after identity creation.
-SOLAND_FIRST_PROVISIONING=true
-SOLAND_KEYSTORE_BACKEND=encrypted_file
-SOLAND_KEYSTORE_PATH=/var/lib/soland/keystore/soland.v1
-SOLAND_KEYSTORE_MASTER_KEY_FILE=/run/secrets/soland-keystore-master-key
-SOLAND_SERVICE_IDENTITY_BUNDLE_DIR=/var/lib/soland/identity-bundle
-SOLAND_EMBEDDED_WEBVH_PROVIDER_ENABLED=true
-SOLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER=<shared-secret-configured-in-coauth>
+COLAND_FIRST_PROVISIONING=true
+COLAND_KEYSTORE_BACKEND=encrypted_file
+COLAND_KEYSTORE_PATH=/var/lib/coland/keystore/coland.v1
+COLAND_KEYSTORE_MASTER_KEY_FILE=/run/secrets/coland-keystore-master-key
+COLAND_SERVICE_IDENTITY_BUNDLE_DIR=/var/lib/coland/identity-bundle
+COLAND_EMBEDDED_WEBVH_PROVIDER_ENABLED=true
+COLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER=<shared-secret-configured-in-coauth>
 # Optional: use a standalone webvh provider instead of, or alongside, the embedded provider.
-# SOLAND_EXTERNAL_WEBVH_PROVIDER_URL=https://webvh.example
-# SOLAND_EXTERNAL_WEBVH_REGISTRATION_BEARER=<provider-registration-secret>
-# With both values set, Soland's own identity is Provider-backed (class A), so
-# SOLAND_FIRST_PROVISIONING is not required.
-# SOLAND_DEFAULT_WEBVH_PROVIDER_ID=soland.embedded
-SOLAND_ACCOUNT_AUTHORITY_URL=https://coauth.example
-SOLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN=ak:trust_domain:coauth.example
-SOLAND_SESSION_GRANT_INTROSPECTION_URL=https://coauth.example/_coauth/internal/session-grants/introspect
-SOLAND_AUTH_SESSION_LOGOUT_URL=https://coauth.example/_coauth/internal/auth-sessions/logout
-SOLAND_INTERNAL_AUTHORITY_SHARED_SECRET=<shared-secret-configured-in-coauth>
-SOLAND_OBJECT_STORAGE_BACKEND=s3-compatible
-SOLAND_OBJECT_STORAGE_S3_BUCKET=soland
-SOLAND_OBJECT_STORAGE_S3_REGION=us-east-1
-SOLAND_OBJECT_STORAGE_S3_ENDPOINT=https://s3.example.com
-SOLAND_OBJECT_STORAGE_S3_ACCESS_KEY_ID=<access-key>
-SOLAND_OBJECT_STORAGE_S3_SECRET_ACCESS_KEY=<secret-key>
-SOLAND_OBJECT_STORAGE_S3_FORCE_PATH_STYLE=true
-SOLAND_OBJECT_STORAGE_PREFIX=prod
-SOLAND_CORS_ALLOW_ORIGIN=https://app.example
-SOLAND_MAX_REQUEST_SIZE=1048576
-DATABASE_URL=postgres://soland:<password>@db.internal:5432/soland?sslmode=verify-full
+# COLAND_EXTERNAL_WEBVH_PROVIDER_URL=https://webvh.example
+# COLAND_EXTERNAL_WEBVH_REGISTRATION_BEARER=<provider-registration-secret>
+# With both values set, Coland's own identity is Provider-backed (class A), so
+# COLAND_FIRST_PROVISIONING is not required.
+# COLAND_DEFAULT_WEBVH_PROVIDER_ID=coland.embedded
+COLAND_ACCOUNT_AUTHORITY_URL=https://coauth.example
+COLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN=ak:trust_domain:coauth.example
+COLAND_SESSION_GRANT_INTROSPECTION_URL=https://coauth.example/_coauth/internal/session-grants/introspect
+COLAND_AUTH_SESSION_LOGOUT_URL=https://coauth.example/_coauth/internal/auth-sessions/logout
+COLAND_INTERNAL_AUTHORITY_SHARED_SECRET=<shared-secret-configured-in-coauth>
+COLAND_OBJECT_STORAGE_BACKEND=s3-compatible
+COLAND_OBJECT_STORAGE_S3_BUCKET=coland
+COLAND_OBJECT_STORAGE_S3_REGION=us-east-1
+COLAND_OBJECT_STORAGE_S3_ENDPOINT=https://s3.example.com
+COLAND_OBJECT_STORAGE_S3_ACCESS_KEY_ID=<access-key>
+COLAND_OBJECT_STORAGE_S3_SECRET_ACCESS_KEY=<secret-key>
+COLAND_OBJECT_STORAGE_S3_FORCE_PATH_STYLE=true
+COLAND_OBJECT_STORAGE_PREFIX=prod
+COLAND_CORS_ALLOW_ORIGIN=https://app.example
+COLAND_MAX_REQUEST_SIZE=1048576
+DATABASE_URL=postgres://coland:<password>@db.internal:5432/coland?sslmode=verify-full
 
-# `SOLAND_DEVELOPMENT_MODE` is unset (defaults to false). Enabling it in
+# `COLAND_DEVELOPMENT_MODE` is unset (defaults to false). Enabling it in
 # production permits local network egress and development diagnostics; it never
 # relaxes formal signature/DID validation. Synthetic login/admin credentials
 # exist only in explicitly compiled conformance-harness builds, not default binaries.
 
-RUST_LOG=soland=info,salvo=info,warn
+RUST_LOG=coland=info,salvo=info,warn
 ```
 
-`SOLAND_MAX_REQUEST_SIZE` is parsed as bytes. Leave it unset for the default
+`COLAND_MAX_REQUEST_SIZE` is parsed as bytes. Leave it unset for the default
 1 MiB body cap; requests above the cap return `413 Payload Too Large` before
 the route handler reads JSON or form data.
 
 ### Embedded webvh provider: deployment-profile gate
 
-The embedded webvh provider (`SOLAND_EMBEDDED_WEBVH_PROVIDER_ENABLED=true`)
+The embedded webvh provider (`COLAND_EMBEDDED_WEBVH_PROVIDER_ENABLED=true`)
 is only suitable for `ak.profile.personal_node.v1` and
 `ak.profile.small_team.v1` deployments. Those profiles accept a single
 witness proof with no distinct-controlling-organization requirement, so a
@@ -155,20 +155,20 @@ service identity from the embedded (local) provider. The spec witness
 baseline (arkret-spec `spec/v1/zh/identity/identity-did.md` §3.4.2) requires
 at least 2 valid witness proofs from at least 2 distinct controlling
 organizations for those profiles, and forbids host self-witnessing as the
-sole basis for high-risk control decisions. soland's local/embedded provider
+sole basis for high-risk control decisions. coland's local/embedded provider
 path performs no witness verification at all (see the trust-root layering
 note below), so it can never satisfy that baseline. For `organization` and
 above, provision the service identity through an external webvh provider
-(`SOLAND_EXTERNAL_WEBVH_PROVIDER_URL` +
-`SOLAND_EXTERNAL_WEBVH_REGISTRATION_BEARER`) whose DID log carries the
+(`COLAND_EXTERNAL_WEBVH_PROVIDER_URL` +
+`COLAND_EXTERNAL_WEBVH_REGISTRATION_BEARER`) whose DID log carries the
 required independent witness proofs.
 
 ### Witness verification is layered by trust root
 
 The describe payload advertises `"webvh_witness_quorum": "unsupported"` only
-under the `soland.local_identity_store` trust root
+under the `coland.local_identity_store` trust root
 (`crates/http/src/routing/identity/did/webvh.rs`). The flag is scoped, not
-global — soland has two distinct did:webvh paths:
+global — coland has two distinct did:webvh paths:
 
 - **Local / embedded provider path — always rejects (fail-closed).** DID
   logs handled through the local identity store are validated by
@@ -190,61 +190,61 @@ global — soland has two distinct did:webvh paths:
 ### Advanced environment reference
 
 Most deployments only need the variables in the sample above. The table below
-lists the remaining runtime variables soland reads, including security-sensitive
+lists the remaining runtime variables coland reads, including security-sensitive
 and rollout-only switches that should be managed deliberately.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SOLAND_ADMIN_PRINCIPAL_IDS` | empty | Comma-separated typed principal ID allowlist (`ak:did_core:…`) for production admin APIs. An empty value closes the admin API outside development mode; browser sessions additionally require `SOLAND_SESSION_GRANT_INTROSPECTION_URL`. |
-| `SOLAND_ADMIN_PAGE_LIMIT` | `100` | Default admin API page size. |
-| `SOLAND_ADMIN_MAX_PAGE_LIMIT` | `1000` | Maximum admin API page size; clamped above the default. |
-| `SOLAND_AGENT_PARTICIPATION_CEILING` | all five bits `true` | Closed JSON object with required boolean fields `reply_message`, `reaction_add`, `reaction_remove`, `accept_third_party_mention`, and `act_on_behalf`. This deployment ceiling only narrows participation; it does not grant permissions or override management restrictions. Invalid JSON or unknown fields fail startup. |
-| `SOLAND_APPLET_TRANSACTION_INFLIGHT_CAPACITY` | `64` | Maximum concurrent applet transactions retained in memory. |
-| `SOLAND_DB_POOL_ACQUIRE_TIMEOUT_SECS` | deadpool default | Positive database-pool acquisition timeout; unset means no explicit wait timeout. |
-| `SOLAND_DB_POOL_MAX_SIZE` | CPU count × 4 | Positive database-pool size override. |
-| `SOLAND_DID_RESOLVER_ALLOW_METHODS` | `web,key,uuid` | Comma-separated DID methods accepted by outbound DID resolution. |
-| `SOLAND_DEACTIVATION_PROPAGATION_WINDOW_MS` | `86400000` | Positive acknowledgement window for exact account-deactivation propagation; expiry with pending destinations sets the durable admin projection to incomplete while retries continue. |
-| `SOLAND_EGRESS_ALLOW_PRIVATE_NETWORKS` | development mode | Authoritative override for private/link-local outbound destinations. Keep `false` in production unless the network path has been explicitly reviewed. |
-| `SOLAND_EGRESS_ALLOWED_HOSTS` | empty | Optional comma-separated exact/wildcard outbound host allowlist. |
-| `SOLAND_EGRESS_DENYLIST` | empty | Comma-separated outbound host denylist; evaluated in addition to the private-network guard. |
-| `SOLAND_EXTERNAL_WEBVH_PROVIDER_TRUST_DOMAIN` | derived trust domain | Expected trust domain for the external webvh provider probe. |
-| `SOLAND_FEDERATION_DENYLIST` | empty | Comma-separated federation host/service denylist. |
-| `SOLAND_FEDERATION_FANOUT_TOPOLOGY` | `mesh` | Federation fanout topology (`mesh` or `hub`). |
-| `SOLAND_FEDERATION_FRONTIER_INTERVAL_SECONDS` | `0` | Optional frontier synchronization interval, at most `3600` seconds; `0` disables periodic polling. |
-| `SOLAND_FEDERATION_PEER_DENYLIST` | empty | Additional comma-separated peer denylist. |
-| `SOLAND_HEALTHCHECK_URL` | derived from `SOLAND_BIND` | URL used by the built-in healthcheck command. |
-| `SOLAND_ICE_STUN_URLS` | `stun:stun.l.google.com:19302` | Comma-separated STUN URLs advertised in signed ICE configs. |
-| `SOLAND_ICE_TTL_SECONDS` | `300` | Lifetime of an issued ICE config / TURN credential before refresh; non-positive falls back to default. |
-| `SOLAND_ICE_REFRESH_LEAD_SECONDS` | `75` | Lead time before TTL at which clients should refresh the ICE config. |
-| `SOLAND_INTERNAL_AUTHORITY_SHARED_SECRET_FILE` | unset | Path to a non-empty UTF-8 file containing the per-edge internal authority secret; surrounding whitespace is trimmed. It replaces the direct secret value, not the channel's URL or trust-domain bindings. Setting both forms, even to the same secret, fails startup. |
-| `SOLAND_KEY_BACKUP_DAILY_DOWNLOAD_LIMIT` | spec default | Per-principal daily key-backup download limit. |
-| `SOLAND_NOTARY_SIGNING_KEY` | unset | Base64 (standard or url-safe-no-pad) 32-byte NotaryWorker signing seed. Required outside development mode unless a durable `SOLAND_KEYSTORE_BACKEND` is configured; an ephemeral notary key breaks the Seal signature chain across restarts. |
-| `SOLAND_OBJECT_STORAGE_S3_SESSION_TOKEN` | unset | Optional S3 session token for temporary credentials. |
-| `SOLAND_OBJECT_STORAGE_S3_SKIP_SIGNATURE` | `false` | Skip S3 request signing for test-only object stores; do not enable for production S3. |
-| `SOLAND_SECURITY_ROTATION_WORKER_INTERVAL_SECONDS` | `5` | Durable SecurityRotation worker sweep interval, an integer in `1..=3600` seconds. An invalid value fails startup. |
-| `SOLAND_TRUSTED_PUSH_GATEWAYS` | empty registry | Closed JSON array of entries containing `canonical_origin`, `service_did`, `receipt_verification_method`, and `receipt_public_key_multibase`. Each explicitly onboarded HTTPS origin binds its Gateway DID and canonical Ed25519 receipt key; malformed or duplicate bindings fail startup. Federation peers and user-supplied Gateway URLs do not establish this trust. |
-| `SOLAND_WEBSOCKET_MAX_LIFETIME_SECS` | `600` | Physical WebSocket lifetime before bounded drain. Must parse as an unsigned integer and is clamped to `1..=600` seconds; malformed values fail startup. |
-| `SOLAND_RECEIVE_POLICY_*` | unset | Optional ServiceDescribe receive-policy constraints. See `.env.example` for exact names and accepted values. |
-| `SOLAND_RATE_LIMIT_TRUST_X_FORWARDED_FOR` | `false` | Trust `X-Forwarded-For` for rate limiting when behind a trusted proxy. |
-| `SOLAND_SEED_DEMO_DATA` | `false` | Seed deterministic demo data. Test/development only; never enable in production. |
-| `SOLAND_SERVICE_IDENTITY_BUNDLE` | unset | Identity-bundle input used only by `soland-keystore-snapshot`; the server uses `SOLAND_SERVICE_IDENTITY_BUNDLE_DIR`. |
-| `SOLAND_SHUTDOWN_GRACE_SECS` | `0` | Graceful-drain bound in seconds; `0` waits indefinitely. |
-| `SOLAND_TO_DEVICE_QUEUE_CAPACITY` | `10000` | Per-device in-memory to-device queue capacity. Overflow advances the lost watermark. |
-| `SOLAND_TURN_URLS` | `turn:turn.soland.local:3478?transport=udp` | Comma-separated TURN URLs advertised in signed ICE configs. |
-| `SOLAND_TURN_SECRET_ROTATION_WINDOW_SECS` | `86400` | Rotation window for the TURN shared secret used in credential derivation. |
-| `SOLAND_TURN_SHARED_SECRET` | unset | Optional shared secret folded into derived TURN credentials (`*_FILE` form supported); when unset, credential material is unchanged. |
-| `SOLAND_LIVEKIT_API_KEY` | unset | LiveKit API Key. In the LiveKit binding (`bindings/livekit.md` §2) this is the focus `issuer_kid`; the `livekit` focus token issuer fails closed unless the realm focus `issuer_kid` matches this value. |
-| `SOLAND_LIVEKIT_API_SECRET` | unset | LiveKit API Secret (`*_FILE` form supported). HMAC-SHA256 signing key for the LiveKit JWT; never exposed in any cell, `/health`, or describe payload. Required together with `SOLAND_LIVEKIT_API_KEY` to mint LiveKit backend tokens. |
-| `SOLAND_RESUMABLE_UPLOAD_DIR` | `./soland-resumable-uploads` | Directory for resumable-upload staging files. |
-| `SOLAND_RESUMABLE_UPLOAD_TTL_SECS` | `86400` | Incomplete resumable-upload TTL; minimum 60 seconds. |
-| `SOLAND_SOVEREIGN_ENCLAVE` | `false` | Enables the sovereign-enclave startup and egress security posture; it does not advertise a conformance profile. |
-| `SOLAND_SOVEREIGN_ENCLAVE_ALLOWED_OUTBOUND_HOSTS` | empty | Comma-separated outbound host allow-list for sovereign-enclave deployments. |
-| `SOLAND_VERIFIED_PROFILES_ARTIFACT` | unset | Path to a cotest `verified-profiles.json` artifact to advertise verified profiles. |
+| `COLAND_ADMIN_PRINCIPAL_IDS` | empty | Comma-separated typed principal ID allowlist (`ak:did_core:…`) for production admin APIs. An empty value closes the admin API outside development mode; browser sessions additionally require `COLAND_SESSION_GRANT_INTROSPECTION_URL`. |
+| `COLAND_ADMIN_PAGE_LIMIT` | `100` | Default admin API page size. |
+| `COLAND_ADMIN_MAX_PAGE_LIMIT` | `1000` | Maximum admin API page size; clamped above the default. |
+| `COLAND_AGENT_PARTICIPATION_CEILING` | all five bits `true` | Closed JSON object with required boolean fields `reply_message`, `reaction_add`, `reaction_remove`, `accept_third_party_mention`, and `act_on_behalf`. This deployment ceiling only narrows participation; it does not grant permissions or override management restrictions. Invalid JSON or unknown fields fail startup. |
+| `COLAND_APPLET_TRANSACTION_INFLIGHT_CAPACITY` | `64` | Maximum concurrent applet transactions retained in memory. |
+| `COLAND_DB_POOL_ACQUIRE_TIMEOUT_SECS` | deadpool default | Positive database-pool acquisition timeout; unset means no explicit wait timeout. |
+| `COLAND_DB_POOL_MAX_SIZE` | CPU count × 4 | Positive database-pool size override. |
+| `COLAND_DID_RESOLVER_ALLOW_METHODS` | `web,key,uuid` | Comma-separated DID methods accepted by outbound DID resolution. |
+| `COLAND_DEACTIVATION_PROPAGATION_WINDOW_MS` | `86400000` | Positive acknowledgement window for exact account-deactivation propagation; expiry with pending destinations sets the durable admin projection to incomplete while retries continue. |
+| `COLAND_EGRESS_ALLOW_PRIVATE_NETWORKS` | development mode | Authoritative override for private/link-local outbound destinations. Keep `false` in production unless the network path has been explicitly reviewed. |
+| `COLAND_EGRESS_ALLOWED_HOSTS` | empty | Optional comma-separated exact/wildcard outbound host allowlist. |
+| `COLAND_EGRESS_DENYLIST` | empty | Comma-separated outbound host denylist; evaluated in addition to the private-network guard. |
+| `COLAND_EXTERNAL_WEBVH_PROVIDER_TRUST_DOMAIN` | derived trust domain | Expected trust domain for the external webvh provider probe. |
+| `COLAND_FEDERATION_DENYLIST` | empty | Comma-separated federation host/service denylist. |
+| `COLAND_FEDERATION_FANOUT_TOPOLOGY` | `mesh` | Federation fanout topology (`mesh` or `hub`). |
+| `COLAND_FEDERATION_FRONTIER_INTERVAL_SECONDS` | `0` | Optional frontier synchronization interval, at most `3600` seconds; `0` disables periodic polling. |
+| `COLAND_FEDERATION_PEER_DENYLIST` | empty | Additional comma-separated peer denylist. |
+| `COLAND_HEALTHCHECK_URL` | derived from `COLAND_BIND` | URL used by the built-in healthcheck command. |
+| `COLAND_ICE_STUN_URLS` | `stun:stun.l.google.com:19302` | Comma-separated STUN URLs advertised in signed ICE configs. |
+| `COLAND_ICE_TTL_SECONDS` | `300` | Lifetime of an issued ICE config / TURN credential before refresh; non-positive falls back to default. |
+| `COLAND_ICE_REFRESH_LEAD_SECONDS` | `75` | Lead time before TTL at which clients should refresh the ICE config. |
+| `COLAND_INTERNAL_AUTHORITY_SHARED_SECRET_FILE` | unset | Path to a non-empty UTF-8 file containing the per-edge internal authority secret; surrounding whitespace is trimmed. It replaces the direct secret value, not the channel's URL or trust-domain bindings. Setting both forms, even to the same secret, fails startup. |
+| `COLAND_KEY_BACKUP_DAILY_DOWNLOAD_LIMIT` | spec default | Per-principal daily key-backup download limit. |
+| `COLAND_NOTARY_SIGNING_KEY` | unset | Base64 (standard or url-safe-no-pad) 32-byte NotaryWorker signing seed. Required outside development mode unless a durable `COLAND_KEYSTORE_BACKEND` is configured; an ephemeral notary key breaks the Seal signature chain across restarts. |
+| `COLAND_OBJECT_STORAGE_S3_SESSION_TOKEN` | unset | Optional S3 session token for temporary credentials. |
+| `COLAND_OBJECT_STORAGE_S3_SKIP_SIGNATURE` | `false` | Skip S3 request signing for test-only object stores; do not enable for production S3. |
+| `COLAND_SECURITY_ROTATION_WORKER_INTERVAL_SECONDS` | `5` | Durable SecurityRotation worker sweep interval, an integer in `1..=3600` seconds. An invalid value fails startup. |
+| `COLAND_TRUSTED_PUSH_GATEWAYS` | empty registry | Closed JSON array of entries containing `canonical_origin`, `service_did`, `receipt_verification_method`, and `receipt_public_key_multibase`. Each explicitly onboarded HTTPS origin binds its Gateway DID and canonical Ed25519 receipt key; malformed or duplicate bindings fail startup. Federation peers and user-supplied Gateway URLs do not establish this trust. |
+| `COLAND_WEBSOCKET_MAX_LIFETIME_SECS` | `600` | Physical WebSocket lifetime before bounded drain. Must parse as an unsigned integer and is clamped to `1..=600` seconds; malformed values fail startup. |
+| `COLAND_RECEIVE_POLICY_*` | unset | Optional ServiceDescribe receive-policy constraints. See `.env.example` for exact names and accepted values. |
+| `COLAND_RATE_LIMIT_TRUST_X_FORWARDED_FOR` | `false` | Trust `X-Forwarded-For` for rate limiting when behind a trusted proxy. |
+| `COLAND_SEED_DEMO_DATA` | `false` | Seed deterministic demo data. Test/development only; never enable in production. |
+| `COLAND_SERVICE_IDENTITY_BUNDLE` | unset | Identity-bundle input used only by `coland-keystore-snapshot`; the server uses `COLAND_SERVICE_IDENTITY_BUNDLE_DIR`. |
+| `COLAND_SHUTDOWN_GRACE_SECS` | `0` | Graceful-drain bound in seconds; `0` waits indefinitely. |
+| `COLAND_TO_DEVICE_QUEUE_CAPACITY` | `10000` | Per-device in-memory to-device queue capacity. Overflow advances the lost watermark. |
+| `COLAND_TURN_URLS` | `turn:turn.coland.local:3478?transport=udp` | Comma-separated TURN URLs advertised in signed ICE configs. |
+| `COLAND_TURN_SECRET_ROTATION_WINDOW_SECS` | `86400` | Rotation window for the TURN shared secret used in credential derivation. |
+| `COLAND_TURN_SHARED_SECRET` | unset | Optional shared secret folded into derived TURN credentials (`*_FILE` form supported); when unset, credential material is unchanged. |
+| `COLAND_LIVEKIT_API_KEY` | unset | LiveKit API Key. In the LiveKit binding (`bindings/livekit.md` §2) this is the focus `issuer_kid`; the `livekit` focus token issuer fails closed unless the realm focus `issuer_kid` matches this value. |
+| `COLAND_LIVEKIT_API_SECRET` | unset | LiveKit API Secret (`*_FILE` form supported). HMAC-SHA256 signing key for the LiveKit JWT; never exposed in any cell, `/health`, or describe payload. Required together with `COLAND_LIVEKIT_API_KEY` to mint LiveKit backend tokens. |
+| `COLAND_RESUMABLE_UPLOAD_DIR` | `./coland-resumable-uploads` | Directory for resumable-upload staging files. |
+| `COLAND_RESUMABLE_UPLOAD_TTL_SECS` | `86400` | Incomplete resumable-upload TTL; minimum 60 seconds. |
+| `COLAND_SOVEREIGN_ENCLAVE` | `false` | Enables the sovereign-enclave startup and egress security posture; it does not advertise a conformance profile. |
+| `COLAND_SOVEREIGN_ENCLAVE_ALLOWED_OUTBOUND_HOSTS` | empty | Comma-separated outbound host allow-list for sovereign-enclave deployments. |
+| `COLAND_VERIFIED_PROFILES_ARTIFACT` | unset | Path to a cotest `verified-profiles.json` artifact to advertise verified profiles. |
 
 Validate the env block on the target host once:
 
 ```bash
-soland --bind "${SOLAND_BIND}" --help    # cheap startup sanity check
+coland --bind "${COLAND_BIND}" --help    # cheap startup sanity check
 ```
 
 ## 3. Run the binary
@@ -253,89 +253,89 @@ soland --bind "${SOLAND_BIND}" --help    # cheap startup sanity check
 
 ```ini
 [Unit]
-Description=soland — Arkret v1 Station
+Description=coland — Arkret v1 Station
 After=network-online.target postgresql.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=soland
-Group=soland
-EnvironmentFile=/etc/soland/soland.env
-ExecStart=/usr/local/bin/soland
-WorkingDirectory=/var/lib/soland
-StateDirectory=soland
+User=coland
+Group=coland
+EnvironmentFile=/etc/coland/coland.env
+ExecStart=/usr/local/bin/coland
+WorkingDirectory=/var/lib/coland
+StateDirectory=coland
 Restart=on-failure
 RestartSec=2s
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ReadWritePaths=/var/lib/soland
+ReadWritePaths=/var/lib/coland
 ProtectHome=yes
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-soland traps `SIGINT` / `SIGTERM` and runs Salvo's graceful shutdown, so
+coland traps `SIGINT` / `SIGTERM` and runs Salvo's graceful shutdown, so
 `systemctl stop` (or `docker stop` / Kubernetes pod termination) drains
 in-flight requests before exiting.
 
 ### Docker
 
 ```bash
-docker run --name soland --restart=always -d \
+docker run --name coland --restart=always -d \
   -p 127.0.0.1:8698:8698 \
-  -e SOLAND_BIND=0.0.0.0:8698 \
-  -e SOLAND_PUBLIC_BASE_URL=https://soland.example \
-  -e SOLAND_FIRST_PROVISIONING=true \
-  -e SOLAND_KEYSTORE_BACKEND=encrypted_file \
-  -e SOLAND_KEYSTORE_PATH=/var/lib/soland/keystore/soland.v1 \
-  -e SOLAND_KEYSTORE_MASTER_KEY_FILE=/run/secrets/soland-keystore-master-key \
-  -e SOLAND_SERVICE_IDENTITY_BUNDLE_DIR=/var/lib/soland/identity-bundle \
-  -e SOLAND_ACCOUNT_AUTHORITY_URL=https://coauth.example \
-  -e SOLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN=ak:trust_domain:coauth.example \
-  -e SOLAND_SESSION_GRANT_INTROSPECTION_URL=https://coauth.example/_coauth/internal/session-grants/introspect \
-  -e SOLAND_AUTH_SESSION_LOGOUT_URL=https://coauth.example/_coauth/internal/auth-sessions/logout \
-  -e SOLAND_INTERNAL_AUTHORITY_SHARED_SECRET=<shared-secret-configured-in-coauth> \
-  -e DATABASE_URL=postgres://soland:<password>@db:5432/soland?sslmode=verify-full \
-  -e SOLAND_OBJECT_STORAGE_BACKEND=filesystem \
-  -e SOLAND_OBJECT_STORAGE_LOCAL_ROOT=/var/lib/soland/objects \
-  -e RUST_LOG=soland=info \
-  --mount type=volume,source=soland-data,target=/var/lib/soland \
-  --mount type=bind,source=/secure/soland/soland-keystore-master-key,target=/run/secrets/soland-keystore-master-key,readonly \
-  ghcr.io/arkret/soland:<tag>
+  -e COLAND_BIND=0.0.0.0:8698 \
+  -e COLAND_PUBLIC_BASE_URL=https://coland.example \
+  -e COLAND_FIRST_PROVISIONING=true \
+  -e COLAND_KEYSTORE_BACKEND=encrypted_file \
+  -e COLAND_KEYSTORE_PATH=/var/lib/coland/keystore/coland.v1 \
+  -e COLAND_KEYSTORE_MASTER_KEY_FILE=/run/secrets/coland-keystore-master-key \
+  -e COLAND_SERVICE_IDENTITY_BUNDLE_DIR=/var/lib/coland/identity-bundle \
+  -e COLAND_ACCOUNT_AUTHORITY_URL=https://coauth.example \
+  -e COLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN=ak:trust_domain:coauth.example \
+  -e COLAND_SESSION_GRANT_INTROSPECTION_URL=https://coauth.example/_coauth/internal/session-grants/introspect \
+  -e COLAND_AUTH_SESSION_LOGOUT_URL=https://coauth.example/_coauth/internal/auth-sessions/logout \
+  -e COLAND_INTERNAL_AUTHORITY_SHARED_SECRET=<shared-secret-configured-in-coauth> \
+  -e DATABASE_URL=postgres://coland:<password>@db:5432/coland?sslmode=verify-full \
+  -e COLAND_OBJECT_STORAGE_BACKEND=filesystem \
+  -e COLAND_OBJECT_STORAGE_LOCAL_ROOT=/var/lib/coland/objects \
+  -e RUST_LOG=coland=info \
+  --mount type=volume,source=coland-data,target=/var/lib/coland \
+  --mount type=bind,source=/secure/coland/coland-keystore-master-key,target=/run/secrets/coland-keystore-master-key,readonly \
+  ghcr.io/arkret/coland:<tag>
 ```
 
 The image runs as UID `10001`. Mounted volumes for
-`SOLAND_OBJECT_STORAGE_LOCAL_ROOT` must be chowned to that UID (or use a named
+`COLAND_OBJECT_STORAGE_LOCAL_ROOT` must be chowned to that UID (or use a named
 Docker volume so Docker handles it). The mounted KeyStore master-key file must
 be readable by UID `10001`; generate and back it up separately from the named
 ciphertext volume. After the first successful identity creation, recreate the
-container without `SOLAND_FIRST_PROVISIONING`; it is a one-time authorization,
+container without `COLAND_FIRST_PROVISIONING`; it is a one-time authorization,
 not a permanent runtime setting. S3-compatible backends do not need a media
 volume.
 
 ### Helm
 
-The production chart lives at `deploy/helm/soland`. Render it before applying
+The production chart lives at `deploy/helm/coland`. Render it before applying
 so secrets and network ranges are explicit in the release artifact:
 
 ```bash
-helm template soland ./deploy/helm/soland \
+helm template coland ./deploy/helm/coland \
   --namespace arkret \
   --set image.tag=<tag> \
-  --set existingSecret=soland-runtime \
-  --set env.SOLAND_PUBLIC_BASE_URL=https://soland.example \
-  --set env.SOLAND_FIRST_PROVISIONING=true \
-  --set env.SOLAND_KEYSTORE_BACKEND=encrypted_file \
-  --set env.SOLAND_KEYSTORE_PATH=/var/lib/soland/keystore/soland.v1 \
-  --set env.SOLAND_ACCOUNT_AUTHORITY_URL=https://coauth.example
+  --set existingSecret=coland-runtime \
+  --set env.COLAND_PUBLIC_BASE_URL=https://coland.example \
+  --set env.COLAND_FIRST_PROVISIONING=true \
+  --set env.COLAND_KEYSTORE_BACKEND=encrypted_file \
+  --set env.COLAND_KEYSTORE_PATH=/var/lib/coland/keystore/coland.v1 \
+  --set env.COLAND_ACCOUNT_AUTHORITY_URL=https://coauth.example
 ```
 
-Create `soland-runtime` through the cluster's secret-management path before
+Create `coland-runtime` through the cluster's secret-management path before
 rendering or installing the chart. It must provide every key listed under
-`secretEnv` in `values.yaml`, including `SOLAND_KEYSTORE_MASTER_KEY`. Prefer an
+`secretEnv` in `values.yaml`, including `COLAND_KEYSTORE_MASTER_KEY`. Prefer an
 external secret controller or encrypted GitOps secret; do not pass secret
 values through Helm `--set`, where they can leak into shell history and release
 metadata.
@@ -343,7 +343,7 @@ metadata.
 Install the same values with:
 
 ```bash
-helm upgrade --install soland ./deploy/helm/soland \
+helm upgrade --install coland ./deploy/helm/coland \
   --namespace arkret --create-namespace \
   -f production-values.yaml
 ```
@@ -351,23 +351,23 @@ helm upgrade --install soland ./deploy/helm/soland \
 For production, set `networkPolicy.enabled=true` and provide
 `networkPolicy.egress.databaseCidrs`, `objectStorageCidrs`, and `oauthCidrs`
 for the actual PostgreSQL, S3-compatible object storage, and coauth
-introspection endpoints. Leave `SOLAND_DEVELOPMENT_MODE` unset; the chart
+introspection endpoints. Leave `COLAND_DEVELOPMENT_MODE` unset; the chart
 does not set it by default.
 
 ## 4. Front with TLS
 
-soland speaks plaintext HTTP — terminate TLS in the reverse proxy.
+coland speaks plaintext HTTP — terminate TLS in the reverse proxy.
 The Arkret v1 transport baseline requires TLS 1.3 connections to negotiate
 `X25519MLKEM768` and fail closed when the peer cannot offer it. Run that
 handshake probe against the externally reachable client-service and
-service-to-service listener, then set `SOLAND_PQ_TLS_DEPLOYMENT_PROBE=verified`
+service-to-service listener, then set `COLAND_PQ_TLS_DEPLOYMENT_PROBE=verified`
 only for a passing deployment. Production `/readyz` returns 503 until that
 machine-verifiable probe evidence is present.
 
 Caddy example:
 
 ```caddyfile
-soland.example {
+coland.example {
     encode zstd gzip
 
     @api {
@@ -383,7 +383,7 @@ soland.example {
 ```
 
 Make sure the proxy passes the `Authorization`, `X-Arkret-Wait-For`,
-`X-Arkret-SHA256`, and `Range` request headers; soland sends back
+`X-Arkret-SHA256`, and `Range` request headers; coland sends back
 `Retry-After`, `X-Arkret-Wait-For-Satisfied`, `Content-Range`, and
 `Accept-Ranges`.
 
@@ -427,37 +427,37 @@ external webvh provider has passed the startup `/describe` probe.
 | --- | --- | --- |
 | PostgreSQL | All tables | `pg_dump` daily, plus continuous WAL archiving for point-in-time recovery |
 | Object storage bucket/volume | Uploaded media | enable bucket versioning or snapshot the local volume on the same cadence as the database; align so blob references in the DB stay resolvable |
-| Service identity database rows + identity bundle | Stable DID, WebVH history, and public recovery evidence | Back up the database and `SOLAND_SERVICE_IDENTITY_BUNDLE_DIR`; keep private keys in the configured secret store |
-| Encrypted KeyStore | Service signing and WebVH control seeds | Back up `SOLAND_KEYSTORE_PATH` and its master key through separate systems; neither artifact is recoverable from the other |
+| Service identity database rows + identity bundle | Stable DID, WebVH history, and public recovery evidence | Back up the database and `COLAND_SERVICE_IDENTITY_BUNDLE_DIR`; keep private keys in the configured secret store |
+| Encrypted KeyStore | Service signing and WebVH control seeds | Back up `COLAND_KEYSTORE_PATH` and its master key through separate systems; neither artifact is recoverable from the other |
 
-Restore order: stop soland → restore DB, identity bundle, and encrypted KeyStore → restore the master key through its secret-management path → restore object storage bucket/volume → start soland.
+Restore order: stop coland → restore DB, identity bundle, and encrypted KeyStore → restore the master key through its secret-management path → restore object storage bucket/volume → start coland.
 The startup migrations are idempotent.
 
 ## 7. Observability
 
-soland emits structured `tracing` events with stable `event` and `worker`
+coland emits structured `tracing` events with stable `event` and `worker`
 fields for process lifecycle and background tasks. It also exposes
 Prometheus text metrics on a separate listener:
 
 ```dotenv
-SOLAND_METRICS_BIND=127.0.0.1:9090
+COLAND_METRICS_BIND=127.0.0.1:9090
 ```
 
 Scrape `http://127.0.0.1:9090/metrics` for:
 
-- `soland_request_total{op,status}`
-- `soland_request_duration_seconds` histogram buckets
-- `soland_db_pool_in_use`
-- `soland_federation_outbox_depth` (rows still owed to a peer: `pending` +
+- `coland_request_total{op,status}`
+- `coland_request_duration_seconds` histogram buckets
+- `coland_db_pool_in_use`
+- `coland_federation_outbox_depth` (rows still owed to a peer: `pending` +
   `leased`)
-- `soland_federation_outbox_state_depth{state,peer}` — per-peer breakdown
+- `coland_federation_outbox_state_depth{state,peer}` — per-peer breakdown
   across the full lifecycle, including `policy_suppressed`
-- `soland_federation_outbox_oldest_pending_age_seconds`
-- `soland_federation_retry_delay_seconds` histogram
-- `soland_federation_outbox_lease_takeover_total`
-- `soland_federation_outbox_dead_letter_total{reason}` (P5 — counter; alert on
+- `coland_federation_outbox_oldest_pending_age_seconds`
+- `coland_federation_retry_delay_seconds` histogram
+- `coland_federation_outbox_lease_takeover_total`
+- `coland_federation_outbox_dead_letter_total{reason}` (P5 — counter; alert on
   any non-zero rate over 5m via `examples/prometheus-alerts.yml`)
-- `soland_audit_append_failures_total` (alert on any non-zero rate over
+- `coland_audit_append_failures_total` (alert on any non-zero rate over
   5m — see `examples/prometheus-alerts.yml`)
 
 A copy-pasteable `prometheus-alerts.yml` lives under `examples/`; load
@@ -466,10 +466,10 @@ it via Prometheus' `rule_files:` directive.
 ### Structured JSON logging
 
 Production deployments default to **JSON logs** when
-`SOLAND_DEVELOPMENT_MODE=false` (the default). One log line per event,
+`COLAND_DEVELOPMENT_MODE=false` (the default). One log line per event,
 keyed by the standard `tracing` span / field set, ready for ingestion
 by Loki / OpenSearch / Cloud Logging without a bespoke parser. Force
-the format explicitly with `SOLAND_LOG_FORMAT=json|plain`. The
+the format explicitly with `COLAND_LOG_FORMAT=json|plain`. The
 runbook log-search recipes in `docs/runbook.md` assume the JSON shape.
 
 OpenTelemetry tracing is build-time opt-in so ordinary local runs do not pull
@@ -482,19 +482,19 @@ cargo run --features otel -- --bind 127.0.0.1:8698
 Enable OTLP export at runtime:
 
 ```dotenv
-SOLAND_OTEL_EXPORTER=otlp
-SOLAND_OTEL_ENDPOINT=http://otel-collector:4317
-SOLAND_OTEL_SERVICE_NAME=soland
-SOLAND_OTEL_SAMPLE_RATIO=1.0
-SOLAND_OTEL_TIMEOUT_SECS=3
+COLAND_OTEL_EXPORTER=otlp
+COLAND_OTEL_ENDPOINT=http://otel-collector:4317
+COLAND_OTEL_SERVICE_NAME=coland
+COLAND_OTEL_SAMPLE_RATIO=1.0
+COLAND_OTEL_TIMEOUT_SECS=3
 ```
 
 Remaining roadmap before 1.0:
 
 - per-handler `instrument` spans carrying `actor / space / event_kind`
 
-Set `RUST_LOG=soland=debug,salvo=info,warn` in production-like environments
-while closing 1.0 readiness. Keep `SOLAND_LOG_FILE` pointed at a durable path
+Set `RUST_LOG=coland=debug,salvo=info,warn` in production-like environments
+while closing 1.0 readiness. Keep `COLAND_LOG_FILE` pointed at a durable path
 when running under a supervisor that buffers stdout.
 
 Alert on:
@@ -502,7 +502,7 @@ Alert on:
 - `200 /health` request rate dropping below the configured threshold
 - 5xx error rate over rolling 5-minute windows
 - `auth.dev_login` audit events outside the development environment (this
-  should be impossible with `SOLAND_DEVELOPMENT_MODE=false`, but alert
+  should be impossible with `COLAND_DEVELOPMENT_MODE=false`, but alert
   belt-and-braces)
 
 ### Local observability and rate-limit examples
@@ -510,38 +510,38 @@ Alert on:
 Minimal local metrics-only run:
 
 ```dotenv
-SOLAND_BIND=127.0.0.1:8698
-SOLAND_METRICS_BIND=127.0.0.1:9090
-RUST_LOG=soland=info,salvo=warn
+COLAND_BIND=127.0.0.1:8698
+COLAND_METRICS_BIND=127.0.0.1:9090
+RUST_LOG=coland=info,salvo=warn
 ```
 
 OTLP trace export run:
 
 ```powershell
-$env:SOLAND_OTEL_EXPORTER="otlp"
-$env:SOLAND_OTEL_ENDPOINT="http://127.0.0.1:4317"
-$env:SOLAND_OTEL_SAMPLE_RATIO="0.25"
+$env:COLAND_OTEL_EXPORTER="otlp"
+$env:COLAND_OTEL_ENDPOINT="http://127.0.0.1:4317"
+$env:COLAND_OTEL_SAMPLE_RATIO="0.25"
 cargo run --features otel -- --bind 127.0.0.1:8698
 ```
 
 Single-process local reverse-proxy rate-limit sketch:
 
 ```nginx
-limit_req_zone $binary_remote_addr zone=soland_api:10m rate=600r/m;
+limit_req_zone $binary_remote_addr zone=coland_api:10m rate=600r/m;
 
 server {
   listen 443 ssl;
-  server_name soland.example;
+  server_name coland.example;
 
   location / {
-    limit_req zone=soland_api burst=120 nodelay;
+    limit_req zone=coland_api burst=120 nodelay;
     proxy_pass http://127.0.0.1:8698;
   }
 }
 ```
 
 For multi-replica deployments, enforce the quota at the shared gateway or
-load balancer. soland's in-process limiter remains useful as a last-resort
+load balancer. coland's in-process limiter remains useful as a last-resort
 guard, but it is not a distributed budget.
 
 ## 8. Local supply-chain artifacts
@@ -550,13 +550,13 @@ Generate local image metadata and an SPDX JSON SBOM without pushing an image or
 creating a release tag:
 
 ```powershell
-pwsh ./scripts/local-supply-chain.ps1 -ImageTag soland:local
+pwsh ./scripts/local-supply-chain.ps1 -ImageTag coland:local
 ```
 
 The script writes:
 
-- `target/supply-chain/soland-build-metadata.json` from `docker buildx`
-- `target/supply-chain/soland.spdx.json` from `syft`
+- `target/supply-chain/coland-build-metadata.json` from `docker buildx`
+- `target/supply-chain/coland.spdx.json` from `syft`
 
 For local provenance evidence, sign or attest the generated metadata with an
 operator-owned key:
@@ -565,8 +565,8 @@ operator-owned key:
 cosign attest-blob \
   --key cosign.key \
   --type slsaprovenance \
-  --predicate target/supply-chain/soland-build-metadata.json \
-  target/supply-chain/soland-build-metadata.json
+  --predicate target/supply-chain/coland-build-metadata.json \
+  target/supply-chain/coland-build-metadata.json
 ```
 
 ## 9. Upgrade procedure
@@ -574,7 +574,7 @@ cosign attest-blob \
 1. Read the changelog / release notes for the target tag.
 2. `pg_dump` the database.
 3. Pull / install the new binary or container image.
-4. Restart soland; embedded migrations run on boot.
+4. Restart coland; embedded migrations run on boot.
 5. Tail logs for at least one request cycle (`/health`, `/_arkret/describe`).
 
 Downgrades are **not** supported once a migration has run; restore from the
@@ -582,18 +582,18 @@ pre-upgrade backup if you need to roll back.
 
 ## 10. Hardening checklist
 
-- `SOLAND_DEVELOPMENT_MODE` is unset (or explicitly `false`).
-- `SOLAND_ACCOUNT_AUTHORITY_URL` points at coauth's public account authority,
-  and `SOLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN` is its explicit source trust
+- `COLAND_DEVELOPMENT_MODE` is unset (or explicitly `false`).
+- `COLAND_ACCOUNT_AUTHORITY_URL` points at coauth's public account authority,
+  and `COLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN` is its explicit source trust
   domain. It is never inferred from the URL.
 - The Account Authority signs as this Station with a delegated assertion method, even when it runs at a separate origin.
-- `SOLAND_SESSION_GRANT_INTROSPECTION_URL` points at coauth's
+- `COLAND_SESSION_GRANT_INTROSPECTION_URL` points at coauth's
   `/_coauth/internal/session-grants/introspect`, and
-  `SOLAND_INTERNAL_AUTHORITY_SHARED_SECRET` matches the shared
+  `COLAND_INTERNAL_AUTHORITY_SHARED_SECRET` matches the shared
   server-to-server secret configured there (coauth's
   `stations[].internal_authority_shared_secret` for this Station).
-- Before registering the channel, Soland canonicalizes
-  `SOLAND_ACCOUNT_AUTHORITY_URL` and requires every configured bearer target to
+- Before registering the channel, Coland canonicalizes
+  `COLAND_ACCOUNT_AUTHORITY_URL` and requires every configured bearer target to
   use its exact origin (same scheme, host and effective port). Introspection and
   Auth-side logout must use their exact operation paths; credentials, query and
   fragment are forbidden. The controller-gate target is derived as its exact
@@ -601,13 +601,13 @@ pre-upgrade backup if you need to roll back.
   sent.
 - Setting that bearer together with the Authority URL/trust domain registers a
   deployment-internal authenticated channel between this Station and that
-  Account Authority. Current-device admission enters Soland only through the
-  product-private `POST /_soland/account-authority/current-device/check`
+  Account Authority. Current-device admission enters Coland only through the
+  product-private `POST /_coland/account-authority/current-device/check`
   adapter. It is not an Arkret Operation and is never advertised through
   Service Describe. Nothing on `/_arkret/peer/*` accepts this bearer; every
   peer operation keeps its RFC 9421 service signature.
   Every plaintext proxy on this internal link is a trusted member of the same
-  deployment TCB; Soland does not model or inspect the proxy chain.
+  deployment TCB; Coland does not model or inspect the proxy chain.
 - Account Authority calls to `GET /_arkret/self/agents/{id}` and
   `POST /_arkret/gate/account/agent-key-pair` are outside that four-operation
   bearer channel. They require an RFC 9421 signature whose source and
@@ -615,37 +615,37 @@ pre-upgrade backup if you need to roll back.
   match the explicitly configured Authority and Station domains, and whose
   `keyid` is exactly this Station DID's delegated `#account-authority`
   assertion method. The shared bearer does not authorize these routes.
-- `SOLAND_AUTH_SESSION_LOGOUT_URL` independently points at coauth's exact
+- `COLAND_AUTH_SESSION_LOGOUT_URL` independently points at coauth's exact
   `/_coauth/internal/auth-sessions/logout` private adapter; it is never
   inferred from the introspection URL.
 - `DATABASE_URL` uses `sslmode=verify-full` and a password kept out of source
   control (Vault / Kubernetes Secret / systemd `LoadCredential`).
-- `SOLAND_CORS_ALLOW_ORIGIN` is the **single** browser origin you trust;
-  never `*` while soland sets `Access-Control-Allow-Credentials: true`.
+- `COLAND_CORS_ALLOW_ORIGIN` is the **single** browser origin you trust;
+  never `*` while coland sets `Access-Control-Allow-Credentials: true`.
 - Object storage uses a dedicated bucket/prefix or a dedicated local volume
   with quota enforcement.
 - Reverse proxy enforces TLS 1.2+ and the security headers you require.
 - Reverse proxy / gateway TLS 1.3 probe verifies `X25519MLKEM768` negotiation
-  and sets `SOLAND_PQ_TLS_DEPLOYMENT_PROBE=verified`; classical fallback is not
+  and sets `COLAND_PQ_TLS_DEPLOYMENT_PROBE=verified`; classical fallback is not
   accepted.
 - Reverse proxy, API gateway, or load balancer enforces a shared rate-limit
-  budget when more than one soland replica is running. soland's built-in
+  budget when more than one coland replica is running. coland's built-in
   limiter is per-process and must not be treated as a distributed quota.
 - `cargo deny check` runs in CI on every dependabot bump.
-- soland process runs as a non-root user (UID 10001 in the local container image).
+- coland process runs as a non-root user (UID 10001 in the local container image).
 - Rate-limit configuration matches your anticipated traffic and is enforced
-  at the shared gateway when more than one soland replica is running.
+  at the shared gateway when more than one coland replica is running.
 
 ## 11. Service-identity signing-key custody
 
 The active signing key is bound to the WebVH DID document and persisted
-service-identity bundle. Soland does not expose an online key-only rotation
+service-identity bundle. Coland does not expose an online key-only rotation
 endpoint: changing only the runtime or KeyStore seed would split those
 authorities. A future rotation workflow must commit the KeyStore write,
 WebVH update, DID document, identity bundle and recovery material as one
 recoverable transition before an admin route is added.
 
-Use `soland-keystore-snapshot --export-only` and `--import-only` only for
+Use `coland-keystore-snapshot --export-only` and `--import-only` only for
 backup/restore of the already-bound key. They do not rotate identity material.
 
 ## 12. Known limits
@@ -655,7 +655,7 @@ backup/restore of the already-bound key. They do not rotate identity material.
   proxy or API gateway (see SECURITY.md and `docs/architecture.md` §4).
   Until an external Redis (or equivalent) backend is wired in, treat the
   per-process quota as a single-instance soft floor; production fleets MUST
-  front soland with nginx/Caddy/Traefik `limit_req` or an API gateway that
+  front coland with nginx/Caddy/Traefik `limit_req` or an API gateway that
   shares state across replicas.
 
 ### AKP-0007 (Circle primitive) — migration & sizing notes
@@ -681,9 +681,9 @@ backup/restore of the already-bound key. They do not rotate identity material.
   events will fail-closed on Circle membership writes — the canonical fix
   is to gate writes behind the federation outbox acknowledgement.
 - **Metrics**: Prometheus text metrics are exposed on the separate
-  `SOLAND_METRICS_BIND` listener (default `127.0.0.1:9090`) at `/metrics`.
+  `COLAND_METRICS_BIND` listener (default `127.0.0.1:9090`) at `/metrics`.
 - **OpenTelemetry**: OTLP trace export is disabled unless the binary is built
-  with `--features otel` and `SOLAND_OTEL_EXPORTER=otlp` is set.
+  with `--features otel` and `COLAND_OTEL_EXPORTER=otlp` is set.
 - **Scaffold endpoints**: push outbound bridge, the MIMI provider directory,
   and most of the directory surface return placeholder shapes.
 - **Pre-1.0 schema drift**: protocol field renames may require client updates
@@ -691,7 +691,7 @@ backup/restore of the already-bound key. They do not rotate identity material.
 
 ## Pre-1.0 schema initialization
 
-Soland keeps the current pre-1.0 schema in
+Coland keeps the current pre-1.0 schema in
 `crates/storage-postgres/migrations/00000000000000_initial`. New deployments
 run that migration as a unit; the historical per-feature R3 migration list is
 no longer part of this repository.
@@ -725,11 +725,11 @@ canonical shape — capture the row and escalate; do not delete.
 Media connectivity is configured in two independent layers:
 
 - **Per-deployment ICE/STUN/TURN (P2P NAT traversal)** — set via the
-  `SOLAND_ICE_*` / `SOLAND_TURN_*` env vars above. These feed the signed
+  `COLAND_ICE_*` / `COLAND_TURN_*` env vars above. These feed the signed
   `POST /_arkret/self/rtc/ice-config` response. Defaults reproduce the
-  historical hardcoded `stun.l.google.com` / `turn.soland.local` values so
+  historical hardcoded `stun.l.google.com` / `turn.coland.local` values so
   existing deployments behave identically until overridden. Point
-  `SOLAND_TURN_URLS` at your own coturn/eturnal pool for production.
+  `COLAND_TURN_URLS` at your own coturn/eturnal pool for production.
 - **Per-realm SFU foci (LiveKit / Mediasoup conferencing)** — declared in the
   realm `ak.component.realm.media_service.v1` cell as the `foci[]` array shown
   above, consumed by the AKP-0010 token exchange at
@@ -737,11 +737,11 @@ Media connectivity is configured in two independent layers:
   `connect_url` / `issuer_kid` / `audience` are bound; it is realm-scoped
   config, not a deployment env var.
   - **LiveKit API Key/Secret** are the one piece of the LiveKit binding that
-    *is* a deployment env var: set `SOLAND_LIVEKIT_API_KEY` +
-    `SOLAND_LIVEKIT_API_SECRET` so the `livekit` focus mints a standard
+    *is* a deployment env var: set `COLAND_LIVEKIT_API_KEY` +
+    `COLAND_LIVEKIT_API_SECRET` so the `livekit` focus mints a standard
     LiveKit JWT (`HS256` over `header.payload`, signed with the API Secret —
     `bindings/livekit.md` §2). The realm focus `issuer_kid` MUST equal
-    `SOLAND_LIVEKIT_API_KEY`; a mismatch (or unset credentials) fails the
+    `COLAND_LIVEKIT_API_KEY`; a mismatch (or unset credentials) fails the
     token exchange closed instead of issuing a token LiveKit would reject.
     v1 supports a single API Key/Secret pair; mapping multiple LiveKit
     deployments (one pair per cluster, keyed by focus `issuer_kid`) is

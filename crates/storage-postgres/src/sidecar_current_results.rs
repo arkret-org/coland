@@ -4,11 +4,11 @@
 use arkret_models_collaboration::events_payloads::sidecar::SidecarContextAttachPayload;
 use arkret_models_collaboration::sidecar_operations::SidecarContextRef;
 use arkret_wire::{CommitStreamRef, Event, EventKind, RealmCommit, ScopeRef, SidecarId};
+use coland_storage::{ConflictCode, PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
 use diesel::{OptionalExtension as _, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::{Value, json};
-use soland_storage::{ConflictCode, PersistenceError, PersistenceResult};
 
 #[derive(diesel::QueryableByName)]
 struct ExistingCreate {
@@ -224,7 +224,7 @@ pub(crate) async fn prepare_context_current(
 ) -> PersistenceResult<
     Option<(
         arkret_wire::EventId,
-        Option<soland_storage::AgentSidecarContextRecord>,
+        Option<coland_storage::AgentSidecarContextRecord>,
     )>,
 > {
     use diesel_async::AsyncConnection as _;
@@ -284,7 +284,7 @@ pub(crate) async fn prepare_context_current(
             || i64::try_from(payload.version).ok() != Some(row.version) || row.value != row.accepted_payload {
             return Err(invalid("Sidecar context current differs from its accepted source").into());
         }
-        Ok(Some((genesis, Some(soland_storage::AgentSidecarContextRecord {
+        Ok(Some((genesis, Some(coland_storage::AgentSidecarContextRecord {
             sidecar_id: sidecar.to_string(), normalized_context_ref_digest: digest,
             normalized_context_ref: serde_json::to_value(context).map_err(PersistenceError::database)?,
             version: row.version, predecessor_event_ref: payload.predecessor_event_ref.map(|id| id.to_string()),

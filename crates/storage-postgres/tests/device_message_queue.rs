@@ -2,7 +2,7 @@
 //! the closed `DeviceMessageEnvelope` it serves, and fails closed on any other
 //! stored shape instead of repairing it.
 //!
-//! Requires `SOLAND_TEST_DATABASE_URL` or `DATABASE_URL`; the lease gives each
+//! Requires `COLAND_TEST_DATABASE_URL` or `DATABASE_URL`; the lease gives each
 //! case an isolated, freshly migrated database.
 
 #[path = "../../test-support/src/device_authorization_history.rs"]
@@ -17,17 +17,17 @@ mod pcr_genesis;
 
 use arkret_models_collaboration::device_messages::RecipientDelivery;
 use chrono::{Duration, Utc};
-use diesel::sql_query;
-use diesel::sql_types::{BigInt, Jsonb, Text};
-use diesel_async::RunQueryDsl;
-use soland_storage::contract_tests::test_device_message_envelope;
-use soland_storage::{
+use coland_storage::contract_tests::test_device_message_envelope;
+use coland_storage::{
     DeviceMessageBatchCommitOutcome, DeviceMessageBatchInspection, DeviceMessageBatchItemRecord,
     DeviceMessageBatchRecord, DeviceMessageIntentRecord, DeviceMessageRecord, DeviceMessageStore,
     DeviceRevocationGateSelector, PersistenceError, RecipientQueueSelector,
 };
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{Db, PgDeviceMessageStore, PgPool};
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{Db, PgDeviceMessageStore, PgPool};
+use diesel::sql_query;
+use diesel::sql_types::{BigInt, Jsonb, Text};
+use diesel_async::RunQueryDsl;
 
 #[path = "support/historical_control_source.rs"]
 #[expect(
@@ -68,7 +68,7 @@ async fn two_device_history_for_station(
         .await
         .unwrap();
     drop(conn);
-    let persistence = soland_storage_postgres::PgPersistenceStore::new(pool.clone());
+    let persistence = coland_storage_postgres::PgPersistenceStore::new(pool.clone());
     let mut fixture = pcr_genesis::PcrGenesisFixture::new(station_did);
     let founding = fixture
         .admit_founding_device(&persistence)
@@ -255,7 +255,7 @@ async fn queue_refuses_device_authorizations_the_station_did_not_accept() {
     use arkret_models_collaboration::events_payloads::{
         DeviceAuthorizationBindingKind, DeviceOrPrincipalRef,
     };
-    use soland_storage::DeviceRevocationStore;
+    use coland_storage::DeviceRevocationStore;
 
     let database = TestDatabase::lease().await;
     let pool = database.pool();
@@ -270,7 +270,7 @@ async fn queue_refuses_device_authorizations_the_station_did_not_accept() {
         device_authorization_history::did_web_station(&STATION.parse().unwrap()),
     );
     let founding = fixture
-        .admit_founding_device(&soland_storage_postgres::PgPersistenceStore::new(
+        .admit_founding_device(&coland_storage_postgres::PgPersistenceStore::new(
             pool.clone(),
         ))
         .await
@@ -326,7 +326,7 @@ async fn queue_refuses_device_authorizations_the_station_did_not_accept() {
     };
 
     // The Station's PCR status admits the founding device only.
-    let status = soland_storage_postgres::PgDeviceRevocationStore { pool: pool.clone() };
+    let status = coland_storage_postgres::PgDeviceRevocationStore { pool: pool.clone() };
     let account = fixture.history.account.clone();
     let at = Utc::now();
     assert_eq!(
@@ -574,7 +574,7 @@ async fn postgres_agent_sender_without_current_authorization_writes_nothing() {
         sender_agent_key_authorize_event_id: authorization_ref.event_id.clone(),
     };
     let mut refused = batch("agent-sender", message(&device_a, &device_b, envelope));
-    refused.sender_agent_guard = Some(soland_storage::AgentEndpointGuard {
+    refused.sender_agent_guard = Some(coland_storage::AgentEndpointGuard {
         pcr_realm_id: authorization_ref.stream_ref.realm_id().clone(),
         agent_id,
         authorization_ref,
@@ -607,8 +607,8 @@ const AGENT_RUNTIME_SEED: [u8; 32] = [91; 32];
 /// `agent_status` / `agent_key` current results in the same transaction, so
 /// the queue's endpoint recheck reads exactly what a production commit wrote.
 struct CommittedAgent {
-    authority: soland_services::authority_commit::AuthorityCommitApplication,
-    store: soland_storage_postgres::PgAuthorityCommitStore,
+    authority: coland_services::authority_commit::AuthorityCommitApplication,
+    store: coland_storage_postgres::PgAuthorityCommitStore,
     controller: device_authorization_history::DeviceHistoryFixture,
     station: arkret_wire::DidCoreId,
     agent_did: arkret_wire::Did,
@@ -624,7 +624,7 @@ impl CommittedAgent {
         use arkret_models_collaboration::events_payloads::agent::{
             AgentKeyApprovalEvidence, AgentKeyApprovalEvidenceKind, AgentKeyAuthorizePayload,
         };
-        use soland_storage::ActorProfileStore as _;
+        use coland_storage::ActorProfileStore as _;
 
         let historical_station = historical_control_source::HistoricalControlStation::new(
             "device-queue-native-agent",
@@ -640,13 +640,13 @@ impl CommittedAgent {
             &controller.founding_device_id,
             &controller.events[1].event_id,
         );
-        let authority = soland_services::authority_commit::AuthorityCommitApplication::new(
-            soland_services::persistence::PersistenceHandle::new(std::sync::Arc::new(
-                soland_storage_postgres::PgPersistenceStore::new(pool.clone()),
+        let authority = coland_services::authority_commit::AuthorityCommitApplication::new(
+            coland_services::persistence::PersistenceHandle::new(std::sync::Arc::new(
+                coland_storage_postgres::PgPersistenceStore::new(pool.clone()),
             )),
             100,
         );
-        let store = soland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() };
+        let store = coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() };
         let station = historical_station.core.clone();
         let at = chrono::DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).unwrap();
         let endpoint = "https://queue-agent.example/".parse().unwrap();
@@ -729,10 +729,10 @@ impl CommittedAgent {
             controller.device_verification_method.clone(),
             controller.founding_device_signing_seed,
         );
-        let profiles = soland_storage_postgres::PgActorProfileStore { pool: pool.clone() };
+        let profiles = coland_storage_postgres::PgActorProfileStore { pool: pool.clone() };
         let committed_at = Utc::now();
         profiles
-            .admit_agent_provision(soland_storage::AgentProvisionAdmissionWrite {
+            .admit_agent_provision(coland_storage::AgentProvisionAdmissionWrite {
                 commit: authority
                     .prepare_self_event_transaction(
                         &provision,
@@ -751,7 +751,7 @@ impl CommittedAgent {
         historical_control_source::admit_genesis(
             &profiles,
             pool,
-            soland_storage::AgentPcrGenesisAdmissionWrite {
+            coland_storage::AgentPcrGenesisAdmissionWrite {
                 commit: authority
                     .prepare_genesis_transaction(
                         &genesis,
@@ -858,8 +858,8 @@ impl CommittedAgent {
         }
     }
 
-    fn guard(&self) -> soland_storage::AgentEndpointGuard {
-        soland_storage::AgentEndpointGuard {
+    fn guard(&self) -> coland_storage::AgentEndpointGuard {
+        coland_storage::AgentEndpointGuard {
             pcr_realm_id: self.pcr_realm_id.clone(),
             agent_id: self.agent_account.principal_id.clone(),
             authorization_ref: self.authorization_ref.clone(),
@@ -978,12 +978,12 @@ fn station_method(station: &arkret_wire::DidCoreId) -> arkret_wire::DidUrl {
 /// Commit one Agent PCR control Event at the stream head through the
 /// Station's Agent control unit with a Station-signed `RealmCommit`.
 async fn admit(
-    authority: &soland_services::authority_commit::AuthorityCommitApplication,
-    store: &soland_storage_postgres::PgAuthorityCommitStore,
+    authority: &coland_services::authority_commit::AuthorityCommitApplication,
+    store: &coland_storage_postgres::PgAuthorityCommitStore,
     station: &arkret_wire::DidCoreId,
     event: &arkret_wire::Event,
 ) -> arkret_wire::RealmCommit {
-    use soland_storage::ActorProfileStore as _;
+    use coland_storage::ActorProfileStore as _;
 
     let committed_at = Utc::now();
     let transaction = authority
@@ -997,16 +997,16 @@ async fn admit(
         .await
         .unwrap();
     historical_control_source::stage_registered(&store.pool, &transaction).await;
-    let outcome = soland_storage_postgres::PgActorProfileStore {
+    let outcome = coland_storage_postgres::PgActorProfileStore {
         pool: store.pool.clone(),
     }
-    .admit_agent_control_event(soland_storage::AgentControlAdmissionWrite {
+    .admit_agent_control_event(coland_storage::AgentControlAdmissionWrite {
         commit: transaction,
         queued_at: committed_at,
     })
     .await
     .unwrap();
-    let soland_storage::AgentControlAdmissionOutcome::Committed(commit) = outcome else {
+    let coland_storage::AgentControlAdmissionOutcome::Committed(commit) = outcome else {
         panic!("the governing Station commits the Agent Event");
     };
     commit
@@ -1260,7 +1260,7 @@ async fn controller_agent_discussion(
     // Match the accepted-controller fixture's real local account registration.
     // This establishes account presence/continuity, while ownership still comes
     // from accepted Agent provision and controller-bound membership Events.
-    use soland_storage::{
+    use coland_storage::{
         AuthorityCommitStore as _, EventCommitUnitOfWork as _, IdentityStoreRegistry as _,
     };
     let controller_pcr = agent
@@ -1277,10 +1277,10 @@ async fn controller_agent_discussion(
         controller_pcr.event.actor_id,
         arkret_wire::ActorId::account(agent.controller.account.clone())
     );
-    soland_storage_postgres::PgPersistenceStore::new(pool.clone())
+    coland_storage_postgres::PgPersistenceStore::new(pool.clone())
         .accounts()
-        .put(&soland_storage::AccountRecord {
-            pk: soland_storage::AccountPk(0),
+        .put(&coland_storage::AccountRecord {
+            pk: coland_storage::AccountPk(0),
             principal_id: agent.controller.account.principal_id.clone(),
             station_id: agent.controller.account.station_id.clone(),
             localpart: String::new(),
@@ -1319,7 +1319,7 @@ async fn controller_agent_discussion(
         at,
     );
     let strand = ordinary_realm::source_request(pool, strand).await;
-    let uow = soland_storage_postgres::PgEventCommitUnitOfWork::new(pool.clone());
+    let uow = coland_storage_postgres::PgEventCommitUnitOfWork::new(pool.clone());
     uow.commit_event(strand.clone())
         .await
         .expect("create discussion Strand");
@@ -1346,7 +1346,7 @@ async fn controller_agent_discussion(
 /// cut. Revocation wins over a stale ciphertext epoch and both refuse writes.
 #[tokio::test]
 async fn postgres_agent_message_send_gate_checks_epoch_and_current_key() {
-    use soland_storage::{
+    use coland_storage::{
         AuthorityCommitStore as _, EventCommitUnitOfWork as _, MlsGroupCurrentStore as _,
     };
 
@@ -1371,7 +1371,7 @@ async fn postgres_agent_message_send_gate_checks_epoch_and_current_key() {
     use arkret_models_collaboration::governance::agent_participation::{
         ParticipationBits, ParticipationScope,
     };
-    use soland_storage::{AgentParticipationStore as _, AgentStore as _};
+    use coland_storage::{AgentParticipationStore as _, AgentStore as _};
     #[derive(diesel::QueryableByName)]
     struct AcceptedParticipationOwner {
         #[diesel(sql_type = Jsonb)]
@@ -1400,8 +1400,8 @@ async fn postgres_agent_message_send_gate_checks_epoch_and_current_key() {
         lifecycle,
         arkret_models_collaboration::agent_operations::AgentLifecycleState::Active
     );
-    soland_storage_postgres::PgAgentStore { pool: pool.clone() }
-        .put(soland_storage::AgentPrincipalRecord::new(
+    coland_storage_postgres::PgAgentStore { pool: pool.clone() }
+        .put(coland_storage::AgentPrincipalRecord::new(
             agent.agent_account.principal_id.to_string(),
             provision.controller_principal_id.to_string(),
             provision.principal_control_realm_id.to_string(),
@@ -1411,7 +1411,7 @@ async fn postgres_agent_message_send_gate_checks_epoch_and_current_key() {
         ))
         .await
         .unwrap();
-    let participation = soland_storage_postgres::PgAgentParticipationStore { pool: pool.clone() };
+    let participation = coland_storage_postgres::PgAgentParticipationStore { pool: pool.clone() };
     let selection_scope = ParticipationScope::Realm {
         realm_id: realm_id.clone(),
     };
@@ -1468,7 +1468,7 @@ async fn postgres_agent_message_send_gate_checks_epoch_and_current_key() {
             .iter()
             .all(|ceiling| ceiling["reply_message"] == true)
     );
-    let uow = soland_storage_postgres::PgEventCommitUnitOfWork::new(pool.clone());
+    let uow = coland_storage_postgres::PgEventCommitUnitOfWork::new(pool.clone());
     // Bind membership to the actual controller join Event from the accepted
     // bootstrap, then commit public mode and both halves of bounded authority.
     let controller_generation = discussion
@@ -1530,7 +1530,7 @@ async fn postgres_agent_message_send_gate_checks_epoch_and_current_key() {
         arkret_wire::EventKind::DeviceAuthorize
     );
     assert_eq!(device_authorization.event.actor_id, controller_actor);
-    mode.self_producer_guard = Some(soland_storage::SelfProducerCommitGuard::HumanDevice(
+    mode.self_producer_guard = Some(coland_storage::SelfProducerCommitGuard::HumanDevice(
         DeviceRevocationGateSelector {
             principal_id: agent.controller.account.principal_id.clone(),
             station_id: agent.controller.account.station_id.clone(),
@@ -1670,7 +1670,7 @@ async fn postgres_agent_message_send_gate_checks_epoch_and_current_key() {
         serde_json::to_value(genesis_payload).unwrap(),
         at,
     );
-    genesis.authority_commit.mls_state = Some(soland_storage::MlsStateInstallation {
+    genesis.authority_commit.mls_state = Some(coland_storage::MlsStateInstallation {
         effective_scope: scope.clone(),
         base: None,
         epoch: 0,
@@ -1683,7 +1683,7 @@ async fn postgres_agent_message_send_gate_checks_epoch_and_current_key() {
         genesis.authority_commit.event.clone(),
     ));
     uow.commit_event(genesis.clone()).await.unwrap();
-    let groups = soland_storage_postgres::PgMlsGroupCurrentStore { pool: pool.clone() };
+    let groups = coland_storage_postgres::PgMlsGroupCurrentStore { pool: pool.clone() };
     let before = groups.current(&scope).await.unwrap().unwrap();
 
     // The Agent's ciphertext is frozen at an epoch the scope never had.
@@ -1710,7 +1710,7 @@ async fn postgres_agent_message_send_gate_checks_epoch_and_current_key() {
     let event = &mut request.authority_commit.event;
     event.producer_proof.as_mut().unwrap().verification_method = agent.verification_method.clone();
     request.event.envelope = serde_json::to_value(&*event).unwrap();
-    request.self_producer_guard = Some(soland_storage::SelfProducerCommitGuard::Agent {
+    request.self_producer_guard = Some(coland_storage::SelfProducerCommitGuard::Agent {
         pcr_realm_id: agent.pcr_realm_id.clone(),
         agent_id: agent.agent_account.principal_id.clone(),
         authorization_ref: agent.authorization_ref.clone(),
@@ -1723,7 +1723,7 @@ async fn postgres_agent_message_send_gate_checks_epoch_and_current_key() {
     let current = uow.commit_event(request.clone()).await.unwrap_err();
     assert_eq!(
         current.conflict_code(),
-        Some(soland_storage::ConflictCode::EpochMismatch),
+        Some(coland_storage::ConflictCode::EpochMismatch),
         "{current}"
     );
 
@@ -1771,7 +1771,7 @@ async fn postgres_agent_message_send_gate_checks_epoch_and_current_key() {
     ));
     uow.commit_event(accepted.clone()).await.unwrap();
     assert!(
-        soland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() }
+        coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() }
             .committed_event(&accepted.authority_commit.event.event_id)
             .await
             .unwrap()
@@ -1782,11 +1782,11 @@ async fn postgres_agent_message_send_gate_checks_epoch_and_current_key() {
     let revoked = uow.commit_event(request.clone()).await.unwrap_err();
     assert_eq!(
         revoked.conflict_code(),
-        Some(soland_storage::ConflictCode::CapabilityDenied),
+        Some(coland_storage::ConflictCode::CapabilityDenied),
         "{revoked}"
     );
     assert!(
-        soland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() }
+        coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() }
             .committed_event(&request.authority_commit.event.event_id)
             .await
             .unwrap()
@@ -1800,7 +1800,7 @@ async fn postgres_agent_message_send_gate_checks_epoch_and_current_key() {
 /// coordinates, duplicate replay, PCR independence, and post-revoke retention.
 #[tokio::test]
 async fn postgres_historical_agent_key_survives_revocation_at_exact_coordinate() {
-    use soland_storage::AuthorityCommitStore as _;
+    use coland_storage::AuthorityCommitStore as _;
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let (agent, _recipient) = CommittedAgent::provision(&pool).await;
@@ -1827,21 +1827,21 @@ async fn postgres_historical_agent_key_survives_revocation_at_exact_coordinate()
         .as_mut()
         .unwrap()
         .verification_method = agent.verification_method.clone();
-    let guard = soland_storage::SelfProducerCommitGuard::Agent {
+    let guard = coland_storage::SelfProducerCommitGuard::Agent {
         pcr_realm_id: agent.pcr_realm_id.clone(),
         agent_id: agent.agent_account.principal_id.clone(),
         authorization_ref: agent.authorization_ref.clone(),
         verification_method: agent.verification_method.clone(),
     };
-    let admission_store = soland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() };
+    let admission_store = coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() };
     assert_eq!(
         admission_store
             .admit_self_event_transaction(&accepted.authority_commit, &guard, at)
             .await
             .unwrap(),
-        soland_storage::AuthorityCommitWriteOutcome::Committed
+        coland_storage::AuthorityCommitWriteOutcome::Committed
     );
-    let historical_store = soland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() };
+    let historical_store = coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() };
     let historical_selector = arkret_models_identity::SignerKeyQuerySelector::HistoricalEvent {
         sender: arkret_models_identity::HistoricalSignerKeyQuerySender::Agent {
             actor: accepted.authority_commit.event.actor_id.clone(),
@@ -1885,7 +1885,7 @@ async fn postgres_historical_agent_key_survives_revocation_at_exact_coordinate()
             .admit_self_event_transaction(&accepted.authority_commit, &guard, at)
             .await
             .unwrap(),
-        soland_storage::AuthorityCommitWriteOutcome::Duplicate
+        coland_storage::AuthorityCommitWriteOutcome::Duplicate
     );
     agent.revoke_key().await;
     assert_eq!(

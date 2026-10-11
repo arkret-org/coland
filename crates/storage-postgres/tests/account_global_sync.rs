@@ -2,15 +2,15 @@
 #[allow(dead_code)]
 mod ordinary_realm;
 mod support;
-use deadpool::managed::Pool;
-use diesel_async::pooled_connection::AsyncDieselConnectionManager;
-use soland_storage::{
+use coland_storage::{
     AccountDataCasResult, AccountDataRecord, AccountDataStore, AgentDraftPendingIntentStore,
     SyncCursorStore,
 };
-use soland_storage_postgres::{
+use coland_storage_postgres::{
     Db, PgAccountDataStore, PgAgentDraftPendingIntentStore, PgPool, PgSyncCursorStore,
 };
+use deadpool::managed::Pool;
+use diesel_async::pooled_connection::AsyncDieselConnectionManager;
 
 async fn pool() -> PgPool {
     let url = support::contract_database_url();
@@ -126,7 +126,7 @@ async fn agent_draft_pending_intent_projects_live_and_terminal_redacted_versions
         .unwrap();
     assert_eq!(
         expired.state,
-        soland_storage::AgentDraftPendingIntentState::Expired
+        coland_storage::AgentDraftPendingIntentState::Expired
     );
     assert!(expired.content_handoff.is_none());
     assert_eq!(expired.expired_at, Some(expires_at));
@@ -284,14 +284,14 @@ async fn admit(
     expected_revision: u64,
     payload: serde_json::Value,
     tombstone: bool,
-) -> soland_storage::PersistenceResult<soland_storage::ActorPrivateAccountDataOutcome> {
+) -> coland_storage::PersistenceResult<coland_storage::ActorPrivateAccountDataOutcome> {
     store
-        .admit_actor_private_event(&soland_storage::ActorPrivateAccountDataAdmission {
+        .admit_actor_private_event(&coland_storage::ActorPrivateAccountDataAdmission {
             canonical_event_digest: arkret_canonical::sha256_bytes(
                 arkret_canonical::canonical_json_bytes(event).unwrap(),
             )
             .to_vec(),
-            cas: soland_storage::AccountDataCasCommit {
+            cas: coland_storage::AccountDataCasCommit {
                 record: AccountDataRecord {
                     actor: event.actor_id.to_string(),
                     account_data_key: key.into(),
@@ -313,9 +313,9 @@ async fn admit(
 #[tokio::test]
 async fn holder_current_event_changes_only_with_successful_cas_and_the_private_source_is_immutable()
 {
+    use coland_storage::ActorPrivateAccountDataOutcome::{Applied, Replayed};
     use diesel::sql_types::Binary;
     use diesel_async::RunQueryDsl;
-    use soland_storage::ActorPrivateAccountDataOutcome::{Applied, Replayed};
     let pool = pool().await;
     let cas = PgAccountDataStore { pool: pool.clone() };
     let sync = PgSyncCursorStore { pool: pool.clone() };
@@ -372,7 +372,7 @@ async fn holder_current_event_changes_only_with_successful_cas_and_the_private_s
         .unwrap_err();
     assert_eq!(
         refused.conflict_code(),
-        Some(soland_storage::ConflictCode::CasConflict)
+        Some(coland_storage::ConflictCode::CasConflict)
     );
     // The clock is Station-wide, and other tests legitimately publish for
     // different accounts concurrently. A replay or a failed CAS must leave
@@ -472,10 +472,10 @@ async fn visible(pool: &PgPool, recipient: &str, owner: &str) -> bool {
 /// a real leave Commit, never a hand-written summary row.
 #[tokio::test]
 async fn device_interest_requires_exact_actor_current_membership() {
+    use coland_storage::EventCommitUnitOfWork;
     use ordinary_realm::{next_request, open_discussion, source_request};
-    use soland_storage::EventCommitUnitOfWork;
 
-    let database = soland_storage_postgres::test_database::TestDatabase::lease().await;
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     let pool = database.pool();
     let run = uuid::Uuid::now_v7();
     let account = |principal: &arkret_wire::DidCoreId, station: &str| {
@@ -501,10 +501,10 @@ async fn device_interest_requires_exact_actor_current_membership() {
         "an actor with no member state shares no Realm"
     );
     let at = discussion.committed_at();
-    let uow = soland_storage_postgres::PgEventCommitUnitOfWork::new(pool.clone());
+    let uow = coland_storage_postgres::PgEventCommitUnitOfWork::new(pool.clone());
     // The peer is hosted by another Station, so each Commit plans its
     // committed-replication fanout from the exact source submission.
-    let with_fanout_source = |mut request: soland_storage::EventCommitRequest| {
+    let with_fanout_source = |mut request: coland_storage::EventCommitRequest| {
         request.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
             request.authority_commit.event.clone(),
         ));
@@ -569,8 +569,8 @@ struct Count {
 }
 #[tokio::test]
 async fn racing_realm_commit_accepts_only_one_event_and_rolls_back_the_loser() {
+    use coland_storage::EventCommitUnitOfWork;
     use diesel_async::RunQueryDsl;
-    use soland_storage::EventCommitUnitOfWork;
     let pool = pool().await;
     let mut conn = pool.get().await.unwrap();
     let station=diesel::sql_query("SELECT COALESCE(current_device_inventory_station(),'ak:did_core:web:storage-contract.example') AS station").get_result::<Station>(&mut *conn).await.unwrap().station;
@@ -588,7 +588,7 @@ async fn racing_realm_commit_accepts_only_one_event_and_rolls_back_the_loser() {
     let now = chrono::Utc::now();
     // Both writers claim the Realm stream's genesis position, so the authority
     // commit is the mutual exclusion the racing holders contend on.
-    let authority = soland_storage::CurrentRealmAuthority {
+    let authority = coland_storage::CurrentRealmAuthority {
         realm_id: realm.clone(),
         generation: 0,
         service_id: station.clone(),
@@ -601,8 +601,8 @@ async fn racing_realm_commit_accepts_only_one_event_and_rolls_back_the_loser() {
         ),
         last_handoff_ref: None,
     };
-    soland_storage::AuthorityCommitStore::install_genesis_authority(
-        &soland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() },
+    coland_storage::AuthorityCommitStore::install_genesis_authority(
+        &coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() },
         &authority,
     )
     .await
@@ -629,7 +629,7 @@ async fn racing_realm_commit_accepts_only_one_event_and_rolls_back_the_loser() {
             proof_purpose: None,
             jws: arkret_wire::test_support::structural_only_detached_jws(&event_digest),
         });
-        let record = soland_storage::CanonicalEventRecord {
+        let record = coland_storage::CanonicalEventRecord {
             event_id: event.event_id.to_string(),
             actor_id: event.actor_id.to_string(),
             realm_id: Some(realm.to_string()),
@@ -646,8 +646,8 @@ async fn racing_realm_commit_accepts_only_one_event_and_rolls_back_the_loser() {
             envelope: serde_json::to_value(&event).unwrap(),
             received_at: now,
         };
-        soland_storage::EventCommitRequest {
-            authority_commit: soland_storage::AuthorityCommitTransaction {
+        coland_storage::EventCommitRequest {
+            authority_commit: coland_storage::AuthorityCommitTransaction {
                 expected_authority: authority.clone(),
                 commit: arkret_wire::RealmCommit {
                     producer_signer_fact_digest: None,
@@ -706,8 +706,8 @@ async fn racing_realm_commit_accepts_only_one_event_and_rolls_back_the_loser() {
     let b = make(2);
     let a_id = a.event.event_id.clone();
     let b_id = b.event.event_id.clone();
-    let first = soland_storage_postgres::PgEventCommitUnitOfWork::new(pool.clone());
-    let second = soland_storage_postgres::PgEventCommitUnitOfWork::new(pool.clone());
+    let first = coland_storage_postgres::PgEventCommitUnitOfWork::new(pool.clone());
+    let second = coland_storage_postgres::PgEventCommitUnitOfWork::new(pool.clone());
     let (a_result, b_result) = tokio::join!(first.commit_event(a), second.commit_event(b));
     assert_ne!(
         a_result.is_ok(),
@@ -724,7 +724,7 @@ async fn racing_realm_commit_accepts_only_one_event_and_rolls_back_the_loser() {
     // so it answers the registered retryable code, not a schema fault.
     assert_eq!(
         rejected_error.conflict_code(),
-        Some(soland_storage::ConflictCode::TemporarilyUnavailable),
+        Some(coland_storage::ConflictCode::TemporarilyUnavailable),
         "{rejected_error}"
     );
     let rejected = if a_result.is_err() { a_id } else { b_id };
@@ -758,8 +758,8 @@ async fn racing_realm_commit_accepts_only_one_event_and_rolls_back_the_loser() {
 
 #[tokio::test]
 async fn account_blocklist_value_replays_exactly_and_cas_conflict_rolls_back_every_write() {
+    use coland_storage::ActorPrivateAccountDataOutcome::{Applied, Replayed};
     use diesel_async::RunQueryDsl;
-    use soland_storage::ActorPrivateAccountDataOutcome::{Applied, Replayed};
 
     let pool = pool().await;
     let store = PgAccountDataStore { pool: pool.clone() };
@@ -824,7 +824,7 @@ async fn account_blocklist_value_replays_exactly_and_cas_conflict_rolls_back_eve
         .unwrap_err();
     assert_eq!(
         error.conflict_code(),
-        Some(soland_storage::ConflictCode::CasConflict)
+        Some(coland_storage::ConflictCode::CasConflict)
     );
     let mut conn = pool.get().await.unwrap();
     let rolled_back =

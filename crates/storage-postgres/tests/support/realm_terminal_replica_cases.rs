@@ -130,7 +130,7 @@ async fn terminal_replication_respects_last_member_departure_after_restart() {
     }
 }
 
-async fn terminal_persistent_rows(pool: &soland_storage_postgres::PgPool) -> serde_json::Value {
+async fn terminal_persistent_rows(pool: &coland_storage_postgres::PgPool) -> serde_json::Value {
     use diesel_async::RunQueryDsl as _;
     #[derive(diesel::QueryableByName)]
     struct Table {

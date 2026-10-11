@@ -84,7 +84,7 @@ pub(in crate::routing) struct SubmittedEventOutcome {
 #[cfg(test)]
 pub(super) fn map_event_hash_collision(
     event_id: impl Into<String>,
-    error: &soland_services::ServiceError,
+    error: &coland_services::ServiceError,
 ) -> Option<SubmitOneError> {
     error.is_conflict("event_hash_collision").then(|| {
         SubmitOneError::quarantine(
@@ -215,13 +215,13 @@ impl InternalEventAdmission {
     ) -> bool {
         session.actor == self.session_actor_id
             && match &session.endpoint {
-                soland_services::identity::SessionEndpointState::HumanDevice { device_id } => {
+                coland_services::identity::SessionEndpointState::HumanDevice { device_id } => {
                     device_id == &self.device_id
                 }
-                soland_services::identity::SessionEndpointState::ServiceSynthetic => {
+                coland_services::identity::SessionEndpointState::ServiceSynthetic => {
                     self.device_id.is_empty()
                 }
-                soland_services::identity::SessionEndpointState::AgentRuntime { .. } => false,
+                coland_services::identity::SessionEndpointState::AgentRuntime { .. } => false,
             }
             && object
                 .get("actor_id")
@@ -618,7 +618,7 @@ pub(in crate::routing) async fn submit_peer_pcr_genesis(
         return Ok(outcome);
     }
     validate_identity_creation_control_proof(state, request).await?;
-    let authority = soland_storage::CurrentRealmAuthority {
+    let authority = coland_storage::CurrentRealmAuthority {
         realm_id: request.pcr_realm_id.clone(),
         generation: 0,
         service_id: request.account_authority_id.clone(),
@@ -670,8 +670,8 @@ pub(in crate::routing) async fn submit_peer_pcr_genesis(
             SubmitOneError::new(status, code, format!("PCR genesis commit failed: {error}"))
         })?;
     let outcome = match result {
-        soland_storage::PcrGenesisCommitOutcome::Committed(outcome)
-        | soland_storage::PcrGenesisCommitOutcome::Duplicate(outcome) => outcome,
+        coland_storage::PcrGenesisCommitOutcome::Committed(outcome)
+        | coland_storage::PcrGenesisCommitOutcome::Duplicate(outcome) => outcome,
     };
     if outcome.accepted_device_id != accepted_device_id {
         return Err(SubmitOneError::new(

@@ -2,13 +2,13 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "soland.fullname" . }}
+  name: {{ include "coland.fullname" . }}
   labels:
-    {{- include "soland.labels" . | nindent 4 }}
+    {{- include "coland.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      {{- include "soland.selectorLabels" . | nindent 6 }}
+      {{- include "coland.selectorLabels" . | nindent 6 }}
   policyTypes:
     - Ingress
     - Egress

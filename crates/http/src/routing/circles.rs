@@ -15,7 +15,7 @@
 //! cannot carry the signature fails closed instead of manufacturing a local
 //! projection with no durable Event.
 //!
-//! Routes (mirror of `/_soland/self/realms` / `/_soland/self/spaces` style):
+//! Routes (mirror of `/_coland/self/realms` / `/_coland/self/spaces` style):
 //!
 //! - `POST   /_arkret/self/circles`                              create Circle
 //! - `GET    /_arkret/self/circles`                              list Circles (filtered by
@@ -36,15 +36,15 @@ use arkret_models_collaboration::governance::circle::{
     CircleScopeRotateOutcome, CircleScopeRotateRequestBody, CircleState, CircleView,
 };
 use arkret_wire::{ActorId, Event};
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
+use coland_services::identity::SessionIdentityState as SessionRecord;
 use salvo::oapi::endpoint;
 use salvo::oapi::extract::{JsonBody, PathParam, QueryParam};
 use salvo::prelude::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
-use soland_services::identity::SessionIdentityState as SessionRecord;
 
 use super::AuthArgs;
 use crate::routing::events::event_log::submit_event_value;
@@ -373,16 +373,16 @@ async fn submit_caller_signed_circle_event(
         .await
         .map(|_| ())
         .map_err(|error| match error.kind() {
-            soland_services::ServiceErrorKind::Conflict => AppError::conflict(error.detail()),
-            soland_services::ServiceErrorKind::NotFound => AppError::not_found(error.detail()),
-            soland_services::ServiceErrorKind::SchemaViolation => {
+            coland_services::ServiceErrorKind::Conflict => AppError::conflict(error.detail()),
+            coland_services::ServiceErrorKind::NotFound => AppError::not_found(error.detail()),
+            coland_services::ServiceErrorKind::SchemaViolation => {
                 AppError::schema_violation(error.detail())
             }
-            soland_services::ServiceErrorKind::UnsupportedEventKind => {
+            coland_services::ServiceErrorKind::UnsupportedEventKind => {
                 crate::app_error!(UnsupportedEventKind, error.detail())
             }
-            soland_services::ServiceErrorKind::Database
-            | soland_services::ServiceErrorKind::Internal => AppError::internal(error.detail()),
+            coland_services::ServiceErrorKind::Database
+            | coland_services::ServiceErrorKind::Internal => AppError::internal(error.detail()),
         })
 }
 
@@ -628,7 +628,7 @@ async fn post_scope_rotate(
 #[cfg(test)]
 mod tests {
     use arkret_identifiers::DidCoreId;
-    use soland_http::error::ErrorCode;
+    use coland_http::error::ErrorCode;
 
     use super::*;
 

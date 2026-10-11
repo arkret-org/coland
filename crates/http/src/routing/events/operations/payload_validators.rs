@@ -68,7 +68,7 @@ fn payload_string(payload: &serde_json::Map<String, Value>, field: &str) -> Opti
 }
 
 pub fn validate_message_operation_payload(operation: &Operation) -> Result<(), &'static str> {
-    if soland_services::operation_semantics::operation_is_message_create(operation) {
+    if coland_services::operation_semantics::operation_is_message_create(operation) {
         if operation
             .payload
             .get("strand_id")

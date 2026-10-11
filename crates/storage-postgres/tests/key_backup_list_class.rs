@@ -15,10 +15,10 @@ use arkret_wire::{
     AccountId, ActorId, CommitStreamRef, DidCoreId, Event, EventKind, RealmCommit, RealmId,
     ScopeRef,
 };
+use coland_storage::{KeyBackupListQuery, KeyBackupStore};
+use coland_storage_postgres::{Db, PgKeyBackupStore, PgPool};
 use diesel::sql_types::{BigInt, Binary, Jsonb, Nullable, Text, Timestamptz, Uuid};
 use diesel_async::RunQueryDsl;
-use soland_storage::{KeyBackupListQuery, KeyBackupStore};
-use soland_storage_postgres::{Db, PgKeyBackupStore, PgPool};
 
 static TEST_POOL: OnceLock<PgPool> = OnceLock::new();
 
@@ -124,7 +124,7 @@ async fn seed_confirmed_pcr(pool: &PgPool) -> (AccountId, RealmCommit) {
     .await
     .unwrap();
     let token =
-        soland_storage::ids::event_token_part_expect_internal(genesis.event_id.as_str(), "event");
+        coland_storage::ids::event_token_part_expect_internal(genesis.event_id.as_str(), "event");
     diesel::sql_query(
         "INSERT INTO canonical_events \
          (id,digest_suite,digest,actor_id,realm_id,scope_ref,kind,canonical_bytes,envelope,state,received_at,committed_at) \
@@ -314,7 +314,7 @@ async fn initial_schema_rejects_every_other_backup_class() {
     for (class, backup_id, payload) in raw_payloads {
         let error =
             diesel::sql_query("INSERT INTO key_backups(id,actor_id,payload) VALUES($1,$2,$3)")
-                .bind::<Uuid, _>(soland_storage::ids::typed_uuid_part_expect_internal(
+                .bind::<Uuid, _>(coland_storage::ids::typed_uuid_part_expect_internal(
                     &backup_id,
                 ))
                 .bind::<Text, _>(actor.to_string())

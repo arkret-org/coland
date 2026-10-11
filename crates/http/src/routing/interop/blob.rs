@@ -23,15 +23,15 @@ use arkret_models_collaboration::objects::blob::{
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
+use coland_services::delivery::BlobState as BlobRecord;
+use coland_services::identity::SessionIdentityState as SessionRecord;
 use ed25519_dalek::Signer;
 use salvo::http::{Method, ParseError, StatusCode};
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
 use serde_json::{Value, json};
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
-use soland_services::delivery::BlobState as BlobRecord;
-use soland_services::identity::SessionIdentityState as SessionRecord;
 use subtle::ConstantTimeEq as _;
 
 use super::{
@@ -105,7 +105,7 @@ pub(super) fn blob_upload_outcome(
 }
 
 #[handler]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.blob.upload"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.blob.upload"))]
 async fn blob_upload(depot: &mut Depot, req: &mut Request, res: &mut Response) {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let Some(session) = auth_or_render(state, req, res).await else {
@@ -258,7 +258,7 @@ async fn blob_upload(depot: &mut Depot, req: &mut Request, res: &mut Response) {
 }
 
 #[handler]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.blob.get"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.blob.get"))]
 async fn blob_get(depot: &mut Depot, req: &mut Request, res: &mut Response) {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let Some(blob_ref) = query_param(req, "blob_ref") else {
@@ -1571,14 +1571,14 @@ mod tests {
     async fn blob_membership_needs_a_session_of_this_station() {
         let state = AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let principal = DidCoreId::new("ak:did_core:web:blob-owner.example").unwrap();
         let session = SessionRecord {
             token_hash: "blob-membership-fixture".to_owned(),
             account_pk: None,
             actor: principal.to_string(),
-            endpoint: soland_services::identity::SessionEndpointState::HumanDevice {
+            endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
                 device_id: "ak:device:01904100-0000-7000-8000-000000000071".to_owned(),
             },
             audience: "ak:did_core:web:other-station.example".to_owned(),

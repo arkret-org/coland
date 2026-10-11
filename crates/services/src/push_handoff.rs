@@ -5,7 +5,7 @@ use std::future::Future;
 use arkret::PushRegisterDeviceRequestBody;
 use arkret_identifiers::PushTargetId;
 use arkret_wire::{AccountId, DidCoreId, Hash, WebOrigin};
-use soland_storage::{
+use coland_storage::{
     PushRegistrationHandoffIntentRecord, PushRegistrationHandoffIntentStatus,
     PushRegistrationHandoffRetryCursor,
 };
@@ -170,19 +170,19 @@ mod tests {
     use arkret_identifiers::PushTargetId;
     use arkret_wire::{AccountId, DeviceId, DidCoreId};
     use chrono::{DateTime, Utc};
+    use coland_storage::PushRegistrationHandoffRouteLocator;
     use serde_json::json;
-    use soland_storage::PushRegistrationHandoffRouteLocator;
 
     use super::*;
 
     fn device_authorization(
         source: &DidCoreId,
         device_id: &DeviceId,
-    ) -> soland_storage::DeviceRevocationGateSelector {
+    ) -> coland_storage::DeviceRevocationGateSelector {
         let event_id =
             arkret_wire::EventId::new("ak:event:AcIMom-0qqAXx_hmDJfxxaUJb_oJ64S3ARW1-WKFDCoD")
                 .unwrap();
-        soland_storage::DeviceRevocationGateSelector {
+        coland_storage::DeviceRevocationGateSelector {
             principal_id: DidCoreId::new("ak:did_core:web:alice.example").unwrap(),
             station_id: source.clone(),
             device_id: device_id.as_str().to_owned(),

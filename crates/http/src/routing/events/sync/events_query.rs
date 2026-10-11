@@ -65,24 +65,24 @@ pub(crate) fn events_subscribe_filter_digest(
 
 pub(crate) fn canonical_actor_selectors(
     actors: &[String],
-) -> Result<BTreeSet<String>, soland_http::error::AppError> {
+) -> Result<BTreeSet<String>, coland_http::error::AppError> {
     if actors.len() > 256 {
-        return Err(soland_http::error::AppError::param_invalid(
+        return Err(coland_http::error::AppError::param_invalid(
             "actor_ids exceeds 256 entries",
         ));
     }
     let mut selectors = BTreeSet::new();
     for encoded in actors {
         let actor: arkret_wire::ActorId = serde_json::from_str(encoded).map_err(|_| {
-            soland_http::error::AppError::param_invalid(
+            coland_http::error::AppError::param_invalid(
                 "actor_ids requires canonical JCS ActorId objects",
             )
         })?;
         actor
             .validate()
-            .map_err(|error| soland_http::error::AppError::param_invalid(error.to_string()))?;
+            .map_err(|error| coland_http::error::AppError::param_invalid(error.to_string()))?;
         if actor.to_string() != *encoded || !selectors.insert(encoded.clone()) {
-            return Err(soland_http::error::AppError::param_invalid(
+            return Err(coland_http::error::AppError::param_invalid(
                 "actor_ids must be canonical and unique",
             ));
         }
@@ -94,8 +94,8 @@ pub(crate) async fn authorize_actor_only_selectors(
     state: &AppState,
     session: Option<&SessionIdentityState>,
     actors: &BTreeSet<String>,
-) -> Result<(), soland_http::error::AppError> {
-    use soland_http::error::AppError;
+) -> Result<(), coland_http::error::AppError> {
+    use coland_http::error::AppError;
     let unauthorized = || {
         crate::app_error!(
             CapabilityDenied,
@@ -214,13 +214,13 @@ struct EventsQueryParts {
     filters: Option<Value>,
 }
 
-pub(super) fn events_query_cursor_error(error: SyncCursorError) -> soland_http::error::AppError {
+pub(super) fn events_query_cursor_error(error: SyncCursorError) -> coland_http::error::AppError {
     match error {
         SyncCursorError::Unavailable(message) => crate::app_error!(TemporarilyUnavailable, message),
         SyncCursorError::Expired => crate::app_error!(CursorExpired, "cursor has expired",),
         // encoding.md §8.3 closed set: syntax/schema failures pin the top-level
         // `param_invalid` code with reason `invalid_cursor`.
-        SyncCursorError::Invalid(message) => soland_http::error::AppError::param_invalid(message)
+        SyncCursorError::Invalid(message) => coland_http::error::AppError::param_invalid(message)
             .with_reason_code(arkret_wire::ReasonCode::INVALID_CURSOR),
         SyncCursorError::Mismatch(message) | SyncCursorError::Integrity(message) => {
             crate::app_error!(CursorIntegrityInvalid, message,)
@@ -250,10 +250,10 @@ fn canonical_query_page(
     before: Option<&str>,
     backward: bool,
     limit: usize,
-) -> Result<(Vec<usize>, bool), soland_http::error::AppError> {
+) -> Result<(Vec<usize>, bool), coland_http::error::AppError> {
     let position = |id: &str| {
         ids.iter().position(|value| *value == id).ok_or_else(|| {
-            soland_http::error::AppError::param_invalid("cursor position unavailable")
+            coland_http::error::AppError::param_invalid("cursor position unavailable")
                 .with_reason_code(arkret_wire::ReasonCode::INVALID_CURSOR)
         })
     };
@@ -264,7 +264,7 @@ fn canonical_query_page(
     let end = before.map(position).transpose()?.unwrap_or(ids.len());
     if end < start {
         return Err(
-            soland_http::error::AppError::param_invalid("cursor bounds are reversed")
+            coland_http::error::AppError::param_invalid("cursor bounds are reversed")
                 .with_reason_code(arkret_wire::ReasonCode::INVALID_CURSOR),
         );
     }
@@ -291,7 +291,7 @@ fn canonical_query_page(
 async fn full_events_from_projection_json(
     state: &AppState,
     projection_rows: &[Value],
-) -> Result<Vec<arkret_wire::CommittedEventView>, soland_http::error::AppError> {
+) -> Result<Vec<arkret_wire::CommittedEventView>, coland_http::error::AppError> {
     let mut events = Vec::with_capacity(projection_rows.len());
     for row in projection_rows {
         events.push(event_read_row_from_projection_json(state, row).await?);
@@ -303,9 +303,9 @@ async fn full_events_from_projection_json(
 async fn event_read_row_from_projection_json(
     state: &AppState,
     row: &Value,
-) -> Result<arkret_wire::CommittedEventView, soland_http::error::AppError> {
+) -> Result<arkret_wire::CommittedEventView, coland_http::error::AppError> {
     let event_id = row.get("event_id").and_then(Value::as_str).ok_or_else(|| {
-        soland_http::error::AppError::internal(
+        coland_http::error::AppError::internal(
             "projected Event row is missing its canonical event_id",
         )
     })?;
@@ -314,19 +314,19 @@ async fn event_read_row_from_projection_json(
         .canonical_event(event_id)
         .await
         .map_err(|error| {
-            soland_http::error::AppError::internal(format!(
+            coland_http::error::AppError::internal(format!(
                 "canonical Event lookup failed for projected row {event_id}: {error}"
             ))
         })?
         .ok_or_else(|| {
-            soland_http::error::AppError::internal(format!(
+            coland_http::error::AppError::internal(format!(
                 "projected Event row {event_id} has no canonical Event record"
             ))
         })?;
     let view = super::super::event_log::canonical_event_read_row(state, &record).await?;
     let retained = row["payload"]["retention_tombstone"].as_bool() == Some(true);
     let erased = row["sender"].as_str()
-        == Some(soland_services::projection::tombstone::ERASED_USER_PLACEHOLDER);
+        == Some(coland_services::projection::tombstone::ERASED_USER_PLACEHOLDER);
     if !projection_row_is_redacted_message_tombstone(row) && !retained && !erased {
         return Ok(view);
     }
@@ -416,7 +416,7 @@ mod tests {
     fn test_state() -> AppState {
         let mut config = crate::config::AppConfig::test_default();
         config.seed_demo_data = false;
-        AppState::new(config, soland_storage_postgres::Db { pool: None })
+        AppState::new(config, coland_storage_postgres::Db { pool: None })
     }
 
     fn selector_at(station: &str) -> arkret_wire::ActorId {
@@ -519,7 +519,7 @@ mod tests {
         .await
         .expect_err("a projection row without its canonical Event must fail the page");
 
-        assert_eq!(error.code, soland_http::error::ErrorCode::InternalError);
+        assert_eq!(error.code, coland_http::error::ErrorCode::InternalError);
         assert!(error.message.contains("has no canonical Event record"));
     }
 }
@@ -532,46 +532,46 @@ mod tests {
 pub(super) async fn realm_state_snapshot_head(
     depot: &mut Depot,
     req: &mut Request,
-) -> soland_http::result::JsonResult<arkret_wire::RealmStateSnapshot> {
+) -> coland_http::result::JsonResult<arkret_wire::RealmStateSnapshot> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let realm_id = query_param(req, "realm_id")
-        .ok_or_else(|| soland_http::error::AppError::param_missing("realm_id is required"))?;
+        .ok_or_else(|| coland_http::error::AppError::param_missing("realm_id is required"))?;
     let realm_id = scope_selector_to_realm_id(&realm_id)?;
     let session = authenticated_session(state, req)
         .await
         .map_err(|(_status, code, message)| {
-            let typed = soland_http::error::ErrorCode::from_wire(code)
-                .unwrap_or(soland_http::error::ErrorCode::Unauthenticated);
-            soland_http::error::AppError::from_rejection(typed, message)
+            let typed = coland_http::error::ErrorCode::from_wire(code)
+                .unwrap_or(coland_http::error::ErrorCode::Unauthenticated);
+            coland_http::error::AppError::from_rejection(typed, message)
         })?;
     let actor =
         crate::routing::identity::session_actor::validated_session_actor(state, &session).await?;
     let account = actor
         .as_account_id()
-        .ok_or_else(|| soland_http::error::AppError::not_found("not found"))?;
+        .ok_or_else(|| coland_http::error::AppError::not_found("not found"))?;
     if is_realm_deleted(state, &realm_id).await
         || !crate::routing::realm_state_snapshot::account_is_joined_member(
             state, &realm_id, account,
         )
         .await?
     {
-        return Err(soland_http::error::AppError::not_found("not found"));
+        return Err(coland_http::error::AppError::not_found("not found"));
     }
     let manifest = realm_state_snapshot_manifest_for_realm(state, &realm_id, account)
         .await
         .map_err(|error| {
             if matches!(
                 error.code,
-                soland_http::error::ErrorCode::NotFound
-                    | soland_http::error::ErrorCode::PayloadTooLarge
-                    | soland_http::error::ErrorCode::InternalError
+                coland_http::error::ErrorCode::NotFound
+                    | coland_http::error::ErrorCode::PayloadTooLarge
+                    | coland_http::error::ErrorCode::InternalError
             ) {
                 error
             } else {
                 crate::app_error!(RealmStateSnapshotUnavailable, error.message,)
             }
         })?;
-    soland_http::result::json_ok(manifest)
+    coland_http::result::json_ok(manifest)
 }
 
 #[endpoint(operation_id = "ak.self.realm_state_snapshot.read.by_ref")]
@@ -579,27 +579,27 @@ pub(super) async fn realm_state_snapshot_head(
 pub(super) async fn realm_state_snapshot_by_ref(
     depot: &mut Depot,
     req: &mut Request,
-) -> soland_http::result::JsonResult<arkret_wire::RealmStateSnapshot> {
+) -> coland_http::result::JsonResult<arkret_wire::RealmStateSnapshot> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let snapshot_id = req
         .param::<String>("snapshot_id")
         .and_then(|value| arkret_wire::RealmSnapshotId::new(value).ok())
-        .ok_or_else(|| soland_http::error::AppError::param_invalid("invalid snapshot_id"))?;
+        .ok_or_else(|| coland_http::error::AppError::param_invalid("invalid snapshot_id"))?;
     let realm_id = query_param(req, "realm_id")
-        .ok_or_else(|| soland_http::error::AppError::param_missing("realm_id is required"))?;
+        .ok_or_else(|| coland_http::error::AppError::param_missing("realm_id is required"))?;
     let realm_id = scope_selector_to_realm_id(&realm_id)?;
     let session = authenticated_session(state, req)
         .await
         .map_err(|(_status, code, message)| {
-            let typed = soland_http::error::ErrorCode::from_wire(code)
-                .unwrap_or(soland_http::error::ErrorCode::Unauthenticated);
-            soland_http::error::AppError::from_rejection(typed, message)
+            let typed = coland_http::error::ErrorCode::from_wire(code)
+                .unwrap_or(coland_http::error::ErrorCode::Unauthenticated);
+            coland_http::error::AppError::from_rejection(typed, message)
         })?;
     // The registered error mapping sends every authorization failure of the
     // exact read through the universal `capability_denied` surface; absent or
     // no longer disclosable bytes are `realm_state_snapshot_unavailable`.
     let denied = || {
-        soland_http::error::AppError::capability_denied(
+        coland_http::error::AppError::capability_denied(
             "the Realm snapshot is not readable by this caller",
         )
     };
@@ -621,5 +621,5 @@ pub(super) async fn realm_state_snapshot_by_ref(
         account,
     )
     .await?;
-    soland_http::result::json_ok(snapshot)
+    coland_http::result::json_ok(snapshot)
 }

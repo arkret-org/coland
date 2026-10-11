@@ -1,6 +1,6 @@
 //! Historical method authority for detached Event admission approvals.
-use soland_services::{ServiceError, ServiceResult};
-use soland_storage::{ApprovalHistoricalMethod, EventApprovalCommit};
+use coland_services::{ServiceError, ServiceResult};
+use coland_storage::{ApprovalHistoricalMethod, EventApprovalCommit};
 
 use crate::state::AppState;
 

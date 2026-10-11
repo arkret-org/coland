@@ -2,13 +2,13 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: soland
+  name: coland
   labels:
-    app: soland
+    app: coland
 spec:
   type: ClusterIP
   selector:
-    app: soland
+    app: coland
   ports:
     - name: http
       port: 8698

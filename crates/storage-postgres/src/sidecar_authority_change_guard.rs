@@ -43,7 +43,7 @@ pub(crate) async fn after_current_writes_in_connection(
         {
             return Err(PersistenceError::Conflict(format!(
                 "{}: Sidecar participant authority cut exceeds 64 accepted refs",
-                soland_storage::ConflictCode::FailedPrecondition
+                coland_storage::ConflictCode::FailedPrecondition
             )));
         }
         // A missing parent membership means this Sidecar has no live desired

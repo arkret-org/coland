@@ -8,15 +8,15 @@ use arkret_wire::{
     CircleId, CommitStreamRef, CurrentSelector, EventKind, MessageId, ScopeRef, StrandId,
     TypedCurrentRow,
 };
-use diesel::sql_types::BigInt;
-use diesel_async::RunQueryDsl;
-use serde_json::{Value, json};
-use soland_storage::{
+use coland_storage::{
     AuthorityCommitStore, AuthorityCommitTransaction, EventCommitRequest, EventCommitUnitOfWork,
     EventProjectionStoreRegistry,
 };
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
+use diesel::sql_types::BigInt;
+use diesel_async::RunQueryDsl;
+use serde_json::{Value, json};
 
 #[derive(diesel::QueryableByName)]
 struct Counts {
@@ -117,7 +117,7 @@ async fn circle_strand_and_plaintext_poll_require_exact_scope_and_current_member
     let baseline = counts(&pool).await;
     let refused = uow.commit_event(unknown.clone()).await.unwrap_err();
     assert!(
-        matches!(refused, soland_storage::PersistenceError::Conflict(ref detail)
+        matches!(refused, coland_storage::PersistenceError::Conflict(ref detail)
         if detail == "failed_precondition: circle_not_active"),
         "{refused:?}"
     );
@@ -191,7 +191,7 @@ async fn circle_strand_and_plaintext_poll_require_exact_scope_and_current_member
     );
     uow.commit_event(strand.clone()).await.unwrap();
     let strand_id = StrandId::from_event_id(&strand.authority_commit.event.event_id);
-    let projection = soland_storage_postgres::PgPersistenceStore::new(pool.clone());
+    let projection = coland_storage_postgres::PgPersistenceStore::new(pool.clone());
     let restored = projection
         .object_current_snapshot()
         .snapshot()

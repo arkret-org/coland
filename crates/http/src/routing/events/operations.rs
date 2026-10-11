@@ -31,8 +31,8 @@
 //! - `content` — canonical-JSON, content-block, mention, and device-message shape checks.
 
 use arkret_event_draft::ProjectedEventOperation as Operation;
+use coland_services::operation_semantics as kinds;
 use serde_json::Value;
-use soland_services::operation_semantics as kinds;
 
 use crate::routing::interop::participant_binding;
 use crate::state::AppState;

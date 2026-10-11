@@ -28,13 +28,13 @@ use arkret_wire::{
     ProfileId,
 };
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-pub use soland_contracts::admin::{
+pub use coland_contracts::admin::{
     AuthorizedDeviceSigningKey, DeviceSigningKeyDirectoryOutcome,
     DeviceSigningKeyDirectoryQueryRequestBody,
 };
-use soland_services::protocol_artifacts as artifacts;
+use coland_services::protocol_artifacts as artifacts;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 #[derive(salvo::oapi::ToSchema, Debug, Serialize)]
 pub struct HealthOutcome {
@@ -42,8 +42,8 @@ pub struct HealthOutcome {
     pub service: &'static str,
     pub storage: &'static str,
     pub checks: Value,
-    /// True when soland is running with `SOLAND_DEVELOPMENT_MODE=true`.
-    /// Surfaced here so operators / dashboards (e.g. sodmin) can flag the
+    /// True when coland is running with `COLAND_DEVELOPMENT_MODE=true`.
+    /// Surfaced here so operators / dashboards (e.g. codmin) can flag the
     /// deployment with a "DEVELOPMENT MODE — do not use in production"
     /// banner without having to scrape `/_arkret/describe`.
     pub development_mode: bool,
@@ -53,18 +53,18 @@ pub struct HealthOutcome {
     /// Effective admin-API authentication posture:
     ///   - `"development"` — synthetic local admin sessions are enabled in an explicit harness
     ///     build
-    ///   - `"principal_id_allowlist"` — production gate via `SOLAND_ADMIN_PRINCIPAL_IDS`
+    ///   - `"principal_id_allowlist"` — production gate via `COLAND_ADMIN_PRINCIPAL_IDS`
     ///   - `"closed"` — production mode with no admin principals; admin endpoints are locked.
     pub admin_auth_mode: &'static str,
     /// T8.3 — non-sensitive production hardening checklist snapshot.
-    /// Surfaced on `/health` so sodmin's `/hardening` dashboard can
+    /// Surfaced on `/health` so codmin's `/hardening` dashboard can
     /// aggregate it across all services without scraping the more
     /// expensive describe payload.
     pub hardening: HardeningStatus,
 }
 
 #[derive(salvo::oapi::ToSchema, Debug, Serialize)]
-pub struct SolandServerDescribeOutcome {
+pub struct ColandServerDescribeOutcome {
     #[serde(flatten)]
     pub service: ServiceDescribe,
     pub unsupported_profiles: Vec<UnsupportedProfileDescriptor>,
@@ -132,29 +132,29 @@ pub struct AuthBridgeExamples {
 
 // Shared `/_floria/integration/describe` manifest shape: re-exported from
 // the SDK contracts crate (the authoritative definition shared by floria,
-// soland, and coauth) instead of a local copy.
+// coland, and coauth) instead of a local copy.
 // Client-sync family DTOs come straight from the SDK (`ServiceDescribe`
 // answers `account/describe`, `SyncRequestBody` carries the subscribe/sync
-// request); both are shared SDK wire types, so soland keeps
+// request); both are shared SDK wire types, so coland keeps
 // no private copies that could drift. NOTE: the explicit `model::` path
 // matters — the SDK root re-exports a different, client-side typed
 // `sync::SyncRequestBody` under the same name.
 // Snapshot head operations return the full signed `ak.schema.realm_state_snapshot.v1`
-// manifest. soland answers both operations with `not_implemented` until it can
+// manifest. coland answers both operations with `not_implemented` until it can
 // produce a real Snapshot detached proof.
 
 // authz check DTOs are now the spec-authoritative SDK types. The SDK
 // `AuthzDecision` enum was aligned to the spec five-valued form
 // (allow / soft_deny / hard_deny / quarantine / require_review) and
 // `AuthzCheckRequestBody` to `{ actor_id, action, resource?, context? }`,
-// so soland re-uses them directly instead of carrying local copies.
+// so coland re-uses them directly instead of carrying local copies.
 pub use arkret_models_collaboration::governance::authorization::{
     AuthzCheckOutcome, AuthzCheckRequestBody,
 };
 // Moderation report request/outcome are the SDK DTOs (`arkret-models-collaboration` carries
 // `service-operation-dtos.schema.json#/$defs/ModerationReportOutcome`:
 // `status` enum `submitted|resolved`, `routed_to` is an array of DIDs);
-// no soland mirrors.
+// no coland mirrors.
 pub use arkret_models_collaboration::governance::moderation::{
     ModerationReportOutcome, ModerationReportRequestBody,
 };
@@ -166,8 +166,8 @@ pub use arkret_models_integration::{
     PushRegisterDeviceRequestBody, PushUnregisterDeviceRequestBody,
 };
 // The policy document surface is one definition shared with the operator
-// console (`soland-contracts::admin::policy`); see that module for why.
-pub use soland_contracts::admin::policy::{
+// console (`coland-contracts::admin::policy`); see that module for why.
+pub use coland_contracts::admin::policy::{
     AdminPolicyDocument, AdminPolicyDocumentPage, AdminPolicyPayload, PolicyEffect,
     UpsertPolicyDocumentRequestBody,
 };
@@ -192,7 +192,7 @@ pub struct SessionLoginOutcome {
 }
 
 #[derive(salvo::oapi::ToSchema, Debug, Serialize)]
-pub struct SolandAccountRegisterOutcome {
+pub struct ColandAccountRegisterOutcome {
     pub principal_id: arkret_wire::DidCoreId,
     pub handle: String,
     pub display_name: Option<String>,
@@ -202,7 +202,7 @@ pub struct SolandAccountRegisterOutcome {
 }
 
 // Identity log / receipts outcomes are owned by the corresponding SDK model crates;
-// authoritative carrier for identity operation shapes); no soland mirrors.
+// authoritative carrier for identity operation shapes); no coland mirrors.
 // AKP-0008 / AKP-0009 — Agent operations. Every request/response
 // DTO is the SDK-authoritative `arkret_models_collaboration::agent_operations` shape (spec
 // `agent-operations.schema.json`): `agent_view`/`agent_list` carry the spec
@@ -220,7 +220,7 @@ pub struct SolandAccountRegisterOutcome {
 // typed ids `realm_id`/`call_id`/`actor_id`/`device_id` plus the optional
 // `capability_refs`/`desired_media` inputs; `CallMediaTokenExchangeOutcome`
 // / `CallMediaParticipantBinding` are shared SDK wire types),
-// so soland no longer mints private mirrors that can drift from the spec DTOs.
+// so coland no longer mints private mirrors that can drift from the spec DTOs.
 pub use arkret_models_collaboration::agent_operations::{
     AgentDeactivateRequestBody, AgentKeyPairOutcome, AgentKeyPairRequestBody, AgentList,
     AgentPauseRequestBody, AgentResumeRequestBody, AgentSidecarList, AgentSidecarView, AgentView,
@@ -235,7 +235,7 @@ pub use arkret_models_crypto::KeysBackupsPutRequestBody;
 // Key-backup replace/delete outcomes are the SDK server-side DTOs
 // (`arkret-models-crypto` is the authoritative carrier for
 // `keys-operations.schema.json#/$defs/keys_backups_replace_outcome` /
-// `keys_backups_delete_outcome`); no soland mirrors.
+// `keys_backups_delete_outcome`); no coland mirrors.
 pub use arkret_models_crypto::{
     KeyBackupPutStatus, KeysBackupsDeleteOutcome, KeysBackupsList, KeysBackupsReplaceOutcome,
 };
@@ -246,10 +246,10 @@ pub use arkret_models_identity::identity::{IdentityLogListOutcome, IdentityRecei
 // while receipt write keeps a signed JSON wrapper so the raw signed fields can
 // be verified before being projected into typed outcomes. The SDK carries the
 // authoritative typed forms (`arkret_models_crypto::{RecoveryPolicy,
-// RecoveryReceipt}`) for clients; no soland-private mirror exists.
+// RecoveryReceipt}`) for clients; no coland-private mirror exists.
 
 fn local_extension_operations() -> Vec<String> {
-    crate::routing::soland_extension_operation_ids()
+    crate::routing::coland_extension_operation_ids()
 }
 
 fn profile_limitations() -> Vec<Value> {
@@ -313,12 +313,12 @@ fn profile_limitations() -> Vec<Value> {
         json!({
             "area": "blob.presign",
             "status": "local_direct_serve",
-            "reason": "presign issues a short-lived soland-signed local /blob/get URL; backend-native object-store presign is not claimed"
+            "reason": "presign issues a short-lived coland-signed local /blob/get URL; backend-native object-store presign is not claimed"
         }),
         json!({
             "area": "snapshot.head",
             "status": "standard_self_supported",
-            "reason": "ak.self.realm_state_snapshot.read.manifest_head.v1 returns a signed ak.schema.realm_state_snapshot.v1 manifest; the /_soland dev bundle is development-only diagnostics"
+            "reason": "ak.self.realm_state_snapshot.read.manifest_head.v1 returns a signed ak.schema.realm_state_snapshot.v1 manifest; the /_coland dev bundle is development-only diagnostics"
         }),
         json!({
             "area": "account_auth.device_pair",
@@ -340,13 +340,13 @@ fn profile_limitations() -> Vec<Value> {
             "status": "unsupported",
             "spec": "SEC-01 / identity-did.md §3.4",
             "unsupported": "resolver degraded/health signal verification is not wired into production paths",
-            "reason": "soland has no inbound resolver-health signal feed or per-write gate for this verdict"
+            "reason": "coland has no inbound resolver-health signal feed or per-write gate for this verdict"
         }),
         json!({
             "area": "audit.policy_receipt_emit",
             "status": "unsupported",
             "spec": "B1.12 / B1.16",
-            "unsupported": "soland does not emit signed audit policy receipts on any production route",
+            "unsupported": "coland does not emit signed audit policy receipts on any production route",
             "reason": "no production audit-receipt emission path is wired in this deployment"
         }),
     ]
@@ -569,7 +569,7 @@ pub fn describe(
             "search.encrypted_or_authorized_index".to_owned(),
         ],
         notes: Some(
-            "Soland only accepts private plaintext when the current Realm policy lists this service DID with matching plaintext_visible_services.data_classes; otherwise it fails closed."
+            "Coland only accepts private plaintext when the current Realm policy lists this service DID with matching plaintext_visible_services.data_classes; otherwise it fails closed."
                 .to_owned(),
         ),
         extra: Default::default(),
@@ -596,7 +596,7 @@ pub fn describe(
             // PROF-1 (R3 spec-sync 2026-05-27, arkret-spec b47ff6ec) —
             // advertise `ak.profile.media_service_binding.v1` whenever the
             // server exposes the `ak.self.call.media.exchange.issue_token.v1`
-            // handler. soland mounts the handler unconditionally, and also
+            // handler. coland mounts the handler unconditionally, and also
             // claims the required `ak.profile.webrtc_media.v1` dependency above.
             profiles.push(arkret_wire::ProfileId::MEDIA_SERVICE_BINDING_V1.to_owned());
             if websocket_binding.is_some() {
@@ -850,7 +850,7 @@ pub fn describe(
                 "conformance": "limited_reference",
                 "unsupported_profiles": [
                     {
-                        "profile": "org.arkret.soland.profile.limited_server.v1",
+                        "profile": "org.arkret.coland.profile.limited_server.v1",
                         "status": "unsupported",
                         "reason": "limited profile is a limitation descriptor, not a conformance claim"
                     }
@@ -898,7 +898,7 @@ mod tests {
 
     fn fixture_service_resolution() -> arkret_models_identity::ResolutionCommitment {
         arkret_models_identity::ResolutionCommitment {
-            did: arkret_wire::Did::new("did:web:soland.example").unwrap(),
+            did: arkret_wire::Did::new("did:web:coland.example").unwrap(),
             method_history_head: "fixture-history-head".to_owned(),
             version_id: "fixture-v1".to_owned(),
         }
@@ -931,7 +931,7 @@ mod tests {
     #[test]
     fn websocket_advertisement_is_complete_on_https_and_http_keeps_fallback() {
         for development_mode in [false, true] {
-            for base_url in ["https://soland.example/", "http://localhost/"] {
+            for base_url in ["https://coland.example/", "http://localhost/"] {
                 let description = describe(
                     &fixture_service_resolution(),
                     "memory",
@@ -994,7 +994,7 @@ mod tests {
             &fixture_service_resolution(),
             "memory",
             &crate::config::AppConfig {
-                public_base_url: "https://soland.example/".to_owned(),
+                public_base_url: "https://coland.example/".to_owned(),
                 development_mode: true,
                 ..crate::config::AppConfig::test_default()
             },
@@ -1022,14 +1022,14 @@ mod tests {
         assert!(matches!(
             arkret_models_discovery::websocket_binding::select_websocket_binding(&description, 262_144),
             Some(arkret_models_discovery::TransportBinding::Websocket { base_url, max_frame_bytes: 262_144, max_channels: 16 })
-                if base_url == "wss://soland.example/_arkret/ws"
+                if base_url == "wss://coland.example/_arkret/ws"
         ));
         let value = serde_json::to_value(description).expect("description serializes");
         assert!(value["limits"].get("mls_governance_proof").is_none());
         assert_eq!(value["transport_bindings"][0]["kind"], "http_json");
         assert_eq!(
             value["transport_bindings"][0]["base_url"],
-            "https://soland.example/"
+            "https://coland.example/"
         );
         let bundles = value["supported_operation_bundles"]
             .as_array()
@@ -1059,7 +1059,7 @@ mod tests {
         );
         assert_eq!(
             value["transport_bindings"][1]["base_url"],
-            json!("https://soland.example/_arkret/self/blob/resumable")
+            json!("https://coland.example/_arkret/self/blob/resumable")
         );
         assert!(value["transport_bindings"][1].get("operations").is_none());
         assert!(value["transport_bindings"][1]["extension_profile_required"].is_null());
@@ -1265,7 +1265,7 @@ mod tests {
         );
         assert_eq!(
             value["limits"]["scalability_constraints"]["daily_principal_download_limit"],
-            json!(soland_services::runtime_guards::KEY_BACKUP_DAILY_DOWNLOAD_LIMIT_DEFAULT)
+            json!(coland_services::runtime_guards::KEY_BACKUP_DAILY_DOWNLOAD_LIMIT_DEFAULT)
         );
     }
 }

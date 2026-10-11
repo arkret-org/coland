@@ -9,7 +9,7 @@
 //! both observe the last remaining unit. One consumption row per operation
 //! identity counts an exact retry once.
 
-use soland_storage::QuotaReservation;
+use coland_storage::QuotaReservation;
 
 use super::{
     AsyncPgConnection, BigInt, OptionalExtension, PersistenceError, PersistenceResult,

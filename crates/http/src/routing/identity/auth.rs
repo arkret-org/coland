@@ -1,7 +1,7 @@
 //! Auth + session handlers and the session-validation helpers they rely on.
 //!
 //! Surfaces:
-//! - `POST /_soland/gate/auth/dev-login` — dev-mode session credential issue
+//! - `POST /_coland/gate/auth/dev-login` — dev-mode session credential issue
 //! - `POST /_arkret/gate/account/session-grants` — coauth session-grant bridge
 //! - `POST /_arkret/gate/account/logout` — spec `ak.gate.account.command.logout.v1`: revoke the
 //!   presented session credential + queued to-device while preserving device authorization
@@ -17,14 +17,14 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 #[cfg(any(test, feature = "conformance-harness"))]
 use chrono::Duration;
+use coland_http::error::{AppError, ErrorCode};
+use coland_services::identity::SessionIdentityState as SessionRecord;
 use salvo::http::StatusCode;
 #[cfg(any(test, feature = "conformance-harness"))]
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use soland_http::error::{AppError, ErrorCode};
-use soland_services::identity::SessionIdentityState as SessionRecord;
 
 use super::{append_audit_log, bearer_token, dpop_token, now, render_error};
 #[cfg(any(test, feature = "conformance-harness"))]
@@ -74,7 +74,7 @@ pub(super) fn protocol_account_router() -> Router {
         // logout (account-lifecycle §4.1): revoke this session credential and
         // drop the device's queued to-device while preserving its durable
         // authorization. Canonical `/_arkret/gate/account/logout`; deployment
-        // gateways route this longer prefix to soland even though `/_arkret/gate/`
+        // gateways route this longer prefix to coland even though `/_arkret/gate/`
         // otherwise goes to the Account Authority process.
         .push(Router::with_path("logout").post(logout::logout))
 }
@@ -82,8 +82,8 @@ pub(super) fn protocol_account_router() -> Router {
 pub(super) fn local_router() -> Router {
     // Device logout is the spec op `ak.gate.account.command.logout.v1`, served at
     // the canonical `/_arkret/gate/account/logout` (see `protocol_account_router`).
-    // Deployment gateways route that longer prefix to soland (the Station) even though
-    // `/_arkret/gate/` otherwise goes to the Account Authority process, so no `/_soland/gate/
+    // Deployment gateways route that longer prefix to coland (the Station) even though
+    // `/_arkret/gate/` otherwise goes to the Account Authority process, so no `/_coland/gate/
     // auth/logout` product alias is needed. ② (api-conventions.md §3.3): no local credential
     // issuance endpoint is mounted under `session-grants`. dev-login remains the only local
     // development session issuer; production clients present the grant + DPoP

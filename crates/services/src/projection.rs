@@ -5,14 +5,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use arkret_event_draft::ProjectedEventOperation as Operation;
 use arkret_identifiers::RealmId;
 use chrono::{DateTime, Utc};
-use parking_lot::{Mutex, MutexGuard};
-use serde_json::Value;
-use soland_domain::hlc::ServerHlc;
-use soland_domain::reducer::{
-    FacetRef, ProjectionEffect, ProjectionState, SolandMembershipState, SolandRealmState,
+use coland_domain::hlc::ServerHlc;
+use coland_domain::reducer::{
+    ColandMembershipState, ColandRealmState, FacetRef, ProjectionEffect, ProjectionState,
     object_stage_wire_value,
 };
-use soland_storage::{PersistenceResult, PersistenceStore};
+use coland_storage::{PersistenceResult, PersistenceStore};
+use parking_lot::{Mutex, MutexGuard};
+use serde_json::Value;
 
 use crate::hydration::{HydrationProjectionAdapter, hydrate_projections_from_persistence};
 
@@ -25,7 +25,7 @@ fn projection_event_ref(operation: &Operation) -> String {
 }
 
 pub fn morph_document_body(fields: &BTreeMap<String, Value>) -> Option<Value> {
-    soland_domain::reducer::morph_document_body(fields)
+    coland_domain::reducer::morph_document_body(fields)
 }
 
 pub fn check_realm_link_admissible(
@@ -35,7 +35,7 @@ pub fn check_realm_link_admissible(
     link_kind: &str,
     status: &str,
 ) -> Result<(), &'static str> {
-    soland_domain::reducer::realm_links::check_realm_link_admissible(
+    coland_domain::reducer::realm_links::check_realm_link_admissible(
         projection,
         realm_id,
         target_realm_id,
@@ -156,10 +156,10 @@ impl From<ProjectionEffect> for ProjectionEffectView {
             } => Self::PendingReplayQueued { target_ref, reason },
             ProjectionEffect::Ignored => Self::Ignored,
             ProjectionEffect::Mls(effect) => Self::Mls(match effect {
-                soland_domain::reducer::MlsEffect::KeyPackagePublished {
+                coland_domain::reducer::MlsEffect::KeyPackagePublished {
                     keypackage_id, ..
                 } => MlsProjectionEffect::KeyPackagePublished { keypackage_id },
-                soland_domain::reducer::MlsEffect::KeyPackageClaimed {
+                coland_domain::reducer::MlsEffect::KeyPackageClaimed {
                     keypackage_id,
                     group_id,
                     intended_realm_id,
@@ -250,7 +250,7 @@ impl ProjectionService {
                     );
                     state.realm_organization_statements.insert(
                         key,
-                        soland_domain::reducer::RealmOrganizationStatementState {
+                        coland_domain::reducer::RealmOrganizationStatementState {
                             realm_id: record.realm_id,
                             organization_id: record.organization_id,
                             relationship: record.relationship,
@@ -703,9 +703,9 @@ impl ProjectionService {
 
     pub fn apply_mls_keypackage_publish(
         &self,
-        projection: &soland_domain::reducer::mls::MlsKeyPackagePublishProjection,
+        projection: &coland_domain::reducer::mls::MlsKeyPackagePublishProjection,
     ) -> ProjectionEffectView {
-        soland_domain::reducer::mls::apply_keypackage_upload_projection(
+        coland_domain::reducer::mls::apply_keypackage_upload_projection(
             &mut self.write_state(),
             projection,
         )
@@ -725,7 +725,7 @@ impl ProjectionService {
                 id: row.id,
                 keypackage_ref: row.keypackage_ref,
                 keypackage_digest: row.keypackage_digest,
-                owner_account_pk: soland_storage::AccountPk(row.owner_account_pk),
+                owner_account_pk: coland_storage::AccountPk(row.owner_account_pk),
                 actor_id: row.actor_id,
                 device_id: row.device_id,
                 endpoint_verification_method: row.endpoint_verification_method,
@@ -824,7 +824,7 @@ impl ProjectionService {
     /// deterministic fold, but semantic rejection must not be deferred until
     /// the post-commit projection lane.
     pub fn preflight_poll_rejection(&self, operation: &Operation) -> Option<String> {
-        if soland_domain::kinds::canonical_kind_for_operation(operation)
+        if coland_domain::kinds::canonical_kind_for_operation(operation)
             != Some(arkret_wire::EventKind::MessageCreate)
             || operation
                 .payload
@@ -844,7 +844,7 @@ impl ProjectionService {
         operation: &Operation,
         accepted_kinds: &[arkret_wire::EventKind],
     ) -> Option<String> {
-        let kind = soland_domain::kinds::canonical_kind_for_operation(operation)?;
+        let kind = coland_domain::kinds::canonical_kind_for_operation(operation)?;
         if !accepted_kinds.contains(&kind) {
             return None;
         }
@@ -928,7 +928,7 @@ impl ProjectionService {
             None => {
                 state.realm_states.insert(
                     realm_id.to_owned(),
-                    SolandRealmState {
+                    ColandRealmState {
                         realm_id: realm_id.to_owned(),
                         owner: Some(controller_actor_id.to_owned()),
                         title: None,
@@ -967,7 +967,7 @@ pub(crate) fn restore_invite_acceptance_membership(
         .unwrap_or(operation.created_at);
     state.members.insert(
         key,
-        SolandMembershipState {
+        ColandMembershipState {
             member: member.to_owned(),
             realm_id: realm_id.to_owned(),
             state: "join".to_owned(),
@@ -985,7 +985,7 @@ pub(crate) fn restore_invite_acceptance_membership(
 }
 
 fn morph_write_through_record(
-    row: &soland_domain::reducer::MorphProjection,
+    row: &coland_domain::reducer::MorphProjection,
 ) -> ProjectionWriteThroughRecord {
     ProjectionWriteThroughRecord::Morph(crate::events::MorphProjectionRecord {
         morph_id: row.morph_id.clone(),
@@ -1013,7 +1013,7 @@ fn morph_write_through_record(
 #[cfg(test)]
 mod projection_service_tests {
     use arkret_wire::{Did, ScopeRef, project_did_to_core_id};
-    use soland_domain::reducer::facet;
+    use coland_domain::reducer::facet;
 
     use super::*;
 

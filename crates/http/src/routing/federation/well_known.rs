@@ -4,9 +4,9 @@
 //!   service DID, trust domain, public base URL, and fanout topology without an auth round-trip.
 //!   The body is built from the live `AppConfig`; the route is unauthenticated.
 
+use coland_http::result::{JsonResult, json_ok};
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
-use soland_http::result::{JsonResult, json_ok};
 
 use crate::state::AppState;
 
@@ -35,8 +35,8 @@ struct WellKnownArkretOutcome {
     version: String,
 }
 
-#[endpoint(operation_id = "org.arkret.soland.well_known.arkret")]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.well_known.arkret"))]
+#[endpoint(operation_id = "org.arkret.coland.well_known.arkret")]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.well_known.arkret"))]
 async fn well_known_arkret(depot: &mut Depot) -> JsonResult<WellKnownArkretOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     // Spec: B.3 — server description endpoint. Returns the small set

@@ -1,6 +1,6 @@
-# soland — changelog
+# coland — changelog
 
-All notable wire-affecting changes to the soland Station are
+All notable wire-affecting changes to the coland Station are
 recorded here. Format follows [Keep a Changelog](https://keepachangelog.com/)
 and the project tracks Arkret v1 spec revisions.
 
@@ -80,7 +80,7 @@ reason codes registered in `arkret-spec` `9cb47c1..2b0d70d`.
 - `confidential_discussion_of` Relation kind accepted by the reducer
   with a new `confidential_discussions_of(strand_id)` query helper.
 - Dockerfile gains `HEALTHCHECK`, `tini` PID-1 init, and a
-  `SOLAND_METRICS_BIND` default so the metrics endpoint surfaces under
+  `COLAND_METRICS_BIND` default so the metrics endpoint surfaces under
   the new sidecar port `9698`.
 
 ### Round R4 — protocol review closures (2026-05-20; arkret-spec `2a4d39b..a77b995`)
@@ -150,7 +150,7 @@ below. Producers on the old wire MUST upgrade.
 
 - **`crate::round23` module** — consolidated reducer/validation helpers
   for every Round R2/R3 normative requirement (T01–T23).
-- **`AppConfig.trust_domain`** field plumbed from `SOLAND_TRUST_DOMAIN`
+- **`AppConfig.trust_domain`** field plumbed from `COLAND_TRUST_DOMAIN`
   env var (default derived from `service_id`). Required by the
   the now-removed legacy device-hierarchy reset replay defence (T08).
 - **13 new `ErrorCode` variants** mirroring the new spec registry:
@@ -220,7 +220,7 @@ below. Producers on the old wire MUST upgrade.
 
 #### Migration
 
-- Operators MUST set `SOLAND_TRUST_DOMAIN` (or rely on the
+- Operators MUST set `COLAND_TRUST_DOMAIN` (or rely on the
   `service_id`-derived default) before processing the removed legacy reset
   events. The boot path validates the value via the SDK
   `TrustDomainId` regex.

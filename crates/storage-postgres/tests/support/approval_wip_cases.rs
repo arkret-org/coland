@@ -8,11 +8,11 @@ use arkret_wire::{
 use super::*;
 
 fn vote(
-    request: &soland_storage::EventCommitRequest,
+    request: &coland_storage::EventCommitRequest,
     list: &arkret_wire::SpaceId,
     revision: CurrentRevision,
     nonce: &str,
-) -> soland_storage::EventApprovalCommit {
+) -> coland_storage::EventApprovalCommit {
     let signer = arkret_signatures::Ed25519DetachedJwsSigner::from_seed([70; 32], "fixture");
     let multibase =
         arkret_canonical::ed25519_pubkey_to_did_key_multibase(signer.verifying_key().as_bytes());
@@ -51,7 +51,7 @@ fn vote(
         &arkret_signatures::approval_signature::approval_signature_signing_bytes(&signature)
             .unwrap(),
     );
-    soland_storage::EventApprovalCommit {
+    coland_storage::EventApprovalCommit {
         event_id: event.event_id.clone(),
         event_digest: digest,
         committed_at: request.authority_commit.commit.committed_at,
@@ -60,10 +60,10 @@ fn vote(
 }
 
 fn batch(
-    request: soland_storage::EventCommitRequest,
-    proof: soland_storage::EventApprovalCommit,
-) -> soland_storage::EventBatchCommitRequest {
-    soland_storage::EventBatchCommitRequest {
+    request: coland_storage::EventCommitRequest,
+    proof: coland_storage::EventApprovalCommit,
+) -> coland_storage::EventBatchCommitRequest {
+    coland_storage::EventBatchCommitRequest {
         events: vec![request],
         franking_replay_nonce: None,
         realm_organization_proof: None,
@@ -78,10 +78,10 @@ fn batch(
 struct WipSetup {
     opened: ordinary_realm::Discussion,
     board_id: arkret_wire::SpaceId,
-    list: soland_storage::EventCommitRequest,
+    list: coland_storage::EventCommitRequest,
     list_id: arkret_wire::SpaceId,
     second_id: arkret_wire::StrandId,
-    first: soland_storage::EventCommitRequest,
+    first: coland_storage::EventCommitRequest,
 }
 
 async fn prepare_wip_setup(pool: &PgPool) -> WipSetup {
@@ -151,7 +151,7 @@ async fn prepare_wip_setup(pool: &PgPool) -> WipSetup {
     }
 }
 
-async fn qualify_wip_review(pool: &PgPool, setup: &WipSetup) -> soland_storage::EventCommitRequest {
+async fn qualify_wip_review(pool: &PgPool, setup: &WipSetup) -> coland_storage::EventCommitRequest {
     let opened = &setup.opened;
     let board_id = setup.board_id.clone();
     let list_id = setup.list_id.clone();

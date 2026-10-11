@@ -15,9 +15,9 @@ const DEFAULT_HTTPS_PORT: u16 = 443;
 /// Every input that can change an egress or federation verdict, parsed once.
 ///
 /// These used to be eight separate `std::env::var` reads spread across this
-/// file, each with its own parser. `SOLAND_SOVEREIGN_ENCLAVE` in particular had
+/// file, each with its own parser. `COLAND_SOVEREIGN_ENCLAVE` in particular had
 /// a second parser in `AppConfig` that accepted `on` and was case-insensitive
-/// while this file's did not, so `SOLAND_SOVEREIGN_ENCLAVE=on` enforced the
+/// while this file's did not, so `COLAND_SOVEREIGN_ENCLAVE=on` enforced the
 /// enclave posture at startup while leaving this gate — the one that actually
 /// denies outbound federation — switched off.
 ///
@@ -57,7 +57,7 @@ fn egress_policy() -> &'static EgressPolicy {
 
 /// The hosts outbound HTTP may reach when the sovereign enclave profile is on.
 ///
-/// The single parse of `SOLAND_SOVEREIGN_ENCLAVE_ALLOWED_OUTBOUND_HOSTS`.
+/// The single parse of `COLAND_SOVEREIGN_ENCLAVE_ALLOWED_OUTBOUND_HOSTS`.
 /// `AppConfig` surfaces this rather than parsing the variable a second time:
 /// the config field used to be an independent copy that only reached a startup
 /// log, so what an operator read back was not, by construction, what the
@@ -186,7 +186,7 @@ fn federation_outbound_trust_domain_denial_with_policy(
 
 /// Whether outbound egress to private/loopback networks is permitted.
 ///
-/// `SOLAND_EGRESS_ALLOW_PRIVATE_NETWORKS`, when set, is authoritative and MUST
+/// `COLAND_EGRESS_ALLOW_PRIVATE_NETWORKS`, when set, is authoritative and MUST
 /// be used to decouple this decision from the deployment posture in any
 /// environment where the two must differ. When the variable is unset the
 /// default follows `development_mode` (dev needs to reach localhost services).
@@ -221,8 +221,8 @@ pub fn egress_policy_version(development_mode: bool) -> String {
     });
     let policy = egress_policy();
     for (name, entries) in [
-        ("SOLAND_EGRESS_ALLOWED_HOSTS", policy.allowed_hosts.clone()),
-        ("SOLAND_EGRESS_DENYLIST", policy.denylist.clone()),
+        ("COLAND_EGRESS_ALLOWED_HOSTS", policy.allowed_hosts.clone()),
+        ("COLAND_EGRESS_DENYLIST", policy.denylist.clone()),
     ] {
         canonical.push('\n');
         canonical.push_str(name);
@@ -358,13 +358,13 @@ pub fn validate_url_for_egress_with_resolved_ips(
     })
 }
 
-/// Judge the host through soland's deployment layers, which the shared guard
+/// Judge the host through coland's deployment layers, which the shared guard
 /// knows nothing about: the sovereign-enclave outbound allowlist and the
 /// operator host deny/allow lists.
 ///
 /// Runs *after* the shared guard's scheme/host judgment so the reported denial
 /// reason keeps its existing precedence.
-fn validate_soland_host_layers(url: &Url, purpose: &str) -> Result<String, String> {
+fn validate_coland_host_layers(url: &Url, purpose: &str) -> Result<String, String> {
     let host = url
         .host_str()
         .filter(|host| !host.trim().is_empty())
@@ -383,7 +383,7 @@ fn resolve_and_validate_url_for_egress(
     guard
         .validate_url(url, purpose)
         .map_err(|error| error.to_string())?;
-    validate_soland_host_layers(url, purpose)?;
+    validate_coland_host_layers(url, purpose)?;
     guard
         .lock_url(url, purpose)
         .map_err(|error| error.to_string())
@@ -402,7 +402,7 @@ where
     guard
         .validate_url(url, purpose)
         .map_err(|error| error.to_string())?;
-    let host = validate_soland_host_layers(url, purpose)?;
+    let host = validate_coland_host_layers(url, purpose)?;
     let port = url.port_or_known_default().unwrap_or(DEFAULT_HTTPS_PORT);
     let addresses = match arkret_egress_reqwest::literal_host_ip(url) {
         Some(ip) => vec![SocketAddr::new(ip, port)],
@@ -516,7 +516,7 @@ fn federation_target_denied_with_entries(
     })
 }
 
-/// soland's outbound posture. A controlled-network deployment additionally
+/// coland's outbound posture. A controlled-network deployment additionally
 /// admits private and CGNAT destinations; metadata / link-local destinations
 /// stay impossible in both postures.
 fn egress_guard(allow_private_networks: bool) -> EgressGuard {
@@ -701,7 +701,7 @@ mod tests {
     fn base_config() -> AppConfig {
         AppConfig {
             object_storage: ObjectStorageConfig::local(
-                std::env::temp_dir().join("soland-enclave-tests"),
+                std::env::temp_dir().join("coland-enclave-tests"),
             ),
             development_mode: true,
             did_resolver_allow_methods: vec!["web".to_owned()],

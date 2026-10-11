@@ -23,25 +23,25 @@ use arkret_signatures::http_signature::{
 };
 use arkret_wire::{ActorId, Event, EventKind, ScopeRef};
 use base64::Engine as _;
+use coland_http::config::AppConfig;
+use coland_http::service;
+use coland_http::state::AppState;
+use coland_storage::AuthorityCommitStore;
+use coland_storage_postgres::{PgAuthorityCommitStore, PgPool};
+use coland_test_support::AppStateTestExt as _;
+use coland_test_support::pcr_genesis::PcrGenesisFixture;
 use diesel_async::RunQueryDsl as _;
 use ed25519_dalek::SigningKey;
 use salvo::http::StatusCode;
 use salvo::test::{ResponseExt, TestClient};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use soland_http::config::AppConfig;
-use soland_http::service;
-use soland_http::state::AppState;
-use soland_storage::AuthorityCommitStore;
-use soland_storage_postgres::{PgAuthorityCommitStore, PgPool};
-use soland_test_support::AppStateTestExt as _;
-use soland_test_support::pcr_genesis::PcrGenesisFixture;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::Url;
 
 #[tokio::test]
 async fn controller_cannot_directly_grant_business_authority_to_managed_bot() {
-    use soland_storage::EventCommitUnitOfWork as _;
+    use coland_storage::EventCommitUnitOfWork as _;
     let fixture = Fixture::new().await;
     let installed = fixture.install(false).await;
     let event = fixture.admin_event(
@@ -77,7 +77,7 @@ async fn controller_cannot_directly_grant_business_authority_to_managed_bot() {
     let before = authority_snapshot(&fixture.pool).await;
     let request = admin_domain_request(&fixture, event).await;
     assert!(
-        soland_storage_postgres::PgEventCommitUnitOfWork::new(fixture.pool.clone())
+        coland_storage_postgres::PgEventCommitUnitOfWork::new(fixture.pool.clone())
             .commit_event(request)
             .await
             .is_err()
@@ -722,8 +722,8 @@ async fn revoke_original_admin_device(fixture: &Fixture) {
         ControllerBackupTrustAnchor, DeviceAuthorizePayload, UnsignedKeyBackupActiveSeries,
     };
     use arkret_models_crypto::*;
+    use coland_storage::*;
     use ed25519_dalek::Signer as _;
-    use soland_storage::*;
     let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let account = fixture.pcr.history.account.clone();
     let device = fixture.pcr.history.founding_device_id.clone();
@@ -734,7 +734,7 @@ async fn revoke_original_admin_device(fixture: &Fixture) {
     let authorizer = arkret_wire::DeviceId::new(other.authorization.device_id.clone()).unwrap();
     let sign_as_other = |mut event: Event| {
         event.producer_proof = None;
-        soland_test_support::signed_event::sign_fixture_event(
+        coland_test_support::signed_event::sign_fixture_event(
             event,
             fixture.pcr.history.did.as_str(),
             authorizer.as_str(),
@@ -820,8 +820,8 @@ async fn revoke_original_admin_device(fixture: &Fixture) {
     let stream = fixture.pcr.unit.transactions[1].commit.stream_ref.clone();
     let head = store.stream_head(&stream).await.unwrap().unwrap();
     let initial_pointer = pointer(&old_series, 1, vec![], head.commit_id);
-    let transaction = soland_services::authority_commit::AuthorityCommitApplication::new(
-        soland_services::persistence::PersistenceHandle::from_shared(
+    let transaction = coland_services::authority_commit::AuthorityCommitApplication::new(
+        coland_services::persistence::PersistenceHandle::from_shared(
             fixture.state.test_persistence(),
         ),
         0,
@@ -847,8 +847,8 @@ async fn revoke_original_admin_device(fixture: &Fixture) {
         .await
         .unwrap();
     let revoke = sign_as_other(fixture.admin_event(EventKind::DeviceRevoke,ScopeRef::Realm {realm_id:stream.realm_id().clone()},json!({"device_id":device,"revoked_by":authorizer,"revoked_at":at,"reason":"security_rotation"})));
-    let transaction = soland_services::authority_commit::AuthorityCommitApplication::new(
-        soland_services::persistence::PersistenceHandle::from_shared(
+    let transaction = coland_services::authority_commit::AuthorityCommitApplication::new(
+        coland_services::persistence::PersistenceHandle::from_shared(
             fixture.state.test_persistence(),
         ),
         0,
@@ -1155,7 +1155,7 @@ async fn service_install_and_separate_bot_unit_have_exact_retry_without_new_writ
         assert_accepted_event(&fixture, event).await;
     }
     assert_profile_in_principal_control_realm(&fixture, &bot_body.managed_actor_bundle).await;
-    let authority = soland_http::routing::extensions::applet_bridge::managed_principal_authority(
+    let authority = coland_http::routing::extensions::applet_bridge::managed_principal_authority(
         &fixture.state,
         install.bot_outcome.bot_actor_id.signing_principal_id(),
     )
@@ -1291,7 +1291,7 @@ async fn accepted_applet_revoke_fences_original_bot_authority_from_durable_curre
     let fixture = Box::new(Box::pin(Fixture::new()).await);
     let install = Box::new(Box::pin(fixture.install(false)).await);
     let principal = install.bot_outcome.bot_actor_id.signing_principal_id();
-    let before = soland_http::routing::extensions::applet_bridge::managed_principal_authority(
+    let before = coland_http::routing::extensions::applet_bridge::managed_principal_authority(
         &fixture.state,
         principal,
     )
@@ -1304,7 +1304,7 @@ async fn accepted_applet_revoke_fences_original_bot_authority_from_durable_curre
         install.bot_outcome.principal_control_realm_id
     );
     Box::pin(fixture.revoke(&install)).await;
-    let after = soland_http::routing::extensions::applet_bridge::managed_principal_authority(
+    let after = coland_http::routing::extensions::applet_bridge::managed_principal_authority(
         &fixture.state,
         principal,
     )
@@ -1597,20 +1597,20 @@ async fn service_original_issuer_can_revoke_terminal_child_after_parent_revocati
         .unwrap();
     assert_eq!(
         rows.iter().find(|r| r.grant_id == child_id).unwrap().status,
-        soland_storage::CapabilityGrantCurrentStatus::Revoked
+        coland_storage::CapabilityGrantCurrentStatus::Revoked
     );
     assert_eq!(
         rows.iter()
             .find(|r| &r.grant_id == parent_id)
             .unwrap()
             .status,
-        soland_storage::CapabilityGrantCurrentStatus::Revoked
+        coland_storage::CapabilityGrantCurrentStatus::Revoked
     );
 }
 
 fn deterministic_managed_actor_seed(label: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"soland:extensions-smoke:managed-actor:");
+    hasher.update(b"coland:extensions-smoke:managed-actor:");
     hasher.update(label.as_bytes());
     hasher.finalize().into()
 }
@@ -1706,7 +1706,7 @@ async fn ingest_managed_actor_current_document(state: &AppState, actor: &Managed
     let now = chrono::Utc::now();
     let did = actor.initial_resolution.did.to_string();
     let document = actor.inception_log_entry["state"].clone();
-    let record = soland_storage::WebvhDocumentRecord {
+    let record = coland_storage::WebvhDocumentRecord {
         did: did.clone(),
         did_document: document,
         key_log_head: Some(actor.initial_resolution.method_history_head.clone()),
@@ -1719,7 +1719,7 @@ async fn ingest_managed_actor_current_document(state: &AppState, actor: &Managed
     state
         .test_persistence()
         .webvh()
-        .append_log_event(soland_storage::WebvhLogRecord {
+        .append_log_event(coland_storage::WebvhLogRecord {
             event_digest: actor.initial_resolution.method_history_head.clone(),
             did,
             seq: 1,
@@ -1735,7 +1735,7 @@ async fn ingest_managed_actor_current_document(state: &AppState, actor: &Managed
         .await
         .unwrap();
     state
-        .test_cache_resolved_webvh_record(soland_services::identity::DidDocumentState {
+        .test_cache_resolved_webvh_record(coland_services::identity::DidDocumentState {
             did: record.did,
             did_document: record.did_document,
             key_log_head: record.key_log_head,
@@ -1970,7 +1970,7 @@ fn applet_service_signing_key(verification_method: &str) -> SigningKey {
         return SigningKey::from_bytes(&[44; 32]);
     }
     let mut hasher = Sha256::new();
-    hasher.update(b"soland:applet-service-key:");
+    hasher.update(b"coland:applet-service-key:");
     hasher.update(verification_method.as_bytes());
     let seed: [u8; 32] = hasher.finalize().into();
     SigningKey::from_bytes(&seed)
@@ -2117,7 +2117,7 @@ fn applet_service_id_document(package: &AppletPackage) -> arkret_identity::DidDo
 async fn ingest_applet_service_id_document(state: &AppState, package: &AppletPackage) {
     let now = chrono::Utc::now();
     let document = applet_service_id_document(package);
-    let record = soland_storage::WebvhDocumentRecord {
+    let record = coland_storage::WebvhDocumentRecord {
         did: document.id.to_string(),
         did_document: serde_json::to_value(document).unwrap(),
         key_log_head: None,
@@ -2134,7 +2134,7 @@ async fn ingest_applet_service_id_document(state: &AppState, package: &AppletPac
         .await
         .unwrap();
     state
-        .test_cache_resolved_webvh_record(soland_services::identity::DidDocumentState {
+        .test_cache_resolved_webvh_record(coland_services::identity::DidDocumentState {
             did: record.did,
             did_document: record.did_document,
             key_log_head: record.key_log_head,
@@ -2251,7 +2251,7 @@ pub(crate) struct Fixture {
     authority_event_ref: Option<EventId>,
     token: String,
     holder_key: SigningKey,
-    other_device: Option<soland_test_support::pcr_genesis::AcceptedDevice>,
+    other_device: Option<coland_test_support::pcr_genesis::AcceptedDevice>,
 }
 
 impl Fixture {
@@ -2377,10 +2377,10 @@ impl Fixture {
                 "key".to_owned(),
                 "uuid".to_owned(),
             ],
-            ..soland_test_support::app_config()
+            ..coland_test_support::app_config()
         };
         config.register_test_internal_authority_channel("applet-http-standard-grant".to_owned());
-        let (state, pool) = soland_test_support::app_state_with_pool(config);
+        let (state, pool) = coland_test_support::app_state_with_pool(config);
         let mut pcr = PcrGenesisFixture::new(state.service_did());
         Box::pin(pcr.admit(&state)).await.unwrap();
         let other_device = if with_second_device {
@@ -2395,8 +2395,8 @@ impl Fixture {
         state
             .test_persistence()
             .accounts()
-            .put(&soland_storage::AccountRecord {
-                pk: soland_storage::AccountPk(0),
+            .put(&coland_storage::AccountRecord {
+                pk: coland_storage::AccountPk(0),
                 principal_id: pcr.history.account.principal_id.clone(),
                 station_id: pcr.history.account.station_id.clone(),
                 localpart: String::new(),
@@ -2562,7 +2562,7 @@ impl Fixture {
         // Replace the bootstrap fixture's structural proof only after finalizing
         // the complete Event content with the real device signer.
         event.producer_proof = None;
-        soland_test_support::signed_event::sign_fixture_event(
+        coland_test_support::signed_event::sign_fixture_event(
             event,
             self.pcr.history.did.as_str(),
             self.pcr.history.founding_device_id.as_str(),
@@ -3062,7 +3062,7 @@ impl Fixture {
 async fn admin_domain_request(
     fixture: &Fixture,
     event: Event,
-) -> soland_storage::EventCommitRequest {
+) -> coland_storage::EventCommitRequest {
     let store = PgAuthorityCommitStore {
         pool: fixture.pool.clone(),
     };
@@ -3075,7 +3075,7 @@ async fn admin_domain_request(
         .await
         .unwrap()
         .unwrap();
-    let previous = soland_storage::AuthorityCommitTransaction {
+    let previous = coland_storage::AuthorityCommitTransaction {
         expected_authority: store
             .current_authority(&fixture.realm)
             .await
@@ -3101,7 +3101,7 @@ async fn admin_domain_request(
         .and_then(|fact| fact.as_human())
     {
         let producer = event.human_device_producer().unwrap().unwrap();
-        let selector = soland_storage::DeviceRevocationGateSelector {
+        let selector = coland_storage::DeviceRevocationGateSelector {
             principal_id: producer.account_id.principal_id,
             station_id: producer.account_id.station_id,
             device_id: producer.device_id.to_string(),
@@ -3123,7 +3123,7 @@ async fn admin_domain_request(
             .get_result::<Root>(&mut conn).await.optional().unwrap();
         if let Some(original) = original {
             request.self_producer_guard = Some(
-                soland_storage::SelfProducerCommitGuard::HumanDeviceEvidence {
+                coland_storage::SelfProducerCommitGuard::HumanDeviceEvidence {
                     selector,
                     evidence: Box::new(serde_json::from_value(original.value).unwrap()),
                 },
@@ -3141,7 +3141,7 @@ async fn replace_installation_closed_unit(
     prior: &Installed,
     package: AppletPackage,
 ) -> AppletInstallOutcome {
-    use soland_storage::{AppletStore as _, PersistenceError, SelfProducerCommitGuard};
+    use coland_storage::{AppletStore as _, PersistenceError, SelfProducerCommitGuard};
     let mut body: AppletInstallRequestBody = serde_json::from_value(prior.body.clone()).unwrap();
     body.applet_package = package.clone();
     body.authoring_request_basis.package_digest = package.package_digest.clone().unwrap();
@@ -3187,7 +3187,7 @@ async fn replace_installation_closed_unit(
     assert_eq!(status, StatusCode::OK, "{preview}");
     let plan: AppletInstallPlan = serde_json::from_value(preview["plan"].clone()).unwrap();
     body.plan_digest = plan.plan_digest.clone();
-    let store = soland_storage_postgres::PgAppletStore {
+    let store = coland_storage_postgres::PgAppletStore {
         pool: fixture.pool.clone(),
     };
     let identity = store
@@ -3196,7 +3196,7 @@ async fn replace_installation_closed_unit(
         .unwrap()
         .unwrap();
     let scope =
-        soland_storage::applet_effective_scope_key(&body.authoring_request_basis.effective_scope)
+        coland_storage::applet_effective_scope_key(&body.authoring_request_basis.effective_scope)
             .unwrap();
     let old = store
         .get(package.applet_id.as_str(), &scope)
@@ -3223,15 +3223,15 @@ async fn replace_installation_closed_unit(
         .state
         .service_verification_method("notary-key")
         .unwrap();
-    let app = soland_services::authority_commit::AuthorityCommitApplication::new(
-        soland_services::persistence::PersistenceHandle::from_shared(
+    let app = coland_services::authority_commit::AuthorityCommitApplication::new(
+        coland_services::persistence::PersistenceHandle::from_shared(
             fixture.state.test_persistence(),
         ),
         0,
     );
     let signing_key = key.clone();
     let signing_method = vm.clone();
-    let author: soland_storage::AppletCommitAuthor =
+    let author: coland_storage::AppletCommitAuthor =
         Arc::new(move |event, authority, head, at, fact, core| {
             let commit = app
                 .sign_event_commit_at_authority_cut(
@@ -3256,7 +3256,7 @@ async fn replace_installation_closed_unit(
             });
             Ok((commit, root))
         });
-    let attester: soland_storage::AppletResolutionAttester = Arc::new(move |core| {
+    let attester: coland_storage::AppletResolutionAttester = Arc::new(move |core| {
         arkret_signatures::service_resolution::sign_principal_resolution_projection_attestation(
             core,
             vm.clone(),
@@ -3268,8 +3268,8 @@ async fn replace_installation_closed_unit(
     let digest = arkret_canonical::canonical_sha256(&body).unwrap();
     let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let idempotency_key = format!("closed-replacement-{}", uuid::Uuid::now_v7());
-    let input = soland_storage::AppletAuthoringUnitWrite {
-        request: soland_storage::AppletAdmissionRequest::Install(Box::new(body.clone())),
+    let input = coland_storage::AppletAuthoringUnitWrite {
+        request: coland_storage::AppletAdmissionRequest::Install(Box::new(body.clone())),
         package: package.clone(),
         recomputed_install_plan: Some(plan),
         service_did_document: applet_service_id_document(&package),
@@ -3313,7 +3313,7 @@ async fn replace_installation_closed_unit(
         accepted_at: at,
     };
     let mut outcome = prior.outcome.clone();
-    outcome.install_id = soland_storage::ids::generate("install");
+    outcome.install_id = coland_storage::ids::generate("install");
     outcome.registration_event_ref = body
         .authoring_request_basis
         .registration_event
@@ -3327,7 +3327,7 @@ async fn replace_installation_closed_unit(
         .map(|e| arkret_wire::GrantId::from_event_id(&e.event_id))
         .collect();
     let response = serde_json::to_value(&outcome).unwrap();
-    let finalizer: soland_storage::AppletUnitFinalizer = Arc::new(move |_| {
+    let finalizer: coland_storage::AppletUnitFinalizer = Arc::new(move |_| {
         let mut record = old.clone();
         record["package"] = serde_json::to_value(&package).unwrap();
         record["registration_event"] =
@@ -3371,10 +3371,10 @@ async fn replace_installation_closed_unit(
             }
             step
         }).collect::<Vec<_>>());
-        Ok(soland_storage::AppletUnitFinalization {
-            applet_record: soland_storage::AppletRecordCommit {
+        Ok(coland_storage::AppletUnitFinalization {
+            applet_record: coland_storage::AppletRecordCommit {
                 applet_id: package.applet_id.clone(),
-                identity: soland_storage::AppletIdentityCommit {
+                identity: coland_storage::AppletIdentityCommit {
                     target_station_id: body.authoring_request_basis.target_station_id.clone(),
                     expected_record: Some(identity.clone()),
                     record: identity.clone(),
@@ -3382,7 +3382,7 @@ async fn replace_installation_closed_unit(
                 expected_record: Some(old.clone()),
                 record,
             },
-            idempotency_record: soland_storage::IdempotencyRecord {
+            idempotency_record: coland_storage::IdempotencyRecord {
                 authenticated_actor: actor.clone(),
                 operation_id: "ak.self.applet.command.install".to_owned(),
                 idempotency_key: idempotency_key.clone(),
@@ -3403,9 +3403,9 @@ async fn replace_installation_closed_unit(
 }
 
 async fn accepted_admin_domain_event(fixture: &Fixture, event: Event) {
-    use soland_storage::EventCommitUnitOfWork as _;
+    use coland_storage::EventCommitUnitOfWork as _;
     let request = admin_domain_request(fixture, event.clone()).await;
-    soland_storage_postgres::PgEventCommitUnitOfWork::new(fixture.pool.clone())
+    coland_storage_postgres::PgEventCommitUnitOfWork::new(fixture.pool.clone())
         .commit_event(request)
         .await
         .unwrap();

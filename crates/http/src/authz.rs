@@ -8,9 +8,9 @@
 //! Membership is never an authorization source.
 
 use arkret_wire::{ActorId, RealmId, WireResourceSelector};
-use soland_http::error::AppError;
-pub(crate) use soland_services::authorization::CapabilityVerdict;
-use soland_storage::ActorRealmAuthorization;
+use coland_http::error::AppError;
+pub(crate) use coland_services::authorization::CapabilityVerdict;
+use coland_storage::ActorRealmAuthorization;
 
 use crate::state::AppState;
 
@@ -49,11 +49,11 @@ pub(crate) async fn authorize(
         return Ok(CapabilityVerdict::Denied);
     };
     let authorization = actor_realm_authorization(state, &realm_id, actor, at).await?;
-    Ok(soland_services::authorization::evaluate(
+    Ok(coland_services::authorization::evaluate(
         &authorization,
         actions,
         &target,
-        &soland_storage::OperationFacts::default(),
+        &coland_storage::OperationFacts::default(),
     ))
 }
 

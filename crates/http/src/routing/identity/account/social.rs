@@ -260,7 +260,7 @@ pub(crate) async fn contact_continuity_checkpoint(
     let created_at = now();
     state
         .jobs()
-        .store_idempotency_record(soland_services::jobs::IdempotencyState {
+        .store_idempotency_record(coland_services::jobs::IdempotencyState {
             authenticated_actor: holder,
             operation_id: "ak.self.contact.command.checkpoint".to_owned(),
             idempotency_key: replay_key,

@@ -5,15 +5,15 @@
 mod ordinary_realm;
 
 use arkret_wire::{ActorId, EventKind, StrandId};
+use coland_storage::{
+    AuthorityCommitStore, AuthorityCommitTransaction, EventCommitRequest, EventCommitUnitOfWork,
+};
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{PgEventCommitUnitOfWork, PgPool};
 use diesel::sql_types::{BigInt, Jsonb, Text};
 use diesel_async::{RunQueryDsl, SimpleAsyncConnection};
 use ordinary_realm::{next_request, open_discussion};
 use serde_json::{Value, json};
-use soland_storage::{
-    AuthorityCommitStore, AuthorityCommitTransaction, EventCommitRequest, EventCommitUnitOfWork,
-};
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{PgEventCommitUnitOfWork, PgPool};
 
 #[derive(diesel::QueryableByName, Debug, PartialEq)]
 struct Current {
@@ -62,11 +62,11 @@ async fn assert_capability_denied_without_writes(pool: &PgPool, request: EventCo
         .unwrap_err();
     assert_eq!(
         error.conflict_code(),
-        Some(soland_storage::ConflictCode::CapabilityDenied)
+        Some(coland_storage::ConflictCode::CapabilityDenied)
     );
     assert_eq!(full_write_footprint(pool).await, before);
     assert!(
-        soland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() }
+        coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() }
             .committed_event(&id)
             .await
             .unwrap()
@@ -88,7 +88,7 @@ async fn accept_and_assert_exact_replay(pool: &PgPool, request: EventCommitReque
     assert_eq!(replay.projections_inserted, 0);
     assert_eq!(replay.outbox_inserted, 0);
     assert_eq!(full_write_footprint(pool).await, accepted);
-    let held = soland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() }
+    let held = coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() }
         .committed_event(&request.authority_commit.event.event_id)
         .await
         .unwrap()
@@ -425,7 +425,7 @@ async fn stage_initial_cas_concurrent_winner_and_noop_revision_are_durable() {
             .unwrap()
             .event_inserted
     );
-    let reader = soland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() };
+    let reader = coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() };
     for request in [&first, &noop] {
         assert_eq!(
             reader
@@ -450,7 +450,7 @@ async fn stage_initial_cas_concurrent_winner_and_noop_revision_are_durable() {
         ordinary_realm::station(),
     );
     let snapshot =
-        soland_storage_postgres::account_snapshot_material(&pool, &discussion.realm_id(), &account)
+        coland_storage_postgres::account_snapshot_material(&pool, &discussion.realm_id(), &account)
             .await
             .unwrap()
             .unwrap();
@@ -557,7 +557,7 @@ async fn archive_restore_fsm_and_accepting_time_replay_do_not_diverge() {
     );
     let baseline = footprint(&pool).await;
     let reopened = PgEventCommitUnitOfWork::new(pool.clone());
-    let reader = soland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() };
+    let reader = coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() };
     for request in [archive, restore] {
         assert!(
             !reopened
@@ -655,7 +655,7 @@ async fn assert_independent_scope_schema_refused(pool: &PgPool, request: EventCo
         .commit_event(request)
         .await
         .unwrap_err();
-    let soland_storage::PersistenceError::SchemaViolation(detail) = error else {
+    let coland_storage::PersistenceError::SchemaViolation(detail) = error else {
         panic!("expected independent-scope schema violation, got {error:?}");
     };
     assert_eq!(
@@ -668,10 +668,10 @@ async fn assert_independent_scope_schema_refused(pool: &PgPool, request: EventCo
 async fn foreign_station_stage_request(
     previous: &AuthorityCommitTransaction,
     strand: &StrandId,
-) -> (EventCommitRequest, soland_http::state::AppState) {
-    let mut config = soland_test_support::app_config();
+) -> (EventCommitRequest, coland_http::state::AppState) {
+    let mut config = coland_test_support::app_config();
     config.public_base_url = "https://other-transition-station.example".into();
-    let (origin, origin_pool) = soland_test_support::app_state_with_pool(config);
+    let (origin, origin_pool) = coland_test_support::app_state_with_pool(config);
     let account = Box::pin(ordinary_realm::human_profile::admit_for_station_did(
         &origin_pool,
         origin.service_did(),
@@ -691,7 +691,7 @@ async fn foreign_station_stage_request(
         previous.commit.committed_at + chrono::Duration::seconds(1),
     );
     let mut request = Box::pin(ordinary_realm::source_request(&origin_pool, request)).await;
-    let evidence = Box::pin(soland_http::test_fresh_producer_device_evidence(
+    let evidence = Box::pin(coland_http::test_fresh_producer_device_evidence(
         &origin,
         &request.authority_commit.event,
         &previous.expected_authority.service_id,
@@ -716,7 +716,7 @@ async fn foreign_station_stage_request(
     request.authority_commit.commit.committed_at = core.attested_at;
     request.self_producer_guard = None;
     request.forwarded_producer_evidence =
-        Some(soland_storage::ForwardedProducerDeviceEvidence::new(evidence, fact).unwrap());
+        Some(coland_storage::ForwardedProducerDeviceEvidence::new(evidence, fact).unwrap());
     request.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
         request.authority_commit.event.clone(),
     ));

@@ -1,6 +1,6 @@
-# Soland architecture
+# Coland architecture
 
-Soland is the Arkret v1 station implementation. The workspace uses a
+Coland is the Arkret v1 station implementation. The workspace uses a
 one-way dependency graph so transport, use-case orchestration, deterministic
 state, and persistence adapters can be verified independently.
 
@@ -8,18 +8,18 @@ state, and persistence adapters can be verified independently.
 
 | Crate | Responsibility |
 | --- | --- |
-| `soland-domain` | Deterministic reducers, projection state, HLC, and domain invariants. |
-| `soland-storage` | Persistence records, narrow storage ports, and shared adapter contracts. |
-| `soland-storage-postgres` | Diesel/PostgreSQL schema, migrations, row mapping, and production adapters. |
-| `soland-services` | Identity, event, projection, sync, federation, governance, delivery, and job use cases. |
-| `soland-http` | Salvo routing, authentication, signatures, OpenAPI, wire validation, and response mapping. |
-| `soland` | Composition root, process configuration, adapter selection, runtime loops, OTel, and binaries. |
-| `soland-test-support` | Development-only state builders and integration-test fixtures. |
+| `coland-domain` | Deterministic reducers, projection state, HLC, and domain invariants. |
+| `coland-storage` | Persistence records, narrow storage ports, and shared adapter contracts. |
+| `coland-storage-postgres` | Diesel/PostgreSQL schema, migrations, row mapping, and production adapters. |
+| `coland-services` | Identity, event, projection, sync, federation, governance, delivery, and job use cases. |
+| `coland-http` | Salvo routing, authentication, signatures, OpenAPI, wire validation, and response mapping. |
+| `coland` | Composition root, process configuration, adapter selection, runtime loops, OTel, and binaries. |
+| `coland-test-support` | Development-only state builders and integration-test fixtures. |
 
 The hard dependency policy lives in `xtask/src/bin/check_layering.rs` and runs
-in CI. `soland-http` may depend on deterministic domain logic and storage port
+in CI. `coland-http` may depend on deterministic domain logic and storage port
 contracts, but not on concrete storage adapters. Only
-`soland-storage-postgres` may depend on Diesel.
+`coland-storage-postgres` may depend on Diesel.
 
 ## Event pipeline
 
@@ -32,7 +32,7 @@ A successful `POST /_arkret/self/events` follows this path:
    reduction, persistence, and post-commit effects.
 3. Reducers in `crates/domain/src/reducer` calculate projection changes without
    HTTP, SQL, or runtime dependencies.
-4. Ports in `soland-storage` preserve the event/projection/idempotency/outbox
+4. Ports in `coland-storage` preserve the event/projection/idempotency/outbox
    transaction boundary. Memory and PostgreSQL adapters implement the same
    contract tests.
 5. Runtime loops dispatch durable federation outbox entries, notary work,
@@ -45,7 +45,7 @@ depend on an unhydrated cache.
 
 ## Request and runtime state
 
-`soland_http::state::AppState` contains private application services and bounded
+`coland_http::state::AppState` contains private application services and bounded
 runtime resources required by handlers. It does not expose a persistence
 registry or public state fields. `AppStateRuntime` is the composition input used
 by the final server and test-support builders; concrete PostgreSQL, memory, and
@@ -79,10 +79,10 @@ Each row ends in exactly one terminal state: `delivered`, `policy_suppressed`,
 `dead_lettered` or `superseded`. Terminal state and its dead-letter ledger row
 commit together. Receiver idempotency makes duplicate delivery safe.
 
-Operators should alert on sustained `soland_federation_outbox_depth` growth,
-on `soland_federation_outbox_oldest_pending_age_seconds`, and on any non-zero
-rate of `soland_federation_outbox_dead_letter_total`. See `docs/runbook.md` for
-the `soland-federation-outbox` list/inspect/requeue commands.
+Operators should alert on sustained `coland_federation_outbox_depth` growth,
+on `coland_federation_outbox_oldest_pending_age_seconds`, and on any non-zero
+rate of `coland_federation_outbox_dead_letter_total`. See `docs/runbook.md` for
+the `coland-federation-outbox` list/inspect/requeue commands.
 
 ## MLS and Move/Seal/Cell state
 

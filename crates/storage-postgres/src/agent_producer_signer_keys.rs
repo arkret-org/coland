@@ -259,7 +259,7 @@ async fn confirmed_human_outcome_in_connection(
             "self historical authorization source differs".into(),
         ));
     }
-    let guard = soland_storage::DeviceRevocationGateSelector {
+    let guard = coland_storage::DeviceRevocationGateSelector {
         principal_id: account.principal_id.clone(),
         station_id: account.station_id.clone(),
         device_id: device.to_string(),
@@ -275,7 +275,7 @@ async fn confirmed_human_outcome_in_connection(
 
 fn guard_matches_pcr_target(
     event: &arkret_wire::Event,
-    guard: &soland_storage::DeviceRevocationGateSelector,
+    guard: &coland_storage::DeviceRevocationGateSelector,
 ) -> bool {
     &event.realm_id == guard.authorization_ref.stream_ref.realm_id()
 }
@@ -284,7 +284,7 @@ async fn human_outcome_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
-    guard: &soland_storage::DeviceRevocationGateSelector,
+    guard: &coland_storage::DeviceRevocationGateSelector,
 ) -> PersistenceResult<SignerKeyQueryOutcome> {
     if commit.event_ref != event.event_id || commit.realm_id != event.realm_id {
         return Err(PersistenceError::Conflict(
@@ -407,7 +407,7 @@ async fn prepare_local_human_source_inner(
         .get_result::<SourceRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let source: arkret_wire::RealmCommit =
         serde_json::from_value(row.commit_json).map_err(PersistenceError::database)?;
-    let guard = soland_storage::DeviceRevocationGateSelector {
+    let guard = coland_storage::DeviceRevocationGateSelector {
         principal_id: producer.account_id.principal_id.clone(),
         station_id: producer.account_id.station_id.clone(),
         device_id: producer.device_id.to_string(),
@@ -427,7 +427,7 @@ pub(crate) async fn prepare_human_source_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     admitted_at: chrono::DateTime<chrono::Utc>,
-    guard: &soland_storage::DeviceRevocationGateSelector,
+    guard: &coland_storage::DeviceRevocationGateSelector,
 ) -> PersistenceResult<arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact> {
     let reject = |message: &str| PersistenceError::Conflict(message.to_owned());
     let producer = event
@@ -621,7 +621,7 @@ pub(crate) async fn prepare_human_source_in_connection(
 /// Exact accepted replay supplies its original canonical witness instead.
 pub(crate) async fn validate_prepared_local_human_in_connection(
     conn: &mut AsyncPgConnection,
-    transaction: &soland_storage::AuthorityCommitTransaction,
+    transaction: &coland_storage::AuthorityCommitTransaction,
 ) -> PersistenceResult<
     Option<arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact>,
 > {

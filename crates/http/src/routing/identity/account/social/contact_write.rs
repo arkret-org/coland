@@ -773,7 +773,7 @@ async fn store_prepare(
     ] {
         state
             .jobs()
-            .store_idempotency_record(soland_services::jobs::IdempotencyState {
+            .store_idempotency_record(coland_services::jobs::IdempotencyState {
                 authenticated_actor: arkret_wire::ActorId::account(arkret_wire::AccountId::new(
                     principal_id.clone(),
                     state.service_core_id(),
@@ -839,7 +839,7 @@ async fn persist_final(
         .map_err(|error| AppError::internal(format!("Contact principal id invalid: {error}")))?;
     state
         .jobs()
-        .store_idempotency_record(soland_services::jobs::IdempotencyState {
+        .store_idempotency_record(coland_services::jobs::IdempotencyState {
             authenticated_actor: arkret_wire::ActorId::account(arkret_wire::AccountId::new(
                 principal_id,
                 state.service_core_id(),
@@ -976,7 +976,7 @@ async fn contact_authority_realm(
             }
             let device = state
                 .identities()
-                .find_device(soland_services::identity::FindDeviceQuery {
+                .find_device(coland_services::identity::FindDeviceQuery {
                     actor_id: account_id.principal_id.to_string(),
                     device_id: session.require_human_device_id().clone(),
                 })
@@ -1190,7 +1190,7 @@ fn normal_basis(receipt: &RequestAcceptanceReceipt) -> Result<(ContactRound, Has
 }
 
 fn next_request_slot_coordinates(
-    states: &[soland_services::identity::ContactRequestSlotState],
+    states: &[coland_services::identity::ContactRequestSlotState],
     owner_id: &arkret_wire::ActorId,
     peer_id: &arkret_wire::ActorId,
 ) -> Result<(u64, Option<Hash>), AppError> {
@@ -1217,7 +1217,7 @@ fn next_request_slot_coordinates(
 /// The slot's accepted Contact Event prefix extended by `observed`: the exact
 /// Commit prefix a CAS of this `(owner, peer)` slot observes.
 fn request_slot_prefix(
-    states: &[soland_services::identity::ContactRequestSlotState],
+    states: &[coland_services::identity::ContactRequestSlotState],
     owner_id: &arkret_wire::ActorId,
     peer_id: &arkret_wire::ActorId,
     observed: &[EventId],
@@ -1227,12 +1227,12 @@ fn request_slot_prefix(
         .find(|state| &state.owner_id == owner_id && &state.peer_id == peer_id)
     {
         Some(current) => current.prefix_with(observed),
-        None => soland_domain::identity::contact_event_prefix(observed),
+        None => coland_domain::identity::contact_event_prefix(observed),
     }
 }
 
 fn accept_request_slot_transition(
-    states: &mut Vec<soland_services::identity::ContactRequestSlotState>,
+    states: &mut Vec<coland_services::identity::ContactRequestSlotState>,
     owner_id: &arkret_wire::ActorId,
     peer_id: &arkret_wire::ActorId,
     accepted_sequence: u64,
@@ -1254,7 +1254,7 @@ fn accept_request_slot_transition(
         current.head_digest = head_digest;
         current.accepted_event_refs = accepted_event_refs;
     } else {
-        states.push(soland_services::identity::ContactRequestSlotState {
+        states.push(coland_services::identity::ContactRequestSlotState {
             owner_id: owner_id.clone(),
             peer_id: peer_id.clone(),
             accepted_sequence,
@@ -1552,7 +1552,7 @@ fn commit<'a>(
                 .map_err(|error| AppError::internal(error.to_string()))?,
             state.service_core_id(),
         ));
-        let response_binding = soland_storage::ContactCompletionBinding {
+        let response_binding = coland_storage::ContactCompletionBinding {
             authenticated_actor: authenticated_actor.clone(),
             idempotency_key: contact_phase_idempotency_key("commit", &body.idempotency_key),
             request_hash: request_hash.clone(),
@@ -1671,7 +1671,7 @@ fn commit<'a>(
         intent
             .freeze_acceptance_time(accepted_at)
             .map_err(|error| AppError::internal(error.to_string()))?;
-        if let soland_storage::ContactCompletionAction::Request {
+        if let coland_storage::ContactCompletionAction::Request {
             slot_version,
             slot_predecessor,
         } = &intent.plan.action
@@ -1714,12 +1714,12 @@ fn commit<'a>(
 /// Map a refused Contact admission onto its registered wire code. A lost
 /// row or slot CAS keeps the Contact code the planner named; producer and
 /// authority-cut refusals keep their registered code.
-fn contact_admission_error(error: soland_services::ServiceError) -> AppError {
-    use soland_services::ServiceError;
+fn contact_admission_error(error: coland_services::ServiceError) -> AppError {
+    use coland_services::ServiceError;
     match &error {
         ServiceError::Conflict(detail) => {
             let (code, message) = detail.split_once(": ").unwrap_or((detail.as_str(), ""));
-            if let Some(mapped) = soland_http::error::ErrorCode::from_wire(code) {
+            if let Some(mapped) = coland_http::error::ErrorCode::from_wire(code) {
                 return AppError::from_rejection(mapped, message.to_owned());
             }
             if code.starts_with("contact_") {
@@ -1736,8 +1736,8 @@ fn contact_admission_error(error: soland_services::ServiceError) -> AppError {
 enum ContactCommitPlan {
     Failed(ContactFailedOutcome),
     Ready {
-        projection: Box<soland_services::events::CommitContactProjection>,
-        action: Box<soland_storage::ContactCompletionAction>,
+        projection: Box<coland_services::events::CommitContactProjection>,
+        action: Box<coland_storage::ContactCompletionAction>,
         local_mirror_target: Option<String>,
     },
 }
@@ -1748,7 +1748,7 @@ fn plan_contact_commit<'a>(
     accepted_at: chrono::DateTime<chrono::Utc>,
 ) -> impl std::future::Future<Output = Result<ContactCommitPlan, AppError>> + Send + 'a {
     Box::pin(async move {
-        use soland_storage::ContactCompletionAction;
+        use coland_storage::ContactCompletionAction;
         let holder = reservation.holder.contact_actor_id().clone();
         let peer = reservation.branch.peer().contact_actor_id().clone();
         let contacts = state.contacts();
@@ -1915,7 +1915,7 @@ fn plan_contact_commit<'a>(
                 // resolvable request Event required to author a response.
                 local_mirror_target = (same_service_target && pending_incoming_admitted)
                     .then(|| contact_mirror_target_holder_key(&peer));
-                projection = Some(soland_services::events::CommitContactProjection {
+                projection = Some(coland_services::events::CommitContactProjection {
                     completion_intent: None,
                     record: ContactRecord {
                         requester_id: holder.clone(),
@@ -2019,7 +2019,7 @@ fn plan_contact_commit<'a>(
                 let outgoing_slot_absence_digest = absence
                     .digest()
                     .map_err(|error| AppError::internal(error.to_string()))?;
-                let accepted_event_refs = soland_domain::identity::contact_event_prefix(
+                let accepted_event_refs = coland_domain::identity::contact_event_prefix(
                     absence
                         .cas_revision
                         .iter()
@@ -2042,7 +2042,7 @@ fn plan_contact_commit<'a>(
                 record.response_event_ref = Some(event.event_id.clone());
                 record.contact_round_evidence = None;
                 record.updated_at = contact_revision_after(expected_updated_at, event.created_at);
-                projection = Some(soland_services::events::CommitContactProjection {
+                projection = Some(coland_services::events::CommitContactProjection {
                     completion_intent: None,
                     record,
                     expected_updated_at: Some(expected_updated_at),
@@ -2083,7 +2083,7 @@ fn plan_contact_commit<'a>(
                 record.request_mirror_receipts.clear();
                 record.response_event_ref = Some(event.event_id.clone());
                 record.updated_at = contact_revision_after(expected_updated_at, event.created_at);
-                projection = Some(soland_services::events::CommitContactProjection {
+                projection = Some(coland_services::events::CommitContactProjection {
                     completion_intent: None,
                     record,
                     expected_updated_at: Some(expected_updated_at),
@@ -2127,7 +2127,7 @@ fn plan_contact_commit<'a>(
                 // heads, so an empty intersection grants nothing.
                 record.status = "accepted".to_owned();
                 set_holder_head(&mut record, &holder, event.event_id.clone());
-                projection = Some(soland_services::events::CommitContactProjection {
+                projection = Some(coland_services::events::CommitContactProjection {
                     completion_intent: None,
                     record,
                     expected_updated_at: Some(expected_updated_at),
@@ -2187,7 +2187,7 @@ fn plan_contact_commit<'a>(
                 } else {
                     None
                 };
-                projection = Some(soland_services::events::CommitContactProjection {
+                projection = Some(coland_services::events::CommitContactProjection {
                     completion_intent: None,
                     record,
                     expected_updated_at: Some(expected_updated_at),
@@ -2374,10 +2374,10 @@ async fn prepare_contact_completion_draft(
     state: &AppState,
     reservation: &ContactReservation,
     event: &Event,
-    action: soland_storage::ContactCompletionAction,
-    response_binding: soland_storage::ContactCompletionBinding,
+    action: coland_storage::ContactCompletionAction,
+    response_binding: coland_storage::ContactCompletionBinding,
     local_mirror_target: Option<String>,
-) -> Result<soland_storage::ContactCompletionDraft, AppError> {
+) -> Result<coland_storage::ContactCompletionDraft, AppError> {
     let introduction_evidence = match &reservation.branch {
         ContactReservationBranch::Request {
             introduction_evidence,
@@ -2402,13 +2402,13 @@ async fn prepare_contact_completion_draft(
         },
         route_assistance: None,
     });
-    Ok(soland_storage::ContactCompletionDraft {
+    Ok(coland_storage::ContactCompletionDraft {
         event: event.clone(),
         operation_id: reservation.operation_id.clone(),
         holder: reservation.holder.clone(),
         action,
         response_binding,
-        target: soland_storage::ContactDeliveryTarget {
+        target: coland_storage::ContactDeliveryTarget {
             contact_address,
             introduction_evidence,
             idempotency_key: IdempotencyKey::new(format!("peer-contact:{}", event.event_id))
@@ -2786,7 +2786,7 @@ pub(super) async fn request(
 }
 
 fn validate_normal_response_slot(
-    record: &soland_services::identity::ContactRecord,
+    record: &coland_services::identity::ContactRecord,
     responder: &ContactPeer,
     request_receipt: &RequestAcceptanceReceipt,
 ) -> Result<(), AppError> {
@@ -3060,7 +3060,7 @@ mod device_authorization_account_tests {
 
         let state = crate::state::AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let source = "ak:did_core:web:contact-peer.example";
         let method = DidUrl::new("did:web:contact-peer.example#notary-key".to_owned()).unwrap();
@@ -3145,7 +3145,7 @@ mod device_authorization_account_tests {
     #[test]
     fn normal_response_requires_the_exact_unconsumed_incoming_receipt() {
         use arkret_wire::{Base64UrlString, DidUrl, ProtocolSignature};
-        use soland_services::identity::ContactRecord;
+        use coland_services::identity::ContactRecord;
 
         use super::{
             RequestAcceptanceReceipt, retained_incoming_receipt, validate_normal_response_slot,
@@ -3328,7 +3328,7 @@ mod device_authorization_account_tests {
     async fn contact_locator_route_requires_the_exact_recipient_account() {
         use arkret_models_collaboration::contact_operations::ContactPeer;
         use arkret_models_collaboration::governance::peer_contact::ContactIntroductionEvidence;
-        use soland_storage_postgres::Db;
+        use coland_storage_postgres::Db;
 
         let state = crate::state::AppState::new(
             crate::config::AppConfig::test_default(),
@@ -3443,14 +3443,14 @@ mod device_authorization_account_tests {
         let alice_head = hash('a');
         let bob_head = hash('b');
         let mut states = vec![
-            soland_services::identity::ContactRequestSlotState {
+            coland_services::identity::ContactRequestSlotState {
                 owner_id: alice.clone(),
                 peer_id: bob.clone(),
                 accepted_sequence: 7,
                 head_digest: alice_head.clone(),
                 accepted_event_refs: Vec::new(),
             },
-            soland_services::identity::ContactRequestSlotState {
+            coland_services::identity::ContactRequestSlotState {
                 owner_id: bob.clone(),
                 peer_id: alice.clone(),
                 accepted_sequence: 3,
@@ -3516,7 +3516,7 @@ mod device_authorization_account_tests {
             "ak:did_core:web:station.example",
         );
         let durable_head = hash('a');
-        let original = vec![soland_services::identity::ContactRequestSlotState {
+        let original = vec![coland_services::identity::ContactRequestSlotState {
             owner_id: alice.clone(),
             peer_id: bob.clone(),
             accepted_sequence: 7,
@@ -3567,7 +3567,7 @@ mod device_authorization_account_tests {
     fn lineage_signatures_cover_exact_wire_presence_for_initial_successor_and_terminal() {
         let state = crate::state::AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let holder = ContactPeer::Human {
             account_id: AccountId::new(
@@ -3645,15 +3645,15 @@ mod device_authorization_account_tests {
         };
         use arkret_wire::{Base64UrlString, DidUrl};
         use base64::Engine as _;
-        use soland_storage::ContactStore as _;
-        use soland_storage_postgres::PgContactStore;
-        use soland_storage_postgres::test_database::TestDatabase;
+        use coland_storage::ContactStore as _;
+        use coland_storage_postgres::PgContactStore;
+        use coland_storage_postgres::test_database::TestDatabase;
 
         use super::{RequestAcceptanceReceipt, validate_request_receipt_cryptography};
 
         let state = crate::state::AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let holder_key = ed25519_dalek::SigningKey::from_bytes(&[29; 32]);
         let accepted_at = chrono::DateTime::parse_from_rfc3339("2026-09-09T00:00:00.000Z")
@@ -3701,7 +3701,7 @@ mod device_authorization_account_tests {
         )
         .unwrap();
 
-        let record = |receipt: RequestAcceptanceReceipt| soland_storage::ContactRecord {
+        let record = |receipt: RequestAcceptanceReceipt| coland_storage::ContactRecord {
             requester_id: receipt.core.holder.contact_actor_id(),
             target_id: receipt.core.peer.contact_actor_id(),
             contact_round_id: None,

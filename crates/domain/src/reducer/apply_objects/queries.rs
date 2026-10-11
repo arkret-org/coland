@@ -210,13 +210,13 @@ impl ProjectionState {
 
     /// Get members of a Realm currently in `state="join"`.
     /// For state-specific queries use [`members_in_state`].
-    pub fn members_of_realm(&self, realm_id: &str) -> Vec<&SolandMembershipState> {
+    pub fn members_of_realm(&self, realm_id: &str) -> Vec<&ColandMembershipState> {
         self.members_in_state(realm_id, "join")
     }
 
-    /// All `SolandMembershipState` entries for a Realm whose transition state matches
+    /// All `ColandMembershipState` entries for a Realm whose transition state matches
     /// `state` (`invite` / `join` / `leave` / `ban` / `knock`).
-    pub fn members_in_state(&self, realm_id: &str, state: &str) -> Vec<&SolandMembershipState> {
+    pub fn members_in_state(&self, realm_id: &str, state: &str) -> Vec<&ColandMembershipState> {
         self.members
             .iter()
             .filter(|((sid, _), m)| sid == realm_id && m.state == state)
@@ -225,7 +225,7 @@ impl ProjectionState {
     }
 
     /// Look up a single `(realm_id, actor_id)` member entry.
-    pub fn member(&self, realm_id: &str, actor_id: &str) -> Option<&SolandMembershipState> {
+    pub fn member(&self, realm_id: &str, actor_id: &str) -> Option<&ColandMembershipState> {
         self.members
             .get(&(realm_id.to_owned(), actor_id.to_owned()))
     }

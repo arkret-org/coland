@@ -2,17 +2,17 @@
 //! commit stages into exists in the initial schema and enforces its closed
 //! staged/terminal shape and binding uniqueness.
 //!
-//! Requires `SOLAND_TEST_DATABASE_URL` or `DATABASE_URL`; the lease gives each
+//! Requires `COLAND_TEST_DATABASE_URL` or `DATABASE_URL`; the lease gives each
 //! case an isolated, freshly migrated database.
 
 use arkret_wire::{AccountId, ActorId, DidCoreId};
+use coland_storage::{ContactStore, PersistenceError};
+use coland_storage_postgres::PgContactStore;
+use coland_storage_postgres::test_database::TestDatabase;
 use diesel::sql_query;
 use diesel::sql_types::{Jsonb, Nullable, Text};
 use diesel_async::RunQueryDsl;
 use serde_json::json;
-use soland_storage::{ContactStore, PersistenceError};
-use soland_storage_postgres::PgContactStore;
-use soland_storage_postgres::test_database::TestDatabase;
 
 fn actor() -> ActorId {
     ActorId::account(AccountId::new(

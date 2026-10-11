@@ -18,11 +18,11 @@ mod pcr_genesis;
 use arkret_wire::{
     AccountId, ActorId, DetachedSignatureContext, DidCoreId, DidUrl, EventKind, RealmCommitId,
 };
+use coland_storage::{ActorProfileAdmissionWrite, ActorProfileStore, AuthorityCommitTransaction};
+use coland_storage_postgres::{PgActorProfileStore, PgPersistenceStore, PgPool};
 use diesel::sql_types::{Jsonb, Text};
 use diesel_async::RunQueryDsl;
 use ed25519_dalek::SigningKey;
-use soland_storage::{ActorProfileAdmissionWrite, ActorProfileStore, AuthorityCommitTransaction};
-use soland_storage_postgres::{PgActorProfileStore, PgPersistenceStore, PgPool};
 
 // Test signing material only. No authorization, source fact, revision or
 // acceptance result is cached here; each candidate reads its actual PG cut.

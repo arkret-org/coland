@@ -1,9 +1,9 @@
 {
-  "title": "soland operational health",
+  "title": "coland operational health",
   "schemaVersion": 39,
   "version": 1,
   "refresh": "30s",
-  "tags": ["soland", "arkret", "operations"],
+  "tags": ["coland", "arkret", "operations"],
   "timezone": "browser",
   "panels": [
     {
@@ -12,7 +12,7 @@
       "title": "Egress denied",
       "targets": [
         {
-          "expr": "sum by (reason, target_class) (rate(soland_egress_denied_total[5m]))",
+          "expr": "sum by (reason, target_class) (rate(coland_egress_denied_total[5m]))",
           "legendFormat": "{{target_class}} {{reason}}"
         }
       ],
@@ -28,7 +28,7 @@
       "title": "Digest mismatches",
       "targets": [
         {
-          "expr": "sum by (scope) (rate(soland_digest_mismatch_total[5m]))",
+          "expr": "sum by (scope) (rate(coland_digest_mismatch_total[5m]))",
           "legendFormat": "{{scope}}"
         }
       ],
@@ -44,7 +44,7 @@
       "title": "Federation retry states",
       "targets": [
         {
-          "expr": "sum by (state) (rate(soland_federation_retry_total[5m]))",
+          "expr": "sum by (state) (rate(coland_federation_retry_total[5m]))",
           "legendFormat": "{{state}}"
         }
       ],
@@ -60,7 +60,7 @@
       "title": "Federation outbox depth",
       "targets": [
         {
-          "expr": "soland_federation_outbox_depth",
+          "expr": "coland_federation_outbox_depth",
           "legendFormat": "undelivered rows"
         }
       ],
@@ -76,7 +76,7 @@
       "title": "Federation dead letters",
       "targets": [
         {
-          "expr": "rate(soland_federation_outbox_dead_letter_total[5m])",
+          "expr": "rate(coland_federation_outbox_dead_letter_total[5m])",
           "legendFormat": "dead letters"
         }
       ],
@@ -92,7 +92,7 @@
       "title": "Audit append failures",
       "targets": [
         {
-          "expr": "rate(soland_audit_append_failures_total[5m])",
+          "expr": "rate(coland_audit_append_failures_total[5m])",
           "legendFormat": "audit append failures"
         }
       ],

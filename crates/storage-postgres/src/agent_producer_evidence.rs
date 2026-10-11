@@ -1,10 +1,10 @@
 //! Immutable verified Agent producer closure retained at the accepting cut.
 use arkret_identity::agent_authority_evidence::VerifiedAgentProducer;
 use arkret_wire::{Event, RealmCommit};
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_query;
 use diesel::sql_types::{Jsonb, Text};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
-use soland_storage::{PersistenceError, PersistenceResult};
 
 pub(crate) async fn retain_in_connection(
     conn: &mut AsyncPgConnection,

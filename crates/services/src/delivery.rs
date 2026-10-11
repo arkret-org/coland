@@ -2,14 +2,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures_util::stream::BoxStream;
-use serde_json::Value;
-pub use soland_storage::{
+pub use coland_storage::{
     AccountNotificationDeltaWrite, NotificationFanoutBasis, NotificationStrandScope,
     RecipientDeliveryRecord, RecipientNotificationRecord, RecipientQueueSelector,
     StoredAccountNotificationDelta,
 };
-use soland_storage::{AccountPk, SignalRelayRecord};
+use coland_storage::{AccountPk, SignalRelayRecord};
+use futures_util::stream::BoxStream;
+use serde_json::Value;
 
 use crate::ServiceResult;
 
@@ -87,7 +87,7 @@ pub trait DeviceDeliveryPort: Send + Sync {
     ) -> ServiceResult<DeviceDeliveryPurgeResult>;
     async fn register_push_device(
         &self,
-        authorization: &soland_storage::DeviceRevocationGateSelector,
+        authorization: &coland_storage::DeviceRevocationGateSelector,
         registration: Value,
     ) -> ServiceResult<()>;
     async fn unregister_push_device(
@@ -104,8 +104,8 @@ pub trait DeviceDeliveryPort: Send + Sync {
 /// Presence, typing, call signalling and read receipts are all Signals in v1:
 /// they share this one opaque relay record instead of four plaintext shapes,
 /// and the server sees only the AAD-bound envelope header.
-pub use soland_storage::BlobRecord as BlobState;
-pub use soland_storage::{
+pub use coland_storage::BlobRecord as BlobState;
+pub use coland_storage::{
     DeviceMessageBatchCommitOutcome, DeviceMessageBatchInspection, DeviceMessageBatchItemRecord,
     DeviceMessageBatchRecord, DeviceMessageIntentRecord, DeviceMessageRecord as DeviceMessageState,
     DeviceMessageTargetSnapshotGuard,
@@ -151,7 +151,7 @@ pub trait SignalRelayPort: Send + Sync {
 pub trait DeviceMessagePort: Send + Sync {
     async fn append(
         &self,
-        device_revocation_gate: Option<&soland_storage::DeviceRevocationGateSelector>,
+        device_revocation_gate: Option<&coland_storage::DeviceRevocationGateSelector>,
         message: DeviceMessageState,
         per_device_queue_capacity: usize,
     ) -> ServiceResult<()>;
@@ -339,7 +339,7 @@ impl DeliveryService {
 
     pub async fn register_push_device(
         &self,
-        authorization: &soland_storage::DeviceRevocationGateSelector,
+        authorization: &coland_storage::DeviceRevocationGateSelector,
         registration: Value,
     ) -> ServiceResult<()> {
         self.device_delivery
@@ -359,7 +359,7 @@ impl DeliveryService {
     }
     pub async fn append_device_message(
         &self,
-        device_revocation_gate: Option<&soland_storage::DeviceRevocationGateSelector>,
+        device_revocation_gate: Option<&coland_storage::DeviceRevocationGateSelector>,
         message: DeviceMessageState,
         per_device_queue_capacity: usize,
     ) -> ServiceResult<()> {
@@ -622,7 +622,7 @@ mod tests {
     impl DeviceMessagePort for NoDeviceMessages {
         async fn append(
             &self,
-            _device_revocation_gate: Option<&soland_storage::DeviceRevocationGateSelector>,
+            _device_revocation_gate: Option<&coland_storage::DeviceRevocationGateSelector>,
             _message: DeviceMessageState,
             _per_device_queue_capacity: usize,
         ) -> ServiceResult<()> {
@@ -712,7 +712,7 @@ mod tests {
 
         async fn register_push_device(
             &self,
-            _authorization: &soland_storage::DeviceRevocationGateSelector,
+            _authorization: &coland_storage::DeviceRevocationGateSelector,
             _registration: Value,
         ) -> ServiceResult<()> {
             Ok(())

@@ -14,38 +14,38 @@ use arkret_models_identity::account::AccountRegistrationPolicy;
 use arkret_models_identity::service_identity::{CanonicalServiceUrl, ServiceRegistrationKey};
 #[cfg(test)]
 use arkret_wire::ServiceKind;
-use ed25519_dalek::{SigningKey, VerifyingKey};
-use serde_json::Value;
-use sha2::{Digest, Sha256};
 #[cfg(test)]
-use soland_domain::reducer::ProjectionState;
-use soland_services::authority_commit::AuthorityCommitApplication;
-use soland_services::delivery::{DeliveryService, ObjectStoragePort};
-use soland_services::events::{
+use coland_domain::reducer::ProjectionState;
+use coland_services::authority_commit::AuthorityCommitApplication;
+use coland_services::delivery::{DeliveryService, ObjectStoragePort};
+use coland_services::events::{
     EventQueryService, EventService, InviteLocatorService, MlsGroupQueryService,
     MlsKeyPackageService, RealmDirectoryEntry, RealmDirectoryIndex, RealmDirectoryService,
     RealmQueryService,
 };
-use soland_services::federation::FederationService;
-use soland_services::governance::{GovernanceService, RuntimeSettingsPort};
-use soland_services::hydration::HydrationProjectionAdapter;
-use soland_services::identity::{
+use coland_services::federation::FederationService;
+use coland_services::governance::{GovernanceService, RuntimeSettingsPort};
+use coland_services::hydration::HydrationProjectionAdapter;
+use coland_services::identity::{
     AccountDataService, AgentPairingService, AgentParticipationService, ConsentService,
     ContactService, DidService, IdentityService, KeyBackupService, KeyMaterialService,
     RecoveryPolicyService, RecoverySessionService, SecurityTransactionService, SessionService,
 };
-use soland_services::jobs::{JobsService, RuntimeHealthPort};
-use soland_services::organization_registration::OrganizationRegistrationService;
-use soland_services::persistence::PersistenceHandle;
-use soland_services::persistence_events::PersistenceEventServices;
-use soland_services::persistence_identity::PersistenceIdentityServices;
-use soland_services::persistence_operations::PersistenceOperationalServices;
-use soland_services::projection::{ProjectionService, ServiceClock};
-use soland_services::runtime_guards::{
+use coland_services::jobs::{JobsService, RuntimeHealthPort};
+use coland_services::organization_registration::OrganizationRegistrationService;
+use coland_services::persistence::PersistenceHandle;
+use coland_services::persistence_events::PersistenceEventServices;
+use coland_services::persistence_identity::PersistenceIdentityServices;
+use coland_services::persistence_operations::PersistenceOperationalServices;
+use coland_services::projection::{ProjectionService, ServiceClock};
+use coland_services::runtime_guards::{
     KeyBackupDownloadOutcome, ModerationReportRateOutcome, RuntimeGuardService,
 };
-use soland_services::service_route::ServiceRouteResolver;
-use soland_services::sync::SyncService;
+use coland_services::service_route::ServiceRouteResolver;
+use coland_services::sync::SyncService;
+use ed25519_dalek::{SigningKey, VerifyingKey};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::member_identity::MemberIdentityRegistry;
 use super::notification::{EventBroadcast, EventNotification, Mutex};
@@ -132,7 +132,7 @@ pub struct AppState {
     trusted_push_gateways: Arc<crate::push_gateway_registry::TrustedPushGatewayRegistry>,
     /// Accepted DID authority bindings (`did-usage-and-verification.md` §5).
     ///
-    /// This is the SDK's shared value object + store — soland deliberately does
+    /// This is the SDK's shared value object + store — coland deliberately does
     /// not define a parallel model. Ordinary Event ingress consults it before
     /// touching the authority path, so a second Event signed by the same
     /// accepted key resolves nothing.
@@ -221,7 +221,7 @@ pub struct AppState {
     /// in the hot read path; the per-pass diagnostic helper just snapshots).
     notary_signing_key_origin: Arc<Mutex<NotarySigningKeyOrigin>>,
     /// G4.T3 — verified-profile descriptors loaded from the artifact path in
-    /// `SOLAND_VERIFIED_PROFILES_ARTIFACT` at startup. Filtered to entries
+    /// `COLAND_VERIFIED_PROFILES_ARTIFACT` at startup. Filtered to entries
     /// whose `service_role == "station"` and additionally
     /// cross-checked against the local `supported_profiles[]` set inside
     /// `describe.rs::apply_conformance_evidence`. Empty when the env var
@@ -234,7 +234,7 @@ pub struct AppState {
     /// projection (`SYNC-MEM-1..3`) both go through this. See
     /// [`MemberIdentityRegistry`] above for storage and effective-set
     /// semantics; writers persist through the durable
-    /// [`soland_storage::MemberIdentityStore`] first and startup hydration
+    /// [`coland_storage::MemberIdentityStore`] first and startup hydration
     /// rebuilds this registry from it. Plaintext Ed25519 MemberIdentity
     /// proofs are verified on
     /// event ingest; encrypted/non-Ed25519 proof forms are refused
@@ -265,7 +265,7 @@ pub struct AppStateRuntime {
 
 /// Founding principal of the development demo Realm.
 pub const DEVELOPMENT_DEMO_SUBJECT_DID: &str = "did:web:alice.example";
-const DEVELOPMENT_DEMO_TRUST_DOMAIN: &str = "ak:trust_domain:soland.test";
+const DEVELOPMENT_DEMO_TRUST_DOMAIN: &str = "ak:trust_domain:coland.test";
 const DEVELOPMENT_DEMO_GENESIS_CREATED_AT: &str = "2026-01-01T00:00:00Z";
 
 /// Canonical `ak.realm.create` payload for a deterministic Realm genesis.
@@ -362,9 +362,9 @@ pub fn build_realm_directory(
             development_demo_realm_id(service_did, service_id, resolved_signing_seed),
             "Arkret Demo Realm",
             // Seeded locally, not projected from an Event.
-            soland_services::events::DirectoryProvenance::LocalOnly,
+            coland_services::events::DirectoryProvenance::LocalOnly,
         );
-        demo.description = Some("Shared demo Realm served by soland".to_owned());
+        demo.description = Some("Shared demo Realm served by coland".to_owned());
         demo.public = true;
         demo.members
             .insert(DidCoreId::new("ak:did_core:web:alice.example").expect("valid principal id"));
@@ -384,16 +384,16 @@ fn development_fixture_service_identity(config: &AppConfig) -> DidCoreIdentitySt
     )
     .expect("station registration key");
     let signing_key_ref =
-        DidCoreIdentityKeyRef::new("fixture:soland:service-signing-key").expect("fixture key ref");
+        DidCoreIdentityKeyRef::new("fixture:coland:service-signing-key").expect("fixture key ref");
     DidCoreIdentityState::Ready {
         identity: LocalDidCoreIdentity {
             did: Did::new(
-                "did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:soland.local:webvh:service",
+                "did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:coland.local:webvh:service",
             )
             .expect("fixture service DID"),
             service_id: arkret_wire::project_did_to_core_id(
                     &Did::new(
-                        "did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:soland.local:webvh:service",
+                        "did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:coland.local:webvh:service",
                     )
                     .expect("fixture service DID"),
                 )
@@ -402,7 +402,7 @@ fn development_fixture_service_identity(config: &AppConfig) -> DidCoreIdentitySt
             provider: None,
             signing_key_refs: vec![signing_key_ref.clone()],
             active_signing_key_ref: signing_key_ref,
-            control_key_ref: DidCoreIdentityKeyRef::new("fixture:soland:webvh-control-key")
+            control_key_ref: DidCoreIdentityKeyRef::new("fixture:coland:webvh-control-key")
                 .expect("fixture control key ref"),
             version_id: "fixture-v1".to_owned(),
             last_verified_at: chrono::Utc::now(),
@@ -436,13 +436,13 @@ mod test_construction {
 
     use async_trait::async_trait;
     use bytes::Bytes;
+    use coland_services::governance::RuntimeSettingsPort;
+    use coland_services::jobs::RuntimeHealthPort;
+    use coland_storage::PersistenceStore;
+    use coland_storage_postgres::test_database::{TestDatabase, block_on_lease_runtime};
+    use coland_storage_postgres::{Db, PgPersistenceStore};
     use futures_util::stream::{self, BoxStream, StreamExt};
     use parking_lot::Mutex;
-    use soland_services::governance::RuntimeSettingsPort;
-    use soland_services::jobs::RuntimeHealthPort;
-    use soland_storage::PersistenceStore;
-    use soland_storage_postgres::test_database::{TestDatabase, block_on_lease_runtime};
-    use soland_storage_postgres::{Db, PgPersistenceStore};
 
     use super::*;
 
@@ -450,7 +450,7 @@ mod test_construction {
         /// Build a fixture `AppState`.
         ///
         /// A caller that already has a pool keeps it. A caller that does not
-        /// leases a real database: Soland stores through one adapter, so a
+        /// leases a real database: Coland stores through one adapter, so a
         /// fixture reaching for a second implementation would prove nothing
         /// about what production runs. The lease is owned by the persistence
         /// store, so the slot is returned when the last holder drops.
@@ -551,7 +551,7 @@ mod test_construction {
     const DEMO_REALM_ID: &str = "ak:realm:AZAySZA7XRDeJ9cO4MqaDWrJD-rqPk6Cudk7CCzsDQz1";
 
     fn seed_demo_data(persistence: &Arc<dyn PersistenceStore>) {
-        use soland_storage::{AccountRecord, RealmMetaRecord};
+        use coland_storage::{AccountRecord, RealmMetaRecord};
 
         let store = persistence.clone();
         block_on_lease_runtime(async move {
@@ -560,7 +560,7 @@ mod test_construction {
                 .accounts()
                 .put(&AccountRecord {
                     // The store assigns the primary key.
-                    pk: soland_storage::AccountPk(0),
+                    pk: coland_storage::AccountPk(0),
                     principal_id: arkret_wire::DidCoreId::new(
                         "ak:did_core:web:alice.example".to_owned(),
                     )
@@ -606,7 +606,7 @@ mod test_construction {
     fn fixture_signing_seed(config: &AppConfig, identity: &DidCoreIdentityState) -> [u8; 32] {
         config.notary_signing_key_seed.unwrap_or_else(|| {
             let mut hasher = Sha256::new();
-            hasher.update(b"soland:test-fixture-notary:");
+            hasher.update(b"coland:test-fixture-notary:");
             hasher.update(
                 identity
                     .identity()
@@ -680,7 +680,7 @@ mod test_construction {
 
     #[async_trait]
     impl RuntimeSettingsPort for NoRuntimeSettings {
-        async fn load_overrides(&self) -> soland_services::ServiceResult<Vec<(String, Value)>> {
+        async fn load_overrides(&self) -> coland_services::ServiceResult<Vec<(String, Value)>> {
             Ok(Vec::new())
         }
 
@@ -689,7 +689,7 @@ mod test_construction {
             _key: &str,
             _value: &Value,
             _updated_by: &str,
-        ) -> soland_services::ServiceResult<()> {
+        ) -> coland_services::ServiceResult<()> {
             Ok(())
         }
     }
@@ -699,7 +699,7 @@ mod test_construction {
     #[async_trait]
     impl RuntimeHealthPort for TestRuntimeHealth {
         async fn database_ready(&self) -> bool {
-            soland_storage_postgres::database_ready(self.0.pool.as_ref()).await
+            coland_storage_postgres::database_ready(self.0.pool.as_ref()).await
         }
 
         fn storage_mode(&self) -> &'static str {
@@ -1047,7 +1047,7 @@ impl AppState {
         // so we can still
         // borrow `&config` for the helper before `config` itself is
         // moved into `Self.config`.
-        let did_resolver = Arc::new(did_resolver_chain::build_soland_did_resolver(&config));
+        let did_resolver = Arc::new(did_resolver_chain::build_coland_did_resolver(&config));
         // §5 — one process-wide accepted-binding store. Building it here (not
         // per request) is what makes "second Event under the same accepted key
         // costs zero resolver calls" structural rather than incidental.
@@ -1075,7 +1075,7 @@ impl AppState {
 
         let push_target_hmac_key: [u8; 32] = {
             let mut hasher = Sha256::new();
-            hasher.update(b"soland:push-target-id:v1:");
+            hasher.update(b"coland:push-target-id:v1:");
             hasher.update(signing_seed);
             hasher.finalize().into()
         };
@@ -1119,7 +1119,7 @@ impl AppState {
             sync,
             jobs,
         } = persistence.operational_services(settings_persistence, runtime_health);
-        let service_route_store: Arc<dyn soland_storage::ServiceRouteStore> =
+        let service_route_store: Arc<dyn coland_storage::ServiceRouteStore> =
             Arc::new(persistence.clone());
         let service_route_resolver = Arc::new(ServiceRouteResolver::new(
             service_route_store.clone(),
@@ -1226,7 +1226,7 @@ impl AppState {
 
     pub(crate) fn authority(
         &self,
-    ) -> &dyn soland_services::authority_commit::AuthorityProtocolPort {
+    ) -> &dyn coland_services::authority_commit::AuthorityProtocolPort {
         self
     }
 
@@ -1282,7 +1282,7 @@ impl AppState {
     /// ServiceDescribe, registration-key, and assertion-method checks.
     pub fn cache_verified_federation_peer_document(
         &self,
-        document: soland_services::identity::DidDocumentState,
+        document: coland_services::identity::DidDocumentState,
     ) -> Result<(), String> {
         let decoded: arkret_identity::DidDocument =
             serde_json::from_value(document.did_document.clone())
@@ -1329,7 +1329,7 @@ impl AppState {
     #[doc(hidden)]
     pub fn test_install_service_route_fetcher(
         &self,
-        fetcher: Arc<dyn soland_services::service_route::ServiceRouteFetcher>,
+        fetcher: Arc<dyn coland_services::service_route::ServiceRouteFetcher>,
     ) {
         let resolver = Arc::new(ServiceRouteResolver::new(
             Arc::new(self.persistence.clone()),
@@ -1347,7 +1347,7 @@ impl AppState {
     /// to.
     ///
     /// The computation is the SDK's canonical resolver policy snapshot
-    /// (`ak.did.resolver_policy.v1`) and nothing else, so soland, flagon,
+    /// (`ak.did.resolver_policy.v1`) and nothing else, so coland, flagon,
     /// bridges, coauth and inkson derive byte-identical digests from the same
     /// policy value instead of each encoding one.
     ///
@@ -1387,7 +1387,7 @@ impl AppState {
     /// (`did-usage-and-verification.md` §5: rotation / deactivation /
     /// controller or service delegation change MUST invalidate).
     ///
-    /// Called from the single place soland learns a DID document moved —
+    /// Called from the single place coland learns a DID document moved —
     /// [`Self::cache_resolved_did_document`] — so an ordinary Event can never
     /// keep verifying against a superseded key.
     pub fn invalidate_did_bindings(&self, did: &arkret_identifiers::Did) -> usize {
@@ -1399,7 +1399,7 @@ impl AppState {
     /// snapshot **and** invalidate any binding that pinned the previous one.
     pub(crate) fn cache_resolved_did_document(
         &self,
-        record: soland_services::identity::DidDocumentState,
+        record: coland_services::identity::DidDocumentState,
     ) -> Result<arkret_identity::DidDocument, String> {
         let decoded: arkret_identity::DidDocument =
             serde_json::from_value(record.did_document.clone())
@@ -1550,7 +1550,7 @@ impl AppState {
     /// in an async context (driven from `main`); see the diesel-async
     /// conversion. Safe to call in memory mode — every store read returns an
     /// empty snapshot, so this is a no-op there.
-    pub async fn hydrate(&self) -> soland_services::ServiceResult<()> {
+    pub async fn hydrate(&self) -> coland_services::ServiceResult<()> {
         // Overlay the persisted per-key operational settings on top of the
         // boot-config seed. Only overridden keys have rows; everything else
         // keeps its env default. Per-key decode failures are logged and
@@ -1598,7 +1598,7 @@ impl AppState {
             )
             .await?;
         let mut reconciled_realms = self.realm_directory.snapshot();
-        soland_services::hydration::reconcile_hydrated_agent_memberships(
+        coland_services::hydration::reconcile_hydrated_agent_memberships(
             &mut reconciled_realms,
             &self.projections.snapshot(),
         );
@@ -1830,7 +1830,7 @@ fn verification_key_belongs_to_service(candidate: &str, service_id: &str) -> boo
 
 impl AppState {
     #[cfg(test)]
-    pub(crate) fn test_persistence(&self) -> Arc<dyn soland_storage::PersistenceStore> {
+    pub(crate) fn test_persistence(&self) -> Arc<dyn coland_storage::PersistenceStore> {
         self.persistence.shared_for_tests()
     }
 
@@ -1942,7 +1942,7 @@ impl AppState {
     #[doc(hidden)]
     pub fn test_cache_resolved_webvh_record(
         &self,
-        record: soland_services::identity::DidDocumentState,
+        record: coland_services::identity::DidDocumentState,
     ) -> Result<arkret_identity::DidDocument, String> {
         self.dids.cache_resolved_document_state(record)
     }
@@ -1959,7 +1959,7 @@ struct RuntimeHydrationProjectionAdapter;
 impl HydrationProjectionAdapter for RuntimeHydrationProjectionAdapter {
     fn operation_from_canonical_record(
         &self,
-        record: &soland_services::events::AcceptedEvent,
+        record: &coland_services::events::AcceptedEvent,
     ) -> Option<arkret_event_draft::ProjectedEventOperation> {
         crate::routing::events::event_log::projection_operation_from_canonical_record(record)
     }
@@ -1979,9 +1979,9 @@ mod hydration_ordinary_realm;
 
 #[cfg(test)]
 mod committed_event_hydration_tests {
-    use soland_storage::{EventProjectionStoreRegistry, PersistenceStore, QueuedEventStatus};
-    use soland_storage_postgres::PgPersistenceStore;
-    use soland_storage_postgres::test_database::TestDatabase;
+    use coland_storage::{EventProjectionStoreRegistry, PersistenceStore, QueuedEventStatus};
+    use coland_storage_postgres::PgPersistenceStore;
+    use coland_storage_postgres::test_database::TestDatabase;
 
     use super::*;
 

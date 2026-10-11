@@ -10,13 +10,13 @@ use arkret_models_integration::{
     ManagedActorPrincipalSignerEvidence,
 };
 use arkret_wire::{CommitStreamHead, CommitStreamRef, DidUrl, Hash, NonEmptyJsonObject};
+use coland_storage::{
+    AppletAuthoringUnitWrite, AppletResolutionAttester, PersistenceError, PersistenceResult,
+};
 use diesel::sql_types::{Jsonb, Text, Timestamptz};
 use diesel::{OptionalExtension, QueryableByName, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::{Value, json};
-use soland_storage::{
-    AppletAuthoringUnitWrite, AppletResolutionAttester, PersistenceError, PersistenceResult,
-};
 
 fn corrupt(message: impl Into<String>) -> PersistenceError {
     PersistenceError::Internal(message.into())
@@ -56,7 +56,7 @@ pub(crate) async fn materialize_context_in_connection(
     attester: &AppletResolutionAttester,
 ) -> PersistenceResult<AppletManagedActorAuthoringContext> {
     let committed_request = match &input.request {
-        soland_storage::AppletAdmissionRequest::Managed(request) => request,
+        coland_storage::AppletAdmissionRequest::Managed(request) => request,
         _ => {
             return Err(corrupt(
                 "Service-only installation has no managed authoring completion",

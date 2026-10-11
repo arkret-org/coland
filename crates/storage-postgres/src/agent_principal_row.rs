@@ -1,9 +1,9 @@
 use arkret_identifiers::{Did, DidCoreId, project_did_to_core_id};
 use arkret_wire::{DidUrl, OpaqueLocalId};
 use chrono::{DateTime, Utc};
+use coland_storage::{AccountPk, AgentPrincipalRecord, PersistenceError};
 use diesel::{AsChangeset, Insertable, Queryable, Selectable};
 use serde_json::Value;
-use soland_storage::{AccountPk, AgentPrincipalRecord, PersistenceError};
 use uuid::Uuid;
 
 use crate::schema::agent_principals;

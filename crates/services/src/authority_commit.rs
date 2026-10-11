@@ -29,15 +29,15 @@ use arkret_wire::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ed25519_dalek::SigningKey;
-pub use mls_roster::{MlsRosterAuthorityApplicationRead, MlsRosterAuthorityPreflight};
-use serde::Serialize;
-use soland_storage::{
+use coland_storage::{
     AuthorityCommitStore, AuthorityCommitTransaction, AuthorityCommitWriteOutcome,
     CurrentRealmAuthority, ForwardAttemptStatus, OrdinaryRealmBootstrapCommitOutcome,
     OrdinaryRealmBootstrapCommitUnit, PcrGenesisCommitOutcome, PcrGenesisCommitUnit,
     QueuedEventRecord, SelfProducerCommitGuard,
 };
+use ed25519_dalek::SigningKey;
+pub use mls_roster::{MlsRosterAuthorityApplicationRead, MlsRosterAuthorityPreflight};
+use serde::Serialize;
 
 use crate::persistence::PersistenceHandle;
 use crate::{ServiceError, ServiceResult};
@@ -116,7 +116,7 @@ struct RealmAuthorityAssertionUnsignedBody<'a> {
 }
 
 pub fn build_signed_realm_state_snapshot(
-    material: &soland_storage::RealmStateSnapshotMaterial,
+    material: &coland_storage::RealmStateSnapshotMaterial,
     verification_method: DidUrl,
     signing_key: &SigningKey,
     created_at: DateTime<Utc>,
@@ -297,7 +297,7 @@ fn ensure_commit_time_admits_event(
     if !payload.admits_commit_at(committed_at) {
         return Err(ServiceError::Conflict(format!(
             "{}: ak.agent.action_approve covering committed_at is after expires_at",
-            soland_storage::ConflictCode::FailedPrecondition.as_str()
+            coland_storage::ConflictCode::FailedPrecondition.as_str()
         )));
     }
     Ok(())
@@ -469,7 +469,7 @@ impl AuthorityCommitApplication {
     pub async fn prepare_service_signer_fact(
         &self,
         event: &Event,
-        guard: &soland_storage::AppletEventProducerGuard,
+        guard: &coland_storage::AppletEventProducerGuard,
         at: DateTime<Utc>,
     ) -> ServiceResult<arkret_models_collaboration::authority_commit::ServiceHistoricalSignerFact>
     {
@@ -532,7 +532,7 @@ impl AuthorityCommitApplication {
     pub async fn accepted_realm_roster(
         &self,
         realm_id: &arkret_wire::RealmId,
-    ) -> ServiceResult<Option<soland_storage::AcceptedRealmRoster>> {
+    ) -> ServiceResult<Option<coland_storage::AcceptedRealmRoster>> {
         Ok(self.store().accepted_realm_roster(realm_id).await?)
     }
 
@@ -704,7 +704,7 @@ impl AuthorityCommitApplication {
         verification_method: DidUrl,
         signing_key: &SigningKey,
         committed_at: DateTime<Utc>,
-    ) -> ServiceResult<soland_storage::DirectConversationFoundingCommitUnit> {
+    ) -> ServiceResult<coland_storage::DirectConversationFoundingCommitUnit> {
         let mut previous_head: Option<CommitStreamHead> = None;
         let mut transactions = Vec::with_capacity(4);
         for submitted in &submission.events {
@@ -740,7 +740,7 @@ impl AuthorityCommitApplication {
         let transactions: [AuthorityCommitTransaction; 4] = transactions
             .try_into()
             .map_err(|_| ServiceError::Internal("four founding Commits expected".to_owned()))?;
-        Ok(soland_storage::DirectConversationFoundingCommitUnit {
+        Ok(coland_storage::DirectConversationFoundingCommitUnit {
             submission,
             transactions,
         })
@@ -749,10 +749,10 @@ impl AuthorityCommitApplication {
     /// Admit a prepared Direct Conversation founding unit in one transaction.
     pub async fn admit_self_direct_conversation_founding_unit(
         &self,
-        unit: &soland_storage::DirectConversationFoundingCommitUnit,
+        unit: &coland_storage::DirectConversationFoundingCommitUnit,
         producer_guards: &[SelfProducerCommitGuard; 4],
         queued_at: DateTime<Utc>,
-    ) -> ServiceResult<soland_storage::DirectConversationFoundingCommitOutcome> {
+    ) -> ServiceResult<coland_storage::DirectConversationFoundingCommitOutcome> {
         Ok(self
             .store()
             .admit_self_direct_conversation_founding_unit(unit, producer_guards, queued_at)
@@ -761,7 +761,7 @@ impl AuthorityCommitApplication {
 
     pub async fn materialize_peer_direct_conversation_founding_unit(
         &self,
-        unit: &soland_storage::DirectConversationFoundingCommitUnit,
+        unit: &coland_storage::DirectConversationFoundingCommitUnit,
         evidence: &arkret_models_collaboration::objects::direct_conversation::DirectConversationFoundingAuthorityEvidence,
         local_station: &arkret_wire::DidCoreId,
         received_at: DateTime<Utc>,
@@ -783,14 +783,14 @@ impl AuthorityCommitApplication {
     pub async fn direct_conversation_admission(
         &self,
         event: &Event,
-    ) -> ServiceResult<soland_storage::DirectConversationAdmissionCut> {
+    ) -> ServiceResult<coland_storage::DirectConversationAdmissionCut> {
         Ok(self.store().direct_conversation_admission(event).await?)
     }
 
     pub async fn direct_conversation_pending_peer_claim_query(
         &self,
         realm_id: &arkret_wire::RealmId,
-    ) -> ServiceResult<Option<soland_storage::DirectConversationPendingPeerClaimQuery>> {
+    ) -> ServiceResult<Option<coland_storage::DirectConversationPendingPeerClaimQuery>> {
         Ok(self
             .store()
             .direct_conversation_pending_peer_claim_query(realm_id)
@@ -1247,8 +1247,8 @@ impl AuthorityCommitApplication {
     pub async fn prepare_self_mls_transaction(
         &self,
         event: &Event,
-        mls_state: soland_storage::MlsStateInstallation,
-        welcomes: Vec<soland_storage::VerifiedMlsWelcome>,
+        mls_state: coland_storage::MlsStateInstallation,
+        welcomes: Vec<coland_storage::VerifiedMlsWelcome>,
         local_service_id: &DidCoreId,
         verification_method: DidUrl,
         signing_key: &SigningKey,
@@ -1274,8 +1274,8 @@ impl AuthorityCommitApplication {
     pub async fn prepare_self_mls_transaction_with_signer_fact(
         &self,
         event: &Event,
-        mls_state: soland_storage::MlsStateInstallation,
-        welcomes: Vec<soland_storage::VerifiedMlsWelcome>,
+        mls_state: coland_storage::MlsStateInstallation,
+        welcomes: Vec<coland_storage::VerifiedMlsWelcome>,
         local_service_id: &DidCoreId,
         verification_method: DidUrl,
         signing_key: &SigningKey,
@@ -1352,7 +1352,7 @@ impl AuthorityCommitApplication {
             if record.event != *event {
                 return Err(ServiceError::Conflict(format!(
                     "{}: event_id is already committed with different canonical content",
-                    soland_storage::ConflictCode::DuplicateConflict
+                    coland_storage::ConflictCode::DuplicateConflict
                 )));
             }
             return Ok(AuthorityEventAdmissionOutcome::Duplicate(record.commit));
@@ -1378,10 +1378,10 @@ impl AuthorityCommitApplication {
                 .admit_accepted_device_authorization(&transaction, committed_at)
                 .await?
             {
-                soland_storage::AcceptedDeviceAuthorizationOutcome::Committed(commit) => {
+                coland_storage::AcceptedDeviceAuthorizationOutcome::Committed(commit) => {
                     AuthorityEventAdmissionOutcome::Committed(commit)
                 }
-                soland_storage::AcceptedDeviceAuthorizationOutcome::Duplicate(commit) => {
+                coland_storage::AcceptedDeviceAuthorizationOutcome::Duplicate(commit) => {
                     AuthorityEventAdmissionOutcome::Duplicate(commit)
                 }
             },
@@ -1403,7 +1403,7 @@ impl AuthorityCommitApplication {
     ) -> ServiceResult<
         Option<(
             arkret_wire::EventId,
-            Option<soland_storage::AgentSidecarContextRecord>,
+            Option<coland_storage::AgentSidecarContextRecord>,
         )>,
     > {
         Ok(self
@@ -1466,7 +1466,7 @@ impl AuthorityCommitApplication {
         event: &Event,
         local_service_id: &arkret_wire::DidCoreId,
         peer: &arkret_wire::DidCoreId,
-        witnesses: &[soland_storage::RealmFanoutAuthorityWitness],
+        witnesses: &[coland_storage::RealmFanoutAuthorityWitness],
         at: DateTime<Utc>,
     ) -> ServiceResult<bool> {
         Ok(self
@@ -1478,8 +1478,8 @@ impl AuthorityCommitApplication {
     /// Store one verified committed replica (`federation.md` §4.1.1).
     pub async fn install_committed_replica(
         &self,
-        replica: &soland_storage::CommittedReplica,
-    ) -> ServiceResult<soland_storage::CommittedReplicaOutcome> {
+        replica: &coland_storage::CommittedReplica,
+    ) -> ServiceResult<coland_storage::CommittedReplicaOutcome> {
         Ok(self.store().install_committed_replica(replica).await?)
     }
 
@@ -1489,9 +1489,9 @@ impl AuthorityCommitApplication {
         event: &arkret_wire::Event,
         commit: &arkret_wire::RealmCommit,
         genesis_event_ref: Option<&arkret_wire::EventId>,
-        welcomes: &[soland_storage::VerifiedMlsWelcome],
+        welcomes: &[coland_storage::VerifiedMlsWelcome],
         at: chrono::DateTime<chrono::Utc>,
-    ) -> ServiceResult<soland_storage::CommittedReplicaOutcome> {
+    ) -> ServiceResult<coland_storage::CommittedReplicaOutcome> {
         Ok(self
             .store()
             .queue_replicated_welcomes(event, commit, genesis_event_ref, welcomes, at)
@@ -1501,28 +1501,28 @@ impl AuthorityCommitApplication {
     /// Store one verified withheld Commit as a continuity-only chain node.
     pub async fn install_committed_chain_node(
         &self,
-        node: &soland_storage::CommittedChainNode,
-    ) -> ServiceResult<soland_storage::CommittedReplicaOutcome> {
+        node: &coland_storage::CommittedChainNode,
+    ) -> ServiceResult<coland_storage::CommittedReplicaOutcome> {
         Ok(self.store().install_committed_chain_node(node).await?)
     }
 
     pub async fn replica_stream_anchor(
         &self,
         realm_id: &arkret_wire::RealmId,
-    ) -> ServiceResult<Option<soland_storage::ReplicaStreamAnchor>> {
+    ) -> ServiceResult<Option<coland_storage::ReplicaStreamAnchor>> {
         Ok(self.store().replica_stream_anchor(realm_id).await?)
     }
 
     pub async fn pending_franking_proofs(
         &self,
         receiver: &arkret_wire::DidCoreId,
-    ) -> ServiceResult<Vec<soland_storage::PendingFrankingProof>> {
+    ) -> ServiceResult<Vec<coland_storage::PendingFrankingProof>> {
         Ok(self.store().pending_franking_proofs(receiver).await?)
     }
 
     pub async fn fix_franking_proof(
         &self,
-        prepared: &soland_storage::PreparedFrankingProof,
+        prepared: &coland_storage::PreparedFrankingProof,
     ) -> ServiceResult<arkret_wire::Event> {
         Ok(self.store().fix_franking_proof(prepared).await?)
     }
@@ -1542,7 +1542,7 @@ impl AuthorityCommitApplication {
     pub async fn replica_anchor_for_stream(
         &self,
         stream: &arkret_wire::CommitStreamRef,
-    ) -> ServiceResult<Option<soland_storage::ReplicaStreamAnchor>> {
+    ) -> ServiceResult<Option<coland_storage::ReplicaStreamAnchor>> {
         Ok(self.store().replica_anchor_for_stream(stream).await?)
     }
 
@@ -1613,7 +1613,7 @@ impl AuthorityCommitApplication {
     /// typed current (`federation.md` §4.1.1).
     pub async fn install_replica_anchor(
         &self,
-        install: &soland_storage::ReplicaAnchorInstall,
+        install: &coland_storage::ReplicaAnchorInstall,
     ) -> ServiceResult<()> {
         Ok(self.store().install_replica_anchor(install).await?)
     }
@@ -1630,7 +1630,7 @@ impl AuthorityCommitApplication {
         realm_id: &arkret_wire::RealmId,
         account: &arkret_wire::AccountId,
         membership_commit_id: &RealmCommitId,
-    ) -> ServiceResult<Option<soland_storage::RealmStateSnapshotMaterial>> {
+    ) -> ServiceResult<Option<coland_storage::RealmStateSnapshotMaterial>> {
         Ok(self
             .store()
             .member_station_bootstrap_material(realm_id, account, membership_commit_id)
@@ -1659,14 +1659,14 @@ impl AuthorityCommitApplication {
     pub async fn realm_stream_heads(
         &self,
         realm_id: &arkret_wire::RealmId,
-    ) -> ServiceResult<Option<soland_storage::RealmStreamFrontier>> {
+    ) -> ServiceResult<Option<coland_storage::RealmStreamFrontier>> {
         Ok(self.store().realm_stream_heads(realm_id).await?)
     }
 
     pub async fn committed_event(
         &self,
         event_id: &arkret_wire::EventId,
-    ) -> ServiceResult<Option<soland_storage::CommittedEventRecord>> {
+    ) -> ServiceResult<Option<coland_storage::CommittedEventRecord>> {
         Ok(self.store().committed_event(event_id).await?)
     }
 
@@ -1702,22 +1702,22 @@ impl AuthorityCommitApplication {
 
     pub async fn signal_scope_authority(
         &self,
-        query: soland_storage::SignalScopeAuthorityQuery<'_>,
-    ) -> ServiceResult<Option<soland_storage::SignalScopeAuthority>> {
+        query: coland_storage::SignalScopeAuthorityQuery<'_>,
+    ) -> ServiceResult<Option<coland_storage::SignalScopeAuthority>> {
         Ok(self.store().signal_scope_authority(query).await?)
     }
 
     pub async fn committed_event_by_commit_id(
         &self,
         commit_id: &RealmCommitId,
-    ) -> ServiceResult<Option<soland_storage::CommittedEventRecord>> {
+    ) -> ServiceResult<Option<coland_storage::CommittedEventRecord>> {
         Ok(self.store().committed_event_by_commit_id(commit_id).await?)
     }
 
     pub async fn current_mimi_room_binding(
         &self,
         room_uri: &arkret_wire::MimiRoomUri,
-    ) -> ServiceResult<Option<soland_storage::MimiRoomBindingCurrentRecord>> {
+    ) -> ServiceResult<Option<coland_storage::MimiRoomBindingCurrentRecord>> {
         Ok(self.store().current_mimi_room_binding(room_uri).await?)
     }
 
@@ -1747,7 +1747,7 @@ impl AuthorityCommitApplication {
     pub async fn realm_state_snapshot_material(
         &self,
         realm_id: &arkret_wire::RealmId,
-    ) -> ServiceResult<Option<soland_storage::RealmStateSnapshotMaterial>> {
+    ) -> ServiceResult<Option<coland_storage::RealmStateSnapshotMaterial>> {
         Ok(self.store().realm_state_snapshot_material(realm_id).await?)
     }
 
@@ -1755,7 +1755,7 @@ impl AuthorityCommitApplication {
         &self,
         realm_id: &arkret_wire::RealmId,
         account: &arkret_wire::AccountId,
-    ) -> ServiceResult<Option<soland_storage::RealmStateSnapshotMaterial>> {
+    ) -> ServiceResult<Option<coland_storage::RealmStateSnapshotMaterial>> {
         Ok(self
             .store()
             .realm_state_snapshot_material_for_account(realm_id, account)
@@ -1780,7 +1780,7 @@ impl AuthorityCommitApplication {
         account: &arkret_wire::AccountId,
         pair_key: &arkret_wire::Hash,
         participants: &[arkret_wire::ActorId; 2],
-    ) -> ServiceResult<Option<soland_storage::DirectConversationReplicaCut>> {
+    ) -> ServiceResult<Option<coland_storage::DirectConversationReplicaCut>> {
         Ok(self
             .store()
             .direct_conversation_replica_cut(realm_id, account, pair_key, participants)
@@ -1831,14 +1831,14 @@ impl AuthorityCommitApplication {
         signing_key: &SigningKey,
         created_at: DateTime<Utc>,
     ) -> ServiceResult<Option<RealmStateSnapshot>> {
-        let sign = |material: &soland_storage::RealmStateSnapshotMaterial| {
+        let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
             build_signed_realm_state_snapshot(
                 material,
                 verification_method.clone(),
                 signing_key,
                 created_at,
             )
-            .map_err(|error| soland_storage::PersistenceError::Internal(error.to_string()))
+            .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
         };
         Ok(self
             .store()
@@ -1854,7 +1854,7 @@ impl AuthorityCommitApplication {
         issuer: &DidCoreId,
         snapshot: &RealmStateSnapshot,
     ) -> ServiceResult<()> {
-        soland_storage::enforce_inline_realm_state_snapshot_capacity(snapshot)?;
+        coland_storage::enforce_inline_realm_state_snapshot_capacity(snapshot)?;
         Ok(self
             .store()
             .install_verified_account_snapshot(account, issuer, snapshot)
@@ -1878,24 +1878,24 @@ impl AuthorityCommitApplication {
     }
 
     /// Freeze one Account Realm-stream window at a single proved cut; see
-    /// [`soland_storage::AuthorityCommitStore::freeze_account_realm_window`].
+    /// [`coland_storage::AuthorityCommitStore::freeze_account_realm_window`].
     /// The frozen head is issued to the Account with the Station's current
     /// service method, exactly like `/head`.
     pub async fn freeze_account_realm_window(
         &self,
-        request: &soland_storage::AccountRealmWindowRequest,
+        request: &coland_storage::AccountRealmWindowRequest,
         verification_method: &DidUrl,
         signing_key: &SigningKey,
         created_at: DateTime<Utc>,
-    ) -> ServiceResult<Option<soland_storage::AccountRealmWindow>> {
-        let sign = |material: &soland_storage::RealmStateSnapshotMaterial| {
+    ) -> ServiceResult<Option<coland_storage::AccountRealmWindow>> {
+        let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
             build_signed_realm_state_snapshot(
                 material,
                 verification_method.clone(),
                 signing_key,
                 created_at,
             )
-            .map_err(|error| soland_storage::PersistenceError::Internal(error.to_string()))
+            .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
         };
         Ok(self
             .store()
@@ -1943,13 +1943,13 @@ impl AuthorityCommitApplication {
 
     /// `ak.self.committed_event.read.scan.v1`: authorization, readable
     /// interval, and page at one governing read cut. See
-    /// [`soland_storage::AuthorityCommitStore::scan_stream_for_account`].
+    /// [`coland_storage::AuthorityCommitStore::scan_stream_for_account`].
     pub async fn scan_stream_for_account(
         &self,
         request: &StreamScanRequest,
         account: &arkret_wire::AccountId,
         issuer: &DidCoreId,
-    ) -> ServiceResult<soland_storage::AccountStreamScan> {
+    ) -> ServiceResult<coland_storage::AccountStreamScan> {
         request.validate().map_err(|error| {
             crate::ServiceError::SchemaViolation(format!("invalid stream scan request: {error}"))
         })?;
@@ -1957,7 +1957,7 @@ impl AuthorityCommitApplication {
             .store()
             .scan_stream_for_account(request, account, issuer)
             .await?;
-        if let soland_storage::AccountStreamScan::Page(outcome) = &scan {
+        if let coland_storage::AccountStreamScan::Page(outcome) = &scan {
             outcome.validate_for_request(request).map_err(|error| {
                 crate::ServiceError::Internal(format!("invalid stream scan outcome: {error}"))
             })?;
@@ -1967,7 +1967,7 @@ impl AuthorityCommitApplication {
 
     /// `ak.peer.committed_event.read.scan.v1`: the authenticated peer's
     /// replication right, interval, and page at one governing read cut. See
-    /// [`soland_storage::AuthorityCommitStore::scan_stream_for_peer`].
+    /// [`coland_storage::AuthorityCommitStore::scan_stream_for_peer`].
     /// The committed Event `event_id` when `peer` holds the replication right
     /// on it at this governing cut (`federation.md` §4.1.1).
     pub async fn committed_event_for_peer(
@@ -1990,7 +1990,7 @@ impl AuthorityCommitApplication {
         request: &arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialRequestBody,
         issuer: &DidCoreId,
         source_peer: Option<&DidCoreId>,
-    ) -> ServiceResult<soland_storage::MlsMemberGroupStateMaterialRead> {
+    ) -> ServiceResult<coland_storage::MlsMemberGroupStateMaterialRead> {
         Ok(self
             .store()
             .mls_member_group_state_material_read(request, issuer, source_peer)
@@ -2001,7 +2001,7 @@ impl AuthorityCommitApplication {
     /// accepted MLS Commit, Welcome and consumed Proposal at one PG cut.
     pub async fn install_mls_add_authority_attestation(
         &self,
-        verified: &soland_storage::VerifiedMlsAddAuthorityAttestation,
+        verified: &coland_storage::VerifiedMlsAddAuthorityAttestation,
         issuer: &DidCoreId,
     ) -> ServiceResult<arkret_models_collaboration::mls_roster_authority::MlsAttestAddOutcome> {
         Ok(self
@@ -2049,13 +2049,13 @@ impl AuthorityCommitApplication {
 
     /// `ak.self.committed_event.resource.get.v1` on an ordinary Realm's Realm
     /// stream. See
-    /// [`soland_storage::AuthorityCommitStore::committed_event_for_member`].
+    /// [`coland_storage::AuthorityCommitStore::committed_event_for_member`].
     pub async fn committed_event_for_member(
         &self,
         event_id: &arkret_wire::EventId,
         caller: &arkret_wire::ActorId,
         issuer: &DidCoreId,
-    ) -> ServiceResult<soland_storage::MemberCommittedEventRead> {
+    ) -> ServiceResult<coland_storage::MemberCommittedEventRead> {
         Ok(self
             .store()
             .committed_event_for_member(event_id, caller, issuer)
@@ -2067,7 +2067,7 @@ impl AuthorityCommitApplication {
         request: &StreamScanRequest,
         peer: &DidCoreId,
         issuer: &DidCoreId,
-    ) -> ServiceResult<soland_storage::PeerStreamScan> {
+    ) -> ServiceResult<coland_storage::PeerStreamScan> {
         request.validate().map_err(|error| {
             crate::ServiceError::SchemaViolation(format!("invalid stream scan request: {error}"))
         })?;
@@ -2075,7 +2075,7 @@ impl AuthorityCommitApplication {
             .store()
             .scan_stream_for_peer(request, peer, issuer)
             .await?;
-        if let soland_storage::PeerStreamScan::Page(outcome) = &scan {
+        if let coland_storage::PeerStreamScan::Page(outcome) = &scan {
             outcome.validate_for_request(request).map_err(|error| {
                 crate::ServiceError::Internal(format!("invalid stream scan outcome: {error}"))
             })?;
@@ -2085,18 +2085,18 @@ impl AuthorityCommitApplication {
 
     /// `ak.self.realm.read.streams.v1`: stream set, heads and floors at one
     /// governing read cut. See
-    /// [`soland_storage::AuthorityCommitStore::list_realm_streams_for_account`].
+    /// [`coland_storage::AuthorityCommitStore::list_realm_streams_for_account`].
     pub async fn list_realm_streams_for_account(
         &self,
         realm_id: &arkret_wire::RealmId,
         account: &arkret_wire::AccountId,
         issuer: &DidCoreId,
-    ) -> ServiceResult<soland_storage::AccountRealmStreamList> {
+    ) -> ServiceResult<coland_storage::AccountRealmStreamList> {
         let listing = self
             .store()
             .list_realm_streams_for_account(realm_id, account, issuer)
             .await?;
-        if let soland_storage::AccountRealmStreamList::Listed(streams) = &listing {
+        if let coland_storage::AccountRealmStreamList::Listed(streams) = &listing {
             arkret_wire::RealmStreamList {
                 realm_id: realm_id.clone(),
                 streams: streams.clone(),
@@ -2116,12 +2116,12 @@ impl AuthorityCommitApplication {
         realm_id: &arkret_wire::RealmId,
         account: &arkret_wire::AccountId,
         issuer: &DidCoreId,
-    ) -> ServiceResult<soland_storage::AccountRealmStreamAuthorizationCut> {
+    ) -> ServiceResult<coland_storage::AccountRealmStreamAuthorizationCut> {
         let cut = self
             .store()
             .realm_stream_subscription_cut(realm_id, account, issuer)
             .await?;
-        if let soland_storage::AccountRealmStreamList::Listed(streams) = &cut.listing {
+        if let coland_storage::AccountRealmStreamList::Listed(streams) = &cut.listing {
             arkret_wire::RealmStreamList {
                 realm_id: realm_id.clone(),
                 streams: streams.clone(),
@@ -2151,7 +2151,7 @@ impl AuthorityCommitApplication {
         request: &ExactCurrentResultsReadRequestBody,
         account: &arkret_wire::AccountId,
         issuer: &DidCoreId,
-    ) -> ServiceResult<soland_storage::SelfExactCurrentRead<ExactCurrentResultsReadOutcome>> {
+    ) -> ServiceResult<coland_storage::SelfExactCurrentRead<ExactCurrentResultsReadOutcome>> {
         request.validate().map_err(|error| {
             crate::ServiceError::SchemaViolation(format!(
                 "invalid exact current-result request: {error}"
@@ -2161,7 +2161,7 @@ impl AuthorityCommitApplication {
             .store()
             .exact_current_result_for_account(request, account, issuer)
             .await?;
-        if let soland_storage::SelfExactCurrentRead::Answer(outcome) = &read {
+        if let coland_storage::SelfExactCurrentRead::Answer(outcome) = &read {
             let generation = match outcome {
                 ExactCurrentResultsReadOutcome::Present {
                     governance_generation,
@@ -2189,12 +2189,12 @@ impl AuthorityCommitApplication {
         request: &StrandWatchCurrentRequestBody,
         account: &arkret_wire::AccountId,
         issuer: &DidCoreId,
-    ) -> ServiceResult<soland_storage::SelfExactCurrentRead<StrandWatchCurrentOutcome>> {
+    ) -> ServiceResult<coland_storage::SelfExactCurrentRead<StrandWatchCurrentOutcome>> {
         let read = self
             .store()
             .strand_watch_current_for_account(request, account, issuer)
             .await?;
-        if let soland_storage::SelfExactCurrentRead::Answer(outcome) = &read {
+        if let coland_storage::SelfExactCurrentRead::Answer(outcome) = &read {
             outcome.validate_for_request(request).map_err(|error| {
                 crate::ServiceError::Internal(format!("invalid watch-current outcome: {error}"))
             })?;
@@ -2209,7 +2209,7 @@ impl AuthorityCommitApplication {
         realm_id: &arkret_wire::RealmId,
         account: &arkret_wire::AccountId,
         issuer: &DidCoreId,
-    ) -> ServiceResult<soland_storage::MediaServiceAnchorRead> {
+    ) -> ServiceResult<coland_storage::MediaServiceAnchorRead> {
         Ok(self
             .store()
             .media_service_anchor_for_account(realm_id, account, issuer)
@@ -2314,7 +2314,7 @@ impl AuthorityCommitApplication {
         }
         Err(ServiceError::Conflict(format!(
             "{}: Realm authority kept changing while building the bundle",
-            soland_storage::ConflictCode::TemporarilyUnavailable
+            coland_storage::ConflictCode::TemporarilyUnavailable
         )))
     }
 
@@ -2700,7 +2700,7 @@ pub trait AuthorityProtocolPort: Send + Sync {
         &self,
         account: &arkret_wire::AccountId,
         request: StreamScanRequest,
-    ) -> ServiceResult<soland_storage::AccountStreamScan>;
+    ) -> ServiceResult<coland_storage::AccountStreamScan>;
 
     /// `ak.peer.committed_event.read.scan.v1` for the authenticated peer
     /// Station; its identity comes only from the verified transport.
@@ -2708,7 +2708,7 @@ pub trait AuthorityProtocolPort: Send + Sync {
         &self,
         peer: &AuthenticatedPeerContext,
         request: StreamScanRequest,
-    ) -> ServiceResult<soland_storage::PeerStreamScan>;
+    ) -> ServiceResult<coland_storage::PeerStreamScan>;
 
     async fn authority_bundle(
         &self,
@@ -2819,7 +2819,7 @@ mod tests {
         let stream_ref = arkret_wire::CommitStreamRef::Realm {
             realm_id: realm_id.clone(),
         };
-        let material = soland_storage::RealmStateSnapshotMaterial {
+        let material = coland_storage::RealmStateSnapshotMaterial {
             realm_id: realm_id.clone(),
             governance_generation: 4,
             visible_stream_heads: vec![arkret_wire::CommitStreamHead {

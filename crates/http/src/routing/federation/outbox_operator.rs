@@ -7,9 +7,9 @@
 //! what this module provides:
 //!
 //! ```text
-//! soland-federation-outbox list [--state <state>] [--dead-letters] [--limit N]
-//! soland-federation-outbox inspect <outbox-id|dead-letter-id>
-//! soland-federation-outbox requeue <dead-letter-id> --operator <did> --reason <text>
+//! coland-federation-outbox list [--state <state>] [--dead-letters] [--limit N]
+//! coland-federation-outbox inspect <outbox-id|dead-letter-id>
+//! coland-federation-outbox requeue <dead-letter-id> --operator <did> --reason <text>
 //! ```
 //!
 //! A requeue never resurrects the old row. It re-validates the target, mints a
@@ -21,14 +21,14 @@
 //!
 //! No HTTP surface is exposed. Adding one would require a canonical operation
 //! and an `/_arkret/...` binding in `arkret-spec` first; a private
-//! `/_soland/...` admin route is not permitted.
+//! `/_coland/...` admin route is not permitted.
 
-use serde::Serialize;
-use soland_services::federation::{
+use coland_services::federation::{
     FederationDeadLetter, FederationDeliveryRecord, PendingFederationDelivery,
     RequeueFederationDeadLetterCommand,
 };
-use soland_storage::FederationOutboxState;
+use coland_storage::FederationOutboxState;
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::state::AppState;

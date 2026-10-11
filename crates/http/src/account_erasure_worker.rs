@@ -115,9 +115,9 @@ pub async fn ensure_intent(
     let created_at = Utc::now();
     state
         .jobs()
-        .store_idempotency_record(soland_services::jobs::IdempotencyState {
+        .store_idempotency_record(coland_services::jobs::IdempotencyState {
             authenticated_actor: arkret_wire::ActorId::service(principal_idempotency_id),
-            operation_id: soland_services::jobs::INTERNAL_IDEMPOTENCY_OPERATION.to_owned(),
+            operation_id: coland_services::jobs::INTERNAL_IDEMPOTENCY_OPERATION.to_owned(),
             idempotency_key: key,
             request_hash,
             response_status: 202,
@@ -137,9 +137,9 @@ async fn store_execution(
 ) -> Result<(), AppError> {
     state
         .jobs()
-        .store_idempotency_record(soland_services::jobs::IdempotencyState {
+        .store_idempotency_record(coland_services::jobs::IdempotencyState {
             authenticated_actor: arkret_wire::ActorId::service(execution_principal_id(state)),
-            operation_id: soland_services::jobs::INTERNAL_IDEMPOTENCY_OPERATION.to_owned(),
+            operation_id: coland_services::jobs::INTERNAL_IDEMPOTENCY_OPERATION.to_owned(),
             idempotency_key: execution_key(&execution.triggering_status_record_id, execution.state),
             request_hash: execution_hash(execution)?,
             response_status: if execution.state == ExecutionState::Pending {

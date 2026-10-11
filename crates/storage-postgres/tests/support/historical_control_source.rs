@@ -2,10 +2,10 @@
 //! This helper prepares material only; production admission decides and freezes it.
 use arkret_wire::{AccountId, DeviceId, Did, DidCoreId, DidUrl, EventId};
 use chrono::{DateTime, Duration, Utc};
+use coland_storage::AuthorityCommitStore;
+use coland_storage_postgres::{PgAuthorityCommitStore, PgPool};
 use ed25519_dalek::SigningKey;
 use rand_core::SeedableRng;
-use soland_storage::AuthorityCommitStore;
-use soland_storage_postgres::{PgAuthorityCommitStore, PgPool};
 
 #[derive(Clone)]
 pub struct HistoricalControlStation {
@@ -67,7 +67,7 @@ impl HistoricalControlStation {
     pub async fn stage(
         &self,
         pool: &PgPool,
-        transaction: &soland_storage::AuthorityCommitTransaction,
+        transaction: &coland_storage::AuthorityCommitTransaction,
         controller: &AccountId,
         device: &DeviceId,
         authorization: &EventId,
@@ -83,8 +83,8 @@ impl HistoricalControlStation {
             }
         }
         assert_eq!(
-            soland_storage::DeviceRevocationStore::pcr_device_admission(
-                &soland_storage_postgres::PgDeviceRevocationStore { pool: pool.clone() },
+            coland_storage::DeviceRevocationStore::pcr_device_admission(
+                &coland_storage_postgres::PgDeviceRevocationStore { pool: pool.clone() },
                 controller,
                 device,
                 transaction.commit.committed_at
@@ -177,7 +177,7 @@ pub fn register_device(account: &AccountId, device: &DeviceId, authorization: &E
         authorization.clone(),
     );
 }
-pub async fn stage_registered(pool: &PgPool, tx: &soland_storage::AuthorityCommitTransaction) {
+pub async fn stage_registered(pool: &PgPool, tx: &coland_storage::AuthorityCommitTransaction) {
     let producer = tx
         .event
         .human_device_producer()
@@ -210,18 +210,18 @@ pub async fn stage_registered(pool: &PgPool, tx: &soland_storage::AuthorityCommi
         .await;
 }
 pub async fn admit_control(
-    store: &impl soland_storage::ActorProfileStore,
+    store: &impl coland_storage::ActorProfileStore,
     pool: &PgPool,
-    write: soland_storage::AgentControlAdmissionWrite,
-) -> soland_storage::PersistenceResult<soland_storage::AgentControlAdmissionOutcome> {
+    write: coland_storage::AgentControlAdmissionWrite,
+) -> coland_storage::PersistenceResult<coland_storage::AgentControlAdmissionOutcome> {
     stage_registered(pool, &write.commit).await;
     store.admit_agent_control_event(write).await
 }
 pub async fn admit_genesis(
-    store: &impl soland_storage::ActorProfileStore,
+    store: &impl coland_storage::ActorProfileStore,
     pool: &PgPool,
-    write: soland_storage::AgentPcrGenesisAdmissionWrite,
-) -> soland_storage::PersistenceResult<soland_storage::AgentPcrGenesisAdmissionOutcome> {
+    write: coland_storage::AgentPcrGenesisAdmissionWrite,
+) -> coland_storage::PersistenceResult<coland_storage::AgentPcrGenesisAdmissionOutcome> {
     stage_registered(pool, &write.commit).await;
     store.admit_agent_pcr_genesis(write).await
 }
@@ -258,7 +258,7 @@ pub fn managed_agent_did(
 /// real source, and any storage/source error remains a hard fixture failure.
 pub async fn stage_registered_signed_candidate(
     pool: &PgPool,
-    tx: &soland_storage::AuthorityCommitTransaction,
+    tx: &coland_storage::AuthorityCommitTransaction,
 ) {
     let Ok(Some(producer)) = tx.event.human_device_producer() else {
         return;
@@ -304,8 +304,8 @@ pub async fn stage_registered_signed_candidate(
     {
         return;
     }
-    if soland_storage::DeviceRevocationStore::pcr_device_admission(
-        &soland_storage_postgres::PgDeviceRevocationStore { pool: pool.clone() },
+    if coland_storage::DeviceRevocationStore::pcr_device_admission(
+        &coland_storage_postgres::PgDeviceRevocationStore { pool: pool.clone() },
         &producer.account_id,
         &producer.device_id,
         tx.commit.committed_at,

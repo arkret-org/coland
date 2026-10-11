@@ -5,13 +5,13 @@
 #[allow(dead_code)]
 mod ordinary_realm;
 
+use coland_storage::{AuthorityCommitStore, EventCommitUnitOfWork};
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{PgEventCommitUnitOfWork, PgPool};
 use diesel::sql_types::{BigInt, Jsonb, Text};
 use diesel_async::RunQueryDsl;
 use ordinary_realm::{next_request, open_discussion};
 use serde_json::{Value, json};
-use soland_storage::{AuthorityCommitStore, EventCommitUnitOfWork};
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{PgEventCommitUnitOfWork, PgPool};
 
 #[derive(diesel::QueryableByName, Debug, PartialEq)]
 struct Current {
@@ -30,7 +30,7 @@ struct Count {
 }
 
 async fn current(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     strand_id: &arkret_wire::StrandId,
 ) -> Current {
     let mut conn = pool.get().await.unwrap();
@@ -45,7 +45,7 @@ async fn current(
 }
 
 async fn realm_counts(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     realm_id: &arkret_wire::RealmId,
 ) -> (i64, i64) {
     let mut conn = pool.get().await.unwrap();
@@ -89,14 +89,14 @@ async fn strand_scope_rebind_returns_the_contract_reason_without_writes() {
     let event_id = request.authority_commit.event.event_id.clone();
     let error = uow.commit_event(request).await.unwrap_err();
     assert!(
-        matches!(error, soland_storage::PersistenceError::Conflict(ref detail)
+        matches!(error, coland_storage::PersistenceError::Conflict(ref detail)
         if detail == "failed_precondition: scope_rebind_forbidden"),
         "{error}"
     );
     assert_eq!(current(&pool, &discussion.strand_id).await, before);
     assert_eq!(realm_counts(&pool, &head.event.realm_id).await, counts);
     assert!(
-        soland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() }
+        coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() }
             .committed_event(&event_id)
             .await
             .unwrap()
@@ -113,7 +113,7 @@ async fn synthesis_content_update_preserves_track_controls_and_refuses_inactive_
     let discussion = Box::pin(open_discussion(&pool, "synthesis-content-current")).await;
     let realm = discussion.head.authority_commit.event.realm_id.clone();
     let at = discussion.head.authority_commit.commit.committed_at;
-    let update = |head: &soland_storage::AuthorityCommitTransaction, body: &str| {
+    let update = |head: &coland_storage::AuthorityCommitTransaction, body: &str| {
         next_request(
             head,
             arkret_wire::EventKind::StrandUpdate,
@@ -259,7 +259,7 @@ async fn strand_update_current_cas_and_rejection_are_one_pg_cut() {
     assert!(outcome.event_inserted);
     let after = current(&pool, &discussion.strand_id).await;
     assert_eq!(after.value["metadata"]["title"], "Accepted title");
-    let store = soland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() };
+    let store = coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() };
     let actor = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
         discussion
             .head
@@ -344,7 +344,7 @@ async fn strand_update_current_cas_and_rejection_are_one_pg_cut() {
             .clone(),
         ordinary_realm::station(),
     );
-    let snapshot = soland_storage_postgres::account_snapshot_material(&pool, &realm_id, &account)
+    let snapshot = coland_storage_postgres::account_snapshot_material(&pool, &realm_id, &account)
         .await
         .unwrap()
         .unwrap();

@@ -7,11 +7,11 @@
 mod ordinary_realm;
 
 use arkret_wire::{EventKind, RealmCommitId};
+use coland_storage::{AccountRealmStreamList, AuthorityCommitStore, EventCommitUnitOfWork};
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork};
 use diesel::sql_types::Text;
 use diesel_async::RunQueryDsl;
-use soland_storage::{AccountRealmStreamList, AuthorityCommitStore, EventCommitUnitOfWork};
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork};
 
 #[tokio::test]
 async fn accepted_append_preserves_digest_policy_change_rebinds_and_missing_source_closes() {
@@ -73,9 +73,9 @@ async fn accepted_append_preserves_digest_policy_change_rebinds_and_missing_sour
     );
     let reversal = Box::pin(ordinary_realm::source_request(&pool, reversal)).await;
     assert!(uow.commit_event(reversal.clone()).await.is_err());
-    use soland_storage::EventStore as _;
+    use coland_storage::EventStore as _;
     assert!(
-        soland_storage_postgres::PgEventStore { pool: pool.clone() }
+        coland_storage_postgres::PgEventStore { pool: pool.clone() }
             .get(reversal.authority_commit.event.event_id.as_str())
             .await
             .unwrap()

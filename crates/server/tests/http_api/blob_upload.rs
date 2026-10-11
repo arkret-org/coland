@@ -19,7 +19,7 @@ fn storage_encryption_is_required_and_ciphertext_cannot_be_presigned() {
 }
 
 async fn storage_encryption_is_required_and_ciphertext_cannot_be_presigned_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let token = dev_token(state.clone()).await;
     let content = || Part::Content {
         filename: None,
@@ -218,7 +218,7 @@ fn canonical_upload_reads_every_member_from_form_parts() {
 }
 
 async fn canonical_upload_reads_every_member_from_form_parts_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let token = dev_token(state.clone()).await;
     let bytes = b"# plaintext long text body";
     let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
@@ -287,7 +287,7 @@ fn canonical_upload_rejects_bodies_outside_the_closed_schema() {
 }
 
 async fn canonical_upload_rejects_bodies_outside_the_closed_schema_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let token = dev_token(state.clone()).await;
     let bytes = b"blob bytes";
     let size = bytes.len().to_string();
@@ -397,7 +397,7 @@ fn canonical_upload_checks_declared_size_digest_and_realm() {
 }
 
 async fn canonical_upload_checks_declared_size_digest_and_realm_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let token = dev_token(state.clone()).await;
     let bytes = b"public group info bytes";
     let size = bytes.len().to_string();

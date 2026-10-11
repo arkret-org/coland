@@ -9,10 +9,10 @@
 
 use arkret_models_collaboration::events_payloads::account_data::AccountDataSetPayload;
 use arkret_wire::Event;
-use soland_http::error::AppError;
-use soland_services::identity::SessionIdentityState;
-use soland_services::{ServiceError, ServiceResult};
-use soland_storage::{
+use coland_http::error::AppError;
+use coland_services::identity::SessionIdentityState;
+use coland_services::{ServiceError, ServiceResult};
+use coland_storage::{
     AccountDataCasCommit, AccountDataRecord, ActorPrivateAccountDataAdmission,
     ActorPrivateAccountDataOutcome,
 };
@@ -152,7 +152,7 @@ async fn fanout_account_data(
 /// registered device, signature, schema, duplicate and availability codes;
 /// any other producer binding refusal is `capability_denied`.
 pub(crate) fn actor_private_refusal(error: ServiceError) -> AppError {
-    use soland_storage::ConflictCode;
+    use coland_storage::ConflictCode;
     match &error {
         ServiceError::SchemaViolation(detail) => AppError::schema_violation(detail.clone()),
         ServiceError::Conflict(detail) => match error.conflict_code() {
@@ -166,7 +166,7 @@ pub(crate) fn actor_private_refusal(error: ServiceError) -> AppError {
                 | ConflictCode::DuplicateConflict
                 | ConflictCode::FailedPrecondition
                 | ConflictCode::TemporarilyUnavailable),
-            ) => soland_http::error::ErrorCode::from_wire(code.as_str()).map_or_else(
+            ) => coland_http::error::ErrorCode::from_wire(code.as_str()).map_or_else(
                 || AppError::internal(format!("unregistered refusal code {code}")),
                 |wire| AppError::from_rejection(wire, detail.clone()),
             ),

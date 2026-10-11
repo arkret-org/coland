@@ -1,21 +1,21 @@
 //! Read-only deployment-local service-route operations projection.
 //!
-//! Every field comes from Soland's verified method state, route cache, or fork quarantine. This
+//! Every field comes from Coland's verified method state, route cache, or fork quarantine. This
 //! surface never resolves a route and never publishes protocol authority.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use salvo::oapi::extract::{PathParam, QueryParam};
-use salvo::prelude::*;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
-use soland_contracts::admin::{
+use coland_contracts::admin::{
     AdminServiceMethodState, AdminServiceRouteCache, AdminServiceRouteCurrent,
     AdminServiceRouteDetail, AdminServiceRouteList, AdminServiceRouteQuarantine,
     AdminServiceRouteSummary,
 };
-use soland_http::error::AppError;
-use soland_storage::ServiceRouteStoredKey;
+use coland_http::error::AppError;
+use coland_storage::ServiceRouteStoredKey;
+use salvo::oapi::extract::{PathParam, QueryParam};
+use salvo::prelude::*;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use super::{AdminAuth, append_audit_log, require_admin_principal};
 use crate::state::AppState;
@@ -198,10 +198,10 @@ fn summary(detail: &AdminServiceRouteDetail) -> AdminServiceRouteSummary {
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.service_routes.list",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.service_routes.list",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.service_routes.list"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.service_routes.list"))]
 async fn admin_list_service_routes(
     admin: AdminAuth,
     limit: QueryParam<usize, false>,
@@ -251,10 +251,10 @@ async fn admin_list_service_routes(
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.service_routes.get",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.service_routes.get",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.service_routes.get"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.service_routes.get"))]
 async fn admin_get_service_route(
     admin: AdminAuth,
     service_id: PathParam<String>,

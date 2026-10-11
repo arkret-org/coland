@@ -138,7 +138,7 @@ mod authorization_scheme_tests {
 
 /// Hex-encoded SHA-256 of `bytes` (lowercase, 64 chars).
 ///
-/// Thin re-export of the SDK [`arkret_canonical::sha256_hex`] so soland
+/// Thin re-export of the SDK [`arkret_canonical::sha256_hex`] so coland
 /// shares the single canonical hash primitive instead of a local
 /// reimplementation.
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -192,7 +192,7 @@ mod sync_token_tests {
     }
 }
 
-/// Convert a persisted [`soland_services::sync::CursorState`] row into the
+/// Convert a persisted [`coland_services::sync::CursorState`] row into the
 /// SDK [`arkret_server::CursorBindingRecord`] consumed by
 /// [`arkret_server::CursorAuthority::resolve_stream`].
 ///
@@ -201,7 +201,7 @@ mod sync_token_tests {
 /// §8.3.1: incomplete/foreign binding rows are integrity failures, never a
 /// panic or a silent accept).
 pub fn cursor_binding_record_from_state(
-    record: soland_services::sync::CursorState,
+    record: coland_services::sync::CursorState,
 ) -> Result<arkret_server::CursorBindingRecord, arkret_server::CursorAuthorityError> {
     use arkret_server::CursorAuthorityError;
     let purpose = match record.purpose.as_str() {
@@ -300,7 +300,7 @@ pub fn is_valid_discoverability(value: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// AKP-0008 / AKP-0009 (B-D, P2-G) — soland's inbound DID validator
+    /// AKP-0008 / AKP-0009 (B-D, P2-G) — coland's inbound DID validator
     /// MUST route through the SDK `Did::new` parser. Regression guard so
     /// the wire ingress points (event_log envelope, agents.rs handlers,
     /// account.register, etc.) stay aligned with the spec DID format.

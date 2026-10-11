@@ -13,15 +13,15 @@
 # this reports it and moves on, so a concurrent run is never disturbed.
 #
 # Usage:
-#   SOLAND_TEST_DATABASE_URL=postgres://postgres:root@localhost/soland_dev \
+#   COLAND_TEST_DATABASE_URL=postgres://postgres:root@localhost/coland_dev \
 #     scripts/drop-stale-test-databases.sh          # report only
 #   ... scripts/drop-stale-test-databases.sh --drop # actually drop
 
 set -eu
 
-url="${SOLAND_TEST_DATABASE_URL:-${DATABASE_URL:-}}"
+url="${COLAND_TEST_DATABASE_URL:-${DATABASE_URL:-}}"
 if [ -z "$url" ]; then
-    echo "set SOLAND_TEST_DATABASE_URL or DATABASE_URL to the base database" >&2
+    echo "set COLAND_TEST_DATABASE_URL or DATABASE_URL to the base database" >&2
     exit 2
 fi
 

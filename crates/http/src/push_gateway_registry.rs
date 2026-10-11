@@ -11,9 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use arkret_wire::{Did, DidCoreId, DidUrl, WebOrigin};
 use chrono::{DateTime, Utc};
+use coland_services::service_route::ResolvedServiceRoute;
 use ed25519_dalek::VerifyingKey;
 use serde::Deserialize;
-use soland_services::service_route::ResolvedServiceRoute;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TrustedPushGatewayError {

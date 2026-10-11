@@ -2,7 +2,7 @@ mod completion_plan;
 
 use arkret_models_collaboration::contact_operations::RequestAcceptanceReceipt;
 use arkret_wire::ActorId;
-use soland_domain::identity::ContactRecord;
+use coland_domain::identity::ContactRecord;
 
 use super::{PersistenceResult, Utc, Value, async_trait};
 

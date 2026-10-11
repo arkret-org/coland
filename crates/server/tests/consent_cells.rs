@@ -1,17 +1,17 @@
 use arkret_identifiers::Did;
 use arkret_models_collaboration::governance::invite_addressing::InviteReceivePolicy;
 use arkret_wire::{AccountId, DidCoreId, InviteReceiveAction, UnknownInviteAction};
+use coland_http::config::AppConfig;
+use coland_http::service;
+use coland_test_support::AppStateTestExt as _;
 use salvo::http::StatusCode;
 use salvo::test::{ResponseExt, TestClient};
 use serde_json::Value;
-use soland_http::config::AppConfig;
-use soland_http::service;
-use soland_test_support::AppStateTestExt as _;
 
-const ACCOUNT_REGISTER_BEARER: &str = "soland-test-account-register-bearer";
+const ACCOUNT_REGISTER_BEARER: &str = "coland-test-account-register-bearer";
 
 fn fixture_account_actor(
-    state: &soland_http::state::AppState,
+    state: &coland_http::state::AppState,
     principal_did: &str,
 ) -> arkret_wire::ActorId {
     let principal_id = arkret_wire::project_did_to_core_id(
@@ -26,14 +26,14 @@ fn test_config() -> AppConfig {
         development_mode: true,
         embedded_webvh_registration_bearer: Some(ACCOUNT_REGISTER_BEARER.to_owned()),
         did_resolver_allow_methods: vec!["web".to_owned(), "key".to_owned(), "peer".to_owned()],
-        ..soland_test_support::app_config()
+        ..coland_test_support::app_config()
     }
 }
 
 async fn ensure_account(app: &salvo::Service, actor: &str) {
     let did = Did::new(actor.to_owned()).expect("fixture account DID");
     let principal_id = arkret_wire::project_did_to_core_id(&did).expect("fixture account core id");
-    let mut response = TestClient::post("http://server/_soland/gate/account/project")
+    let mut response = TestClient::post("http://server/_coland/gate/account/project")
         .add_header(
             "authorization",
             format!("Bearer {ACCOUNT_REGISTER_BEARER}"),
@@ -55,9 +55,9 @@ async fn ensure_account(app: &salvo::Service, actor: &str) {
 }
 
 async fn dev_token(
-    state: &soland_http::state::AppState,
+    state: &coland_http::state::AppState,
     app: &salvo::Service,
-    fixture: &soland_test_support::pcr_genesis::PcrGenesisFixture,
+    fixture: &coland_test_support::pcr_genesis::PcrGenesisFixture,
 ) -> String {
     let actor = fixture.history.did.as_str();
     fixture.admit(state).await.expect("accepted PCR genesis");
@@ -67,7 +67,7 @@ async fn dev_token(
     )
     .expect("fixture actor core id");
     let device_id = fixture.history.founding_device_id.to_string();
-    let login: Value = TestClient::post("http://server/_soland/gate/auth/dev-login")
+    let login: Value = TestClient::post("http://server/_coland/gate/auth/dev-login")
         .json(&serde_json::json!({
             "actor": actor_core,
             "device_id": device_id,
@@ -84,11 +84,11 @@ async fn dev_token(
 
 #[tokio::test]
 async fn opaque_consent_request_does_not_create_a_pending_cell() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let app = service(state.clone());
     let alice_fixture =
-        soland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
-    let bob_fixture = soland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
+        coland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
+    let bob_fixture = coland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
     let alice_did = alice_fixture.history.did.as_str();
     let bob_did = bob_fixture.history.did.as_str();
     let alice_token = dev_token(&state, &app, &alice_fixture).await;
@@ -139,7 +139,7 @@ async fn opaque_consent_request_does_not_create_a_pending_cell() {
 }
 
 fn signed_consent_event(
-    fixture: &soland_test_support::pcr_genesis::PcrGenesisFixture,
+    fixture: &coland_test_support::pcr_genesis::PcrGenesisFixture,
     kind: arkret_wire::EventKind,
     payload: Value,
 ) -> arkret_wire::Event {
@@ -155,7 +155,7 @@ fn signed_consent_event(
     )
     .unwrap();
     event.authorization_ref = Some(fixture.unit.transactions[0].event.event_id.clone().into());
-    soland_test_support::device_authorization_history::sign_event(
+    coland_test_support::device_authorization_history::sign_event(
         event,
         fixture.history.device_verification_method.clone(),
         fixture.history.founding_device_signing_seed,
@@ -204,12 +204,12 @@ async fn consent_command(
 /// Seed accepted state through the production PCR transaction, never raw SQL.
 /// Positive HTTP writes with Standard SessionGrant run in Cotest.
 async fn admit_consent_fixture(
-    state: &soland_http::state::AppState,
+    state: &coland_http::state::AppState,
     event: arkret_wire::Event,
 ) -> Value {
     let store = state.test_persistence();
-    let application = soland_services::authority_commit::AuthorityCommitApplication::new(
-        soland_services::persistence::PersistenceHandle::from_shared(store.clone()),
+    let application = coland_services::authority_commit::AuthorityCommitApplication::new(
+        coland_services::persistence::PersistenceHandle::from_shared(store.clone()),
         0,
     );
     let transaction = application
@@ -225,22 +225,22 @@ async fn admit_consent_fixture(
         .unwrap();
     let outcome = store
         .consent_current()
-        .admit(soland_storage::ConsentAdmissionWrite { transaction })
+        .admit(coland_storage::ConsentAdmissionWrite { transaction })
         .await
         .unwrap();
     let record = match outcome {
-        soland_storage::ConsentAdmissionOutcome::Committed(record)
-        | soland_storage::ConsentAdmissionOutcome::Duplicate(record) => record,
+        coland_storage::ConsentAdmissionOutcome::Committed(record)
+        | coland_storage::ConsentAdmissionOutcome::Duplicate(record) => record,
     };
     serde_json::to_value(record.view()).unwrap()
 }
 
 #[tokio::test]
 async fn consent_holder_reads_exact_current_reject_ambiguity_and_local_bearer_writes() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let app = service(state.clone());
-    let holder = soland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
-    let other = soland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
+    let holder = coland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
+    let other = coland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
     let token = dev_token(&state, &app, &holder).await;
     let other_token = dev_token(&state, &app, &other).await;
     let peer = serde_json::json!({"kind":"actor","actor_id":arkret_wire::ActorId::account(other.history.account.clone())});
@@ -347,10 +347,10 @@ async fn consent_holder_reads_exact_current_reject_ambiguity_and_local_bearer_wr
 
 #[tokio::test]
 async fn invite_receive_policy_get_set_round_trips() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let app = service(state.clone());
     let alice_fixture =
-        soland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
+        coland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
     let alice = alice_fixture.history.account.clone();
     let mallory = DidCoreId::new("ak:did_core:web:irp-mallory.example").unwrap();
     let alice_token = dev_token(&state, &app, &alice_fixture).await;

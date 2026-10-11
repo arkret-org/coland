@@ -9,29 +9,29 @@
 #   * bounded `--jobs` — at full parallelism a low-memory or Windows runner
 #     fails to mmap an rlib (`os error 1455`, the pagefile is too small). That
 #     surfaces as a *test* failure and sends people chasing a bug that is not
-#     there. One job removes it; raise `SOLAND_GATE_JOBS` on a machine with
+#     there. One job removes it; raise `COLAND_GATE_JOBS` on a machine with
 #     headroom.
 #   * saved artifacts — the exit status and an extracted summary are written to
 #     files, so the verdict never depends on what happened to still be on
-#     screen. Read `$SOLAND_GATE_DIR/summary.txt`, not the terminal tail.
+#     screen. Read `$COLAND_GATE_DIR/summary.txt`, not the terminal tail.
 #
 # Runs with `--no-fail-fast` so one early failure does not hide the rest.
 # Exits with cargo's status.
 #
 # Usage:
 #   scripts/gate.sh                                  # whole workspace
-#   scripts/gate.sh -p soland --test extensions_smoke
+#   scripts/gate.sh -p coland --test extensions_smoke
 #
 # Every argument is forwarded to `cargo test`, so a narrow re-run keeps the same
 # quiet output, the same bounded parallelism and the same artifacts.
 
 set -eu
 
-jobs="${SOLAND_GATE_JOBS:-1}"
-gate_dir="${SOLAND_GATE_DIR:-target/gate}"
+jobs="${COLAND_GATE_JOBS:-1}"
+gate_dir="${COLAND_GATE_DIR:-target/gate}"
 # A separate target dir keeps a long-running `just dev` from holding a lock on
 # the test binaries on Windows.
-target_dir="${SOLAND_GATE_TARGET_DIR:-target/test}"
+target_dir="${COLAND_GATE_TARGET_DIR:-target/test}"
 
 mkdir -p "$gate_dir"
 log="$gate_dir/test.log"

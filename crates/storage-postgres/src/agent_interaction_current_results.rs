@@ -6,11 +6,11 @@ use arkret_wire::{
     AccountId, ActorId, CommitStreamRef, CurrentRevision, Event, EventKind, RealmCommit, RealmId,
     ScopeRef,
 };
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
 use diesel::{OptionalExtension, QueryableByName, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::{Value, json};
-use soland_storage::{PersistenceError, PersistenceResult};
 
 #[derive(QueryableByName)]
 pub(crate) struct ModeRow {

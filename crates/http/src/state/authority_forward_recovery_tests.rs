@@ -23,17 +23,17 @@ use arkret_wire::{
     StreamScanDirection, StreamScanRequest,
 };
 use chrono::{Duration, Utc};
-use soland_services::identity::{
+use coland_services::identity::{
     SessionEndpointState, SessionGrantAuthorizationState, SessionIdentityState,
 };
-use soland_services::service_route::{
+use coland_services::service_route::{
     ServiceRouteFetcher, VerifiedRouteCandidate, VerifiedServiceDescribeMetadata,
 };
-use soland_storage::{
+use coland_storage::{
     AccountPk, AccountRecord, AuthorityCommitStore, CommittedReplica, CommittedReplicaRole,
     EventCommitUnitOfWork, ForwardedProducerDeviceEvidence, ReplicaAnchorInstall,
 };
-use soland_storage_postgres::{
+use coland_storage_postgres::{
     PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPersistenceStore, PgPool,
 };
 
@@ -46,20 +46,20 @@ impl ServiceRouteFetcher for VerifiedSourceRoute {
         &self,
         id: &DidCoreId,
         kind: &str,
-    ) -> soland_services::ServiceResult<Option<VerifiedRouteCandidate>> {
+    ) -> coland_services::ServiceResult<Option<VerifiedRouteCandidate>> {
         Ok((id == &self.0.evidence.service_id && kind == "station").then(|| self.0.clone()))
     }
 }
 
 /// Preserve the same accepted fixture identity, original method history and PG
 /// store across the local test-crate type boundary (as the native replay test).
-fn station(url: String) -> (AppState, PgPool, Arc<dyn soland_storage::PersistenceStore>) {
-    let mut external = soland_test_support::app_config();
+fn station(url: String) -> (AppState, PgPool, Arc<dyn coland_storage::PersistenceStore>) {
+    let mut external = coland_test_support::app_config();
     external.public_base_url = url.clone();
     external.notary_signing_key_seed = Some([83; 32]);
     external.seed_demo_data = false;
     external.development_mode = true;
-    let (leased, pool) = soland_test_support::app_state_with_pool(external.clone());
+    let (leased, pool) = coland_test_support::app_state_with_pool(external.clone());
     let local = crate::config::AppConfig {
         public_base_url: url,
         notary_signing_key_seed: Some([83; 32]),
@@ -70,15 +70,15 @@ fn station(url: String) -> (AppState, PgPool, Arc<dyn soland_storage::Persistenc
     assert_eq!(local.trust_domain, external.trust_domain);
     let state = AppState::new_with_service_identity(
         local,
-        soland_storage_postgres::Db {
+        coland_storage_postgres::Db {
             pool: Some(pool.clone()),
         },
         Arc::new(PgPersistenceStore::new(pool.clone())),
-        soland_test_support::fixture_service_identity(&external),
+        coland_test_support::fixture_service_identity(&external),
         leased.service_resolution_commitment().as_ref().clone(),
         [83; 32],
     );
-    use soland_test_support::AppStateTestExt as _;
+    use coland_test_support::AppStateTestExt as _;
     let keep_lease = leased.test_persistence();
     (state, pool, keep_lease)
 }
@@ -87,10 +87,10 @@ async fn foreign_request(
     origin: &AppState,
     joining: &historical_human::HumanFixture,
     governor: &historical_human::HumanFixture,
-    previous: &soland_storage::AuthorityCommitTransaction,
+    previous: &coland_storage::AuthorityCommitTransaction,
     kind: EventKind,
     payload: serde_json::Value,
-) -> soland_storage::EventCommitRequest {
+) -> coland_storage::EventCommitRequest {
     let at = previous.commit.committed_at + Duration::seconds(1);
     let circle_id = (kind == EventKind::CircleMemberState).then(|| {
         serde_json::from_value::<arkret_wire::CircleId>(payload["circle_id"].clone()).unwrap()
@@ -101,7 +101,7 @@ async fn foreign_request(
             realm_id: previous.event.realm_id.clone(),
             circle_id,
         };
-        event = soland_test_support::device_authorization_history::sign_event(
+        event = coland_test_support::device_authorization_history::sign_event(
             event,
             joining.pcr.history.device_verification_method.clone(),
             joining.pcr.history.founding_device_signing_seed,
@@ -174,7 +174,7 @@ async fn authenticated_context(
     pool: &PgPool,
     human: &historical_human::HumanFixture,
 ) -> SessionIdentityState {
-    use soland_storage::IdentityStoreRegistry;
+    use coland_storage::IdentityStoreRegistry;
     let account = &human.pcr.history.account;
     let persistence = PgPersistenceStore::new(pool.clone());
     let pk = persistence
@@ -348,7 +348,7 @@ async fn register_original_peer_history(
     governor: &AppState,
     pool: &PgPool,
 ) {
-    use soland_storage::DeliveryPolicyStoreRegistry as _;
+    use coland_storage::DeliveryPolicyStoreRegistry as _;
     let records = PgPersistenceStore::new(pool.clone())
         .webvh()
         .list_log_events(governor.service_did().as_str())
@@ -757,7 +757,7 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
         .unwrap()
         .unwrap();
     let key = ed25519_dalek::SigningKey::from_bytes(&historical_human::station_authority_seed());
-    let snapshot = soland_services::authority_commit::build_signed_realm_state_snapshot(
+    let snapshot = coland_services::authority_commit::build_signed_realm_state_snapshot(
         &material,
         DidUrl::new(format!("{}#authority", governor.pcr.history.station_did)).unwrap(),
         &key,
@@ -887,7 +887,7 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
         direction: StreamScanDirection::After(Some(join.authority_commit.commit.stream_position)),
         limit: 128,
     };
-    let soland_storage::PeerStreamScan::Page(page) = source
+    let coland_storage::PeerStreamScan::Page(page) = source
         .scan_stream_for_peer(
             &scan,
             &human.pcr.history.account.station_id,
@@ -1131,14 +1131,14 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
 
 fn station_with_webvh(
     url: String,
-) -> (AppState, PgPool, Arc<dyn soland_storage::PersistenceStore>) {
-    let mut external = soland_test_support::app_config();
+) -> (AppState, PgPool, Arc<dyn coland_storage::PersistenceStore>) {
+    let mut external = coland_test_support::app_config();
     external.public_base_url = url.clone();
     external.notary_signing_key_seed = Some([83; 32]);
     external.seed_demo_data = false;
     external.development_mode = true;
     external.did_resolver_allow_methods.push("webvh".into());
-    let (leased, pool) = soland_test_support::app_state_with_pool(external.clone());
+    let (leased, pool) = coland_test_support::app_state_with_pool(external.clone());
     let local = crate::config::AppConfig {
         public_base_url: url,
         notary_signing_key_seed: Some([83; 32]),
@@ -1150,15 +1150,15 @@ fn station_with_webvh(
     assert_eq!(local.trust_domain, external.trust_domain);
     let state = AppState::new_with_service_identity(
         local,
-        soland_storage_postgres::Db {
+        coland_storage_postgres::Db {
             pool: Some(pool.clone()),
         },
         Arc::new(PgPersistenceStore::new(pool.clone())),
-        soland_test_support::fixture_service_identity(&external),
+        coland_test_support::fixture_service_identity(&external),
         leased.service_resolution_commitment().as_ref().clone(),
         [83; 32],
     );
-    use soland_test_support::AppStateTestExt as _;
+    use coland_test_support::AppStateTestExt as _;
     let keep_lease = leased.test_persistence();
     (state, pool, keep_lease)
 }
@@ -1498,7 +1498,7 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
         direction: StreamScanDirection::After(None),
         limit: 128,
     };
-    let soland_storage::PeerStreamScan::Page(page) = source
+    let coland_storage::PeerStreamScan::Page(page) = source
         .scan_stream_for_peer(
             &scan,
             &human.pcr.history.account.station_id,
@@ -1719,7 +1719,7 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
         direction: StreamScanDirection::After(Some(commit.stream_position)),
         ..opening_scan.clone()
     };
-    let soland_storage::PeerStreamScan::Page(opening_page) = source
+    let coland_storage::PeerStreamScan::Page(opening_page) = source
         .scan_stream_for_peer(
             &opening_scan,
             &origin.service_core_id(),
@@ -1730,7 +1730,7 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
     else {
         panic!("the joined hosted members authorize the opening scan")
     };
-    let soland_storage::PeerStreamScan::Page(continuous_page) = source
+    let coland_storage::PeerStreamScan::Page(continuous_page) = source
         .scan_stream_for_peer(
             &continuous_scan,
             &origin.service_core_id(),
@@ -2209,7 +2209,7 @@ async fn accepted_own_leave_returns_original_bound_result_after_terminal_members
         direction: StreamScanDirection::After(None),
         limit: 128,
     };
-    let soland_storage::PeerStreamScan::Page(page) = source
+    let coland_storage::PeerStreamScan::Page(page) = source
         .scan_stream_for_peer(
             &scan,
             &human.pcr.history.account.station_id,
@@ -2418,7 +2418,7 @@ async fn accepted_own_leave_returns_original_bound_result_after_terminal_members
         direction: StreamScanDirection::After(Some(final_parent.commit.stream_position)),
         limit: 128,
     };
-    let soland_storage::PeerStreamScan::Page(page) = source
+    let coland_storage::PeerStreamScan::Page(page) = source
         .scan_stream_for_peer(
             &scan,
             &human.pcr.history.account.station_id,
@@ -2508,7 +2508,7 @@ async fn accepted_own_leave_returns_original_bound_result_after_terminal_members
             .scan_stream_for_account(&read, &human.pcr.history.account, &origin.service_core_id())
             .await
             .unwrap(),
-        soland_storage::AccountStreamScan::NotAuthorized
+        coland_storage::AccountStreamScan::NotAuthorized
     ));
     // The governor has a real later Full, but the departed peer's original
     // interval ends at the leave, including its terminal node only.
@@ -2545,7 +2545,7 @@ async fn accepted_own_leave_returns_original_bound_result_after_terminal_members
         direction: StreamScanDirection::After(Some(lc.stream_position)),
         limit: 1,
     };
-    let soland_storage::PeerStreamScan::Page(no_future) = source
+    let coland_storage::PeerStreamScan::Page(no_future) = source
         .scan_stream_for_peer(
             &future_read,
             &human.pcr.history.account.station_id,
@@ -2745,7 +2745,7 @@ async fn accepted_own_leave_returns_original_bound_result_after_terminal_members
             .scan_stream_for_account(&read, &human.pcr.history.account, &origin.service_core_id())
             .await
             .unwrap(),
-        soland_storage::AccountStreamScan::NotAuthorized
+        coland_storage::AccountStreamScan::NotAuthorized
     ));
 }
 
@@ -2760,12 +2760,12 @@ async fn circle_own_leave_bound_result_cases(
     governor_pool: &PgPool,
     human: &historical_human::HumanFixture,
     governor: &historical_human::HumanFixture,
-    parent_join: &soland_storage::AuthorityCommitTransaction,
+    parent_join: &coland_storage::AuthorityCommitTransaction,
     circle_id: &arkret_wire::CircleId,
     listener: Arc<RegisteredTlsPeer>,
     located: &mut crate::routing::realm_join::LocatedRealmAuthority,
     session: &SessionIdentityState,
-) -> soland_storage::AuthorityCommitTransaction {
+) -> coland_storage::AuthorityCommitTransaction {
     use diesel_async::RunQueryDsl as _;
     register_original_peer_history(&listener, governor_state, governor_pool).await;
     let source = PgAuthorityCommitStore {
@@ -2850,7 +2850,7 @@ async fn circle_own_leave_bound_result_cases(
             ),
             limit: 128,
         };
-        let soland_storage::PeerStreamScan::Page(page) = source
+        let coland_storage::PeerStreamScan::Page(page) = source
             .scan_stream_for_peer(
                 &scan,
                 &human.pcr.history.account.station_id,
@@ -2931,7 +2931,7 @@ async fn circle_own_leave_bound_result_cases(
                     )
                     .await
                     .unwrap(),
-                soland_storage::AccountStreamScan::Unproved("the caller has no held Circle join")
+                coland_storage::AccountStreamScan::Unproved("the caller has no held Circle join")
             );
             assert!(
                 !store
@@ -3059,11 +3059,11 @@ async fn circle_cleanup_parent_rejoin(
     governor_pool: &PgPool,
     human: &historical_human::HumanFixture,
     governor: &historical_human::HumanFixture,
-    old_parent: &soland_storage::AuthorityCommitTransaction,
+    old_parent: &coland_storage::AuthorityCommitTransaction,
     listener: Arc<RegisteredTlsPeer>,
     located: &mut crate::routing::realm_join::LocatedRealmAuthority,
     session: &SessionIdentityState,
-) -> soland_storage::AuthorityCommitTransaction {
+) -> coland_storage::AuthorityCommitTransaction {
     let source = PgAuthorityCommitStore {
         pool: governor_pool.clone(),
     };
@@ -3115,7 +3115,7 @@ async fn circle_cleanup_parent_rejoin(
             ),
             limit: 128,
         };
-        let soland_storage::PeerStreamScan::Page(page) = source
+        let coland_storage::PeerStreamScan::Page(page) = source
             .scan_stream_for_peer(
                 &scan,
                 &human.pcr.history.account.station_id,
@@ -3222,7 +3222,7 @@ async fn circle_cleanup_install_refusals(
                 .await
                 .unwrap_err()
                 .conflict_code(),
-            Some(soland_storage::ConflictCode::CapabilityDenied)
+            Some(coland_storage::ConflictCode::CapabilityDenied)
         );
         assert_eq!(opening_footprint(pool, &event.realm_id).await, baseline);
     }
@@ -3258,7 +3258,7 @@ async fn circle_cleanup_install_refusals(
                 .await
                 .unwrap_err()
                 .conflict_code(),
-            Some(soland_storage::ConflictCode::CapabilityDenied)
+            Some(coland_storage::ConflictCode::CapabilityDenied)
         );
         assert_eq!(opening_footprint(pool, &event.realm_id).await, baseline);
         conn = pool.get().await.unwrap();
@@ -3281,7 +3281,7 @@ async fn circle_cleanup_install_refusals(
             .await
             .unwrap_err()
             .conflict_code(),
-        Some(soland_storage::ConflictCode::CapabilityDenied)
+        Some(coland_storage::ConflictCode::CapabilityDenied)
     );
     conn = pool.get().await.unwrap();
     let unchanged=diesel::sql_query("SELECT circle_leave_parent_revision AS parent FROM authority_forward_attempts WHERE event_pk=(SELECT pk FROM canonical_events WHERE id=$1)")
@@ -3346,7 +3346,7 @@ async fn circle_cleanup_install_refusals(
             .await
             .unwrap_err()
             .conflict_code(),
-        Some(soland_storage::ConflictCode::CapabilityDenied)
+        Some(coland_storage::ConflictCode::CapabilityDenied)
     );
     assert_eq!(opening_footprint(pool, &event.realm_id).await, baseline);
     let mut conn = pool.get().await.unwrap();
@@ -3372,7 +3372,7 @@ async fn circle_cleanup_missing_parent_is_frozen(
     }
     let mut queued = event.clone();
     queued.created_at += Duration::milliseconds(1);
-    let queued = soland_test_support::device_authorization_history::sign_event(
+    let queued = coland_test_support::device_authorization_history::sign_event(
         queued,
         human.pcr.history.device_verification_method.clone(),
         human.pcr.history.founding_device_signing_seed,
@@ -3426,7 +3426,7 @@ async fn tcp_opening_bootstrap(
     expected: arkret_wire::RealmCommit,
     history_stop: Arc<std::sync::atomic::AtomicBool>,
 ) -> usize {
-    use soland_storage::DeliveryPolicyStoreRegistry as _;
+    use coland_storage::DeliveryPolicyStoreRegistry as _;
     let records = PgPersistenceStore::new(pool.clone())
         .webvh()
         .list_log_events(governor.service_did().as_str())
@@ -3496,7 +3496,7 @@ async fn tcp_opening_bootstrap(
             &actual.realm_id, &actual.member_account_id, &actual.membership_commit_id,
         ).await.unwrap().unwrap();
         let key = ed25519_dalek::SigningKey::from_bytes(&historical_human::station_authority_seed());
-        let snapshot = soland_services::authority_commit::build_signed_realm_state_snapshot(
+        let snapshot = coland_services::authority_commit::build_signed_realm_state_snapshot(
             &material, governor.service_verification_method("notary-key").unwrap(),
             &key, Utc::now(),
         ).unwrap();
@@ -3595,7 +3595,7 @@ async fn tcp_original_service_history_once(
     governor: AppState,
     pool: PgPool,
 ) -> usize {
-    use soland_storage::DeliveryPolicyStoreRegistry as _;
+    use coland_storage::DeliveryPolicyStoreRegistry as _;
     let records = PgPersistenceStore::new(pool)
         .webvh()
         .list_log_events(governor.service_did().as_str())

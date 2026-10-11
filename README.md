@@ -1,4 +1,4 @@
-# soland
+# coland
 
 Reference Arkret v1 Station, built with Salvo, Diesel, and
 PostgreSQL. The HTTP surface mirrors `arkret-spec/spec/v1/artifacts/openapi/arkret-service-api.openapi.yaml`;
@@ -65,7 +65,7 @@ operator must address at boot — see
 [`CHANGELOG.md`](CHANGELOG.md) `[Unreleased]` and the `arkret-spec`
 `spec/v1/zh/` normative source. The key operational hooks:
 
-- **`SOLAND_TRUST_DOMAIN`** — required `ak:trust_domain:<scope>` value
+- **`COLAND_TRUST_DOMAIN`** — required `ak:trust_domain:<scope>` value
   (defaults to a value derived from the configured `service_id`) and binds
   peer authorization and recovery transcripts to this deployment.
 - **Ephemeral kinds rejected on `POST /_arkret/self/events`** — producers
@@ -78,13 +78,13 @@ operator must address at boot — see
 
 ## Quick start
 
-soland depends on the `arkret-*` crates under `../arkret-rust-sdk/crates/`
+coland depends on the `arkret-*` crates under `../arkret-rust-sdk/crates/`
 via path dependencies. Clone both repos side by side:
 
 ```bash
 git clone https://github.com/arkret-org/arkret-rust-sdk.git
-git clone https://github.com/arkret-org/soland.git
-cd soland
+git clone https://github.com/arkret-org/coland.git
+cd coland
 ```
 
 The shortest local workflow uses [`just`](https://github.com/casey/just).
@@ -104,18 +104,18 @@ just start
 
 `just start` (an alias of `just dev`) loads the checked-in local `.env`,
 idempotently provisions the encrypted-file KeyStore master key, and then starts
-Soland against the configured PostgreSQL database. Local custody artifacts are
+Coland against the configured PostgreSQL database. Local custody artifacts are
 kept outside Git:
 
 ```text
-.local/secrets/soland-keystore-master-key  # separately stored master key
-.local/keystore/soland.v1                  # encrypted private-key material
+.local/secrets/coland-keystore-master-key  # separately stored master key
+.local/keystore/coland.v1                  # encrypted private-key material
 .local/identity-bundle/                    # public recovery evidence + KeyRefs
 ```
 
-Realm, Event, account, and other application rows remain in PostgreSQL; Soland
+Realm, Event, account, and other application rows remain in PostgreSQL; Coland
 does not currently provide a file-backed relational database under `.local`.
-`SOLAND_DEVELOPMENT_MODE` defaults to `false` in the server, while the `just`
+`COLAND_DEVELOPMENT_MODE` defaults to `false` in the server, while the `just`
 development recipes set it to `true` unless overridden.
 
 ### Let Docker provide PostgreSQL
@@ -124,15 +124,15 @@ development recipes set it to `true` unless overridden.
 just start-db
 ```
 
-`just start-db` starts a local `postgres:16` container named `soland-postgres`,
-idempotently provisions `./.local/secrets/soland-keystore-master-key` with the
-cross-platform `soland-keystore-keygen` helper, waits for PostgreSQL to accept
-connections, then starts soland with the connection string below. Existing
+`just start-db` starts a local `postgres:16` container named `coland-postgres`,
+idempotently provisions `./.local/secrets/coland-keystore-master-key` with the
+cross-platform `coland-keystore-keygen` helper, waits for PostgreSQL to accept
+connections, then starts coland with the connection string below. Existing
 valid keys are retained and malformed files fail closed. This path requires
 Docker:
 
 ```dotenv
-DATABASE_URL=postgres://soland:soland@localhost:5432/soland
+DATABASE_URL=postgres://coland:coland@localhost:5432/coland
 ```
 
 Embedded Diesel migrations run on every startup; the tables are created
@@ -156,11 +156,11 @@ Then `just start` will use the durable configuration in that file. Calling
 Manual equivalent:
 
 ```bash
-DATABASE_URL=postgres://soland:soland@localhost:5432/soland \
-  SOLAND_KEYSTORE_BACKEND=encrypted_file \
-  SOLAND_KEYSTORE_PATH=./.local/keystore/soland.v1 \
-  SOLAND_KEYSTORE_MASTER_KEY_FILE=./.local/secrets/soland-keystore-master-key \
-  SOLAND_DEVELOPMENT_MODE=true \
+DATABASE_URL=postgres://coland:coland@localhost:5432/coland \
+  COLAND_KEYSTORE_BACKEND=encrypted_file \
+  COLAND_KEYSTORE_PATH=./.local/keystore/coland.v1 \
+  COLAND_KEYSTORE_MASTER_KEY_FILE=./.local/secrets/coland-keystore-master-key \
+  COLAND_DEVELOPMENT_MODE=true \
   cargo run -- --bind 127.0.0.1:8698
 ```
 
@@ -172,13 +172,13 @@ this Linux example creates the host directory for the image's UID `10001` and
 never overwrites an existing key:
 
 ```bash
-sudo install -d -m 0700 -o 10001 -g 10001 /secure/soland
+sudo install -d -m 0700 -o 10001 -g 10001 /secure/coland
 docker run --rm \
-  --entrypoint /usr/local/bin/soland-keystore-keygen \
-  --mount type=bind,source=/secure/soland,target=/secrets \
-  ghcr.io/arkret/soland:<tag> \
-  --output /secrets/soland-keystore-master-key
-sudo chmod 0400 /secure/soland/soland-keystore-master-key
+  --entrypoint /usr/local/bin/coland-keystore-keygen \
+  --mount type=bind,source=/secure/coland,target=/secrets \
+  ghcr.io/arkret/coland:<tag> \
+  --output /secrets/coland-keystore-master-key
+sudo chmod 0400 /secure/coland/coland-keystore-master-key
 ```
 
 Then mount that file read-only while keeping the encrypted KeyStore on a
@@ -186,29 +186,29 @@ persistent volume:
 
 ```bash
 docker run --rm -p 8698:8698 \
-  -e SOLAND_PUBLIC_BASE_URL=https://soland.example \
-  -e SOLAND_FIRST_PROVISIONING=1 \
-  -e SOLAND_KEYSTORE_BACKEND=encrypted_file \
-  -e SOLAND_KEYSTORE_PATH=/var/lib/soland/keystore/soland.v1 \
-  -e SOLAND_KEYSTORE_MASTER_KEY_FILE=/run/secrets/soland-keystore-master-key \
-  -e SOLAND_SERVICE_IDENTITY_BUNDLE_DIR=/var/lib/soland/identity-bundle \
-  -e SOLAND_ACCOUNT_AUTHORITY_URL=https://coauth.example \
-  -e SOLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN=ak:trust_domain:coauth.example \
-  -e SOLAND_SESSION_GRANT_INTROSPECTION_URL=https://coauth.example/_coauth/internal/session-grants/introspect \
-  -e SOLAND_AUTH_SESSION_LOGOUT_URL=https://coauth.example/_coauth/internal/auth-sessions/logout \
-  -e SOLAND_INTERNAL_AUTHORITY_SHARED_SECRET=shared-secret-known-by-coauth \
-  -e DATABASE_URL=postgres://soland:soland@db:5432/soland \
-  -e SOLAND_OBJECT_STORAGE_BACKEND=filesystem \
-  -e SOLAND_OBJECT_STORAGE_LOCAL_ROOT=/var/lib/soland/objects \
-  --mount type=volume,source=soland-data,target=/var/lib/soland \
-  --mount type=bind,source=/secure/soland/soland-keystore-master-key,target=/run/secrets/soland-keystore-master-key,readonly \
-  ghcr.io/arkret/soland:<tag>
+  -e COLAND_PUBLIC_BASE_URL=https://coland.example \
+  -e COLAND_FIRST_PROVISIONING=1 \
+  -e COLAND_KEYSTORE_BACKEND=encrypted_file \
+  -e COLAND_KEYSTORE_PATH=/var/lib/coland/keystore/coland.v1 \
+  -e COLAND_KEYSTORE_MASTER_KEY_FILE=/run/secrets/coland-keystore-master-key \
+  -e COLAND_SERVICE_IDENTITY_BUNDLE_DIR=/var/lib/coland/identity-bundle \
+  -e COLAND_ACCOUNT_AUTHORITY_URL=https://coauth.example \
+  -e COLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN=ak:trust_domain:coauth.example \
+  -e COLAND_SESSION_GRANT_INTROSPECTION_URL=https://coauth.example/_coauth/internal/session-grants/introspect \
+  -e COLAND_AUTH_SESSION_LOGOUT_URL=https://coauth.example/_coauth/internal/auth-sessions/logout \
+  -e COLAND_INTERNAL_AUTHORITY_SHARED_SECRET=shared-secret-known-by-coauth \
+  -e DATABASE_URL=postgres://coland:coland@db:5432/coland \
+  -e COLAND_OBJECT_STORAGE_BACKEND=filesystem \
+  -e COLAND_OBJECT_STORAGE_LOCAL_ROOT=/var/lib/coland/objects \
+  --mount type=volume,source=coland-data,target=/var/lib/coland \
+  --mount type=bind,source=/secure/coland/coland-keystore-master-key,target=/run/secrets/coland-keystore-master-key,readonly \
+  ghcr.io/arkret/coland:<tag>
 ```
 
 Back up the mounted master key separately from the ciphertext volume. Remove
-`SOLAND_FIRST_PROVISIONING` after the first successful identity creation. The
+`COLAND_FIRST_PROVISIONING` after the first successful identity creation. The
 identity bundle contains only public recovery evidence and KeyRefs; it is not a
-substitute for control-key custody. Soland fails closed instead of writing
+substitute for control-key custody. Coland fails closed instead of writing
 control seeds to PostgreSQL. Windows ACL and Docker Desktop examples are in
 [DEPLOYMENT.md](DEPLOYMENT.md#provision-the-keystore-master-key).
 
@@ -221,46 +221,46 @@ All settings can be supplied via environment variables (preferred) or a
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SOLAND_BIND` (or `--bind`) | `127.0.0.1:8698` | Listen address |
-| `SOLAND_PUBLIC_BASE_URL` | `http://<bind>` | Advertised base URL (`/_arkret/describe`) |
-| `SOLAND_TLS_CERT_PATH` | unset | TLS certificate PEM path; when paired with `SOLAND_TLS_KEY_PATH`, soland serves HTTPS via rustls |
-| `SOLAND_TLS_KEY_PATH` | unset | TLS private-key PEM path paired with `SOLAND_TLS_CERT_PATH` |
-| `SOLAND_PQ_TLS_DEPLOYMENT_PROBE` | unset | Set to `verified` only after an external TLS 1.3 probe proves `X25519MLKEM768` negotiation and fail-closed classical fallback |
-| `SOLAND_FIRST_PROVISIONING` | unset | One-time class-B production authorization to create a new service identity when no stored identity, local registration, or bundle exists |
-| `SOLAND_SERVICE_IDENTITY_BUNDLE_DIR` | unset | SDK identity-bundle backend used to recover the same service DID after database loss; contains public evidence and KeyRefs, never private keys |
-| `SOLAND_KEYSTORE_BACKEND` | unset | Durable key custody: `platform` for the current user's native credential store, or `encrypted_file`; required for runtime startup together with `DATABASE_URL` |
-| `SOLAND_KEYSTORE_PATH` | unset | Ciphertext file used by the `encrypted_file` backend; it may hold multiple isolated Soland namespaces |
-| `SOLAND_KEYSTORE_MASTER_KEY` / `_FILE` | unset | Base64-encoded, random 32-byte master key for `encrypted_file`; custody and backup must be separate from `SOLAND_KEYSTORE_PATH` |
-| `SOLAND_EMBEDDED_WEBVH_PROVIDER_ENABLED` | `true` | Enable soland's built-in `did:webvh` provider for coauth registration |
-| `SOLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER` | unset | Shared bearer token coauth must present to write embedded `did:webvh` registrations |
-| `SOLAND_EXTERNAL_WEBVH_PROVIDER_URL` | unset | Optional external `did:webvh` provider; any standalone registrar implementing the `did:webvh` provider surface |
-| `SOLAND_EXTERNAL_WEBVH_REGISTRATION_BEARER` / `_FILE` | unset | When set with the external Provider URL, stores Soland's own service identity there (class A); no first-provisioning flag or configured DID is used |
-| `SOLAND_DEFAULT_WEBVH_PROVIDER_ID` | unset | Optional coauth default provider id: `soland.embedded` or `external.webvh` |
-| `SOLAND_ACCOUNT_AUTHORITY_URL` | unset | Canonical public Account Authority base URL advertised at `/_arkret/describe.auth_metadata.account_authority`; internal bearer targets must use this exact origin |
-| `SOLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN` | unset | Explicit source trust domain of the configured Account Authority; required to register the unsigned §2.2.3 internal channel and never derived from its URL |
-| `SOLAND_SESSION_GRANT_INTROSPECTION_URL` | unset | Exact `/_coauth/internal/session-grants/introspect` endpoint used for `ak.session.grant + DPoP`; when the internal channel is registered it must match the Account Authority scheme, host and effective port and contain no credentials/query/fragment |
-| `SOLAND_AUTH_SESSION_LOGOUT_URL` | unset | Exact Account Authority process S2S `/_coauth/internal/auth-sessions/logout` endpoint; never derived from the introspection URL and subject to the same origin/URL restrictions |
-| `SOLAND_INTERNAL_AUTHORITY_SHARED_SECRET` | unset | Shared per-edge secret for this Station ↔ its Account Authority, presented as an HTTP Bearer token. Together with the Authority URL/trust domain it registers the trusted-proxy §2.2.3 channel, confined to exact-token introspection, Auth-side logout, controller-gate issue, and device-revocation gate check. Agent projection GET and Agent key pairing instead require the Station DID's delegated `#account-authority` RFC 9421 signature; this secret never authorizes them |
-| `DATABASE_URL` | unset | Required for runtime startup; enables PostgreSQL and runs migrations. In-memory persistence is test-only, and a durable `SOLAND_KEYSTORE_BACKEND` is mandatory |
-| `SOLAND_OBJECT_STORAGE_BACKEND` | `filesystem` | Blob object backend: `filesystem`/`local` or `s3-compatible` |
-| `SOLAND_OBJECT_STORAGE_LOCAL_ROOT` | system temp + `/soland-objects` | Local filesystem root when using `filesystem`/`local` |
-| `SOLAND_OBJECT_STORAGE_PREFIX` | unset | Optional object key prefix shared by local and S3-compatible backends |
-| `SOLAND_OBJECT_STORAGE_S3_BUCKET` | required for S3 | S3-compatible bucket name |
-| `SOLAND_OBJECT_STORAGE_S3_ENDPOINT` | region endpoint | Optional custom endpoint for MinIO/R2/etc. |
-| `SOLAND_CORS_ALLOW_ORIGIN` | unset | Comma-separated explicit browser origin allowlist; wildcards rejected; opt-in in every mode |
-| `SOLAND_DEVELOPMENT_MODE` | `false` | Enable the global development posture: dev-only endpoints (`dev_login`, admin snapshots, relaxed DID validation), private error diagnostics in server logs and `error.details.reason_detail`, and a default `debug` log filter when `RUST_LOG` is unset. Production responses continue to redact private diagnostics. |
-| `SOLAND_MAX_REQUEST_SIZE` | `16777216` | Maximum request body bytes Salvo will read before returning `413 Payload Too Large` (values below the protocol 16 MiB floor are clamped) |
-| `SOLAND_METRICS_BIND` | `127.0.0.1:9090` | Separate Prometheus listener; scrape `/metrics` |
-| `SOLAND_OTEL_EXPORTER` | unset | Set to `otlp` when built with `--features otel` to export traces |
-| `SOLAND_OTEL_ENDPOINT` | `http://127.0.0.1:4317` | OTLP gRPC collector endpoint when OTEL export is enabled |
-| `SOLAND_LOG_FORMAT` | `json` in prod, `plain` in dev | Tracing output format. Production deployments default to JSON for structured log aggregation; development defaults to ANSI-decorated text. Force either via `json` / `plain`. |
-| `RUST_LOG` | unset | Tracing subscriber filter, e.g. `soland=info,salvo=warn` |
+| `COLAND_BIND` (or `--bind`) | `127.0.0.1:8698` | Listen address |
+| `COLAND_PUBLIC_BASE_URL` | `http://<bind>` | Advertised base URL (`/_arkret/describe`) |
+| `COLAND_TLS_CERT_PATH` | unset | TLS certificate PEM path; when paired with `COLAND_TLS_KEY_PATH`, coland serves HTTPS via rustls |
+| `COLAND_TLS_KEY_PATH` | unset | TLS private-key PEM path paired with `COLAND_TLS_CERT_PATH` |
+| `COLAND_PQ_TLS_DEPLOYMENT_PROBE` | unset | Set to `verified` only after an external TLS 1.3 probe proves `X25519MLKEM768` negotiation and fail-closed classical fallback |
+| `COLAND_FIRST_PROVISIONING` | unset | One-time class-B production authorization to create a new service identity when no stored identity, local registration, or bundle exists |
+| `COLAND_SERVICE_IDENTITY_BUNDLE_DIR` | unset | SDK identity-bundle backend used to recover the same service DID after database loss; contains public evidence and KeyRefs, never private keys |
+| `COLAND_KEYSTORE_BACKEND` | unset | Durable key custody: `platform` for the current user's native credential store, or `encrypted_file`; required for runtime startup together with `DATABASE_URL` |
+| `COLAND_KEYSTORE_PATH` | unset | Ciphertext file used by the `encrypted_file` backend; it may hold multiple isolated Coland namespaces |
+| `COLAND_KEYSTORE_MASTER_KEY` / `_FILE` | unset | Base64-encoded, random 32-byte master key for `encrypted_file`; custody and backup must be separate from `COLAND_KEYSTORE_PATH` |
+| `COLAND_EMBEDDED_WEBVH_PROVIDER_ENABLED` | `true` | Enable coland's built-in `did:webvh` provider for coauth registration |
+| `COLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER` | unset | Shared bearer token coauth must present to write embedded `did:webvh` registrations |
+| `COLAND_EXTERNAL_WEBVH_PROVIDER_URL` | unset | Optional external `did:webvh` provider; any standalone registrar implementing the `did:webvh` provider surface |
+| `COLAND_EXTERNAL_WEBVH_REGISTRATION_BEARER` / `_FILE` | unset | When set with the external Provider URL, stores Coland's own service identity there (class A); no first-provisioning flag or configured DID is used |
+| `COLAND_DEFAULT_WEBVH_PROVIDER_ID` | unset | Optional coauth default provider id: `coland.embedded` or `external.webvh` |
+| `COLAND_ACCOUNT_AUTHORITY_URL` | unset | Canonical public Account Authority base URL advertised at `/_arkret/describe.auth_metadata.account_authority`; internal bearer targets must use this exact origin |
+| `COLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN` | unset | Explicit source trust domain of the configured Account Authority; required to register the unsigned §2.2.3 internal channel and never derived from its URL |
+| `COLAND_SESSION_GRANT_INTROSPECTION_URL` | unset | Exact `/_coauth/internal/session-grants/introspect` endpoint used for `ak.session.grant + DPoP`; when the internal channel is registered it must match the Account Authority scheme, host and effective port and contain no credentials/query/fragment |
+| `COLAND_AUTH_SESSION_LOGOUT_URL` | unset | Exact Account Authority process S2S `/_coauth/internal/auth-sessions/logout` endpoint; never derived from the introspection URL and subject to the same origin/URL restrictions |
+| `COLAND_INTERNAL_AUTHORITY_SHARED_SECRET` | unset | Shared per-edge secret for this Station ↔ its Account Authority, presented as an HTTP Bearer token. Together with the Authority URL/trust domain it registers the trusted-proxy §2.2.3 channel, confined to exact-token introspection, Auth-side logout, controller-gate issue, and device-revocation gate check. Agent projection GET and Agent key pairing instead require the Station DID's delegated `#account-authority` RFC 9421 signature; this secret never authorizes them |
+| `DATABASE_URL` | unset | Required for runtime startup; enables PostgreSQL and runs migrations. In-memory persistence is test-only, and a durable `COLAND_KEYSTORE_BACKEND` is mandatory |
+| `COLAND_OBJECT_STORAGE_BACKEND` | `filesystem` | Blob object backend: `filesystem`/`local` or `s3-compatible` |
+| `COLAND_OBJECT_STORAGE_LOCAL_ROOT` | system temp + `/coland-objects` | Local filesystem root when using `filesystem`/`local` |
+| `COLAND_OBJECT_STORAGE_PREFIX` | unset | Optional object key prefix shared by local and S3-compatible backends |
+| `COLAND_OBJECT_STORAGE_S3_BUCKET` | required for S3 | S3-compatible bucket name |
+| `COLAND_OBJECT_STORAGE_S3_ENDPOINT` | region endpoint | Optional custom endpoint for MinIO/R2/etc. |
+| `COLAND_CORS_ALLOW_ORIGIN` | unset | Comma-separated explicit browser origin allowlist; wildcards rejected; opt-in in every mode |
+| `COLAND_DEVELOPMENT_MODE` | `false` | Enable the global development posture: dev-only endpoints (`dev_login`, admin snapshots, relaxed DID validation), private error diagnostics in server logs and `error.details.reason_detail`, and a default `debug` log filter when `RUST_LOG` is unset. Production responses continue to redact private diagnostics. |
+| `COLAND_MAX_REQUEST_SIZE` | `16777216` | Maximum request body bytes Salvo will read before returning `413 Payload Too Large` (values below the protocol 16 MiB floor are clamped) |
+| `COLAND_METRICS_BIND` | `127.0.0.1:9090` | Separate Prometheus listener; scrape `/metrics` |
+| `COLAND_OTEL_EXPORTER` | unset | Set to `otlp` when built with `--features otel` to export traces |
+| `COLAND_OTEL_ENDPOINT` | `http://127.0.0.1:4317` | OTLP gRPC collector endpoint when OTEL export is enabled |
+| `COLAND_LOG_FORMAT` | `json` in prod, `plain` in dev | Tracing output format. Production deployments default to JSON for structured log aggregation; development defaults to ANSI-decorated text. Force either via `json` / `plain`. |
+| `RUST_LOG` | unset | Tracing subscriber filter, e.g. `coland=info,salvo=warn` |
 
 ### OpenTelemetry tracing
 
 OTLP trace export is a build-time opt-in to keep the default binary
 free of the OpenTelemetry SDK. Build with `--features otel`, then set
-`SOLAND_OTEL_EXPORTER=otlp` at runtime to export spans to your
+`COLAND_OTEL_EXPORTER=otlp` at runtime to export spans to your
 collector. The recommended local collector setup is the
 [OpenTelemetry Collector Contrib](https://github.com/open-telemetry/opentelemetry-collector-contrib)
 distribution with an `otlp` receiver on `:4317` and your preferred
@@ -271,7 +271,7 @@ sample collector config.
 ## Local TLS
 
 For local HTTPS development, use `mkcert`. It installs a local CA into your
-OS/browser trust store and produces PEM files that soland can hand directly to
+OS/browser trust store and produces PEM files that coland can hand directly to
 Salvo's rustls listener.
 
 The embedded `did:webvh` provider needs a dotted host, so plain `localhost` is
@@ -293,20 +293,20 @@ and the `local.host.pem` / `local.host-key.pem` file names.
 3. If `local.host` does not already resolve to loopback on your machine, add a
    hosts entry pointing it at `127.0.0.1`.
 
-4. Configure soland to use the generated files:
+4. Configure coland to use the generated files:
 
    ```dotenv
-    SOLAND_BIND=127.0.0.1:443
-    SOLAND_PUBLIC_BASE_URL=https://local.host:443
-   SOLAND_KEYSTORE_BACKEND=encrypted_file
-   SOLAND_KEYSTORE_PATH=./.local/keystore/soland.v1
-   SOLAND_KEYSTORE_MASTER_KEY_FILE=./.local/secrets/soland-keystore-master-key
-    SOLAND_SERVICE_IDENTITY_BUNDLE_DIR=./identity-bundle
-   SOLAND_TLS_CERT_PATH=./local.host.pem
-   SOLAND_TLS_KEY_PATH=./local.host-key.pem
-   SOLAND_OBJECT_STORAGE_BACKEND=filesystem
-   SOLAND_OBJECT_STORAGE_LOCAL_ROOT=../testdata
-   SOLAND_DEVELOPMENT_MODE=true
+    COLAND_BIND=127.0.0.1:443
+    COLAND_PUBLIC_BASE_URL=https://local.host:443
+   COLAND_KEYSTORE_BACKEND=encrypted_file
+   COLAND_KEYSTORE_PATH=./.local/keystore/coland.v1
+   COLAND_KEYSTORE_MASTER_KEY_FILE=./.local/secrets/coland-keystore-master-key
+    COLAND_SERVICE_IDENTITY_BUNDLE_DIR=./identity-bundle
+   COLAND_TLS_CERT_PATH=./local.host.pem
+   COLAND_TLS_KEY_PATH=./local.host-key.pem
+   COLAND_OBJECT_STORAGE_BACKEND=filesystem
+   COLAND_OBJECT_STORAGE_LOCAL_ROOT=../testdata
+   COLAND_DEVELOPMENT_MODE=true
    ```
 
 5. Start the server:
@@ -316,13 +316,13 @@ and the `local.host.pem` / `local.host-key.pem` file names.
    cargo run
    ```
 
-If you choose a different hostname, update `SOLAND_PUBLIC_BASE_URL` and the TLS
+If you choose a different hostname, update `COLAND_PUBLIC_BASE_URL` and the TLS
 file paths together. Use a host name that
 contains a dot so embedded `did:webvh` URLs remain valid.
 
 ### Run local Caddy for coauth integration
 
-For local coauth + soland testing, the checked-in `Caddyfile` terminates HTTPS
+For local coauth + coland testing, the checked-in `Caddyfile` terminates HTTPS
 on port 443 and proxies:
 
 ```text
@@ -331,29 +331,29 @@ https://auth.local.host -> 127.0.0.1:7080
 ```
 
 Start coauth on `127.0.0.1:7080` first so its OIDC discovery and public JWKS
-are available, then start soland on `127.0.0.1:8698`. Coauth keeps its business
+are available, then start coland on `127.0.0.1:8698`. Coauth keeps its business
 routes unavailable until it has verified the running Station.
 
 ```dotenv
-SOLAND_BIND=127.0.0.1:8698
-SOLAND_PUBLIC_BASE_URL=https://local.host
-SOLAND_KEYSTORE_BACKEND=encrypted_file
-SOLAND_KEYSTORE_PATH=./.local/keystore/soland.v1
-SOLAND_KEYSTORE_MASTER_KEY_FILE=./.local/secrets/soland-keystore-master-key
-SOLAND_SERVICE_IDENTITY_BUNDLE_DIR=./identity-bundle
-SOLAND_DEVELOPMENT_MODE=true
-SOLAND_ACCOUNT_AUTHORITY_URL=https://auth.local.host
-SOLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN=ak:trust_domain:auth.local.host
-SOLAND_OAUTH_CLIENT_ID=01GFWR28C4KNE04WG3HKXB7C9R
-SOLAND_SESSION_GRANT_INTROSPECTION_URL=https://auth.local.host/_coauth/internal/session-grants/introspect
-SOLAND_AUTH_SESSION_LOGOUT_URL=https://auth.local.host/_coauth/internal/auth-sessions/logout
-SOLAND_INTERNAL_AUTHORITY_SHARED_SECRET=local-coauth-session-grant-introspection
-SOLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER=local-soland-webvh-registration
+COLAND_BIND=127.0.0.1:8698
+COLAND_PUBLIC_BASE_URL=https://local.host
+COLAND_KEYSTORE_BACKEND=encrypted_file
+COLAND_KEYSTORE_PATH=./.local/keystore/coland.v1
+COLAND_KEYSTORE_MASTER_KEY_FILE=./.local/secrets/coland-keystore-master-key
+COLAND_SERVICE_IDENTITY_BUNDLE_DIR=./identity-bundle
+COLAND_DEVELOPMENT_MODE=true
+COLAND_ACCOUNT_AUTHORITY_URL=https://auth.local.host
+COLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN=ak:trust_domain:auth.local.host
+COLAND_OAUTH_CLIENT_ID=01GFWR28C4KNE04WG3HKXB7C9R
+COLAND_SESSION_GRANT_INTROSPECTION_URL=https://auth.local.host/_coauth/internal/session-grants/introspect
+COLAND_AUTH_SESSION_LOGOUT_URL=https://auth.local.host/_coauth/internal/auth-sessions/logout
+COLAND_INTERNAL_AUTHORITY_SHARED_SECRET=local-coauth-session-grant-introspection
+COLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER=local-coland-webvh-registration
 ```
 
 Those bearer values must match coauth's
 `arkret.stations[]` entry for `https://local.host/`; otherwise
-coauth will reject soland's introspection call and browser sign-in will end
+coauth will reject coland's introspection call and browser sign-in will end
 with `unauthenticated: invalid bearer token`.
 
 Run `just init-dev` once before starting this encrypted-file configuration;
@@ -370,7 +370,7 @@ your hosts file:
 127.0.0.1 local.host auth.local.host
 ```
 
-When `SOLAND_DEVELOPMENT_MODE=false` (the default), submitted commits must use
+When `COLAND_DEVELOPMENT_MODE=false` (the default), submitted commits must use
 production proof material — no `alg: none` or `dev-proof`, proof `payload_digest`
 must match the canonical commit digest, the verification method must be rooted
 in the commit author DID, and proof `domain`/`audience` must bind to the
@@ -378,18 +378,18 @@ service DID resolved from the durable service identity record.
 
 `GET /_arkret/root/identity/describe` exposes `did_webvh.providers[]` for coauth.
 When the embedded provider is enabled, coauth can register through
-`POST /_soland/root/identity/webvh/register` with `Authorization: Bearer
-<SOLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER>`; soland then serves the DID
+`POST /_coland/root/identity/webvh/register` with `Authorization: Bearer
+<COLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER>`; coland then serves the DID
 document and webvh log from `/webvh/{local_id}/did.json` and `.jsonl`. The
 embedded DID uses the public `did:webvh:<scid>:<host>:webvh:<local_id>` path
 rather than the internal registration API path.
 
 Production authentication presents the coauth-issued `ak.session.grant`
-directly to soland as `Authorization: DPoP <ak.session.grant>` plus a matching
-`DPoP` proof. soland validates the grant through session-grant introspection
+directly to coland as `Authorization: DPoP <ak.session.grant>` plus a matching
+`DPoP` proof. coland validates the grant through session-grant introspection
 and maps its typed holder/device binding into the local request-scoped
 account/device view. Device identity is not encoded as a sentinel scope.
-soland no longer exposes a Principal-local credential issuance endpoint for
+coland no longer exposes a Principal-local credential issuance endpoint for
 production grants.
 
 Account subscribe and Events API cursors are structured `ak:cursor:` tokens
@@ -419,20 +419,20 @@ and reject plaintext blobs in private Spaces unless this service is listed in
 
 ## API surface
 
-soland exposes the canonical Arkret v1 routes from the operation registry; local
-operator/product surfaces live under `/_soland/...`. Highlights:
+coland exposes the canonical Arkret v1 routes from the operation registry; local
+operator/product surfaces live under `/_coland/...`. Highlights:
 
 - `GET  /health` — liveness + DB / persistence probe (used as the Docker healthcheck)
 - `GET  /readyz` — readiness probe for DB, boot migrations, introspection bearer config, and external webvh boot probe state
 - `GET  /.well-known/arkret/openapi.json` and `.../openapi.yaml` — the
-  generated OpenAPI 3.1 document from soland's Salvo route wiring
+  generated OpenAPI 3.1 document from coland's Salvo route wiring
 - `GET  /.well-known/mimi-protocol-directory`
 - `POST /_arkret/self/events`, `GET /_arkret/self/events/describe`, …
 - `GET /_arkret/sync`, `GET /_arkret/root/identity/*`, `GET /_arkret/find/directory/*`
-- `POST /_soland/gate/auth/dev-login` (development_mode only)
+- `POST /_coland/gate/auth/dev-login` (development_mode only)
 
-A complete list lives in the OpenAPI document above; `/_soland/admin/{resource}`
-and `/_soland/gate/auth/dev-login` are gated behind `SOLAND_DEVELOPMENT_MODE=true`.
+A complete list lives in the OpenAPI document above; `/_coland/admin/{resource}`
+and `/_coland/gate/auth/dev-login` are gated behind `COLAND_DEVELOPMENT_MODE=true`.
 
 ## Development
 
@@ -442,7 +442,7 @@ Workspace layout (the CI checkout assumes the same):
 arkret/
 ├── arkret-rust-sdk/       # https://github.com/arkret-org/arkret-rust-sdk
 │   └── crates/
-└── soland/                 # this repo
+└── coland/                 # this repo
     ├── crates/
     ├── xtask/
     └── Cargo.toml
@@ -469,22 +469,22 @@ in [`CHANGELOG.md`](CHANGELOG.md) and repository issues.
 
 ## Production Deployment Checklist
 
-Before exposing soland to the public internet, walk every item below.
+Before exposing coland to the public internet, walk every item below.
 The same list is computed at runtime and surfaced on
-`/health.hardening` (and `/_arkret/describe.hardening`) so sodmin's
+`/health.hardening` (and `/_arkret/describe.hardening`) so codmin's
 `/hardening` dashboard can flag failing checks across the whole fleet.
 
-- [ ] `SOLAND_DEVELOPMENT_MODE=false` (default — only flip to true on a loopback dev bind)
-- [ ] TLS enabled (`SOLAND_TLS_CERT_PATH` / `SOLAND_TLS_KEY_PATH`, or terminated at the reverse proxy)
-- [ ] PQ-hybrid TLS deployment probe verified (`SOLAND_PQ_TLS_DEPLOYMENT_PROBE=verified` after `X25519MLKEM768` is negotiated)
+- [ ] `COLAND_DEVELOPMENT_MODE=false` (default — only flip to true on a loopback dev bind)
+- [ ] TLS enabled (`COLAND_TLS_CERT_PATH` / `COLAND_TLS_KEY_PATH`, or terminated at the reverse proxy)
+- [ ] PQ-hybrid TLS deployment probe verified (`COLAND_PQ_TLS_DEPLOYMENT_PROBE=verified` after `X25519MLKEM768` is negotiated)
 - [ ] CSP header configured at the reverse proxy
-- [ ] CORS limited to the configured allowed origins (`SOLAND_CORS_ALLOW_ORIGIN`)
-- [ ] Secrets in a secret manager (`SOLAND_NOTARY_SIGNING_KEY`, internal-authority shared secret)
+- [ ] CORS limited to the configured allowed origins (`COLAND_CORS_ALLOW_ORIGIN`)
+- [ ] Secrets in a secret manager (`COLAND_NOTARY_SIGNING_KEY`, internal-authority shared secret)
 - [ ] Log redaction enabled (default outside dev mode)
-- [ ] Admin auth in production mode (`SOLAND_ADMIN_PRINCIPAL_DIDS`, with browser sessions backed by `SOLAND_SESSION_GRANT_INTROSPECTION_URL`)
+- [ ] Admin auth in production mode (`COLAND_ADMIN_PRINCIPAL_DIDS`, with browser sessions backed by `COLAND_SESSION_GRANT_INTROSPECTION_URL`)
 - [ ] Rate limit enabled (default; do not disable in production)
 - [ ] Service signing-key rotation remains disabled until the deployment can atomically commit the KeyStore key, WebVH history, DID document, durable identity, and recovery bundle; the current admin route fails closed with `unsupported_feature`
-- [ ] `SOLAND_SEED_DEMO_DATA=false` (default — never on a federated production deployment)
+- [ ] `COLAND_SEED_DEMO_DATA=false` (default — never on a federated production deployment)
 
 ## License
 

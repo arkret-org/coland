@@ -21,8 +21,8 @@ use std::fmt;
 use std::str::FromStr;
 
 /// Environment variable carrying the whole registry, e.g.
-/// `SOLAND_FAILPOINTS="backup_series_erase_durable_step=fail_after_durable_steps:1"`.
-pub const FAILPOINTS_ENV: &str = "SOLAND_FAILPOINTS";
+/// `COLAND_FAILPOINTS="backup_series_erase_durable_step=fail_after_durable_steps:1"`.
+pub const FAILPOINTS_ENV: &str = "COLAND_FAILPOINTS";
 
 /// The closed set of injection points. Adding a variant means adding the
 /// matching consumer in the workflow it names.
@@ -116,7 +116,7 @@ impl FailpointRegistry {
         };
         if !development_mode {
             anyhow::bail!(
-                "{FAILPOINTS_ENV} is only honoured when SOLAND_DEVELOPMENT_MODE is true; \
+                "{FAILPOINTS_ENV} is only honoured when COLAND_DEVELOPMENT_MODE is true; \
                  unset it or the deployment is running with fault injection configured"
             );
         }

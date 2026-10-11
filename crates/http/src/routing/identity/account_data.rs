@@ -14,13 +14,13 @@ use arkret_models_identity::account::{
     AccountDataDeleteOutcome, AccountDataDeleteRequestBody, AccountDataList,
     AccountDataReplaceRequestBody, AccountDataRow,
 };
+use coland_http::error::AppError;
+use coland_services::identity::{AccountDataState, FindAgentControllerQuery, IdentityService};
 use salvo::http::StatusCode;
 use salvo::oapi::endpoint;
 use salvo::oapi::extract::{JsonBody, PathParam};
 use salvo::prelude::*;
 use serde_json::{Value, json};
-use soland_http::error::AppError;
-use soland_services::identity::{AccountDataState, FindAgentControllerQuery, IdentityService};
 
 use super::AuthArgs;
 use crate::state::AppState;
@@ -288,7 +288,7 @@ async fn session_actor_is_agent_runtime(
 /// forbidden to write (non-disclosure: get stays `not_found`, list filters).
 async fn session_is_agent_context(
     state: &AppState,
-    session: &soland_services::identity::SessionIdentityState,
+    session: &coland_services::identity::SessionIdentityState,
 ) -> Result<bool, AppError> {
     if session.agent_session().is_some() {
         return Ok(true);
@@ -306,7 +306,7 @@ async fn session_is_agent_context(
 /// Returns the accepted revision.
 async fn admit_caller_signed_account_data_set(
     state: &AppState,
-    session: &soland_services::identity::SessionIdentityState,
+    session: &coland_services::identity::SessionIdentityState,
     account_data_key: &str,
     submission: arkret_wire::EventAdmissionSubmission,
     expect_tombstone: bool,
@@ -379,7 +379,7 @@ async fn admit_caller_signed_account_data_set(
     // no RealmCommit covers them (actor-private-effects.md section 1).
     match crate::state::admit_account_data_set(state, session, &set_event).await {
         Ok(_) => {}
-        Err(error) if error.conflict_code() == Some(soland_storage::ConflictCode::CasConflict) => {
+        Err(error) if error.conflict_code() == Some(coland_storage::ConflictCode::CasConflict) => {
             let current = state
                 .account_data()
                 .entry(&account_key, account_data_key)
@@ -682,14 +682,14 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
-    use serde_json::{Value, json};
-    use soland_services::ServiceResult;
-    use soland_services::identity::{
+    use coland_services::ServiceResult;
+    use coland_services::identity::{
         AccountIdentity, AccountLifecycleState, AccountLocalpartState, AccountLookupPort,
         AccountProfileState, AgentController, AgentDirectoryPort, DeviceDirectoryPort,
         DeviceIdentity, SaveDeviceCommand,
     };
-    use soland_storage::AccountPk;
+    use coland_storage::AccountPk;
+    use serde_json::{Value, json};
 
     use super::*;
 
@@ -750,7 +750,7 @@ mod tests {
 
         async fn register_account(
             &self,
-            _command: soland_services::identity::RegisterAccountCommand,
+            _command: coland_services::identity::RegisterAccountCommand,
         ) -> ServiceResult<AccountIdentity> {
             unreachable!("NoAccounts mock: register_account is not exercised by these tests")
         }

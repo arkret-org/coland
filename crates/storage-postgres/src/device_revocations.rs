@@ -1,13 +1,13 @@
-use diesel::sql_types::{BigInt, Jsonb, Nullable, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
-use soland_storage::{
+use coland_storage::{
     DeviceRevocationCleanupIntent, DeviceRevocationGateLinearization,
     DeviceRevocationGateLinearizationRequest, DeviceRevocationGateSelector,
     DeviceRevocationGateStatus, DeviceRevocationStore, DeviceRevocationTargetRecord,
     DeviceRevocationTransition, DeviceRevocationTransitionDecision, PersistenceError,
     PersistenceResult, classify_device_revocation_transition, selector_comparison_status,
 };
+use diesel::sql_types::{BigInt, Jsonb, Nullable, Text, Timestamptz};
+use diesel::{OptionalExtension, QueryableByName, sql_query};
+use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 
 use crate::{PgPool, PgTransactionError, async_trait, pg_conn};
 
@@ -91,7 +91,7 @@ impl DeviceRevocationStore for PgDeviceRevocationStore {
     async fn pcr_device_generation(
         &self,
         account: &arkret_wire::AccountId,
-    ) -> PersistenceResult<Option<soland_storage::PcrDeviceGeneration>> {
+    ) -> PersistenceResult<Option<coland_storage::PcrDeviceGeneration>> {
         crate::pcr_device_status_reader::confirmed_pcr_generation(&self.pool, account).await
     }
 

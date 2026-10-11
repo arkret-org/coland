@@ -26,10 +26,10 @@ use arkret_wire::{
     CommitStreamHead, CommitStreamRef, CommittedEventView, DidCoreId, RealmCommit, RealmId,
     RequestId, StreamScanDirection, StreamScanRequest,
 };
-use soland_services::committed_receipt::{
+use coland_services::committed_receipt::{
     CommitContinuity, verify_committed_event_receipt_with_source,
 };
-use soland_storage::{
+use coland_storage::{
     CommittedChainNode, CommittedReplica, CommittedReplicaRole, ReplicaAnchorInstall,
     ReplicaStreamAnchor,
 };
@@ -400,7 +400,7 @@ async fn anchor_stream_with_forward_source(
     governance: &DidCoreId,
     located: &mut LocatedRealmAuthority,
     forward_source: Option<(
-        &soland_services::identity::SessionIdentityState,
+        &coland_services::identity::SessionIdentityState,
         &arkret_wire::Event,
     )>,
 ) -> Result<CommitStreamHead, String> {
@@ -563,7 +563,7 @@ pub(crate) async fn ensure_forwarded_target(
     event: &arkret_wire::Event,
     expected: Option<&RealmCommit>,
     located: &mut LocatedRealmAuthority,
-    session: &soland_services::identity::SessionIdentityState,
+    session: &coland_services::identity::SessionIdentityState,
 ) -> Result<Option<RealmCommit>, String> {
     const MAX_PAGES: usize = 16;
     const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
@@ -821,7 +821,7 @@ async fn open_forwarded_join(
     event: &arkret_wire::Event,
     expected: Option<&RealmCommit>,
     located: &mut LocatedRealmAuthority,
-    session: &soland_services::identity::SessionIdentityState,
+    session: &coland_services::identity::SessionIdentityState,
     prior: Option<ReplicaStreamAnchor>,
     pages_left: &mut usize,
     total_bytes: &mut usize,
@@ -979,7 +979,7 @@ async fn open_forwarded_join(
             })
             .await;
         if let Err(error) = installed {
-            if error.conflict_code() == Some(soland_storage::ConflictCode::DependencyMissing)
+            if error.conflict_code() == Some(coland_storage::ConflictCode::DependencyMissing)
                 && let Some(anchor) = held_fallback
             {
                 // Another hosted member may still authorize the old interval.
@@ -1050,7 +1050,7 @@ pub(super) fn validate_forward_scan_target(
 
 async fn require_forward_source(
     state: &AppState,
-    session: &soland_services::identity::SessionIdentityState,
+    session: &coland_services::identity::SessionIdentityState,
     event: &arkret_wire::Event,
     located: &LocatedRealmAuthority,
 ) -> Result<(), String> {
@@ -1083,7 +1083,7 @@ async fn require_forward_bound_result_visibility(
     event: &arkret_wire::Event,
     commit: &RealmCommit,
     expected: Option<&RealmCommit>,
-    session: &soland_services::identity::SessionIdentityState,
+    session: &coland_services::identity::SessionIdentityState,
 ) -> Result<(), String> {
     super::authority_forward::validate_recovery_caller(state, session, event)
         .await
@@ -1138,7 +1138,7 @@ async fn require_forward_visibility(
         .await
         .map_err(temporary)?
     {
-        soland_storage::AccountStreamScan::Page(page) if page.committed_events.len() == 1 => {
+        coland_storage::AccountStreamScan::Page(page) if page.committed_events.len() == 1 => {
             match &page.committed_events[0] {
                 CommittedEventView::Full(full)
                     if full.event == *event && full.commit == *commit =>
@@ -1210,7 +1210,7 @@ async fn store_scanned(
             // The prefix up to the anchor snapshot is history that precedes
             // this Station's hosted join; only a Commit after the anchor is
             // a live source Event for its accounts' notifications.
-            if matches!(outcome, soland_storage::CommittedReplicaOutcome::Stored)
+            if matches!(outcome, coland_storage::CommittedReplicaOutcome::Stored)
                 && commit.stream_position > anchored.stream_position
             {
                 crate::routing::events::notify::dispatch_committed_event_notifications(

@@ -2,9 +2,9 @@
 
 use arkret_wire::EventAdmissionSubmission;
 use chrono::Utc;
-use soland_services::identity::SessionIdentityState;
-use soland_services::{ServiceError, ServiceResult};
-use soland_storage::{ConsentAdmissionOutcome, ConsentAdmissionWrite};
+use coland_services::identity::SessionIdentityState;
+use coland_services::{ServiceError, ServiceResult};
+use coland_storage::{ConsentAdmissionOutcome, ConsentAdmissionWrite};
 
 use super::AppState;
 

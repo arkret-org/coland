@@ -11,7 +11,7 @@ use crate::util::render_error;
 pub struct ArkretOpenApiDoc(pub Value);
 
 /// Catch-all handler under `/_arkret/*` (and the deployment-local
-/// `/_soland/*` operator + product namespace, which carries its own
+/// `/_coland/*` operator + product namespace, which carries its own
 /// catch-all and must answer errors identically).
 ///
 /// Per `arkret-spec/spec/v1/zh/sync/api-conventions.md` §10:
@@ -62,9 +62,9 @@ pub async fn api_not_found(req: &mut Request, res: &mut Response) {
 /// `#[endpoint]` annotation coverage.
 ///
 /// Keys are route patterns with `{param}` segments, e.g.
-/// `/_soland/self/spaces/{space_id}`. Pattern→URI matching is segment-based
+/// `/_coland/self/spaces/{space_id}`. Pattern→URI matching is segment-based
 /// (see [`pattern_matches_path`]) so concrete URIs like
-/// `/_soland/self/spaces/ak:space:abc` resolve back to their declaring
+/// `/_coland/self/spaces/ak:space:abc` resolve back to their declaring
 /// pattern without any regex compilation.
 static KNOWN_ROUTES: OnceLock<Vec<(String, Vec<Method>)>> = OnceLock::new();
 
@@ -75,13 +75,13 @@ pub fn populate_known_routes(registered_routes: &BTreeMap<String, BTreeSet<Strin
             // The protocol surface (`/_arkret/...`, trust segments
             // self/gate/root/find/peer/open/edge) is spec-mandated to return
             // the canonical error envelope; the deployment-local
-            // `/_soland/...` operator + product namespace carries its own
+            // `/_coland/...` operator + product namespace carries its own
             // catch-all, so it participates in 404/405 disambiguation too —
             // otherwise the two mounts would answer wrong-method requests
             // differently. Other prefixes (`/health`, `/.well-known/...`) are
             // out of scope for the `unrecognized_endpoint` /
             // `method_not_allowed` contract.
-            if !(path.starts_with("/_arkret/") || path.starts_with("/_soland/")) {
+            if !(path.starts_with("/_arkret/") || path.starts_with("/_coland/")) {
                 continue;
             }
             let methods: Vec<Method> = methods

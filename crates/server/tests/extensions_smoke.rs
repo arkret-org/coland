@@ -2,23 +2,23 @@
 //! Accepted Applet/Realm fixtures pending formal Event/RealmCommit migration are
 //! tracked in arkret-work/tasks/impl-active/2026-09-19-2011.
 
+use coland_http::config::AppConfig;
+use coland_http::service;
 use salvo::http::StatusCode;
 use salvo::test::{ResponseExt, TestClient};
 use serde_json::{Value, json};
-use soland_http::config::AppConfig;
-use soland_http::service;
 
 fn test_config() -> AppConfig {
     AppConfig {
         development_mode: true,
         seed_demo_data: true,
-        ..soland_test_support::app_config()
+        ..coland_test_support::app_config()
     }
 }
 
 #[tokio::test]
 async fn applet_protocol_describe_smoke() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let app = service(state);
 
     // applet-integration.md 7 fixes the ping response fields; there is no
@@ -66,7 +66,7 @@ async fn applet_protocol_describe_smoke() {
 
 #[tokio::test]
 async fn applet_transaction_requires_signature_before_typed_body_validation() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let app = service(state);
     let mut response = TestClient::post("http://server/_arkret/edge/applet/transactions")
         .add_header(
@@ -93,18 +93,18 @@ async fn applet_transaction_requires_signature_before_typed_body_validation() {
 
 #[tokio::test]
 async fn retired_sovereign_shadow_routes_are_unrecognized() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     state.hydrate().await.unwrap();
     let app = service(state);
 
     for path in [
-        "/_soland/admin/deployment/audit",
-        "/_soland/admin/deployment/enclave-frontier?realm_id=ak:realm:retired",
-        "/_soland/admin/deployment/info",
-        "/_soland/self/account/did:web:retired.example",
-        "/_soland/self/directory/realms",
-        "/_soland/self/realm/ak:realm:retired",
-        "/_soland/self/realm/ak:realm:retired/access",
+        "/_coland/admin/deployment/audit",
+        "/_coland/admin/deployment/enclave-frontier?realm_id=ak:realm:retired",
+        "/_coland/admin/deployment/info",
+        "/_coland/self/account/did:web:retired.example",
+        "/_coland/self/directory/realms",
+        "/_coland/self/realm/ak:realm:retired",
+        "/_coland/self/realm/ak:realm:retired/access",
     ] {
         let mut response = TestClient::get(format!("http://server{path}"))
             .send(&app)
@@ -119,16 +119,16 @@ async fn retired_sovereign_shadow_routes_are_unrecognized() {
     }
 
     for path in [
-        "/_soland/admin/deployment/configure",
-        "/_soland/admin/deployment/external-invite",
-        "/_soland/admin/deployment/network/link",
-        "/_soland/admin/deployment/realm.create",
-        "/_soland/admin/deployment/register-enclave",
-        "/_soland/admin/deployment/store-and-forward/messages",
-        "/_soland/admin/deployment/store-and-forward/drain",
-        "/_soland/admin/deployment/store-and-forward/ingest",
-        "/_soland/self/account/accept-external-invite",
-        "/_soland/self/deployment/enclave-proxy",
+        "/_coland/admin/deployment/configure",
+        "/_coland/admin/deployment/external-invite",
+        "/_coland/admin/deployment/network/link",
+        "/_coland/admin/deployment/realm.create",
+        "/_coland/admin/deployment/register-enclave",
+        "/_coland/admin/deployment/store-and-forward/messages",
+        "/_coland/admin/deployment/store-and-forward/drain",
+        "/_coland/admin/deployment/store-and-forward/ingest",
+        "/_coland/self/account/accept-external-invite",
+        "/_coland/self/deployment/enclave-proxy",
     ] {
         let mut response = TestClient::post(format!("http://server{path}"))
             .send(&app)

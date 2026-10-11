@@ -26,16 +26,16 @@ use arkret_wire::{CapabilityActionId, DidUrl, XExtensionMap};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Duration, Utc};
+use coland_domain::reducer::{FacetRef, facet};
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
+use coland_services::identity::SessionIdentityState as SessionRecord;
 use ed25519_dalek::Signer as _;
 use salvo::http::HeaderValue;
 use salvo::oapi::endpoint;
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
 use serde_json::{Value, json};
-use soland_domain::reducer::{FacetRef, facet};
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
-use soland_services::identity::SessionIdentityState as SessionRecord;
 
 use super::{hmac_sha256, now, realm_has_member, sha256_hex, validate_device_id};
 use crate::routing::system::extract::AuthArgs;
@@ -274,7 +274,7 @@ fn pairwise_turn_username(
     // media-service secret so it is not recomputable off stable ids alone and
     // not a deterministic function of the public identifiers.
     let nonce_material = format!(
-        "soland-turn-pseudonym-nonce-v1\0{realm_id}\0{call_id}\0{actor_id}\0{device_id}\0{bucket}"
+        "coland-turn-pseudonym-nonce-v1\0{realm_id}\0{call_id}\0{actor_id}\0{device_id}\0{bucket}"
     );
     let nonce = hmac_sha256(&secret, nonce_material.as_bytes());
     let pseudonym_input = json!({
@@ -298,10 +298,10 @@ fn pairwise_turn_username(
 /// matching what an external coturn expects.
 ///
 /// `turn_shared_secret` comes from `state.config().ice.turn_shared_secret`
-/// (`SOLAND_TURN_SHARED_SECRET`, W1). When unset, a deployment-stable fallback
+/// (`COLAND_TURN_SHARED_SECRET`, W1). When unset, a deployment-stable fallback
 /// key is derived from the notary signing seed so credentials stay
 /// self-consistent across issue/refresh within this deployment; production
-/// deployments fronting an external coturn MUST set `SOLAND_TURN_SHARED_SECRET`
+/// deployments fronting an external coturn MUST set `COLAND_TURN_SHARED_SECRET`
 /// to the same secret coturn is configured with.
 fn turn_rest_credential(state: &AppState, username: &str) -> String {
     let configured = state.config().ice.turn_shared_secret.as_deref();
@@ -311,7 +311,7 @@ fn turn_rest_credential(state: &AppState, username: &str) -> String {
         None => {
             fallback = hmac_sha256(
                 &state.notary_signing_key().to_bytes(),
-                b"soland-turn-shared-secret-fallback-v1",
+                b"coland-turn-shared-secret-fallback-v1",
             );
             &fallback
         }
@@ -501,7 +501,7 @@ async fn handle_rtc_token(
     // `device_id` arrive already validated as the corresponding scalar id types,
     // and the response binding carries the same typed ids — so the wire outcome
     // reuses `arkret_models_collaboration::objects::media::CallMediaTokenExchangeOutcome` directly
-    // instead of a stringly soland mirror.
+    // instead of a stringly coland mirror.
     let realm_id = body.realm_id.clone();
     if !is_valid_webrtc_session_id(body.call_id.as_str()) {
         return Err(AppError::param_invalid("invalid call_id"));
@@ -837,7 +837,7 @@ fn media_service_epoch_for_realm(
     let value = {
         let projection = state.projections().snapshot();
         projection
-            .realm_facet_value(realm_id, soland_domain::reducer::facet::REALM_MEDIA_SERVICE)
+            .realm_facet_value(realm_id, coland_domain::reducer::facet::REALM_MEDIA_SERVICE)
             .cloned()
     }
     .ok_or_else(|| {
@@ -1005,7 +1005,7 @@ fn issue_livekit_backend_token(
         .filter(|secret| !secret.is_empty());
     let (Some(api_key), Some(api_secret)) = (api_key, api_secret) else {
         return Err(focus_unavailable_error(
-            "livekit focus selected but SOLAND_LIVEKIT_API_KEY / SOLAND_LIVEKIT_API_SECRET are not configured",
+            "livekit focus selected but COLAND_LIVEKIT_API_KEY / COLAND_LIVEKIT_API_SECRET are not configured",
         ));
     };
     let (audio, video, screen) = token_media_permissions(request);

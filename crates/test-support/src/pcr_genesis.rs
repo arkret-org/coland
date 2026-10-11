@@ -23,7 +23,7 @@ use arkret_wire::{
     CommittedEventRef, DeviceId, DidUrl, EventKind, Hash, IdempotencyKey, PcrGenesisUnit,
     RealmCommit, RealmCommitAuthorityRef, TrustDomainId, WebOrigin,
 };
-use soland_storage::{
+use coland_storage::{
     AcceptedDeviceAuthorizationOutcome, AuthorityCommitTransaction, CurrentRealmAuthority,
     DeviceRevocationGateSelector, PcrGenesisCommitOutcome, PcrGenesisCommitUnit, PersistenceResult,
     PersistenceStore, WebvhLogRecord,

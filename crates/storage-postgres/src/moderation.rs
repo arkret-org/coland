@@ -245,7 +245,7 @@ async fn management_view_in_connection(
     actor: &arkret_wire::ActorId,
     realm_filter: Option<&arkret_wire::RealmId>,
     at: chrono::DateTime<chrono::Utc>,
-) -> PersistenceResult<soland_storage::ModerationManagementView> {
+) -> PersistenceResult<coland_storage::ModerationManagementView> {
     let realms = sql_query(
         "SELECT realm_id FROM (SELECT realm_id FROM moderation_report_current_results \
          UNION SELECT realm_id FROM moderation_state_current_results) realms \
@@ -255,7 +255,7 @@ async fn management_view_in_connection(
     .load::<RealmRow>(&mut *conn)
     .await
     .map_err(PersistenceError::database)?;
-    let mut view = soland_storage::ModerationManagementView::default();
+    let mut view = coland_storage::ModerationManagementView::default();
     for RealmRow { realm_id } in realms {
         view.items
             .extend(realm_queue_items(conn, &realm_id, actor, at).await?);
@@ -279,7 +279,7 @@ impl ModerationStore for PgModerationStore {
         &self,
         actor: &arkret_wire::ActorId,
         realm_id: Option<&arkret_wire::RealmId>,
-    ) -> PersistenceResult<soland_storage::ModerationManagementView> {
+    ) -> PersistenceResult<coland_storage::ModerationManagementView> {
         let at = chrono::Utc::now();
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {

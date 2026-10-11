@@ -334,16 +334,16 @@ pub(super) async fn bootstrap_realm_member_index(
     let plaintext_visible_services = std::collections::BTreeSet::new();
     let plaintext_visible_service_classes = std::collections::BTreeMap::new();
     let minimal_metadata_realm = payload_object
-        .is_some_and(soland_services::operation_semantics::payload_declares_minimal_metadata_realm);
+        .is_some_and(coland_services::operation_semantics::payload_declares_minimal_metadata_realm);
     // `object` is the accepted Event envelope, so the provenance this entry needs
     // is right here. It used to inherit the constructor's minted placeholder: a
     // directory entry for a real Realm advertising an Event id that resolves to
     // nothing, with the real id one field away.
     let provenance = match event_string_field(object, &["event_id"]) {
-        Some(event_id) => soland_services::events::DirectoryProvenance::AcceptedEvent(event_id),
+        Some(event_id) => coland_services::events::DirectoryProvenance::AcceptedEvent(event_id),
         None => {
             tracing::warn!(%realm_id, "bootstrap_realm_member_index: envelope carries no event_id");
-            soland_services::events::DirectoryProvenance::LocalOnly
+            coland_services::events::DirectoryProvenance::LocalOnly
         }
     };
     let mut entry =
@@ -365,7 +365,7 @@ pub(super) async fn bootstrap_realm_member_index(
         entry.members.insert(actor_typed);
     }
     state.realm_directory().upsert(entry);
-    let meta = soland_services::events::RealmMetadata {
+    let meta = coland_services::events::RealmMetadata {
         owner: actor.to_owned(),
         deleted: false,
         discoverability,
@@ -428,7 +428,7 @@ mod tests {
     async fn realm_create_index_does_not_erase_later_bootstrap_policy_projection() {
         let state = AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let realm_id = "ak:realm:Abeq9pC3fxOERl1X0ivHa5cJCBy41KfYu5LKvGfPFq5K";
         let service_id = "ak:did_core:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x";
@@ -437,7 +437,7 @@ mod tests {
             .realms()
             .store_realm_metadata(
                 realm_id,
-                soland_services::events::RealmMetadata {
+                coland_services::events::RealmMetadata {
                     owner: ALICE.to_owned(),
                     deleted: false,
                     discoverability: "invite_only".to_owned(),
@@ -520,7 +520,7 @@ mod tests {
     async fn invite_membership_exemptions_fail_without_committed_invite() {
         let state = AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let actor = account_actor(ALICE);
         let account = actor.as_account_id().unwrap();

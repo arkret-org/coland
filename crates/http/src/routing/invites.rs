@@ -31,24 +31,24 @@ use arkret_wire::{
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::Duration;
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
+use coland_http::util::sha256_hex;
+use coland_services::events::{
+    AcceptedEvent, InviteLocatorInsertResult as InviteLocatorInsertOutcome,
+    InviteLocatorRotateCommand as InviteLocatorRotateMutation,
+    InviteLocatorState as InviteLocatorRecord,
+};
+use coland_services::federation::{EnqueueFederationDeliveryCommand, FederationDeliveryRecord};
+use coland_services::identity::{
+    AccountDataCasOutcome, AccountDataState, SessionIdentityState as SessionRecord,
+};
+use coland_storage::NewSourceAdmission;
 use salvo::http::HeaderValue;
 use salvo::oapi::endpoint;
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
 use serde_json::{Value, json};
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
-use soland_http::util::sha256_hex;
-use soland_services::events::{
-    AcceptedEvent, InviteLocatorInsertResult as InviteLocatorInsertOutcome,
-    InviteLocatorRotateCommand as InviteLocatorRotateMutation,
-    InviteLocatorState as InviteLocatorRecord,
-};
-use soland_services::federation::{EnqueueFederationDeliveryCommand, FederationDeliveryRecord};
-use soland_services::identity::{
-    AccountDataCasOutcome, AccountDataState, SessionIdentityState as SessionRecord,
-};
-use soland_storage::NewSourceAdmission;
 
 use crate::routing::identity::device_messages::{
     ActorPrivateAccountDataOperation, ActorPrivateAccountDataUpdate, ActorPrivateDeviceUpdate,
@@ -298,7 +298,7 @@ async fn peer_invites_submit(
             .signing_principal_id()
             .as_str()
             .to_owned(),
-        endpoint: soland_services::identity::SessionEndpointState::HumanDevice {
+        endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
             device_id: format!("peer-invite:{source_id}"),
         },
         audience: state.service_id().clone(),
@@ -610,7 +610,7 @@ async fn self_invites_dispatch(
         && producer_signer_fact.is_none()
     {
         return Err(AppError::from_rejection(
-            soland_http::error::ErrorCode::TemporarilyUnavailable,
+            coland_http::error::ErrorCode::TemporarilyUnavailable,
             "original accepted Invite Human signer fact is unavailable",
         ));
     }
@@ -995,7 +995,7 @@ async fn deliver_invite_credential(
         {
             let outcome = state
                 .persistence()
-                .admit_consented_invite_delivery(soland_storage::ConsentDeliveryWrite {
+                .admit_consented_invite_delivery(coland_storage::ConsentDeliveryWrite {
                     holder: account_id.clone(),
                     peer: arkret_wire::ActorId::account(inviter_account_id.clone()),
                     consent_grant_ref: consent_grant_ref.clone(),
@@ -1004,7 +1004,7 @@ async fn deliver_invite_credential(
                         .map(|id| arkret_identifiers::ConsentId::new(id.clone()))
                         .transpose()
                         .map_err(|e| AppError::param_invalid(e.to_string()))?,
-                    record: soland_storage::AccountDataRecord {
+                    record: coland_storage::AccountDataRecord {
                         actor: record.actor_id,
                         account_data_key: record.account_data_key,
                         revision: record.revision,
@@ -1018,7 +1018,7 @@ async fn deliver_invite_credential(
                 .map_err(|e| AppError::internal(e.to_string()))?;
             match outcome {
                 None => return Ok(None),
-                Some(soland_storage::AccountDataCasResult::Applied(record)) => {
+                Some(coland_storage::AccountDataCasResult::Applied(record)) => {
                     AccountDataCasOutcome::Applied(AccountDataState {
                         actor_id: record.actor,
                         account_data_key: record.account_data_key,
@@ -1028,7 +1028,7 @@ async fn deliver_invite_credential(
                         updated_at: record.updated_at,
                     })
                 }
-                Some(soland_storage::AccountDataCasResult::Conflict(_)) => {
+                Some(coland_storage::AccountDataCasResult::Conflict(_)) => {
                     attempt += 1;
                     if attempt >= INVITE_DELIVERY_CAS_ATTEMPTS {
                         return Err(crate::app_error!(
@@ -1537,7 +1537,7 @@ pub(crate) fn new_source_ledger_digest(
 
     let secret = state.notary_signing_key().to_bytes();
     let material = format!(
-        "soland-invite-new-source-ledger-v1\0{}\0{}\0{inviter_id}",
+        "coland-invite-new-source-ledger-v1\0{}\0{}\0{inviter_id}",
         account_id.principal_id.as_str(),
         account_id.station_id.as_str()
     );
@@ -2283,8 +2283,8 @@ async fn authenticate_invite_notification(
             .await
             .map_err(|error| {
                 AppError::from_rejection(
-                    soland_http::error::ErrorCode::from_wire(error.code)
-                        .unwrap_or(soland_http::error::ErrorCode::SchemaViolation),
+                    coland_http::error::ErrorCode::from_wire(error.code)
+                        .unwrap_or(coland_http::error::ErrorCode::SchemaViolation),
                     error.message,
                 )
             })?;
@@ -2309,7 +2309,7 @@ async fn verify_invite_commit(
     // independent historical governance verification below.
     delivery.validate_minimal().map_err(|e| {
         AppError::from_rejection(
-            soland_http::error::ErrorCode::SchemaViolation,
+            coland_http::error::ErrorCode::SchemaViolation,
             e.to_string(),
         )
     })?;
@@ -2328,7 +2328,7 @@ async fn verify_invite_commit(
         )
         .map_err(|error| {
             AppError::from_rejection(
-                soland_http::error::ErrorCode::SignatureInvalid,
+                coland_http::error::ErrorCode::SignatureInvalid,
                 error.to_string(),
             )
         })?;
@@ -2336,14 +2336,14 @@ async fn verify_invite_commit(
     match delivery.producer_signer_fact.as_ref() {
         Some(fact) => arkret_identity::account_device_signer_evidence::verify_historical_human_event_signature(
             &delivery.invite_event,fact,state.projections().realm_digest_suite(delivery.invite_event.realm_id.as_str())
-        ).map_err(|e| AppError::from_rejection(soland_http::error::ErrorCode::SignatureInvalid,e.to_string()))?,
+        ).map_err(|e| AppError::from_rejection(coland_http::error::ErrorCode::SignatureInvalid,e.to_string()))?,
         None if delivery.invite_event.human_device_producer().map_err(|e| AppError::param_invalid(e.to_string()))?.is_some() =>
-            return Err(AppError::from_rejection(soland_http::error::ErrorCode::TemporarilyUnavailable,"original Invite Human source is unavailable")),
+            return Err(AppError::from_rejection(coland_http::error::ErrorCode::TemporarilyUnavailable,"original Invite Human source is unavailable")),
         None => {},
     }
     let unavailable = |detail: String| {
         AppError::from_rejection(
-            soland_http::error::ErrorCode::TemporarilyUnavailable,
+            coland_http::error::ErrorCode::TemporarilyUnavailable,
             detail,
         )
     };
@@ -2367,11 +2367,11 @@ async fn verify_invite_commit(
     )
     .await
     .map_err(|error| unavailable(format!("invite_commit signing key is unavailable: {error}")))?;
-    let received = soland_services::committed_receipt::verify_committed_event_receipt_with_fact(
+    let received = coland_services::committed_receipt::verify_committed_event_receipt_with_fact(
         state.persistence(),
         &delivery.invite_event,
         &delivery.invite_commit,
-        soland_services::committed_receipt::CommitContinuity::Standalone,
+        coland_services::committed_receipt::CommitContinuity::Standalone,
         &located.authority,
         &located.keys,
         &state.service_core_id(),
@@ -2385,24 +2385,24 @@ async fn verify_invite_commit(
     .await
     .map_err(receipt_refusal)?;
     match received {
-        soland_services::committed_receipt::ReceivedProducer::GovernanceCommittedHumanDevice
-        | soland_services::committed_receipt::ReceivedProducer::HostedHumanDevice(_) => Ok(()),
-        soland_services::committed_receipt::ReceivedProducer::OtherSigner
-        | soland_services::committed_receipt::ReceivedProducer::GovernanceCommittedService => Err(unavailable(
+        coland_services::committed_receipt::ReceivedProducer::GovernanceCommittedHumanDevice
+        | coland_services::committed_receipt::ReceivedProducer::HostedHumanDevice(_) => Ok(()),
+        coland_services::committed_receipt::ReceivedProducer::OtherSigner
+        | coland_services::committed_receipt::ReceivedProducer::GovernanceCommittedService => Err(unavailable(
             "invite producer is not a human Account device; its signer evidence is not connected"
                 .to_owned(),
         )),
     }
 }
 
-fn receipt_refusal(error: soland_services::ServiceError) -> AppError {
+fn receipt_refusal(error: coland_services::ServiceError) -> AppError {
     let code = match &error {
-        soland_services::ServiceError::SchemaViolation(_) => {
-            Some(soland_http::error::ErrorCode::SchemaViolation)
+        coland_services::ServiceError::SchemaViolation(_) => {
+            Some(coland_http::error::ErrorCode::SchemaViolation)
         }
         _ => error
             .conflict_code()
-            .and_then(|code| soland_http::error::ErrorCode::from_wire(code.as_str())),
+            .and_then(|code| coland_http::error::ErrorCode::from_wire(code.as_str())),
     };
     match code {
         Some(code) => AppError::from_rejection(code, error.to_string()),
@@ -2490,9 +2490,9 @@ fn invite_locator_not_found() -> AppError {
 #[cfg(test)]
 mod invite_locator_security_tests {
 
-    use soland_services::identity::AccountProfileState;
-    use soland_test_support::AppStateTestExt as _;
-    use soland_test_support::pcr_genesis::PcrGenesisFixture;
+    use coland_services::identity::AccountProfileState;
+    use coland_test_support::AppStateTestExt as _;
+    use coland_test_support::pcr_genesis::PcrGenesisFixture;
 
     use super::*;
 
@@ -2512,7 +2512,7 @@ mod invite_locator_security_tests {
                 state.service_core_id().clone(),
             ),
             service_resolution: ServiceResolutionCarrier::ResolutionUrl {
-                resolution_url: "https://soland.test/_arkret/open/services/resolution".to_owned(),
+                resolution_url: "https://coland.test/_arkret/open/services/resolution".to_owned(),
             },
             route_assistance: None,
             issued_at: at,
@@ -2587,7 +2587,7 @@ mod invite_locator_security_tests {
             development_mode: false,
             seed_demo_data: false,
             object_storage: crate::config::ObjectStorageConfig::local(
-                std::env::temp_dir().join("soland-invite-service-fanout-test-blobs"),
+                std::env::temp_dir().join("coland-invite-service-fanout-test-blobs"),
             ),
             ..crate::config::AppConfig::test_default()
         })
@@ -2595,12 +2595,12 @@ mod invite_locator_security_tests {
     }
 
     async fn production_holder_state_with_config(config: crate::config::AppConfig) -> AppState {
-        let state = AppState::new(config, soland_storage_postgres::Db { pool: None });
+        let state = AppState::new(config, coland_storage_postgres::Db { pool: None });
         let created_at = now();
         state
             .identities()
             .save_account(AccountProfileState {
-                pk: soland_storage::AccountPk(0),
+                pk: coland_storage::AccountPk(0),
                 account_id: arkret_wire::AccountId::new(
                     DidCoreId::new(PRODUCTION_HOLDER.to_owned()).unwrap(),
                     state.service_core_id().clone(),
@@ -2626,19 +2626,19 @@ mod invite_locator_security_tests {
             development_mode: false,
             seed_demo_data: false,
             object_storage: crate::config::ObjectStorageConfig::local(
-                std::env::temp_dir().join("soland-invite-service-fanout-test-blobs"),
+                std::env::temp_dir().join("coland-invite-service-fanout-test-blobs"),
             ),
             ..crate::config::AppConfig::test_default()
         };
         let service_did =
-            AppState::new(config.clone(), soland_storage_postgres::Db { pool: None }).service_did();
-        let persisted = soland_test_support::app_state_with_service_did(
-            soland_test_support::app_config(),
+            AppState::new(config.clone(), coland_storage_postgres::Db { pool: None }).service_did();
+        let persisted = coland_test_support::app_state_with_service_did(
+            coland_test_support::app_config(),
             service_did,
         );
         let state = AppState::new_with_persistence(
             config,
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
             persisted.test_persistence(),
         );
         let fixture = PcrGenesisFixture::new(state.service_did());
@@ -2650,7 +2650,7 @@ mod invite_locator_security_tests {
         state
             .identities()
             .save_account(AccountProfileState {
-                pk: soland_storage::AccountPk(0),
+                pk: coland_storage::AccountPk(0),
                 account_id: arkret_wire::AccountId::new(holder.clone(), state.service_core_id()),
                 principal_id: holder.clone(),
                 localpart: "holder".to_owned(),
@@ -2750,7 +2750,7 @@ mod invite_locator_security_tests {
                 DidCoreId::new(holder.to_owned()).unwrap(),
                 service_id,
                 ServiceResolutionCarrier::ResolutionUrl {
-                    resolution_url: "https://soland.test/.well-known/arkret/current".to_owned(),
+                    resolution_url: "https://coland.test/.well-known/arkret/current".to_owned(),
                 },
             );
         // These fixtures exercise the receive policy, quarantine and fanout
@@ -2806,7 +2806,7 @@ mod invite_locator_security_tests {
             token_hash: "peer-invite:test".to_owned(),
             account_pk: None,
             actor: PRODUCTION_INVITER.to_owned(),
-            endpoint: soland_services::identity::SessionEndpointState::HumanDevice {
+            endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
                 device_id: "peer-invite:test".to_owned(),
             },
             audience: state.service_id().clone(),
@@ -2852,20 +2852,20 @@ mod invite_locator_security_tests {
 
     #[tokio::test]
     async fn genuine_invite_source_refusals_precede_holder_quarantine_delivery_and_outbox_writes() {
-        use soland_storage::EventCommitUnitOfWork as _;
-        use soland_test_support::AppStateTestExt as _;
+        use coland_storage::EventCommitUnitOfWork as _;
+        use coland_test_support::AppStateTestExt as _;
         let (state, holder, _) = accepted_holder_state().await;
         let (sender, pool) =
-            soland_test_support::app_state_with_pool(soland_test_support::app_config());
+            coland_test_support::app_state_with_pool(coland_test_support::app_config());
         let fixture =
-            soland_test_support::historical_human::HumanFixture::new(&pool, sender.service_did())
+            coland_test_support::historical_human::HumanFixture::new(&pool, sender.service_did())
                 .await;
         fixture.admit(&pool).await;
         let pcr = &fixture.pcr;
         let template = production_invite_delivery_for(&state, &holder);
         let previous = fixture.unit.transactions.last().unwrap();
         let at = previous.commit.committed_at + Duration::seconds(1);
-        let event = soland_test_support::device_authorization_history::sign_event(
+        let event = coland_test_support::device_authorization_history::sign_event(
             arkret_wire::test_support::raw_event_at(
                 arkret_wire::EventKind::InviteCreate.as_str(),
                 previous.event.scope_ref.clone(),
@@ -2879,8 +2879,8 @@ mod invite_locator_security_tests {
             pcr.history.founding_device_signing_seed,
         );
         let request =
-            soland_test_support::historical_human::request_for_event(&fixture, previous, event, at);
-        soland_storage_postgres::PgEventCommitUnitOfWork::new(pool.clone())
+            coland_test_support::historical_human::request_for_event(&fixture, previous, event, at);
+        coland_storage_postgres::PgEventCommitUnitOfWork::new(pool.clone())
             .commit_event(request.clone())
             .await
             .unwrap();
@@ -2908,7 +2908,7 @@ mod invite_locator_security_tests {
             arkret_wire::DetachedSignatureContext::RealmCommit,
             &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
                 bytes: ed25519_dalek::SigningKey::from_bytes(
-                    &soland_test_support::device_authorization_history::STATION_AUTHORITY_SEED,
+                    &coland_test_support::device_authorization_history::STATION_AUTHORITY_SEED,
                 )
                 .verifying_key()
                 .to_bytes()
@@ -2961,14 +2961,14 @@ mod invite_locator_security_tests {
                 .digest()
                 .unwrap(),
         );
-        soland_test_support::historical_human::seal_commit(
+        coland_test_support::historical_human::seal_commit(
             &mut wrong_key.invite_commit,
             &pcr.history.station_did,
         );
         let mut legacy = valid.clone();
         legacy.producer_signer_fact = None;
         legacy.invite_commit.producer_signer_fact_digest = None;
-        soland_test_support::historical_human::seal_commit(
+        coland_test_support::historical_human::seal_commit(
             &mut legacy.invite_commit,
             &pcr.history.station_did,
         );
@@ -2976,7 +2976,7 @@ mod invite_locator_security_tests {
             token_hash: "fixture-peer-invite".into(),
             account_pk: None,
             actor: pcr.history.account.principal_id.to_string(),
-            endpoint: soland_services::identity::SessionEndpointState::HumanDevice {
+            endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
                 device_id: pcr.history.founding_device_id.to_string(),
             },
             audience: state.service_id().clone(),
@@ -3487,7 +3487,7 @@ mod invite_locator_security_tests {
             development_mode: false,
             seed_demo_data: false,
             object_storage: crate::config::ObjectStorageConfig::local(
-                std::env::temp_dir().join("soland-invite-quota-applies-to-test-blobs"),
+                std::env::temp_dir().join("coland-invite-quota-applies-to-test-blobs"),
             ),
             ..crate::config::AppConfig::test_default()
         };
@@ -3577,7 +3577,7 @@ mod invite_locator_security_tests {
             development_mode: false,
             seed_demo_data: false,
             object_storage: crate::config::ObjectStorageConfig::local(
-                std::env::temp_dir().join("soland-invite-new-source-quota-test-blobs"),
+                std::env::temp_dir().join("coland-invite-new-source-quota-test-blobs"),
             ),
             ..crate::config::AppConfig::test_default()
         };
@@ -3889,7 +3889,7 @@ mod invite_locator_security_tests {
                 seed_demo_data: false,
                 ..crate::config::AppConfig::test_default()
             },
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let body = json!({
             "invite_event": {

@@ -6,11 +6,11 @@ use arkret_models_crypto::{
     SecurityTransactionTerminalOutcome,
 };
 use arkret_wire::{ActorId, DidCoreId, SchemaId};
-use ed25519_dalek::Signer as _;
-use soland_services::identity::{
+use coland_services::identity::{
     BackupSeriesEraseProgressState, SecurityTransactionStepAttemptState,
     SecurityTransactionStepOutcomeState,
 };
+use ed25519_dalek::Signer as _;
 
 use super::*;
 
@@ -464,7 +464,7 @@ pub(crate) async fn advance_rotation(state: &AppState, transaction_id: &str) {
 async fn try_advance_rotation_step(
     state: &AppState,
     transaction_id: &str,
-) -> Result<bool, soland_services::ServiceError> {
+) -> Result<bool, coland_services::ServiceError> {
     // Partial erase progress is durable but does not change the resource;
     // the loop then stops and the next sweep resumes the remaining objects.
     let progress = |record: &SecurityTransactionRecord| {
@@ -484,7 +484,7 @@ async fn try_advance_rotation_step(
     let next = before
         .resource
         .next_required_step()
-        .map_err(|error| soland_services::ServiceError::Internal(error.to_string()))?;
+        .map_err(|error| coland_services::ServiceError::Internal(error.to_string()))?;
     match next {
         Some(SecurityTransactionStep::Revoke) => {
             try_advance_rotation_revoke(state, transaction_id).await?;
@@ -526,13 +526,13 @@ async fn try_advance_rotation_step(
 async fn try_advance_rotation_revoke(
     state: &AppState,
     transaction_id: &str,
-) -> Result<(), soland_services::ServiceError> {
+) -> Result<(), coland_services::ServiceError> {
     use arkret_models_crypto::{
         SecurityRotationRevokeCommandDecision, SecurityRotationRevokeCommandOutcome,
         SecurityRotationRevokeProposal,
     };
-    use soland_services::ServiceError;
-    use soland_services::identity::{RevokeCommandTerminalWrite, RevokeProposalCommitWrite};
+    use coland_services::ServiceError;
+    use coland_services::identity::{RevokeCommandTerminalWrite, RevokeProposalCommitWrite};
 
     let internal = |error: &dyn std::fmt::Display| ServiceError::Internal(error.to_string());
     let Some(transaction) = state
@@ -673,12 +673,12 @@ async fn try_advance_rotation_revoke(
 
 /// Refusals of the proposal unit that no retry can change, mapped to the
 /// registered reason code the aborted terminal carries (if any).
-fn permanent_revoke_refusal(error: &soland_services::ServiceError) -> Option<Option<String>> {
-    use soland_storage::ConflictCode;
+fn permanent_revoke_refusal(error: &coland_services::ServiceError) -> Option<Option<String>> {
+    use coland_storage::ConflictCode;
 
     if matches!(
         error.kind(),
-        soland_services::ServiceErrorKind::SchemaViolation
+        coland_services::ServiceErrorKind::SchemaViolation
     ) {
         return Some(None);
     }
@@ -698,7 +698,7 @@ async fn abort_rotation_revoke(
     state: &AppState,
     mut transaction: SecurityTransactionRecord,
     reason_code: Option<String>,
-) -> Result<(), soland_services::ServiceError> {
+) -> Result<(), coland_services::ServiceError> {
     debug_assert!(transaction.resource.revoke_proposal.is_none());
     transaction.resource.terminal_outcome = Some(SecurityTransactionTerminalOutcome::Aborted {
         completed_at: chrono::Utc::now(),
@@ -712,11 +712,11 @@ async fn abort_rotation_revoke(
 async fn expire_rotation_revoke(
     state: &AppState,
     mut transaction: SecurityTransactionRecord,
-) -> Result<(), soland_services::ServiceError> {
+) -> Result<(), coland_services::ServiceError> {
     use arkret_models_crypto::{
         SecurityRotationRevokeCommandDecision, SecurityRotationRevokeCommandOutcome,
     };
-    use soland_services::identity::RevokeCommandTerminalWrite;
+    use coland_services::identity::RevokeCommandTerminalWrite;
 
     let expires_at = transaction.resource.expires_at;
     transaction.resource.terminal_outcome = Some(SecurityTransactionTerminalOutcome::Expired {
@@ -747,13 +747,13 @@ async fn expire_rotation_revoke(
 fn worker_step_outcome(
     transaction: &SecurityTransactionRecord,
     step: SecurityTransactionStep,
-) -> Result<SecurityTransactionStepOutcomeState, soland_services::ServiceError> {
+) -> Result<SecurityTransactionStepOutcomeState, coland_services::ServiceError> {
     Ok(SecurityTransactionStepOutcomeState {
         transaction_id: transaction.resource.transaction_id.as_str().to_owned(),
         step,
         canonical_request: transaction.canonical_request.clone(),
         response: serde_json::to_value(&transaction.resource)
-            .map_err(|error| soland_services::ServiceError::Internal(error.to_string()))?,
+            .map_err(|error| coland_services::ServiceError::Internal(error.to_string()))?,
         participant_outcome: None,
     })
 }
@@ -763,7 +763,7 @@ fn with_worker_step(
     state: &AppState,
     transaction: &SecurityTransactionRecord,
     accepted_at: chrono::DateTime<chrono::Utc>,
-) -> Result<SecurityTransactionRecord, soland_services::ServiceError> {
+) -> Result<SecurityTransactionRecord, coland_services::ServiceError> {
     let mut next = transaction.clone();
     next.resource.accepted_steps.push(AcceptedStep {
         acceptor: SecurityTransactionAcceptor::Principal {
@@ -773,7 +773,7 @@ fn with_worker_step(
     });
     next.resource
         .validate_structural()
-        .map_err(|error| soland_services::ServiceError::Internal(error.to_string()))?;
+        .map_err(|error| coland_services::ServiceError::Internal(error.to_string()))?;
     Ok(next)
 }
 
@@ -781,10 +781,10 @@ fn with_worker_step(
 /// the aborted terminal carries. Only a registered-code conflict is final; a
 /// retryable code, an unavailable dependency or an infrastructure failure is
 /// left for the next sweep (and, at worst, for expiry).
-fn permanent_worker_refusal(error: &soland_services::ServiceError) -> Option<Option<String>> {
-    use soland_storage::ConflictCode;
+fn permanent_worker_refusal(error: &coland_services::ServiceError) -> Option<Option<String>> {
+    use coland_storage::ConflictCode;
 
-    if error.kind() != soland_services::ServiceErrorKind::Conflict {
+    if error.kind() != coland_services::ServiceErrorKind::Conflict {
         return None;
     }
     match error.conflict_code() {
@@ -809,7 +809,7 @@ async fn stop_rotation(
     state: &AppState,
     mut transaction: SecurityTransactionRecord,
     reason_code: Option<Option<String>>,
-) -> Result<(), soland_services::ServiceError> {
+) -> Result<(), coland_services::ServiceError> {
     transaction.resource.terminal_outcome = Some(match reason_code {
         None => SecurityTransactionTerminalOutcome::Expired {
             completed_at: transaction.resource.expires_at,
@@ -831,9 +831,9 @@ async fn stop_rotation(
 async fn try_advance_rotation_upload(
     state: &AppState,
     transaction: SecurityTransactionRecord,
-) -> Result<(), soland_services::ServiceError> {
+) -> Result<(), coland_services::ServiceError> {
     let internal =
-        |error: &dyn std::fmt::Display| soland_services::ServiceError::Internal(error.to_string());
+        |error: &dyn std::fmt::Display| coland_services::ServiceError::Internal(error.to_string());
     let now = chrono::Utc::now();
     if transaction.resource.expires_at <= now {
         return stop_rotation(state, transaction, None).await;
@@ -862,7 +862,7 @@ async fn try_advance_rotation_upload(
     let step_outcome = worker_step_outcome(&next, SecurityTransactionStep::UploadNewMaterial)?;
     match state
         .security_transactions()
-        .commit_rotation_upload(soland_storage::RotationUploadCommitWrite {
+        .commit_rotation_upload(coland_storage::RotationUploadCommitWrite {
             transaction: next,
             step_outcome,
         })
@@ -887,9 +887,9 @@ async fn try_advance_rotation_upload(
 async fn try_advance_rotation_switch(
     state: &AppState,
     transaction: SecurityTransactionRecord,
-) -> Result<(), soland_services::ServiceError> {
+) -> Result<(), coland_services::ServiceError> {
     let internal =
-        |error: &dyn std::fmt::Display| soland_services::ServiceError::Internal(error.to_string());
+        |error: &dyn std::fmt::Display| coland_services::ServiceError::Internal(error.to_string());
     let now = chrono::Utc::now();
     if transaction.resource.expires_at <= now {
         return stop_rotation(state, transaction, None).await;
@@ -934,7 +934,7 @@ async fn try_advance_rotation_switch(
         worker_step_outcome(&next, SecurityTransactionStep::SwitchAuthoritativePointer)?;
     match state
         .security_transactions()
-        .commit_rotation_pointer_switch(soland_storage::RotationPointerSwitchWrite {
+        .commit_rotation_pointer_switch(coland_storage::RotationPointerSwitchWrite {
             transaction: next,
             step_outcome,
             commit,
@@ -963,11 +963,11 @@ async fn try_advance_rotation_switch(
 async fn try_advance_rotation_erase(
     state: &AppState,
     transaction: SecurityTransactionRecord,
-) -> Result<(), soland_services::ServiceError> {
-    use soland_storage::BackupSeriesEraseWorkerRequest;
+) -> Result<(), coland_services::ServiceError> {
+    use coland_storage::BackupSeriesEraseWorkerRequest;
 
     let internal =
-        |error: &dyn std::fmt::Display| soland_services::ServiceError::Internal(error.to_string());
+        |error: &dyn std::fmt::Display| coland_services::ServiceError::Internal(error.to_string());
     let now = chrono::Utc::now();
     if transaction.resource.expires_at <= now {
         return stop_rotation(state, transaction, None).await;
@@ -1014,7 +1014,7 @@ async fn try_advance_rotation_erase(
                 .confirmed_active_series_for_device(&resource.account_id, &authorizer, now)
                 .await?
                 .ok_or_else(|| {
-                    soland_services::ServiceError::Conflict(
+                    coland_services::ServiceError::Conflict(
                         "temporarily_unavailable: the confirmed backup pointer is absent"
                             .to_owned(),
                     )
@@ -1059,9 +1059,9 @@ fn backup_rotation_kind_name(kind: arkret_models_crypto::BackupRotationKind) -> 
 }
 
 fn initial_backup_erase_outcome(
-    request: &soland_storage::BackupSeriesEraseWorkerRequest,
-) -> Result<soland_storage::BackupSeriesEraseOutcome, AppError> {
-    use soland_storage::{
+    request: &coland_storage::BackupSeriesEraseWorkerRequest,
+) -> Result<coland_storage::BackupSeriesEraseOutcome, AppError> {
+    use coland_storage::{
         BackupSeriesEraseOutcome, BackupSeriesEraseRow, BackupSeriesEraseRowStatus,
         BackupSeriesEraseStatus,
     };
@@ -1121,11 +1121,11 @@ fn backup_value_matches_rotation(
 }
 
 fn refresh_backup_erase_completion(
-    outcome: &mut soland_storage::BackupSeriesEraseOutcome,
-    request: &soland_storage::BackupSeriesEraseWorkerRequest,
+    outcome: &mut coland_storage::BackupSeriesEraseOutcome,
+    request: &coland_storage::BackupSeriesEraseWorkerRequest,
 ) -> bool {
     use arkret_models_crypto::BackupSeriesEraseConfirmation;
-    use soland_storage::BackupSeriesEraseStatus;
+    use coland_storage::BackupSeriesEraseStatus;
 
     let complete = outcome
         .series_records
@@ -1156,10 +1156,10 @@ fn refresh_backup_erase_completion(
 async fn execute_rotation_erase(
     state: &AppState,
     mut transaction: SecurityTransactionRecord,
-    request: &soland_storage::BackupSeriesEraseWorkerRequest,
+    request: &coland_storage::BackupSeriesEraseWorkerRequest,
     canonical_request: Vec<u8>,
-) -> Result<soland_storage::BackupSeriesEraseOutcome, AppError> {
-    use soland_storage::BackupSeriesEraseRowStatus;
+) -> Result<coland_storage::BackupSeriesEraseOutcome, AppError> {
+    use coland_storage::BackupSeriesEraseRowStatus;
 
     let request = request.clone();
     let transaction_id = transaction.resource.transaction_id.as_str().to_owned();
@@ -1519,7 +1519,7 @@ async fn execute_rotation_erase(
 pub(crate) async fn execute_rotation_erase_for_test(
     state: &AppState,
     transaction: SecurityTransactionRecord,
-    request: &soland_storage::BackupSeriesEraseWorkerRequest,
+    request: &coland_storage::BackupSeriesEraseWorkerRequest,
 ) -> Result<(), AppError> {
     let canonical_request = arkret_canonical::canonical_json_bytes(request)
         .map_err(|error| AppError::internal(error.to_string()))?;
@@ -1585,7 +1585,7 @@ async fn continue_rotation_local_commit(
     };
     let stored = state
         .security_transactions()
-        .commit_rotation_local_commit(soland_services::identity::RotationLocalCommitWrite {
+        .commit_rotation_local_commit(coland_services::identity::RotationLocalCommitWrite {
             transaction,
             step_outcome,
             attestation,
@@ -1600,8 +1600,8 @@ async fn continue_rotation_local_commit(
 /// canonical-bytes conflict and an unavailable PCR cut keep their own code;
 /// every other refusal (inactive device, foreign verification method, bad
 /// signature, drifted resource) is the operation's `failed_precondition`.
-fn local_commit_refusal(error: soland_services::ServiceError) -> AppError {
-    use soland_storage::ConflictCode;
+fn local_commit_refusal(error: coland_services::ServiceError) -> AppError {
+    use coland_storage::ConflictCode;
 
     match error.conflict_code() {
         Some(ConflictCode::DuplicateConflict) => {
@@ -1611,7 +1611,7 @@ fn local_commit_refusal(error: soland_services::ServiceError) -> AppError {
             crate::app_error!(TemporarilyUnavailable, "{}", error.detail())
         }
         Some(_) => crate::app_error!(FailedPrecondition, "{}", error.detail()),
-        None if error.kind() == soland_services::ServiceErrorKind::Conflict => {
+        None if error.kind() == coland_services::ServiceErrorKind::Conflict => {
             crate::app_error!(FailedPrecondition, "{}", error.detail())
         }
         None => security_transaction_service_error(error),
@@ -1810,7 +1810,7 @@ async fn continue_commit_recovery_unit(
         )
         .map_err(|error| AppError::internal(format!("recovery Commit signing: {error}")))?;
     let committed_ref =
-        |item: &soland_storage::AuthorityCommitTransaction| arkret_wire::CommittedEventRef {
+        |item: &coland_storage::AuthorityCommitTransaction| arkret_wire::CommittedEventRef {
             event_id: item.event.event_id.clone(),
             commit_id: item.commit.commit_id.clone(),
             stream_ref: item.commit.stream_ref.clone(),
@@ -1878,7 +1878,7 @@ async fn continue_commit_recovery_unit(
     let _guard = lock.lock().await;
     let accepted = state
         .security_transactions()
-        .commit_recovery_unit(soland_services::identity::RecoveryUnitCommitWrite {
+        .commit_recovery_unit(coland_services::identity::RecoveryUnitCommitWrite {
             transaction,
             step_outcome: outcome,
             predecessor,
@@ -1917,7 +1917,7 @@ async fn prepare_recovery_plan(
         .await
         .map_err(recovery_service_error)?
         .ok_or_else(|| AppError::not_found("recovery session not found"))?;
-    if recovery_session.state != soland_storage::RecoverySessionLifecycle::Verified
+    if recovery_session.state != coland_storage::RecoverySessionLifecycle::Verified
         || recovery_session.principal_id != request.account_id.principal_id
         || recovery_session.station_id != request.account_id.station_id
         || recovery_session.station_id.as_str() != state.service_id()
@@ -2010,7 +2010,7 @@ async fn prepare_recovery_plan(
     let authorize_envelope_digest = authorize_event
         .event_digest_with_digest_suite(digest_suite)
         .map_err(|error| AppError::internal(error.to_string()))?;
-    let replacement_payload_digest = soland_services::events::replacement_authorize_payload_digest(
+    let replacement_payload_digest = coland_services::events::replacement_authorize_payload_digest(
         &authorize_envelope,
         &authorize_envelope_digest,
     )
@@ -2174,8 +2174,8 @@ fn canonical_digest(value: &impl Serialize) -> Result<Hash, AppError> {
     Hash::new(digest).map_err(|error| AppError::internal(error.to_string()))
 }
 
-fn security_transaction_service_error(error: soland_services::ServiceError) -> AppError {
-    if error.kind() == soland_services::ServiceErrorKind::Conflict
+fn security_transaction_service_error(error: coland_services::ServiceError) -> AppError {
+    if error.kind() == coland_services::ServiceErrorKind::Conflict
         && error.detail().contains("different canonical bytes")
     {
         AppError::conflict(error.detail()).with_wire_code("duplicate_conflict")
@@ -2206,7 +2206,7 @@ mod tests {
             [0x52; 32],
         ));
         let signed = |method: DidUrl, author: &AccountId, signing_seed| {
-            soland_test_support::device_authorization_history::sign_event(
+            coland_test_support::device_authorization_history::sign_event(
                 arkret_wire::test_support::raw_event(
                     arkret_wire::EventKind::MessageCreate.as_str(),
                     arkret_wire::ScopeRef::Realm {

@@ -21,11 +21,11 @@ fn approver(
     (actor, did, method, signer.verifying_key().to_bytes())
 }
 fn proofs(
-    request: &soland_storage::EventCommitRequest,
+    request: &coland_storage::EventCommitRequest,
     grant_id: &GrantId,
     seeds: &[u8],
     governance: bool,
-) -> soland_storage::EventApprovalCommit {
+) -> coland_storage::EventApprovalCommit {
     let event = &request.authority_commit.event;
     let station = &request.authority_commit.expected_authority.service_id;
     let digest = arkret_canonical::canonical_sha256(event).unwrap();
@@ -71,7 +71,7 @@ fn proofs(
             native_approval_method(signature, *seed, station)
         })
         .collect();
-    soland_storage::EventApprovalCommit {
+    coland_storage::EventApprovalCommit {
         event_id: event.event_id.clone(),
         event_digest: digest,
         committed_at: request.authority_commit.commit.committed_at,
@@ -79,10 +79,10 @@ fn proofs(
     }
 }
 fn batch(
-    request: soland_storage::EventCommitRequest,
-    proof: soland_storage::EventApprovalCommit,
-) -> soland_storage::EventBatchCommitRequest {
-    soland_storage::EventBatchCommitRequest {
+    request: coland_storage::EventCommitRequest,
+    proof: coland_storage::EventApprovalCommit,
+) -> coland_storage::EventBatchCommitRequest {
+    coland_storage::EventBatchCommitRequest {
         events: vec![request],
         franking_replay_nonce: None,
         realm_organization_proof: None,
@@ -95,9 +95,9 @@ fn batch(
 }
 
 fn signed_age(
-    mut proof: soland_storage::EventApprovalCommit,
+    mut proof: coland_storage::EventApprovalCommit,
     age: chrono::TimeDelta,
-) -> soland_storage::EventApprovalCommit {
+) -> coland_storage::EventApprovalCommit {
     for (method, seed) in proof.methods.iter_mut().zip([81, 82]) {
         method.signature.input.approved_at = proof.committed_at - age;
         let signer = arkret_signatures::Ed25519DetachedJwsSigner::from_seed(
@@ -118,11 +118,11 @@ fn signed_age(
 
 struct GrantSetup {
     opened: ordinary_realm::Discussion,
-    head: soland_storage::AuthorityCommitTransaction,
+    head: coland_storage::AuthorityCommitTransaction,
     board_id: arkret_wire::SpaceId,
     list_id: arkret_wire::SpaceId,
     grant_id: GrantId,
-    command: soland_storage::EventCommitRequest,
+    command: coland_storage::EventCommitRequest,
 }
 
 async fn prepare_grant_setup(pool: &PgPool) -> GrantSetup {

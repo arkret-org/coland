@@ -6,9 +6,9 @@
 
 use arkret_event_draft::ProjectedEventOperation as Operation;
 use chrono::{Duration, Utc};
+use coland_domain::hlc::ServerHlc;
+use coland_domain::reducer::{ProjectionEffect, ProjectionState};
 use serde_json::{Value, json};
-use soland_domain::hlc::ServerHlc;
-use soland_domain::reducer::{ProjectionEffect, ProjectionState};
 
 const REALM_A: &str = "ak:realm:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb";
 const REALM_PARENT: &str = "ak:realm:ASR8x2N1qyfyy6I-eob3l-FNhx4FPBTyMJrIfifkksgW";
@@ -19,7 +19,7 @@ const CAPTCHA_PROVIDER_DID: &str = "did:webvh:z6mkfixture:captcha.example";
 fn member_actor(principal: &str) -> arkret_wire::ActorId {
     arkret_wire::ActorId::account(arkret_wire::AccountId::new(
         arkret_wire::DidCoreId::new(principal).unwrap(),
-        soland_test_support::fixture_station_id(),
+        coland_test_support::fixture_station_id(),
     ))
 }
 
@@ -566,7 +566,7 @@ fn a_claim_gate_without_an_issuer_boundary_is_not_an_admissible_policy() {
 
     // The reducer's own check, reached directly.
     assert_eq!(
-        soland_domain::reducer::validate_join_policy_payload(&json!({
+        coland_domain::reducer::validate_join_policy_payload(&json!({
             "gates": [{
                 "gate_id": "employee",
                 "kind": "claim_required",
@@ -715,7 +715,7 @@ fn a_gate_proof_whose_kind_contradicts_the_gate_is_refused() {
 
 #[test]
 fn a_gate_proof_in_the_pre_ruling_private_shape_is_refused() {
-    // The shape soland used to accept: member names it invented, with no
+    // The shape coland used to accept: member names it invented, with no
     // binding tuple at all. It is not the registered carrier, so the payload
     // does not parse and the Move is refused before any gate is evaluated.
     let (mut state, hlc, join) = captcha_join(|proof| {

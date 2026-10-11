@@ -1,14 +1,14 @@
 //! Host-local widget inventory, serialized with the exact installation fence.
 use arkret_models_integration::AppletInstallRequestBody;
 use chrono::{DateTime, Utc};
+use coland_storage::{
+    AppletWidgetInstallSelector, AppletWidgetTokenGateSelector, AppletWidgetTokenInvalidation,
+    AppletWidgetTokenRecord, PersistenceError, PersistenceResult,
+};
 use diesel::sql_types::{Jsonb, Text, Timestamptz};
 use diesel::{OptionalExtension as _, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::Value;
-use soland_storage::{
-    AppletWidgetInstallSelector, AppletWidgetTokenGateSelector, AppletWidgetTokenInvalidation,
-    AppletWidgetTokenRecord, PersistenceError, PersistenceResult,
-};
 
 #[derive(diesel::QueryableByName)]
 struct RecordRow {
@@ -71,7 +71,7 @@ async fn current_permission(
         &mut std::collections::BTreeSet::new(),
         0,
     )?;
-    let facts = soland_storage::OperationFacts {
+    let facts = coland_storage::OperationFacts {
         applet_id: Some(install.applet_id.to_string()),
         registration_epoch: Some(install.registration_epoch.to_string()),
         ..Default::default()
@@ -79,14 +79,14 @@ async fn current_permission(
     for action in actions {
         for target in resources {
             let actions = [action.as_str()];
-            let operation = soland_storage::AuthorizationOperation {
+            let operation = coland_storage::AuthorizationOperation {
                 actor,
                 actions: &actions,
                 target,
                 at,
                 facts: &facts,
             };
-            if soland_storage::evaluate_grants(&operation, std::iter::once(grant))
+            if coland_storage::evaluate_grants(&operation, std::iter::once(grant))
                 .unreserved()
                 .is_empty()
             {
@@ -103,7 +103,7 @@ pub(crate) async fn lock_install(
     install: &AppletWidgetInstallSelector,
     active: bool,
 ) -> PersistenceResult<Value> {
-    let scope = soland_storage::applet_effective_scope_key(&install.effective_scope)?;
+    let scope = coland_storage::applet_effective_scope_key(&install.effective_scope)?;
     let row=sql_query("SELECT record FROM applet_installations WHERE applet_id=$1 AND effective_scope_key=$2 FOR UPDATE")
         .bind::<Text,_>(install.applet_id.as_str()).bind::<Text,_>(scope)
         .get_result::<RecordRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
@@ -183,7 +183,7 @@ pub(crate) async fn issue(
     if widget.consent_required && !record.consent_approved {
         return Err(denied("widget requires explicit host consent"));
     }
-    soland_storage::validate_applet_widget_scope(
+    coland_storage::validate_applet_widget_scope(
         &widget.token_scope,
         &record.token_scope,
         &record.install,
@@ -199,7 +199,7 @@ pub(crate) async fn issue(
         record.issued_at,
     )
     .await?;
-    let scope = soland_storage::applet_effective_scope_key(&record.install.effective_scope)?;
+    let scope = coland_storage::applet_effective_scope_key(&record.install.effective_scope)?;
     let value = serde_json::to_value(record).map_err(PersistenceError::database)?;
     let inserted=sql_query("INSERT INTO applet_widget_tokens(token_ref,token_digest,applet_id,effective_scope_key,registration_event_ref,registration_epoch,record,issued_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING")
         .bind::<Text,_>(&record.token_ref).bind::<Text,_>(record.token_digest.as_str()).bind::<Text,_>(record.install.applet_id.as_str())
@@ -229,7 +229,7 @@ pub(crate) async fn inventory(
     at: DateTime<Utc>,
 ) -> PersistenceResult<Vec<AppletWidgetTokenRecord>> {
     lock_install(conn, install, false).await?;
-    let scope = soland_storage::applet_effective_scope_key(&install.effective_scope)?;
+    let scope = coland_storage::applet_effective_scope_key(&install.effective_scope)?;
     sql_query("SELECT record FROM applet_widget_tokens WHERE applet_id=$1 AND effective_scope_key=$2 AND registration_event_ref=$3 AND registration_epoch=$4 AND invalidated_at IS NULL AND expires_at>$5 ORDER BY token_ref")
         .bind::<Text,_>(install.applet_id.as_str()).bind::<Text,_>(scope).bind::<Text,_>(install.registration_event_ref.as_str())
         .bind::<Text,_>(install.registration_epoch.as_str()).bind::<Timestamptz,_>(at)
@@ -255,7 +255,7 @@ pub(crate) async fn check(
         .map_err(PersistenceError::database)?
         .ok_or_else(|| denied("widget token is absent"))?;
     let record = serde_json::from_value(row.record).map_err(PersistenceError::database)?;
-    soland_storage::validate_applet_widget_token_use(&record, gate, at)?;
+    coland_storage::validate_applet_widget_token_use(&record, gate, at)?;
     current_permission(
         conn,
         &gate.install,

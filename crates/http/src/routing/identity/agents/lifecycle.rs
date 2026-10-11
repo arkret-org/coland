@@ -3,7 +3,7 @@ use salvo::oapi::endpoint;
 use super::*;
 
 const AGENT_PROVISION_ALLOCATION_TTL_HOURS: i64 = 24;
-const AGENT_PROVISION_ALLOCATION_DOMAIN: &str = "org.arkret.soland.agent_provision_allocation.v1";
+const AGENT_PROVISION_ALLOCATION_DOMAIN: &str = "org.arkret.coland.agent_provision_allocation.v1";
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreparedAgentProvision {
@@ -147,7 +147,7 @@ async fn lookup_provision_allocation(
     state: &AppState,
     controller_principal_id: &str,
     key: &str,
-) -> Result<Option<soland_services::jobs::IdempotencyState>, AppError> {
+) -> Result<Option<coland_services::jobs::IdempotencyState>, AppError> {
     let controller_principal_id = DidCoreId::new(controller_principal_id.to_owned())
         .map_err(|error| AppError::internal(format!("controller principal id invalid: {error}")))?;
     state
@@ -354,7 +354,7 @@ pub(super) async fn provision_agent(
             };
             state
                 .jobs()
-                .store_idempotency_record(soland_services::jobs::IdempotencyState {
+                .store_idempotency_record(coland_services::jobs::IdempotencyState {
                     authenticated_actor: arkret_wire::ActorId::account(
                         arkret_wire::AccountId::new(
                             controller_principal_id.clone(),
@@ -706,7 +706,7 @@ pub(super) async fn provision_agent(
             }
             let controller_account = state
                 .identities()
-                .find_account_by_actor(soland_services::identity::FindAccountByActorQuery {
+                .find_account_by_actor(coland_services::identity::FindAccountByActorQuery {
                     account_id: prepared.controller_authority.clone(),
                 })
                 .await
@@ -761,7 +761,7 @@ pub(super) async fn provision_agent(
             });
             state
                 .jobs()
-                .store_idempotency_record(soland_services::jobs::IdempotencyState {
+                .store_idempotency_record(coland_services::jobs::IdempotencyState {
                     authenticated_actor: arkret_wire::ActorId::account(
                         arkret_wire::AccountId::new(
                             DidCoreId::new(controller_principal_id.clone()).map_err(|error| {
@@ -1050,7 +1050,7 @@ pub(super) async fn get_agent(
         .map_err(|error| AppError::internal(format!("agent grant read failed: {error}")))?
         .into_iter()
         .map(|record| GrantSnapshot {
-            expires_at: soland_storage::capability_grant_expires_at(&record.value),
+            expires_at: coland_storage::capability_grant_expires_at(&record.value),
             grant_id: record.grant_id,
             realm_id: record.realm_id,
             grant_digest: None,

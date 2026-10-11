@@ -4,8 +4,8 @@ use arkret_event_draft::EventPayloadExt;
 use arkret_models_collaboration::governance::membership_invite::{
     InviteClaimPayload, InviteThirdPartyCreatePayload,
 };
-use soland_services::{ServiceError, ServiceResult};
-use soland_storage::InviteClaimProofCommit;
+use coland_services::{ServiceError, ServiceResult};
+use coland_storage::InviteClaimProofCommit;
 
 use crate::state::AppState;
 

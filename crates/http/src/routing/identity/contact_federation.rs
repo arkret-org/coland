@@ -38,11 +38,11 @@ use arkret_models_collaboration::governance::peer_contact::{
     ContactIntroductionEvidence, PeerContactAddress,
 };
 use arkret_wire::{AccountId, Did, DidUrl, Event, IdempotencyKey, ProtocolSignature};
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
+use coland_services::identity::ContactRecord;
 use salvo::prelude::*;
 use serde_json::{Value, json};
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
-use soland_services::identity::ContactRecord;
 use uuid::Uuid;
 
 fn event_digest_for_frozen_claim(event: &Event, claim: &Hash) -> Result<Hash, AppError> {
@@ -207,7 +207,7 @@ pub(crate) async fn enqueue_peer_contact_carrier(
     state
         .federation()
         .enqueue_delivery(
-            soland_services::federation::EnqueueFederationDeliveryCommand { delivery: prepared },
+            coland_services::federation::EnqueueFederationDeliveryCommand { delivery: prepared },
         )
         .await
         .map_err(|error| AppError::internal(format!("contact delivery enqueue: {error}")))?;
@@ -218,7 +218,7 @@ pub(crate) async fn prepare_peer_contact_carrier(
     state: &AppState,
     recipient_id: &str,
     delivery: &PeerContactSubmitRequestBody,
-) -> Result<Option<soland_services::federation::FederationDeliveryRecord>, AppError> {
+) -> Result<Option<coland_services::federation::FederationDeliveryRecord>, AppError> {
     if recipient_id == state.service_id() {
         return Ok(None);
     }
@@ -255,7 +255,7 @@ pub(crate) async fn prepare_peer_contact_carrier(
     let payload_json = String::from_utf8(payload_bytes)
         .map_err(|error| AppError::internal(format!("contact delivery utf8: {error}")))?;
     Ok(Some(
-        soland_services::federation::FederationDeliveryRecord {
+        coland_services::federation::FederationDeliveryRecord {
             id: Uuid::new_v4().to_string(),
             peer_id: contact_address.delivery_station_id().clone(),
             peer_url: Some(peer_url.trim_end_matches('/').to_owned()),
@@ -636,7 +636,7 @@ async fn peer_contacts_submit(
                 .to_string();
         state
             .persistence()
-            .put_contact_verified_mirror(&soland_storage::ContactVerifiedMirrorRecord {
+            .put_contact_verified_mirror(&coland_storage::ContactVerifiedMirrorRecord {
                 target_holder_principal_id: subject_id.clone(),
                 request_event_id: signed_event.event_id.to_string(),
                 request_digest,
@@ -2484,7 +2484,7 @@ async fn terminal_ack_contact_current_proof(
         peer,
         true,
         source.head_event_ref.clone(),
-        soland_domain::identity::contact_event_prefix([&local_head, &source.head_event_ref]),
+        coland_domain::identity::contact_event_prefix([&local_head, &source.head_event_ref]),
         complete_through,
         issued_at + chrono::Duration::minutes(10),
         |bytes| {
@@ -3570,7 +3570,7 @@ fn advance_contact_revision(
 }
 
 async fn save_contact_cas(
-    contacts: &soland_services::identity::ContactService,
+    contacts: &coland_services::identity::ContactService,
     expected_updated_at: chrono::DateTime<chrono::Utc>,
     record: ContactRecord,
 ) -> Result<(), AppError> {
@@ -4428,7 +4428,7 @@ fn granted_scopes(payload: &Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use arkret_identifiers::DidCoreId;
-    use soland_storage_postgres::Db;
+    use coland_storage_postgres::Db;
 
     use super::*;
     use crate::config::{AppConfig, ObjectStorageConfig};
@@ -4699,8 +4699,8 @@ mod tests {
         // never reaches the projection this test is about.
         state
             .identities()
-            .save_account(soland_services::identity::AccountProfileState {
-                pk: soland_storage::AccountPk(0),
+            .save_account(coland_services::identity::AccountProfileState {
+                pk: coland_storage::AccountPk(0),
                 account_id: arkret_wire::AccountId::new(
                     DidCoreId::new(target.to_owned()).unwrap(),
                     state.service_core_id().clone(),

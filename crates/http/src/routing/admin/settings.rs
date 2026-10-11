@@ -1,4 +1,4 @@
-//! `GET`/`PUT /_soland/admin/settings` — read and hot-swap the mutable
+//! `GET`/`PUT /_coland/admin/settings` — read and hot-swap the mutable
 //! operational overlay ([`crate::runtime_settings::RuntimeSettings`]).
 //!
 //! - `GET` returns the full **effective** settings (env defaults with any persisted overrides
@@ -9,16 +9,16 @@
 //!   [`arc_swap::ArcSwap`] so the next request — rate limiter, admin allowlist, federation fanout —
 //!   observes the change with no restart.
 //!
-//! Gated by the shared `RequireAdmin` hoop like the rest of `/_soland/admin/*`
+//! Gated by the shared `RequireAdmin` hoop like the rest of `/_coland/admin/*`
 //! (the same posture under which `control.rs` serves its admin writes).
 //!
 //! Boundary reminder: this endpoint deliberately does NOT touch Tier-1 boot
 //! config (bind address, `DATABASE_URL`, service DID, TLS paths, signing
 //! seeds). Those are secrets or pre-DB bootstrap and stay in env.
 
+use coland_http::error::AppError;
 use salvo::prelude::*;
 use serde_json::{Map, Value};
-use soland_http::error::AppError;
 
 use super::AdminAuth;
 use crate::runtime_settings::RuntimeSettings;
@@ -32,8 +32,8 @@ pub(super) fn router() -> Router {
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.settings.get",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.settings.get",
+    tags("coland_admin")
 )]
 async fn get_settings(depot: &mut Depot) -> JsonResult<RuntimeSettings> {
     let state = depot.get_typed::<AppState>().expect("state injected");
@@ -42,8 +42,8 @@ async fn get_settings(depot: &mut Depot) -> JsonResult<RuntimeSettings> {
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.settings.update",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.settings.update",
+    tags("coland_admin")
 )]
 async fn put_settings(depot: &mut Depot, req: &mut Request) -> JsonResult<RuntimeSettings> {
     let state = depot.get_typed::<AppState>().expect("state injected");
@@ -89,7 +89,7 @@ async fn put_settings(depot: &mut Depot, req: &mut Request) -> JsonResult<Runtim
     super::audit::append_audit_log(
         state,
         Some(&session.actor),
-        "org.arkret.soland.admin.settings.update",
+        "org.arkret.coland.admin.settings.update",
         serde_json::json!({ "changed_keys": changed_keys }),
         "ok",
     )

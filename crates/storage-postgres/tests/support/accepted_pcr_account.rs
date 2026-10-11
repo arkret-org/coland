@@ -2,9 +2,9 @@
 //! No display Profile is required by capability-grant admission.
 
 use arkret_wire::{ActorId, Did};
+use coland_storage_postgres::{PgPersistenceStore, PgPool};
 use diesel::sql_types::Text;
 use diesel_async::RunQueryDsl;
-use soland_storage_postgres::{PgPersistenceStore, PgPool};
 
 pub async fn accepted_pcr_account(pool: &PgPool, station_did: Did) -> ActorId {
     let fixture = crate::pcr_genesis::PcrGenesisFixture::new(station_did);

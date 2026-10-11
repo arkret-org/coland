@@ -4,11 +4,11 @@ use arkret_wire::{
     DeviceRevocationDeniedAction, EventId, Hash, RealmCommitId,
 };
 use chrono::{DateTime, Utc};
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
+use coland_services::ServiceErrorKind;
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
-use soland_services::ServiceErrorKind;
 
 use super::peer::{cross_domain_replay, schema_violation};
 use crate::state::AppState;
@@ -28,8 +28,8 @@ use crate::state::AppState;
 ///   "unauthorized" answer. It MUST surface as an internal availability fault and MUST NOT be
 ///   returned as `allow`.
 fn admit_origin_current_selector(
-    derived: Result<soland_storage::DeviceRevocationGateSelector, soland_services::ServiceError>,
-) -> Result<Option<soland_storage::DeviceRevocationGateSelector>, AppError> {
+    derived: Result<coland_storage::DeviceRevocationGateSelector, coland_services::ServiceError>,
+) -> Result<Option<coland_storage::DeviceRevocationGateSelector>, AppError> {
     match derived {
         Ok(selector) => Ok(Some(selector)),
         Err(error) if matches!(error.kind(), ServiceErrorKind::NotFound) => Ok(None),
@@ -51,8 +51,8 @@ struct GateDecisionProjection {
 /// `authority_mismatch` included, MUST return no `derived_binding` so the
 /// receipt cannot be read as an oracle for "does this device exist".
 fn project_gate_decision(
-    status: soland_storage::DeviceRevocationGateStatus,
-    origin_current_selector: Option<&soland_storage::DeviceRevocationGateSelector>,
+    status: coland_storage::DeviceRevocationGateStatus,
+    origin_current_selector: Option<&coland_storage::DeviceRevocationGateSelector>,
 ) -> GateDecisionProjection {
     let decision = status.admission_decision();
     GateDecisionProjection {
@@ -64,14 +64,14 @@ fn project_gate_decision(
 }
 
 fn current_binding_stable(
-    before: Option<&soland_storage::DeviceRevocationGateSelector>,
-    after: Option<&soland_storage::DeviceRevocationGateSelector>,
+    before: Option<&coland_storage::DeviceRevocationGateSelector>,
+    after: Option<&coland_storage::DeviceRevocationGateSelector>,
 ) -> bool {
     before == after
 }
 
 fn accepted_device_proof_requires_verification(
-    origin_current_selector: Option<&soland_storage::DeviceRevocationGateSelector>,
+    origin_current_selector: Option<&coland_storage::DeviceRevocationGateSelector>,
 ) -> bool {
     // Device authorization derivation is a partial function. An unknown,
     // foreign, or never-authorized device must reach this authenticated peer
@@ -110,7 +110,7 @@ impl CurrentDeviceCheckRequest {
 
 fn initial_issue_authorization_ref(
     request: &CurrentDeviceCheckRequest,
-    current: Option<&soland_storage::DeviceRevocationGateSelector>,
+    current: Option<&coland_storage::DeviceRevocationGateSelector>,
 ) -> Option<CommittedEventRef> {
     // Initial registration/recovery issues use the authority's terminal
     // ledger, not a previously issued grant binding. Freeze the independently
@@ -130,7 +130,7 @@ fn initial_issue_authorization_ref(
 
 fn returning_issue_authorization_ref(
     request: &CurrentDeviceCheckRequest,
-    current: Option<&soland_storage::DeviceRevocationGateSelector>,
+    current: Option<&coland_storage::DeviceRevocationGateSelector>,
     current_generation_ref: Option<u64>,
     verified: Option<&crate::jws_verify::VerifiedPrincipalDeviceSignatureBinding>,
 ) -> Option<CommittedEventRef> {
@@ -191,7 +191,7 @@ fn require_account_authority_request(request: &CurrentDeviceCheckRequest) -> Res
 }
 
 #[handler]
-#[tracing::instrument(skip_all, fields(op = "soland.account_authority.current_device.check"))]
+#[tracing::instrument(skip_all, fields(op = "coland.account_authority.current_device.check"))]
 pub(super) async fn check_private_current_device(
     depot: &mut Depot,
     req: &mut Request,
@@ -355,7 +355,7 @@ pub(super) async fn check_private_current_device(
     let linearization = state
         .persistence()
         .linearize_device_revocation_gate(
-            soland_storage::DeviceRevocationGateLinearizationRequest {
+            coland_storage::DeviceRevocationGateLinearizationRequest {
                 principal_id: request.account_id.principal_id.clone(),
                 station_id: request.account_id.station_id.clone(),
                 device_id: request.device_id.to_string(),
@@ -439,13 +439,13 @@ pub(super) async fn check_private_current_device(
 
 #[cfg(test)]
 mod tests {
-    use soland_services::ServiceError;
-    use soland_storage::{DeviceRevocationGateSelector, DeviceRevocationGateStatus};
+    use coland_services::ServiceError;
+    use coland_storage::{DeviceRevocationGateSelector, DeviceRevocationGateStatus};
 
     use super::*;
 
     const PRINCIPAL: &str = "ak:did_core:webvh:z6mkfixture:alice.example";
-    const STATION: &str = "ak:did_core:web:soland.example";
+    const STATION: &str = "ak:did_core:web:coland.example";
     const DEVICE: &str = "ak:device:01904100-0000-7000-8000-000000000030";
     const AUTHORIZE_EVENT: &str = "ak:event:ATyaOl1JkDDCC-6ZytsgoAKvlQJ6s6NJuDC_bmWKARBa";
 
@@ -615,7 +615,7 @@ mod tests {
         };
         let adopted = resolve(&request, Some(&verified));
         assert_eq!(adopted, Some(current.authorization_ref.clone()));
-        let gate = soland_storage::DeviceRevocationGateLinearizationRequest {
+        let gate = coland_storage::DeviceRevocationGateLinearizationRequest {
             principal_id: current.principal_id.clone(),
             station_id: current.station_id.clone(),
             device_id: current.device_id.clone(),
@@ -626,7 +626,7 @@ mod tests {
             requested_at: request.requested_at,
         };
         assert_eq!(
-            soland_storage::selector_comparison_status(&gate, Some(&current)),
+            coland_storage::selector_comparison_status(&gate, Some(&current)),
             None
         );
         assert!(resolve(&request, None).is_none());
@@ -676,7 +676,7 @@ mod tests {
         };
         let adopted = initial_issue_authorization_ref(&request, Some(&current));
         assert_eq!(adopted, Some(current.authorization_ref.clone()));
-        let mut gate = soland_storage::DeviceRevocationGateLinearizationRequest {
+        let mut gate = coland_storage::DeviceRevocationGateLinearizationRequest {
             principal_id: current.principal_id.clone(),
             station_id: current.station_id.clone(),
             device_id: current.device_id.clone(),
@@ -687,7 +687,7 @@ mod tests {
             requested_at: request.requested_at,
         };
         assert_eq!(
-            soland_storage::selector_comparison_status(&gate, Some(&current)),
+            coland_storage::selector_comparison_status(&gate, Some(&current)),
             None
         );
         assert!(initial_issue_authorization_ref(&request, None).is_none());
@@ -701,7 +701,7 @@ mod tests {
             gate.expected_authorization_ref =
                 initial_issue_authorization_ref(&not_initial, Some(&current));
             assert_eq!(
-                soland_storage::selector_comparison_status(&gate, Some(&current)),
+                coland_storage::selector_comparison_status(&gate, Some(&current)),
                 Some(DeviceRevocationGateStatus::GenerationMismatch)
             );
         }
@@ -766,7 +766,7 @@ mod tests {
             let mut forged = encoded.clone();
             forged[member] = serde_json::json!({
                 "kind": "detached_jws",
-                "verification_method": "did:web:soland.example#notary-key",
+                "verification_method": "did:web:coland.example#notary-key",
             });
             assert!(
                 serde_json::from_value::<CurrentDeviceCheckOutcome>(forged).is_err(),

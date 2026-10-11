@@ -12,11 +12,11 @@
 //! Signatures are structural-only; these fixtures exercise the storage
 //! boundary, not signature verification.
 
-use soland_storage::{
+use coland_storage::{
     AuthorityCommitStore, AuthorityCommitTransaction, CurrentRealmAuthority, EventCommitRequest,
     EventCommitUnitOfWork, OrdinaryRealmBootstrapCommitUnit,
 };
-use soland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
+use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
 
 #[path = "human_profile.rs"]
 #[allow(dead_code)]
@@ -516,7 +516,7 @@ pub fn request_for_event(
         )
         .unwrap();
     }
-    let projection = soland_storage::ProjectionEventRecord {
+    let projection = coland_storage::ProjectionEventRecord {
         event_id: event.event_id.to_string(),
         realm_id: realm_id.to_string(),
         event_kind: event.kind.as_str().to_owned(),
@@ -527,7 +527,7 @@ pub fn request_for_event(
         created_at: event.created_at,
         received_at: at,
     };
-    let record = soland_storage::CanonicalEventRecord {
+    let record = coland_storage::CanonicalEventRecord {
         event_id: event.event_id.to_string(),
         actor_id: event.actor_id.to_string(),
         realm_id: Some(realm_id.to_string()),

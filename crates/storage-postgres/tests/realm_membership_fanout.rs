@@ -32,17 +32,17 @@ mod realm_terminal_replica_cases;
 mod space_parent_replica_cases;
 
 use arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest;
-use diesel::sql_types::{BigInt, Jsonb, Text};
-use diesel_async::RunQueryDsl;
-use ordinary_realm::{STATION, message_payload, next_request, next_request_for_actor};
-use soland_storage::{
+use coland_storage::{
     AuthorityCommitStore, AuthorityCommitTransaction, CommittedChainNode, CommittedReplica,
     CommittedReplicaOutcome, CommittedReplicaRole, ConflictCode, CurrentRealmAuthority,
     EventCommitRequest, EventCommitUnitOfWork, OrdinaryRealmBootstrapCommitUnit,
     RealmFanoutAuthorityWitness, ReplicaAnchorInstall,
 };
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
+use diesel::sql_types::{BigInt, Jsonb, Text};
+use diesel_async::RunQueryDsl;
+use ordinary_realm::{STATION, message_payload, next_request, next_request_for_actor};
 
 // Construct large native fixture futures in a separate synchronous frame.
 // Returning the pinned allocation before polling avoids stacking construction
@@ -433,7 +433,7 @@ async fn remote_joined_target_set_and_fanout_basis_commit_with_the_event_case() 
     );
 }
 
-fn assert_code(error: &soland_storage::PersistenceError, code: ConflictCode) {
+fn assert_code(error: &coland_storage::PersistenceError, code: ConflictCode) {
     assert_eq!(error.conflict_code(), Some(code), "{error}");
 }
 
@@ -2016,7 +2016,7 @@ async fn scanned(
     store: &PgAuthorityCommitStore,
     request: arkret_wire::StreamScanRequest,
     account: &arkret_wire::ActorId,
-) -> soland_storage::AccountStreamScan {
+) -> coland_storage::AccountStreamScan {
     store
         .scan_stream_for_account(
             &request,
@@ -2027,9 +2027,9 @@ async fn scanned(
         .unwrap()
 }
 
-fn page(scan: soland_storage::AccountStreamScan) -> arkret_wire::StreamScanOutcome {
+fn page(scan: coland_storage::AccountStreamScan) -> arkret_wire::StreamScanOutcome {
     match scan {
-        soland_storage::AccountStreamScan::Page(page) => page,
+        coland_storage::AccountStreamScan::Page(page) => page,
         other => panic!("expected a proved page, got {other:?}"),
     }
 }
@@ -2137,7 +2137,7 @@ async fn circle_create_withholds_private_object_from_remote_realm_member() {
 #[tokio::test]
 async fn circle_create_withheld_gap_allows_next_realm_replica() {
     use arkret_wire::StreamScanDirection::After;
-    use soland_storage::AccountStreamScan;
+    use coland_storage::AccountStreamScan;
 
     let governance_database = TestDatabase::lease().await;
     let member_database = TestDatabase::lease().await;
@@ -2334,7 +2334,7 @@ async fn member_read(
     event_id: &arkret_wire::EventId,
     caller: &arkret_wire::ActorId,
     issuer: &arkret_wire::DidCoreId,
-) -> soland_storage::MemberCommittedEventRead {
+) -> coland_storage::MemberCommittedEventRead {
     store
         .committed_event_for_member(event_id, caller, issuer)
         .await
@@ -2343,12 +2343,12 @@ async fn member_read(
 
 /// Whether a single read is disclosed in full (`Some(true)`), withheld
 /// (`Some(false)`) or not visible (`None`).
-fn read_shape(read: soland_storage::MemberCommittedEventRead) -> Option<bool> {
+fn read_shape(read: coland_storage::MemberCommittedEventRead) -> Option<bool> {
     match read {
-        soland_storage::MemberCommittedEventRead::Read(view) => {
+        coland_storage::MemberCommittedEventRead::Read(view) => {
             Some(matches!(*view, arkret_wire::CommittedEventView::Full(_)))
         }
-        soland_storage::MemberCommittedEventRead::NotVisible => None,
+        coland_storage::MemberCommittedEventRead::NotVisible => None,
         other => panic!("expected a decided read, got {other:?}"),
     }
 }
@@ -2534,7 +2534,7 @@ async fn account_stream_scan_serves_joined_member_from_its_join_commit_case() {
         )
         .await
         .unwrap();
-    let soland_storage::AccountRealmStreamList::Listed(streams) = listed else {
+    let coland_storage::AccountRealmStreamList::Listed(streams) = listed else {
         panic!("a joined member's stream list is proved, got {listed:?}");
     };
     assert_eq!(streams.len(), 1);
@@ -2681,7 +2681,7 @@ async fn account_stream_scan_serves_joined_member_from_its_join_commit_case() {
     uow.commit_event(leave.clone()).await.unwrap();
     assert_eq!(
         heap_future(|| scanned(&store, scan_request(&realm_id, After(None), 10), &bob)).await,
-        soland_storage::AccountStreamScan::NotAuthorized
+        coland_storage::AccountStreamScan::NotAuthorized
     );
     // After the leave only Bob's own Events stay readable to him.
     assert_eq!(
@@ -3060,18 +3060,18 @@ async fn joined_realm(pool: &PgPool, seed: &str) -> Box<JoinedRealm> {
 }
 
 fn snapshot_signer() -> impl Fn(
-    &soland_storage::RealmStateSnapshotMaterial,
-) -> soland_storage::PersistenceResult<arkret_wire::RealmStateSnapshot> {
+    &coland_storage::RealmStateSnapshotMaterial,
+) -> coland_storage::PersistenceResult<arkret_wire::RealmStateSnapshot> {
     let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
     let method = arkret_wire::DidUrl::new("did:web:ordinary-station.example#notary-key").unwrap();
     move |material| {
-        soland_services::authority_commit::build_signed_realm_state_snapshot(
+        coland_services::authority_commit::build_signed_realm_state_snapshot(
             material,
             method.clone(),
             &key,
             chrono::Utc::now(),
         )
-        .map_err(|error| soland_storage::PersistenceError::Internal(error.to_string()))
+        .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
     }
 }
 
@@ -3136,7 +3136,7 @@ async fn member_account_snapshot_preserves_governance_and_exact_replica_cut() {
         })
         .await
         .unwrap();
-    let never_sign = |_: &soland_storage::RealmStateSnapshotMaterial| -> soland_storage::PersistenceResult<arkret_wire::RealmStateSnapshot> {
+    let never_sign = |_: &coland_storage::RealmStateSnapshotMaterial| -> coland_storage::PersistenceResult<arkret_wire::RealmStateSnapshot> {
         panic!("a member Station must never sign a Realm Snapshot")
     };
     let issuer = member_station();
@@ -3159,7 +3159,7 @@ async fn member_account_snapshot_preserves_governance_and_exact_replica_cut() {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let window = member
         .freeze_account_realm_window(
-            &soland_storage::AccountRealmWindowRequest {
+            &coland_storage::AccountRealmWindowRequest {
                 realm_id: realm.clone(),
                 account: account.clone(),
                 issuer: issuer.clone(),
@@ -3264,7 +3264,7 @@ async fn member_account_snapshot_preserves_governance_and_exact_replica_cut() {
             .is_err()
     );
     let wrong_key = ed25519_dalek::SigningKey::from_bytes(&[0x43; 32]);
-    let wrong_signer = soland_services::authority_commit::build_signed_realm_state_snapshot(
+    let wrong_signer = coland_services::authority_commit::build_signed_realm_state_snapshot(
         &next_material,
         arkret_wire::DidUrl::new("did:web:member-station.example#notary-key").unwrap(),
         &wrong_key,
@@ -3350,7 +3350,7 @@ async fn account_snapshot_serves_joined_member_floor() {
     let bob_message_id =
         arkret_wire::MessageId::from_event_id(&realm.bob_message.authority_commit.event.event_id);
 
-    let full = soland_storage_postgres::account_snapshot_material(
+    let full = coland_storage_postgres::account_snapshot_material(
         &pool,
         &realm.realm_id,
         &founder_account,
@@ -3359,7 +3359,7 @@ async fn account_snapshot_serves_joined_member_floor() {
     .unwrap()
     .unwrap();
     let bob_cut =
-        soland_storage_postgres::account_snapshot_material(&pool, &realm.realm_id, &bob_account)
+        coland_storage_postgres::account_snapshot_material(&pool, &realm.realm_id, &bob_account)
             .await
             .unwrap()
             .unwrap();
@@ -3470,7 +3470,7 @@ async fn account_snapshot_serves_joined_member_floor() {
     );
     uow.commit_event(leave).await.unwrap();
     assert!(
-        soland_storage_postgres::account_snapshot_material(&pool, &realm.realm_id, &bob_account)
+        coland_storage_postgres::account_snapshot_material(&pool, &realm.realm_id, &bob_account)
             .await
             .is_err()
     );
@@ -3511,7 +3511,7 @@ async fn account_window_starts_joined_member_at_its_join_commit() {
     let head_position = realm.bob_message.authority_commit.commit.stream_position;
     let sign = snapshot_signer();
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let request = |limit: u32| soland_storage::AccountRealmWindowRequest {
+    let request = |limit: u32| coland_storage::AccountRealmWindowRequest {
         realm_id: realm.realm_id.clone(),
         account: bob_account.clone(),
         issuer: issuer.clone(),
@@ -3523,7 +3523,7 @@ async fn account_window_starts_joined_member_at_its_join_commit() {
         delivered_heads: Vec::new(),
         selected_stream_refs: None,
     };
-    let positions = |window: &soland_storage::AccountRealmWindow| {
+    let positions = |window: &coland_storage::AccountRealmWindow| {
         window
             .committed_events
             .iter()
@@ -3615,7 +3615,7 @@ async fn peer_page(
     store: &PgAuthorityCommitStore,
     request: arkret_wire::StreamScanRequest,
     peer: &arkret_wire::DidCoreId,
-) -> soland_storage::AccountStreamScan {
+) -> coland_storage::AccountStreamScan {
     peer_interval_decision(
         store
             .scan_stream_for_peer(
@@ -3662,7 +3662,7 @@ async fn peer_scan_serves_joined_and_departed_member_intervals() {
 
 async fn peer_scan_serves_joined_and_departed_member_intervals_case() {
     use arkret_wire::StreamScanDirection::{After, Before};
-    use soland_storage::AccountStreamScan;
+    use coland_storage::AccountStreamScan;
 
     let database = TestDatabase::lease().await;
     let pool = database.pool();
@@ -3891,7 +3891,7 @@ async fn peer_scan_serves_joined_and_departed_member_intervals_case() {
 #[tokio::test]
 async fn member_station_anchors_on_the_bootstrap_snapshot_and_keeps_chain_nodes() {
     use arkret_wire::StreamScanDirection::After;
-    use soland_storage::AccountStreamScan;
+    use coland_storage::AccountStreamScan;
 
     let governance_database = TestDatabase::lease().await;
     let member_database = TestDatabase::lease().await;
@@ -4010,7 +4010,7 @@ async fn member_station_anchors_on_the_bootstrap_snapshot_and_keeps_chain_nodes(
             &member_station(),
         )
         .await,
-        soland_storage::MemberCommittedEventRead::PendingAnchor
+        coland_storage::MemberCommittedEventRead::PendingAnchor
     );
     assert_eq!(summary_title(&member_pool, &realm_id, &alice).await, None);
 
@@ -4140,7 +4140,7 @@ async fn member_station_anchors_on_the_bootstrap_snapshot_and_keeps_chain_nodes(
             &member_station(),
         )
         .await,
-        soland_storage::MemberCommittedEventRead::Read(Box::new(
+        coland_storage::MemberCommittedEventRead::Read(Box::new(
             arkret_wire::CommittedEventView::Withheld(arkret_wire::CommittedEventWithheldView {
                 commit: message.authority_commit.commit.clone(),
                 event_disclosure: arkret_wire::EventDisclosure {
@@ -4353,8 +4353,8 @@ async fn member_station_anchors_on_the_bootstrap_snapshot_and_keeps_chain_nodes(
         .await
         .unwrap();
     assert!(pointer.is_some());
-    let persistence = soland_storage_postgres::PgPersistenceStore::new(member_pool.clone());
-    let restarted = soland_services::projection::ProjectionService::new("member-anchor-restart");
+    let persistence = coland_storage_postgres::PgPersistenceStore::new(member_pool.clone());
+    let restarted = coland_services::projection::ProjectionService::new("member-anchor-restart");
     restarted
         .hydrate_from_persistence(
             &persistence,
@@ -4405,7 +4405,7 @@ async fn member_station_anchors_on_the_bootstrap_snapshot_and_keeps_chain_nodes(
             .unwrap(),
         pointer
     );
-    let refused = soland_services::projection::ProjectionService::new("unanchored-member-restart")
+    let refused = coland_services::projection::ProjectionService::new("unanchored-member-restart")
         .hydrate_from_persistence(
             &persistence,
             &hydration::BootstrapHydrationAdapter,
@@ -4425,8 +4425,8 @@ async fn member_claim(
     pool: &PgPool,
     claim_id: &str,
     state: &str,
-) -> soland_storage::MlsWelcomeClaimLedgerKey {
-    let key = soland_storage::MlsWelcomeClaimLedgerKey {
+) -> coland_storage::MlsWelcomeClaimLedgerKey {
+    let key = coland_storage::MlsWelcomeClaimLedgerKey {
         source_id: STATION.to_owned(),
         claim_request_id: uuid::Uuid::now_v7().simple().to_string(),
         request_digest: format!("sha256:{}", "6".repeat(64)),
@@ -4460,10 +4460,10 @@ fn replicated_welcome(
     recipient: &arkret_wire::ActorId,
     device: &str,
     claim_id: &str,
-    claim: soland_storage::MlsWelcomeClaimLedgerKey,
-) -> soland_storage::VerifiedMlsWelcome {
+    claim: coland_storage::MlsWelcomeClaimLedgerKey,
+) -> coland_storage::VerifiedMlsWelcome {
     let event = &commit.authority_commit.event;
-    soland_storage::VerifiedMlsWelcome {
+    coland_storage::VerifiedMlsWelcome {
         delivery: arkret_wire::MlsWelcomeDelivery {
             welcome_id: arkret_wire::MlsWelcomeDeliveryId::new(format!(
                 "ak:mls_welcome_delivery:{}",
@@ -4505,11 +4505,11 @@ fn replicated_welcome(
 fn recipient_roster_witness(
     commit: &EventCommitRequest,
     genesis_ref: &arkret_wire::EventId,
-    welcome: &soland_storage::VerifiedMlsWelcome,
-    claim_key: &soland_storage::MlsWelcomeClaimLedgerKey,
+    welcome: &coland_storage::VerifiedMlsWelcome,
+    claim_key: &coland_storage::MlsWelcomeClaimLedgerKey,
     authorization_event_ref: &arkret_wire::EventId,
 ) -> (
-    soland_storage::VerifiedMlsRecipientRosterWitness,
+    coland_storage::VerifiedMlsRecipientRosterWitness,
     serde_json::Value,
 ) {
     use arkret_models_collaboration::mls_roster_authority::{
@@ -4630,7 +4630,7 @@ fn recipient_roster_witness(
     request.validate_claim_binding().unwrap();
     let json = serde_json::to_value(&request.claim_outcome).unwrap();
     (
-        soland_storage::VerifiedMlsRecipientRosterWitness {
+        coland_storage::VerifiedMlsRecipientRosterWitness {
             accepted_genesis_event_ref: genesis_ref.clone(),
             signed_attest_add_request_canonical_json: arkret_canonical::canonical_json_bytes(
                 &request,
@@ -4711,7 +4711,7 @@ async fn recipient_roster_outbox_count(pool: &PgPool) -> i64 {
 /// nothing twice.
 #[tokio::test]
 async fn replicated_welcomes_queue_with_their_commit_replica_or_on_replay() {
-    use soland_storage::MlsKeyPackageStore as _;
+    use coland_storage::MlsKeyPackageStore as _;
 
     let database = TestDatabase::lease().await;
     let pool = database.pool();
@@ -4726,7 +4726,7 @@ async fn replicated_welcomes_queue_with_their_commit_replica_or_on_replay() {
         .await
         .unwrap();
     }
-    let persistence = soland_storage_postgres::PgPersistenceStore::new(pool.clone());
+    let persistence = coland_storage_postgres::PgPersistenceStore::new(pool.clone());
     let device = pcr_genesis::PcrGenesisFixture::new(
         device_authorization_history::did_web_station(&member_station()),
     )
@@ -4799,7 +4799,7 @@ async fn replicated_welcomes_queue_with_their_commit_replica_or_on_replay() {
         vec![passing.delivery.welcome_id.to_string()]
     );
     assert_eq!(
-        soland_storage_postgres::PgMlsKeyPackageStore { pool: pool.clone() }
+        coland_storage_postgres::PgMlsKeyPackageStore { pool: pool.clone() }
             .get_claim_welcome_binding(&claim(1))
             .await
             .unwrap()
@@ -4855,7 +4855,7 @@ async fn replicated_welcomes_queue_with_their_commit_replica_or_on_replay() {
 /// queue/binding/outbox, and short-lived claim cleanup cannot erase the proof.
 #[tokio::test]
 async fn recipient_mls_add_attestation_outbox_is_atomic_durable_and_idempotent() {
-    use soland_storage::MlsKeyPackageStore as _;
+    use coland_storage::MlsKeyPackageStore as _;
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let store = PgAuthorityCommitStore { pool: pool.clone() };
@@ -4869,7 +4869,7 @@ async fn recipient_mls_add_attestation_outbox_is_atomic_durable_and_idempotent()
         .await
         .unwrap();
     }
-    let persistence = soland_storage_postgres::PgPersistenceStore::new(pool.clone());
+    let persistence = coland_storage_postgres::PgPersistenceStore::new(pool.clone());
     let device = pcr_genesis::PcrGenesisFixture::new(
         device_authorization_history::did_web_station(&member_station()),
     )
@@ -5013,7 +5013,7 @@ async fn recipient_mls_add_attestation_outbox_is_atomic_durable_and_idempotent()
         vec![first.delivery.welcome_id.to_string()]
     );
     assert!(
-        soland_storage_postgres::PgMlsKeyPackageStore { pool: pool.clone() }
+        coland_storage_postgres::PgMlsKeyPackageStore { pool: pool.clone() }
             .get_claim_welcome_binding(&refused_claim_id)
             .await
             .unwrap()
@@ -5402,7 +5402,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
             )
             .await
             .unwrap(),
-        soland_storage::AccountStreamScan::Unproved(
+        coland_storage::AccountStreamScan::Unproved(
             "the Circle stream is pending its bootstrap anchor"
         )
     ));
@@ -5560,7 +5560,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         )),
         limit: 16,
     };
-    let soland_storage::AccountStreamScan::Page(gap) =
+    let coland_storage::AccountStreamScan::Page(gap) =
         peer_page(&governor, scan_gap, &member_station()).await
     else {
         panic!("the hosting Station must receive a Circle peer scan")
@@ -5633,7 +5633,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
             .scan_stream_for_account(&scan, remote.as_account_id().unwrap(), &member_station())
             .await
             .unwrap(),
-        soland_storage::AccountStreamScan::Unproved("the caller has no held Circle join")
+        coland_storage::AccountStreamScan::Unproved("the caller has no held Circle join")
     ));
     assert!(
         governor
@@ -5649,9 +5649,9 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
     );
 }
 
-fn rows_of_circle_scan(scan: soland_storage::AccountStreamScan) -> Vec<bool> {
+fn rows_of_circle_scan(scan: coland_storage::AccountStreamScan) -> Vec<bool> {
     match scan {
-        soland_storage::AccountStreamScan::Page(page) => page
+        coland_storage::AccountStreamScan::Page(page) => page
             .committed_events
             .iter()
             .map(|event| matches!(event, arkret_wire::CommittedEventView::Full(_)))
@@ -5726,21 +5726,21 @@ async fn private_confirmation_and_policy_ref_sources_are_never_owed_to_ordinary_
 }
 
 fn peer_interval_decision(
-    scan: soland_storage::PeerStreamScan,
-) -> soland_storage::AccountStreamScan {
+    scan: coland_storage::PeerStreamScan,
+) -> coland_storage::AccountStreamScan {
     match scan {
-        soland_storage::PeerStreamScan::Page(page) => {
-            soland_storage::AccountStreamScan::Page(arkret_wire::StreamScanOutcome {
+        coland_storage::PeerStreamScan::Page(page) => {
+            coland_storage::AccountStreamScan::Page(arkret_wire::StreamScanOutcome {
                 committed_events: page.committed_events,
                 readable_floor: page.readable_floor,
                 truncated: page.truncated,
             })
         }
-        soland_storage::PeerStreamScan::NotAuthorized => {
-            soland_storage::AccountStreamScan::NotAuthorized
+        coland_storage::PeerStreamScan::NotAuthorized => {
+            coland_storage::AccountStreamScan::NotAuthorized
         }
-        soland_storage::PeerStreamScan::Unproved(reason) => {
-            soland_storage::AccountStreamScan::Unproved(reason)
+        coland_storage::PeerStreamScan::Unproved(reason) => {
+            coland_storage::AccountStreamScan::Unproved(reason)
         }
     }
 }

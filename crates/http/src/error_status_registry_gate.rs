@@ -7,7 +7,7 @@
 //! whose constructor names a different status (`AppError::conflict(..)
 //! .with_wire_code("claim_failed")`), or hand an unregistered string to a raw
 //! renderer. This gate reads `registry/error-code-registry.json` directly and
-//! scans every soland source file for those shapes.
+//! scans every coland source file for those shapes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

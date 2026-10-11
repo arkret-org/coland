@@ -142,8 +142,8 @@ pub struct PgKeyBackupStore {
 }
 async fn list_page_in_connection(
     conn: &mut crate::AsyncPgConnection,
-    query: &soland_storage::KeyBackupListQuery,
-) -> PersistenceResult<soland_storage::KeyBackupListPage> {
+    query: &coland_storage::KeyBackupListQuery,
+) -> PersistenceResult<coland_storage::KeyBackupListPage> {
     #[derive(QueryableByName)]
     struct PageRow {
         #[diesel(sql_type = diesel::sql_types::BigInt)]
@@ -189,7 +189,7 @@ async fn list_page_in_connection(
         .bind::<diesel::sql_types::BigInt,_>(i64::from(query.limit))
         .get_result::<PageRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let payloads = serde_json::from_value(row.payloads).map_err(PersistenceError::database)?;
-    Ok(soland_storage::KeyBackupListPage {
+    Ok(coland_storage::KeyBackupListPage {
         revision: row.revision,
         byte_limited: row.byte_limited,
         payloads,
@@ -201,8 +201,8 @@ impl KeyBackupStore for PgKeyBackupStore {
     async fn confirmed_list_page_for_account(
         &self,
         account_id: &arkret_wire::AccountId,
-        query: &soland_storage::KeyBackupListQuery,
-    ) -> PersistenceResult<soland_storage::ConfirmedKeyBackupListPage> {
+        query: &coland_storage::KeyBackupListQuery,
+    ) -> PersistenceResult<coland_storage::ConfirmedKeyBackupListPage> {
         if query.actor_id != arkret_wire::ActorId::account(account_id.clone()).to_string() {
             return Err(PersistenceError::SchemaViolation(
                 "KeyBackup page actor differs from authenticated account".to_owned(),
@@ -224,7 +224,7 @@ impl KeyBackupStore for PgKeyBackupStore {
                     )
                 })?;
             let page = list_page_in_connection(conn, query).await?;
-            Ok(soland_storage::ConfirmedKeyBackupListPage {
+            Ok(coland_storage::ConfirmedKeyBackupListPage {
                 active_series,
                 page,
             })
@@ -238,8 +238,8 @@ impl KeyBackupStore for PgKeyBackupStore {
         account_id: &arkret_wire::AccountId,
         device_id: &arkret_wire::DeviceId,
         now: chrono::DateTime<Utc>,
-        query: &soland_storage::KeyBackupListQuery,
-    ) -> PersistenceResult<soland_storage::ConfirmedKeyBackupListPage> {
+        query: &coland_storage::KeyBackupListQuery,
+    ) -> PersistenceResult<coland_storage::ConfirmedKeyBackupListPage> {
         let expected_actor = arkret_wire::ActorId::account(account_id.clone()).to_string();
         if query.actor_id != expected_actor {
             return Err(PersistenceError::SchemaViolation(
@@ -247,7 +247,7 @@ impl KeyBackupStore for PgKeyBackupStore {
             ));
         }
         let mut conn = pg_conn(&self.pool).await?;
-        conn.transaction::<soland_storage::ConfirmedKeyBackupListPage, crate::PgTransactionError, _>(
+        conn.transaction::<coland_storage::ConfirmedKeyBackupListPage, crate::PgTransactionError, _>(
             async |conn| {
                 sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
                     .execute(&mut *conn)
@@ -260,7 +260,7 @@ impl KeyBackupStore for PgKeyBackupStore {
                     "KeyBackup list has no confirmed PCR cut".to_owned(),
                 ))?;
                 let page = list_page_in_connection(conn, query).await?;
-                Ok(soland_storage::ConfirmedKeyBackupListPage { active_series, page })
+                Ok(coland_storage::ConfirmedKeyBackupListPage { active_series, page })
             },
         )
         .await
@@ -269,10 +269,10 @@ impl KeyBackupStore for PgKeyBackupStore {
 
     async fn commit_active_series_pointer(
         &self,
-        write: soland_storage::KeyBackupActiveSeriesCommitWrite,
-    ) -> PersistenceResult<soland_storage::KeyBackupActiveSeriesCommitOutcome> {
+        write: coland_storage::KeyBackupActiveSeriesCommitWrite,
+    ) -> PersistenceResult<coland_storage::KeyBackupActiveSeriesCommitOutcome> {
         let mut conn = pg_conn(&self.pool).await?;
-        conn.transaction::<soland_storage::KeyBackupActiveSeriesCommitOutcome, crate::PgTransactionError, _>(
+        conn.transaction::<coland_storage::KeyBackupActiveSeriesCommitOutcome, crate::PgTransactionError, _>(
             async |conn| {
                 // An active-series Event a SecurityRotation reserved moves the
                 // pointer only through that rotation's switch step, after its
@@ -314,7 +314,7 @@ impl KeyBackupStore for PgKeyBackupStore {
     async fn confirmed_active_series_basis(
         &self,
         account_id: &arkret_wire::AccountId,
-    ) -> PersistenceResult<Option<soland_storage::ConfirmedKeyBackupAuthorityBasis>> {
+    ) -> PersistenceResult<Option<coland_storage::ConfirmedKeyBackupAuthorityBasis>> {
         crate::key_backup_current_results::confirmed_key_backup_pointer_basis(
             &self.pool, account_id,
         )
@@ -342,7 +342,7 @@ impl KeyBackupStore for PgKeyBackupStore {
     }
     async fn consume_unlock(
         &self,
-        command: soland_storage::KeyBackupUnlockCommand<'_>,
+        command: coland_storage::KeyBackupUnlockCommand<'_>,
     ) -> PersistenceResult<Value> {
         self.consume_unlock_entry(command).await
     }
@@ -414,8 +414,8 @@ impl KeyBackupStore for PgKeyBackupStore {
 
     async fn list_page(
         &self,
-        query: &soland_storage::KeyBackupListQuery,
-    ) -> PersistenceResult<soland_storage::KeyBackupListPage> {
+        query: &coland_storage::KeyBackupListQuery,
+    ) -> PersistenceResult<coland_storage::KeyBackupListPage> {
         let mut conn = pg_conn(&self.pool).await?;
         list_page_in_connection(&mut conn, query).await
     }
@@ -490,7 +490,7 @@ impl KeyBackupStore for PgKeyBackupStore {
 
     async fn consume_delete_challenge(
         &self,
-        gate: &soland_storage::KeyBackupDeleteGate,
+        gate: &coland_storage::KeyBackupDeleteGate,
         challenge_id: &str,
         backup: Value,
         recovery_session_id: Option<&str>,

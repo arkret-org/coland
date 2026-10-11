@@ -19,20 +19,20 @@ use arkret_models_collaboration::authority_commit::{
     OrdinaryRealmBootstrapUnitKind, OrdinaryRealmBootstrapUnitSubmission,
     SelfAuthoritySubmitRequest,
 };
-use diesel::sql_types::{BigInt, Text};
-use diesel_async::RunQueryDsl;
-use hydration::BootstrapHydrationAdapter;
-use soland_services::projection::ProjectionService;
-use soland_storage::{
+use coland_services::projection::ProjectionService;
+use coland_storage::{
     AuthorityCommitStore, AuthorityCommitTransaction, CurrentRealmAuthority, EventCommitRequest,
     EventCommitUnitOfWork, InviteCurrentResultStore, OrdinaryRealmBootstrapCommitOutcome,
     OrdinaryRealmBootstrapCommitUnit, SelfProducerCommitGuard,
 };
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{
     PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgInviteCurrentResultStore,
     account_snapshot_material,
 };
+use diesel::sql_types::{BigInt, Text};
+use diesel_async::RunQueryDsl;
+use hydration::BootstrapHydrationAdapter;
 
 fn snapshot_signer_for_issuer(
     unit: &OrdinaryRealmBootstrapCommitUnit,
@@ -72,8 +72,8 @@ async fn realm_directory_entry_replays_only_its_committed_realm() {
         .unwrap();
     let realm_id = &target.transactions[0].event.realm_id;
     assert_ne!(realm_id, &unrelated.transactions[0].event.realm_id);
-    let persistence = soland_services::persistence::PersistenceHandle::new(std::sync::Arc::new(
-        soland_storage_postgres::PgPersistenceStore::new(pool.clone()),
+    let persistence = coland_services::persistence::PersistenceHandle::new(std::sync::Arc::new(
+        coland_storage_postgres::PgPersistenceStore::new(pool.clone()),
     ));
     let directory = persistence.hydrate_realm_directory().await.unwrap();
     let expected = directory.get(realm_id).unwrap().clone();
@@ -131,8 +131,8 @@ async fn realm_directory_entry_rejects_target_commit_binding_mismatch() {
         .admit_ordinary_realm_bootstrap_unit(&target, target.transactions[0].commit.committed_at)
         .await
         .unwrap();
-    let persistence = soland_services::persistence::PersistenceHandle::new(std::sync::Arc::new(
-        soland_storage_postgres::PgPersistenceStore::new(pool.clone()),
+    let persistence = coland_services::persistence::PersistenceHandle::new(std::sync::Arc::new(
+        coland_storage_postgres::PgPersistenceStore::new(pool.clone()),
     ));
     let mut damaged = serde_json::to_value(&target.transactions[1].event).unwrap();
     damaged["payload"]["title"] = serde_json::json!("forged title");
@@ -149,7 +149,7 @@ async fn realm_directory_entry_rejects_target_commit_binding_mismatch() {
 }
 
 async fn damage_hydration_mirror(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     event_id: &arkret_wire::EventId,
     damaged: serde_json::Value,
 ) {
@@ -188,8 +188,8 @@ async fn owned_agent_exact_current_is_issuer_only_even_after_membership_ends() {
     use arkret_models_collaboration::exact_current_results::{
         ExactCurrentResultEntry, ExactCurrentResultsReadOutcome, ExactCurrentResultsReadRequestBody,
     };
+    use coland_storage::SelfExactCurrentRead;
     use diesel::sql_types::Jsonb;
-    use soland_storage::SelfExactCurrentRead;
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let station = arkret_wire::DidCoreId::new("ak:did_core:web:bootstrap-station.example").unwrap();
@@ -262,7 +262,7 @@ async fn owned_agent_exact_current_is_issuer_only_even_after_membership_ends() {
         &store,
         &pool,
         &stale,
-        soland_storage::ConflictCode::CasConflict,
+        coland_storage::ConflictCode::CasConflict,
     )
     .await;
     let revoke = realm_event_request_as(
@@ -511,7 +511,7 @@ async fn founder_disclosure_covers_every_accepted_cut_of_disclosed_kinds() {
 }
 
 async fn issuance_count(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     realm_id: &arkret_wire::RealmId,
 ) -> i64 {
     #[derive(diesel::QueryableByName)]
@@ -572,16 +572,16 @@ async fn account_snapshot_issuance_is_same_cut_and_by_ref_rechecks_disclosure() 
     let other_station = arkret_wire::DidCoreId::new("ak:did_core:web:elsewhere.example").unwrap();
     let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
     let method = snapshot_signer_for_issuer(&unit, &issuer);
-    let sign = |material: &soland_storage::RealmStateSnapshotMaterial| {
-        soland_services::authority_commit::build_signed_realm_state_snapshot(
+    let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
+        coland_services::authority_commit::build_signed_realm_state_snapshot(
             material,
             method.clone(),
             &key,
             chrono::Utc::now(),
         )
-        .map_err(|error| soland_storage::PersistenceError::Internal(error.to_string()))
+        .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
     };
-    let tamper = |material: &soland_storage::RealmStateSnapshotMaterial| {
+    let tamper = |material: &coland_storage::RealmStateSnapshotMaterial| {
         let mut partial = material.clone();
         partial.current_state_entries.pop();
         sign(&partial)
@@ -593,7 +593,7 @@ async fn account_snapshot_issuance_is_same_cut_and_by_ref_rechecks_disclosure() 
         store
             .issue_realm_state_snapshot_for_account(&realm_id, &creator, &other_station, &sign)
             .await,
-        Err(soland_storage::PersistenceError::SchemaViolation(_))
+        Err(coland_storage::PersistenceError::SchemaViolation(_))
     ));
     assert!(
         store
@@ -605,7 +605,7 @@ async fn account_snapshot_issuance_is_same_cut_and_by_ref_rechecks_disclosure() 
         store
             .issue_realm_state_snapshot_for_account(&realm_id, &creator, &issuer, &tamper)
             .await,
-        Err(soland_storage::PersistenceError::Internal(_))
+        Err(coland_storage::PersistenceError::Internal(_))
     ));
     assert_eq!(issuance_count(&pool, &realm_id).await, 0);
 
@@ -782,7 +782,7 @@ async fn account_snapshot_issuance_is_same_cut_and_by_ref_rechecks_disclosure() 
                 issuer.clone()
             )
             .await,
-            Err(soland_storage::PersistenceError::SchemaViolation(_))
+            Err(coland_storage::PersistenceError::SchemaViolation(_))
         ));
     }
     diesel::sql_query(
@@ -840,7 +840,7 @@ struct CountRow {
 }
 
 async fn authority_root_count(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     realm_id: &arkret_wire::RealmId,
 ) -> i64 {
     let mut conn = pool.get().await.unwrap();
@@ -855,7 +855,7 @@ async fn authority_root_count(
 }
 
 async fn bootstrap_singleton_count(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     realm_id: &arkret_wire::RealmId,
 ) -> i64 {
     let mut conn = pool.get().await.unwrap();
@@ -870,7 +870,7 @@ async fn bootstrap_singleton_count(
 }
 
 async fn source_outbox_count(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     realm_id: &arkret_wire::RealmId,
 ) -> i64 {
     let mut conn = pool.get().await.unwrap();
@@ -1212,7 +1212,7 @@ fn strand_create_request(unit: &OrdinaryRealmBootstrapCommitUnit) -> EventCommit
         .event_digest_with_digest_suite(arkret_canonical::DigestSuite::Sha256)
         .unwrap();
     let envelope = serde_json::to_value(&event).unwrap();
-    let projection = soland_storage::ProjectionEventRecord {
+    let projection = coland_storage::ProjectionEventRecord {
         event_id: event.event_id.to_string(),
         realm_id: realm_id.to_string(),
         event_kind: event.kind.as_str().to_owned(),
@@ -1223,7 +1223,7 @@ fn strand_create_request(unit: &OrdinaryRealmBootstrapCommitUnit) -> EventCommit
         created_at: event.created_at,
         received_at: at,
     };
-    let record = soland_storage::CanonicalEventRecord {
+    let record = coland_storage::CanonicalEventRecord {
         event_id: event.event_id.to_string(),
         actor_id: event.actor_id.to_string(),
         realm_id: Some(realm_id.to_string()),
@@ -1380,7 +1380,7 @@ async fn ordinary_bootstrap_failure_rolls_back_every_event_then_exact_replay_ret
     let producer = unit.transactions[0].event.actor_id.as_account_id().unwrap();
     let first_commit = &unit.transactions[0].commit;
     let unaccepted_guard =
-        SelfProducerCommitGuard::HumanDevice(soland_storage::DeviceRevocationGateSelector {
+        SelfProducerCommitGuard::HumanDevice(coland_storage::DeviceRevocationGateSelector {
             principal_id: producer.principal_id.clone(),
             station_id: producer.station_id.clone(),
             device_id: "key".to_owned(),
@@ -1557,7 +1557,7 @@ async fn confirmed_bootstrap_recovers_after_postcommit_projection_install_is_los
             .is_none()
     );
 
-    let persistence = soland_storage_postgres::PgPersistenceStore::new(pool.clone());
+    let persistence = coland_storage_postgres::PgPersistenceStore::new(pool.clone());
     fresh_process
         .hydrate_from_persistence(&persistence, &BootstrapHydrationAdapter, [realm_id.clone()])
         .await
@@ -1659,7 +1659,7 @@ async fn strand_create_writes_registered_current_result_and_rejects_remote_unpla
     let restarted = ProjectionService::new("strand-current-restart-test");
     restarted
         .hydrate_from_persistence(
-            &soland_storage_postgres::PgPersistenceStore::new(pool.clone()),
+            &coland_storage_postgres::PgPersistenceStore::new(pool.clone()),
             &BootstrapHydrationAdapter,
             [unit.transactions[0].event.realm_id.clone()],
         )
@@ -1823,7 +1823,7 @@ async fn default_strand_writes_exact_current_at_commit_and_rejects_dangling_and_
     let restarted = ProjectionService::new("default-strand-current-restart-test");
     restarted
         .hydrate_from_persistence(
-            &soland_storage_postgres::PgPersistenceStore::new(pool.clone()),
+            &coland_storage_postgres::PgPersistenceStore::new(pool.clone()),
             &BootstrapHydrationAdapter,
             [realm_id.clone()],
         )
@@ -1875,7 +1875,7 @@ async fn default_strand_writes_exact_current_at_commit_and_rejects_dangling_and_
     let restarted = ProjectionService::new("default-strand-isolated-current-restart-test");
     restarted
         .hydrate_from_persistence(
-            &soland_storage_postgres::PgPersistenceStore::new(pool.clone()),
+            &coland_storage_postgres::PgPersistenceStore::new(pool.clone()),
             &BootstrapHydrationAdapter,
             [realm_id.clone()],
         )
@@ -1917,7 +1917,7 @@ struct AccountSummaryCurrentRow {
 }
 
 async fn account_summary_current(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     realm_id: &arkret_wire::RealmId,
 ) -> Vec<AccountSummaryCurrentRow> {
     let mut conn = pool.get().await.unwrap();
@@ -1932,7 +1932,7 @@ async fn account_summary_current(
 }
 
 async fn account_summary_version_count(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     realm_id: &arkret_wire::RealmId,
 ) -> i64 {
     let mut conn = pool.get().await.unwrap();
@@ -1950,7 +1950,7 @@ async fn account_summary_version_count(
 /// revision with the default Strand, and a failed Commit leaves no summary.
 #[tokio::test]
 async fn account_summary_follows_bootstrap_and_default_strand_in_the_commit_transaction() {
-    use soland_storage::SyncCursorStore as _;
+    use coland_storage::SyncCursorStore as _;
 
     let database = TestDatabase::lease().await;
     let pool = database.pool();
@@ -1961,7 +1961,7 @@ async fn account_summary_follows_bootstrap_and_default_strand_in_the_commit_tran
     )
     .await;
     let store = PgAuthorityCommitStore { pool: pool.clone() };
-    let cursors = soland_storage_postgres::PgSyncCursorStore { pool: pool.clone() };
+    let cursors = coland_storage_postgres::PgSyncCursorStore { pool: pool.clone() };
     let unit = unit(&pool).await;
     let realm_id = unit.transactions[0].event.realm_id.clone();
     let creator = unit.transactions[0].event.actor_id.canonical_key().unwrap();
@@ -2127,7 +2127,7 @@ async fn local_markdown_text_message_writes_exact_revision_and_rejects_missing_s
     let restarted = ProjectionService::new("message-current-restart-test");
     restarted
         .hydrate_from_persistence(
-            &soland_storage_postgres::PgPersistenceStore::new(pool.clone()),
+            &coland_storage_postgres::PgPersistenceStore::new(pool.clone()),
             &BootstrapHydrationAdapter,
             [realm_id.clone()],
         )
@@ -2269,14 +2269,14 @@ async fn snapshot_issuance_racing_a_handoff_is_retryable_unavailability() {
             let store = PgAuthorityCommitStore { pool };
             let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
             let method = arkret_wire::DidUrl::new("did:web:station.example#notary-key").unwrap();
-            let sign = |material: &soland_storage::RealmStateSnapshotMaterial| {
-                soland_services::authority_commit::build_signed_realm_state_snapshot(
+            let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
+                coland_services::authority_commit::build_signed_realm_state_snapshot(
                     material,
                     method.clone(),
                     &key,
                     chrono::Utc::now(),
                 )
-                .map_err(|error| soland_storage::PersistenceError::Internal(error.to_string()))
+                .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
             };
             store
                 .issue_realm_state_snapshot_for_account(&realm_id, &creator, &issuer, &sign)
@@ -2314,13 +2314,13 @@ async fn snapshot_issuance_racing_a_handoff_is_retryable_unavailability() {
     let error = racing.await.unwrap().unwrap_err();
     assert_eq!(
         error.conflict_code(),
-        Some(soland_storage::ConflictCode::TemporarilyUnavailable),
+        Some(coland_storage::ConflictCode::TemporarilyUnavailable),
         "{error}"
     );
     assert_eq!(issuance_count(&pool, &realm_id).await, 0);
 }
 
-async fn reservation_count(pool: &soland_storage_postgres::PgPool) -> i64 {
+async fn reservation_count(pool: &coland_storage_postgres::PgPool) -> i64 {
     #[derive(diesel::QueryableByName)]
     struct Count {
         #[diesel(sql_type = BigInt)]
@@ -2342,7 +2342,7 @@ async fn reservation_count(pool: &soland_storage_postgres::PgPool) -> i64 {
 /// the guarantee (disclosure or expiry) withdraws the basis.
 #[tokio::test]
 async fn account_window_basis_reserves_exact_issued_snapshot_or_is_preview_only() {
-    use soland_storage::{AccountRealmWindowRequest, SyncCursorStore as _};
+    use coland_storage::{AccountRealmWindowRequest, SyncCursorStore as _};
 
     let database = TestDatabase::lease().await;
     let pool = database.pool();
@@ -2353,7 +2353,7 @@ async fn account_window_basis_reserves_exact_issued_snapshot_or_is_preview_only(
     )
     .await;
     let store = PgAuthorityCommitStore { pool: pool.clone() };
-    let cursors = soland_storage_postgres::PgSyncCursorStore { pool: pool.clone() };
+    let cursors = coland_storage_postgres::PgSyncCursorStore { pool: pool.clone() };
     let unit = unit(&pool).await;
     let realm_id = unit.transactions[0].event.realm_id.clone();
     let creator = unit.transactions[0]
@@ -2381,14 +2381,14 @@ async fn account_window_basis_reserves_exact_issued_snapshot_or_is_preview_only(
     };
     let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
     let method = snapshot_signer_for_issuer(&unit, &issuer);
-    let sign = |material: &soland_storage::RealmStateSnapshotMaterial| {
-        soland_services::authority_commit::build_signed_realm_state_snapshot(
+    let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
+        coland_services::authority_commit::build_signed_realm_state_snapshot(
             material,
             method.clone(),
             &key,
             chrono::Utc::now(),
         )
-        .map_err(|error| soland_storage::PersistenceError::Internal(error.to_string()))
+        .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
     };
     let now_ms = chrono::Utc::now().timestamp_millis();
     let window_ttl = 300_000;
@@ -2404,7 +2404,7 @@ async fn account_window_basis_reserves_exact_issued_snapshot_or_is_preview_only(
         delivered_heads: Vec::new(),
         selected_stream_refs: None,
     };
-    let positions = |window: &soland_storage::AccountRealmWindow| {
+    let positions = |window: &coland_storage::AccountRealmWindow| {
         window
             .committed_events
             .iter()
@@ -2556,7 +2556,7 @@ async fn account_window_basis_reserves_exact_issued_snapshot_or_is_preview_only(
             .unwrap()
             .unwrap();
         material.current_state_entries.clear();
-        soland_services::authority_commit::build_signed_realm_state_snapshot(
+        coland_services::authority_commit::build_signed_realm_state_snapshot(
             &material,
             method.clone(),
             &key,
@@ -2673,9 +2673,9 @@ fn scan_request(
     }
 }
 
-fn scanned_page(scan: soland_storage::AccountStreamScan) -> arkret_wire::StreamScanOutcome {
+fn scanned_page(scan: coland_storage::AccountStreamScan) -> arkret_wire::StreamScanOutcome {
     match scan {
-        soland_storage::AccountStreamScan::Page(page) => page,
+        coland_storage::AccountStreamScan::Page(page) => page,
         other => panic!("expected a proved page, got {other:?}"),
     }
 }
@@ -2690,7 +2690,7 @@ fn positions(page: &arkret_wire::StreamScanOutcome) -> Vec<u64> {
 #[tokio::test]
 async fn account_stream_scan_serves_only_the_proved_sole_founder_interval() {
     use arkret_wire::StreamScanDirection::{After, Before};
-    use soland_storage::AccountStreamScan;
+    use coland_storage::AccountStreamScan;
 
     let database = TestDatabase::lease().await;
     let pool = database.pool();
@@ -2873,7 +2873,7 @@ async fn account_stream_scan_serves_only_the_proved_sole_founder_interval() {
 /// the Account cursor that carries the window is bounded by.
 #[tokio::test]
 async fn account_window_carries_same_cut_current_and_reservation_deadline() {
-    use soland_storage::AccountRealmWindowRequest;
+    use coland_storage::AccountRealmWindowRequest;
 
     let database = TestDatabase::lease().await;
     let pool = database.pool();
@@ -2904,14 +2904,14 @@ async fn account_window_carries_same_cut_current_and_reservation_deadline() {
         .service_id;
     let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
     let method = snapshot_signer_for_issuer(&unit, &issuer);
-    let sign = |material: &soland_storage::RealmStateSnapshotMaterial| {
-        soland_services::authority_commit::build_signed_realm_state_snapshot(
+    let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
+        coland_services::authority_commit::build_signed_realm_state_snapshot(
             material,
             method.clone(),
             &key,
             chrono::Utc::now(),
         )
-        .map_err(|error| soland_storage::PersistenceError::Internal(error.to_string()))
+        .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
     };
     let at_six = store
         .issue_realm_state_snapshot_for_account(&realm_id, &creator, &issuer, &sign)
@@ -2937,7 +2937,7 @@ async fn account_window_carries_same_cut_current_and_reservation_deadline() {
         issuer: issuer.clone(),
         window_limit: 2,
         window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
-        expires_at_ms: now_ms + soland_storage::MAX_ACCOUNT_WINDOW_RESERVATION_MS,
+        expires_at_ms: now_ms + coland_storage::MAX_ACCOUNT_WINDOW_RESERVATION_MS,
         now_ms,
         byte_budget: 7 * 1024 * 1024,
         delivered_heads: Vec::new(),
@@ -2999,7 +2999,7 @@ async fn account_window_carries_same_cut_current_and_reservation_deadline() {
         store
             .freeze_account_realm_window(
                 &AccountRealmWindowRequest {
-                    expires_at_ms: now_ms + soland_storage::MAX_ACCOUNT_WINDOW_RESERVATION_MS + 1,
+                    expires_at_ms: now_ms + coland_storage::MAX_ACCOUNT_WINDOW_RESERVATION_MS + 1,
                     window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
                     ..request.clone()
                 },
@@ -3019,7 +3019,7 @@ async fn account_window_carries_same_cut_current_and_reservation_deadline() {
 /// anchor was never issued is preview only.
 #[tokio::test]
 async fn message_tail_window_beyond_twenty_commits_names_the_issued_anchor() {
-    use soland_storage::AccountRealmWindowRequest;
+    use coland_storage::AccountRealmWindowRequest;
 
     let database = TestDatabase::lease().await;
     let pool = database.pool();
@@ -3050,14 +3050,14 @@ async fn message_tail_window_beyond_twenty_commits_names_the_issued_anchor() {
         .service_id;
     let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
     let method = snapshot_signer_for_issuer(&unit, &issuer);
-    let sign = |material: &soland_storage::RealmStateSnapshotMaterial| {
-        soland_services::authority_commit::build_signed_realm_state_snapshot(
+    let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
+        coland_services::authority_commit::build_signed_realm_state_snapshot(
             material,
             method.clone(),
             &key,
             chrono::Utc::now(),
         )
-        .map_err(|error| soland_storage::PersistenceError::Internal(error.to_string()))
+        .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
     };
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let strand = strand_create_request(&unit);
@@ -3128,7 +3128,7 @@ async fn message_tail_window_beyond_twenty_commits_names_the_issued_anchor() {
         issuer: issuer.clone(),
         window_limit: 21,
         window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
-        expires_at_ms: now_ms + soland_storage::MAX_ACCOUNT_WINDOW_RESERVATION_MS,
+        expires_at_ms: now_ms + coland_storage::MAX_ACCOUNT_WINDOW_RESERVATION_MS,
         now_ms,
         byte_budget: 7 * 1024 * 1024,
         delivered_heads: Vec::new(),
@@ -3248,7 +3248,7 @@ async fn message_tail_window_beyond_twenty_commits_names_the_issued_anchor() {
         .unwrap_err();
     assert!(matches!(
         forged,
-        soland_storage::PersistenceError::Internal(message)
+        coland_storage::PersistenceError::Internal(message)
             if message == "Account continuation minimum head is not covered at the frozen cut"
     ));
     assert_eq!(issuance_count(&pool, &realm_id).await, issuances_before);
@@ -3264,7 +3264,7 @@ async fn message_tail_window_beyond_twenty_commits_names_the_issued_anchor() {
 }
 
 async fn account_issuance_count(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     realm_id: &arkret_wire::RealmId,
 ) -> i64 {
     issuance_count(pool, realm_id).await
@@ -3279,7 +3279,7 @@ async fn account_issuance_count(
 /// Account can never read a window basis through the creator's cursor.
 #[tokio::test]
 async fn issued_snapshots_and_window_reservations_stay_within_their_caps() {
-    use soland_storage::{AccountRealmWindowRequest, SyncCursorStore as _};
+    use coland_storage::{AccountRealmWindowRequest, SyncCursorStore as _};
 
     let database = TestDatabase::lease().await;
     let pool = database.pool();
@@ -3290,7 +3290,7 @@ async fn issued_snapshots_and_window_reservations_stay_within_their_caps() {
     )
     .await;
     let store = PgAuthorityCommitStore { pool: pool.clone() };
-    let cursors = soland_storage_postgres::PgSyncCursorStore { pool: pool.clone() };
+    let cursors = coland_storage_postgres::PgSyncCursorStore { pool: pool.clone() };
     let unit = unit_with_plaintext_service(&pool).await;
     let realm_id = unit.transactions[0].event.realm_id.clone();
     let creator = unit.transactions[0]
@@ -3318,14 +3318,14 @@ async fn issued_snapshots_and_window_reservations_stay_within_their_caps() {
     };
     let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
     let method = snapshot_signer_for_issuer(&unit, &issuer);
-    let sign = |material: &soland_storage::RealmStateSnapshotMaterial| {
-        soland_services::authority_commit::build_signed_realm_state_snapshot(
+    let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
+        coland_services::authority_commit::build_signed_realm_state_snapshot(
             material,
             method.clone(),
             &key,
             chrono::Utc::now(),
         )
-        .map_err(|error| soland_storage::PersistenceError::Internal(error.to_string()))
+        .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
     };
     let head = || {
         let store = PgAuthorityCommitStore { pool: pool.clone() };
@@ -3397,7 +3397,7 @@ async fn issued_snapshots_and_window_reservations_stay_within_their_caps() {
         previous = message;
         issued.push(head().await);
     }
-    let cap = soland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_REALM;
+    let cap = coland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_REALM;
     assert_eq!(account_issuance_count(&pool, &realm_id).await, cap);
     assert_eq!(by_ref(first.snapshot_id.clone()).await, None);
     for (index, snapshot) in issued.iter().enumerate() {
@@ -3413,7 +3413,7 @@ async fn issued_snapshots_and_window_reservations_stay_within_their_caps() {
     let delivered = latest.visible_stream_heads[0].clone();
     let message = message_create_request(&previous, &strand_id, "live");
     uow.commit_event(message.clone()).await.unwrap();
-    let reservation_cap = soland_storage::MAX_LIVE_WINDOW_RESERVATIONS_PER_ACCOUNT_STREAM;
+    let reservation_cap = coland_storage::MAX_LIVE_WINDOW_RESERVATIONS_PER_ACCOUNT_STREAM;
     let mut reference = None;
     let mut creator_cursor = None;
     for _ in 0..reservation_cap {
@@ -3497,7 +3497,7 @@ async fn issued_snapshots_and_window_reservations_stay_within_their_caps() {
 #[tokio::test]
 async fn account_scan_withholds_expired_and_redacted_messages_on_their_commits() {
     use arkret_wire::StreamScanDirection::After;
-    use soland_storage::AccountRealmWindowRequest;
+    use coland_storage::AccountRealmWindowRequest;
 
     let database = TestDatabase::lease().await;
     let pool = database.pool();
@@ -3528,14 +3528,14 @@ async fn account_scan_withholds_expired_and_redacted_messages_on_their_commits()
         .service_id;
     let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
     let method = arkret_wire::DidUrl::new("did:web:station.example#notary-key").unwrap();
-    let sign = |material: &soland_storage::RealmStateSnapshotMaterial| {
-        soland_services::authority_commit::build_signed_realm_state_snapshot(
+    let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
+        coland_services::authority_commit::build_signed_realm_state_snapshot(
             material,
             method.clone(),
             &key,
             chrono::Utc::now(),
         )
-        .map_err(|error| soland_storage::PersistenceError::Internal(error.to_string()))
+        .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
     };
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let strand = strand_create_request(&unit);
@@ -3651,7 +3651,7 @@ async fn account_scan_withholds_expired_and_redacted_messages_on_their_commits()
         store
             .issued_realm_state_snapshot(&realm_id, &creator, &before.snapshot_id, &issuer)
             .await,
-        Err(soland_storage::PersistenceError::SchemaViolation(_))
+        Err(coland_storage::PersistenceError::SchemaViolation(_))
     ));
 }
 
@@ -3697,7 +3697,7 @@ async fn peer_stream_scan_refuses_non_hosting_peers_and_serves_a_hosting_peer_it
     // the founding stream is fully readable by its local founder.
     assert_eq!(
         scan(scan_request(&realm_id, After(None), 3), remote.clone()).await,
-        soland_storage::PeerStreamScan::NotAuthorized
+        coland_storage::PeerStreamScan::NotAuthorized
     );
     // A Realm not governed here is refused without enumerating it.
     let unknown = arkret_wire::RealmId::from_event_id(&unit.transactions[1].event.event_id);
@@ -3707,7 +3707,7 @@ async fn peer_stream_scan_refuses_non_hosting_peers_and_serves_a_hosting_peer_it
             creator.station_id.clone()
         )
         .await,
-        soland_storage::PeerStreamScan::NotAuthorized
+        coland_storage::PeerStreamScan::NotAuthorized
     );
 
     // A peer hosting a joined member holds its replication right from that
@@ -3736,7 +3736,7 @@ async fn peer_stream_scan_refuses_non_hosting_peers_and_serves_a_hosting_peer_it
         .unwrap();
         let decision = scan(scan_request(&realm_id, After(None), 3), remote.clone()).await;
         if membership == "join" {
-            let soland_storage::PeerStreamScan::Page(page) = decision else {
+            let coland_storage::PeerStreamScan::Page(page) = decision else {
                 panic!("a hosting peer is served its interval: {decision:?}");
             };
             assert_eq!(
@@ -3754,7 +3754,7 @@ async fn peer_stream_scan_refuses_non_hosting_peers_and_serves_a_hosting_peer_it
             );
         } else {
             // A knock is not a joined member and grants nothing.
-            assert_eq!(decision, soland_storage::PeerStreamScan::NotAuthorized);
+            assert_eq!(decision, coland_storage::PeerStreamScan::NotAuthorized);
         }
     }
     // The same holds for a Circle stream and for a Station that lost tenure.
@@ -3768,7 +3768,7 @@ async fn peer_stream_scan_refuses_non_hosting_peers_and_serves_a_hosting_peer_it
     };
     assert!(matches!(
         scan(circle, remote.clone()).await,
-        soland_storage::PeerStreamScan::NotAuthorized
+        coland_storage::PeerStreamScan::NotAuthorized
     ));
     let other_station =
         arkret_wire::DidCoreId::new("ak:did_core:web:other-station.example").unwrap();
@@ -3781,7 +3781,7 @@ async fn peer_stream_scan_refuses_non_hosting_peers_and_serves_a_hosting_peer_it
             )
             .await
             .unwrap(),
-        soland_storage::PeerStreamScan::Unproved(_)
+        coland_storage::PeerStreamScan::Unproved(_)
     ));
 }
 
@@ -3863,13 +3863,13 @@ fn franking_nonce(
     request: &EventCommitRequest,
     received_by: &arkret_wire::DidCoreId,
     replay_nonce: &str,
-) -> soland_storage::EventBatchCommitRequest {
-    soland_storage::EventBatchCommitRequest {
+) -> coland_storage::EventBatchCommitRequest {
+    coland_storage::EventBatchCommitRequest {
         events: vec![request.clone()],
         realm_organization_proof: None,
         invite_claim_proof: None,
         event_approvals: None,
-        franking_replay_nonce: Some(soland_storage::FrankingReplayNonceCommit {
+        franking_replay_nonce: Some(coland_storage::FrankingReplayNonceCommit {
             realm_id: request.authority_commit.event.realm_id.to_string(),
             received_by: received_by.clone(),
             replay_nonce: replay_nonce.to_owned(),
@@ -3882,7 +3882,7 @@ fn franking_nonce(
     }
 }
 
-async fn report_row_count(pool: &soland_storage_postgres::PgPool) -> i64 {
+async fn report_row_count(pool: &coland_storage_postgres::PgPool) -> i64 {
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query("SELECT COUNT(*) AS count FROM moderation_report_current_results")
         .get_result::<CountRow>(&mut *conn)
@@ -3891,7 +3891,7 @@ async fn report_row_count(pool: &soland_storage_postgres::PgPool) -> i64 {
         .count
 }
 
-async fn franking_nonce_count(pool: &soland_storage_postgres::PgPool) -> i64 {
+async fn franking_nonce_count(pool: &coland_storage_postgres::PgPool) -> i64 {
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query("SELECT COUNT(*) AS count FROM moderation_franking_replay_nonces")
         .get_result::<CountRow>(&mut *conn)
@@ -3970,7 +3970,7 @@ async fn self_moderation_report_commits_exact_current_and_refuses_with_zero_writ
     );
     let error = uow.commit_event(denied.clone()).await.unwrap_err();
     assert!(
-        matches!(error, soland_storage::PersistenceError::NotFound(_)),
+        matches!(error, coland_storage::PersistenceError::NotFound(_)),
         "{error}"
     );
     assert_zero_writes(&denied, 0, 0).await;
@@ -3984,7 +3984,7 @@ async fn self_moderation_report_commits_exact_current_and_refuses_with_zero_writ
     );
     assert!(matches!(
         uow.commit_event(denied.clone()).await.unwrap_err(),
-        soland_storage::PersistenceError::NotFound(_)
+        coland_storage::PersistenceError::NotFound(_)
     ));
     assert_zero_writes(&denied, 0, 0).await;
 
@@ -4012,7 +4012,7 @@ async fn self_moderation_report_commits_exact_current_and_refuses_with_zero_writ
     let denied = moderation_report_request(&message, &reporter, circle);
     assert!(matches!(
         uow.commit_event(denied.clone()).await.unwrap_err(),
-        soland_storage::PersistenceError::NotFound(_)
+        coland_storage::PersistenceError::NotFound(_)
     ));
     assert_zero_writes(&denied, 0, 0).await;
 
@@ -4234,8 +4234,8 @@ async fn moderation_report_row_is_disclosed_to_the_realm_root_controller() {
     )));
 }
 
-async fn event_row_count(pool: &soland_storage_postgres::PgPool, event_id: &str) -> i64 {
-    let token = soland_storage::ids::parse_event_id(event_id).unwrap();
+async fn event_row_count(pool: &coland_storage_postgres::PgPool, event_id: &str) -> i64 {
+    let token = coland_storage::ids::parse_event_id(event_id).unwrap();
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query("SELECT COUNT(*) AS count FROM canonical_events WHERE id=$1")
         .bind::<diesel::sql_types::Binary, _>(token.to_vec())
@@ -4309,12 +4309,12 @@ async fn concurrent_self_reports_on_one_stream_head_leave_one_winner_and_a_retry
     };
     assert_eq!(
         error.conflict_code(),
-        Some(soland_storage::ConflictCode::TemporarilyUnavailable),
+        Some(coland_storage::ConflictCode::TemporarilyUnavailable),
         "{error}"
     );
     assert_eq!(
-        soland_services::ServiceError::from(error).conflict_code(),
-        Some(soland_storage::ConflictCode::TemporarilyUnavailable)
+        coland_services::ServiceError::from(error).conflict_code(),
+        Some(coland_storage::ConflictCode::TemporarilyUnavailable)
     );
     let committed = store
         .committed_event(&winner.authority_commit.event.event_id)
@@ -4367,7 +4367,7 @@ async fn concurrent_self_reports_on_one_stream_head_leave_one_winner_and_a_retry
 #[tokio::test]
 async fn moderation_queue_view_derives_from_the_report_family_at_one_cut() {
     use arkret_models_collaboration::governance::moderation_queue::ModerationQueueItem;
-    use soland_storage::ModerationStore as _;
+    use coland_storage::ModerationStore as _;
 
     let database = TestDatabase::lease().await;
     let pool = database.pool();
@@ -4378,7 +4378,7 @@ async fn moderation_queue_view_derives_from_the_report_family_at_one_cut() {
     )
     .await;
     let store = PgAuthorityCommitStore { pool: pool.clone() };
-    let queue = soland_storage_postgres::PgModerationStore { pool: pool.clone() };
+    let queue = coland_storage_postgres::PgModerationStore { pool: pool.clone() };
     let unit = unit(&pool).await;
     store
         .admit_ordinary_realm_bootstrap_unit(&unit, unit.transactions[0].commit.committed_at)
@@ -4589,7 +4589,7 @@ async fn moderation_queue_view_derives_from_the_report_family_at_one_cut() {
     let refusal = uow.commit_event(stale.clone()).await.unwrap_err();
     assert_eq!(
         refusal.conflict_code(),
-        Some(soland_storage::ConflictCode::CasConflict),
+        Some(coland_storage::ConflictCode::CasConflict),
         "{refusal:?}"
     );
     let current = lift(
@@ -4669,7 +4669,7 @@ async fn moderation_queue_view_derives_from_the_report_family_at_one_cut() {
     );
 }
 
-async fn moderation_state_rows(pool: &soland_storage_postgres::PgPool) -> i64 {
+async fn moderation_state_rows(pool: &coland_storage_postgres::PgPool) -> i64 {
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query("SELECT COUNT(*) AS count FROM moderation_state_current_results")
         .get_result::<CountRow>(&mut *conn)
@@ -4679,7 +4679,7 @@ async fn moderation_state_rows(pool: &soland_storage_postgres::PgPool) -> i64 {
 }
 
 async fn realm_root_authority_event_ref(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     realm_id: &arkret_wire::RealmId,
 ) -> String {
     #[derive(diesel::QueryableByName)]
@@ -4709,7 +4709,7 @@ async fn self_current_reads_answer_only_the_provable_cut() {
         ExactCurrentResultEntry, ExactCurrentResultsReadOutcome, ExactCurrentResultsReadRequestBody,
     };
     use arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentRequestBody;
-    use soland_storage::{AccountRealmStreamList, MediaServiceAnchorRead, SelfExactCurrentRead};
+    use coland_storage::{AccountRealmStreamList, MediaServiceAnchorRead, SelfExactCurrentRead};
 
     let database = TestDatabase::lease().await;
     let pool = database.pool();
@@ -5066,7 +5066,7 @@ fn creator_account(unit: &OrdinaryRealmBootstrapCommitUnit) -> arkret_wire::Acco
 }
 
 fn admit_joined_human<'a>(
-    pool: &'a soland_storage_postgres::PgPool,
+    pool: &'a coland_storage_postgres::PgPool,
     uow: &'a PgEventCommitUnitOfWork,
     previous: &'a EventCommitRequest,
     unit: &'a OrdinaryRealmBootstrapCommitUnit,
@@ -5083,7 +5083,7 @@ fn admit_joined_human<'a>(
 }
 
 fn admit_joined_account<'a>(
-    pool: &'a soland_storage_postgres::PgPool,
+    pool: &'a coland_storage_postgres::PgPool,
     uow: &'a PgEventCommitUnitOfWork,
     previous: &'a EventCommitRequest,
     unit: &'a OrdinaryRealmBootstrapCommitUnit,
@@ -5140,7 +5140,7 @@ struct InviteFamilies {
 }
 
 async fn invite_families(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     realm_id: &arkret_wire::RealmId,
 ) -> InviteFamilies {
     #[derive(diesel::QueryableByName)]
@@ -5208,7 +5208,7 @@ fn live_target_key(account: &arkret_wire::AccountId) -> String {
 }
 
 async fn inject_joined_member(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     unit: &OrdinaryRealmBootstrapCommitUnit,
     member: &arkret_wire::AccountId,
 ) {
@@ -5231,7 +5231,7 @@ async fn inject_joined_member(
 }
 
 fn source_if_human(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     mut request: EventCommitRequest,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = EventCommitRequest> + Send + '_>> {
     Box::pin(async move {
@@ -5286,7 +5286,7 @@ fn source_if_human(
 }
 
 fn source_request(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     mut request: EventCommitRequest,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = EventCommitRequest> + Send + '_>> {
     Box::pin(async move {
@@ -5311,7 +5311,7 @@ fn source_request(
 }
 
 fn invite_grant_request<'a>(
-    pool: &'a soland_storage_postgres::PgPool,
+    pool: &'a coland_storage_postgres::PgPool,
     previous: &'a EventCommitRequest,
     unit: &'a OrdinaryRealmBootstrapCommitUnit,
     root_event_ref: &'a str,
@@ -5353,10 +5353,10 @@ fn invite_grant_request<'a>(
 fn assert_refused_with_zero_writes<'a>(
     uow: &'a PgEventCommitUnitOfWork,
     store: &'a PgAuthorityCommitStore,
-    pool: &'a soland_storage_postgres::PgPool,
+    pool: &'a coland_storage_postgres::PgPool,
     request: &'a EventCommitRequest,
-    code: soland_storage::ConflictCode,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = soland_storage::PersistenceError> + 'a>> {
+    code: coland_storage::ConflictCode,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = coland_storage::PersistenceError> + 'a>> {
     // Long scenarios reuse this assertion without duplicating its large
     // commit future in their default-stack poll frames.
     Box::pin(async move {
@@ -5503,10 +5503,10 @@ async fn invite_create_writes_three_families_and_rejects_occupied_live_target() 
         &store,
         &pool,
         &second,
-        soland_storage::ConflictCode::InviteLiveTargetOccupied,
+        coland_storage::ConflictCode::InviteLiveTargetOccupied,
     )
     .await;
-    let soland_storage::PersistenceError::Conflict(detail) = error else {
+    let coland_storage::PersistenceError::Conflict(detail) = error else {
         panic!("occupied slot is a conflict");
     };
     assert_eq!(
@@ -5572,7 +5572,7 @@ async fn third_party_invite_create_reads_from_committed_event_and_lifecycle() {
         &store,
         &pool,
         &refused,
-        soland_storage::ConflictCode::CapabilityDenied,
+        coland_storage::ConflictCode::CapabilityDenied,
     )
     .await;
 
@@ -5602,7 +5602,7 @@ async fn third_party_invite_create_reads_from_committed_event_and_lifecycle() {
         &store,
         &pool,
         &long_lived,
-        soland_storage::ConflictCode::FailedPrecondition,
+        coland_storage::ConflictCode::FailedPrecondition,
     )
     .await;
     let mut conn = pool.get().await.unwrap();
@@ -5636,7 +5636,7 @@ async fn third_party_invite_create_reads_from_committed_event_and_lifecycle() {
         &store,
         &pool,
         &reused_commitment,
-        soland_storage::ConflictCode::DuplicateConflict,
+        coland_storage::ConflictCode::DuplicateConflict,
     )
     .await;
     let current = PgInviteCurrentResultStore { pool: pool.clone() };
@@ -5778,7 +5778,7 @@ struct RelationSnapshotFixture {
 // Keep fixture phases off the parent poll frame. Deep bootstrap/join helpers
 // run in immediately awaited tasks on the same default-stack runtime.
 fn relation_snapshot_base(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RelationSnapshotBase> + '_>> {
     Box::pin(async move {
         use arkret_wire::EventKind;
@@ -5851,7 +5851,7 @@ fn relation_snapshot_base(
 }
 
 fn relation_snapshot_fixture(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     base: RelationSnapshotBase,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RelationSnapshotFixture> + '_>> {
     Box::pin(async move {
@@ -5925,7 +5925,7 @@ fn relation_snapshot_fixture(
     })
 }
 
-fn relation_snapshot_rows(material: &soland_storage::RealmStateSnapshotMaterial) -> usize {
+fn relation_snapshot_rows(material: &coland_storage::RealmStateSnapshotMaterial) -> usize {
     material
         .current_state_entries
         .iter()
@@ -5942,7 +5942,7 @@ fn relation_snapshot_rows(material: &soland_storage::RealmStateSnapshotMaterial)
 }
 
 fn assert_circle_relation_snapshot_disclosure<'a>(
-    pool: &'a soland_storage_postgres::PgPool,
+    pool: &'a coland_storage_postgres::PgPool,
     fixture: &'a RelationSnapshotFixture,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
     Box::pin(async move {
@@ -6015,7 +6015,7 @@ fn assert_circle_relation_snapshot_disclosure<'a>(
 }
 
 fn assert_cross_realm_relation_snapshot_disclosure<'a>(
-    pool: &'a soland_storage_postgres::PgPool,
+    pool: &'a coland_storage_postgres::PgPool,
     fixture: &'a RelationSnapshotFixture,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
     Box::pin(async move {
@@ -6079,7 +6079,7 @@ fn assert_cross_realm_relation_snapshot_disclosure<'a>(
                 )
                 .await
                 .unwrap(),
-            soland_storage::MemberCommittedEventRead::Read(view)
+            coland_storage::MemberCommittedEventRead::Read(view)
                 if matches!(*view, arkret_wire::CommittedEventView::Withheld(_))
         ));
         // The shared ordinary-Realm helper owns a separate fixture signing registry.
@@ -6112,18 +6112,18 @@ fn assert_cross_realm_relation_snapshot_disclosure<'a>(
                 )
                 .await
                 .unwrap(),
-            soland_storage::MemberCommittedEventRead::Read(view)
+            coland_storage::MemberCommittedEventRead::Read(view)
                 if matches!(*view, arkret_wire::CommittedEventView::Full(_))
         ));
         let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
-        let sign = |material: &soland_storage::RealmStateSnapshotMaterial| {
-            soland_services::authority_commit::build_signed_realm_state_snapshot(
+        let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
+            coland_services::authority_commit::build_signed_realm_state_snapshot(
                 material,
                 arkret_wire::DidUrl::new("did:web:bootstrap-station.example#snapshot").unwrap(),
                 &key,
                 chrono::Utc::now(),
             )
-            .map_err(|error| soland_storage::PersistenceError::Internal(error.to_string()))
+            .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
         };
         let signed = store
             .issue_realm_state_snapshot_for_account(&realm_id, &creator, &station, &sign)
@@ -6151,7 +6151,7 @@ fn assert_cross_realm_relation_snapshot_disclosure<'a>(
             .await
             .unwrap_err();
         assert!(
-            matches!(withdrawn, soland_storage::PersistenceError::SchemaViolation(reason)
+            matches!(withdrawn, coland_storage::PersistenceError::SchemaViolation(reason)
         if reason == "issued snapshot is no longer provably disclosable: a signed row is no longer disclosed")
         );
         assert_eq!(
@@ -6240,7 +6240,7 @@ async fn circle_create_and_self_join_write_same_cut_current() {
     let refusal = uow.commit_event(duplicate.clone()).await.unwrap_err();
     assert_eq!(
         refusal.conflict_code(),
-        Some(soland_storage::ConflictCode::FailedPrecondition)
+        Some(coland_storage::ConflictCode::FailedPrecondition)
     );
     assert!(
         store
@@ -6276,7 +6276,7 @@ async fn circle_create_and_self_join_write_same_cut_current() {
     let refused = uow.commit_event(outsider_join.clone()).await.unwrap_err();
     assert_eq!(
         refused.conflict_code(),
-        Some(soland_storage::ConflictCode::FailedPrecondition)
+        Some(coland_storage::ConflictCode::FailedPrecondition)
     );
     assert!(
         store
@@ -6297,7 +6297,7 @@ async fn circle_create_and_self_join_write_same_cut_current() {
         .unwrap();
     assert!(matches!(
         before_join,
-        soland_storage::MemberCommittedEventRead::Read(view)
+        coland_storage::MemberCommittedEventRead::Read(view)
             if matches!(*view, arkret_wire::CommittedEventView::Withheld(_))
     ));
     let join = circle_self_member_request(
@@ -6333,24 +6333,24 @@ async fn circle_create_and_self_join_write_same_cut_current() {
         .unwrap();
     assert!(matches!(
         after_join,
-        soland_storage::MemberCommittedEventRead::Read(view)
+        coland_storage::MemberCommittedEventRead::Read(view)
             if matches!(*view, arkret_wire::CommittedEventView::Full(_))
     ));
     // The Account detail freezes Realm and joined Circle windows at one cut.
     // The typed current and signed head keep both independent stream heads.
     let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
     let method = snapshot_signer_for_issuer(&unit, &station);
-    let sign = |material: &soland_storage::RealmStateSnapshotMaterial| {
-        soland_services::authority_commit::build_signed_realm_state_snapshot(
+    let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
+        coland_services::authority_commit::build_signed_realm_state_snapshot(
             material,
             method.clone(),
             &key,
             chrono::Utc::now(),
         )
-        .map_err(|error| soland_storage::PersistenceError::Internal(error.to_string()))
+        .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
     };
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let request = soland_storage::AccountRealmWindowRequest {
+    let request = coland_storage::AccountRealmWindowRequest {
         realm_id: realm_id.clone(),
         account: creator.clone(),
         issuer: station.clone(),
@@ -6404,7 +6404,7 @@ async fn circle_create_and_self_join_write_same_cut_current() {
     );
     let selected = store
         .freeze_account_realm_window(
-            &soland_storage::AccountRealmWindowRequest {
+            &coland_storage::AccountRealmWindowRequest {
                 selected_stream_refs: Some(vec![arkret_wire::CommitStreamRef::Circle {
                     realm_id: realm_id.clone(),
                     circle_id: circle_id.clone(),
@@ -6433,7 +6433,7 @@ async fn circle_create_and_self_join_write_same_cut_current() {
         )),
         limit: 1,
     };
-    let soland_storage::AccountStreamScan::Page(page) = store
+    let coland_storage::AccountStreamScan::Page(page) = store
         .scan_stream_for_account(&scan_request, &creator, &station)
         .await
         .unwrap()
@@ -6457,7 +6457,7 @@ async fn circle_create_and_self_join_write_same_cut_current() {
     let refused = uow.commit_event(stale.clone()).await.unwrap_err();
     assert_eq!(
         refused.conflict_code(),
-        Some(soland_storage::ConflictCode::FailedPrecondition)
+        Some(coland_storage::ConflictCode::FailedPrecondition)
     );
     assert!(
         store
@@ -6498,7 +6498,7 @@ async fn circle_create_and_self_join_write_same_cut_current() {
         .unwrap();
     assert!(matches!(
         after_leave,
-        soland_storage::MemberCommittedEventRead::Read(view)
+        coland_storage::MemberCommittedEventRead::Read(view)
             if matches!(*view, arkret_wire::CommittedEventView::Withheld(_))
     ));
 }
@@ -6527,7 +6527,7 @@ struct InviteCapabilityFixture {
 }
 
 fn invite_capability_fixture(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = InviteCapabilityFixture> + '_>> {
     Box::pin(async move {
         human_profile::admit(
@@ -6567,7 +6567,7 @@ fn invite_capability_fixture(
 }
 
 fn assert_invite_initial_capability_denials<'a>(
-    pool: &'a soland_storage_postgres::PgPool,
+    pool: &'a coland_storage_postgres::PgPool,
     fixture: &'a InviteCapabilityFixture,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
     Box::pin(async move {
@@ -6594,7 +6594,7 @@ fn assert_invite_initial_capability_denials<'a>(
                 &store,
                 &pool,
                 &denied,
-                soland_storage::ConflictCode::CapabilityDenied,
+                coland_storage::ConflictCode::CapabilityDenied,
             )
             .await;
         }
@@ -6602,7 +6602,7 @@ fn assert_invite_initial_capability_denials<'a>(
 }
 
 fn assert_invite_sequenced_revocation<'a>(
-    pool: &'a soland_storage_postgres::PgPool,
+    pool: &'a coland_storage_postgres::PgPool,
     fixture: &'a InviteCapabilityFixture,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = EventCommitRequest> + 'a>> {
     Box::pin(async move {
@@ -6660,7 +6660,7 @@ fn assert_invite_sequenced_revocation<'a>(
             &store,
             &pool,
             &prepared,
-            soland_storage::ConflictCode::TemporarilyUnavailable,
+            coland_storage::ConflictCode::TemporarilyUnavailable,
         )
         .await;
         let resequenced = realm_event_request_as(
@@ -6679,7 +6679,7 @@ fn assert_invite_sequenced_revocation<'a>(
             &store,
             &pool,
             &resequenced,
-            soland_storage::ConflictCode::CapabilityDenied,
+            coland_storage::ConflictCode::CapabilityDenied,
         )
         .await;
         revoke
@@ -6687,7 +6687,7 @@ fn assert_invite_sequenced_revocation<'a>(
 }
 
 fn assert_invite_racing_revocation<'a>(
-    pool: &'a soland_storage_postgres::PgPool,
+    pool: &'a coland_storage_postgres::PgPool,
     fixture: &'a InviteCapabilityFixture,
     revoke: &'a EventCommitRequest,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
@@ -6746,7 +6746,7 @@ fn assert_invite_racing_revocation<'a>(
             (Ok(_), Err(error)) => {
                 assert_eq!(
                     error.conflict_code(),
-                    Some(soland_storage::ConflictCode::TemporarilyUnavailable)
+                    Some(coland_storage::ConflictCode::TemporarilyUnavailable)
                 );
                 let after = realm_event_request_as(
                     &racing_create,
@@ -6762,7 +6762,7 @@ fn assert_invite_racing_revocation<'a>(
             (Err(error), Ok(_)) => {
                 assert_eq!(
                     error.conflict_code(),
-                    Some(soland_storage::ConflictCode::TemporarilyUnavailable)
+                    Some(coland_storage::ConflictCode::TemporarilyUnavailable)
                 );
                 let after = realm_event_request_as(
                     &racing_revoke,
@@ -6776,7 +6776,7 @@ fn assert_invite_racing_revocation<'a>(
                     &store,
                     &pool,
                     &after,
-                    soland_storage::ConflictCode::CapabilityDenied,
+                    coland_storage::ConflictCode::CapabilityDenied,
                 )
                 .await;
                 assert!(invite_families(&pool, &realm_id).await.lifecycle.is_empty());
@@ -6865,7 +6865,7 @@ async fn invite_revoke_releases_live_target_and_stale_previous_state_fails() {
                 "invitee_account_id": bob, "target_state": "revoked"
             }),
         ),
-        soland_storage::ConflictCode::FailedPrecondition,
+        coland_storage::ConflictCode::FailedPrecondition,
     )
     .await;
 
@@ -6901,7 +6901,7 @@ async fn invite_revoke_releases_live_target_and_stale_previous_state_fails() {
                 "invitee_account_id": bob, "target_state": "revoked"
             }),
         ),
-        soland_storage::ConflictCode::FailedPrecondition,
+        coland_storage::ConflictCode::FailedPrecondition,
     )
     .await;
     // A directed Invite cannot keep its slot by omitting its invitee.
@@ -6915,7 +6915,7 @@ async fn invite_revoke_releases_live_target_and_stale_previous_state_fails() {
                 "invite_id": first, "previous_state": "send_failed", "target_state": "revoked"
             }),
         ),
-        soland_storage::ConflictCode::InviteDirectedInviteeMismatch,
+        coland_storage::ConflictCode::InviteDirectedInviteeMismatch,
     )
     .await;
 
@@ -6948,7 +6948,7 @@ async fn invite_revoke_releases_live_target_and_stale_previous_state_fails() {
                 "invitee_account_id": bob, "target_state": "expired"
             }),
         ),
-        soland_storage::ConflictCode::InviteAlreadyTerminal,
+        coland_storage::ConflictCode::InviteAlreadyTerminal,
     )
     .await;
 
@@ -6990,7 +6990,7 @@ async fn invite_revoke_releases_live_target_and_stale_previous_state_fails() {
         &store,
         &pool,
         &cancel(&reinvite, &creator, &mallory, "revoked"),
-        soland_storage::ConflictCode::InviteDirectedInviteeMismatch,
+        coland_storage::ConflictCode::InviteDirectedInviteeMismatch,
     )
     .await;
     assert_refused_with_zero_writes(
@@ -6998,7 +6998,7 @@ async fn invite_revoke_releases_live_target_and_stale_previous_state_fails() {
         &store,
         &pool,
         &cancel(&reinvite, &bob, &bob, "revoked"),
-        soland_storage::ConflictCode::CapabilityDenied,
+        coland_storage::ConflictCode::CapabilityDenied,
     )
     .await;
     assert_refused_with_zero_writes(
@@ -7006,7 +7006,7 @@ async fn invite_revoke_releases_live_target_and_stale_previous_state_fails() {
         &store,
         &pool,
         &cancel(&reinvite, &creator, &bob, "rejected"),
-        soland_storage::ConflictCode::CapabilityDenied,
+        coland_storage::ConflictCode::CapabilityDenied,
     )
     .await;
     let declined = cancel(&reinvite, &bob, &bob, "rejected");
@@ -7019,7 +7019,7 @@ async fn invite_revoke_releases_live_target_and_stale_previous_state_fails() {
         &store,
         &pool,
         &cancel(&declined, &creator, &bob, "revoked"),
-        soland_storage::ConflictCode::InviteAlreadyTerminal,
+        coland_storage::ConflictCode::InviteAlreadyTerminal,
     )
     .await;
 
@@ -7059,7 +7059,7 @@ struct MessageFamilies {
 }
 
 async fn message_families(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     realm_id: &arkret_wire::RealmId,
 ) -> MessageFamilies {
     #[derive(diesel::QueryableByName)]
@@ -7111,10 +7111,10 @@ async fn message_families(
 fn assert_message_write_refused<'a>(
     uow: &'a PgEventCommitUnitOfWork,
     store: &'a PgAuthorityCommitStore,
-    pool: &'a soland_storage_postgres::PgPool,
+    pool: &'a coland_storage_postgres::PgPool,
     request: &'a EventCommitRequest,
-    code: Option<soland_storage::ConflictCode>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = soland_storage::PersistenceError> + 'a>> {
+    code: Option<coland_storage::ConflictCode>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = coland_storage::PersistenceError> + 'a>> {
     Box::pin(async move {
         let request = source_if_human(pool, request.clone()).await;
         let realm_id = &request.authority_commit.event.realm_id;
@@ -7170,7 +7170,7 @@ struct MessageRevisionFixture {
 }
 
 fn message_revision_fixture(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = MessageRevisionFixture> + '_>> {
     Box::pin(async move {
         human_profile::admit(
@@ -7206,7 +7206,7 @@ fn message_revision_fixture(
 }
 
 fn assert_message_revision_carriers<'a>(
-    pool: &'a soland_storage_postgres::PgPool,
+    pool: &'a coland_storage_postgres::PgPool,
     fixture: &'a MessageRevisionFixture,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = EventCommitRequest> + 'a>> {
     Box::pin(async move {
@@ -7267,7 +7267,7 @@ fn assert_message_revision_carriers<'a>(
             &store,
             &pool,
             &stale,
-            Some(soland_storage::ConflictCode::TemporarilyUnavailable),
+            Some(coland_storage::ConflictCode::TemporarilyUnavailable),
         )
         .await;
 
@@ -7321,7 +7321,7 @@ fn assert_message_revision_carriers<'a>(
 }
 
 fn assert_message_revision_editor_grants<'a>(
-    pool: &'a soland_storage_postgres::PgPool,
+    pool: &'a coland_storage_postgres::PgPool,
     fixture: &'a MessageRevisionFixture,
     revised: &'a EventCommitRequest,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = EventCommitRequest> + 'a>> {
@@ -7352,7 +7352,7 @@ fn assert_message_revision_editor_grants<'a>(
                 &store,
                 &pool,
                 &foreign,
-                Some(soland_storage::ConflictCode::CapabilityDenied),
+                Some(coland_storage::ConflictCode::CapabilityDenied),
             )
             .await;
         }
@@ -7382,7 +7382,7 @@ fn assert_message_revision_editor_grants<'a>(
             &store,
             &pool,
             &foreign,
-            Some(soland_storage::ConflictCode::CapabilityDenied),
+            Some(coland_storage::ConflictCode::CapabilityDenied),
         )
         .await;
 
@@ -7419,7 +7419,7 @@ fn assert_message_revision_editor_grants<'a>(
 }
 
 fn assert_message_revision_window_and_redaction<'a>(
-    pool: &'a soland_storage_postgres::PgPool,
+    pool: &'a coland_storage_postgres::PgPool,
     fixture: &'a MessageRevisionFixture,
     moderated: &'a EventCommitRequest,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
@@ -7503,7 +7503,7 @@ fn assert_message_revision_window_and_redaction<'a>(
             &store,
             &pool,
             &late_edit,
-            Some(soland_storage::ConflictCode::FailedPrecondition),
+            Some(coland_storage::ConflictCode::FailedPrecondition),
         )
         .await;
 
@@ -7528,7 +7528,7 @@ fn assert_message_revision_window_and_redaction<'a>(
             &store,
             &pool,
             &after_redaction,
-            Some(soland_storage::ConflictCode::FailedPrecondition),
+            Some(coland_storage::ConflictCode::FailedPrecondition),
         )
         .await;
     })
@@ -7571,14 +7571,14 @@ async fn message_redact_writes_object_redaction_and_withholds_on_scan() {
         .service_id;
     let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
     let method = snapshot_signer_for_issuer(&unit, &issuer);
-    let sign = |material: &soland_storage::RealmStateSnapshotMaterial| {
-        soland_services::authority_commit::build_signed_realm_state_snapshot(
+    let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
+        coland_services::authority_commit::build_signed_realm_state_snapshot(
             material,
             method.clone(),
             &key,
             chrono::Utc::now(),
         )
-        .map_err(|error| soland_storage::PersistenceError::Internal(error.to_string()))
+        .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
     };
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let strand = strand_create_request(&unit);
@@ -7615,7 +7615,7 @@ async fn message_redact_writes_object_redaction_and_withholds_on_scan() {
     );
     let error = assert_message_write_refused(&uow, &store, &pool, &missing, None).await;
     assert!(
-        matches!(error, soland_storage::PersistenceError::NotFound(_)),
+        matches!(error, coland_storage::PersistenceError::NotFound(_)),
         "{error}"
     );
 
@@ -7696,7 +7696,7 @@ async fn message_redact_writes_object_redaction_and_withholds_on_scan() {
         store
             .issued_realm_state_snapshot(&realm_id, &creator, &before.snapshot_id, &issuer)
             .await,
-        Err(soland_storage::PersistenceError::SchemaViolation(_))
+        Err(coland_storage::PersistenceError::SchemaViolation(_))
     ));
     assert_eq!(
         store
@@ -7718,7 +7718,7 @@ async fn message_redact_writes_object_redaction_and_withholds_on_scan() {
         &store,
         &pool,
         &again,
-        Some(soland_storage::ConflictCode::FailedPrecondition),
+        Some(coland_storage::ConflictCode::FailedPrecondition),
     )
     .await;
 
@@ -7741,13 +7741,13 @@ async fn message_redact_writes_object_redaction_and_withholds_on_scan() {
         &store,
         &pool,
         &foreign,
-        Some(soland_storage::ConflictCode::CapabilityDenied),
+        Some(coland_storage::ConflictCode::CapabilityDenied),
     )
     .await;
 }
 
 async fn admitted_message_discussion(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
 ) -> (
     OrdinaryRealmBootstrapCommitUnit,
     EventCommitRequest,
@@ -8062,7 +8062,7 @@ async fn replies_and_direct_mentions_require_accepted_visible_full_accounts() {
         &store,
         &pool,
         &hidden_reply,
-        Some(soland_storage::ConflictCode::FailedPrecondition),
+        Some(coland_storage::ConflictCode::FailedPrecondition),
     )
     .await;
     let mention_member = realm_event_request_as(
@@ -8096,7 +8096,7 @@ async fn replies_and_direct_mentions_require_accepted_visible_full_accounts() {
         &store,
         &pool,
         &refused,
-        Some(soland_storage::ConflictCode::FailedPrecondition),
+        Some(coland_storage::ConflictCode::FailedPrecondition),
     )
     .await;
 }
@@ -8119,7 +8119,7 @@ fn identity_payload(unit: &OrdinaryRealmBootstrapCommitUnit, name: &str) -> serd
 
 #[tokio::test]
 async fn member_identity_accepted_assertions_keep_bad_proofs_edges_and_restart_exact_payloads() {
-    use soland_storage::MemberIdentityStore as _;
+    use coland_storage::MemberIdentityStore as _;
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let (unit, head, _) = admitted_message_discussion(&pool).await;
@@ -8214,7 +8214,7 @@ async fn member_identity_accepted_assertions_keep_bad_proofs_edges_and_restart_e
     }
     // Recreate the durable reader; hydration reads every accepted assertion,
     // including unverified display carriers, directly from Event/Commit facts.
-    let restarted = soland_storage_postgres::PgMemberIdentityStore { pool: pool.clone() };
+    let restarted = coland_storage_postgres::PgMemberIdentityStore { pool: pool.clone() };
     let records = restarted
         .snapshot_events()
         .await
@@ -8288,7 +8288,7 @@ mod invite_claim_cases;
 mod realm_lifecycle_cases;
 
 async fn source_unit(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     mut unit: OrdinaryRealmBootstrapCommitUnit,
 ) -> OrdinaryRealmBootstrapCommitUnit {
     let station = unit.transactions[0].expected_authority.service_id.clone();
@@ -8317,11 +8317,11 @@ async fn source_unit(
     .unwrap();
     unit
 }
-async fn unit(pool: &soland_storage_postgres::PgPool) -> OrdinaryRealmBootstrapCommitUnit {
+async fn unit(pool: &coland_storage_postgres::PgPool) -> OrdinaryRealmBootstrapCommitUnit {
     Box::pin(source_unit(pool, legacy_unit())).await
 }
 async fn unit_with_plaintext_service(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
 ) -> OrdinaryRealmBootstrapCommitUnit {
     Box::pin(source_unit(pool, legacy_unit_with_plaintext_service())).await
 }

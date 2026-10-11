@@ -18,18 +18,18 @@ mod ordinary_realm;
 use std::sync::Arc;
 
 use arkret_wire::{ActorId, EventKind, ScopeRef};
-use ed25519_dalek::{Signer as _, SigningKey};
-use soland_storage::{AuthorityCommitStore, EventCommitUnitOfWork};
-use soland_storage_postgres::{
+use coland_storage::{AuthorityCommitStore, EventCommitUnitOfWork};
+use coland_storage_postgres::{
     PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPersistenceStore,
 };
+use ed25519_dalek::{Signer as _, SigningKey};
 
 fn prepared(
-    job: &soland_storage::PendingFrankingProof,
+    job: &coland_storage::PendingFrankingProof,
     nonce: u8,
     method: arkret_wire::DidUrl,
     key: &SigningKey,
-) -> soland_storage::PreparedFrankingProof {
+) -> coland_storage::PreparedFrankingProof {
     let mut proof = arkret_models_collaboration::events_payloads::moderation::FrankingProof {
         realm_id: job.realm_id.clone(),
         event_id: job.target_event_id.clone(),
@@ -66,7 +66,7 @@ fn prepared(
         arkret_signatures::SignEventOptions::new().with_created_at(job.received_at),
     )
     .unwrap();
-    soland_storage::PreparedFrankingProof {
+    coland_storage::PreparedFrankingProof {
         realm_id: job.realm_id.clone(),
         target_event_id: job.target_event_id.clone(),
         received_by: job.received_by.clone(),
@@ -81,7 +81,7 @@ async fn accepted_encrypted_receipt_fixes_one_real_proof_across_restart_and_exac
         EventContentPreEncryptionHeader, EventContentRoutingContext, MlsGovernanceBindingPayload,
     };
     use arkret_wire::EncryptedPayloadScheme;
-    let database = soland_storage_postgres::test_database::TestDatabase::lease().await;
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     let pool = database.pool();
     let label = uuid::Uuid::now_v7().to_string();
     let account = human_profile::admit(&pool, &ordinary_realm::station(), &label).await;
@@ -91,8 +91,8 @@ async fn accepted_encrypted_receipt_fixes_one_real_proof_across_restart_and_exac
     let did = human_profile::station_did(&ordinary_realm::station());
     let method = arkret_wire::DidUrl::new(format!("{did}#authority")).unwrap();
     let key = SigningKey::from_bytes(&device_authorization_history::STATION_AUTHORITY_SEED);
-    let app = soland_services::authority_commit::AuthorityCommitApplication::new(
-        soland_services::persistence::PersistenceHandle::new(Arc::new(PgPersistenceStore::new(
+    let app = coland_services::authority_commit::AuthorityCommitApplication::new(
+        coland_services::persistence::PersistenceHandle::new(Arc::new(PgPersistenceStore::new(
             pool.clone(),
         ))),
         0,
@@ -214,7 +214,7 @@ async fn accepted_encrypted_receipt_fixes_one_real_proof_across_restart_and_exac
     request.authority_commit = app
         .prepare_self_mls_transaction(
             &genesis,
-            soland_storage::MlsStateInstallation {
+            coland_storage::MlsStateInstallation {
                 effective_scope: scope.clone(),
                 base: None,
                 epoch: 0,

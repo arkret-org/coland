@@ -1,9 +1,9 @@
+use coland_storage::PendingAgentPairingCommitIntent;
 use diesel::dsl::case_when;
 use diesel::{
     BoolExpressionMethods, ExpressionMethods, PgExpressionMethods, QueryDsl, SelectableHelper,
 };
 use diesel_async::AsyncConnection;
-use soland_storage::PendingAgentPairingCommitIntent;
 
 use super::{
     AgentPairingCommitIntent, AgentParticipationStore, AgentPrincipalRecord, AgentPrincipalRow,
@@ -264,7 +264,7 @@ impl AgentStore for PgAgentStore {
     async fn pairing_receipt(
         &self,
         event_id: &str,
-    ) -> PersistenceResult<Option<soland_storage::AgentPairingReceipt>> {
+    ) -> PersistenceResult<Option<coland_storage::AgentPairingReceipt>> {
         #[derive(QueryableByName)]
         struct Receipt {
             #[diesel(sql_type = Text)]
@@ -294,7 +294,7 @@ impl AgentStore for PgAgentStore {
             };
             let authorize_event_ref = arkret_wire::EventId::new(row.authorize_event_ref)
                 .map_err(|error| PersistenceError::Internal(format!("invalid Agent pairing receipt Event id: {error}")))?;
-            Ok(soland_storage::AgentPairingReceipt {
+            Ok(coland_storage::AgentPairingReceipt {
                 agent_id: row.agent_id,
                 controller_principal_id: row.controller_principal_id,
                 request_digest: row.request_digest,

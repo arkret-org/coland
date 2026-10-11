@@ -21,15 +21,15 @@ use arkret_wire::{SignalRelayOutcome, SignalRelayRequest};
 #[cfg(test)]
 use chrono::DateTime;
 use chrono::{Duration, Utc};
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
+#[cfg(test)]
+use coland_services::events::AcceptedEvent;
+#[cfg(test)]
+use coland_services::events::RealmMetadata as RealmMetaRecord;
 use salvo::http::StatusCode;
 use salvo::prelude::*;
 use serde_json::{Value, json};
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
-#[cfg(test)]
-use soland_services::events::AcceptedEvent;
-#[cfg(test)]
-use soland_services::events::RealmMetadata as RealmMetaRecord;
 
 use super::{render_error, validate_did};
 use crate::state::AppState;
@@ -246,7 +246,7 @@ async fn peer_account_status_submit(
         .map_err(|error| AppError::param_invalid(format!("Source-Service-ID invalid: {error}")))?;
     let idempotency_actor = arkret_wire::ActorId::service(idempotency_principal_id);
     let stored_at = Utc::now();
-    let reservation = soland_services::jobs::IdempotencyState {
+    let reservation = coland_services::jobs::IdempotencyState {
         authenticated_actor: idempotency_actor.clone(),
         operation_id: arkret_wire::ServiceOperationId::PEER_ACCOUNT_STATUS_COMMAND_SUBMIT_V1
             .to_owned(),
@@ -294,19 +294,19 @@ async fn peer_account_status_submit(
             AppError::internal(format!("account-status replica unavailable: {error}"))
         })?;
     let (status, current, required_status_seq, receipt) = match append {
-        soland_storage::AccountStatusReplicaAppend::Accepted(receipt) => (
+        coland_storage::AccountStatusReplicaAppend::Accepted(receipt) => (
             AccountStatusPublicationStatus::Accepted,
             Some(record.clone()),
             None,
             receipt,
         ),
-        soland_storage::AccountStatusReplicaAppend::Duplicate(receipt) => (
+        coland_storage::AccountStatusReplicaAppend::Duplicate(receipt) => (
             AccountStatusPublicationStatus::Duplicate,
             Some(record.clone()),
             None,
             receipt,
         ),
-        soland_storage::AccountStatusReplicaAppend::DependencyMissing {
+        coland_storage::AccountStatusReplicaAppend::DependencyMissing {
             current_record,
             required_status_seq,
         } => {
@@ -319,7 +319,7 @@ async fn peer_account_status_submit(
             );
             return json_ok(outcome);
         }
-        soland_storage::AccountStatusReplicaAppend::Stale { current_record } => {
+        coland_storage::AccountStatusReplicaAppend::Stale { current_record } => {
             return Err(crate::app_error!(
                 FailedPrecondition,
                 format!(
@@ -329,8 +329,8 @@ async fn peer_account_status_submit(
             )
             .with_reason_code(arkret_wire::ReasonCode::ACCOUNT_STATUS_RECORD_STALE));
         }
-        soland_storage::AccountStatusReplicaAppend::Conflict { kind, .. } => {
-            use soland_storage::AccountStatusReplicaConflictKind;
+        coland_storage::AccountStatusReplicaAppend::Conflict { kind, .. } => {
+            use coland_storage::AccountStatusReplicaConflictKind;
             return Err(match kind {
                 AccountStatusReplicaConflictKind::Fork => {
                     crate::app_error!(FailedPrecondition, "account-status ledger fork",)
@@ -385,7 +385,7 @@ async fn peer_account_status_submit(
         pending_destination_count,
         receipt: Some(receipt),
     };
-    let completed = soland_services::jobs::IdempotencyState {
+    let completed = coland_services::jobs::IdempotencyState {
         response_status: StatusCode::OK.as_u16() as i32,
         response_body: serde_json::to_value(&outcome)
             .map_err(|error| AppError::internal(error.to_string()))?,
@@ -421,7 +421,7 @@ async fn peer_account_status_submit(
         .and_then(json_ok)
 }
 
-fn account_status_idempotency_is_pending(record: &soland_services::jobs::IdempotencyState) -> bool {
+fn account_status_idempotency_is_pending(record: &coland_services::jobs::IdempotencyState) -> bool {
     record.response_status == ACCOUNT_STATUS_IDEMPOTENCY_RESERVED_STATUS
         && record.response_body.get("state").and_then(Value::as_str)
             == Some(ACCOUNT_STATUS_IDEMPOTENCY_RESERVED_STATE)
@@ -637,16 +637,16 @@ async fn enqueue_account_status_fanout(
 }
 
 fn account_status_propagation_state(
-    state: soland_storage::AccountStatusPropagationProjectionState,
+    state: coland_storage::AccountStatusPropagationProjectionState,
 ) -> AccountStatusPropagationState {
     match state {
-        soland_storage::AccountStatusPropagationProjectionState::Scheduled => {
+        coland_storage::AccountStatusPropagationProjectionState::Scheduled => {
             AccountStatusPropagationState::Scheduled
         }
-        soland_storage::AccountStatusPropagationProjectionState::Complete => {
+        coland_storage::AccountStatusPropagationProjectionState::Complete => {
             AccountStatusPropagationState::Complete
         }
-        soland_storage::AccountStatusPropagationProjectionState::Incomplete => {
+        coland_storage::AccountStatusPropagationProjectionState::Incomplete => {
             AccountStatusPropagationState::Incomplete
         }
     }
@@ -853,7 +853,7 @@ async fn validate_account_status_publication(
     // account id (account-lifecycle.md §3.1); a Station never mints or
     // stores it, so it can only be bound to the Event payload and to the
     // monotonic authority floor below. The local `AccountRecord.id` is an
-    // unrelated soland-local identifier and comparing the two rejects every
+    // unrelated coland-local identifier and comparing the two rejects every
     // lawful publication.
     if resolution.pcr_realm_id != record.principal_control_realm_id {
         return Err(AppError::capability_denied(
@@ -923,7 +923,7 @@ async fn peer_signal_relay(depot: &mut Depot, req: &mut Request) -> JsonResult<S
 
 fn validate_signal_signature_window(req: &Request) -> Result<(), AppError> {
     let signature_input =
-        soland_http::http_signature::parse_signature_input_header(req).map_err(|error| {
+        coland_http::http_signature::parse_signature_input_header(req).map_err(|error| {
             schema_violation(format!("invalid Signal relay Signature-Input: {error}"))
         })?;
     if signature_input.expires < signature_input.created
@@ -992,7 +992,7 @@ async fn peer_events_submit(depot: &mut Depot, req: &mut Request, res: &mut Resp
     match state.authority().submit_peer(&peer, submission).await {
         Ok(outcome) => res.render(Json(outcome)),
         Err(error) => {
-            if error.conflict_code() == Some(soland_storage::ConflictCode::DependencyMissing)
+            if error.conflict_code() == Some(coland_storage::ConflictCode::DependencyMissing)
                 && let Some(dependency) = founding_missing_dependency
             {
                 let details = DirectConversationFoundingMissingDependencyList {
@@ -1015,8 +1015,8 @@ async fn peer_events_submit(depot: &mut Depot, req: &mut Request, res: &mut Resp
             }
             if matches!(
                 error,
-                soland_services::ServiceError::Internal(_)
-                    | soland_services::ServiceError::Database(_)
+                coland_services::ServiceError::Internal(_)
+                    | coland_services::ServiceError::Database(_)
             ) {
                 tracing::warn!(?error, "peer authority submission unavailable");
             }
@@ -1399,12 +1399,12 @@ pub(in crate::routing) async fn authenticated_peer_context(
     state: &AppState,
     req: &mut Request,
     has_body: bool,
-) -> Result<soland_services::authority_commit::AuthenticatedPeerContext, AppError> {
+) -> Result<coland_services::authority_commit::AuthenticatedPeerContext, AppError> {
     validate_peer_request(state, req, has_body).await?;
     let source_service_id =
         arkret_wire::DidCoreId::new(required_header(req, HEADER_SOURCE_SERVICE_ID)?)
             .map_err(|_| schema_violation("source-service-id must be a service core_id"))?;
-    Ok(soland_services::authority_commit::AuthenticatedPeerContext { source_service_id })
+    Ok(coland_services::authority_commit::AuthenticatedPeerContext { source_service_id })
 }
 
 pub(in crate::routing) fn source_id_from_request(req: &Request) -> Result<String, AppError> {
@@ -1441,24 +1441,24 @@ mod internal_channel_tests {
 
     use super::*;
 
-    const TRUST_DOMAIN: &str = "ak:trust_domain:soland.example";
-    const AUTHORITY_TRUST_DOMAIN: &str = "ak:trust_domain:auth.soland.example";
+    const TRUST_DOMAIN: &str = "ak:trust_domain:coland.example";
+    const AUTHORITY_TRUST_DOMAIN: &str = "ak:trust_domain:auth.coland.example";
     const CREDENTIAL: &str = "shared-internal-channel-credential";
 
     fn configured_values() -> BTreeMap<String, String> {
         BTreeMap::from([
-            ("SOLAND_TRUST_DOMAIN".to_owned(), TRUST_DOMAIN.to_owned()),
-            ("SOLAND_DEVELOPMENT_MODE".to_owned(), "true".to_owned()),
+            ("COLAND_TRUST_DOMAIN".to_owned(), TRUST_DOMAIN.to_owned()),
+            ("COLAND_DEVELOPMENT_MODE".to_owned(), "true".to_owned()),
             (
-                "SOLAND_ACCOUNT_AUTHORITY_URL".to_owned(),
-                "https://auth.soland.example".to_owned(),
+                "COLAND_ACCOUNT_AUTHORITY_URL".to_owned(),
+                "https://auth.coland.example".to_owned(),
             ),
             (
-                "SOLAND_INTERNAL_AUTHORITY_SHARED_SECRET".to_owned(),
+                "COLAND_INTERNAL_AUTHORITY_SHARED_SECRET".to_owned(),
                 CREDENTIAL.to_owned(),
             ),
             (
-                "SOLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN".to_owned(),
+                "COLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN".to_owned(),
                 AUTHORITY_TRUST_DOMAIN.to_owned(),
             ),
         ])
@@ -1542,7 +1542,7 @@ mod internal_channel_tests {
     #[test]
     fn channel_without_explicit_authority_trust_domain_is_not_registered() {
         let mut values = configured_values();
-        values.remove("SOLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN");
+        values.remove("COLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN");
         let config = crate::config::AppConfig::from_values(
             &values,
             crate::config::StartupOverrides::default(),
@@ -1703,7 +1703,7 @@ mod membership_identity_tests {
 
 #[cfg(test)]
 mod account_authority_identity_tests {
-    use soland_storage_postgres::Db;
+    use coland_storage_postgres::Db;
 
     use super::*;
 
@@ -1772,7 +1772,7 @@ mod account_status_resolution_tests {
     fn account_status_reservation_is_operation_scoped_and_explicit() {
         let now = Utc::now();
         let authority = DidCoreId::new("ak:did_core:web:authority.example").unwrap();
-        let mut record = soland_services::jobs::IdempotencyState {
+        let mut record = coland_services::jobs::IdempotencyState {
             authenticated_actor: arkret_wire::ActorId::service(authority),
             operation_id: arkret_wire::ServiceOperationId::PEER_ACCOUNT_STATUS_COMMAND_SUBMIT_V1
                 .to_owned(),

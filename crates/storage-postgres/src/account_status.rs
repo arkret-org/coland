@@ -1,5 +1,5 @@
 use arkret_models_collaboration::account_status::{AccountStatusReceipt, AccountStatusRecord};
-use soland_storage::{
+use coland_storage::{
     AccountStatusAffectedServiceObservation, AccountStatusPropagationProjection,
     AccountStatusPropagationProjectionState, AccountStatusPropagationProjectionTransition,
     classify_account_status_replica_append,
@@ -116,8 +116,8 @@ fn decode_propagation_projection(
 
 fn affected_source(
     value: &str,
-) -> PersistenceResult<soland_storage::AccountStatusAffectedServiceSource> {
-    use soland_storage::AccountStatusAffectedServiceSource as Source;
+) -> PersistenceResult<coland_storage::AccountStatusAffectedServiceSource> {
+    use coland_storage::AccountStatusAffectedServiceSource as Source;
     match value {
         "session" => Ok(Source::Session),
         "device" => Ok(Source::Device),
@@ -135,7 +135,7 @@ fn affected_source(
 fn push_unique_observation(
     observations: &mut Vec<AccountStatusAffectedServiceObservation>,
     service_id: arkret_wire::DidCoreId,
-    source: soland_storage::AccountStatusAffectedServiceSource,
+    source: coland_storage::AccountStatusAffectedServiceSource,
     observed_at: chrono::DateTime<chrono::Utc>,
 ) {
     if observations
@@ -790,8 +790,8 @@ mod tests {
     use arkret_models_collaboration::account_status::UnsignedAccountStatusRecord;
     use arkret_models_collaboration::objects::account_status::AccountStatus;
     use arkret_wire::{DidUrl, PayloadProof, RealmId, SchemaId};
-    use soland_storage::AccountStatusAffectedServiceSource;
-    use soland_storage::contract_tests::assert_account_status_replica_decision_table_contract;
+    use coland_storage::AccountStatusAffectedServiceSource;
+    use coland_storage::contract_tests::assert_account_status_replica_decision_table_contract;
 
     use super::*;
 
@@ -801,7 +801,7 @@ mod tests {
         pk: i64,
     }
 
-    /// The shared contract pool. `SOLAND_TEST_DATABASE_URL` or `DATABASE_URL`
+    /// The shared contract pool. `COLAND_TEST_DATABASE_URL` or `DATABASE_URL`
     /// must name a reachable database; these contracts fail rather than skip.
     async fn test_pool() -> PgPool {
         crate::test_database::contract_pool().await

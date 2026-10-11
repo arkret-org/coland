@@ -6,7 +6,7 @@ use arkret_models_crypto::{KeyOperationSignature, peer_keypackage_claim_receipt_
 use arkret_models_identity::{AuthenticatedServiceResolution, DidDocument};
 use arkret_wire::{DidCoreId, DidUrl, project_did_to_core_id};
 use chrono::{DateTime, Utc};
-use soland_http::error::AppError;
+use coland_http::error::AppError;
 
 fn signature_invalid() -> AppError {
     crate::app_error!(

@@ -1,23 +1,23 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use coland_http::config::AppConfig;
+use coland_http::state::{
+    AppState, AppStateRuntime, EventBroadcast, EventNotification, EventNotificationRelay,
+};
+use coland_services::governance::RuntimeSettingsPort;
+use coland_services::jobs::RuntimeHealthPort;
+use coland_services::persistence::PersistenceHandle;
+use coland_storage_postgres::{Db, PgPool};
 use futures_util::future::poll_fn;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use soland_http::config::AppConfig;
-use soland_http::state::{
-    AppState, AppStateRuntime, EventBroadcast, EventNotification, EventNotificationRelay,
-};
-use soland_services::governance::RuntimeSettingsPort;
-use soland_services::jobs::RuntimeHealthPort;
-use soland_services::persistence::PersistenceHandle;
-use soland_storage_postgres::{Db, PgPool};
 use tokio::sync::mpsc;
 use tokio_postgres::{AsyncMessage, NoTls};
 
 use crate::object_storage::build_object_storage;
 
-const EVENT_NOTIFICATION_CHANNEL: &str = "soland_event_notifications";
+const EVENT_NOTIFICATION_CHANNEL: &str = "coland_event_notifications";
 
 pub fn build_app_state(
     config: AppConfig,
@@ -31,8 +31,8 @@ pub fn build_app_state(
         .identity()
         .ok_or_else(|| anyhow::anyhow!("runtime requires a serving service identity"))?;
     let service_id = serving_identity.service_id.to_string();
-    let projections = soland_services::projection::ProjectionService::new(&service_id);
-    let realm_directory = soland_http::state::build_realm_directory(
+    let projections = coland_services::projection::ProjectionService::new(&service_id);
+    let realm_directory = coland_http::state::build_realm_directory(
         &config,
         &serving_identity.did,
         &serving_identity.service_id,
@@ -71,11 +71,11 @@ struct RuntimeSettingsPersistence {
 struct RuntimeDatabaseHealth(Db);
 #[async_trait::async_trait]
 impl RuntimeSettingsPort for RuntimeSettingsPersistence {
-    async fn load_overrides(&self) -> soland_services::ServiceResult<Vec<(String, Value)>> {
+    async fn load_overrides(&self) -> coland_services::ServiceResult<Vec<(String, Value)>> {
         let Some(pool) = self.pool.as_ref() else {
             return Ok(Vec::new());
         };
-        soland_storage_postgres::load_settings_overrides(pool)
+        coland_storage_postgres::load_settings_overrides(pool)
             .await
             .map_err(Into::into)
     }
@@ -85,11 +85,11 @@ impl RuntimeSettingsPort for RuntimeSettingsPersistence {
         key: &str,
         value: &Value,
         updated_by: &str,
-    ) -> soland_services::ServiceResult<()> {
+    ) -> coland_services::ServiceResult<()> {
         let Some(pool) = self.pool.as_ref() else {
             return Ok(());
         };
-        soland_storage_postgres::store_settings_override(pool, key, value, updated_by)
+        coland_storage_postgres::store_settings_override(pool, key, value, updated_by)
             .await
             .map_err(Into::into)
     }
@@ -98,7 +98,7 @@ impl RuntimeSettingsPort for RuntimeSettingsPersistence {
 #[async_trait::async_trait]
 impl RuntimeHealthPort for RuntimeDatabaseHealth {
     async fn database_ready(&self) -> bool {
-        soland_storage_postgres::database_ready(self.0.pool.as_ref()).await
+        coland_storage_postgres::database_ready(self.0.pool.as_ref()).await
     }
 
     fn storage_mode(&self) -> &'static str {
@@ -200,7 +200,7 @@ impl PgEventNotificationWorker {
             origin: self.origin.clone(),
             notification,
         })?;
-        soland_storage_postgres::publish_event_notification(&self.pool, &payload).await?;
+        coland_storage_postgres::publish_event_notification(&self.pool, &payload).await?;
         Ok(())
     }
 
@@ -245,7 +245,7 @@ impl PgEventNotificationWorker {
                     continue;
                 };
                 let Some(payload) =
-                    soland_storage_postgres::load_event_notification(&self.pool, id).await?
+                    coland_storage_postgres::load_event_notification(&self.pool, id).await?
                 else {
                     tracing::warn!(%id, "PostgreSQL event notification reference expired");
                     continue;
@@ -272,7 +272,7 @@ mod notification_tests {
 
     #[tokio::test]
     async fn independent_listeners_forward_large_events_without_origin_echo() {
-        let database = soland_storage_postgres::TestDatabase::lease().await;
+        let database = coland_storage_postgres::TestDatabase::lease().await;
         let make_worker = |origin: &str| {
             Arc::new(PgEventNotificationWorker {
                 pool: database.pool(),
@@ -318,7 +318,7 @@ mod notification_tests {
                         tokio::time::timeout(Duration::from_millis(100), first_rx.recv()).await
                 {
                     assert_eq!(notification.realm_id, "from-second");
-                    let soland_http::state::EventNotificationKind::Event { event_payload, .. } =
+                    let coland_http::state::EventNotificationKind::Event { event_payload, .. } =
                         notification.kind
                     else {
                         panic!("expected event");
@@ -331,7 +331,7 @@ mod notification_tests {
                         tokio::time::timeout(Duration::from_millis(100), second_rx.recv()).await
                 {
                     assert_eq!(notification.realm_id, "from-first");
-                    let soland_http::state::EventNotificationKind::Event { event_payload, .. } =
+                    let coland_http::state::EventNotificationKind::Event { event_payload, .. } =
                         notification.kind
                     else {
                         panic!("expected event");

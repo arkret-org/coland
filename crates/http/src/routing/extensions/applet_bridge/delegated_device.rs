@@ -4,7 +4,7 @@
 //! current installation at the actual scope, separately from native PCR control.
 
 use arkret_wire::{AppletId, DidCoreId, EventId, RealmId, ScopeRef};
-use soland_http::error::AppError;
+use coland_http::error::AppError;
 
 use super::record::applet_records;
 use super::types::AppletRecord;

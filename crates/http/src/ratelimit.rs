@@ -11,7 +11,7 @@
 //!   be able to starve the one probe a client needs just to begin signing in.
 //! - `auth`   — the credential/bearer-issuing surface (strict, low ceiling): the spec-canonical
 //!   `/_arkret/gate/account/register`, `/_arkret/gate/account/session-grants`, and
-//!   `/_arkret/gate/account/agent-key-pair`, plus the `/_soland/gate/auth/*` auth routes. Must be
+//!   `/_arkret/gate/account/agent-key-pair`, plus the `/_coland/gate/auth/*` auth routes. Must be
 //!   hardened against credential-stuffing.
 //! - `api`    — every other `/_arkret/*` request (moderate ceiling).
 //! - `other`  — anything outside `/_arkret/*` (default ceiling).
@@ -27,11 +27,11 @@
 //! loopback bucket, so prod ceilings would otherwise trip 429 during dx
 //! hot-reload + repeated connect bootstraps and block sign-in). The limiter
 //! stays installed in both modes. Operators can tune any class with the
-//! `SOLAND_RATE_LIMIT_{DEFAULT,AUTH,API,PROBE}_PER_MINUTE` and
-//! `SOLAND_RATE_LIMIT_WINDOW_SECONDS` env vars.
+//! `COLAND_RATE_LIMIT_{DEFAULT,AUTH,API,PROBE}_PER_MINUTE` and
+//! `COLAND_RATE_LIMIT_WINDOW_SECONDS` env vars.
 //!
 //! Reverse-proxy deployments can opt into sanitized `X-Forwarded-For`
-//! client extraction with `SOLAND_RATE_LIMIT_TRUST_X_FORWARDED_FOR=1`.
+//! client extraction with `COLAND_RATE_LIMIT_TRUST_X_FORWARDED_FOR=1`.
 //! Directly exposed deployments keep the default fail-closed behaviour and
 //! bucket on the TCP peer address.
 
@@ -49,7 +49,7 @@ const DESCRIBE_PROBE_PATH: &str = "/_arkret/describe";
 const AUTH_REGISTER_PATH: &str = "/_arkret/gate/account/register";
 const AUTH_SESSION_GRANTS_PATH: &str = "/_arkret/gate/account/session-grants";
 const AUTH_AGENT_KEY_PAIR_PATH: &str = "/_arkret/gate/account/agent-key-pair";
-const SOLAND_AUTH_PREFIX: &str = "/_soland/gate/auth/";
+const COLAND_AUTH_PREFIX: &str = "/_coland/gate/auth/";
 const ARKRET_PREFIX: &str = "/_arkret/";
 
 /// Rate limiter configuration.
@@ -104,7 +104,7 @@ pub struct RateLimitOverrides {
 
 impl RateLimiterConfig {
     /// Build the runtime config from the deployment posture +
-    /// `SOLAND_RATE_LIMIT_*` overrides.
+    /// `COLAND_RATE_LIMIT_*` overrides.
     ///
     /// Production keeps the strict per-class ceilings ([`Self::default`]).
     /// `development_mode` lifts every ceiling far above any human dev's click
@@ -195,7 +195,7 @@ impl RateLimiterConfig {
                 entry(AUTH_REGISTER_PATH.to_owned(), self.auth_max_requests),
                 entry(AUTH_SESSION_GRANTS_PATH.to_owned(), self.auth_max_requests),
                 entry(AUTH_AGENT_KEY_PAIR_PATH.to_owned(), self.auth_max_requests),
-                entry(format!("{SOLAND_AUTH_PREFIX}*"), self.auth_max_requests),
+                entry(format!("{COLAND_AUTH_PREFIX}*"), self.auth_max_requests),
                 entry(format!("{ARKRET_PREFIX}*"), self.api_max_requests),
                 entry("*".to_owned(), self.max_requests),
             ],
@@ -229,11 +229,11 @@ impl EndpointClass {
         // under a single `/_arkret/gate/auth/` prefix: the spec-canonical
         // account registration, session-grant exchange, and agent-key-pair authorization sit under
         // `/_arkret/gate/account/*`, and the private auth surface lives under
-        // `/_soland/gate/auth/*`. Match the real routes, not a dead prefix.
+        // `/_coland/gate/auth/*`. Match the real routes, not a dead prefix.
         else if path == AUTH_REGISTER_PATH
             || path == AUTH_SESSION_GRANTS_PATH
             || path == AUTH_AGENT_KEY_PAIR_PATH
-            || path.starts_with(SOLAND_AUTH_PREFIX)
+            || path.starts_with(COLAND_AUTH_PREFIX)
         {
             Self::Auth
         } else if path.starts_with(ARKRET_PREFIX) {
@@ -489,7 +489,7 @@ mod tests {
             let concrete = match endpoint {
                 "*" => "/some/non-arkret/path",
                 "/_arkret/*" => "/_arkret/self/account/subscribe",
-                "/_soland/gate/auth/*" => "/_soland/gate/auth/dev-login",
+                "/_coland/gate/auth/*" => "/_coland/gate/auth/dev-login",
                 literal => literal,
             };
             let enforced = config.ceiling_for(EndpointClass::classify(concrete));

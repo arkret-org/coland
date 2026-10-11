@@ -19,7 +19,7 @@ pub async fn auth_or_render(
 }
 
 /// Look up the bearer-bound session and validate every gate. Development
-/// sessions are resolved from soland's local session store. Production clients
+/// sessions are resolved from coland's local session store. Production clients
 /// present `ak.session.grant` with DPoP; unknown local bearer credentials fail
 /// closed instead of being sent through a second authentication model.
 pub async fn authenticated_session(
@@ -332,7 +332,7 @@ async fn enforce_recovery_session_grant_operation(
             "capability_denied",
             "recovery proof has not been verified",
         ))?;
-    if recovery.state != soland_storage::RecoverySessionLifecycle::Verified
+    if recovery.state != coland_storage::RecoverySessionLifecycle::Verified
         || recovery.expires_at <= now()
         || recovery.principal_id.as_str() != session.actor
         || recovery.station_id.as_str() != session.audience
@@ -599,7 +599,7 @@ async fn enforce_session_device_revocation_gate(
                 })?;
             let device = state
                 .identities()
-                .find_device(soland_services::identity::FindDeviceQuery {
+                .find_device(coland_services::identity::FindDeviceQuery {
                     actor_id: session.actor.clone(),
                     device_id: session.require_human_device_id().clone(),
                 })
@@ -733,14 +733,14 @@ async fn enforce_session_device_revocation_gate(
             )
         })?;
     match status {
-        soland_storage::DeviceRevocationGateStatus::Active => Ok(()),
-        soland_storage::DeviceRevocationGateStatus::Revoked { .. } => Err((
+        coland_storage::DeviceRevocationGateStatus::Active => Ok(()),
+        coland_storage::DeviceRevocationGateStatus::Revoked { .. } => Err((
             StatusCode::CONFLICT,
             "device_revoked",
             "device generation is revoked",
         )),
-        soland_storage::DeviceRevocationGateStatus::AuthorityMismatch
-        | soland_storage::DeviceRevocationGateStatus::GenerationMismatch => Err((
+        coland_storage::DeviceRevocationGateStatus::AuthorityMismatch
+        | coland_storage::DeviceRevocationGateStatus::GenerationMismatch => Err((
             StatusCode::UNAUTHORIZED,
             "auth_expired",
             "session device authority binding is no longer current",
@@ -749,7 +749,7 @@ async fn enforce_session_device_revocation_gate(
 }
 
 fn session_device_selector_error(
-    error: &soland_services::ServiceError,
+    error: &coland_services::ServiceError,
 ) -> (StatusCode, &'static str, &'static str) {
     if error.is_not_found() {
         (
@@ -1150,7 +1150,7 @@ mod tests {
     #[test]
     fn selector_absence_is_403_generation_conflict_is_401_and_corruption_is_500() {
         assert_eq!(
-            session_device_selector_error(&soland_services::ServiceError::NotFound(
+            session_device_selector_error(&coland_services::ServiceError::NotFound(
                 "absent".to_owned()
             )),
             (
@@ -1160,7 +1160,7 @@ mod tests {
             )
         );
         assert_eq!(
-            session_device_selector_error(&soland_services::ServiceError::Conflict(
+            session_device_selector_error(&coland_services::ServiceError::Conflict(
                 "device authorization is outside the current generation".to_owned()
             )),
             (
@@ -1170,7 +1170,7 @@ mod tests {
             )
         );
         assert_eq!(
-            session_device_selector_error(&soland_services::ServiceError::SchemaViolation(
+            session_device_selector_error(&coland_services::ServiceError::SchemaViolation(
                 "corrupt".to_owned()
             )),
             (

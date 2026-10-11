@@ -5,8 +5,8 @@ use arkret_models_collaboration::events_payloads::device_identity::DeviceAuthori
 use arkret_models_crypto::DeviceStatus;
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use coland_services::identity::{FindDeviceQuery, RecoveryPolicyState};
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
-use soland_services::identity::{FindDeviceQuery, RecoveryPolicyState};
 
 use crate::state::AppState;
 
@@ -46,7 +46,7 @@ pub(crate) async fn current_device_authorization(
     actor: &arkret_wire::ActorId,
     device_id: &arkret_wire::DeviceId,
     facet: &DeviceSigningDirectoryFacet,
-) -> Result<Option<DeviceAuthorizePayload>, soland_services::ServiceError> {
+) -> Result<Option<DeviceAuthorizePayload>, coland_services::ServiceError> {
     if !actor
         .as_account_id()
         .is_some_and(|account| account.station_id.as_str() == state.service_id())
@@ -66,7 +66,7 @@ pub(crate) async fn current_device_authorization(
         .event_queries()
         .canonical_event(event_id.as_str())
         .await
-        .map_err(|error| soland_services::ServiceError::internal(error.to_string()))?
+        .map_err(|error| coland_services::ServiceError::internal(error.to_string()))?
     else {
         return Ok(None);
     };
@@ -95,7 +95,7 @@ pub(crate) async fn current_device_authorization(
         .persistence()
         .device_revocation_gate_status(&selector)
         .await?
-        == soland_storage::DeviceRevocationGateStatus::Active;
+        == coland_storage::DeviceRevocationGateStatus::Active;
     let authorization_binding_kind = match authorization.authorization_binding_kind {
         arkret_models_collaboration::events_payloads::device_identity::DeviceAuthorizationBindingKind::RegistrationAnchor => "registration_anchor",
         arkret_models_collaboration::events_payloads::device_identity::DeviceAuthorizationBindingKind::AcceptedDevice => "accepted_device",
@@ -103,14 +103,14 @@ pub(crate) async fn current_device_authorization(
         arkret_models_collaboration::events_payloads::device_identity::DeviceAuthorizationBindingKind::AppletManagedDelegation => "applet_managed_delegation",
     };
     let (verification_state, verification_source) =
-        soland_services::identity::fold_device_verification_checkpoint(
+        coland_services::identity::fold_device_verification_checkpoint(
             "verified",
             true,
             Some(authorization_binding_kind),
             false,
         );
-    if soland_services::identity::evaluate_device_checkpoint_live_eligibility(
-        soland_services::identity::DeviceCheckpointLiveFacts {
+    if coland_services::identity::evaluate_device_checkpoint_live_eligibility(
+        coland_services::identity::DeviceCheckpointLiveFacts {
             lifecycle_active: facet.status == DeviceStatus::Active,
             verification_state,
             verification_source,
@@ -178,7 +178,7 @@ pub(crate) async fn try_resolve_device_signing_directory_facet(
     state: &AppState,
     principal_id: &str,
     device_id: &str,
-) -> Result<DeviceSigningDirectoryFacet, soland_services::ServiceError> {
+) -> Result<DeviceSigningDirectoryFacet, coland_services::ServiceError> {
     let record = match state
         .identities()
         .find_device(FindDeviceQuery {

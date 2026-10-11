@@ -10,19 +10,19 @@
 
 use std::sync::{Arc, Mutex};
 
+use coland_http::config::AppConfig;
+use coland_http::service;
+use coland_http::state::AppState;
+use coland_test_support::AppStateTestExt as _;
+use coland_test_support::pcr_genesis::PcrGenesisFixture;
 use ed25519_dalek::SigningKey;
 use salvo::http::StatusCode;
 use salvo::test::{ResponseExt, TestClient};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use soland_http::config::AppConfig;
-use soland_http::service;
-use soland_http::state::AppState;
-use soland_test_support::AppStateTestExt as _;
-use soland_test_support::pcr_genesis::PcrGenesisFixture;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const QUEUE_PATH: &str = "/_soland/admin/moderation/queue";
+const QUEUE_PATH: &str = "/_coland/admin/moderation/queue";
 const VIEWER_PATH: &str = "/_arkret/self/account/viewer";
 const INTROSPECTION_PATH: &str = "/_coauth/internal/session-grants/introspect";
 
@@ -100,19 +100,19 @@ async fn grant_session(slug: &str, configure: impl FnOnce(&mut AppConfig)) -> Gr
         development_mode: true,
         session_grant_introspection_url: Some(format!("{origin}{INTROSPECTION_PATH}")),
         account_authority_url: Some(origin),
-        ..soland_test_support::app_config()
+        ..coland_test_support::app_config()
     };
     config.register_test_internal_authority_channel(format!("admin-dpop-{slug}"));
     configure(&mut config);
-    let state = soland_test_support::app_state(config);
+    let state = coland_test_support::app_state(config);
     let fixture = PcrGenesisFixture::new(state.service_did());
     fixture.admit(&state).await.expect("durable PCR genesis");
     // The Account row the grant's account binding resolves to at this Station.
     state
         .test_persistence()
         .accounts()
-        .put(&soland_storage::AccountRecord {
-            pk: soland_storage::AccountPk(0),
+        .put(&coland_storage::AccountRecord {
+            pk: coland_storage::AccountPk(0),
             principal_id: fixture.history.account.principal_id.clone(),
             station_id: state.service_core_id(),
             localpart: format!("admin-dpop-{slug}"),
@@ -308,12 +308,12 @@ async fn dpop_session_reaches_every_admin_router_once() {
     // (including a handler that shares its body with a self-path endpoint),
     // and the collection/retention/settings branch.
     for path in [
-        "/_soland/admin/server/status",
-        "/_soland/admin/actors",
-        "/_soland/admin/capabilities",
-        "/_soland/admin/key-backups",
-        "/_soland/admin/realms",
-        "/_soland/admin/settings",
+        "/_coland/admin/server/status",
+        "/_coland/admin/actors",
+        "/_coland/admin/capabilities",
+        "/_coland/admin/key-backups",
+        "/_coland/admin/realms",
+        "/_coland/admin/settings",
     ] {
         let headers = session.headers("GET", path);
         let (status, body) = session.get(path, Some(&headers)).await;
@@ -330,7 +330,7 @@ async fn dpop_session_reaches_every_admin_router_once() {
 async fn production_dpop_session_is_scope_checked_and_authenticated_once() {
     // The loopback Account Authority mock is a private address; production
     // egress refuses it unless the process policy allows it explicitly.
-    soland_http::security::install_egress_policy(soland_http::security::EgressPolicy {
+    coland_http::security::install_egress_policy(coland_http::security::EgressPolicy {
         allow_private_networks: Some(true),
         ..Default::default()
     });

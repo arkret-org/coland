@@ -1,6 +1,6 @@
 # Agent name reservation
 
-Soland rejects a second Agent with the same canonical `agent_slug` for the
+Coland rejects a second Agent with the same canonical `agent_slug` for the
 same controller principal in its locally observed accepted provisioning
 history. Display names remain presentation text; Agent IDs remain distinct
 identities. This local policy does not establish global uniqueness across

@@ -16,14 +16,14 @@ use arkret_models_collaboration::events_payloads::{
     DeviceAuthorizationBindingKind, DeviceAuthorizePayload, DeviceOrPrincipalRef,
 };
 use arkret_wire::{CommitStreamRef, CommittedEventRef, ScopeRef};
+use coland_storage::{
+    AcceptedDeviceAuthorizationOutcome, AuthorityCommitTransaction, AuthorityCommitWriteOutcome,
+    ConflictCode, PersistenceError,
+};
 use diesel::sql_types::{Binary, Jsonb, Text, Timestamptz};
 use diesel::{OptionalExtension, QueryableByName, sql_query};
 use diesel_async::RunQueryDsl;
 use serde_json::Value;
-use soland_storage::{
-    AcceptedDeviceAuthorizationOutcome, AuthorityCommitTransaction, AuthorityCommitWriteOutcome,
-    ConflictCode, PersistenceError,
-};
 
 use crate::pcr_device_status_fold::PcrDeviceLifecycle;
 use crate::{AsyncPgConnection, PgTransactionError};

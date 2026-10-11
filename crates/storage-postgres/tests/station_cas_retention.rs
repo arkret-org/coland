@@ -1,9 +1,9 @@
 mod support;
 
+use coland_storage::{AccountDataCasResult, AccountDataRecord, AccountDataStore};
+use coland_storage_postgres::{Db, PgAccountDataStore, PgPool};
 use deadpool::managed::Pool;
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
-use soland_storage::{AccountDataCasResult, AccountDataRecord, AccountDataStore};
-use soland_storage_postgres::{Db, PgAccountDataStore, PgPool};
 
 async fn test_pool() -> PgPool {
     let url = support::contract_database_url();

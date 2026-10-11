@@ -12,7 +12,7 @@ use arkret_models_integration::{AppletTransactionOutcome, AppletTransactionReque
 use arkret_signatures::http_signature::{
     HttpSignatureScenario, SignatureVerificationPolicy, verify_signed_http_message,
 };
-use soland_test_support::AppStateTestExt as _;
+use coland_test_support::AppStateTestExt as _;
 
 fn request_bytes(socket: &mut impl Read) -> Vec<u8> {
     let mut raw = Vec::new();
@@ -194,7 +194,7 @@ async fn durable_completion_retries_real_signed_delivery_before_ack() {
         }
     });
     assert_eq!(
-        soland_http::state::deliver_pending_applet_completions(&fixture.state)
+        coland_http::state::deliver_pending_applet_completions(&fixture.state)
             .await
             .unwrap(),
         0
@@ -219,7 +219,7 @@ async fn durable_completion_retries_real_signed_delivery_before_ack() {
     assert_eq!(retained[0].request_digest, pending[0].request_digest);
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     assert_eq!(
-        soland_http::state::deliver_pending_applet_completions(&fixture.state)
+        coland_http::state::deliver_pending_applet_completions(&fixture.state)
             .await
             .unwrap(),
         1
@@ -244,7 +244,7 @@ async fn durable_completion_retries_real_signed_delivery_before_ack() {
             .is_empty()
     );
     assert_eq!(
-        soland_http::state::deliver_pending_applet_completions(&fixture.state)
+        coland_http::state::deliver_pending_applet_completions(&fixture.state)
             .await
             .unwrap(),
         0,

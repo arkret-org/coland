@@ -1,9 +1,9 @@
 [package]
-name = "soland"
+name = "coland"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-default-run = "soland"
+default-run = "coland"
 description = "Reference Arkret v1 Station implementation built on Salvo, Diesel, and PostgreSQL."
 license.workspace = true
 repository.workspace = true
@@ -18,9 +18,9 @@ default = []
 # Compile the development-only `/_arkret/_conformance/*` harness into the
 # binary. Off by default; `cotest` enables it for the SUT build.
 conformance-harness = [
-    "soland-http/conformance-harness",
-    "soland-storage-postgres/conformance-harness",
-    "soland-storage-postgres/test-support",
+    "coland-http/conformance-harness",
+    "coland-storage-postgres/conformance-harness",
+    "coland-storage-postgres/test-support",
 ]
 otel = [
     "dep:opentelemetry",
@@ -61,10 +61,10 @@ salvo = { workspace = true, default-features = false, features = ["cookie", "fix
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
-soland-http = { workspace = true }
-soland-services = { workspace = true }
-soland-storage = { workspace = true }
-soland-storage-postgres = { workspace = true }
+coland-http = { workspace = true }
+coland-services = { workspace = true }
+coland-storage = { workspace = true }
+coland-storage-postgres = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-postgres = { workspace = true }
@@ -100,9 +100,9 @@ hmac = { workspace = true }
 parking_lot = { workspace = true }
 proptest = { workspace = true }
 salvo = { workspace = true, features = ["test"] }
-soland-domain = { workspace = true }
-soland-http = { workspace = true, features = ["test-support", "conformance-harness"] }
-soland-test-support = { workspace = true }
+coland-domain = { workspace = true }
+coland-http = { workspace = true, features = ["test-support", "conformance-harness"] }
+coland-test-support = { workspace = true }
 # `test-util` enables the paused-clock test runtime
 # (`#[tokio::test(start_paused = true)]`) used to assert the federation
 # auth-failure timing-bucket pad deterministically without a real sleep.

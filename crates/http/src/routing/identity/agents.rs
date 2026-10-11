@@ -1,8 +1,8 @@
 //! AKP-0008 / AKP-0009 — Agent provisioning + lifecycle surface.
 //!
 //! Implements the 11 agent HTTP operations gap-reported as missing
-//! in soland. The handlers below stand up the cross-project HTTP contract
-//! (sodmin admin UI, inkson client, cotest journey vectors) ahead of the
+//! in coland. The handlers below stand up the cross-project HTTP contract
+//! (codmin admin UI, inkson client, cotest journey vectors) ahead of the
 //! deep reducer logic.
 //!
 //! Surfaces:
@@ -55,16 +55,16 @@ use arkret_models_collaboration::governance::agent_participation::{
 use arkret_models_identity::validate_agent_slug;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
+use coland_services::identity::{
+    AgentPairingState as AgentPrincipalRecord, SessionIdentityState as SessionRecord,
+};
 use ed25519_dalek::Verifier as _;
 use salvo::http::StatusCode;
 use salvo::oapi::extract::{JsonBody, PathParam};
 use salvo::prelude::*;
 use serde_json::{Value, json};
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
-use soland_services::identity::{
-    AgentPairingState as AgentPrincipalRecord, SessionIdentityState as SessionRecord,
-};
 
 use super::{AuthArgs, append_audit_log, now};
 use crate::ids;
@@ -154,7 +154,7 @@ async fn agent_projection_service_authorized(
         .internal_authority_channel
         .as_ref()
         .ok_or_else(|| AppError::unauthenticated("Agent service authentication failed"))?;
-    let signature_input = soland_http::http_signature::parse_signature_input_header(req)
+    let signature_input = coland_http::http_signature::parse_signature_input_header(req)
         .map_err(|_| AppError::unauthenticated("Agent service authentication failed"))?;
     validate_agent_service_claims(
         state.service_id(),

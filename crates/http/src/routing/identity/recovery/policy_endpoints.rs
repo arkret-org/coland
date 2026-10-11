@@ -35,7 +35,7 @@ pub(super) async fn resolve_recovery_read_account(
 }
 
 pub(super) fn typed_recovery_policy_summary(
-    record: &soland_services::identity::RecoveryPolicyState,
+    record: &coland_services::identity::RecoveryPolicyState,
 ) -> Result<RecoveryPolicySummary, AppError> {
     let policy: RecoveryPolicy = serde_json::from_value(record.raw_payload.clone())
         .map_err(|error| stored_recovery_type_error("policy payload", error))?;
@@ -129,19 +129,19 @@ pub(super) async fn recovery_policy_get(
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.identity.recovery_policies.get",
+    operation_id = "org.arkret.coland.identity.recovery_policies.get",
     tags("identity")
 )]
 #[tracing::instrument(
     skip_all,
-    fields(op = "org.arkret.soland.identity.recovery_policies.get")
+    fields(op = "org.arkret.coland.identity.recovery_policies.get")
 )]
 pub(super) async fn recovery_policies_get(
     aa: AuthArgs,
     account_id: QueryParam<String, false>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<SolandRecoveryPoliciesOutcome> {
+) -> JsonResult<ColandRecoveryPoliciesOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let account = resolve_recovery_read_account(&aa, state, req, account_id.into_inner()).await?;
     let policies = state
@@ -153,7 +153,7 @@ pub(super) async fn recovery_policies_get(
         .iter()
         .map(typed_recovery_policy_summary)
         .collect::<Result<Vec<_>, _>>()?;
-    json_ok(SolandRecoveryPoliciesOutcome { policies })
+    json_ok(ColandRecoveryPoliciesOutcome { policies })
 }
 
 #[salvo::oapi::endpoint(
@@ -228,21 +228,21 @@ pub(super) async fn recovery_policy_put(
         .map_err(recovery_policy_publication_error)?;
     let outcome = state
         .recovery_policies()
-        .commit_publication(soland_storage::RecoveryPolicyPublicationWrite {
+        .commit_publication(coland_storage::RecoveryPolicyPublicationWrite {
             commit: transaction,
             queued_at: committed_at,
         })
         .await
         .map_err(recovery_policy_publication_error)?;
     let record = match outcome {
-        soland_storage::RecoveryPolicyPublicationOutcome::Committed(record)
-        | soland_storage::RecoveryPolicyPublicationOutcome::Duplicate(record) => record,
+        coland_storage::RecoveryPolicyPublicationOutcome::Committed(record)
+        | coland_storage::RecoveryPolicyPublicationOutcome::Duplicate(record) => record,
     };
     json_ok(recovery_policy_publish_outcome(&record)?)
 }
 
-fn recovery_policy_publication_error(error: soland_services::ServiceError) -> AppError {
-    use soland_storage::ConflictCode;
+fn recovery_policy_publication_error(error: coland_services::ServiceError) -> AppError {
+    use coland_storage::ConflictCode;
     let registered = match error.conflict_code() {
         // §8.1: the signer is not an active current-generation device of
         // this account; the operation has no device-specific code.

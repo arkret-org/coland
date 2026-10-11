@@ -111,7 +111,7 @@ impl AppletStore for PgAppletStore {
 
     async fn issue_widget_token(
         &self,
-        record: soland_storage::AppletWidgetTokenRecord,
+        record: coland_storage::AppletWidgetTokenRecord,
     ) -> PersistenceResult<bool> {
         let mut conn = pg_conn(&self.pool)
             .await
@@ -125,9 +125,9 @@ impl AppletStore for PgAppletStore {
 
     async fn widget_tokens(
         &self,
-        install: &soland_storage::AppletWidgetInstallSelector,
+        install: &coland_storage::AppletWidgetInstallSelector,
         at: chrono::DateTime<chrono::Utc>,
-    ) -> PersistenceResult<Vec<soland_storage::AppletWidgetTokenRecord>> {
+    ) -> PersistenceResult<Vec<coland_storage::AppletWidgetTokenRecord>> {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
@@ -140,9 +140,9 @@ impl AppletStore for PgAppletStore {
 
     async fn check_widget_token(
         &self,
-        gate: &soland_storage::AppletWidgetTokenGateSelector,
+        gate: &coland_storage::AppletWidgetTokenGateSelector,
         at: chrono::DateTime<chrono::Utc>,
-    ) -> PersistenceResult<soland_storage::AppletWidgetTokenRecord> {
+    ) -> PersistenceResult<coland_storage::AppletWidgetTokenRecord> {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
@@ -155,10 +155,10 @@ impl AppletStore for PgAppletStore {
 
     async fn invalidate_widget_token(
         &self,
-        install: &soland_storage::AppletWidgetInstallSelector,
+        install: &coland_storage::AppletWidgetInstallSelector,
         token_ref: &str,
         at: chrono::DateTime<chrono::Utc>,
-    ) -> PersistenceResult<soland_storage::AppletWidgetTokenInvalidation> {
+    ) -> PersistenceResult<coland_storage::AppletWidgetTokenInvalidation> {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
@@ -172,7 +172,7 @@ impl AppletStore for PgAppletStore {
     async fn pending_authoring_completions(
         &self,
         limit: u32,
-    ) -> PersistenceResult<Vec<soland_storage::AppletAuthoringCompletion>> {
+    ) -> PersistenceResult<Vec<coland_storage::AppletAuthoringCompletion>> {
         #[derive(QueryableByName)]
         struct CompletionRow {
             #[diesel(sql_type=Text)]
@@ -200,7 +200,7 @@ impl AppletStore for PgAppletStore {
             .load::<CompletionRow>(&mut *conn).await.map_err(PersistenceError::database)?;
         rows.into_iter()
             .map(|row| {
-                Ok(soland_storage::AppletAuthoringCompletion {
+                Ok(coland_storage::AppletAuthoringCompletion {
                     applet_id: row.applet_id.parse().map_err(PersistenceError::database)?,
                     request_digest: row
                         .request_digest
@@ -242,11 +242,11 @@ impl AppletStore for PgAppletStore {
     }
     async fn admit_authoring_unit(
         &self,
-        input: soland_storage::AppletAuthoringUnitWrite,
-        author: soland_storage::AppletCommitAuthor,
-        attester: soland_storage::AppletResolutionAttester,
-        finalize: soland_storage::AppletUnitFinalizer,
-    ) -> PersistenceResult<soland_storage::AppletAuthoringUnitOutcome> {
+        input: coland_storage::AppletAuthoringUnitWrite,
+        author: coland_storage::AppletCommitAuthor,
+        attester: coland_storage::AppletResolutionAttester,
+        finalize: coland_storage::AppletUnitFinalizer,
+    ) -> PersistenceResult<coland_storage::AppletAuthoringUnitOutcome> {
         crate::applet_admission::admit_authoring_unit(&self.pool, input, author, attester, finalize)
             .await
     }
@@ -299,11 +299,11 @@ impl AppletStore for PgAppletStore {
         expected: &Value,
         replacement: Value,
     ) -> PersistenceResult<bool> {
-        soland_storage::validate_applet_installation_record(expected)?;
-        soland_storage::validate_applet_installation_record(&replacement)?;
-        if soland_storage::applet_id_from_record(expected)? != applet_id
-            || soland_storage::applet_id_from_record(&replacement)? != applet_id
-            || soland_storage::applet_effective_scope_key_from_record(&replacement)?
+        coland_storage::validate_applet_installation_record(expected)?;
+        coland_storage::validate_applet_installation_record(&replacement)?;
+        if coland_storage::applet_id_from_record(expected)? != applet_id
+            || coland_storage::applet_id_from_record(&replacement)? != applet_id
+            || coland_storage::applet_effective_scope_key_from_record(&replacement)?
                 != effective_scope_key
         {
             return Err(PersistenceError::Conflict(
@@ -324,7 +324,7 @@ impl AppletStore for PgAppletStore {
                 && let Some(plan)=replacement.pointer("/revoke_execution/revoke_plan") {
                     let plan:arkret_models_integration::AppletRevokePlan=serde_json::from_value(plan.clone()).map_err(PersistenceError::database)?;
                     if matches!(plan.revoke_mode,arkret_wire::AppletRevokeMode::RevokeAll|arkret_wire::AppletRevokeMode::RevokeWidgetOnly) {
-                        let install=soland_storage::AppletWidgetInstallSelector {
+                        let install=coland_storage::AppletWidgetInstallSelector {
                             applet_id:plan.applet_id,effective_scope:plan.effective_scope,registration_epoch:plan.registration_epoch,
                             registration_event_ref:serde_json::from_value(expected.pointer("/install_response/registration_event_ref").cloned().ok_or_else(||PersistenceError::SchemaViolation("Applet registration Event is absent".into()))?).map_err(PersistenceError::database)?
                         };
@@ -349,12 +349,12 @@ impl AppletStore for PgAppletStore {
         expected: &Value,
         replacement: Value,
         fenced_at: chrono::DateTime<chrono::Utc>,
-    ) -> PersistenceResult<soland_storage::AppletInstallationFenceOutcome> {
-        soland_storage::validate_applet_installation_record(expected)?;
-        soland_storage::validate_applet_installation_record(&replacement)?;
-        if soland_storage::applet_id_from_record(expected)? != applet_id
-            || soland_storage::applet_id_from_record(&replacement)? != applet_id
-            || soland_storage::applet_effective_scope_key_from_record(&replacement)?
+    ) -> PersistenceResult<coland_storage::AppletInstallationFenceOutcome> {
+        coland_storage::validate_applet_installation_record(expected)?;
+        coland_storage::validate_applet_installation_record(&replacement)?;
+        if coland_storage::applet_id_from_record(expected)? != applet_id
+            || coland_storage::applet_id_from_record(&replacement)? != applet_id
+            || coland_storage::applet_effective_scope_key_from_record(&replacement)?
                 != effective_scope_key
         {
             return Err(PersistenceError::Conflict(
@@ -399,7 +399,7 @@ impl AppletStore for PgAppletStore {
             .execute(&mut *conn)
             .await?;
             if updated == 0 {
-                return Ok(soland_storage::AppletInstallationFenceOutcome {
+                return Ok(coland_storage::AppletInstallationFenceOutcome {
                     updated: false,
                     globally_fenced: false,
                 });
@@ -417,7 +417,7 @@ impl AppletStore for PgAppletStore {
             .await?
             .present;
             if has_active_scope {
-                return Ok(soland_storage::AppletInstallationFenceOutcome {
+                return Ok(coland_storage::AppletInstallationFenceOutcome {
                     updated: true,
                     globally_fenced: false,
                 });
@@ -434,7 +434,7 @@ impl AppletStore for PgAppletStore {
             .execute(&mut *conn)
             .await?;
             debug_assert_eq!(globally_fenced, 1);
-            Ok(soland_storage::AppletInstallationFenceOutcome {
+            Ok(coland_storage::AppletInstallationFenceOutcome {
                 updated: true,
                 globally_fenced: true,
             })

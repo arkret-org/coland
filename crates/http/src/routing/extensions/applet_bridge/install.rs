@@ -18,11 +18,11 @@ use arkret_models_integration::{
 use arkret_wire::{
     ActorId, CapabilityActionId, Event, ResourceMatchScope, ScopeRef, WireResourceSelector,
 };
+use coland_http::error::AppError;
+use coland_services::identity::{PinnedDidVersionStatus, SessionIdentityState as SessionRecord};
 use salvo::http::StatusCode;
 use salvo::prelude::*;
 use serde_json::{Value, json};
-use soland_http::error::AppError;
-use soland_services::identity::{PinnedDidVersionStatus, SessionIdentityState as SessionRecord};
 
 use super::record::{
     applet_identity, applet_record, applet_records, encode_applet_identity, encode_applet_record,
@@ -358,7 +358,7 @@ pub(super) async fn validate_managed_actor_current_method_evidence(
 }
 
 fn managed_actor_pinned_resolution_is_current(
-    pinned: &soland_services::identity::PinnedDidDocumentState,
+    pinned: &coland_services::identity::PinnedDidDocumentState,
     expected_did: &arkret_identifiers::Did,
     expected_version_id: &str,
     expected_history_head: &Hash,
@@ -391,7 +391,7 @@ pub(super) async fn register_package_install(
     let registration_event = basis.registration_event.clone();
     let capability_grant_events = basis.capability_grant_events.clone();
     let committed_request =
-        soland_storage::AppletAdmissionRequest::Install(Box::new(commit.clone()));
+        coland_storage::AppletAdmissionRequest::Install(Box::new(commit.clone()));
     let mut admin_producer_guards = Vec::with_capacity(1 + capability_grant_events.len());
     for event in std::iter::once(&registration_event).chain(capability_grant_events.iter()) {
         admin_producer_guards.push(
@@ -479,7 +479,7 @@ pub(super) async fn register_package_install(
     let station_verification_method = state
         .service_verification_method("notary-key")
         .map_err(AppError::internal)?;
-    let input = soland_storage::AppletAuthoringUnitWrite {
+    let input = coland_storage::AppletAuthoringUnitWrite {
         request: committed_request,
         package: package.clone(),
         recomputed_install_plan: Some(recomputed_install_plan),
@@ -505,7 +505,7 @@ pub(super) async fn register_package_install(
     let audit_package = package.clone();
     let admin_actor = owner_actor.clone();
     let station_id = state.service_id().to_owned();
-    let finalizer: soland_storage::AppletUnitFinalizer = std::sync::Arc::new(move |references| {
+    let finalizer: coland_storage::AppletUnitFinalizer = std::sync::Arc::new(move |references| {
         let registration_event_ref = crate::routing::events::event_log::applet_committed_ref(
             references,
             &registration_event,
@@ -533,7 +533,7 @@ pub(super) async fn register_package_install(
             applet_id: typed_applet_id.clone(),
             owner_actor_id: registration_event.actor_id.clone(),
             portal_realm_id: RealmId::new(realm_id.clone()).map_err(|error| {
-                soland_storage::PersistenceError::Internal(format!(
+                coland_storage::PersistenceError::Internal(format!(
                     "validated portal realm id is invalid: {error}"
                 ))
             })?,
@@ -546,7 +546,7 @@ pub(super) async fn register_package_install(
             revoked_at: None,
             idempotency_key: idempotency_key.clone(),
             install_body_digest: Hash::new(body_digest.clone()).map_err(|error| {
-                soland_storage::PersistenceError::Internal(format!(
+                coland_storage::PersistenceError::Internal(format!(
                     "validated install body digest is invalid: {error}"
                 ))
             })?,
@@ -569,23 +569,23 @@ pub(super) async fn register_package_install(
             &response,
             true,
         )
-        .map_err(|error| soland_storage::PersistenceError::Internal(error.to_string()))?;
+        .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))?;
         let response_body = serde_json::to_value(&response)
-            .map_err(|error| soland_storage::PersistenceError::Internal(error.to_string()))?;
-        Ok(soland_storage::AppletUnitFinalization {
-            applet_record: soland_storage::AppletRecordCommit {
+            .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))?;
+        Ok(coland_storage::AppletUnitFinalization {
+            applet_record: coland_storage::AppletRecordCommit {
                 applet_id: typed_applet_id.clone(),
-                identity: soland_storage::AppletIdentityCommit {
+                identity: coland_storage::AppletIdentityCommit {
                     target_station_id: target_station_id.clone(),
                     expected_record: expected_identity.clone(),
                     record: identity_value.clone(),
                 },
                 expected_record: None,
                 record: encode_applet_record(&record).map_err(|error| {
-                    soland_storage::PersistenceError::Internal(error.to_string())
+                    coland_storage::PersistenceError::Internal(error.to_string())
                 })?,
             },
-            idempotency_record: soland_storage::IdempotencyRecord {
+            idempotency_record: coland_storage::IdempotencyRecord {
                 authenticated_actor: admin_actor.clone(),
                 operation_id: "ak.self.applet.command.install".to_owned(),
                 idempotency_key: idempotency_key.clone(),
@@ -811,7 +811,7 @@ pub(super) fn validate_applet_package(
     // canonical package body. Digest equality alone is forgeable — anyone can
     // recompute `payload_digest` over `unsigned` and sign it with an arbitrary
     // key. Anchor the proof's verification_method to `controller_principal_id` and run
-    // the same detached-JWS verifier every other soland proof path uses
+    // the same detached-JWS verifier every other coland proof path uses
     // (DID-resolved Ed25519 in every mode). Preview/commit MUST
     // fail closed (`proof_invalid`) when the controller proof is invalid or its
     // key cannot be resolved.
@@ -887,7 +887,7 @@ fn validate_requested_capability_actions(package: &AppletPackage) -> Result<(), 
 
 /// Cryptographically verify the controller detached proof on an Applet package.
 ///
-/// Reuses the shared soland detached-JWS verifier boundary
+/// Reuses the shared coland detached-JWS verifier boundary
 /// (`crate::jws_verify`) in every mode: the controller DID document is
 /// resolved and the Ed25519 signature is verified against the verification
 /// method's public key.
@@ -1314,13 +1314,13 @@ mod tests {
     fn production_test_state() -> AppState {
         let config = crate::config::AppConfig {
             object_storage: crate::config::ObjectStorageConfig::local(
-                std::env::temp_dir().join("soland-applet-proof-test-blobs"),
+                std::env::temp_dir().join("coland-applet-proof-test-blobs"),
             ),
             did_resolver_allow_methods: vec!["web".to_owned(), "key".to_owned()],
             notary_signing_key_seed: Some([9u8; 32]),
             ..crate::config::AppConfig::test_default()
         };
-        AppState::new(config, soland_storage_postgres::Db { pool: None })
+        AppState::new(config, coland_storage_postgres::Db { pool: None })
     }
 
     #[test]
@@ -1805,7 +1805,7 @@ mod tests {
         )
         .unwrap();
         let historical_head = Hash::new(format!("sha256:{}", "11".repeat(32))).unwrap();
-        let pinned = soland_services::identity::PinnedDidDocumentState {
+        let pinned = coland_services::identity::PinnedDidDocumentState {
             did: did.clone(),
             version_id: "1-historical".to_owned(),
             log_head_digest: historical_head.clone(),

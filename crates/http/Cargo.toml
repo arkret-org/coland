@@ -1,5 +1,5 @@
 [package]
-name = "soland-http"
+name = "coland-http"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,21 +7,21 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "Soland HTTP transport, middleware, routing, and OpenAPI surface."
+description = "Coland HTTP transport, middleware, routing, and OpenAPI surface."
 
 [features]
 default = []
 # COT-06-002 / `service-http-binding.md` §2.1.2: the `/_arkret/_conformance/*`
 # harness is test-only observation / injection. `development_mode` already
 # decides whether it is mounted; this feature decides whether it is compiled at
-# all, so a default `soland-server` build carries neither the handlers nor the
+# all, so a default `coland-server` build carries neither the handlers nor the
 # seeded notary signer they build fixtures with. `cotest` turns it on when it
 # builds the SUT binary.
-conformance-harness = ["soland-services/test-support"]
+conformance-harness = ["coland-services/test-support"]
 test-support = [
     "arkret-event-draft/test-support",
     "arkret-wire/test-support",
-    "soland-services/test-support",
+    "coland-services/test-support",
 ]
 
 [dependencies]
@@ -74,10 +74,10 @@ serde = { workspace = true, features = ["derive"] }
 serde-saphyr.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-soland-contracts = { workspace = true, features = ["openapi"] }
-soland-domain.workspace = true
-soland-services.workspace = true
-soland-storage.workspace = true
+coland-contracts = { workspace = true, features = ["openapi"] }
+coland-domain.workspace = true
+coland-services.workspace = true
+coland-storage.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
@@ -97,10 +97,10 @@ arkret-event-draft = { workspace = true, features = ["test-support"] }
 rand = "0.10"
 rustls.workspace = true
 salvo = { workspace = true, features = ["test"] }
-soland-domain.workspace = true
-soland-services = { workspace = true, features = ["test-support"] }
-soland-storage-postgres = { workspace = true, features = ["test-support"] }
-soland-test-support.workspace = true
+coland-domain.workspace = true
+coland-services = { workspace = true, features = ["test-support"] }
+coland-storage-postgres = { workspace = true, features = ["test-support"] }
+coland-test-support.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]

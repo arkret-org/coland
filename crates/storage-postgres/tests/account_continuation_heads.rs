@@ -8,11 +8,11 @@ mod ordinary_realm;
 #[allow(dead_code)]
 mod pcr_genesis;
 
+use coland_storage::AuthorityCommitStore as _;
+use coland_storage_postgres::PgAuthorityCommitStore;
+use coland_storage_postgres::test_database::TestDatabase;
 use diesel::sql_types::{BigInt, Jsonb, Text};
 use diesel_async::RunQueryDsl as _;
-use soland_storage::AuthorityCommitStore as _;
-use soland_storage_postgres::PgAuthorityCommitStore;
-use soland_storage_postgres::test_database::TestDatabase;
 
 #[derive(diesel::QueryableByName)]
 struct JsonRow {

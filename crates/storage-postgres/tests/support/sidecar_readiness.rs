@@ -123,7 +123,7 @@ pub(super) fn add_witness(
     position: u64,
     leaf_key: arkret_wire::Base64UrlString,
     resolution: arkret_models_identity::AuthenticatedServiceResolution,
-) -> soland_storage::VerifiedMlsRecipientRosterWitness {
+) -> coland_storage::VerifiedMlsRecipientRosterWitness {
     use arkret_models_collaboration::mls_roster_authority::{
         MlsAddAuthorityAttestation, MlsAttestAddRequestBody,
     };
@@ -164,7 +164,7 @@ pub(super) fn add_witness(
         claim_outcome: outcome,
     };
     request.validate_claim_binding().unwrap();
-    soland_storage::VerifiedMlsRecipientRosterWitness {
+    coland_storage::VerifiedMlsRecipientRosterWitness {
         accepted_genesis_event_ref: base.genesis_event_ref.clone(),
         signed_attest_add_request_canonical_json: arkret_canonical::canonical_json_bytes(&request)
             .unwrap(),

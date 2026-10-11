@@ -1,12 +1,12 @@
-{{- define "soland.name" -}}
+{{- define "coland.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "soland.fullname" -}}
+{{- define "coland.fullname" -}}
 {{- if .Values.fullnameOverride -}}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
 {{- else -}}
-{{- $name := include "soland.name" . -}}
+{{- $name := include "coland.name" . -}}
 {{- if contains $name .Release.Name -}}
 {{- .Release.Name | trunc 63 | trimSuffix "-" -}}
 {{- else -}}
@@ -15,22 +15,22 @@
 {{- end -}}
 {{- end -}}
 
-{{- define "soland.labels" -}}
+{{- define "coland.labels" -}}
 helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
-app.kubernetes.io/name: {{ include "soland.name" . }}
+app.kubernetes.io/name: {{ include "coland.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
 
-{{- define "soland.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "soland.name" . }}
+{{- define "coland.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "coland.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
-{{- define "soland.serviceAccountName" -}}
+{{- define "coland.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
-{{- default (include "soland.fullname" .) .Values.serviceAccount.name -}}
+{{- default (include "coland.fullname" .) .Values.serviceAccount.name -}}
 {{- else -}}
 {{- default "default" .Values.serviceAccount.name -}}
 {{- end -}}

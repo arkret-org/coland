@@ -44,7 +44,7 @@ fn generate_openapi_doc(router: &Router, artifact_registry_summary: Value) -> Va
     let root = doc
         .as_object_mut()
         .expect("generated OpenAPI root must be an object");
-    // Soland-specific extension metadata carried over from the previous
+    // Coland-specific extension metadata carried over from the previous
     // artifact-first document. Operation aliases map spec stream/command kinds
     // onto their canonical operationIds for clients that resolve by alias.
     root.insert(
@@ -259,12 +259,12 @@ fn join_route_path(parent: &str, fragment: &str) -> String {
     }
 }
 
-/// The soland extension operationIds advertised through `*.describe`.
+/// The coland extension operationIds advertised through `*.describe`.
 ///
 /// Raw transport handlers that cannot contribute an OpenAPI operation are
 /// declared in a small registry. Every ordinary HTTP endpoint comes from the
 /// live router document; duplicating one in the transport registry is rejected.
-pub fn soland_extension_operation_ids() -> Vec<String> {
+pub fn coland_extension_operation_ids() -> Vec<String> {
     let mut operation_ids = TRANSPORT_OPERATION_IDS
         .get_or_init(|| {
             serde_json::from_str(include_str!("transport_operation_ids.json")).map_err(|error| {
@@ -297,7 +297,7 @@ pub fn soland_extension_operation_ids() -> Vec<String> {
                 .filter_map(|(_, operation)| operation.get("operationId"))
                 .filter_map(Value::as_str)
         })
-        .filter(|operation_id| operation_id.starts_with("org.arkret.soland."))
+        .filter(|operation_id| operation_id.starts_with("org.arkret.coland."))
         .map(ToOwned::to_owned)
         .collect::<BTreeSet<_>>();
     if let Some(duplicate) = operation_ids.intersection(&generated_operation_ids).next() {
@@ -331,7 +331,7 @@ pub fn product_registered_routes() -> anyhow::Result<BTreeMap<String, BTreeSet<S
 }
 
 #[handler]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.openapi.json"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.openapi.json"))]
 pub async fn arkret_openapi_json(depot: &mut Depot, res: &mut Response) {
     let doc = depot
         .get_typed::<ArkretOpenApiDoc>()
@@ -344,7 +344,7 @@ pub async fn arkret_openapi_json(depot: &mut Depot, res: &mut Response) {
 }
 
 #[handler]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.openapi.yaml"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.openapi.yaml"))]
 pub async fn arkret_openapi_yaml(depot: &mut Depot, res: &mut Response) {
     let doc = depot
         .get_typed::<ArkretOpenApiDoc>()

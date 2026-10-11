@@ -6,7 +6,7 @@
 //! route or handoff intent, and unregistration of the same device stays the
 //! idempotent 204.
 
-use soland_test_support::pcr_genesis::PcrGenesisFixture;
+use coland_test_support::pcr_genesis::PcrGenesisFixture;
 
 use super::common::*;
 
@@ -19,7 +19,7 @@ fn register_with_not_onboarded_gateway_fails_closed_without_writes() {
 }
 
 async fn register_with_not_onboarded_gateway_fails_closed_without_writes_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let fixture = PcrGenesisFixture::new(state.service_did());
     fixture.admit(&state).await.expect("accepted PCR genesis");
     let device_id = fixture.history.founding_device_id.clone();

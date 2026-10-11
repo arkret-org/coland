@@ -1,10 +1,10 @@
 //! `/_arkret/self/*` inbound credential: `ak.session.grant` + DPoP (RFC 9449).
 //!
-//! Per api-conventions.md §3.3 the Station (soland) no longer mints a
+//! Per api-conventions.md §3.3 the Station (coland) no longer mints a
 //! local credential from a session grant. The client
 //! presents the `ak.session.grant` directly on every `/_arkret/self/*` request
 //! as `Authorization: DPoP <ak.session.grant>` plus a sender-constrained
-//! `DPoP` proof. soland validates and serves; the resulting `SessionRecord` is
+//! `DPoP` proof. coland validates and serves; the resulting `SessionRecord` is
 //! request-scoped and is NEVER persisted as a local bearer.
 //!
 //! `api-conventions.md` §3.1/§3.3 makes this an **exact-token introspection
@@ -48,14 +48,14 @@ use arkret_wire::FreshnessState;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Duration, Utc};
+use coland_services::identity::{
+    AgentSessionState as AgentSessionRecord, SessionEndpointState, SessionGrantAuthorizationState,
+    SessionIdentityState as SessionRecord,
+};
 use parking_lot::Mutex;
 use salvo::http::StatusCode;
 use salvo::prelude::Request;
 use sha2::{Digest, Sha256};
-use soland_services::identity::{
-    AgentSessionState as AgentSessionRecord, SessionEndpointState, SessionGrantAuthorizationState,
-    SessionIdentityState as SessionRecord,
-};
 
 use crate::state::AppState;
 use crate::wire::{
@@ -106,7 +106,7 @@ struct CachedIntrospection {
 }
 
 /// Process-local introspection cache. Same in-memory trade-off as the other
-/// soland reducer projections (`handle_releases`, `account_lifecycle`): a
+/// coland reducer projections (`handle_releases`, `account_lifecycle`): a
 /// restart drops the cache and the next request re-introspects. Keyed by a
 /// service-DID-bound hash of the presented grant so cross-audience grants never
 /// collide.
@@ -587,7 +587,7 @@ pub(crate) fn dpop_header(req: &Request) -> Option<String> {
 /// scheme. Proof presence is validated separately so `Authorization: DPoP`
 /// without a `DPoP` header fails as an incomplete grant presentation.
 pub(crate) fn is_grant_dpop_presentation(req: &Request) -> bool {
-    soland_http::util::dpop_token(req).is_some()
+    coland_http::util::dpop_token(req).is_some()
 }
 
 fn session_binding_from_introspection(
@@ -867,8 +867,8 @@ pub(crate) fn session_from_verified_grant(
 pub(crate) async fn authenticated_session_account_id(
     state: &AppState,
     session: &SessionRecord,
-) -> Result<arkret_wire::AccountId, soland_http::error::AppError> {
-    use soland_http::error::AppError;
+) -> Result<arkret_wire::AccountId, coland_http::error::AppError> {
+    use coland_http::error::AppError;
     let unauthenticated = || {
         crate::app_error!(
             Unauthenticated,
@@ -1112,7 +1112,7 @@ mod tests {
         config.session_grant_introspection_url = Some(url.clone());
         config.account_authority_url = Some(url.trim_end_matches("/introspect").to_owned());
         config.register_test_internal_authority_channel("counting-mock-secret");
-        let state = AppState::new(config, soland_storage_postgres::Db { pool: None });
+        let state = AppState::new(config, coland_storage_postgres::Db { pool: None });
         let token = format!("counting-grant-{}", url.rsplit(':').next().unwrap());
         let key = introspection_cache_key_for(&state, &token);
         INTROSPECTION_CACHE.lock().remove(&key);
@@ -1255,7 +1255,7 @@ mod tests {
                 },
             ),
             audience_id: arkret_wire::project_did_to_core_id(
-                    &arkret_wire::Did::new("did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:soland.local:webvh:service").unwrap(),
+                    &arkret_wire::Did::new("did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:coland.local:webvh:service").unwrap(),
                 )
                 .unwrap(),
             scopes: vec!["ak.self.committed_event.read.scan.v1".to_owned()],
@@ -1296,7 +1296,7 @@ mod tests {
     async fn session_retains_signed_account_and_never_fills_a_missing_station() {
         let mut config = crate::config::AppConfig::test_default();
         config.seed_demo_data = false;
-        let state = AppState::new(config, soland_storage_postgres::Db { pool: None });
+        let state = AppState::new(config, coland_storage_postgres::Db { pool: None });
         let mut grant = test_introspection_grant();
         grant.account_id.station_id = DidCoreId::new("ak:did_core:web:origin.example").unwrap();
         assert!(session_binding_from_introspection(&grant).is_err());

@@ -15,7 +15,7 @@ fn seed_circle_authz_state() -> (ProjectionState, ServerHlc, String, String) {
         let actor = account_actor_string(did);
         state.members.insert(
             (realm.clone(), actor.clone()),
-            SolandMembershipState {
+            ColandMembershipState {
                 member: actor,
                 realm_id: realm.clone(),
                 state: "join".to_owned(),

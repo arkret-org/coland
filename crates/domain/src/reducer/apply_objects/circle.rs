@@ -422,7 +422,7 @@ impl ProjectionState {
 
     /// AKP-0007 read helper — return the Circle projection for `circle_id`,
     /// or `None` when the Circle is unknown or already tombstoned. Used by
-    /// `/_soland/self/circles/*` route handlers and by `scope_circle_id`
+    /// `/_coland/self/circles/*` route handlers and by `scope_circle_id`
     /// validators that need to confirm the Circle is alive before allowing
     /// Strand / Space / Morph writes against it.
     pub fn circle(&self, circle_id: &str) -> Option<&CircleProjection> {

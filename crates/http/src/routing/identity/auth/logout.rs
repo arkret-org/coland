@@ -6,9 +6,9 @@ use super::*;
 /// the single client-visible hard logout (account-lifecycle §4.1).
 ///
 /// Request identity differs from every other protected endpoint: per §4.1 the
-/// caller presents `Authorization: DPoP <ak.session.grant>` (NOT the soland
+/// caller presents `Authorization: DPoP <ak.session.grant>` (NOT the coland
 /// principal bearer) plus a `DPoP` holder proof bound to the grant's `cnf.jkt`.
-/// We therefore do NOT run the soland session-bearer pipeline
+/// We therefore do NOT run the coland session-bearer pipeline
 /// (`AuthArgs::authenticated_session`) here; instead we identify the
 /// principal/device from the presented grant via coauth server-to-server
 /// introspection.
@@ -31,7 +31,7 @@ pub(super) async fn logout(
     let state = depot.get_typed::<AppState>().expect("state injected");
 
     // Development fallback: with no Account Authority process introspection wired (dev mode
-    // dev-login mints plain soland bearers, not DPoP-bound grants), treat the
+    // dev-login mints plain coland bearers, not DPoP-bound grants), treat the
     // Authorization bearer as a local session bearer and perform the
     // principal-side termination directly. Production keeps the strict
     // grant+DPoP+introspection contract below.
@@ -95,7 +95,7 @@ pub(super) async fn logout(
                 "account logout requires a device-bound session grant",
             ));
         }
-        let record = soland_storage::PushHardLogoutJournalRecord {
+        let record = coland_storage::PushHardLogoutJournalRecord {
             grant_token_digest: digest.clone(),
             revocation_ref: grant.revocation_ref,
             account_id: grant.account_id,
@@ -210,7 +210,7 @@ fn auth_error_to_app_error(error: (StatusCode, &'static str, &'static str)) -> A
 }
 
 /// Development-mode hard logout: with no Account Authority process introspection wired,
-/// `dev_login` mints plain soland session bearers (not DPoP-bound grants), so
+/// `dev_login` mints plain coland session bearers (not DPoP-bound grants), so
 /// the Authorization bearer IS the local session bearer. Perform the
 /// principal-side termination directly (revoke the bearer session + remove
 /// push registrations), mirroring the production
@@ -310,7 +310,7 @@ fn invalid_logout_introspection(
 /// `POST {gate_account_base_url}/auth-sessions/logout` sub-operation so the grant
 /// rotation chain + browser session are terminated (account-lifecycle §4.1
 /// step 2). When introspection returned grant metadata, the client DPoP proof
-/// is validated by soland before this call and is not forwarded to the Auth
+/// is validated by coland before this call and is not forwarded to the Auth
 /// Server. A `not_found` retry has no holder metadata left to validate; this
 /// sub-operation then only confirms that no Auth-side chain remains.
 async fn trigger_auth_side_auth_session_logout(
@@ -333,7 +333,7 @@ fn confirm_auth_side_logout(body: AuthSessionTerminationOutcome) -> Result<(), A
     ))
 }
 
-/// Revoke every active soland bearer session for a specific (actor, device).
+/// Revoke every active coland bearer session for a specific (actor, device).
 /// Used by the single hard logout so only the logging-out device's local
 /// sessions are terminated (other devices stay logged in).
 pub(crate) async fn revoke_sessions_for_actor_device(

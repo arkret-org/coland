@@ -6,10 +6,10 @@ use arkret_models_identity::{
     ResolutionMethodHistoryEvidence,
 };
 use arkret_wire::{AccountId, Did, DidCoreId, Hash};
+use coland_http::error::AppError;
+use coland_services::identity::PinnedDidVersionStatus;
 use salvo::oapi::extract::{PathParam, QueryParam};
 use salvo::prelude::*;
-use soland_http::error::AppError;
-use soland_services::identity::PinnedDidVersionStatus;
 
 use crate::state::AppState;
 use crate::{JsonResult, json_ok};

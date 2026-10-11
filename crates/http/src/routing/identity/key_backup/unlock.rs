@@ -43,7 +43,7 @@ pub(super) async fn anchor_key_backup_auth_data_trust_root(
         .map_err(|_| key_backup_untrusted_signature())?;
     let record = state
         .identities()
-        .find_device(soland_services::identity::FindDeviceQuery {
+        .find_device(coland_services::identity::FindDeviceQuery {
             actor_id: actor_id.to_owned(),
             device_id: device_id.to_owned(),
         })
@@ -223,7 +223,7 @@ fn enforce_unlock_signer_admission(
 pub(super) async fn verify_key_backup_unlock_proof(
     state: &AppState,
     proof: &Value,
-    session: &soland_services::identity::SessionIdentityState,
+    session: &coland_services::identity::SessionIdentityState,
     backup: &Value,
 ) -> Result<(), AppError> {
     use arkret_models_crypto::KeyBackupUnlockAuthority;
@@ -302,7 +302,7 @@ pub(super) async fn verify_key_backup_unlock_proof(
             // challenge.
             let device = state
                 .identities()
-                .find_device(soland_services::identity::FindDeviceQuery {
+                .find_device(coland_services::identity::FindDeviceQuery {
                     actor_id: session.actor.clone(),
                     device_id: session.require_human_device_id().clone(),
                 })
@@ -344,7 +344,7 @@ pub(super) async fn verify_key_backup_unlock_proof(
                 != arkret_models_identity::SessionGrantCredentialClass::RecoverySession
                 || grant.grant_id.as_str() != record.session_grant_id
                 || grant.cnf_jkt != record.session_grant_cnf_jkt
-                || record.state != soland_storage::RecoverySessionLifecycle::Verified
+                || record.state != coland_storage::RecoverySessionLifecycle::Verified
                 || record.expires_at <= now
                 || record.expires_at != typed.expires_at
                 || record.principal_id != typed.account_id.principal_id
@@ -597,7 +597,7 @@ pub(super) async fn unlock_active_basis(
     state: &AppState,
     account: &arkret_wire::AccountId,
     backup: &Value,
-) -> Result<soland_storage::KeyBackupPointerBasis, AppError> {
+) -> Result<coland_storage::KeyBackupPointerBasis, AppError> {
     use arkret_models_crypto::BackupActiveSeriesPointer;
     let pointers = super::listing::active_pointers(state, account).await?;
     let typed: KeyBackup = serde_json::from_value(backup.clone())
@@ -612,7 +612,7 @@ pub(super) async fn unlock_active_basis(
             "the envelope is not in the active series or has expired",
         ));
     }
-    Ok(soland_storage::KeyBackupPointerBasis {
+    Ok(coland_storage::KeyBackupPointerBasis {
         account_id: pointers.account_id,
         secret_storage: pointers.secret_storage,
     })

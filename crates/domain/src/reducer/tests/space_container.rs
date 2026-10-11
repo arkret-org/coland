@@ -5,7 +5,7 @@ fn seed_realm_member(state: &mut ProjectionState, realm_id: &str, member: &str) 
     let member = account_actor_string(member);
     state.realm_states.insert(
         realm_id.to_owned(),
-        SolandRealmState {
+        ColandRealmState {
             realm_id: realm_id.to_owned(),
             owner: Some(member.clone()),
             title: Some("Product".to_owned()),
@@ -21,7 +21,7 @@ fn seed_realm_member(state: &mut ProjectionState, realm_id: &str, member: &str) 
     );
     state.members.insert(
         (realm_id.to_owned(), member.clone()),
-        SolandMembershipState {
+        ColandMembershipState {
             member,
             realm_id: realm_id.to_owned(),
             state: "join".to_owned(),

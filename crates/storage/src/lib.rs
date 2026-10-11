@@ -1,11 +1,11 @@
 //! Backend-neutral persistence records, ports, and adapter contracts.
 //!
-//! PostgreSQL is Soland's current durable production adapter, but it is not
+//! PostgreSQL is Coland's current durable production adapter, but it is not
 //! part of this crate's public boundary. A future SQLite or other durable
 //! adapter implements these same ports and contract suites without exposing
 //! backend client, query, transaction, or row types to services and HTTP.
 //! Backend-specific code belongs in an adapter crate such as
-//! `soland-storage-postgres`.
+//! `coland-storage-postgres`.
 
 // Crate-private imports shared by the explicitly imported storage modules.
 pub(crate) use std::collections::{BTreeMap, BTreeSet};
@@ -13,8 +13,8 @@ pub(crate) use std::collections::{BTreeMap, BTreeSet};
 pub(crate) use arkret_event_draft::ProjectedEventOperation;
 pub(crate) use async_trait::async_trait;
 pub(crate) use chrono::Utc;
+pub use coland_domain::identity::{ContactRecord, ContactRequestSlotState};
 pub(crate) use serde_json::Value;
-pub use soland_domain::identity::{ContactRecord, ContactRequestSlotState};
 pub(crate) use uuid::Uuid;
 
 mod agent_draft_pending_intents;

@@ -95,7 +95,7 @@ pub(crate) fn validate_reaction_target_kind(
 /// Spec B1.13 / B1.14 / B1.15 — typed payload validators dispatched on the
 /// canonical event kind. Hooks the SDK typed payload shapes
 /// (SpaceStateTransition / SpaceObjectTombstone / ConsentRevoke) into the
-/// soland operation admission pipeline.
+/// coland operation admission pipeline.
 ///
 /// For the space lifecycle events the SDK's typed payload requires
 /// `space_id`. The validator here HARD-REJECTS the

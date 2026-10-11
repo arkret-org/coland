@@ -8,7 +8,7 @@
 //! See `arkret-spec/spec/v1/zh/conformance/encoding.md` §4.
 
 /// Typed wire identifiers are owned by the SDK `arkret` (identifiers) crate.
-/// soland re-exports them so the whole server shares one validated newtype per
+/// coland re-exports them so the whole server shares one validated newtype per
 /// id-kind instead of maintaining parallel local copies.
 ///
 /// - [`RealmId`] is the SDK security-boundary id and validates `ak:realm:`.
@@ -58,12 +58,12 @@ pub fn parse_typed_uuid(typed: &str, expected_kind: &str) -> Option<Uuid> {
 }
 
 /// Kind-agnostic typed-ID → `Uuid` helpers. Canonical home is
-/// `soland_storage::ids` (the lower-level crate); re-exported here so existing
+/// `coland_storage::ids` (the lower-level crate); re-exported here so existing
 /// `crate::ids::*` call sites are unchanged. SOL-COR-02: the `expect_internal`
 /// variant is reserved for IDs the server itself generated or that arrived
 /// through an SDK strong-typed producer-allocated newtype — see the storage
 /// copies' docs for the full contract.
-pub use soland_storage::ids::{typed_uuid_part, typed_uuid_part_expect_internal};
+pub use coland_storage::ids::{typed_uuid_part, typed_uuid_part_expect_internal};
 
 /// Format a raw `Uuid` back to a typed wire ID `ak:<kind>:<uuid>`.
 pub fn format_typed_uuid(kind: &str, uuid: &Uuid) -> String {
@@ -76,7 +76,7 @@ mod tests {
 
     fn fixture_realm_id() -> String {
         let digest = arkret_identifiers::Hash::new(arkret_canonical::sha256_digest(
-            b"soland-http-id-fixture",
+            b"coland-http-id-fixture",
         ))
         .unwrap();
         RealmId::from_event_id(&arkret_identifiers::EventId::from_event_digest(&digest).unwrap())

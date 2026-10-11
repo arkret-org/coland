@@ -21,7 +21,7 @@
 //! authorizing actions on a selector covering the Realm, with an intact issuer
 //! chain. Membership is a required input, never an authorization source.
 //!
-//! Every grant is judged by [`soland_storage::evaluate_grants`], the single
+//! Every grant is judged by [`coland_storage::evaluate_grants`], the single
 //! constraint evaluator (`authz/constraint-schema.md` §15.4); a hard quota a
 //! satisfied grant owes is reserved on the quota authority inside the same
 //! transaction ([`crate::capability_quota`]), so the reservation commits or
@@ -51,7 +51,7 @@ use arkret_wire::{
     ActorId, CapabilityActionId, CurrentRevision, EventKind, GrantId, RealmId, StrandId,
     WireResourceSelector,
 };
-use soland_storage::{
+use coland_storage::{
     ActorRealmAuthorization, AuthorizationOperation, EffectiveActorGrant, GrantEvaluation,
     OperationFacts, evaluate_grants,
 };
@@ -413,7 +413,7 @@ impl RealmAuthorizationCut {
         owner_covers: bool,
         identity: &str,
         operation: &AuthorizationOperation<'_>,
-        approvals: &[soland_storage::VerifiedGrantApproval],
+        approvals: &[coland_storage::VerifiedGrantApproval],
     ) -> PersistenceResult<ActionAdmission> {
         let controller = if self.is_direct_conversation() {
             None
@@ -463,7 +463,7 @@ impl RealmAuthorizationCut {
                 .collect::<Vec<_>>();
             // Filtering a forbidden allow path must not discard an existing
             // global grant deny/quarantine/review on the original operation.
-            let original = soland_storage::evaluate_controller_bounded_grants(
+            let original = coland_storage::evaluate_controller_bounded_grants(
                 operation,
                 &agent_grants,
                 &controller_cut.actor,
@@ -475,7 +475,7 @@ impl RealmAuthorizationCut {
                 GrantEvaluation::Denied
                 | GrantEvaluation::Quarantined
                 | GrantEvaluation::RequiresReview => original,
-                _ => soland_storage::evaluate_controller_bounded_grants(
+                _ => coland_storage::evaluate_controller_bounded_grants(
                     &managed_operation,
                     &agent_grants,
                     &controller_cut.actor,
@@ -518,7 +518,7 @@ impl RealmAuthorizationCut {
                 }
                 Err(PersistenceError::Conflict(format!(
                     "{}: every grant allowing the operation has exhausted its quota",
-                    soland_storage::ConflictCode::RateLimited
+                    coland_storage::ConflictCode::RateLimited
                 )))
             }
             GrantEvaluation::Unsatisfied if !owner_covers => {
@@ -643,7 +643,7 @@ impl RealmAuthorizationCut {
             if !arkret_wire::events::kinds::realm_write_gate_exempt(&event.kind, &payload) {
                 return Err(PersistenceError::Conflict(format!(
                     "{}: the Realm is archived or frozen and refuses {}",
-                    soland_storage::ConflictCode::RealmFrozen,
+                    coland_storage::ConflictCode::RealmFrozen,
                     event.kind.as_str()
                 )));
             }
@@ -798,7 +798,7 @@ impl RealmAuthorizationCut {
         source: Option<&arkret_wire::SpaceId>,
         destination: &arkret_wire::SpaceId,
         commit: &arkret_wire::RealmCommit,
-        prepared: Option<&soland_storage::EventApprovalCommit>,
+        prepared: Option<&coland_storage::EventApprovalCommit>,
     ) -> PersistenceResult<(bool, Vec<crate::approval_admission::QualifiedApproval>)> {
         let at = commit.committed_at;
         self.require_open_lifecycle(event)?;
@@ -836,7 +836,7 @@ impl RealmAuthorizationCut {
             .prepare_grant_approvals(conn, event, commit, prepared, action, &target, &facts)
             .await?;
         let evaluate = || {
-            soland_storage::evaluate_grants_with_verified_approvals(
+            coland_storage::evaluate_grants_with_verified_approvals(
                 &AuthorizationOperation {
                     actor: &self.actor,
                     actions: &actions,
@@ -927,12 +927,12 @@ impl RealmAuthorizationCut {
         conn: &mut AsyncPgConnection,
         event: &arkret_wire::Event,
         commit: &arkret_wire::RealmCommit,
-        prepared: Option<&soland_storage::EventApprovalCommit>,
+        prepared: Option<&coland_storage::EventApprovalCommit>,
         action: CapabilityActionId,
         target: &WireResourceSelector,
         facts: &OperationFacts,
     ) -> PersistenceResult<(
-        Vec<soland_storage::VerifiedGrantApproval>,
+        Vec<coland_storage::VerifiedGrantApproval>,
         Vec<crate::approval_admission::QualifiedApproval>,
     )> {
         let mut markers = Vec::new();
@@ -940,7 +940,7 @@ impl RealmAuthorizationCut {
         for (_, grant) in self
             .effective_grants(commit.committed_at)
             .filter(|(_, grant)| {
-                soland_storage::grant_names_target(grant, &[action.as_str()], target)
+                coland_storage::grant_names_target(grant, &[action.as_str()], target)
             })
         {
             for requirement in crate::grant_approval_admission::require_grant_approvals(
@@ -948,7 +948,7 @@ impl RealmAuthorizationCut {
             )
             .await?
             {
-                markers.push(soland_storage::VerifiedGrantApproval {
+                markers.push(coland_storage::VerifiedGrantApproval {
                     grant_id: requirement.grant_id,
                     constraint_digest: requirement.constraint_digest,
                     action,
@@ -964,7 +964,7 @@ impl RealmAuthorizationCut {
         conn: &mut AsyncPgConnection,
         event: &arkret_wire::Event,
         commit: &arkret_wire::RealmCommit,
-        prepared: Option<&soland_storage::EventApprovalCommit>,
+        prepared: Option<&coland_storage::EventApprovalCommit>,
         target: &WireResourceSelector,
     ) -> PersistenceResult<Vec<crate::approval_admission::QualifiedApproval>> {
         self.require_open_lifecycle(event)?;
@@ -1001,7 +1001,7 @@ impl RealmAuthorizationCut {
         let (markers, mut accepted) = self
             .prepare_grant_approvals(conn, event, commit, prepared, action, target, &facts)
             .await?;
-        let evaluation = soland_storage::evaluate_grants_with_verified_approvals(
+        let evaluation = coland_storage::evaluate_grants_with_verified_approvals(
             &AuthorizationOperation {
                 actor: &self.actor,
                 actions: &actions,
@@ -1599,7 +1599,7 @@ pub(crate) async fn authorize_strand_position_in_connection(
     source: Option<&arkret_wire::SpaceId>,
     destination: &arkret_wire::SpaceId,
     commit: &arkret_wire::RealmCommit,
-    prepared: Option<&soland_storage::EventApprovalCommit>,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<(bool, Vec<crate::approval_admission::QualifiedApproval>)> {
     lock_realm_authorization_cut(conn, &event.realm_id).await?;
     let cut = RealmAuthorizationCut::read_for_event(conn, event).await?;

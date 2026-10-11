@@ -12,9 +12,9 @@ pub fn canonical_event_record(
     event: &Event,
     realm_id: Option<&str>,
     received_at: chrono::DateTime<chrono::Utc>,
-) -> soland_storage::CanonicalEventRecord {
+) -> coland_storage::CanonicalEventRecord {
     let digest_suite = event.event_id.digest_suite_code().digest_suite();
-    soland_storage::CanonicalEventRecord {
+    coland_storage::CanonicalEventRecord {
         event_id: event.event_id.to_string(),
         actor_id: event.actor_id.to_string(),
         realm_id: realm_id.map(str::to_owned),
@@ -142,7 +142,7 @@ pub fn fixture_verification_method(actor_id: &str, device_id: &str) -> DidUrl {
 }
 
 pub async fn sign_accepted_fixture_event(
-    _state: &soland_http::state::AppState,
+    _state: &coland_http::state::AppState,
     event: Event,
     actor_id: &str,
     device_id: &str,

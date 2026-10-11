@@ -861,7 +861,7 @@ fn public_entry_skips_c_axis_but_still_enforces_cooldown() {
         .insert(realm_id.to_owned(), "public".to_owned());
     state.members.insert(
         (realm_id.to_owned(), account_actor_string(member)),
-        SolandMembershipState {
+        ColandMembershipState {
             member: account_actor_string(member),
             realm_id: realm_id.to_owned(),
             state: "leave".to_owned(),
@@ -999,7 +999,7 @@ fn closed_entry_rejects_self_join_but_allows_authorized_writer_path() {
     assert_eq!(state.check_membership_join_admission(&admin_join), Ok(()));
     state.members.insert(
         (realm_id.to_owned(), account_actor_string(member)),
-        SolandMembershipState {
+        ColandMembershipState {
             member: account_actor_string(member),
             realm_id: realm_id.to_owned(),
             state: "join".to_owned(),
@@ -1026,7 +1026,7 @@ fn bare_member_state_cannot_leave_a_live_invite_state() {
     let member = "ak:did_core:web:alice.example";
     state.members.insert(
         (realm_id.to_owned(), account_actor_string(member)),
-        SolandMembershipState {
+        ColandMembershipState {
             member: account_actor_string(member),
             realm_id: realm_id.to_owned(),
             state: "invite".to_owned(),

@@ -1,7 +1,7 @@
-//! Soland error integration for canonical Arkret SDK error codes.
+//! Coland error integration for canonical Arkret SDK error codes.
 //!
 //! Wire-form error codes are owned by `arkret_wire::ErrorCode`; this module
-//! only adds soland-specific Salvo rendering and typed endpoint plumbing.
+//! only adds coland-specific Salvo rendering and typed endpoint plumbing.
 
 use salvo::async_trait;
 use salvo::http::StatusCode;
@@ -137,7 +137,7 @@ pub fn render_error_with_reason_code(
     render_problem_envelope(res, status, envelope);
 }
 
-/// Render an SDK-owned error code through soland's standard error envelope.
+/// Render an SDK-owned error code through coland's standard error envelope.
 pub fn render_error_code(code: ErrorCode, res: &mut Response, message: &str) {
     render_error(res, error_http_status(code), code.as_str(), message);
 }
@@ -191,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn sdk_error_codes_are_soland_source_of_truth() {
+    fn sdk_error_codes_are_coland_source_of_truth() {
         assert!(
             !ErrorCode::ALL.is_empty()
                 && ErrorCode::ALL
@@ -338,7 +338,7 @@ pub struct AppError {
     ///
     /// Privacy-sensitive endpoints use this field to retain the concrete
     /// rejection cause while returning the same indistinguishable protocol
-    /// error in production. When `SOLAND_DEVELOPMENT_MODE=true`, the writer
+    /// error in production. When `COLAND_DEVELOPMENT_MODE=true`, the writer
     /// exposes it as the unstable `error.details.reason_detail` diagnostic.
     pub private_detail: Option<Box<str>>,
     /// Typed protocol details inserted into `error.details`.

@@ -3,10 +3,10 @@
 
 use arkret_models_integration::{AppletManagedActorProvisionPayload, AppletRegistrationPayload};
 use arkret_wire::{CommitStreamRef, Event, EventKind, RealmCommit};
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
 use diesel::{OptionalExtension as _, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
-use soland_storage::{PersistenceError, PersistenceResult};
 
 #[derive(diesel::QueryableByName)]
 struct SeededResolution {

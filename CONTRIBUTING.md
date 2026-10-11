@@ -1,6 +1,6 @@
-# Contributing to soland
+# Contributing to coland
 
-Thanks for considering a contribution! soland is a reference Arkret v1
+Thanks for considering a contribution! coland is a reference Arkret v1
 Station; the protocol contract lives in
 [`arkret-spec`](https://github.com/arkret-org/arkret-spec) and the Rust SDK
 in [`arkret-rust-sdk`](https://github.com/arkret-org/arkret-rust-sdk).
@@ -21,14 +21,14 @@ adapt to your local toolchain.
 
 ## Repository layout
 
-soland depends on the `arkret` SDK at a sibling path. The CI workflows clone
+coland depends on the `arkret` SDK at a sibling path. The CI workflows clone
 both repositories side by side; reproduce the same layout locally:
 
 ```
 arkret/
 ├── arkret-rust-sdk/
 │   └── crates/
-└── soland/                # this repo
+└── coland/                # this repo
     ├── crates/
     ├── xtask/
     └── Cargo.toml
@@ -73,7 +73,7 @@ dependencies locally with a `[patch.crates-io]` entry in
 - Keep handlers as `#[endpoint]` (Salvo OpenAPI variant). When you add a new
   route, mount it in
   [`crates/http/src/routing/router_build.rs`](crates/http/src/routing/router_build.rs)
-  and, for a `/_soland/*` path, record it in
+  and, for a `/_coland/*` path, record it in
   [`noncanonical-route-inventory.jsonl`](noncanonical-route-inventory.jsonl)
   so `noncanonical_route_boundary` still passes.
 - Don't introduce new `serde_json::Value` blobs at the wire boundary if a
@@ -86,14 +86,14 @@ dependencies locally with a `[patch.crates-io]` entry in
   integration-test binary, split into per-domain modules with `main.rs` as the
   entry point.
 - `crates/http/tests/noncanonical_route_boundary.rs` is load-bearing — adding
-  or removing a `/_soland/*` route needs a matching
+  or removing a `/_coland/*` route needs a matching
   `noncanonical-route-inventory.jsonl` update, including the metadata
   `current_private_path_count`.
 
-The sibling Cotest process harness launches a prebuilt Soland executable.
+The sibling Cotest process harness launches a prebuilt Coland executable.
 Before running cross-repository conformance scenarios, build the current
-source with `cargo build --locked --bin soland --features conformance-harness -j 2`
-and set `SOLAND_BIN` to that executable's absolute path. Compiling Soland as a
+source with `cargo build --locked --bin coland --features conformance-harness -j 2`
+and set `COLAND_BIN` to that executable's absolute path. Compiling Coland as a
 dependency of `cargo test` does not refresh the standalone executable; an older
 binary can otherwise report behavior that the current source already rejects.
 

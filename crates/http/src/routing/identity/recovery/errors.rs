@@ -5,7 +5,7 @@ pub(super) fn stored_recovery_type_error(context: &str, error: impl std::fmt::Di
 }
 
 pub(super) fn recovery_session_store_error(error: PersistenceError) -> AppError {
-    if error.conflict_code() == Some(soland_storage::ConflictCode::RecoverySessionAlreadyExists) {
+    if error.conflict_code() == Some(coland_storage::ConflictCode::RecoverySessionAlreadyExists) {
         AppError::conflict(error.detail()).with_internal_reason("recovery_session_conflict")
     } else {
         recovery_store_error(error)
@@ -14,27 +14,27 @@ pub(super) fn recovery_session_store_error(error: PersistenceError) -> AppError 
 
 pub(super) fn recovery_store_error(error: PersistenceError) -> AppError {
     match error.kind() {
-        soland_services::ServiceErrorKind::Conflict => AppError::conflict(error.detail()),
-        soland_services::ServiceErrorKind::NotFound => AppError::not_found(error.detail()),
-        soland_services::ServiceErrorKind::Database => AppError::internal(format!(
+        coland_services::ServiceErrorKind::Conflict => AppError::conflict(error.detail()),
+        coland_services::ServiceErrorKind::NotFound => AppError::not_found(error.detail()),
+        coland_services::ServiceErrorKind::Database => AppError::internal(format!(
             "recovery persistence database error: {}",
             error.detail()
         )),
-        soland_services::ServiceErrorKind::SchemaViolation => {
+        coland_services::ServiceErrorKind::SchemaViolation => {
             AppError::schema_violation(error.detail())
         }
-        soland_services::ServiceErrorKind::Internal => AppError::internal(error.detail()),
-        soland_services::ServiceErrorKind::UnsupportedEventKind => {
+        coland_services::ServiceErrorKind::Internal => AppError::internal(error.detail()),
+        coland_services::ServiceErrorKind::UnsupportedEventKind => {
             crate::app_error!(UnsupportedEventKind, error.detail())
         }
     }
 }
 
-pub(super) fn recovery_service_error(error: soland_services::ServiceError) -> AppError {
+pub(super) fn recovery_service_error(error: coland_services::ServiceError) -> AppError {
     recovery_store_error(error)
 }
 
-pub(super) fn recovery_policy_service_error(error: soland_services::ServiceError) -> AppError {
+pub(super) fn recovery_policy_service_error(error: coland_services::ServiceError) -> AppError {
     recovery_policy_store_error(error)
 }
 
@@ -48,13 +48,13 @@ pub(super) fn recovery_policy_store_error(error: PersistenceError) -> AppError {
     // rejection, discriminated by their registered reason code.
     let rejection = AppError::conflict(message).with_internal_reason("recovery_policy_conflict");
     match error.conflict_code() {
-        Some(soland_storage::ConflictCode::RecoveryPolicyVersionNotMonotonic) => {
+        Some(coland_storage::ConflictCode::RecoveryPolicyVersionNotMonotonic) => {
             rejection.with_reason_code("recovery_policy_version_not_monotonic")
         }
-        Some(soland_storage::ConflictCode::RecoveryPolicySupersedesInvalid) => {
+        Some(coland_storage::ConflictCode::RecoveryPolicySupersedesInvalid) => {
             rejection.with_reason_code("recovery_policy_supersedes_invalid")
         }
-        Some(soland_storage::ConflictCode::RecoveryPolicyGenesisNotV1) => {
+        Some(coland_storage::ConflictCode::RecoveryPolicyGenesisNotV1) => {
             rejection.with_reason_code("recovery_policy_genesis_not_v1")
         }
         _ => rejection,

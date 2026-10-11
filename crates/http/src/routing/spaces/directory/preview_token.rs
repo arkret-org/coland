@@ -243,7 +243,7 @@ mod tests {
     fn state() -> AppState {
         AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         )
     }
 

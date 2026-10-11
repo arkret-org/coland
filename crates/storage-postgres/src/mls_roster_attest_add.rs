@@ -6,8 +6,8 @@
 use arkret_models_collaboration::mls_roster_authority::{MlsAttestAddOutcome, MlsAttestAddStatus};
 use arkret_models_crypto::MlsCommitPayload;
 use arkret_wire::{DidCoreId, EventKind, MlsGroupCurrent, MlsWelcomeDelivery};
+use coland_storage::{ConflictCode, VerifiedMlsAddAuthorityAttestation};
 use diesel::sql_types::{BigInt, Binary, Integer, Jsonb, Text};
-use soland_storage::{ConflictCode, VerifiedMlsAddAuthorityAttestation};
 
 use crate::{
     AsyncConnection, AsyncPgConnection, OptionalExtension, PersistenceError, PersistenceResult,

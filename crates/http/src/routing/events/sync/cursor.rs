@@ -22,7 +22,7 @@ pub struct SyncCursor {
     /// account continuation still has complete replay coverage.
     pub account_data_change_position: i64,
     pub global_baseline: Option<Value>,
-    pub detail_positions: BTreeMap<String, soland_storage::AccountDetailProgress>,
+    pub detail_positions: BTreeMap<String, coland_storage::AccountDetailProgress>,
     pub detail_turn: bool,
     pub detail_next_realm: Option<String>,
 }
@@ -266,7 +266,7 @@ pub(crate) async fn sync_token_for_account_positions(
     account_summary_position: i64,
     account_data_change_position: i64,
     global_baseline: Option<Value>,
-    detail_positions: BTreeMap<String, soland_storage::AccountDetailProgress>,
+    detail_positions: BTreeMap<String, coland_storage::AccountDetailProgress>,
     detail_turn: bool,
     detail_next_realm: Option<String>,
 ) -> Result<String, SyncCursorError> {
@@ -571,7 +571,7 @@ pub(crate) async fn parse_account_cursor(
         "account_realms",
         Some("cursor handle is missing positions.account_realms"),
     )?;
-    let mut detail_positions: BTreeMap<String, soland_storage::AccountDetailProgress> =
+    let mut detail_positions: BTreeMap<String, coland_storage::AccountDetailProgress> =
         serde_json::from_value(positions_value["detail_positions"].clone())
             .map_err(|_| SyncCursorError::Integrity("invalid current detail positions"))?;
     let filter_changed = positions_value.get("detail_filter") != filter;
@@ -953,8 +953,8 @@ pub(super) async fn account_cursor_revoke(
     >,
     depot: &mut Depot,
     req: &mut Request,
-) -> soland_http::result::JsonResult<arkret_models_identity::account::AccountCursorRevokeOutcome> {
-    use soland_http::error::AppError;
+) -> coland_http::result::JsonResult<arkret_models_identity::account::AccountCursorRevokeOutcome> {
+    use coland_http::error::AppError;
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     if session.human_device_id().is_none() {
@@ -1027,7 +1027,7 @@ pub(super) async fn account_cursor_revoke(
     } else {
         Some(session.require_human_device_id().clone())
     };
-    let application_record = soland_services::sync::CursorRevocationState {
+    let application_record = coland_services::sync::CursorRevocationState {
         cursor_digest: sha256_hex(cursor.h.as_bytes()),
         account_id: arkret_wire::AccountId::new(
             arkret_wire::DidCoreId::new(session.actor.clone()).map_err(|error| {
@@ -1076,14 +1076,14 @@ pub(super) async fn account_cursor_revoke(
     )
 }
 
-pub(crate) fn cursor_revoke_error(error: SyncCursorError) -> soland_http::error::AppError {
+pub(crate) fn cursor_revoke_error(error: SyncCursorError) -> coland_http::error::AppError {
     match error {
         SyncCursorError::Expired => crate::app_error!(CursorExpired, "cursor has expired"),
         SyncCursorError::Unavailable(message) => crate::app_error!(TemporarilyUnavailable, message),
         SyncCursorError::Revoked => {
             crate::app_error!(CursorRevoked, "cursor authority has been revoked")
         }
-        SyncCursorError::Invalid(message) => soland_http::error::AppError::param_invalid(message)
+        SyncCursorError::Invalid(message) => coland_http::error::AppError::param_invalid(message)
             .with_reason_code(arkret_wire::ReasonCode::INVALID_CURSOR),
         _ => crate::app_error!(
             CursorIntegrityInvalid,
@@ -1112,7 +1112,7 @@ pub(crate) async fn cursor_authority_revoked(
         .binding_subject
         .as_deref()
         .and_then(|subject| serde_json::from_str(subject).ok());
-    let revoked = soland_services::sync::SyncService::revoked_in(
+    let revoked = coland_services::sync::SyncService::revoked_in(
         &entries,
         &sha256_hex(cursor.h.as_bytes()),
         account.as_ref(),
@@ -1128,7 +1128,7 @@ pub(crate) struct RealmListPosition {
     pub watermark: i64,
     pub global_watermark: i64,
     pub expires_at_ms: i64,
-    pub after: Option<soland_storage::AccountSummaryKey>,
+    pub after: Option<coland_storage::AccountSummaryKey>,
     pub snapshot_cursor: Option<arkret_wire::Cursor>,
 }
 
@@ -1235,7 +1235,7 @@ fn recipient_queue_cursor_binding(
     let selector = crate::routing::identity::device_messages::recipient_queue_selector(session)
         .map_err(|_| SyncCursorError::Mismatch("recipient queue selector unavailable"))?;
     match selector {
-        soland_services::delivery::RecipientQueueSelector::HumanDevice {
+        coland_services::delivery::RecipientQueueSelector::HumanDevice {
             recipient,
             device_id,
         } => {
@@ -1246,7 +1246,7 @@ fn recipient_queue_cursor_binding(
                 json!({"kind":"human_device","recipient":recipient,"device_id":device_id}),
             ))
         }
-        soland_services::delivery::RecipientQueueSelector::AgentRuntime {
+        coland_services::delivery::RecipientQueueSelector::AgentRuntime {
             agent_id,
             verification_method,
             authorization_event_ref,

@@ -146,8 +146,8 @@ impl RecoveryPolicyStore for PgRecoveryPolicyStore {
 
     async fn commit_publication(
         &self,
-        write: soland_storage::RecoveryPolicyPublicationWrite,
-    ) -> PersistenceResult<soland_storage::RecoveryPolicyPublicationOutcome> {
+        write: coland_storage::RecoveryPolicyPublicationWrite,
+    ) -> PersistenceResult<coland_storage::RecoveryPolicyPublicationOutcome> {
         write.commit.validate().map_err(|error| {
             PersistenceError::SchemaViolation(format!(
                 "invalid recovery policy authority transaction: {error}"

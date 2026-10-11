@@ -238,7 +238,7 @@ impl ProjectionState {
 }
 
 /// Map the SDK verifier's `Error::Protocol` message — which embeds the canonical
-/// spec wire error-code constant in parentheses — onto the soland rejection
+/// spec wire error-code constant in parentheses — onto the coland rejection
 /// reason. We surface the embedded code when present, falling back to a stable
 /// generic when the message shape is unexpected.
 fn organization_rejection_reason(message: &str) -> String {

@@ -14,8 +14,8 @@
 //! Message `thread_id` is a message-layer discussion grouping within that
 //! container; it is not a synonym for `strand_id`.
 
+use coland_services::events::ProjectedEvent as ProjectionEventRecord;
 use serde_json::json;
-use soland_services::events::ProjectedEvent as ProjectionEventRecord;
 
 use super::{now, realm_discoverability};
 use crate::state::AppState;

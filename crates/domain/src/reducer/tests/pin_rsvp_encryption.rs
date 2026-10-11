@@ -19,7 +19,7 @@ fn seed_pin_target(state: &mut ProjectionState, hlc: &ServerHlc) {
     let now = chrono::Utc::now();
     state.realm_states.insert(
         REALM_ID.to_owned(),
-        SolandRealmState {
+        ColandRealmState {
             realm_id: REALM_ID.to_owned(),
             owner: Some("ak:did_core:web:alice.example".to_owned()),
             title: Some("Product".to_owned()),

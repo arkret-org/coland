@@ -2,16 +2,16 @@
 //! PCR. The fixture never inserts an uncommitted Event as accepted state.
 
 use arkret_wire::{EventKind, ScopeRef};
+use coland_http::config::AppConfig;
+use coland_http::service;
+use coland_http::state::AppState;
+use coland_test_support::AppStateTestExt as _;
+use coland_test_support::pcr_genesis::PcrGenesisFixture;
 use ed25519_dalek::SigningKey;
 use salvo::http::StatusCode;
 use salvo::test::{ResponseExt, TestClient};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use soland_http::config::AppConfig;
-use soland_http::service;
-use soland_http::state::AppState;
-use soland_test_support::AppStateTestExt as _;
-use soland_test_support::pcr_genesis::PcrGenesisFixture;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[path = "../../storage-postgres/tests/support/ordinary_realm.rs"]
@@ -25,14 +25,14 @@ fn test_config() -> AppConfig {
     AppConfig {
         development_mode: true,
         embedded_webvh_registration_bearer: Some("fixture-registration".to_owned()),
-        ..soland_test_support::app_config()
+        ..coland_test_support::app_config()
     }
 }
 
 async fn account_session(state: &AppState, fixture: &PcrGenesisFixture) -> String {
     fixture.admit(state).await.expect("durable PCR genesis");
     let app = service(state.clone());
-    let mut registration = TestClient::post("http://server/_soland/gate/account/project")
+    let mut registration = TestClient::post("http://server/_coland/gate/account/project")
         .add_header("authorization", "Bearer fixture-registration", true)
         .json(&json!({
             "principal_id": fixture.history.account.principal_id,
@@ -47,7 +47,7 @@ async fn account_session(state: &AppState, fixture: &PcrGenesisFixture) -> Strin
         matches!(status, Some(StatusCode::OK | StatusCode::CONFLICT)),
         "account projection: {body:?}"
     );
-    let mut login = TestClient::post("http://server/_soland/gate/auth/dev-login")
+    let mut login = TestClient::post("http://server/_coland/gate/auth/dev-login")
         .json(&json!({
             "actor": fixture.history.account.principal_id,
             "device_id": fixture.history.founding_device_id,
@@ -92,7 +92,7 @@ fn signed_account_data_event(
         chrono::Utc::now(),
     )
     .expect("typed account data Event");
-    soland_test_support::signed_event::sign_fixture_event(
+    coland_test_support::signed_event::sign_fixture_event(
         event,
         fixture.history.did.as_str(),
         fixture.history.founding_device_id.as_str(),
@@ -121,7 +121,7 @@ fn signed_account_data_tombstone(
         chrono::Utc::now(),
     )
     .expect("typed account data tombstone Event");
-    soland_test_support::signed_event::sign_fixture_event(
+    coland_test_support::signed_event::sign_fixture_event(
         event,
         fixture.history.did.as_str(),
         fixture.history.founding_device_id.as_str(),
@@ -237,13 +237,13 @@ async fn account_grant_session(fixture: &PcrGenesisFixture) -> GrantSession {
     config.session_grant_introspection_url = Some(format!("{origin}{INTROSPECTION_PATH}"));
     config.account_authority_url = Some(origin);
     config.register_test_internal_authority_channel("account-data-sync".to_owned());
-    let state = soland_test_support::app_state(config);
+    let state = coland_test_support::app_state(config);
     fixture.admit(&state).await.expect("accepted PCR genesis");
     state
         .test_persistence()
         .accounts()
-        .put(&soland_storage::AccountRecord {
-            pk: soland_storage::AccountPk(0),
+        .put(&coland_storage::AccountRecord {
+            pk: coland_storage::AccountPk(0),
             principal_id: fixture.history.account.principal_id.clone(),
             station_id: state.service_core_id(),
             localpart: format!("account-data-{}", uuid::Uuid::now_v7().simple()),
@@ -321,7 +321,7 @@ impl GrantSession {
 /// tombstone visibility rules over that accepted producer history.
 #[tokio::test]
 async fn signed_account_data_round_trip_enforces_cas_and_tombstone() {
-    let service_did = soland_test_support::fixture_service_identity(&test_config())
+    let service_did = coland_test_support::fixture_service_identity(&test_config())
         .identity()
         .expect("fixture Station identity")
         .did
@@ -425,11 +425,11 @@ async fn signed_account_data_round_trip_enforces_cas_and_tombstone() {
 /// projection returns the verified founding device instead of failing closed.
 #[tokio::test]
 async fn verified_device_summary_carries_only_authorization_provenance() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let fixture = PcrGenesisFixture::new(state.service_did());
     fixture.admit(&state).await.expect("durable PCR genesis");
     let app = service(state.clone());
-    let mut projection = TestClient::post("http://server/_soland/gate/account/project")
+    let mut projection = TestClient::post("http://server/_coland/gate/account/project")
         .add_header("authorization", "Bearer fixture-registration", true)
         .json(&json!({
             "principal_id": fixture.history.account.principal_id,
@@ -470,7 +470,7 @@ async fn verified_device_summary_carries_only_authorization_provenance() {
 /// is stored. The admitted path runs live in Cotest `protocol_payloads`.
 #[tokio::test]
 async fn development_bearer_session_cannot_produce_account_data_events() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let fixture = PcrGenesisFixture::new(state.service_did());
     let token = account_session(&state, &fixture).await;
     let app = service(state.clone());
@@ -512,7 +512,7 @@ async fn development_bearer_session_cannot_produce_account_data_events() {
 
 #[tokio::test]
 async fn account_data_write_rejects_another_actors_signed_event() {
-    let service_did = soland_test_support::fixture_service_identity(&test_config())
+    let service_did = coland_test_support::fixture_service_identity(&test_config())
         .identity()
         .unwrap()
         .did
@@ -564,7 +564,7 @@ async fn account_data_write_rejects_another_actors_signed_event() {
 
 #[tokio::test]
 async fn signed_read_cursor_round_trip_replays_without_entering_the_realm_log() {
-    let service_did = soland_test_support::fixture_service_identity(&test_config())
+    let service_did = coland_test_support::fixture_service_identity(&test_config())
         .identity()
         .unwrap()
         .did
@@ -577,8 +577,8 @@ async fn signed_read_cursor_round_trip_replays_without_entering_the_realm_log() 
         &fixture.history.account,
         &session.state.service_did(),
     );
-    let identity = soland_test_support::fixture_service_identity(session.state.config());
-    let station_key = SigningKey::from_bytes(&soland_test_support::fixture_signing_seed(
+    let identity = coland_test_support::fixture_service_identity(session.state.config());
+    let station_key = SigningKey::from_bytes(&coland_test_support::fixture_signing_seed(
         session.state.config(),
         &identity,
     ));
@@ -586,7 +586,7 @@ async fn signed_read_cursor_round_trip_replays_without_entering_the_realm_log() 
     // Freeze the real device source before signing each final Station Commit.
     for (index, transaction) in unit.transactions.iter_mut().enumerate() {
         transaction.event.producer_proof = None;
-        transaction.event = soland_test_support::signed_event::sign_fixture_event(
+        transaction.event = coland_test_support::signed_event::sign_fixture_event(
             transaction.event.clone(),
             fixture.history.did.as_str(),
             fixture.history.founding_device_id.as_str(),
@@ -660,7 +660,7 @@ async fn signed_read_cursor_round_trip_replays_without_entering_the_realm_log() 
         chrono::Utc::now(),
     )
     .unwrap();
-    let event = soland_test_support::signed_event::sign_fixture_event(
+    let event = coland_test_support::signed_event::sign_fixture_event(
         event,
         fixture.history.did.as_str(),
         fixture.history.founding_device_id.as_str(),

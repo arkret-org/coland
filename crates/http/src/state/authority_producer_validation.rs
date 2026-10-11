@@ -11,9 +11,9 @@ use arkret_models_identity::session_credential::{
     SessionGrantCredentialClass, SessionGrantHolderBinding,
 };
 use arkret_wire::{AccountId, ActorId, DeviceId, Did, Event};
-use soland_services::identity::{SessionGrantAuthorizationState, SessionIdentityState};
-use soland_services::{ServiceError, ServiceResult};
-use soland_storage::SelfProducerCommitGuard;
+use coland_services::identity::{SessionGrantAuthorizationState, SessionIdentityState};
+use coland_services::{ServiceError, ServiceResult};
+use coland_storage::SelfProducerCommitGuard;
 
 use super::AppState;
 
@@ -422,7 +422,7 @@ mod tests {
             token_hash: "local-only".to_owned(),
             account_pk: None,
             actor: account.principal_id.as_str().to_owned(),
-            endpoint: soland_services::identity::SessionEndpointState::HumanDevice {
+            endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
                 device_id: "ak:device:01904100-0000-7000-8000-0000000000a1".to_owned(),
             },
             audience: account.station_id.as_str().to_owned(),
@@ -445,7 +445,7 @@ mod tests {
             token_hash: "human-session".to_owned(),
             account_pk: None,
             actor: account.principal_id.as_str().to_owned(),
-            endpoint: soland_services::identity::SessionEndpointState::HumanDevice {
+            endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
                 device_id: device_id.as_str().to_owned(),
             },
             audience: account.station_id.as_str().to_owned(),
@@ -481,7 +481,7 @@ mod tests {
         method: &arkret_wire::DidUrl,
         seed: [u8; 32],
     ) -> Event {
-        soland_test_support::device_authorization_history::sign_event(
+        coland_test_support::device_authorization_history::sign_event(
             arkret_wire::test_support::raw_event(
                 arkret_wire::EventKind::MessageCreate.as_str(),
                 arkret_wire::ScopeRef::Realm {
@@ -505,10 +505,10 @@ mod tests {
     async fn another_active_device_of_the_session_principal_may_sign() {
         // Complete native Service history is part of issuing the ordinary
         // Account Device root; a bare test AppState has no durable identity.
-        let mut fixture_config = soland_test_support::app_config();
+        let mut fixture_config = coland_test_support::app_config();
         fixture_config.notary_signing_key_seed = Some([83; 32]);
         fixture_config.seed_demo_data = false;
-        let (leased_state, pool) = soland_test_support::app_state_with_pool(fixture_config.clone());
+        let (leased_state, pool) = coland_test_support::app_state_with_pool(fixture_config.clone());
         let state = AppState::new_with_service_identity(
             crate::config::AppConfig {
                 public_base_url: fixture_config.public_base_url.clone(),
@@ -516,11 +516,11 @@ mod tests {
                 seed_demo_data: false,
                 ..crate::config::AppConfig::test_default()
             },
-            soland_storage_postgres::Db {
+            coland_storage_postgres::Db {
                 pool: Some(pool.clone()),
             },
-            std::sync::Arc::new(soland_storage_postgres::PgPersistenceStore::new(pool)),
-            soland_test_support::fixture_service_identity(&fixture_config),
+            std::sync::Arc::new(coland_storage_postgres::PgPersistenceStore::new(pool)),
+            coland_test_support::fixture_service_identity(&fixture_config),
             leased_state
                 .service_resolution_commitment()
                 .as_ref()
@@ -529,7 +529,7 @@ mod tests {
         );
         let persistence = state.test_persistence();
         let mut fixture =
-            soland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
+            coland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
         let founding = fixture
             .admit_founding_device(persistence.as_ref())
             .await

@@ -10,9 +10,9 @@ use arkret_models_discovery::{
     ServiceDescribe, ServiceProtocolVersion,
 };
 use chrono::{DateTime, Utc};
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
 use salvo::prelude::*;
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
 
 use crate::state::{AppState, RealmDirectoryEntry};
 
@@ -129,13 +129,13 @@ mod tests {
         let mut entry = RealmDirectoryEntry::new(
             realm_id,
             "private reducer title",
-            soland_services::events::DirectoryProvenance::LocalOnly,
+            coland_services::events::DirectoryProvenance::LocalOnly,
         );
         entry.public = true;
         let at = Utc::now();
         assert!(public_directory_entry(&entry, at).is_none());
 
-        entry.public_metadata = Some(soland_services::events::PublicRealmMetadataRecord {
+        entry.public_metadata = Some(coland_services::events::PublicRealmMetadataRecord {
             display_name: "Published Realm".to_owned(),
             summary: Some("Public summary".to_owned()),
             public_locator: Some("https://realm.example".to_owned()),

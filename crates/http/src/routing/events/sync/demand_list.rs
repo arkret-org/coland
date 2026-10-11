@@ -10,7 +10,7 @@ pub(crate) struct AccountSummaryDelta {
     pub initial_global_snapshot: Option<(i64, i64)>,
 }
 
-fn visible_item(row: &soland_storage::AccountSummaryVersion) -> Option<RealmListRow> {
+fn visible_item(row: &coland_storage::AccountSummaryVersion) -> Option<RealmListRow> {
     if !row.current_available {
         return None;
     }
@@ -213,8 +213,8 @@ mod tests {
     use super::*;
     #[test]
     fn frozen_join_never_discloses_private_fields_after_knock_or_revocation() {
-        let mut row = soland_storage::AccountSummaryVersion {
-            key: soland_storage::AccountSummaryKey {
+        let mut row = coland_storage::AccountSummaryVersion {
+            key: coland_storage::AccountSummaryKey {
                 realm_id: "ak:realm:AQVZRUJrSSC16EodjmqL6mBFC9TGwv6oxx-sQlJzlvxS".to_owned(),
                 revision: 1,
                 activity_position: 1,

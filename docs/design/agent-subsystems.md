@@ -1,6 +1,6 @@
-# Agent 子系统设计(soland)
+# Agent 子系统设计(coland)
 
-本文记录 Soland 当前 Agent participation、治理策略和通知子系统的实现边界。规范真源是
+本文记录 Coland 当前 Agent participation、治理策略和通知子系统的实现边界。规范真源是
 `arkret-spec/spec/v1`；本文只说明服务端内部结构。
 
 设计原则：controller selection、Realm/Circle/Strand policy、capability 与生命周期是四个独立权威；
@@ -142,9 +142,9 @@ S4(session overlay)── 依赖 participation 解析共享 fn(已存在) ──
 S3(notification dispatcher)── 最大,独立子系统;mention gate 依赖 participation 读侧(已就绪)
 ```
 
-- S1 + S2 + S4 较有界,优先;各自加 reducer/handler 单测 + soland 集成测试。
+- S1 + S2 + S4 较有界,优先;各自加 reducer/handler 单测 + coland 集成测试。
 - S3 分两步:先 NotificationStore + mention 派生 + agent gate(本地可测),再 floria 推送联调。
 - 每个子系统落地后回填 `_agents_todos.md` 对应项与 commit hash;cotest 真实联调在 S1–S4 就绪后统一跑。
 
 ## 与 spec 的关系
-本设计是 soland 实现侧落点,不改协议语义;AKP-0016 与已 merge 的 normative 文本(capabilities §5.4、strand-and-message §9.4.5、realm-and-space §2、circle 字段表、private-objects §4.1)是真源。若实现中发现 spec 不完善,先改 spec 再改码。
+本设计是 coland 实现侧落点,不改协议语义;AKP-0016 与已 merge 的 normative 文本(capabilities §5.4、strand-and-message §9.4.5、realm-and-space §2、circle 字段表、private-objects §4.1)是真源。若实现中发现 spec 不完善,先改 spec 再改码。

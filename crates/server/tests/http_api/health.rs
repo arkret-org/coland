@@ -80,10 +80,10 @@ async fn health_and_describe_work_body() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|profile| profile == "org.arkret.soland.profile.limited_server.v1")
+            .any(|profile| profile == "org.arkret.coland.profile.limited_server.v1")
     );
 
-    let operator_describe: Value = TestClient::get("http://server/_soland/describe")
+    let operator_describe: Value = TestClient::get("http://server/_coland/describe")
         .send(&app())
         .await
         .take_json()
@@ -95,7 +95,7 @@ async fn health_and_describe_work_body() {
             .unwrap()
             .iter()
             .any(
-                |profile| profile["profile"] == "org.arkret.soland.profile.limited_server.v1"
+                |profile| profile["profile"] == "org.arkret.coland.profile.limited_server.v1"
                     && profile["status"] == "unsupported"
             )
     );
@@ -217,7 +217,7 @@ async fn health_and_describe_work_body() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|operation| operation == "org.arkret.soland.admin.actors.get")
+            .any(|operation| operation == "org.arkret.coland.admin.actors.get")
     );
     assert!(
         describe["limits"]["profile_status"]["implemented_surfaces"]
@@ -291,7 +291,7 @@ fn server_describe_accepts_only_its_selected_role() {
 }
 
 async fn server_describe_accepts_only_its_selected_role_body() {
-    let service = app_from_state(soland_test_support::app_state(test_config()));
+    let service = app_from_state(coland_test_support::app_state(test_config()));
 
     let selected: Value = TestClient::get("http://server/_arkret/describe?service_kind=station")
         .send(&service)
@@ -319,7 +319,7 @@ fn open_service_resolution_serves_byte_canonical_evidence() {
 }
 
 async fn open_service_resolution_serves_byte_canonical_evidence_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let service = app_from_state(state.clone());
     let service_id = arkret_identifiers::DidCoreId::new(state.service_id().to_owned()).unwrap();
     let path = arkret_models_identity::canonical_service_resolution_path(&service_id);
@@ -349,8 +349,8 @@ async fn open_service_resolution_serves_byte_canonical_evidence_body() {
                 .publish_route_cache(resolution.clone(), entry)
                 .await
                 .unwrap(),
-            soland_storage::MonotonicRouteWrite::Applied
-                | soland_storage::MonotonicRouteWrite::Replay
+            coland_storage::MonotonicRouteWrite::Applied
+                | coland_storage::MonotonicRouteWrite::Replay
         ));
     }
     store
@@ -394,7 +394,7 @@ async fn readyz_returns_503_until_session_grant_internal_channel_is_complete_bod
     // registration have also produced `internal_authority_channel`.
     config.internal_authority_shared_secret = Some("configured-but-insufficient".to_owned());
     config.internal_authority_channel = None;
-    let service = app_from_state(soland_test_support::app_state(config));
+    let service = app_from_state(coland_test_support::app_state(config));
 
     let mut response = TestClient::get("http://server/readyz").send(&service).await;
     assert_eq!(
@@ -455,7 +455,7 @@ async fn describe_separates_claim_levels_body() {
         .expect("interop_surfaces array present");
     assert!(
         interop.is_empty(),
-        "Soland product-private routes are not interop surfaces"
+        "Coland product-private routes are not interop surfaces"
     );
     let _: arkret_models_discovery::ServiceDescribe = serde_json::from_value(describe)
         .expect("server describe must deserialize with the SDK client model");
@@ -493,7 +493,7 @@ async fn describe_returns_development_mode_field_body() {
     assert!(describe.get("proof_verifier_mode").is_none());
     assert!(describe.get("admin_auth_mode").is_none());
 
-    let operator_describe: Value = TestClient::get("http://server/_soland/describe")
+    let operator_describe: Value = TestClient::get("http://server/_coland/describe")
         .send(&dev_app)
         .await
         .take_json()
@@ -504,7 +504,7 @@ async fn describe_returns_development_mode_field_body() {
 
     // Now flip to production posture with an explicit admin allowlist to
     // make sure the derivation tracks the config — this is the production
-    // shape sodmin must NOT render a red banner for.
+    // shape codmin must NOT render a red banner for.
     let prod_config = AppConfig {
         development_mode: false,
         public_base_url: "https://server.example.com".to_owned(),
@@ -514,7 +514,7 @@ async fn describe_returns_development_mode_field_body() {
         to_device_queue_capacity: 10_000,
         ..test_config()
     };
-    let prod_state = soland_test_support::app_state(prod_config);
+    let prod_state = coland_test_support::app_state(prod_config);
     let prod_app = app_from_state(prod_state);
 
     let prod_health: Value = TestClient::get("http://server/health")
@@ -540,7 +540,7 @@ async fn describe_returns_development_mode_field_body() {
     assert!(prod_describe.get("proof_verifier_mode").is_none());
     assert!(prod_describe.get("admin_auth_mode").is_none());
 
-    let prod_operator_describe: Value = TestClient::get("http://server/_soland/describe")
+    let prod_operator_describe: Value = TestClient::get("http://server/_coland/describe")
         .send(&prod_app)
         .await
         .take_json()
@@ -606,14 +606,14 @@ async fn healthz_exposes_hardening_status_body() {
             arkret_identifiers::DidCoreId::new("ak:did_core:web:ops.example").unwrap(),
         ],
         to_device_queue_capacity: 10_000,
-        tls_cert_path: Some(std::path::PathBuf::from("/etc/soland/tls.crt")),
-        tls_key_path: Some(std::path::PathBuf::from("/etc/soland/tls.key")),
+        tls_cert_path: Some(std::path::PathBuf::from("/etc/coland/tls.crt")),
+        tls_key_path: Some(std::path::PathBuf::from("/etc/coland/tls.key")),
         cors_allow_origin: Some("https://app.example.com".to_owned()),
         notary_signing_key_seed: Some([7u8; 32]),
         seed_demo_data: false,
         ..test_config()
     };
-    let prod_state = soland_test_support::app_state(prod_config);
+    let prod_state = coland_test_support::app_state(prod_config);
     let prod_app = app_from_state(prod_state);
 
     let prod_health: Value = TestClient::get("http://server/health")
@@ -635,8 +635,8 @@ async fn healthz_exposes_hardening_status_body() {
         "prod posture should clear several extra checks (dev={score} prod={prod_score})"
     );
 
-    // /_soland/describe keeps the soland-local operator posture fields.
-    let describe: Value = TestClient::get("http://server/_soland/describe")
+    // /_coland/describe keeps the coland-local operator posture fields.
+    let describe: Value = TestClient::get("http://server/_coland/describe")
         .send(&prod_app)
         .await
         .take_json()

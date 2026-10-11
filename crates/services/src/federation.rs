@@ -25,8 +25,8 @@ pub struct FederationDeliveryRecord {
 
 /// One outbox row with its full explicit lifecycle. Re-exported storage state
 /// so the dispatcher and the operator surfaces speak one vocabulary.
-use soland_storage::FederationOutboxState;
-pub use soland_storage::{RealmFanoutAuthorityWitness, RealmFanoutBinding};
+use coland_storage::FederationOutboxState;
+pub use coland_storage::{RealmFanoutAuthorityWitness, RealmFanoutBinding};
 
 #[derive(Clone, Debug)]
 pub struct PendingFederationDelivery {
@@ -104,7 +104,7 @@ pub fn event_delivery_target_status(
     }))
 }
 
-pub use soland_storage::FederationOutboxDeadLetterRecord as FederationDeadLetter;
+pub use coland_storage::FederationOutboxDeadLetterRecord as FederationDeadLetter;
 
 #[derive(Clone, Debug)]
 pub struct EnqueueFederationDeliveryCommand {
@@ -148,7 +148,7 @@ pub enum FederationDeliveryOutcome {
 }
 
 /// Verdict of one `policy_suppressed` revalidation.
-use soland_storage::FederationOutboxPolicyResolution;
+use coland_storage::FederationOutboxPolicyResolution;
 
 /// One attempt's complete, atomically applied result.
 #[derive(Clone, Debug)]
@@ -176,7 +176,7 @@ pub struct RequeueFederationDeadLetterCommand {
     pub requeued_at: i64,
 }
 
-use soland_storage::FederationOutboxStateDepth;
+use coland_storage::FederationOutboxStateDepth;
 
 #[async_trait]
 pub trait FederationOutboxPort: Send + Sync {

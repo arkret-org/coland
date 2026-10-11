@@ -559,8 +559,8 @@ pub(super) fn event_proof_binding_bytes(
 }
 
 mod tests {
+    use coland_storage_postgres::Db;
     use serde_json::json;
-    use soland_storage_postgres::Db;
 
     use super::*;
 
@@ -568,7 +568,7 @@ mod tests {
         AppState::new(
             crate::config::AppConfig {
                 object_storage: crate::config::ObjectStorageConfig::local(
-                    std::env::temp_dir().join("soland-event-proof-root-test"),
+                    std::env::temp_dir().join("coland-event-proof-root-test"),
                 ),
                 did_resolver_allow_methods: vec!["key".to_owned()],
                 ..crate::config::AppConfig::test_default()
@@ -583,7 +583,7 @@ mod tests {
             account_pk: None,
             token_hash: "event-proof-root-test".to_owned(),
             actor: actor.to_owned(),
-            endpoint: soland_services::identity::SessionEndpointState::HumanDevice {
+            endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
                 device_id: "ak:device:01904100-0000-7000-8000-000000000001".to_owned(),
             },
             audience: state.service_id().clone(),

@@ -222,7 +222,7 @@ impl ProjectionState {
         cleanup_third_party_projection(invite);
         self.members.insert(
             (invite.realm_id.clone(), subject_id.clone()),
-            SolandMembershipState {
+            ColandMembershipState {
                 member: subject_id.clone(),
                 realm_id: invite.realm_id.clone(),
                 state: "invite".to_owned(),

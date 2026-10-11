@@ -483,7 +483,7 @@ async fn advance_active_intent_to_revoked(
 }
 
 fn device_revocation_input_digest(
-    transition: &soland_storage::DeviceRevocationTransition,
+    transition: &coland_storage::DeviceRevocationTransition,
 ) -> PersistenceResult<Hash> {
     let input = serde_json::json!({
         "operation": "ak.device.revoke.public_push",
@@ -590,7 +590,7 @@ async fn expire_public_push_registration(
                 )
                 .into());
             }
-            let route_authorization: soland_storage::DeviceRevocationGateSelector =
+            let route_authorization: coland_storage::DeviceRevocationGateSelector =
                 serde_json::from_value(route.device_authorization.clone()).map_err(|error| {
                     PersistenceError::Internal(format!(
                         "stored public push route authorization is invalid during expiry: {error}"
@@ -646,7 +646,7 @@ async fn expire_public_push_registration(
 /// or receipt commit from appearing between the scan and the tombstone write.
 pub(crate) async fn revoke_public_push_routes_for_device_in_connection(
     conn: &mut AsyncPgConnection,
-    transition: &soland_storage::DeviceRevocationTransition,
+    transition: &coland_storage::DeviceRevocationTransition,
 ) -> PersistenceResult<usize> {
     let selector_json =
         serde_json::to_value(&transition.selector).map_err(PersistenceError::database)?;
@@ -988,7 +988,7 @@ impl PushRegistrationHandoffStore for PgPushRegistrationHandoffStore {
         &self,
         source_station_id: &DidCoreId,
         local_route: &PushRegistrationHandoffRouteLocator,
-        device_authorization: &soland_storage::DeviceRevocationGateSelector,
+        device_authorization: &coland_storage::DeviceRevocationGateSelector,
         client_input_digest: &Hash,
         request: &PushRegistrationHandoffRequestBody,
         session_revocation_ref: Option<&str>,
@@ -1376,7 +1376,7 @@ impl PushRegistrationHandoffStore for PgPushRegistrationHandoffStore {
                                 .to_owned(),
                         )
                     })?;
-                let route_authorization: soland_storage::DeviceRevocationGateSelector =
+                let route_authorization: coland_storage::DeviceRevocationGateSelector =
                     serde_json::from_value(route_row.device_authorization.clone()).map_err(
                         |error| {
                             PersistenceError::Internal(format!(
@@ -1678,7 +1678,7 @@ impl PushRegistrationHandoffStore for PgPushRegistrationHandoffStore {
         registration_id: &PushRegistrationId,
         expected_request_digest: &Hash,
         receipt: &PushRegistrationInstallationReceipt,
-        authorization: &soland_storage::DeviceRevocationGateSelector,
+        authorization: &coland_storage::DeviceRevocationGateSelector,
         registration: &PushRegistrationRecord,
         session_revocation_ref: Option<&str>,
         now: chrono::DateTime<chrono::Utc>,
@@ -1774,8 +1774,8 @@ mod tests {
 
     use arkret_models_integration::PushRegistrationHandoffState;
     use arkret_wire::{AccountId, Audience, DeviceId, DidUrl, PayloadProof};
+    use coland_storage::{DeviceRevocationStore, PushDeviceStore};
     use serde_json::json;
-    use soland_storage::{DeviceRevocationStore, PushDeviceStore};
     use tokio::sync::Barrier;
 
     use super::*;
@@ -1839,7 +1839,7 @@ mod tests {
         destination: &DidCoreId,
     ) -> (
         PushRegistrationHandoffRouteLocator,
-        soland_storage::DeviceRevocationGateSelector,
+        coland_storage::DeviceRevocationGateSelector,
     ) {
         {
             let mut conn = pool.get().await.unwrap();
@@ -2010,7 +2010,7 @@ mod tests {
         store: &PgPushRegistrationHandoffStore,
         station_id: &DidCoreId,
         route: &PushRegistrationHandoffRouteLocator,
-        authorization: &soland_storage::DeviceRevocationGateSelector,
+        authorization: &coland_storage::DeviceRevocationGateSelector,
         request: &PushRegistrationHandoffRequestBody,
         client_digest: &Hash,
         at: chrono::DateTime<chrono::Utc>,
@@ -2942,7 +2942,7 @@ mod tests {
             .await
             .unwrap();
         PgDeviceRevocationStore { pool: pool.clone() }
-            .commit_revocation(&soland_storage::DeviceRevocationTransition {
+            .commit_revocation(&coland_storage::DeviceRevocationTransition {
                 selector: authorization.clone(),
                 revoke_ref: authorization.authorization_ref.clone(),
                 committed_at: started_at + chrono::Duration::seconds(6),
@@ -3654,7 +3654,7 @@ mod tests {
             .await
             .unwrap();
         PgDeviceRevocationStore { pool: pool.clone() }
-            .commit_revocation(&soland_storage::DeviceRevocationTransition {
+            .commit_revocation(&coland_storage::DeviceRevocationTransition {
                 selector: authorization.clone(),
                 revoke_ref: authorization.authorization_ref.clone(),
                 committed_at: started_at + chrono::Duration::seconds(3),
@@ -3691,14 +3691,14 @@ mod tests {
         let durable_revoke = revoked.canonical_request.clone();
         assert_eq!(
             PgDeviceRevocationStore { pool: pool.clone() }
-                .commit_revocation(&soland_storage::DeviceRevocationTransition {
+                .commit_revocation(&coland_storage::DeviceRevocationTransition {
                     selector: authorization.clone(),
                     revoke_ref: authorization.authorization_ref.clone(),
                     committed_at: started_at + chrono::Duration::seconds(3),
                 })
                 .await
                 .unwrap(),
-            soland_storage::DeviceRevocationTransitionDecision::Duplicate
+            coland_storage::DeviceRevocationTransitionDecision::Duplicate
         );
         assert_eq!(
             store
@@ -4016,7 +4016,7 @@ mod tests {
         }
         // The revocation is refused before its reference is recorded, so any
         // committed reference of this PCR serves as the attempted revoke.
-        let transition = soland_storage::DeviceRevocationTransition {
+        let transition = coland_storage::DeviceRevocationTransition {
             revoke_ref: authorization.authorization_ref.clone(),
             selector: authorization,
             committed_at: started_at + chrono::Duration::seconds(1),

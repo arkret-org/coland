@@ -1,7 +1,7 @@
 //! List native stream heads from an anchored replica's single read cut.
 
 use arkret_wire::{ActorId, CommitStreamRef, RealmId, RealmStreamRow};
-use soland_storage::AccountRealmStreamList;
+use coland_storage::AccountRealmStreamList;
 
 use super::{
     AsyncPgConnection, BigInt, Jsonb, PersistenceError, PersistenceResult, QueryableByName,

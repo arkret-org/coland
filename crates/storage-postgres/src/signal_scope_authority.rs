@@ -13,12 +13,12 @@ use arkret_wire::{
     RealmId, ScopeRef, SignalClass, WireResourceSelector,
 };
 use chrono::{DateTime, Utc};
-use diesel::sql_types::{Jsonb, Nullable, Text};
-use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
-use soland_storage::{
+use coland_storage::{
     AuthorizationOperation, OperationFacts, PersistenceError, PersistenceResult,
     SignalScopeAuthority, SignalScopeAuthorityQuery, evaluate_grants,
 };
+use diesel::sql_types::{Jsonb, Nullable, Text};
+use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 
 use crate::capability_grant_current_results::RealmAuthorityRootCurrent;
 use crate::{OptionalExtension, PgPool, PgTransactionError, pg_conn};

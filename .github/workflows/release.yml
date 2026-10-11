@@ -27,27 +27,27 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact: soland
+            artifact: coland
             archive: tar.gz
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            artifact: soland
+            artifact: coland
             archive: tar.gz
             cross: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact: soland.exe
+            artifact: coland.exe
             archive: zip
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact: soland
+            artifact: coland
             archive: tar.gz
 
     steps:
-      - name: Checkout soland
+      - name: Checkout coland
         uses: actions/checkout@v6
         with:
-          path: soland
+          path: coland
 
       - name: Checkout Arkret Rust SDK
         uses: actions/checkout@v6
@@ -74,7 +74,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/configure-windows-openssl.ps1
-        working-directory: soland
+        working-directory: coland
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -88,33 +88,33 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: soland -> target
+          workspaces: coland -> target
           key: ${{ matrix.target }}
 
       - name: Build (cargo)
         if: matrix.cross != true
         run: cargo build --release --locked --target ${{ matrix.target }}
-        working-directory: soland
+        working-directory: coland
 
       - name: Build (cross)
         if: matrix.cross == true
         run: cross build --release --locked --target ${{ matrix.target }}
-        working-directory: soland
+        working-directory: coland
 
       - name: Stage artifact
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p stage
-          cp "soland/target/${{ matrix.target }}/release/${{ matrix.artifact }}" "stage/${{ matrix.artifact }}"
-          cp soland/README.md soland/LICENSE stage/
+          cp "coland/target/${{ matrix.target }}/release/${{ matrix.artifact }}" "stage/${{ matrix.artifact }}"
+          cp coland/README.md coland/LICENSE stage/
 
       - name: Archive (tar.gz)
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
           set -euo pipefail
-          name="soland-${GITHUB_REF_NAME:-${{ inputs.tag }}}-${{ matrix.target }}"
+          name="coland-${GITHUB_REF_NAME:-${{ inputs.tag }}}-${{ matrix.target }}"
           tar -C stage -czf "${name}.tar.gz" .
           sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
 
@@ -123,19 +123,19 @@ jobs:
         shell: pwsh
         run: |
           $tag = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { '${{ inputs.tag }}' }
-          $name = "soland-$tag-${{ matrix.target }}"
+          $name = "coland-$tag-${{ matrix.target }}"
           Compress-Archive -Path stage\* -DestinationPath "$name.zip"
           (Get-FileHash "$name.zip" -Algorithm SHA256).Hash + "  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: soland-${{ matrix.target }}
+          name: coland-${{ matrix.target }}
           path: |
-            soland-*.tar.gz
-            soland-*.tar.gz.sha256
-            soland-*.zip
-            soland-*.zip.sha256
+            coland-*.tar.gz
+            coland-*.tar.gz.sha256
+            coland-*.zip
+            coland-*.zip.sha256
           if-no-files-found: error
 
   release:

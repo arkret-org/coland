@@ -1,12 +1,12 @@
 use arkret_models_identity::PrincipalResolutionProjection;
 use arkret_wire::{AccountId, DidCoreId, Event, RealmId};
-use diesel::sql_types::{BigInt, Jsonb, Nullable, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::RunQueryDsl;
-use soland_storage::{
+use coland_storage::{
     PersistenceError, PersistenceResult, PrincipalResolutionCasResult, PrincipalResolutionRecord,
     PrincipalResolutionStore, validate_principal_resolution_record,
 };
+use diesel::sql_types::{BigInt, Jsonb, Nullable, Text, Timestamptz};
+use diesel::{OptionalExtension, QueryableByName, sql_query};
+use diesel_async::RunQueryDsl;
 
 use crate::{PgPool, async_trait, pg_conn};
 
@@ -295,14 +295,14 @@ impl PrincipalResolutionStore for PgPrincipalResolutionStore {
     async fn current_principal(
         &self,
         account_id: &AccountId,
-    ) -> PersistenceResult<soland_storage::CurrentPrincipalRead> {
+    ) -> PersistenceResult<coland_storage::CurrentPrincipalRead> {
         Ok(match self.indexed_by_account_id(account_id).await? {
-            Ok(Some(record)) => soland_storage::CurrentPrincipalRead::Ready {
+            Ok(Some(record)) => coland_storage::CurrentPrincipalRead::Ready {
                 pcr_realm_id: record.pcr_realm_id,
                 projection: record.projection,
             },
-            Ok(None) => soland_storage::CurrentPrincipalRead::Missing,
-            Err(_) => soland_storage::CurrentPrincipalRead::Unavailable,
+            Ok(None) => coland_storage::CurrentPrincipalRead::Missing,
+            Err(_) => coland_storage::CurrentPrincipalRead::Unavailable,
         })
     }
     async fn by_account_id(

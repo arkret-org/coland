@@ -32,7 +32,7 @@ pub struct MemberIdentityEventRecord {
     /// (mismatched / cross-subject references are dropped as no-op edges per
     /// MID-2).
     pub replaces: Vec<MemberIdentityReplacementEdge>,
-    /// Original Event envelope as received. MID-5: soland MUST store the
+    /// Original Event envelope as received. MID-5: coland MUST store the
     /// envelope verbatim; no query-time re-encryption, no projection
     /// rewrite.
     pub raw_event: Value,

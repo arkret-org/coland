@@ -1,5 +1,5 @@
+use coland_services::identity::SessionIdentityState as SessionRecord;
 use salvo::prelude::*;
-use soland_services::identity::SessionIdentityState as SessionRecord;
 
 mod account_authority_private;
 pub(crate) mod event_log;
@@ -39,7 +39,7 @@ pub fn router() -> Router {
 pub(crate) fn require_agent_session_scope(
     session: &SessionRecord,
     required_scope: &str,
-) -> Result<(), soland_http::error::AppError> {
+) -> Result<(), coland_http::error::AppError> {
     let Some(agent_session) = session.agent_session() else {
         return Ok(());
     };
@@ -50,12 +50,12 @@ pub(crate) fn require_agent_session_scope(
     {
         return Ok(());
     }
-    Err(soland_http::error::AppError::capability_denied(format!(
+    Err(coland_http::error::AppError::capability_denied(format!(
         "agent session scope {required_scope} is required"
     )))
 }
 
-/// Product-private (`/_soland/self/*`) projection read surface: single-Strand
+/// Product-private (`/_coland/self/*`) projection read surface: single-Strand
 /// object read with materialized `fields`, and the relation edge list. These
 /// stay off the canonical `/_arkret/*` protocol root per
 /// `service-http-binding.md` §2.1.3 (relation / object direct reads beyond the
@@ -94,7 +94,7 @@ pub fn peer_router() -> Router {
 mod tests {
     use arkret_wire::FreshnessState;
     use chrono::Utc;
-    use soland_services::identity::AgentSessionState as AgentSessionRecord;
+    use coland_services::identity::AgentSessionState as AgentSessionRecord;
 
     use super::*;
 
@@ -103,9 +103,9 @@ mod tests {
             account_pk: None,
             token_hash: "grant".to_owned(),
             actor: "did:web:agent.example".to_owned(),
-            audience: "did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:soland.local:webvh:service".to_owned(),
+            audience: "did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:coland.local:webvh:service".to_owned(),
             session_public_key: Some("{}".to_owned()),
-            endpoint: soland_services::identity::SessionEndpointState::AgentRuntime { state: AgentSessionRecord {
+            endpoint: coland_services::identity::SessionEndpointState::AgentRuntime { state: AgentSessionRecord {
                 granted_scope: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
                 scope_details: serde_json::json!({
                     "controller_principal_id": "ak:did_core:web:alice.example",
@@ -131,8 +131,8 @@ mod tests {
             account_pk: None,
             token_hash: "human".to_owned(),
             actor: "did:web:alice.example".to_owned(),
-            endpoint: soland_services::identity::SessionEndpointState::HumanDevice { device_id: "ak:device:0196419b-0000-7000-8000-000000000001".to_owned() },
-            audience: "did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:soland.local:webvh:service".to_owned(),
+            endpoint: coland_services::identity::SessionEndpointState::HumanDevice { device_id: "ak:device:0196419b-0000-7000-8000-000000000001".to_owned() },
+            audience: "did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:coland.local:webvh:service".to_owned(),
             session_public_key: None,
             session_grant: None,
             expires_at: Utc::now() + chrono::Duration::minutes(5),

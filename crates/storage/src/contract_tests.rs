@@ -50,7 +50,7 @@ pub async fn assert_account_localpart_remove_contract(
     localparts: &dyn AccountLocalpartStore,
     namespace: &str,
 ) {
-    let station_id = DidCoreId::new("ak:did_core:web:soland.example").unwrap();
+    let station_id = DidCoreId::new("ak:did_core:web:coland.example").unwrap();
     let owner_pk = accounts
         .put(&AccountRecord {
             pk: AccountPk(0),
@@ -3403,7 +3403,7 @@ pub async fn assert_last_resort_claim_ledger_contract(
         key_package_use: "last_resort".to_owned(),
         state: "last_resort_claimed".to_owned(),
         outcome: Some(serde_json::json!({
-            "schema": "soland.last_resort_keypackage_claim.v1",
+            "schema": "coland.last_resort_keypackage_claim.v1",
             "keypackage_id": keypackage.id,
             "keypackage_ref": keypackage.keypackage_ref,
             "keypackage_digest": keypackage.keypackage_digest,
@@ -4432,7 +4432,7 @@ pub async fn assert_invite_new_source_ledger_contract(
 ) {
     let holder = arkret_wire::AccountId::new(
         DidCoreId::new(format!("ak:did_core:web:{namespace}.example")).unwrap(),
-        DidCoreId::new("ak:did_core:web:soland.example").unwrap(),
+        DidCoreId::new("ak:did_core:web:coland.example").unwrap(),
     );
     accounts
         .put(&super::AccountRecord {

@@ -6,9 +6,9 @@ use arkret_models_collaboration::events_payloads::{ContentBlock, RealmPurpose};
 use arkret_models_collaboration::governance::plaintext_visibility::PlaintextVisibleServicesPayload;
 use arkret_models_collaboration::objects::space::ChildScopePolicy;
 use arkret_wire::{CommitStreamRef, Event, PlaintextDataClassKind};
+use coland_domain::reducer::ProjectionState;
+use coland_storage::{CanonicalEventRecord, RealmMetaRecord};
 use serde_json::Value;
-use soland_domain::reducer::ProjectionState;
-use soland_storage::{CanonicalEventRecord, RealmMetaRecord};
 
 use crate::events::{DirectoryProvenance, RealmDirectoryEntry, RealmDirectoryIndex};
 
@@ -111,11 +111,11 @@ fn operation_from_hydration_record(
     projection_adapter: &dyn HydrationProjectionAdapter,
     record: &CanonicalEventRecord,
     projection_name: &str,
-) -> soland_storage::PersistenceResult<arkret_event_draft::ProjectedEventOperation> {
+) -> coland_storage::PersistenceResult<arkret_event_draft::ProjectedEventOperation> {
     projection_adapter
         .operation_from_canonical_record(&application_canonical_event(record))
         .ok_or_else(|| {
-            soland_storage::PersistenceError::Internal(format!(
+            coland_storage::PersistenceError::Internal(format!(
                 "{projection_name} canonical Event {} cannot be projected",
                 record.event_id
             ))
@@ -126,9 +126,9 @@ fn replay_hydration_record(
     projection_adapter: &dyn HydrationProjectionAdapter,
     proj: &mut ProjectionState,
     record: CanonicalEventRecord,
-    hydration_hlc: &soland_domain::hlc::ServerHlc,
+    hydration_hlc: &coland_domain::hlc::ServerHlc,
     projection_name: &str,
-) -> soland_storage::PersistenceResult<()> {
+) -> coland_storage::PersistenceResult<()> {
     replay_hydration_record_with_commit(
         projection_adapter,
         proj,
@@ -143,20 +143,20 @@ fn replay_hydration_record_with_commit(
     projection_adapter: &dyn HydrationProjectionAdapter,
     proj: &mut ProjectionState,
     record: CanonicalEventRecord,
-    hydration_hlc: &soland_domain::hlc::ServerHlc,
+    hydration_hlc: &coland_domain::hlc::ServerHlc,
     projection_name: &str,
     committed_ref: Option<arkret_wire::CommittedEventRef>,
-) -> soland_storage::PersistenceResult<()> {
+) -> coland_storage::PersistenceResult<()> {
     let mut operation =
         operation_from_hydration_record(projection_adapter, &record, projection_name)?;
     if let Some(reference) = committed_ref {
         operation = operation
             .with_committed_ref(reference)
-            .map_err(|error| soland_storage::PersistenceError::Internal(error.to_string()))?;
+            .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))?;
     }
     if record.kind == arkret_wire::EventKind::CircleMemberState.as_str() {
         let payload = operation.payload.as_object_mut().ok_or_else(|| {
-            soland_storage::PersistenceError::Internal(format!(
+            coland_storage::PersistenceError::Internal(format!(
                 "{projection_name} projection event {} has a non-object payload",
                 record.event_id
             ))
@@ -166,10 +166,10 @@ fn replay_hydration_record_with_commit(
         // payload remains closed and never persists this internal field.
         payload.insert("manage_capability_verified".to_owned(), Value::Bool(true));
     }
-    if let soland_domain::reducer::ProjectionEffect::Rejected { reason } =
+    if let coland_domain::reducer::ProjectionEffect::Rejected { reason } =
         proj.apply(&operation, hydration_hlc)
     {
-        return Err(soland_storage::PersistenceError::Internal(format!(
+        return Err(coland_storage::PersistenceError::Internal(format!(
             "{projection_name} projection event {} failed deterministic hydration: {reason}",
             record.event_id
         )));
@@ -183,23 +183,23 @@ fn replay_hydration_record_with_commit(
 /// settled on its own commit stream and is not a producer Event field, so the
 /// two enums are converted at this boundary rather than aliased.
 fn sidecar_projection_state(
-    state: soland_storage::SidecarLifecycleState,
+    state: coland_storage::SidecarLifecycleState,
 ) -> arkret_models_collaboration::agent_sidecar::AgentSidecarState {
     use arkret_models_collaboration::agent_sidecar::AgentSidecarState;
 
     match state {
-        soland_storage::SidecarLifecycleState::Active => AgentSidecarState::Active,
-        soland_storage::SidecarLifecycleState::Suspended => AgentSidecarState::Suspended,
-        soland_storage::SidecarLifecycleState::Tombstoned => AgentSidecarState::Tombstoned,
+        coland_storage::SidecarLifecycleState::Active => AgentSidecarState::Active,
+        coland_storage::SidecarLifecycleState::Suspended => AgentSidecarState::Suspended,
+        coland_storage::SidecarLifecycleState::Tombstoned => AgentSidecarState::Tombstoned,
     }
 }
 
 pub async fn hydrate_sidecar_projections(
-    persistence: &dyn soland_storage::PersistenceStore,
+    persistence: &dyn coland_storage::PersistenceStore,
     proj: &mut ProjectionState,
-    _hydration_hlc: &soland_domain::hlc::ServerHlc,
-) -> soland_storage::PersistenceResult<()> {
-    use soland_domain::reducer::SidecarProjection;
+    _hydration_hlc: &coland_domain::hlc::ServerHlc,
+) -> coland_storage::PersistenceResult<()> {
+    use coland_domain::reducer::SidecarProjection;
 
     let records = persistence.sidecars().snapshot_all().await?;
     for record in records {
@@ -233,11 +233,11 @@ pub async fn hydrate_sidecar_projections(
 }
 
 pub async fn hydrate_sidecar_context_projections(
-    persistence: &dyn soland_storage::PersistenceStore,
+    persistence: &dyn coland_storage::PersistenceStore,
     proj: &mut ProjectionState,
-    hydration_hlc: &soland_domain::hlc::ServerHlc,
+    hydration_hlc: &coland_domain::hlc::ServerHlc,
     projection_adapter: &dyn HydrationProjectionAdapter,
-) -> soland_storage::PersistenceResult<()> {
+) -> coland_storage::PersistenceResult<()> {
     let events = hydration_replay_records(persistence).await?;
     for event in events {
         if event.kind == arkret_wire::EventKind::SidecarContextAttach.as_str() {
@@ -261,26 +261,26 @@ pub async fn hydrate_sidecar_context_projections(
 /// Sidecar stream, so there is no second plane to reconcile and no timeline
 /// publication check left to apply.
 async fn hydration_replay_records(
-    persistence: &dyn soland_storage::PersistenceStore,
-) -> soland_storage::PersistenceResult<Vec<CanonicalEventRecord>> {
+    persistence: &dyn coland_storage::PersistenceStore,
+) -> coland_storage::PersistenceResult<Vec<CanonicalEventRecord>> {
     let records = persistence.events().snapshot_all().await?;
     ordered_hydration_replay_records(persistence, records).await
 }
 
 async fn ordered_hydration_replay_records(
-    persistence: &dyn soland_storage::PersistenceStore,
+    persistence: &dyn coland_storage::PersistenceStore,
     records: Vec<CanonicalEventRecord>,
-) -> soland_storage::PersistenceResult<Vec<CanonicalEventRecord>> {
+) -> coland_storage::PersistenceResult<Vec<CanonicalEventRecord>> {
     let mut ordered = BTreeMap::new();
     for record in records {
         let id = arkret_wire::EventId::new(record.event_id.clone())
-            .map_err(soland_storage::PersistenceError::database)?;
+            .map_err(coland_storage::PersistenceError::database)?;
         let accepted = persistence
             .authority_commits()
             .committed_event(&id)
             .await?
             .ok_or_else(|| {
-                soland_storage::PersistenceError::Internal(
+                coland_storage::PersistenceError::Internal(
                     "hydration canonical Event has no accepting Commit".to_owned(),
                 )
             })?;
@@ -290,25 +290,25 @@ async fn ordered_hydration_replay_records(
             .event
             .verify_event_id_matches_content_with_digest_suite(record.digest_suite)
             .map_err(|_| {
-                soland_storage::PersistenceError::Internal(
+                coland_storage::PersistenceError::Internal(
                     "hydration canonical Event differs from its Commit binding".to_owned(),
                 )
             })?;
         if serde_json::to_value(&accepted.event)
-            .map_err(soland_storage::PersistenceError::database)?
+            .map_err(coland_storage::PersistenceError::database)?
             != record.envelope
         {
-            return Err(soland_storage::PersistenceError::Internal(
+            return Err(coland_storage::PersistenceError::Internal(
                 "hydration canonical Event differs from its Commit binding".to_owned(),
             ));
         }
         let stream = arkret_canonical::canonical_json_bytes(&accepted.commit.stream_ref)
-            .map_err(soland_storage::PersistenceError::database)?;
+            .map_err(coland_storage::PersistenceError::database)?;
         if ordered
             .insert((stream, accepted.commit.stream_position), record)
             .is_some()
         {
-            return Err(soland_storage::PersistenceError::Internal(
+            return Err(coland_storage::PersistenceError::Internal(
                 "hydration contains two Events at one Commit stream position".to_owned(),
             ));
         }
@@ -318,10 +318,10 @@ async fn ordered_hydration_replay_records(
 
 fn install_relation_current_results(
     proj: &mut ProjectionState,
-    records: Vec<soland_storage::RelationCurrentResultRecord>,
-) -> soland_storage::PersistenceResult<()> {
+    records: Vec<coland_storage::RelationCurrentResultRecord>,
+) -> coland_storage::PersistenceResult<()> {
     use arkret_wire::RelationState;
-    use soland_domain::reducer::{RelationCurrentResultProjection, SolandRelationState};
+    use coland_domain::reducer::{ColandRelationState, RelationCurrentResultProjection};
 
     let mut staged_relations = std::collections::BTreeMap::new();
     let mut staged_current = std::collections::BTreeMap::new();
@@ -329,13 +329,13 @@ fn install_relation_current_results(
     for record in records {
         let relation = record.relation;
         let relation_id = relation.id.clone().ok_or_else(|| {
-            soland_storage::PersistenceError::Internal(
+            coland_storage::PersistenceError::Internal(
                 "durable Relation current value has no derived id".to_owned(),
             )
         })?;
         let source_event_id = arkret_wire::EventId::from_token_bytes(relation_id.token_bytes())
             .map_err(|error| {
-                soland_storage::PersistenceError::Internal(format!(
+                coland_storage::PersistenceError::Internal(format!(
                     "durable Relation id cannot be retyped as its create Event: {error}"
                 ))
             })?;
@@ -343,7 +343,7 @@ fn install_relation_current_results(
             Some(RelationState::Active) => "active",
             Some(RelationState::Tombstoned) => "tombstoned",
             None => {
-                return Err(soland_storage::PersistenceError::Internal(
+                return Err(coland_storage::PersistenceError::Internal(
                     "durable Relation current value has no lifecycle state".to_owned(),
                 ));
             }
@@ -352,7 +352,7 @@ fn install_relation_current_results(
         let current_key = (record.realm_id.to_string(), record.domain_key);
         if staged_current.contains_key(&current_key) || staged_relations.contains_key(&relation_id)
         {
-            return Err(soland_storage::PersistenceError::Internal(
+            return Err(coland_storage::PersistenceError::Internal(
                 "durable Relation current results contain duplicate identity".to_owned(),
             ));
         }
@@ -367,7 +367,7 @@ fn install_relation_current_results(
         );
         staged_relations.insert(
             relation_id.clone(),
-            SolandRelationState {
+            ColandRelationState {
                 relation_id,
                 realm_id: record.realm_id.to_string(),
                 relation_kind: relation.relation_kind.as_str().to_owned(),
@@ -393,7 +393,7 @@ fn install_relation_current_results(
         .keys()
         .any(|id| proj.relations.contains_key(id) && !previous_current_ids.contains(id))
     {
-        return Err(soland_storage::PersistenceError::Internal(
+        return Err(coland_storage::PersistenceError::Internal(
             "durable Relation current result collides with a non-current projection".to_owned(),
         ));
     }
@@ -410,12 +410,12 @@ fn install_relation_current_results(
 /// Rebuild ordinary Realm genesis from its exact confirmed command unit.
 /// Raw admission, actor sequence and timestamps confer no execution outcome.
 async fn hydrate_canonical_realm_bootstraps(
-    persistence: &dyn soland_storage::PersistenceStore,
+    persistence: &dyn coland_storage::PersistenceStore,
     proj: &mut ProjectionState,
-    hydration_hlc: &soland_domain::hlc::ServerHlc,
+    hydration_hlc: &coland_domain::hlc::ServerHlc,
     projection_adapter: &dyn HydrationProjectionAdapter,
-) -> soland_storage::PersistenceResult<()> {
-    use soland_domain::reducer::ProjectionEffect;
+) -> coland_storage::PersistenceResult<()> {
+    use coland_domain::reducer::ProjectionEffect;
 
     let records = hydration_replay_records(persistence).await?;
     for create in records
@@ -432,14 +432,14 @@ async fn hydrate_canonical_realm_bootstraps(
         // restart paths silently grow different interpretations.
         let create_event =
             serde_json::from_value::<Event>(create.envelope.clone()).map_err(|error| {
-                soland_storage::PersistenceError::Internal(format!(
+                coland_storage::PersistenceError::Internal(format!(
                     "canonical Realm create failed SDK Event decode: {error}"
                 ))
             })?;
         let create_payload = create_event
             .typed_payload::<arkret_wire::event_spec::RealmCreate>()
             .map_err(|error| {
-                soland_storage::PersistenceError::Internal(format!(
+                coland_storage::PersistenceError::Internal(format!(
                     "canonical Realm create failed typed payload decode: {error}"
                 ))
             })?;
@@ -467,13 +467,13 @@ async fn hydrate_canonical_realm_bootstraps(
                     projection_adapter
                         .operation_from_canonical_record(&application_canonical_event(record))
                         .ok_or_else(|| {
-                            soland_storage::PersistenceError::Internal(format!(
+                            coland_storage::PersistenceError::Internal(format!(
                                 "ordinary bootstrap Event {} cannot rebuild its projection operation",
                                 record.event_id
                             ))
                         })
                 })
-                .collect::<soland_storage::PersistenceResult<Vec<_>>>()?;
+                .collect::<coland_storage::PersistenceResult<Vec<_>>>()?;
             let mut staged = proj.clone();
             crate::projection::ProjectionService::apply_realm_bootstrap_to_state(
                 &mut staged,
@@ -482,7 +482,7 @@ async fn hydrate_canonical_realm_bootstraps(
                 hydration_hlc,
             )
             .map_err(|error| {
-                soland_storage::PersistenceError::Internal(format!(
+                coland_storage::PersistenceError::Internal(format!(
                     "confirmed ordinary bootstrap failed deterministic hydration at slot {}: {}",
                     error.operation_index, error.reason
                 ))
@@ -499,7 +499,7 @@ async fn hydrate_canonical_realm_bootstraps(
         // ordinary replay paths that already own those Event kinds.
         arkret_policy::realm_bootstrap::validate_realm_genesis_event(&create_event).map_err(
             |error| {
-                soland_storage::PersistenceError::Internal(format!(
+                coland_storage::PersistenceError::Internal(format!(
                     "canonical Realm genesis failed deterministic validation: {error}"
                 ))
             },
@@ -508,7 +508,7 @@ async fn hydrate_canonical_realm_bootstraps(
         let Some(operation) = projection_adapter
             .operation_from_canonical_record(&application_canonical_event(create))
         else {
-            return Err(soland_storage::PersistenceError::Internal(format!(
+            return Err(coland_storage::PersistenceError::Internal(format!(
                 "Realm genesis Event {} cannot rebuild its projection operation",
                 create.event_id
             )));
@@ -516,13 +516,13 @@ async fn hydrate_canonical_realm_bootstraps(
         let mut staged = proj.clone();
         match staged.apply_projected(&operation, hydration_hlc) {
             ProjectionEffect::Rejected { reason } => {
-                return Err(soland_storage::PersistenceError::Internal(format!(
+                return Err(coland_storage::PersistenceError::Internal(format!(
                     "Realm genesis Event {} failed deterministic hydration: {reason}",
                     create.event_id
                 )));
             }
             ProjectionEffect::Ignored => {
-                return Err(soland_storage::PersistenceError::Internal(format!(
+                return Err(coland_storage::PersistenceError::Internal(format!(
                     "Realm genesis Event {} was ignored during deterministic hydration",
                     create.event_id
                 )));
@@ -535,10 +535,10 @@ async fn hydrate_canonical_realm_bootstraps(
 }
 
 async fn confirmed_ordinary_bootstrap_facets(
-    persistence: &dyn soland_storage::PersistenceStore,
+    persistence: &dyn coland_storage::PersistenceStore,
     records: &[CanonicalEventRecord],
     create: &Event,
-) -> soland_storage::PersistenceResult<Option<Vec<CanonicalEventRecord>>> {
+) -> coland_storage::PersistenceResult<Option<Vec<CanonicalEventRecord>>> {
     use arkret_schema::{
         RealmBootstrapPresence, RealmBootstrapProfile, realm_bootstrap_profile_descriptor,
     };
@@ -557,7 +557,7 @@ async fn confirmed_ordinary_bootstrap_facets(
         .scan_stream(&request)
         .await?;
     scan.validate_for_request(&request).map_err(|error| {
-        soland_storage::PersistenceError::Internal(format!(
+        coland_storage::PersistenceError::Internal(format!(
             "ordinary bootstrap confirmed stream is invalid: {error}"
         ))
     })?;
@@ -577,17 +577,17 @@ async fn confirmed_ordinary_bootstrap_facets(
     let mut prefix = Vec::new();
     for (position, item) in items.iter().enumerate() {
         if item.commit().stream_position != position as u64 {
-            return Err(soland_storage::PersistenceError::Internal(
+            return Err(coland_storage::PersistenceError::Internal(
                 "ordinary bootstrap confirmed positions are discontinuous".to_owned(),
             ));
         }
         let event = item.reducer_input().ok_or_else(|| {
-            soland_storage::PersistenceError::Internal(
+            coland_storage::PersistenceError::Internal(
                 "ordinary bootstrap confirmed Event was withheld".to_owned(),
             )
         })?;
         if event.actor_id != create.actor_id || event.realm_id != create.realm_id {
-            return Err(soland_storage::PersistenceError::Internal(
+            return Err(coland_storage::PersistenceError::Internal(
                 "ordinary bootstrap confirmed actor or Realm changed".to_owned(),
             ));
         }
@@ -606,7 +606,7 @@ async fn confirmed_ordinary_bootstrap_facets(
         {
             cursor.next();
         } else if slot.presence == RealmBootstrapPresence::Required {
-            return Err(soland_storage::PersistenceError::Internal(format!(
+            return Err(coland_storage::PersistenceError::Internal(format!(
                 "confirmed ordinary bootstrap is missing required slot {}",
                 slot.event_kind
             )));
@@ -617,7 +617,7 @@ async fn confirmed_ordinary_bootstrap_facets(
             .last()
             .is_none_or(|event| event.kind != arkret_wire::EventKind::MemberState)
     {
-        return Err(soland_storage::PersistenceError::Internal(
+        return Err(coland_storage::PersistenceError::Internal(
             "confirmed ordinary bootstrap has an unregistered or incomplete prefix".to_owned(),
         ));
     }
@@ -636,13 +636,13 @@ async fn confirmed_ordinary_bootstrap_facets(
                 .get(event.event_id.as_str())
                 .map(|record| (*record).clone())
                 .ok_or_else(|| {
-                    soland_storage::PersistenceError::Internal(format!(
+                    coland_storage::PersistenceError::Internal(format!(
                         "confirmed ordinary bootstrap Event {} is missing from canonical snapshot",
                         event.event_id
                     ))
                 })
         })
-        .collect::<soland_storage::PersistenceResult<Vec<_>>>()
+        .collect::<coland_storage::PersistenceResult<Vec<_>>>()
         .map(Some)
 }
 
@@ -656,12 +656,12 @@ async fn confirmed_ordinary_bootstrap_facets(
 /// confirmed command order. Agent lifecycle must be restored before
 /// ordinary Realm membership is replayed; Applet PCRs never gain Agent status.
 async fn hydrate_managed_pcr_identity(
-    persistence: &dyn soland_storage::PersistenceStore,
+    persistence: &dyn coland_storage::PersistenceStore,
     proj: &mut ProjectionState,
-    hydration_hlc: &soland_domain::hlc::ServerHlc,
+    hydration_hlc: &coland_domain::hlc::ServerHlc,
     projection_adapter: &dyn HydrationProjectionAdapter,
-) -> soland_storage::PersistenceResult<()> {
-    use soland_domain::reducer::ProjectionEffect;
+) -> coland_storage::PersistenceResult<()> {
+    use coland_domain::reducer::ProjectionEffect;
 
     let records = hydration_replay_records(persistence).await?;
     let mut managed_pcr_realms = BTreeSet::new();
@@ -670,14 +670,14 @@ async fn hydrate_managed_pcr_identity(
         .filter(|record| record.kind == arkret_wire::EventKind::RealmCreate.as_str())
     {
         let event = serde_json::from_value::<Event>(record.envelope.clone()).map_err(|error| {
-            soland_storage::PersistenceError::Internal(format!(
+            coland_storage::PersistenceError::Internal(format!(
                 "canonical Managed PCR create failed SDK Event decode: {error}"
             ))
         })?;
         let payload = event
             .typed_payload::<arkret_wire::event_spec::RealmCreate>()
             .map_err(|error| {
-                soland_storage::PersistenceError::Internal(format!(
+                coland_storage::PersistenceError::Internal(format!(
                     "canonical Managed PCR create failed typed payload decode: {error}"
                 ))
             })?;
@@ -708,7 +708,7 @@ async fn hydrate_managed_pcr_identity(
     let mut current_by_realm = BTreeMap::new();
     for record in lineage {
         let typed = serde_json::from_value::<Event>(record.envelope.clone()).map_err(|error| {
-            soland_storage::PersistenceError::Internal(format!(
+            coland_storage::PersistenceError::Internal(format!(
                 "Managed PCR Event {} failed SDK Event decode: {error}",
                 record.event_id
             ))
@@ -716,20 +716,20 @@ async fn hydrate_managed_pcr_identity(
         let operation = projection_adapter
             .operation_from_canonical_record(&application_canonical_event(&record))
             .ok_or_else(|| {
-                soland_storage::PersistenceError::Internal(format!(
+                coland_storage::PersistenceError::Internal(format!(
                     "Managed PCR Event {} cannot rebuild its projection operation",
                     record.event_id
                 ))
             })?;
         match proj.apply_projected(&operation, hydration_hlc) {
             ProjectionEffect::Rejected { reason } => {
-                return Err(soland_storage::PersistenceError::Internal(format!(
+                return Err(coland_storage::PersistenceError::Internal(format!(
                     "Managed PCR Event {} failed deterministic hydration: {reason}",
                     record.event_id
                 )));
             }
             ProjectionEffect::Ignored => {
-                return Err(soland_storage::PersistenceError::Internal(format!(
+                return Err(coland_storage::PersistenceError::Internal(format!(
                     "Managed PCR Event {} was ignored during deterministic hydration",
                     record.event_id
                 )));
@@ -756,7 +756,7 @@ async fn hydrate_managed_pcr_identity(
             .get(&pcr_realm_id)
             .cloned()
             .ok_or_else(|| {
-                soland_storage::PersistenceError::Internal(format!(
+                coland_storage::PersistenceError::Internal(format!(
                     "Managed PCR {} has no canonical genesis during hydration",
                     pcr_realm_id
                 ))
@@ -765,13 +765,13 @@ async fn hydrate_managed_pcr_identity(
             .principal_resolution_for_realm(pcr_realm_id.as_str())
             .cloned()
             .ok_or_else(|| {
-                soland_storage::PersistenceError::Internal(format!(
+                coland_storage::PersistenceError::Internal(format!(
                     "Managed PCR {} did not materialize current resolution during hydration",
                     pcr_realm_id
                 ))
             })?;
         let projection = serde_json::from_value(projection_value).map_err(|error| {
-            soland_storage::PersistenceError::Internal(format!(
+            coland_storage::PersistenceError::Internal(format!(
                 "Managed PCR {} materialized invalid resolution: {error}",
                 pcr_realm_id
             ))
@@ -794,13 +794,13 @@ async fn hydrate_managed_pcr_identity(
             .as_account_id()
             .cloned()
             .ok_or_else(|| {
-                soland_storage::PersistenceError::Internal(format!(
+                coland_storage::PersistenceError::Internal(format!(
                     "Managed PCR {} genesis actor is not an AccountId",
                     pcr_realm_id
                 ))
             })?;
         let expected_current_event_id = current_event.event_id.clone();
-        let next = soland_storage::PrincipalResolutionRecord {
+        let next = coland_storage::PrincipalResolutionRecord {
             account_id,
             pcr_realm_id: pcr_realm_id.clone(),
             genesis_event,
@@ -812,11 +812,11 @@ async fn hydrate_managed_pcr_identity(
             .compare_and_set(expected, next)
             .await?
         {
-            soland_storage::PrincipalResolutionCasResult::Applied(_) => {}
-            soland_storage::PrincipalResolutionCasResult::Conflict(Some(record))
+            coland_storage::PrincipalResolutionCasResult::Applied(_) => {}
+            coland_storage::PrincipalResolutionCasResult::Conflict(Some(record))
                 if record.current_event.event_id == expected_current_event_id => {}
-            soland_storage::PrincipalResolutionCasResult::Conflict(_) => {
-                return Err(soland_storage::PersistenceError::Internal(format!(
+            coland_storage::PrincipalResolutionCasResult::Conflict(_) => {
+                return Err(coland_storage::PersistenceError::Internal(format!(
                     "Managed PCR {} read-index repair CAS conflict",
                     pcr_realm_id
                 )));
@@ -835,11 +835,11 @@ async fn hydrate_managed_pcr_identity(
 /// views disagreeing after every restart: the member is visible in Realm
 /// rosters while the Circle reducer rejects it as a non-member.
 pub async fn hydrate_canonical_realm_memberships(
-    persistence: &dyn soland_storage::PersistenceStore,
+    persistence: &dyn coland_storage::PersistenceStore,
     proj: &mut ProjectionState,
     projection_adapter: &dyn HydrationProjectionAdapter,
-) -> soland_storage::PersistenceResult<()> {
-    use soland_domain::reducer::ProjectionEffect;
+) -> coland_storage::PersistenceResult<()> {
+    use coland_domain::reducer::ProjectionEffect;
 
     let all_records = hydration_replay_records(persistence).await?;
     let invite_times = all_records
@@ -870,7 +870,7 @@ pub async fn hydrate_canonical_realm_memberships(
         let Some(operation) = projection_adapter
             .operation_from_canonical_record(&application_canonical_event(&record))
         else {
-            return Err(soland_storage::PersistenceError::Internal(format!(
+            return Err(coland_storage::PersistenceError::Internal(format!(
                 "Realm membership Event {} cannot rebuild its projection operation",
                 record.event_id
             )));
@@ -879,7 +879,7 @@ pub async fn hydrate_canonical_realm_memberships(
             let accepted = operation
                 .typed_payload::<arkret_wire::event_spec::InviteAccept>()
                 .map_err(|error| {
-                    soland_storage::PersistenceError::Internal(format!(
+                    coland_storage::PersistenceError::Internal(format!(
                         "accepted invite {} cannot rebuild membership: {error}",
                         record.event_id
                     ))
@@ -889,7 +889,7 @@ pub async fn hydrate_canonical_realm_memberships(
                     operation.context.sender.as_account_id() != Some(account)
                 })
             {
-                return Err(soland_storage::PersistenceError::Internal(format!(
+                return Err(coland_storage::PersistenceError::Internal(format!(
                     "accepted invite {} has a mismatched account",
                     record.event_id
                 )));
@@ -912,13 +912,13 @@ pub async fn hydrate_canonical_realm_memberships(
         }
         match proj.restore_accepted_membership(&operation, operation.created_at) {
             ProjectionEffect::Rejected { reason } => {
-                return Err(soland_storage::PersistenceError::Internal(format!(
+                return Err(coland_storage::PersistenceError::Internal(format!(
                     "Realm membership Event {} failed deterministic hydration: {reason}",
                     record.event_id
                 )));
             }
             ProjectionEffect::Ignored => {
-                return Err(soland_storage::PersistenceError::Internal(format!(
+                return Err(coland_storage::PersistenceError::Internal(format!(
                     "Realm membership Event {} was ignored during deterministic hydration",
                     record.event_id
                 )));
@@ -933,17 +933,17 @@ pub async fn hydrate_canonical_realm_memberships(
 /// Registered Space and Strand values come from RealmCommit-backed typed
 /// current rows; their old mirror tables cannot resurrect stale state.
 pub async fn hydrate_projections_from_persistence(
-    persistence: &dyn soland_storage::PersistenceStore,
+    persistence: &dyn coland_storage::PersistenceStore,
     proj: &mut ProjectionState,
     projection_adapter: &dyn HydrationProjectionAdapter,
-) -> soland_storage::PersistenceResult<()> {
-    use soland_domain::reducer::{
+) -> coland_storage::PersistenceResult<()> {
+    use coland_domain::reducer::{
         KeyPackageLifetimeProjection, MlsKeyPackageProjection, MorphProjection,
         ObjectLifecycleState, SpaceContainerLifecycleState, SpaceContainerProjection,
         StrandProjection, object_stage_from_wire_value,
     };
 
-    let hydration_hlc = soland_domain::hlc::ServerHlc::new("soland:projection-hydration");
+    let hydration_hlc = coland_domain::hlc::ServerHlc::new("coland:projection-hydration");
 
     hydrate_managed_pcr_identity(persistence, proj, &hydration_hlc, projection_adapter).await?;
     hydrate_canonical_realm_bootstraps(persistence, proj, &hydration_hlc, projection_adapter)
@@ -1002,7 +1002,7 @@ pub async fn hydrate_projections_from_persistence(
                     realm.updated_at = realm.updated_at.max(record.updated_at);
                 }
                 std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(soland_domain::reducer::SolandRealmState {
+                    entry.insert(coland_domain::reducer::ColandRealmState {
                         realm_id,
                         owner: Some(record.owner),
                         title: None,
@@ -1027,12 +1027,12 @@ pub async fn hydrate_projections_from_persistence(
     let current_objects = persistence.object_current_snapshot().snapshot().await?;
     for space in current_objects.spaces {
         let id = space.id.ok_or_else(|| {
-            soland_storage::PersistenceError::Internal(
+            coland_storage::PersistenceError::Internal(
                 "registered Space current has no id".to_owned(),
             )
         })?;
         let state = match space.state.ok_or_else(|| {
-            soland_storage::PersistenceError::Internal(
+            coland_storage::PersistenceError::Internal(
                 "registered Space current has no lifecycle state".to_owned(),
             )
         })? {
@@ -1065,12 +1065,12 @@ pub async fn hydrate_projections_from_persistence(
     let mut canonical_strands = BTreeMap::new();
     for strand in current_objects.strands {
         let id = strand.id.ok_or_else(|| {
-            soland_storage::PersistenceError::Internal(
+            coland_storage::PersistenceError::Internal(
                 "registered Strand current has no id".to_owned(),
             )
         })?;
         let state = match strand.state.ok_or_else(|| {
-            soland_storage::PersistenceError::Internal(
+            coland_storage::PersistenceError::Internal(
                 "registered Strand current has no lifecycle state".to_owned(),
             )
         })? {
@@ -1091,12 +1091,12 @@ pub async fn hydrate_projections_from_persistence(
                     .content
                     .map(serde_json::to_value)
                     .transpose()
-                    .map_err(soland_storage::PersistenceError::database)?,
+                    .map_err(coland_storage::PersistenceError::database)?,
                 encrypted_content: strand
                     .encrypted_content
                     .map(serde_json::to_value)
                     .transpose()
-                    .map_err(soland_storage::PersistenceError::database)?,
+                    .map_err(coland_storage::PersistenceError::database)?,
                 fields: metadata.fields,
                 state,
                 state_changed_at: strand.state_changed_at,
@@ -1132,21 +1132,21 @@ pub async fn hydrate_projections_from_persistence(
         )
     }) {
         let id = arkret_wire::EventId::new(record.event_id.clone())
-            .map_err(soland_storage::PersistenceError::database)?;
+            .map_err(coland_storage::PersistenceError::database)?;
         let accepted = persistence
             .authority_commits()
             .committed_event(&id)
             .await?
             .ok_or_else(|| {
-                soland_storage::PersistenceError::Internal(
+                coland_storage::PersistenceError::Internal(
                     "Circle hydration has no accepting Commit".to_owned(),
                 )
             })?;
         if serde_json::to_value(&accepted.event)
-            .map_err(soland_storage::PersistenceError::database)?
+            .map_err(coland_storage::PersistenceError::database)?
             != record.envelope
         {
-            return Err(soland_storage::PersistenceError::Internal(
+            return Err(coland_storage::PersistenceError::Internal(
                 "Circle hydration canonical Event differs from its Commit binding".to_owned(),
             ));
         }
@@ -1161,7 +1161,7 @@ pub async fn hydrate_projections_from_persistence(
                 })
                 || circle_creates.insert(circle_id, record.clone()).is_some()
             {
-                return Err(soland_storage::PersistenceError::Internal(
+                return Err(coland_storage::PersistenceError::Internal(
                     "Circle create hydration has an invalid or duplicate Realm-stream source"
                         .to_owned(),
                 ));
@@ -1172,7 +1172,7 @@ pub async fn hydrate_projections_from_persistence(
                 circle_id,
             } = &accepted.commit.stream_ref
             else {
-                return Err(soland_storage::PersistenceError::Internal(
+                return Err(coland_storage::PersistenceError::Internal(
                     "Circle transition hydration is outside its Circle stream".to_owned(),
                 ));
             };
@@ -1196,7 +1196,7 @@ pub async fn hydrate_projections_from_persistence(
                     )
                     .is_some()
             {
-                return Err(soland_storage::PersistenceError::Internal(
+                return Err(coland_storage::PersistenceError::Internal(
                     "Circle transition hydration has a conflicting Commit position".to_owned(),
                 ));
             }
@@ -1210,7 +1210,7 @@ pub async fn hydrate_projections_from_persistence(
         .keys()
         .any(|(circle_id, _)| !rebuilt_circle_ids.contains(circle_id.as_str()))
     {
-        return Err(soland_storage::PersistenceError::Internal(
+        return Err(coland_storage::PersistenceError::Internal(
             "Circle transition hydration has no accepted create".to_owned(),
         ));
     }
@@ -1233,23 +1233,23 @@ pub async fn hydrate_projections_from_persistence(
     }
     for circle_id in rebuilt_circle_ids {
         let circle = proj.circles.get_mut(&circle_id).ok_or_else(|| {
-            soland_storage::PersistenceError::Internal(
+            coland_storage::PersistenceError::Internal(
                 "accepted Circle create did not rebuild its projection".to_owned(),
             )
         })?;
         let realm_id = RealmId::new(circle.realm_id.clone())
-            .map_err(soland_storage::PersistenceError::database)?;
+            .map_err(coland_storage::PersistenceError::database)?;
         let scope = arkret_wire::ScopeRef::Circle {
             realm_id: realm_id.clone(),
             circle_id: CircleId::new(circle_id)
-                .map_err(soland_storage::PersistenceError::database)?,
+                .map_err(coland_storage::PersistenceError::database)?,
         };
         let group = persistence.mls_groups().current(&scope).await?;
         if group
             .as_ref()
             .is_some_and(|group| group.realm_id != realm_id || group.value.effective_scope != scope)
         {
-            return Err(soland_storage::PersistenceError::Internal(
+            return Err(coland_storage::PersistenceError::Internal(
                 "Circle MLS current has a mismatched effective scope".to_owned(),
             ));
         }
@@ -1258,7 +1258,7 @@ pub async fn hydrate_projections_from_persistence(
                 scope
                     .canonical_mls_group_id()
                     .map(|id| id.to_string())
-                    .map_err(soland_storage::PersistenceError::database)
+                    .map_err(coland_storage::PersistenceError::database)
             })
             .transpose()?;
     }
@@ -1361,26 +1361,26 @@ pub async fn hydrate_projections_from_persistence(
         .filter(|record| record.kind == arkret_wire::EventKind::StrandCreate.as_str())
         .map(|record| {
             let id = arkret_wire::EventId::new(record.event_id.clone())
-                .map_err(soland_storage::PersistenceError::database)?;
+                .map_err(coland_storage::PersistenceError::database)?;
             Ok(arkret_wire::StrandId::from_event_id(&id).to_string())
         })
-        .collect::<soland_storage::PersistenceResult<BTreeSet<_>>>()?;
+        .collect::<coland_storage::PersistenceResult<BTreeSet<_>>>()?;
     let default_strand_realms = events
         .iter()
         .filter(|event| event.kind == arkret_wire::EventKind::RealmSetDefaultStrand.as_str())
         .map(|event| {
             let realm_id = event.realm_id.as_ref().ok_or_else(|| {
-                soland_storage::PersistenceError::Internal(
+                coland_storage::PersistenceError::Internal(
                     "confirmed default Strand Event has no Realm".to_owned(),
                 )
             })?;
             RealmId::new(realm_id.clone()).map_err(|error| {
-                soland_storage::PersistenceError::Internal(format!(
+                coland_storage::PersistenceError::Internal(format!(
                     "confirmed default Strand Realm is invalid: {error}"
                 ))
             })
         })
-        .collect::<soland_storage::PersistenceResult<BTreeSet<_>>>()?;
+        .collect::<coland_storage::PersistenceResult<BTreeSet<_>>>()?;
     let replay_events = events
         .into_iter()
         .filter(|event| {
@@ -1438,21 +1438,21 @@ pub async fn hydrate_projections_from_persistence(
     let mut ordered_polls = BTreeMap::new();
     for record in poll_events {
         let id = arkret_wire::EventId::new(record.event_id.clone())
-            .map_err(soland_storage::PersistenceError::database)?;
+            .map_err(coland_storage::PersistenceError::database)?;
         let accepted = persistence
             .authority_commits()
             .committed_event(&id)
             .await?
             .ok_or_else(|| {
-                soland_storage::PersistenceError::Internal(
+                coland_storage::PersistenceError::Internal(
                     "poll hydration has no accepting Commit".to_owned(),
                 )
             })?;
         if serde_json::to_value(&accepted.event)
-            .map_err(soland_storage::PersistenceError::database)?
+            .map_err(coland_storage::PersistenceError::database)?
             != record.envelope
         {
-            return Err(soland_storage::PersistenceError::Internal(
+            return Err(coland_storage::PersistenceError::Internal(
                 "poll hydration canonical Event differs from its Commit binding".to_owned(),
             ));
         }
@@ -1463,7 +1463,7 @@ pub async fn hydrate_projections_from_persistence(
             stream_position: accepted.commit.stream_position,
         };
         let scope = arkret_canonical::canonical_json_bytes(&reference.stream_ref)
-            .map_err(soland_storage::PersistenceError::database)?;
+            .map_err(coland_storage::PersistenceError::database)?;
         ordered_polls.insert((scope, reference.stream_position), (record, reference));
     }
     for (record, reference) in ordered_polls.into_values() {
@@ -1494,7 +1494,7 @@ pub async fn hydrate_projections_from_persistence(
             .realm_default_strand_current(&realm_id)
             .await?
             .ok_or_else(|| {
-                soland_storage::PersistenceError::Internal(
+                coland_storage::PersistenceError::Internal(
                     "confirmed default Strand Event has no typed current result".to_owned(),
                 )
             })?;
@@ -1503,30 +1503,30 @@ pub async fn hydrate_projections_from_persistence(
             .as_object()
             .filter(|object| object.len() == 1)
             .ok_or_else(|| {
-                soland_storage::PersistenceError::Internal(
+                coland_storage::PersistenceError::Internal(
                     "default Strand current value is malformed".to_owned(),
                 )
             })?;
         let strand_id: arkret_wire::StrandId =
             serde_json::from_value(object.get("default_strand_id").cloned().ok_or_else(|| {
-                soland_storage::PersistenceError::Internal(
+                coland_storage::PersistenceError::Internal(
                     "default Strand current value has no pointer".to_owned(),
                 )
             })?)
             .map_err(|error| {
-                soland_storage::PersistenceError::Internal(format!(
+                coland_storage::PersistenceError::Internal(format!(
                     "default Strand current pointer is invalid: {error}"
                 ))
             })?;
         let strand = proj.strands.get(strand_id.as_str()).ok_or_else(|| {
-            soland_storage::PersistenceError::Internal(
+            coland_storage::PersistenceError::Internal(
                 "default Strand current pointer is dangling".to_owned(),
             )
         })?;
         if strand.realm_id != realm_id.as_str()
-            || strand.state == soland_domain::reducer::ObjectLifecycleState::Redacted
+            || strand.state == coland_domain::reducer::ObjectLifecycleState::Redacted
         {
-            return Err(soland_storage::PersistenceError::Internal(
+            return Err(coland_storage::PersistenceError::Internal(
                 "default Strand current pointer targets a redacted or foreign Strand".to_owned(),
             ));
         }
@@ -1552,7 +1552,7 @@ pub async fn hydrate_projections_from_persistence(
                         })
                 });
             if !anchored {
-                return Err(soland_storage::PersistenceError::Internal(format!(
+                return Err(coland_storage::PersistenceError::Internal(format!(
                     "default Strand Realm projection is missing without an anchored replica: {realm_id}"
                 )));
             }
@@ -1585,18 +1585,18 @@ pub async fn hydrate_projections_from_persistence(
             continue;
         }
         let id = arkret_wire::EventId::new(record.event_id.clone())
-            .map_err(soland_storage::PersistenceError::database)?;
+            .map_err(coland_storage::PersistenceError::database)?;
         let accepted = persistence
             .authority_commits()
             .committed_event(&id)
             .await?
             .ok_or_else(|| {
-                soland_storage::PersistenceError::Internal(
+                coland_storage::PersistenceError::Internal(
                     "lifecycle hydration has no accepting Commit".to_owned(),
                 )
             })?;
         if serde_json::to_value(&accepted.event)
-            .map_err(soland_storage::PersistenceError::database)?
+            .map_err(coland_storage::PersistenceError::database)?
             != record.envelope
             || accepted.commit.event_ref != id
             || accepted.commit.stream_ref
@@ -1604,7 +1604,7 @@ pub async fn hydrate_projections_from_persistence(
                     realm_id: accepted.event.realm_id.clone(),
                 })
         {
-            return Err(soland_storage::PersistenceError::Internal(
+            return Err(coland_storage::PersistenceError::Internal(
                 "lifecycle hydration differs from its accepted Realm stream binding".to_owned(),
             ));
         }
@@ -1615,12 +1615,12 @@ pub async fn hydrate_projections_from_persistence(
             stream_position: accepted.commit.stream_position,
         };
         let stream = arkret_canonical::canonical_json_bytes(&reference.stream_ref)
-            .map_err(soland_storage::PersistenceError::database)?;
+            .map_err(coland_storage::PersistenceError::database)?;
         if lifecycle
             .insert((stream, reference.stream_position), (record, reference))
             .is_some()
         {
-            return Err(soland_storage::PersistenceError::Internal(
+            return Err(coland_storage::PersistenceError::Internal(
                 "lifecycle hydration has conflicting stream coordinates".to_owned(),
             ));
         }
@@ -1639,9 +1639,9 @@ pub async fn hydrate_projections_from_persistence(
 }
 
 pub async fn hydrate_realms_from_canonical_events(
-    persistence: &dyn soland_storage::PersistenceStore,
+    persistence: &dyn coland_storage::PersistenceStore,
     realms: &mut RealmDirectoryIndex,
-) -> soland_storage::PersistenceResult<()> {
+) -> coland_storage::PersistenceResult<()> {
     let events = hydration_replay_records(persistence).await?;
     hydrate_realm_directory_records(persistence, realms, &events).await;
     Ok(())
@@ -1649,10 +1649,10 @@ pub async fn hydrate_realms_from_canonical_events(
 
 /// Rebuild one Realm without replaying unrelated Station history.
 pub async fn hydrate_realm_from_canonical_events(
-    persistence: &dyn soland_storage::PersistenceStore,
+    persistence: &dyn coland_storage::PersistenceStore,
     realms: &mut RealmDirectoryIndex,
     realm_id: &RealmId,
-) -> soland_storage::PersistenceResult<()> {
+) -> coland_storage::PersistenceResult<()> {
     let records = persistence
         .events()
         .realm_events_newest_first(realm_id.as_str())
@@ -1663,7 +1663,7 @@ pub async fn hydrate_realm_from_canonical_events(
                 .ok()
                 .is_none_or(|event| event.realm_id != *realm_id)
     }) {
-        return Err(soland_storage::PersistenceError::Internal(
+        return Err(coland_storage::PersistenceError::Internal(
             "Realm-local hydration contains a foreign canonical Event".to_owned(),
         ));
     }
@@ -1673,7 +1673,7 @@ pub async fn hydrate_realm_from_canonical_events(
 }
 
 async fn hydrate_realm_directory_records(
-    persistence: &dyn soland_storage::PersistenceStore,
+    persistence: &dyn coland_storage::PersistenceStore,
     realms: &mut RealmDirectoryIndex,
     events: &[CanonicalEventRecord],
 ) {
@@ -1842,7 +1842,7 @@ pub fn hydrate_realm_member_state_event(
 }
 
 pub async fn hydrate_realm_create_event(
-    persistence: &dyn soland_storage::PersistenceStore,
+    persistence: &dyn coland_storage::PersistenceStore,
     realms: &mut RealmDirectoryIndex,
     record: &CanonicalEventRecord,
 ) {
@@ -1939,7 +1939,7 @@ pub async fn hydrate_realm_create_event(
         }
     }
     let minimal_metadata_realm =
-        payload_object.is_some_and(soland_domain::kinds::payload_declares_minimal_metadata_realm);
+        payload_object.is_some_and(coland_domain::kinds::payload_declares_minimal_metadata_realm);
 
     let mut entry = RealmDirectoryEntry::new(
         realm_id.clone(),
@@ -1985,7 +1985,7 @@ pub async fn hydrate_realm_create_event(
 }
 
 pub async fn hydrate_realm_policy_event(
-    persistence: &dyn soland_storage::PersistenceStore,
+    persistence: &dyn coland_storage::PersistenceStore,
     record: &CanonicalEventRecord,
 ) {
     let Some(realm_id) = event_record_realm_id(record) else {
@@ -2110,8 +2110,8 @@ mod agent_membership_reconcile_tests {
 #[cfg(test)]
 mod relation_current_result_hydration_tests {
     use arkret_models_collaboration::objects::relation::{Relation, RelationPrimaryConflictDomain};
-    use soland_domain::reducer::SolandRelationState;
-    use soland_storage::RelationCurrentResultRecord;
+    use coland_domain::reducer::ColandRelationState;
+    use coland_storage::RelationCurrentResultRecord;
 
     use super::*;
 
@@ -2216,7 +2216,7 @@ mod relation_current_result_hydration_tests {
             .unwrap_err();
         assert!(matches!(
             error,
-            soland_storage::PersistenceError::Internal(_)
+            coland_storage::PersistenceError::Internal(_)
         ));
         assert!(projection.relations.is_empty());
         assert!(projection.relation_current.is_empty());
@@ -2229,7 +2229,7 @@ mod relation_current_result_hydration_tests {
         let derived_id = "ak:relation:AQdknt9AByYY2gb16KB093xeB4J8b02mTEd4Mt8z2rO-".to_owned();
         projection.relations.insert(
             derived_id.clone(),
-            SolandRelationState {
+            ColandRelationState {
                 relation_id: derived_id.clone(),
                 realm_id: "ak:realm:AUGIFvQctz4TjQTmvvO4Wdy-xdc5XP2ZnJ5Qpbh4s8Ru".to_owned(),
                 relation_kind: "contains".to_owned(),

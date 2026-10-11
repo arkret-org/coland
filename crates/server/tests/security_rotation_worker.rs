@@ -10,23 +10,23 @@ use arkret_models_crypto::{
     SecurityTransactionStep,
 };
 use arkret_wire::{ActorId, BackupSeriesId, CommittedEventRef, EventKind, Hash, TransactionId};
-use ed25519_dalek::Signer as _;
-use serde_json::json;
-use soland_storage::{
+use coland_storage::{
     AuthorityCommitTransaction, KeyBackupActiveSeriesCommitOutcome,
     KeyBackupActiveSeriesCommitWrite, RevokeCommandTerminalWrite, RevokeProposalCommitWrite,
     SecurityTransactionRecord, SecurityTransactionStepOutcomeRecord,
 };
-use soland_test_support::AppStateTestExt as _;
-use soland_test_support::pcr_genesis::PcrGenesisFixture;
+use coland_test_support::AppStateTestExt as _;
+use coland_test_support::pcr_genesis::PcrGenesisFixture;
+use ed25519_dalek::Signer as _;
+use serde_json::json;
 
 struct EraseFixture {
-    state: soland_http::state::AppState,
+    state: coland_http::state::AppState,
     pcr: PcrGenesisFixture,
     record: SecurityTransactionRecord,
-    request: soland_storage::BackupSeriesEraseWorkerRequest,
+    request: coland_storage::BackupSeriesEraseWorkerRequest,
     old_backup_id: arkret_wire::BackupId,
-    authorizer: soland_storage::DeviceRevocationGateSelector,
+    authorizer: coland_storage::DeviceRevocationGateSelector,
     revoker_id: arkret_wire::DeviceId,
     revoker_authorization_ref: CommittedEventRef,
     revoker_verification_method: arkret_wire::DidUrl,
@@ -83,7 +83,7 @@ fn backup_value(
 }
 
 async fn erase_fixture() -> EraseFixture {
-    let (state, pool) = soland_test_support::app_state_with_pool(soland_test_support::app_config());
+    let (state, pool) = coland_test_support::app_state_with_pool(coland_test_support::app_config());
     let persistence = state.test_persistence();
     let mut fixture = PcrGenesisFixture::new(state.service_did());
     let authorizer = fixture
@@ -265,11 +265,11 @@ async fn erase_fixture() -> EraseFixture {
         resource,
         canonical_request,
     };
-    soland_storage_postgres::PgSecurityTransactionStore { pool }
+    coland_storage_postgres::PgSecurityTransactionStore { pool }
         .seed_worker_checkpoint_for_test(&record)
         .await
         .unwrap();
-    let request = soland_storage::BackupSeriesEraseWorkerRequest {
+    let request = coland_storage::BackupSeriesEraseWorkerRequest {
         transaction_id: record.resource.transaction_id.clone(),
         transaction_request_digest: record.resource.request_digest.clone(),
         prepared_plan_digest: record.resource.prepared_plan_digest.clone(),
@@ -303,7 +303,7 @@ async fn propose_authorizer_revocation(fixture: &mut EraseFixture) -> SecurityTr
     let account = fixture.pcr.history.account.clone();
     let authorizer = fixture.pcr.history.founding_device_id.clone();
     let authorize_event_id = fixture.revoker_authorization_ref.event_id.clone();
-    let revoke = soland_test_support::device_authorization_history::sign_event(
+    let revoke = coland_test_support::device_authorization_history::sign_event(
         fixture.pcr.history.raw_event(
             EventKind::DeviceRevoke,
             json!({
@@ -365,7 +365,7 @@ async fn propose_authorizer_revocation(fixture: &mut EraseFixture) -> SecurityTr
             .unwrap(),
         )
         .unwrap();
-    let replacement_pointer_event = soland_test_support::device_authorization_history::sign_event(
+    let replacement_pointer_event = coland_test_support::device_authorization_history::sign_event(
         fixture.pcr.history.raw_event(
             EventKind::KeyBackupActiveSeries,
             serde_json::to_value(replacement_pointer).unwrap(),
@@ -518,7 +518,7 @@ async fn erase_worker_refuses_a_revoked_authorizer_without_deleting_old_backups(
     let mut fixture = erase_fixture().await;
     let proposal = propose_authorizer_revocation(&mut fixture).await;
     accept_authorizer_revocation(&fixture, proposal).await;
-    let error = soland_http::security_rotation_worker::execute_erase_for_test(
+    let error = coland_http::security_rotation_worker::execute_erase_for_test(
         &fixture.state,
         fixture.record.clone(),
         &fixture.request,
@@ -534,7 +534,7 @@ async fn assert_forward_refused_before_effects(fixture: &EraseFixture, expected:
         arkret_canonical::DigestSuite::Sha256,
         arkret_canonical::sha256_bytes(uuid::Uuid::now_v7().as_bytes()),
     ));
-    let event = soland_test_support::device_authorization_history::sign_event(
+    let event = coland_test_support::device_authorization_history::sign_event(
         fixture.pcr.history.raw_event(
             EventKind::RealmProfile,
             arkret_models_collaboration::events_payloads::RealmProfile::new(
@@ -557,7 +557,7 @@ async fn assert_forward_refused_before_effects(fixture: &EraseFixture, expected:
         .unwrap();
     // No remote service is needed: reaching service resolution, HTTP or the
     // queue would return a different error or leave an observable Event.
-    let error = soland_http::test_forward_self_event(
+    let error = coland_http::test_forward_self_event(
         &fixture.state,
         &arkret_wire::DidCoreId::new("ak:did_core:web:governance.example").unwrap(),
         arkret_wire::EventAdmissionSubmission::new(event.clone()),
@@ -567,7 +567,7 @@ async fn assert_forward_refused_before_effects(fixture: &EraseFixture, expected:
     assert_eq!(
         error
             .conflict_code()
-            .map(soland_storage::ConflictCode::as_str),
+            .map(coland_storage::ConflictCode::as_str),
         Some(expected),
         "{error}"
     );
@@ -628,7 +628,7 @@ async fn erase_worker_refuses_a_wrong_authority_commit_without_deleting_old_back
         fixture.request.authority_commit_id,
         fixture.pointer_ref.commit_id
     );
-    let error = soland_http::security_rotation_worker::execute_erase_for_test(
+    let error = coland_http::security_rotation_worker::execute_erase_for_test(
         &fixture.state,
         fixture.record.clone(),
         &fixture.request,

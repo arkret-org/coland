@@ -48,7 +48,7 @@ async fn historical_method_key(
     }
     // Fetch and verify the complete method-native history, including witness
     // thresholds, before selecting the entry effective at the signature time.
-    let resolver = crate::state::did_resolver_chain::build_soland_did_resolver(state.config());
+    let resolver = crate::state::did_resolver_chain::build_coland_did_resolver(state.config());
     let history = resolver
         .fetch_verified_webvh_history(&did)
         .await
@@ -179,7 +179,7 @@ pub(crate) struct LocatedRealmAuthority {
 
 impl LocatedRealmAuthority {
     /// The durable current-authority record this verified chain names.
-    pub(crate) fn current_authority(&self) -> soland_storage::CurrentRealmAuthority {
+    pub(crate) fn current_authority(&self) -> coland_storage::CurrentRealmAuthority {
         let (authority_ref, last_handoff_ref) = match self.bundle.authority_transitions.last() {
             Some(transition) => (
                 arkret_wire::RealmCommitAuthorityRef::Handoff(
@@ -194,7 +194,7 @@ impl LocatedRealmAuthority {
                 None,
             ),
         };
-        soland_storage::CurrentRealmAuthority {
+        coland_storage::CurrentRealmAuthority {
             realm_id: self.authority.realm_id().clone(),
             generation: self.authority.current_generation(),
             service_id: self.authority.current_service_id().clone(),

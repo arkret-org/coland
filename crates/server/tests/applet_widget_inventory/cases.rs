@@ -1,9 +1,9 @@
 //! Included inside the real Applet admission fixture after the shared build freeze.
-use soland_storage::{
+use coland_storage::{
     AppletStore as _, AppletWidgetInstallSelector, AppletWidgetTokenGateSelector,
     AppletWidgetTokenRecord,
 };
-use soland_storage_postgres::PgAppletStore;
+use coland_storage_postgres::PgAppletStore;
 
 use super::*;
 impl Fixture {
@@ -294,7 +294,7 @@ async fn widget_inventory_real_install_checks_scope_consent_and_three_revoke_mod
             .await
             .unwrap()
             .unwrap();
-        let prior = soland_storage::AuthorityCommitTransaction {
+        let prior = coland_storage::AuthorityCommitTransaction {
             expected_authority: authority_store
                 .current_authority(&fixture.realm)
                 .await
@@ -313,7 +313,7 @@ async fn widget_inventory_real_install_checks_scope_consent_and_three_revoke_mod
             .admit_founding_device(fixture.state.test_persistence().as_ref())
             .await
             .unwrap();
-        request.self_producer_guard = Some(soland_storage::SelfProducerCommitGuard::HumanDevice(
+        request.self_producer_guard = Some(coland_storage::SelfProducerCommitGuard::HumanDevice(
             device_selector,
         ));
         request = Box::pin(ordinary_realm::source_request(&fixture.pool, request)).await;
@@ -334,8 +334,8 @@ async fn widget_inventory_real_install_checks_scope_consent_and_three_revoke_mod
         let mut write_gate = gate.clone();
         write_gate.action = "ak.strand.create".into();
         request.widget_token_gate = Some(write_gate.clone());
-        let uow = soland_storage_postgres::PgEventCommitUnitOfWork::new(fixture.pool.clone());
-        use soland_storage::EventCommitUnitOfWork as _;
+        let uow = coland_storage_postgres::PgEventCommitUnitOfWork::new(fixture.pool.clone());
+        use coland_storage::EventCommitUnitOfWork as _;
         let before_write = authority_snapshot(&fixture.pool).await;
         let mut wrong_token = request.clone();
         wrong_token.widget_token_gate.as_mut().unwrap().token_digest =
@@ -352,7 +352,7 @@ async fn widget_inventory_real_install_checks_scope_consent_and_three_revoke_mod
         let install_before = store
             .get(
                 install.package.applet_id.as_str(),
-                &soland_storage::applet_effective_scope_key(&selector.effective_scope).unwrap(),
+                &coland_storage::applet_effective_scope_key(&selector.effective_scope).unwrap(),
             )
             .await
             .unwrap()
@@ -391,7 +391,7 @@ async fn widget_inventory_real_install_checks_scope_consent_and_three_revoke_mod
                     .invalidate_widget_token(&selector, &record.token_ref, chrono::Utc::now())
                     .await
                     .unwrap(),
-                soland_storage::AppletWidgetTokenInvalidation::AlreadyInvalidated
+                coland_storage::AppletWidgetTokenInvalidation::AlreadyInvalidated
             );
         }
         if mode == arkret_wire::AppletRevokeMode::RevokeWidgetOnly {
@@ -410,7 +410,7 @@ async fn widget_inventory_real_install_checks_scope_consent_and_three_revoke_mod
             let current = store
                 .get(
                     install.package.applet_id.as_str(),
-                    &soland_storage::applet_effective_scope_key(&selector.effective_scope).unwrap(),
+                    &coland_storage::applet_effective_scope_key(&selector.effective_scope).unwrap(),
                 )
                 .await
                 .unwrap()

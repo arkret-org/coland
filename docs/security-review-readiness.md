@@ -1,4 +1,4 @@
-# soland security review readiness
+# coland security review readiness
 
 Generated: 2026-05-25
 
@@ -7,7 +7,7 @@ claim that a third-party reviewer has completed an assessment.
 
 ## Scope
 
-- HTTP routing surface mounted by `soland::router`.
+- HTTP routing surface mounted by `coland::router`.
 - Authentication, session grant exchange, DID/webvh validation, and admin scope
   middleware.
 - Event ingestion, reducer projection, MLS lifecycle, and Realm governance
@@ -34,7 +34,7 @@ claim that a third-party reviewer has completed an assessment.
   rejected fail-closed with `WitnessQuorumNotMet`
   (`webvh_validation::validate_witness_policy_for_log`), and describe
   advertises `webvh_witness_quorum: "unsupported"` for the
-  `soland.local_identity_store` trust root. Real witness verification runs
+  `coland.local_identity_store` trust root. Real witness verification runs
   only on the external resolution path
   (`did_resolver_chain.rs::fetch_verified_webvh_history` → SDK
   `verify_did_webvh_v1_chain_and_witness_bytes`). There is no
@@ -51,7 +51,7 @@ claim that a third-party reviewer has completed an assessment.
 - Run the local supply-chain commands from `DEPLOYMENT.md`: `cargo deny`,
   `cargo audit`, `syft`, `trivy`, and local `cosign` verification where the
   tools are installed.
-- Review `SECURITY.md`, `DEPLOYMENT.md`, and `_soland_todos.md` before
+- Review `SECURITY.md`, `DEPLOYMENT.md`, and `_coland_todos.md` before
   accepting any release-readiness claim.
 
 ## Known local limits

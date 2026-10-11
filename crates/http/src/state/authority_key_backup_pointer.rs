@@ -8,8 +8,8 @@
 
 use arkret_wire::{AuthorityCommitStatus, AuthoritySubmitOutcome, EventAdmissionSubmission};
 use chrono::Utc;
-use soland_services::{ServiceError, ServiceResult};
-use soland_storage::{KeyBackupActiveSeriesCommitOutcome, KeyBackupActiveSeriesCommitWrite};
+use coland_services::{ServiceError, ServiceResult};
+use coland_storage::{KeyBackupActiveSeriesCommitOutcome, KeyBackupActiveSeriesCommitWrite};
 
 use super::AppState;
 

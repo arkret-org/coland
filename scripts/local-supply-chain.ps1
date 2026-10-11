@@ -1,5 +1,5 @@
 param(
-    [string] $ImageTag = "soland:local",
+    [string] $ImageTag = "coland:local",
     [string] $OutDir = "target/supply-chain"
 )
 
@@ -16,8 +16,8 @@ Require-Command "syft"
 
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
-$metadataPath = Join-Path $OutDir "soland-build-metadata.json"
-$sbomPath = Join-Path $OutDir "soland.spdx.json"
+$metadataPath = Join-Path $OutDir "coland-build-metadata.json"
+$sbomPath = Join-Path $OutDir "coland.spdx.json"
 
 docker buildx build `
     --load `

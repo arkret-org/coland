@@ -5,7 +5,7 @@
 //! - `POST /_arkret/root/identity/resolve`      — resolve a DID via SDK + local store
 //! - `GET  /_arkret/root/identity/document`     — fetch the locally-cached DID document
 //! - `GET  /_arkret/root/identity/log`          — return the local key log for a DID
-//! - `POST /_soland/root/identity/webvh/register` — register through the embedded webvh provider
+//! - `POST /_coland/root/identity/webvh/register` — register through the embedded webvh provider
 //! - `GET  /webvh/{local_id}/did.json` — embedded webvh DID document
 //! - `GET  /webvh/{local_id}/did.jsonl` — embedded webvh log
 //! - `POST /_arkret/root/identity/submit-did-operation` — submit a DID operation
@@ -22,17 +22,17 @@ use arkret_models_identity::identity::{
 };
 use arkret_signatures::webvh::WEBVH_SCID_PLACEHOLDER;
 use arkret_wire::NonEmptyString;
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
+use coland_services::identity::{
+    DidDocumentState as WebvhDocumentRecord, DidLogCommitResult as WebvhLogCommitOutcome,
+    DidLogEvent as WebvhLogRecord,
+};
 use salvo::http::{StatusCode, header};
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
-use soland_services::identity::{
-    DidDocumentState as WebvhDocumentRecord, DidLogCommitResult as WebvhLogCommitOutcome,
-    DidLogEvent as WebvhLogRecord,
-};
 
 use super::webvh_validation::{
     WebvhLogEntry, validate_log_chain, validate_rotation_authorization_for_log,

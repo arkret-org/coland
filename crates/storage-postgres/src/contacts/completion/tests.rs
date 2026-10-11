@@ -15,11 +15,11 @@ use arkret_wire::{
     ProtocolSignature, RealmCommitId, RealmId, ScopeRef,
 };
 use chrono::{DateTime, Duration, Utc};
-use ed25519_dalek::SigningKey;
-use serde_json::json;
-use soland_storage::{
+use coland_storage::{
     ContactCompletionAction, ContactCompletionDraft, ContactDeliveryTarget, FederationOutboxRecord,
 };
+use ed25519_dalek::SigningKey;
+use serde_json::json;
 
 use super::*;
 use crate::test_database::TestDatabase;
@@ -256,11 +256,11 @@ fn worker(ready: &CommittedContactCompletionIntent, signed_at: DateTime<Utc>) ->
 }
 
 /// The pending Contact row the accepting unit wrote with the intent.
-fn pending_row(intent: &ContactCompletionIntent) -> soland_storage::ContactRecord {
+fn pending_row(intent: &ContactCompletionIntent) -> coland_storage::ContactRecord {
     let peer: ContactPeer =
         serde_json::from_value(intent.plan.event.payload.get("peer").cloned().unwrap()).unwrap();
     let accepted_at = intent.accepted_at().unwrap();
-    soland_storage::ContactRecord {
+    coland_storage::ContactRecord {
         requester_id: intent.plan.event.actor_id.clone(),
         target_id: peer.contact_actor_id(),
         contact_round_id: None,
@@ -290,7 +290,7 @@ async fn stage(pool: &PgPool, fixture: &Fixture) {
     crate::unit_of_work::commit_contact_projection(
         &mut conn,
         None,
-        soland_storage::ContactProjectionCommit {
+        coland_storage::ContactProjectionCommit {
             completion_intent: None,
             record: pending_row(&fixture.ready.intent),
             expected_updated_at: None,

@@ -1,6 +1,6 @@
 //! Deployment-local account handle projection contracts.
 //!
-//! These DTOs belong to the product-private coauth -> soland synchronization
+//! These DTOs belong to the product-private coauth -> coland synchronization
 //! edge. They are not part of the `/_arkret/` protocol surface.
 
 use arkret_identifiers::DidCoreId;

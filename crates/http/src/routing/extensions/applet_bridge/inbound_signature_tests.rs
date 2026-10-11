@@ -74,7 +74,7 @@ fn keyid_mismatch_is_invalid_signature() {
         .expect_err("keyid mismatch must fail");
     assert_eq!(
         err.code,
-        soland_http::error::ErrorCode::HttpSignatureInvalid
+        coland_http::error::ErrorCode::HttpSignatureInvalid
     );
 }
 

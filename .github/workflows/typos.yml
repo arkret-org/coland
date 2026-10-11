@@ -15,7 +15,7 @@ jobs:
     name: Spell check
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout soland
+      - name: Checkout coland
         uses: actions/checkout@v6
 
       - name: Check spelling

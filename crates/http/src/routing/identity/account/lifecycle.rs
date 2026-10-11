@@ -5,7 +5,7 @@
 //! self-service deactivate route: operation-registry has no
 //! `ak.self.account.*deactivate*` operation, and account-lifecycle.md §10
 //! assigns deactivation initiation to the admin/support surface
-//! (`/_soland/admin/accounts/{principal_id}/deactivate`).
+//! (`/_coland/admin/accounts/{principal_id}/deactivate`).
 
 use arkret_models_collaboration::events_payloads::event_wire::ErasureTrigger;
 use arkret_models_collaboration::governance::erasure::{
@@ -179,7 +179,7 @@ struct AccountDeactivationFanout {
 async fn run_account_deactivation_fanout(
     state: &AppState,
     principal_id: &str,
-    owner_account_pk: soland_storage::AccountPk,
+    owner_account_pk: coland_storage::AccountPk,
 ) -> Result<AccountDeactivationFanout, AppError> {
     let sessions_revoked = revoke_sessions_for_actor(state, principal_id)
         .await
@@ -241,7 +241,7 @@ async fn purge_delivery_state_for_actor(
 
 async fn retire_owner_account_keypackages(
     state: &AppState,
-    owner_account_pk: soland_storage::AccountPk,
+    owner_account_pk: coland_storage::AccountPk,
 ) -> Result<usize, AppError> {
     state
         .mls_key_packages()
@@ -268,7 +268,7 @@ async fn append_account_state_change_audit(
 ) {
     // Product-private audit actions must not occupy the protocol `ak.` prefix.
     let payload = json!({
-        "schema": "org.arkret.soland.account.state_change.v1",
+        "schema": "org.arkret.coland.account.state_change.v1",
         "actor": changed_by,
         "subject": principal_id,
         "from": previous_state,
@@ -294,7 +294,7 @@ async fn append_account_state_change_audit(
     append_audit_log(
         state,
         Some(principal_id),
-        "org.arkret.soland.account.state_change",
+        "org.arkret.coland.account.state_change",
         payload.clone(),
         "accepted",
     )
@@ -303,7 +303,7 @@ async fn append_account_state_change_audit(
         append_audit_log(
             state,
             Some(changed_by),
-            "org.arkret.soland.account.state_change",
+            "org.arkret.coland.account.state_change",
             payload,
             "accepted",
         )
@@ -316,7 +316,7 @@ async fn append_account_state_change_audit(
 /// itself is not an incomplete propagation and must never produce this audit.
 pub(crate) async fn audit_account_status_propagation_transition(
     state: &AppState,
-    transition: &soland_storage::AccountStatusPropagationProjectionTransition,
+    transition: &coland_storage::AccountStatusPropagationProjectionTransition,
     deactivation: bool,
 ) {
     if !deactivation || (!transition.became_incomplete && !transition.became_complete) {
@@ -337,9 +337,9 @@ pub(crate) async fn audit_account_status_propagation_transition(
         append_audit_log(
             state,
             Some(projection.account_id.principal_id.as_str()),
-            "org.arkret.soland.account.deactivation_propagation",
+            "org.arkret.coland.account.deactivation_propagation",
             json!({
-                "schema": "org.arkret.soland.account.deactivation_propagation.v1",
+                "schema": "org.arkret.coland.account.deactivation_propagation.v1",
                 "account_authority_id": projection.account_authority_id,
                 "account_id": projection.account_id,
                 "account_status_record_id": projection.account_status_record_id,
@@ -432,13 +432,13 @@ pub(crate) async fn durable_deactivation_peer_service_targets_for_account(
             .iter()
             .filter_map(|target| target.get("service_id").and_then(Value::as_str))
             .map(|service_id| {
-                Ok(soland_storage::AccountStatusAffectedServiceObservation {
+                Ok(coland_storage::AccountStatusAffectedServiceObservation {
                     service_id: arkret_wire::DidCoreId::new(service_id.to_owned()).map_err(
                         |error| {
                             AppError::internal(format!("affected service id is invalid: {error}"))
                         },
                     )?,
-                    source: soland_storage::AccountStatusAffectedServiceSource::RealmMembership,
+                    source: coland_storage::AccountStatusAffectedServiceSource::RealmMembership,
                     observed_at,
                 })
             })
@@ -556,7 +556,7 @@ pub(crate) async fn execute_account_status_erasure(
     append_audit_log(
         state,
         Some(actor),
-        "org.arkret.soland.audit.erasure_executed",
+        "org.arkret.coland.audit.erasure_executed",
         json!({
             "account_id": account_id,
             "actor": actor,
@@ -694,7 +694,7 @@ async fn append_audit_redaction_marker(state: &AppState, actor: &str) {
     append_audit_log(
         state,
         Some(actor),
-        "org.arkret.soland.audit.actor_audit_redacted",
+        "org.arkret.coland.audit.actor_audit_redacted",
         json!({
             "actor": actor,
             "redacted_entry_count": entries.len(),
@@ -845,7 +845,7 @@ fn erasure_retained_stub(
 
 async fn persist_account_lifecycle_record(
     state: &AppState,
-    account_pk: soland_storage::AccountPk,
+    account_pk: coland_storage::AccountPk,
     principal_id: &str,
     record: &AccountLifecycleState,
 ) -> Result<(), AppError> {

@@ -8,15 +8,15 @@
 )]
 mod ordinary_realm;
 
-use diesel::sql_types::{BigInt, Jsonb, Text};
-use diesel_async::RunQueryDsl;
-use ordinary_realm::next_request;
-use soland_storage::{
+use coland_storage::{
     AuthorityCommitStore, ConflictCode, EventBatchCommitRequest, EventCommitRequest,
     EventCommitUnitOfWork,
 };
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork};
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork};
+use diesel::sql_types::{BigInt, Jsonb, Text};
+use diesel_async::RunQueryDsl;
+use ordinary_realm::next_request;
 
 #[derive(diesel::QueryableByName)]
 struct SidecarRow {
@@ -34,7 +34,7 @@ struct SidecarRow {
     value: serde_json::Value,
 }
 
-async fn rows(pool: &soland_storage_postgres::PgPool) -> Vec<SidecarRow> {
+async fn rows(pool: &coland_storage_postgres::PgPool) -> Vec<SidecarRow> {
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
         "SELECT sidecar_id,controller_account_id,create_event_id,current_commit_id,current_stream_position,value \
@@ -61,7 +61,7 @@ struct ContextRow {
     value: serde_json::Value,
 }
 
-async fn contexts(pool: &soland_storage_postgres::PgPool) -> Vec<ContextRow> {
+async fn contexts(pool: &coland_storage_postgres::PgPool) -> Vec<ContextRow> {
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
         "SELECT sidecar_id,context_ref,version,attach_event_id,current_commit_id,value \

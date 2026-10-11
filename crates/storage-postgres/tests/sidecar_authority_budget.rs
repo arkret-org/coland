@@ -18,11 +18,11 @@ mod pcr_genesis;
 )]
 mod sidecar_agent;
 
-use diesel::sql_types::BigInt;
-use diesel_async::RunQueryDsl;
-use soland_storage::{
+use coland_storage::{
     ActorProfileStore, AgentProvisionAdmissionWrite, AuthorityCommitStore, EventCommitUnitOfWork,
 };
+use diesel::sql_types::BigInt;
+use diesel_async::RunQueryDsl;
 
 #[derive(diesel::QueryableByName, Debug, PartialEq)]
 struct Counts {
@@ -42,7 +42,7 @@ struct Counts {
     deliveries: i64,
 }
 
-async fn counts(pool: &soland_storage_postgres::PgPool) -> Counts {
+async fn counts(pool: &coland_storage_postgres::PgPool) -> Counts {
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
         "SELECT (SELECT COUNT(*) FROM canonical_events) AS events, \
@@ -60,7 +60,7 @@ async fn counts(pool: &soland_storage_postgres::PgPool) -> Counts {
 
 #[tokio::test]
 async fn provision_ref_65_is_refused_without_accepted_source_or_current_writes() {
-    let database = soland_storage_postgres::test_database::TestDatabase::lease().await;
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     let pool = database.pool();
     let station = ordinary_realm::station();
     let station_did = device_authorization_history::did_web_station(&station);
@@ -73,7 +73,7 @@ async fn provision_ref_65_is_refused_without_accepted_source_or_current_writes()
         .unwrap();
     drop(conn);
     principal
-        .admit_founding_device(&soland_storage_postgres::PgPersistenceStore::new(
+        .admit_founding_device(&coland_storage_postgres::PgPersistenceStore::new(
             pool.clone(),
         ))
         .await
@@ -87,7 +87,7 @@ async fn provision_ref_65_is_refused_without_accepted_source_or_current_writes()
     let unit =
         ordinary_realm::bootstrap_unit_for_account("sidecar-ref-budget", controller, &station_did);
     let unit = ordinary_realm::source_bootstrap(&pool, unit).await;
-    let store = soland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() };
+    let store = coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() };
     store
         .admit_ordinary_realm_bootstrap_unit(&unit, unit.transactions[0].commit.committed_at)
         .await
@@ -101,7 +101,7 @@ async fn provision_ref_65_is_refused_without_accepted_source_or_current_writes()
         parent.commit.committed_at,
     );
     let create = ordinary_realm::source_request(&pool, create).await;
-    soland_storage_postgres::PgEventCommitUnitOfWork::new(pool.clone())
+    coland_storage_postgres::PgEventCommitUnitOfWork::new(pool.clone())
         .commit_event(create.clone())
         .await
         .unwrap();
@@ -109,7 +109,7 @@ async fn provision_ref_65_is_refused_without_accepted_source_or_current_writes()
     let sidecar = arkret_wire::SidecarId::from_event_id(&create.authority_commit.event.event_id);
     let mut head = principal.unit.transactions[1].commit.clone();
     let authority = principal.unit.transactions[1].expected_authority.clone();
-    let profiles = soland_storage_postgres::PgActorProfileStore { pool: pool.clone() };
+    let profiles = coland_storage_postgres::PgActorProfileStore { pool: pool.clone() };
     // Two initial refs (Sidecar creation and controller parent join) leave
     // exactly 62 refs for accepted ownership declarations. The Agent PCRs
     // have not been founded, so none of these Agents is a desired participant.
@@ -139,7 +139,7 @@ async fn provision_ref_65_is_refused_without_accepted_source_or_current_writes()
         );
         let commit = sidecar_agent::station_successor(&head, &event, &station_did, 1);
         let write = AgentProvisionAdmissionWrite {
-            commit: soland_storage::AuthorityCommitTransaction {
+            commit: coland_storage::AuthorityCommitTransaction {
                 expected_authority: authority.clone(),
                 event,
                 commit: commit.clone(),
@@ -163,7 +163,7 @@ async fn provision_ref_65_is_refused_without_accepted_source_or_current_writes()
                 "overflow must roll back accepted Event, Commit and all current carriers"
             );
         }
-        let cut = soland_storage_postgres::sidecar_authority_cut::read(
+        let cut = coland_storage_postgres::sidecar_authority_cut::read(
             &pool, realm, &sidecar, controller,
         )
         .await

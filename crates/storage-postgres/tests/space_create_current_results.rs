@@ -6,13 +6,13 @@
 #[allow(dead_code)]
 mod ordinary_realm;
 
+use coland_storage::{AuthorityCommitStore, EventCommitUnitOfWork, EventProjectionStoreRegistry};
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
 use diesel::sql_types::{BigInt, Jsonb, Text};
 use diesel_async::RunQueryDsl;
 use ordinary_realm::next_request;
 use serde_json::{Value, json};
-use soland_storage::{AuthorityCommitStore, EventCommitUnitOfWork, EventProjectionStoreRegistry};
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
 
 fn founder() -> arkret_wire::DidCoreId {
     ordinary_realm::human_profile::account(&ordinary_realm::station(), "ordinary-founder")
@@ -22,7 +22,7 @@ fn founder() -> arkret_wire::DidCoreId {
 async fn human_bootstrap(
     pool: &PgPool,
     seed: &str,
-) -> soland_storage::OrdinaryRealmBootstrapCommitUnit {
+) -> coland_storage::OrdinaryRealmBootstrapCommitUnit {
     let account = Box::pin(ordinary_realm::human_profile::admit(
         pool,
         &ordinary_realm::station(),
@@ -244,7 +244,7 @@ async fn space_lifecycle_narrow_allow_and_space_deny_override_realm_allow_at_the
             if denied {
                 assert_eq!(
                     uow.commit_event(request).await.unwrap_err().conflict_code(),
-                    Some(soland_storage::ConflictCode::CapabilityDenied),
+                    Some(coland_storage::ConflictCode::CapabilityDenied),
                     "{kind}"
                 );
                 assert_eq!(space_write_footprint(&pool, &realm).await, before, "{kind}");
@@ -407,7 +407,7 @@ async fn space_parent_narrow_resource_cases() {
             .await
             .unwrap_err()
             .conflict_code(),
-        Some(soland_storage::ConflictCode::CapabilityDenied)
+        Some(coland_storage::ConflictCode::CapabilityDenied)
     );
     assert_eq!(cut_counts(&pool, &realm).await, before);
     assert_eq!(
@@ -459,7 +459,7 @@ async fn space_parent_narrow_resource_cases() {
             .await
             .unwrap_err()
             .conflict_code(),
-        Some(soland_storage::ConflictCode::CapabilityDenied)
+        Some(coland_storage::ConflictCode::CapabilityDenied)
     );
     assert_eq!(cut_counts(&pool, &realm).await, before);
     assert_eq!(
@@ -596,7 +596,7 @@ async fn space_parent_attach_detach_cases() {
     let foreign_id = arkret_wire::SpaceId::from_event_id(&foreign.authority_commit.event.event_id);
     uow.commit_event(foreign).await.unwrap();
     let foreign_current = current(&pool, "space_current_results", &foreign_id).await;
-    let visible_foreign = soland_storage_postgres::account_snapshot_material(
+    let visible_foreign = coland_storage_postgres::account_snapshot_material(
         &pool,
         &foreign_last.event.realm_id,
         &arkret_wire::AccountId::new(founder(), ordinary_realm::station()),
@@ -648,7 +648,7 @@ async fn space_parent_attach_detach_cases() {
     let hidden = ordinary_realm::source_request(&pool, hidden).await;
     let hidden_id = arkret_wire::SpaceId::from_event_id(&hidden.authority_commit.event.event_id);
     uow.commit_event(hidden).await.unwrap();
-    let hidden_read = soland_storage_postgres::account_snapshot_material(
+    let hidden_read = coland_storage_postgres::account_snapshot_material(
         &pool,
         &hidden_last.event.realm_id,
         &arkret_wire::AccountId::new(founder(), ordinary_realm::station()),
@@ -713,11 +713,11 @@ async fn space_parent_attach_detach_cases() {
         let footprint_before = space_write_footprint(&pool, &realm).await;
         let error = uow.commit_event(request).await.unwrap_err();
         let expected_code = match reason {
-            "space_parent_mismatch" => Some(soland_storage::ConflictCode::SpaceParentMismatch),
-            "space_parent_unreadable" => Some(soland_storage::ConflictCode::SpaceParentUnreadable),
-            "space_realm_mismatch" => Some(soland_storage::ConflictCode::SpaceRealmMismatch),
-            "capability_denied" => Some(soland_storage::ConflictCode::CapabilityDenied),
-            _ => Some(soland_storage::ConflictCode::FailedPrecondition),
+            "space_parent_mismatch" => Some(coland_storage::ConflictCode::SpaceParentMismatch),
+            "space_parent_unreadable" => Some(coland_storage::ConflictCode::SpaceParentUnreadable),
+            "space_realm_mismatch" => Some(coland_storage::ConflictCode::SpaceRealmMismatch),
+            "capability_denied" => Some(coland_storage::ConflictCode::CapabilityDenied),
+            _ => Some(coland_storage::ConflictCode::FailedPrecondition),
         };
         assert_eq!(error.conflict_code(), expected_code, "{reason}: {error}");
         assert!(error.to_string().contains(reason), "{reason}: {error}");
@@ -847,7 +847,7 @@ async fn space_create_root_and_child_have_three_sibling_results_and_exact_replay
     assert_eq!(child_space.value["id"], json!(child_id));
     assert_eq!(child_parent.value, json!({"parent_space_id": root_id}));
     assert_eq!(child_policy.value, Value::Null);
-    let current_snapshot = soland_storage_postgres::PgPersistenceStore::new(pool.clone())
+    let current_snapshot = coland_storage_postgres::PgPersistenceStore::new(pool.clone())
         .object_current_snapshot()
         .snapshot()
         .await
@@ -882,7 +882,7 @@ async fn space_create_root_and_child_have_three_sibling_results_and_exact_replay
         child_space
     );
 
-    let snapshot = soland_storage_postgres::account_snapshot_material(
+    let snapshot = coland_storage_postgres::account_snapshot_material(
         &pool,
         &realm_id,
         &arkret_wire::AccountId::new(founder(), ordinary_realm::station()),
@@ -962,7 +962,7 @@ async fn space_create_root_and_child_have_three_sibling_results_and_exact_replay
 
 async fn assert_space_create_capability_denied(
     pool: &PgPool,
-    previous: &soland_storage::AuthorityCommitTransaction,
+    previous: &coland_storage::AuthorityCommitTransaction,
 ) {
     let account = Box::pin(ordinary_realm::human_profile::admit(
         pool,
@@ -994,7 +994,7 @@ async fn assert_space_create_capability_denied(
             .await
             .unwrap_err()
             .conflict_code(),
-        Some(soland_storage::ConflictCode::CapabilityDenied)
+        Some(coland_storage::ConflictCode::CapabilityDenied)
     );
     assert_eq!(
         space_write_footprint(pool, &previous.event.realm_id).await,

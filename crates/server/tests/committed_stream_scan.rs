@@ -10,20 +10,20 @@ use arkret_wire::{
     CommitStreamRef, CommittedEventView, EventKind, MessageId, StrandId, StreamScanDirection,
     StreamScanOutcome, StreamScanRequest,
 };
+use coland_http::config::AppConfig;
+use coland_http::service;
+use coland_test_support::AppStateTestExt as _;
 use salvo::http::StatusCode;
 use salvo::test::{ResponseExt, TestClient};
 use serde_json::{Value, json};
-use soland_http::config::AppConfig;
-use soland_http::service;
-use soland_test_support::AppStateTestExt as _;
 
 const SCAN_PATH: &str = "/_arkret/self/streams/scan";
 
 #[tokio::test]
 async fn authority_bundle_unknown_and_non_governing_realms_have_one_public_refusal() {
-    let (state, _pool) = soland_test_support::app_state_with_pool(AppConfig {
+    let (state, _pool) = coland_test_support::app_state_with_pool(AppConfig {
         development_mode: true,
-        ..soland_test_support::app_config()
+        ..coland_test_support::app_config()
     });
     let foreign =
         ordinary_realm::bootstrap_unit(&format!("non-governing-bundle-{}", uuid::Uuid::now_v7()));
@@ -74,10 +74,10 @@ async fn authority_bundle_unknown_and_non_governing_realms_have_one_public_refus
 }
 
 async fn dev_session(
-    state: &soland_http::state::AppState,
+    state: &coland_http::state::AppState,
     actor: &arkret_wire::DidCoreId,
 ) -> String {
-    let mut response = TestClient::post("http://server/_soland/gate/auth/dev-login")
+    let mut response = TestClient::post("http://server/_coland/gate/auth/dev-login")
         .json(&json!({
             "actor": actor,
             "device_id": format!("ak:device:{}", uuid::Uuid::now_v7()),
@@ -94,7 +94,7 @@ async fn dev_session(
 }
 
 async fn scan(
-    state: &soland_http::state::AppState,
+    state: &coland_http::state::AppState,
     token: &str,
     request: &StreamScanRequest,
 ) -> (StatusCode, Value) {
@@ -118,9 +118,9 @@ async fn scan(
     )
 }
 
-fn seal_commit(state: &soland_http::state::AppState, commit: &mut arkret_wire::RealmCommit) {
-    let identity = soland_test_support::fixture_service_identity(state.config());
-    let key = ed25519_dalek::SigningKey::from_bytes(&soland_test_support::fixture_signing_seed(
+fn seal_commit(state: &coland_http::state::AppState, commit: &mut arkret_wire::RealmCommit) {
+    let identity = coland_test_support::fixture_service_identity(state.config());
+    let key = ed25519_dalek::SigningKey::from_bytes(&coland_test_support::fixture_signing_seed(
         state.config(),
         &identity,
     ));
@@ -136,14 +136,14 @@ fn seal_commit(state: &soland_http::state::AppState, commit: &mut arkret_wire::R
 }
 
 async fn next(
-    state: &soland_http::state::AppState,
-    pool: &soland_storage_postgres::PgPool,
-    previous: &soland_storage::AuthorityCommitTransaction,
+    state: &coland_http::state::AppState,
+    pool: &coland_storage_postgres::PgPool,
+    previous: &coland_storage::AuthorityCommitTransaction,
     kind: EventKind,
     payload: Value,
     actor: &arkret_wire::AccountId,
     station_did: &arkret_wire::Did,
-) -> soland_storage::EventCommitRequest {
+) -> coland_storage::EventCommitRequest {
     let mut request = ordinary_realm::next_request_for_actor(
         previous,
         kind,
@@ -162,9 +162,9 @@ async fn next(
 async fn canonical_scan_withholds_redacted_message_without_skipping_commit() {
     let config = AppConfig {
         development_mode: true,
-        ..soland_test_support::app_config()
+        ..coland_test_support::app_config()
     };
-    let (state, pool) = soland_test_support::app_state_with_pool(config);
+    let (state, pool) = coland_test_support::app_state_with_pool(config);
     let human = ordinary_realm::human_profile::admit_for_station_did(
         &pool,
         state.service_did(),

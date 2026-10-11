@@ -18,7 +18,7 @@ jobs:
     name: Typos
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout soland
+      - name: Checkout coland
         uses: actions/checkout@v6
 
       - name: Check spelling
@@ -36,10 +36,10 @@ jobs:
           - macos-latest
 
     steps:
-      - name: Checkout soland
+      - name: Checkout coland
         uses: actions/checkout@v6
         with:
-          path: soland
+          path: coland
 
       - name: Checkout Arkret Rust SDK
         uses: actions/checkout@v6
@@ -66,13 +66,13 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/tests/configure-windows-openssl.tests.ps1
-        working-directory: soland
+        working-directory: coland
 
       - name: Configure Windows OpenSSL
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/configure-windows-openssl.ps1
-        working-directory: soland
+        working-directory: coland
 
       - name: Install Rust 1.98
         uses: dtolnay/rust-toolchain@master
@@ -88,62 +88,62 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: soland -> target
+          workspaces: coland -> target
 
       # ARC-0002 (重构计划 2026-07-10): legacy patterns must ratchet to zero.
       - name: Deletion gate
         run: bash scripts/deletion_gate.sh
-        working-directory: soland
+        working-directory: coland
         shell: bash
 
       - name: Environment documentation gate
         run: python scripts/check-env-docs.py
-        working-directory: soland
+        working-directory: coland
 
       - name: Test-support surface gate
         run: python scripts/check-test-support-surface.py
-        working-directory: soland
+        working-directory: coland
 
       - name: Typed error mapping gate regression tests
         run: python -m unittest discover -s scripts -p test_check_error_mapping.py
-        working-directory: soland
+        working-directory: coland
 
       - name: Typed error mapping gate
         run: python scripts/check-error-mapping.py
-        working-directory: soland
+        working-directory: coland
 
       - name: SDK wire type ownership gate
-        run: python ../arkret-rust-sdk/tools/wire_type_ownership_audit.py --workspace-root .. --require-repository soland
-        working-directory: soland
+        run: python ../arkret-rust-sdk/tools/wire_type_ownership_audit.py --workspace-root .. --require-repository coland
+        working-directory: coland
 
       - name: Crate layering gate
         run: cargo +1.98 run -p xtask --bin check_layering --locked
-        working-directory: soland
+        working-directory: coland
 
       - name: Rustfmt
         run: cargo +nightly fmt --all -- --check
-        working-directory: soland
+        working-directory: coland
 
       - name: Clippy
         run: cargo +1.98 clippy --all-targets --locked -- -D warnings
-        working-directory: soland
+        working-directory: coland
 
       - name: KeyStore keygen Clippy
-        run: cargo +1.98 clippy --locked -p soland-keystore-keygen --all-targets -- -D warnings
-        working-directory: soland
+        run: cargo +1.98 clippy --locked -p coland-keystore-keygen --all-targets -- -D warnings
+        working-directory: coland
 
       - name: KeyStore keygen tests
-        run: cargo +1.98 test --locked -p soland-keystore-keygen
-        working-directory: soland
+        run: cargo +1.98 test --locked -p coland-keystore-keygen
+        working-directory: coland
 
       - name: Clippy with OpenTelemetry
         run: cargo +1.98 clippy --features otel --all-targets --locked -- -D warnings
-        working-directory: soland
+        working-directory: coland
 
       # Keep test binaries separate from `target/dev`, matching the local
       # `just test` gate and preventing Windows dev-server file locks.
       #
-      # Soland persists through one adapter, so every test that needs storage
+      # Coland persists through one adapter, so every test that needs storage
       # leases a real database and fails without one. Service containers only
       # run on Linux, so this matrix runs the crates that need no database and
       # the Linux-only `postgres-workspace` job below runs the rest.
@@ -152,8 +152,8 @@ jobs:
           CARGO_TARGET_DIR: target/test
         run: >-
           cargo +1.98 test --locked
-          -p soland-domain -p soland-contracts -p soland-keystore-keygen
-        working-directory: soland
+          -p coland-domain -p coland-contracts -p coland-keystore-keygen
+        working-directory: coland
 
   postgres-workspace:
     name: Workspace tests (postgres)
@@ -162,9 +162,9 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_USER: soland
-          POSTGRES_PASSWORD: soland
-          POSTGRES_DB: soland_ws
+          POSTGRES_USER: coland
+          POSTGRES_PASSWORD: coland
+          POSTGRES_DB: coland_ws
         ports:
           - 5432:5432
         # Every test leases its own database from this server and the leases
@@ -172,23 +172,23 @@ jobs:
         # `test threads * live AppStates per test` pools plus one session per
         # lease. The default 100 is not enough for a 16-thread runner.
         options: >-
-          --health-cmd "pg_isready -U soland"
+          --health-cmd "pg_isready -U coland"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
           --shm-size=1g
     env:
-      DATABASE_URL: postgres://soland:soland@localhost:5432/soland_ws
+      DATABASE_URL: postgres://coland:coland@localhost:5432/coland_ws
       # Demand is `test threads * live AppStates per test`, not the thread
       # count: restart fixtures hold two leases at once and the deep-stack
       # runners give each test its own thread. A 12-thread local run peaks near
       # 50, so this leaves headroom on a larger runner.
-      SOLAND_TEST_DATABASE_SLOTS: "192"
+      COLAND_TEST_DATABASE_SLOTS: "192"
     steps:
-      - name: Checkout soland
+      - name: Checkout coland
         uses: actions/checkout@v6
         with:
-          path: soland
+          path: coland
 
       - name: Checkout Arkret Rust SDK
         uses: actions/checkout@v6
@@ -219,19 +219,19 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: soland -> target
+          workspaces: coland -> target
 
       - name: Raise the PostgreSQL connection ceiling
         run: |
-          docker exec "$(docker ps --filter ancestor=postgres:16 --format '{{.ID}}')"             psql -U soland -d soland_ws -c "ALTER SYSTEM SET max_connections = 500;"
+          docker exec "$(docker ps --filter ancestor=postgres:16 --format '{{.ID}}')"             psql -U coland -d coland_ws -c "ALTER SYSTEM SET max_connections = 500;"
           docker restart "$(docker ps --filter ancestor=postgres:16 --format '{{.ID}}')"
-          for i in {1..30}; do pg_isready -h localhost -p 5432 -U soland && break; sleep 1; done
+          for i in {1..30}; do pg_isready -h localhost -p 5432 -U coland && break; sleep 1; done
 
       - name: Test (whole workspace, real database)
         env:
           CARGO_TARGET_DIR: target/test
         run: SSL_CERT_FILE="$PWD/crates/server/tests/fixtures/outbox-test-ca.pem" cargo +1.98 test --locked --workspace
-        working-directory: soland
+        working-directory: coland
 
   migration-cycle:
     name: Migration up/down/up cycle (postgres)
@@ -243,20 +243,20 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_USER: soland
-          POSTGRES_PASSWORD: soland
-          POSTGRES_DB: soland_cycle
+          POSTGRES_USER: coland
+          POSTGRES_PASSWORD: coland
+          POSTGRES_DB: coland_cycle
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U soland"
+          --health-cmd "pg_isready -U coland"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
     env:
-      DATABASE_URL: postgres://soland:soland@localhost:5432/soland_cycle
+      DATABASE_URL: postgres://coland:coland@localhost:5432/coland_cycle
     steps:
-      - name: Checkout soland
+      - name: Checkout coland
         uses: actions/checkout@v6
 
       - name: Install Rust
@@ -269,7 +269,7 @@ jobs:
       - name: Wait for postgres
         run: |
           for i in {1..30}; do
-            if pg_isready -h localhost -p 5432 -U soland; then
+            if pg_isready -h localhost -p 5432 -U coland; then
               exit 0
             fi
             sleep 1
@@ -284,7 +284,7 @@ jobs:
           pg_dump --schema-only --no-owner --no-privileges \
             "$DATABASE_URL" > /tmp/schema.baseline.sql
         env:
-          PGPASSWORD: soland
+          PGPASSWORD: coland
 
       - name: Revert every migration in reverse order
         run: diesel migration --migration-dir crates/storage-postgres/migrations revert --all
@@ -297,7 +297,7 @@ jobs:
           pg_dump --schema-only --no-owner --no-privileges \
             "$DATABASE_URL" > /tmp/schema.cycled.sql
         env:
-          PGPASSWORD: soland
+          PGPASSWORD: coland
 
       - name: Diff cycled schema against baseline
         run: |
@@ -318,23 +318,23 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_USER: soland
-          POSTGRES_PASSWORD: soland
-          POSTGRES_DB: soland_contracts
+          POSTGRES_USER: coland
+          POSTGRES_PASSWORD: coland
+          POSTGRES_DB: coland_contracts
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U soland"
+          --health-cmd "pg_isready -U coland"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
     env:
-      DATABASE_URL: postgres://soland:soland@localhost:5432/soland_contracts
+      DATABASE_URL: postgres://coland:coland@localhost:5432/coland_contracts
     steps:
-      - name: Checkout soland
+      - name: Checkout coland
         uses: actions/checkout@v6
         with:
-          path: soland
+          path: coland
 
       - name: Checkout Arkret Rust SDK
         uses: actions/checkout@v6
@@ -363,12 +363,12 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: soland -> target
+          workspaces: coland -> target
 
       - name: Wait for postgres
         run: |
           for i in {1..30}; do
-            pg_isready -h localhost -p 5432 -U soland && break
+            pg_isready -h localhost -p 5432 -U coland && break
             sleep 1
           done
 
@@ -376,8 +376,8 @@ jobs:
       # contracts. They fail without `DATABASE_URL`, so a missing database
       # breaks the build instead of emptying the suite.
       - name: Storage contract and durable-plane tests
-        run: cargo test --locked -p soland-storage-postgres
-        working-directory: soland
+        run: cargo test --locked -p coland-storage-postgres
+        working-directory: coland
 
   postgres-http-api:
     name: Postgres HTTP API cursor tests
@@ -386,23 +386,23 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_USER: soland
-          POSTGRES_PASSWORD: soland
-          POSTGRES_DB: soland_cursor
+          POSTGRES_USER: coland
+          POSTGRES_PASSWORD: coland
+          POSTGRES_DB: coland_cursor
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U soland"
+          --health-cmd "pg_isready -U coland"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
     env:
-      DATABASE_URL: postgres://soland:soland@localhost:5432/soland_cursor
+      DATABASE_URL: postgres://coland:coland@localhost:5432/coland_cursor
     steps:
-      - name: Checkout soland
+      - name: Checkout coland
         uses: actions/checkout@v6
         with:
-          path: soland
+          path: coland
 
       - name: Checkout Arkret Rust SDK
         uses: actions/checkout@v6
@@ -431,15 +431,15 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: soland -> target
+          workspaces: coland -> target
 
       - name: Wait for postgres
         run: |
           for i in {1..30}; do
-            pg_isready -h localhost -p 5432 -U soland && break
+            pg_isready -h localhost -p 5432 -U coland && break
             sleep 1
           done
 
       - name: Test sync cursor restart behavior
-        run: cargo test --locked -p soland --test http_api cursor_handle
-        working-directory: soland
+        run: cargo test --locked -p coland --test http_api cursor_handle
+        working-directory: coland

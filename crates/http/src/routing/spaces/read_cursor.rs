@@ -10,11 +10,11 @@ use arkret_models_collaboration::objects::read_receipts::{
     ReadCursor, ReadCursorAdvanceRequestBody, ReadCursorList, ReadMarkerOutcome,
 };
 use arkret_wire::{Event, ReadCursorScope, ReadScopeKind};
+use coland_http::error::AppError;
+use coland_storage::{ReadCursorAdvanceOutcome, ReadCursorAdvanceRefusal};
 use salvo::oapi::endpoint;
 use salvo::oapi::extract::{JsonBody, QueryParam};
 use salvo::prelude::*;
-use soland_http::error::AppError;
-use soland_storage::{ReadCursorAdvanceOutcome, ReadCursorAdvanceRefusal};
 
 use super::AuthArgs;
 use crate::routing::identity::device_messages::{
@@ -64,7 +64,7 @@ pub(super) async fn set_read_cursor(
         .map_err(crate::state::actor_private_refusal)?;
     let canonical_event_digest = crate::state::canonical_event_digest(&event)
         .map_err(crate::state::actor_private_refusal)?;
-    let advance = soland_storage::ReadCursorAdvance {
+    let advance = coland_storage::ReadCursorAdvance {
         event,
         canonical_event_digest,
         cursor,
@@ -99,7 +99,7 @@ pub(super) async fn set_read_cursor(
 /// device message, whose `updated_at` is the winning advance's envelope time.
 async fn fanout_read_cursor_winner(
     state: &AppState,
-    session: &soland_services::identity::SessionIdentityState,
+    session: &coland_services::identity::SessionIdentityState,
     marker: &ReadMarkerOutcome,
 ) -> Result<(), AppError> {
     let sender_account_id =

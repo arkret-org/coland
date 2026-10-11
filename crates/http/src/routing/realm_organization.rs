@@ -8,7 +8,7 @@
 //!
 //! A relationship is only verified when `lifecycle_phase=verified_active`;
 //! `declared_organization_hint_ids` are unverified claims. This is the protocol
-//! read path referenced by `realm-and-space.md` §2.3.0 — soland never invents a
+//! read path referenced by `realm-and-space.md` §2.3.0 — coland never invents a
 //! private endpoint for it.
 //!
 //! Spec: `arkret-spec/spec/v1/zh/models/realm-and-space.md` §2.3.0; response
@@ -21,13 +21,13 @@ use arkret_models_collaboration::governance::realm_governance::{
     RealmOrganizationLifecyclePhase, RealmOrganizationRelationshipList,
 };
 use arkret_wire::DidCoreId;
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
 use salvo::oapi::endpoint;
 use salvo::oapi::extract::PathParam;
 use salvo::prelude::*;
 use serde::de::DeserializeOwned;
 use serde_json::json;
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
 
 use super::AuthArgs;
 use crate::state::AppState;
@@ -65,13 +65,13 @@ pub(crate) async fn list_realm_organizations(
 }
 
 #[endpoint(
-    operation_id = "org.arkret.soland.admin.realm_organization.query.list",
+    operation_id = "org.arkret.coland.admin.realm_organization.query.list",
     summary = "List a realm's organization relationships for administration",
     tags("admin", "realm_organizations")
 )]
 #[tracing::instrument(
     skip_all,
-    fields(op = "org.arkret.soland.admin.realm_organization.query.list")
+    fields(op = "org.arkret.coland.admin.realm_organization.query.list")
 )]
 pub(crate) async fn admin_list_realm_organizations(
     admin: super::admin::AdminAuth,
@@ -85,7 +85,7 @@ pub(crate) async fn admin_list_realm_organizations(
 /// `session` is the caller already authenticated by the wrapping endpoint
 /// (the self bearer path or the `RequireAdmin` gate).
 async fn list_realm_organizations_impl(
-    session: soland_services::identity::SessionIdentityState,
+    session: coland_services::identity::SessionIdentityState,
     realm_id: PathParam<String>,
     depot: &mut Depot,
 ) -> JsonResult<RealmOrganizationRelationshipList> {

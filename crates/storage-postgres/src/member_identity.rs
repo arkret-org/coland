@@ -104,7 +104,7 @@ impl MemberIdentityStore for PgMemberIdentityStore {
                     replaces: typed
                         .replaces
                         .into_iter()
-                        .map(|edge| soland_storage::MemberIdentityReplacementEdge {
+                        .map(|edge| coland_storage::MemberIdentityReplacementEdge {
                             event_id: edge.event_id.to_string(),
                             payload_digest: edge.payload_digest.to_string(),
                         })

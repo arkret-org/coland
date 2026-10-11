@@ -32,14 +32,14 @@ use arkret_models_collaboration::authority_commit::{
     CommittedEventSubmission, CommittedReplicationBranch, PeerAuthoritySubmitRequest,
     PeerCommittedReplicationRequest,
 };
+use coland_storage::{
+    FederationOutboxRecord, PersistenceError, PersistenceResult, RealmFanoutAuthorityWitness,
+    RealmFanoutBinding, RealmFanoutOutboxInput, ids,
+};
 use diesel::sql_types::{BigInt, Binary, Jsonb, Text, Timestamptz};
 use diesel::{OptionalExtension as _, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::Value;
-use soland_storage::{
-    FederationOutboxRecord, PersistenceError, PersistenceResult, RealmFanoutAuthorityWitness,
-    RealmFanoutBinding, RealmFanoutOutboxInput, ids,
-};
 
 use crate::PgTransactionError;
 
@@ -159,7 +159,7 @@ pub(crate) async fn freeze_welcomes_in_connection(
         }) {
             return Err(PersistenceError::Conflict(format!(
                 "{}: Welcome replay differs from the frozen signed delivery",
-                soland_storage::ConflictCode::DuplicateConflict
+                coland_storage::ConflictCode::DuplicateConflict
             ))
             .into());
         }
@@ -704,7 +704,7 @@ pub(crate) async fn plan_realm_fanout_in_connection(
         if !targets.contains_key(service) {
             return Err(PersistenceError::Conflict(format!(
                 "{}: the remote Welcome recipient's Station is not a replication target",
-                soland_storage::ConflictCode::FailedPrecondition
+                coland_storage::ConflictCode::FailedPrecondition
             ))
             .into());
         }

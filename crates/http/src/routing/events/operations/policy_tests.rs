@@ -1,7 +1,7 @@
 use arkret_models_collaboration::agent_operations::AgentLifecycleState;
+use coland_storage_postgres::Db;
 use ed25519_dalek::{Signer as _, SigningKey};
 use serde_json::json;
-use soland_storage_postgres::Db;
 
 use super::*;
 
@@ -29,7 +29,7 @@ fn fixture_actor(principal: &str) -> arkret_wire::ActorId {
 fn test_config() -> crate::config::AppConfig {
     crate::config::AppConfig {
         object_storage: crate::config::ObjectStorageConfig::local(
-            std::env::temp_dir().join("soland-direct-conversation-policy-test-blobs"),
+            std::env::temp_dir().join("coland-direct-conversation-policy-test-blobs"),
         ),
         development_mode: true,
         did_resolver_allow_methods: vec!["web".to_owned(), "key".to_owned()],
@@ -203,7 +203,7 @@ fn test_state() -> AppState {
 fn install_collaboration_realm(state: &AppState, realm_id: &arkret_identifiers::RealmId) {
     state.test_projection().lock().set_realm_facet(
         realm_id.as_str(),
-        soland_domain::reducer::facet::REALM_GENESIS,
+        coland_domain::reducer::facet::REALM_GENESIS,
         json!({
             "schema": "ak.schema.realm_genesis.v1",
             "purpose": "collaboration",
@@ -265,7 +265,7 @@ async fn install_constrained_grant(
         .expect("fixture Realm root");
     let resource = crate::authz::resource_selector(&realm_id, &resource).expect("fixture resource");
     let grant_id = grants
-        .seed_test_grant(&soland_storage::TestCapabilityGrant {
+        .seed_test_grant(&coland_storage::TestCapabilityGrant {
             realm_id,
             subject: fixture_actor(&subject),
             actions,
@@ -401,7 +401,7 @@ fn insert_joined_realm_member(
     let now = chrono::Utc::now();
     state.test_projection().lock().members.insert(
         (realm_id.to_string(), fixture_actor(actor_id).to_string()),
-        soland_domain::reducer::SolandMembershipState {
+        coland_domain::reducer::ColandMembershipState {
             member: fixture_actor(actor_id).to_string(),
             realm_id: realm_id.to_string(),
             state: "join".to_owned(),
@@ -457,7 +457,7 @@ async fn register_agent_selection(
     reply: bool,
     act_on_behalf: bool,
 ) {
-    let mut record = soland_services::identity::AgentPairingState::new(
+    let mut record = coland_services::identity::AgentPairingState::new(
         agent_id.to_owned(),
         ALICE_CORE_ID.to_owned(),
         "ak:realm:Abeq9pC3fxOERl1X0ivHa5cJCBy41KfYu5LKvGfPFq5K".to_owned(),
@@ -1030,7 +1030,7 @@ async fn reply_agent_projected_deactivation_blocks_writes_even_with_active_recor
 /// registered `ak.accountability-grant-v1` binding transcript.
 #[allow(clippy::too_many_arguments)]
 fn signed_accountability_grant(
-    issuer: &soland_test_support::pcr_genesis::PcrGenesisFixture,
+    issuer: &coland_test_support::pcr_genesis::PcrGenesisFixture,
     issuer_id: &arkret_wire::DidCoreId,
     subject_id: &arkret_wire::DidCoreId,
     status: &str,
@@ -1066,7 +1066,7 @@ fn signed_accountability_grant(
     )
     .unwrap();
     let account = &issuer.history.account;
-    soland_test_support::device_authorization_history::sign_event(
+    coland_test_support::device_authorization_history::sign_event(
         arkret_wire::test_support::raw_event(
             arkret_wire::EventKind::IdentityAccountabilityGrant.as_str(),
             arkret_wire::ScopeRef::Realm {
@@ -1088,7 +1088,7 @@ fn signed_accountability_grant(
 async fn commit_accountability_grant(
     state: &AppState,
     event: &arkret_wire::Event,
-) -> soland_storage::PersistenceResult<soland_storage::AccountabilityGrantAdmissionOutcome> {
+) -> coland_storage::PersistenceResult<coland_storage::AccountabilityGrantAdmissionOutcome> {
     let committed_at = chrono::Utc::now();
     let method = arkret_wire::DidUrl::new(
         crate::routing::federation::federation_service_signature_key_id(
@@ -1109,7 +1109,7 @@ async fn commit_accountability_grant(
         .expect("PCR head transaction");
     state
         .persistence()
-        .admit_accountability_grant(soland_storage::AccountabilityGrantAdmissionWrite {
+        .admit_accountability_grant(coland_storage::AccountabilityGrantAdmissionWrite {
             commit: transaction,
             queued_at: committed_at,
         })
@@ -1119,11 +1119,11 @@ async fn commit_accountability_grant(
 /// A PG-backed state with the issuer's PCR genesis accepted.
 async fn accountability_state() -> (
     AppState,
-    soland_test_support::pcr_genesis::PcrGenesisFixture,
+    coland_test_support::pcr_genesis::PcrGenesisFixture,
     arkret_identifiers::RealmId,
 ) {
     let state = test_state();
-    let issuer = soland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
+    let issuer = coland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
     issuer
         .admit_into(state.test_persistence().as_ref())
         .await
@@ -1195,7 +1195,7 @@ async fn profile_accountable_principal_rejects_batch_grant_signed_by_other_actor
         .expect_err("a grant whose issuer is not its actor is refused");
     assert_eq!(
         refused.conflict_code(),
-        Some(soland_storage::ConflictCode::SignatureInvalid)
+        Some(coland_storage::ConflictCode::SignatureInvalid)
     );
     let profile =
         accountable_profile_create(realm_id, "0000000007a4", AGENT_CORE_ID, &claimed_issuer);
@@ -1224,7 +1224,7 @@ async fn profile_accountable_principal_accepts_committed_active_grant() {
     );
     assert!(matches!(
         commit_accountability_grant(&state, &grant).await.unwrap(),
-        soland_storage::AccountabilityGrantAdmissionOutcome::Committed(_)
+        coland_storage::AccountabilityGrantAdmissionOutcome::Committed(_)
     ));
     let profile = accountable_profile_create(realm_id, "0000000007a9", AGENT_CORE_ID, &issuer_id);
 
@@ -1542,7 +1542,7 @@ async fn agent_action_approval_event(
 ) -> arkret_wire::Event {
     state
         .authority_commits()
-        .install_genesis_authority(&soland_storage::CurrentRealmAuthority {
+        .install_genesis_authority(&coland_storage::CurrentRealmAuthority {
             realm_id: realm_id.clone(),
             generation: 0,
             service_id: crate::test_event::station_id(),
@@ -1578,7 +1578,7 @@ async fn admit_agent_action_approval(
     state: &AppState,
     event: &arkret_wire::Event,
     committed_at: chrono::DateTime<chrono::Utc>,
-) -> soland_services::ServiceResult<soland_services::authority_commit::AuthorityEventAdmissionOutcome>
+) -> coland_services::ServiceResult<coland_services::authority_commit::AuthorityEventAdmissionOutcome>
 {
     state
         .authority_commits()
@@ -1615,7 +1615,7 @@ async fn commit_agent_action_approval(
         .expect("controller confirmation commits");
     assert!(matches!(
         outcome,
-        soland_services::authority_commit::AuthorityEventAdmissionOutcome::Committed(_)
+        coland_services::authority_commit::AuthorityEventAdmissionOutcome::Committed(_)
     ));
     event.event_id
 }
@@ -1768,7 +1768,7 @@ async fn late_confirmation_is_refused_with_zero_writes() {
     .expect_err("a confirmation covered after expires_at is refused");
     assert_eq!(
         error.conflict_code(),
-        Some(soland_storage::ConflictCode::FailedPrecondition),
+        Some(coland_storage::ConflictCode::FailedPrecondition),
         "{error}"
     );
     assert!(
@@ -1781,7 +1781,7 @@ async fn late_confirmation_is_refused_with_zero_writes() {
         "a refused confirmation leaves no Event or Commit"
     );
 
-    let soland_services::authority_commit::AuthorityEventAdmissionOutcome::Committed(commit) =
+    let coland_services::authority_commit::AuthorityEventAdmissionOutcome::Committed(commit) =
         admit_agent_action_approval(&state, &event, expires_at)
             .await
             .expect("a confirmation covered exactly at expires_at commits")
@@ -1794,7 +1794,7 @@ async fn late_confirmation_is_refused_with_zero_writes() {
         admit_agent_action_approval(&state, &event, expires_at + chrono::Duration::hours(1))
             .await
             .expect("exact retry is not re-judged"),
-        soland_services::authority_commit::AuthorityEventAdmissionOutcome::Duplicate(commit)
+        coland_services::authority_commit::AuthorityEventAdmissionOutcome::Duplicate(commit)
     );
 }
 
@@ -1899,7 +1899,7 @@ async fn circle_scoped_relation_update_and_delete_require_circle_membership() {
         members.insert(fixture_actor(ALICE_CORE_ID).to_string());
         projection.circles.insert(
             circle_id.to_owned(),
-            soland_domain::reducer::CircleProjection {
+            coland_domain::reducer::CircleProjection {
                 circle_id: circle_id.to_owned(),
                 realm_id: realm_id.to_string(),
                 profile_ref: None,
@@ -1910,7 +1910,7 @@ async fn circle_scoped_relation_update_and_delete_require_circle_membership() {
                 join_rule: "invite".to_owned(),
                 history_access: "since_join".to_owned(),
                 mls_group_ref: None,
-                state: soland_domain::reducer::CircleLifecycleState::Active,
+                state: coland_domain::reducer::CircleLifecycleState::Active,
                 state_changed_at: None,
                 created_by: ALICE_CORE_ID.to_owned(),
                 created_at: now,
@@ -1921,7 +1921,7 @@ async fn circle_scoped_relation_update_and_delete_require_circle_membership() {
         );
         projection.relations.insert(
             relation_id.to_owned(),
-            soland_domain::reducer::SolandRelationState {
+            coland_domain::reducer::ColandRelationState {
                 relation_id: relation_id.to_owned(),
                 realm_id: realm_id.to_string(),
                 relation_kind: "confidential_discussion_of".to_owned(),

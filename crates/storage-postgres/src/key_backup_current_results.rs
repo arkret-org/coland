@@ -217,9 +217,9 @@ pub(crate) fn verification_method_device(
 /// pointer become visible together or not at all.
 pub(crate) async fn commit_key_backup_pointer_unit_in_connection(
     conn: &mut AsyncPgConnection,
-    write: &soland_storage::KeyBackupActiveSeriesCommitWrite,
-) -> Result<soland_storage::KeyBackupActiveSeriesCommitOutcome, PgTransactionError> {
-    use soland_storage::KeyBackupActiveSeriesCommitOutcome as Outcome;
+    write: &coland_storage::KeyBackupActiveSeriesCommitWrite,
+) -> Result<coland_storage::KeyBackupActiveSeriesCommitOutcome, PgTransactionError> {
+    use coland_storage::KeyBackupActiveSeriesCommitOutcome as Outcome;
 
     let event = &write.commit.event;
     let commit = &write.commit.commit;
@@ -421,13 +421,13 @@ pub(crate) async fn commit_key_backup_pointer_unit_in_connection(
     )
     .await?
     {
-        soland_storage::AuthorityCommitWriteOutcome::Committed => {}
-        soland_storage::AuthorityCommitWriteOutcome::Duplicate => {
+        coland_storage::AuthorityCommitWriteOutcome::Committed => {}
+        coland_storage::AuthorityCommitWriteOutcome::Duplicate => {
             return Err(pointer_rejected(
                 "KeyBackup pointer Event was committed outside this unit",
             ));
         }
-        soland_storage::AuthorityCommitWriteOutcome::StaleAuthority(_) => {
+        coland_storage::AuthorityCommitWriteOutcome::StaleAuthority(_) => {
             return Err(pointer_rejected(
                 "PCR authority changed before KeyBackup pointer commit",
             ));
@@ -455,7 +455,7 @@ pub(crate) async fn confirmed_key_backup_pointer(
 pub(crate) async fn confirmed_key_backup_pointer_basis(
     pool: &PgPool,
     account_id: &AccountId,
-) -> PersistenceResult<Option<soland_storage::ConfirmedKeyBackupAuthorityBasis>> {
+) -> PersistenceResult<Option<coland_storage::ConfirmedKeyBackupAuthorityBasis>> {
     let mut conn = pg_conn(pool).await?;
     confirmed_key_backup_pointer_basis_in_connection(&mut conn, account_id).await
 }
@@ -521,7 +521,7 @@ pub(crate) async fn confirmed_key_backup_pointer_in_connection(
 pub(crate) async fn confirmed_key_backup_pointer_basis_in_connection(
     conn: &mut AsyncPgConnection,
     account_id: &AccountId,
-) -> PersistenceResult<Option<soland_storage::ConfirmedKeyBackupAuthorityBasis>> {
+) -> PersistenceResult<Option<coland_storage::ConfirmedKeyBackupAuthorityBasis>> {
     let actor = ActorId::account(account_id.clone());
     let current_key =
         derive_key_backup_active_series_current_key(&actor, BackupKind::SecretStorage)
@@ -627,7 +627,7 @@ pub(crate) async fn confirmed_key_backup_pointer_basis_in_connection(
         }
         _ => return Err(invalid("KeyBackup pointer provenance is incomplete")),
     };
-    Ok(Some(soland_storage::ConfirmedKeyBackupAuthorityBasis {
+    Ok(Some(coland_storage::ConfirmedKeyBackupAuthorityBasis {
         committed_ref: arkret_wire::CommittedEventRef {
             event_id: head_commit.event_ref,
             commit_id: head_commit.commit_id,
@@ -833,8 +833,8 @@ mod tests {
         );
         let generic = crate::authority_commit::commit_transaction_in_connection(
             &mut conn,
-            &soland_storage::AuthorityCommitTransaction {
-                expected_authority: soland_storage::CurrentRealmAuthority {
+            &coland_storage::AuthorityCommitTransaction {
+                expected_authority: coland_storage::CurrentRealmAuthority {
                     realm_id: successor.realm_id.clone(),
                     generation: 0,
                     service_id: account.station_id.clone(),

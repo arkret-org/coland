@@ -22,26 +22,26 @@ env:
   CARGO_TERM_COLOR: always
   PGUSER: postgres
   PGPASSWORD: postgres
-  PGDATABASE: soland_drill
+  PGDATABASE: coland_drill
   PGHOST: 127.0.0.1
   PGPORT: 5432
-  DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/soland_drill
+  DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/coland_drill
   # Service registration requires a canonical HTTPS public identity even when
   # this persistence drill probes its private listener directly over loopback.
-  SOLAND_PUBLIC_BASE_URL: https://soland.drill.example:8989/
-  SOLAND_TRUST_DOMAIN: ak:trust_domain:soland.drill.example
-  SOLAND_FIRST_PROVISIONING: "true"
-  SOLAND_SERVICE_IDENTITY_BUNDLE_DIR: ${{ github.workspace }}/_drill/identity-bundle
-  SOLAND_BACKUP_DIR: ${{ github.workspace }}/_drill/backups
-  SOLAND_KEYSTORE_BACKEND: encrypted_file
-  SOLAND_KEYSTORE_PATH: ${{ github.workspace }}/_drill/keystore/soland.v1
-  SOLAND_KEYSTORE_MASTER_KEY_FILE: ${{ github.workspace }}/_drill/secrets/keystore-master-key
-  SOLAND_DEVELOPMENT_MODE: "true"
+  COLAND_PUBLIC_BASE_URL: https://coland.drill.example:8989/
+  COLAND_TRUST_DOMAIN: ak:trust_domain:coland.drill.example
+  COLAND_FIRST_PROVISIONING: "true"
+  COLAND_SERVICE_IDENTITY_BUNDLE_DIR: ${{ github.workspace }}/_drill/identity-bundle
+  COLAND_BACKUP_DIR: ${{ github.workspace }}/_drill/backups
+  COLAND_KEYSTORE_BACKEND: encrypted_file
+  COLAND_KEYSTORE_PATH: ${{ github.workspace }}/_drill/keystore/coland.v1
+  COLAND_KEYSTORE_MASTER_KEY_FILE: ${{ github.workspace }}/_drill/secrets/keystore-master-key
+  COLAND_DEVELOPMENT_MODE: "true"
   # This keystore drill has no Account Authority deployment. Override the
   # checked-in local development URL instead of discovering an absent peer.
-  SOLAND_ACCOUNT_AUTHORITY_URL: ""
-  SOLAND_BIND: 127.0.0.1:8989
-  SOLAND_OBJECT_STORAGE_LOCAL_ROOT: ${{ github.workspace }}/_drill/blobs
+  COLAND_ACCOUNT_AUTHORITY_URL: ""
+  COLAND_BIND: 127.0.0.1:8989
+  COLAND_OBJECT_STORAGE_LOCAL_ROOT: ${{ github.workspace }}/_drill/blobs
 
 jobs:
   multisig-drill:
@@ -55,20 +55,20 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: soland_drill
+          POSTGRES_DB: coland_drill
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d soland_drill"
+          --health-cmd "pg_isready -U postgres -d coland_drill"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
 
     steps:
-      - name: Checkout soland
+      - name: Checkout coland
         uses: actions/checkout@v6
         with:
-          path: soland
+          path: coland
 
       - name: Checkout Arkret Rust SDK
         uses: actions/checkout@v6
@@ -96,7 +96,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: soland -> target
+          workspaces: coland -> target
 
       - name: Install drill prerequisites
         run: |
@@ -117,76 +117,76 @@ jobs:
           echo "postgres did not become ready in time" >&2
           exit 1
 
-      - name: Build soland + soland-keystore-snapshot
-        working-directory: soland
+      - name: Build coland + coland-keystore-snapshot
+        working-directory: coland
         run: |
           set -euxo pipefail
-          cargo build --locked --bin soland --bin soland-keystore-snapshot
+          cargo build --locked --bin coland --bin coland-keystore-snapshot
           TARGET_DIRECTORY="$(cargo metadata --locked --format-version 1 --no-deps | jq -er '.target_directory')"
-          test -x "$TARGET_DIRECTORY/debug/soland"
-          test -x "$TARGET_DIRECTORY/debug/soland-keystore-snapshot"
-          echo "SOLAND_DRILL_BIN=$TARGET_DIRECTORY/debug/soland" >> "$GITHUB_ENV"
-          echo "SOLAND_SNAPSHOT_BIN=$TARGET_DIRECTORY/debug/soland-keystore-snapshot" >> "$GITHUB_ENV"
+          test -x "$TARGET_DIRECTORY/debug/coland"
+          test -x "$TARGET_DIRECTORY/debug/coland-keystore-snapshot"
+          echo "COLAND_DRILL_BIN=$TARGET_DIRECTORY/debug/coland" >> "$GITHUB_ENV"
+          echo "COLAND_SNAPSHOT_BIN=$TARGET_DIRECTORY/debug/coland-keystore-snapshot" >> "$GITHUB_ENV"
 
       - name: Prepare drill workspace
         run: |
           set -euxo pipefail
           mkdir -p \
-            "$SOLAND_BACKUP_DIR" \
-            "$SOLAND_SERVICE_IDENTITY_BUNDLE_DIR" \
-            "$(dirname "$SOLAND_KEYSTORE_PATH")" \
-            "$(dirname "$SOLAND_KEYSTORE_MASTER_KEY_FILE")" \
-            "$SOLAND_OBJECT_STORAGE_LOCAL_ROOT" \
+            "$COLAND_BACKUP_DIR" \
+            "$COLAND_SERVICE_IDENTITY_BUNDLE_DIR" \
+            "$(dirname "$COLAND_KEYSTORE_PATH")" \
+            "$(dirname "$COLAND_KEYSTORE_MASTER_KEY_FILE")" \
+            "$COLAND_OBJECT_STORAGE_LOCAL_ROOT" \
             _drill/logs
-          head -c 32 /dev/urandom | base64 > "$SOLAND_KEYSTORE_MASTER_KEY_FILE"
-          chmod 600 "$SOLAND_KEYSTORE_MASTER_KEY_FILE"
+          head -c 32 /dev/urandom | base64 > "$COLAND_KEYSTORE_MASTER_KEY_FILE"
+          chmod 600 "$COLAND_KEYSTORE_MASTER_KEY_FILE"
           : > "$GITHUB_WORKSPACE/_drill/config.env"
 
-      - name: Boot soland once to apply migrations
-        working-directory: soland
+      - name: Boot coland once to apply migrations
+        working-directory: coland
         run: |
           set -euxo pipefail
-          "$SOLAND_DRILL_BIN" --config "$GITHUB_WORKSPACE/_drill/config.env" \
-            > "$GITHUB_WORKSPACE/_drill/logs/soland-boot.log" 2>&1 &
-          SOLAND_PID=$!
+          "$COLAND_DRILL_BIN" --config "$GITHUB_WORKSPACE/_drill/config.env" \
+            > "$GITHUB_WORKSPACE/_drill/logs/coland-boot.log" 2>&1 &
+          COLAND_PID=$!
           READY=false
           for _ in $(seq 1 30); do
-            if curl -fsS "http://${SOLAND_BIND}/health" >/dev/null 2>&1; then
+            if curl -fsS "http://${COLAND_BIND}/health" >/dev/null 2>&1; then
               READY=true
               break
             fi
-            if ! kill -0 "$SOLAND_PID" 2>/dev/null; then
+            if ! kill -0 "$COLAND_PID" 2>/dev/null; then
               break
             fi
             sleep 1
           done
           if [ "$READY" != "true" ]; then
-            cat "$GITHUB_WORKSPACE/_drill/logs/soland-boot.log" >&2
-            kill "$SOLAND_PID" 2>/dev/null || true
-            wait "$SOLAND_PID" 2>/dev/null || true
+            cat "$GITHUB_WORKSPACE/_drill/logs/coland-boot.log" >&2
+            kill "$COLAND_PID" 2>/dev/null || true
+            wait "$COLAND_PID" 2>/dev/null || true
             exit 1
           fi
           psql -v ON_ERROR_STOP=1 "$DATABASE_URL" \
             -c "\d realm_commits" -c "\d event_approval_private_audit"
-          kill "$SOLAND_PID" || true
-          wait "$SOLAND_PID" 2>/dev/null || true
-          mapfile -d '' BUNDLES < <(find "$SOLAND_SERVICE_IDENTITY_BUNDLE_DIR" -maxdepth 1 -type f -name '*.json' -print0)
+          kill "$COLAND_PID" || true
+          wait "$COLAND_PID" 2>/dev/null || true
+          mapfile -d '' BUNDLES < <(find "$COLAND_SERVICE_IDENTITY_BUNDLE_DIR" -maxdepth 1 -type f -name '*.json' -print0)
           if [ "${#BUNDLES[@]}" -ne 1 ]; then
             echo "expected exactly one service identity bundle; found ${#BUNDLES[@]}" >&2
             exit 1
           fi
-          echo "SOLAND_SERVICE_IDENTITY_BUNDLE=${BUNDLES[0]}" >> "$GITHUB_ENV"
+          echo "COLAND_SERVICE_IDENTITY_BUNDLE=${BUNDLES[0]}" >> "$GITHUB_ENV"
 
       - name: Admit actual two-of-three approval fixture
-        working-directory: soland
+        working-directory: coland
         run: |
           set -euxo pipefail
           # This existing real-PG case checks signed historical approval
           # methods, the roster threshold, expiry, exact replay and nonce
           # reuse. Its accepted rows are the backup input; no SQL fabricates
           # an accepted signature or reintroduces the retired pending table.
-          SOLAND_TEST_DATABASE_URL="$DATABASE_URL" \
-            cargo test --locked -p soland-storage-postgres \
+          COLAND_TEST_DATABASE_URL="$DATABASE_URL" \
+            cargo test --locked -p coland-storage-postgres \
               --test strand_position_authority \
               grant_approval_cases::grant_approval_roster_does_not_use_received_votes_as_the_threshold_denominator \
               -- --exact --nocapture --test-threads=1
@@ -194,7 +194,7 @@ jobs:
           # one database. Discover the actual lease rather than duplicating
           # Rust's migration fingerprint or assuming a Cargo output path.
           mapfile -t FIXTURE_DATABASES < <(psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -tA -c \
-            "SELECT datname FROM pg_database WHERE datname ~ '^soland_drill_s[0-9a-f]{8}_slot[0-9]{2}$' ORDER BY datname")
+            "SELECT datname FROM pg_database WHERE datname ~ '^coland_drill_s[0-9a-f]{8}_slot[0-9]{2}$' ORDER BY datname")
           if [ "${#FIXTURE_DATABASES[@]}" -ne 1 ]; then
             echo "expected exactly one owned approval fixture database" >&2
             exit 1
@@ -227,7 +227,7 @@ jobs:
           echo "DATABASE_URL=$FIXTURE_URL" >> "$GITHUB_ENV"
 
       - name: Run backup-drill.sh
-        working-directory: soland
+        working-directory: coland
         run: |
           set -euxo pipefail
           bash scripts/backup-drill.sh
@@ -236,15 +236,15 @@ jobs:
         run: |
           set -euxo pipefail
           shopt -s nullglob
-          TARBALLS=( "$SOLAND_BACKUP_DIR"/soland-*.tar.gz )
+          TARBALLS=( "$COLAND_BACKUP_DIR"/coland-*.tar.gz )
           if [ "${#TARBALLS[@]}" -eq 0 ]; then
-            echo "no backup tarball produced under $SOLAND_BACKUP_DIR" >&2
+            echo "no backup tarball produced under $COLAND_BACKUP_DIR" >&2
             exit 1
           fi
           TAR="${TARBALLS[0]}"
           echo "tarball=$TAR"
           tar -tzf "$TAR" | sort > _drill/tar-listing.txt
-          for expected in manifest.json soland-database.dump service-identity-bundle.json keystore.json; do
+          for expected in manifest.json coland-database.dump service-identity-bundle.json keystore.json; do
             grep -Fxq "$expected" _drill/tar-listing.txt \
               || { echo "tarball missing $expected" >&2; cat _drill/tar-listing.txt; exit 1; }
           done
@@ -262,7 +262,7 @@ jobs:
           done
 
       - name: Run restore-drill.sh
-        working-directory: soland
+        working-directory: coland
         run: |
           set -euxo pipefail
           bash scripts/restore-drill.sh "$DRILL_TARBALL" | tee "$GITHUB_WORKSPACE/_drill/logs/restore-drill.log"
@@ -282,21 +282,21 @@ jobs:
           echo "[approval-drill] complete accepted rows restored byte-for-byte"
 
       - name: KeyStore snapshot export/import roundtrip
-        working-directory: soland
+        working-directory: coland
         run: |
           set -euxo pipefail
           mkdir -p "$GITHUB_WORKSPACE/_drill"
-          "$SOLAND_SNAPSHOT_BIN" \
+          "$COLAND_SNAPSHOT_BIN" \
               --export-only \
-              --identity-bundle "$SOLAND_SERVICE_IDENTITY_BUNDLE" \
+              --identity-bundle "$COLAND_SERVICE_IDENTITY_BUNDLE" \
               --output "$GITHUB_WORKSPACE/_drill/seed-in.json"
-          "$SOLAND_SNAPSHOT_BIN" \
+          "$COLAND_SNAPSHOT_BIN" \
               --import-only \
-              --identity-bundle "$SOLAND_SERVICE_IDENTITY_BUNDLE" \
+              --identity-bundle "$COLAND_SERVICE_IDENTITY_BUNDLE" \
               --input "$GITHUB_WORKSPACE/_drill/seed-in.json"
-          "$SOLAND_SNAPSHOT_BIN" \
+          "$COLAND_SNAPSHOT_BIN" \
               --export-only \
-              --identity-bundle "$SOLAND_SERVICE_IDENTITY_BUNDLE" \
+              --identity-bundle "$COLAND_SERVICE_IDENTITY_BUNDLE" \
               --output "$GITHUB_WORKSPACE/_drill/seed-out.json"
           jq -S '{schema, service_id, key_id, seed_b64}' "$GITHUB_WORKSPACE/_drill/seed-in.json" > "$GITHUB_WORKSPACE/_drill/seed-in.canonical.json"
           jq -S '{schema, service_id, key_id, seed_b64}' "$GITHUB_WORKSPACE/_drill/seed-out.json" > "$GITHUB_WORKSPACE/_drill/seed-out.canonical.json"

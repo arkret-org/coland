@@ -28,7 +28,7 @@ use arkret_wire::{
     AccountId, ActorId, CommitStreamRef, CommittedEventView, DidCoreId, ReadableFloor,
     ReadableFloorReason, StreamScanOutcome, StreamScanRequest,
 };
-use soland_storage::AccountStreamScan;
+use coland_storage::AccountStreamScan;
 
 use super::{
     AsyncConnection, AsyncPgConnection, BigInt, Bool, Jsonb, OptionalExtension, PersistenceError,
@@ -1340,8 +1340,8 @@ pub(crate) async fn committed_event_for_member(
     event_id: &arkret_wire::EventId,
     caller: &ActorId,
     issuer: &DidCoreId,
-) -> PersistenceResult<soland_storage::MemberCommittedEventRead> {
-    use soland_storage::MemberCommittedEventRead as Read;
+) -> PersistenceResult<coland_storage::MemberCommittedEventRead> {
+    use coland_storage::MemberCommittedEventRead as Read;
 
     let Some(token) = crate::ids::parse_event_id(event_id.as_str()) else {
         return Ok(Read::NotVisible);
@@ -1556,7 +1556,7 @@ pub(crate) async fn scan_stream_for_peer(
     request: &StreamScanRequest,
     peer: &DidCoreId,
     issuer: &DidCoreId,
-) -> PersistenceResult<soland_storage::PeerStreamScan> {
+) -> PersistenceResult<coland_storage::PeerStreamScan> {
     request
         .validate()
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
@@ -1571,10 +1571,10 @@ pub(crate) async fn scan_stream_for_peer(
             .await
             .optional()?
         else {
-            return Ok(soland_storage::PeerStreamScan::NotAuthorized);
+            return Ok(coland_storage::PeerStreamScan::NotAuthorized);
         };
         if tenure.service_id != issuer.as_str() {
-            return Ok(soland_storage::PeerStreamScan::Unproved(
+            return Ok(coland_storage::PeerStreamScan::Unproved(
                 "this Station does not hold the Realm's governing tenure",
             ));
         }
@@ -1583,7 +1583,7 @@ pub(crate) async fn scan_stream_for_peer(
             .iter()
             .min_by_key(|interval| interval.floor.oldest_position)
         else {
-            return Ok(soland_storage::PeerStreamScan::NotAuthorized);
+            return Ok(coland_storage::PeerStreamScan::NotAuthorized);
         };
         let floor = lowest.floor.clone();
         let last = if intervals.iter().any(|interval| interval.last.is_none()) {
@@ -1672,7 +1672,7 @@ pub(crate) async fn scan_stream_for_peer(
             committed_events, readable_floor: page.readable_floor, truncated: page.truncated, producer_signer_facts,
         };
         outcome.validate_for_request(request).map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
-        Ok(soland_storage::PeerStreamScan::Page(outcome))
+        Ok(coland_storage::PeerStreamScan::Page(outcome))
     })
     .await
     .map_err(PgTransactionError::into_persistence)

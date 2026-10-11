@@ -6,8 +6,8 @@ use arkret_models_collaboration::governance::grant_constraint::{
 use arkret_wire::{
     ApprovalContext, CapabilityActionId, Event, GrantId, RealmCommit, WireResourceSelector,
 };
+use coland_storage::{EventApprovalCommit, OperationFacts, PersistenceError, PersistenceResult};
 use diesel_async::AsyncPgConnection;
-use soland_storage::{EventApprovalCommit, OperationFacts, PersistenceError, PersistenceResult};
 
 use crate::approval_admission::{QualifiedApproval, validate_candidate};
 
@@ -100,7 +100,7 @@ pub(crate) async fn require_grant_approvals(
         }
         let timeout = match constraint.timeout.as_deref() {
             Some(value) => Some(
-                soland_storage::fixed_duration(value)
+                coland_storage::fixed_duration(value)
                     .filter(|age| *age > chrono::TimeDelta::zero())
                     .ok_or_else(|| missing(action, 0, 0))?,
             ),

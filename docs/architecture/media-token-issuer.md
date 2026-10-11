@@ -5,14 +5,14 @@
 > SDK type reference:
 > [`arkret-rust-sdk docs/architecture.md`](../../../arkret-rust-sdk/docs/architecture.md#call-media-cxcallmediatoken_exchange).
 
-This document is the architectural reference for soland's role as the
+This document is the architectural reference for coland's role as the
 **canonical media-token issuer** in the Arkret v1 protocol family. It is
 the source of truth for: who issues, when floria proxies, focus_id derivation
 rules, participant_binding canonical bytes, TTL policy, and kid rotation.
 
 ## Issuer roles
 
-| Role | soland | floria |
+| Role | coland | floria |
 |---|---|---|
 | Canonical issuer of `MediaTokenResponse` | **Yes** | No (proxy only) |
 | Holds the issuer key material | **Yes** | No |
@@ -21,13 +21,13 @@ rules, participant_binding canonical bytes, TTL policy, and kid rotation.
 | Rotates `issuer_kid` | **Yes** | No |
 | Exposes `POST /rtc/token` to clients | **Yes (direct)** | Yes (proxy in v1) |
 
-In Arkret v1, soland is always the canonical signing authority. floria may
-proxy the request from the client to soland (e.g. when push-side network
-constraints make a direct client→soland call awkward), but floria never
+In Arkret v1, coland is always the canonical signing authority. floria may
+proxy the request from the client to coland (e.g. when push-side network
+constraints make a direct client→coland call awkward), but floria never
 forges, re-signs, or augments the token. Specifically:
 
 - floria's proxy is *transparent*: byte-for-byte forward of the token from
-  soland to the client.
+  coland to the client.
 - floria does NOT cache tokens. Each token is single-issue; caching would
   break the per-(realm, call, actor, device, focus) uniqueness invariant.
 - floria does NOT see the participant_binding in plaintext at any persistent
@@ -59,14 +59,14 @@ Derivation rules:
    (`livekit`, `mediasoup`, `janus`, `arkret_native`, `moq_relay`). Unknown
    backends surface `unknown_focus_type` at exchange time.
 2. `region` is a free-form lowercase tag MAX 32 chars matching
-   `[a-z0-9-]+`. Region is opaque to soland — its only role is human
+   `[a-z0-9-]+`. Region is opaque to coland — its only role is human
    readability and dispatch.
 3. `instance-disambiguator` is optional. When present, it MUST match
    `[a-z0-9-]+` MAX 16 chars.
 4. The total `focus_id` MUST be <= 96 octets and MUST round-trip through
    ASCII bytes (no UTF-8 multibyte).
 
-soland refuses to issue a token for a `focus_id` that is not currently in
+coland refuses to issue a token for a `focus_id` that is not currently in
 the realm's `ak.realm.media_service.foci[]` set, returning `focus_mismatch`.
 
 ## `participant_binding` canonical bytes
@@ -98,10 +98,10 @@ Canonical byte derivation for signing / verification:
    set (the SDK's `ParticipantBinding` decoder rejects unknown algorithms).
 
 Verification reverses the same chain. Any mismatch surfaces as
-`participant_binding_invalid`. soland refuses to issue a binding whose
+`participant_binding_invalid`. coland refuses to issue a binding whose
 canonical bytes round-trip differs from the bytes its signer just signed —
 this is the canonical defense against serializer drift between SDK and
-soland.
+coland.
 
 `participant_id` is its own canonical string:
 
@@ -120,10 +120,10 @@ matches the canonical join string before connecting to the backend.
 |---|---|---|
 | Hard ceiling | 600s | Spec rule: token MUST NOT exceed 10 minutes. |
 | SHOULD ceiling | 300s | Most production realms run 5-minute tokens. |
-| Soft warning | issued > 300s | SDK logs a warning; metric `soland_media_token_long_ttl_total` ticks. |
+| Soft warning | issued > 300s | SDK logs a warning; metric `coland_media_token_long_ttl_total` ticks. |
 | Renewal | client-side | Tokens are single-issue; renew = new `/rtc/token` call. |
 
-If a client passes a `requested_ttl` greater than the hard ceiling, soland
+If a client passes a `requested_ttl` greater than the hard ceiling, coland
 returns the response with the capped `expires_at`. The token is valid for
 the capped window, not the requested window. SDK's `validate_token_ttl()`
 helper enforces the rule client-side.
@@ -131,7 +131,7 @@ helper enforces the rule client-side.
 ## `service_signature.kid` rotation
 
 The `kid` (Key ID) embedded in `service_signature` is the canonical name
-soland uses to look up the signing key. Form:
+coland uses to look up the signing key. Form:
 
 ```text
 ak-media-issuer/<realm-short-or-deployment-label>/<yyyy>-<NN>
@@ -156,7 +156,7 @@ Rotation cadence:
 
 Procedure:
 
-1. Stage the new kid (`status = staged`). soland will NOT issue under a
+1. Stage the new kid (`status = staged`). coland will NOT issue under a
    staged kid.
 2. Flip status to `current`; the prior current becomes `previous`.
 3. After max token TTL (10 minutes), revoke the old `previous`.

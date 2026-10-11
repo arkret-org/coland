@@ -18,9 +18,9 @@ use arkret_wire::{
     RealmAuthorityBundle, RealmAuthorityHandoff, StreamScanRequest,
 };
 use chrono::Utc;
-use soland_services::authority_commit::AuthorityProtocolPort;
-use soland_services::identity::SessionIdentityState;
-use soland_services::{ServiceError, ServiceResult};
+use coland_services::authority_commit::AuthorityProtocolPort;
+use coland_services::identity::SessionIdentityState;
+use coland_services::{ServiceError, ServiceResult};
 
 use super::AppState;
 
@@ -252,7 +252,7 @@ impl AuthorityProtocolPort for AppState {
             phase = "producer_verified",
             "ordinary bootstrap execution boundary"
         );
-        let expected_authority = soland_storage::CurrentRealmAuthority {
+        let expected_authority = coland_storage::CurrentRealmAuthority {
             realm_id: genesis.realm_id.clone(),
             generation: 0,
             service_id: self.service_core_id(),
@@ -294,10 +294,10 @@ impl AuthorityProtocolPort for AppState {
             "ordinary bootstrap execution boundary"
         );
         let (status, commits) = match result {
-            soland_storage::OrdinaryRealmBootstrapCommitOutcome::Committed(commits) => {
+            coland_storage::OrdinaryRealmBootstrapCommitOutcome::Committed(commits) => {
                 (AggregateAcceptanceStatus::Committed, commits)
             }
-            soland_storage::OrdinaryRealmBootstrapCommitOutcome::Duplicate(commits) => {
+            coland_storage::OrdinaryRealmBootstrapCommitOutcome::Duplicate(commits) => {
                 (AggregateAcceptanceStatus::Duplicate, commits)
             }
         };
@@ -400,10 +400,10 @@ impl AuthorityProtocolPort for AppState {
         ) {
             let result = super::authority_consent::submit(self, session, &request).await?;
             let (status, record) = match result {
-                soland_storage::ConsentAdmissionOutcome::Committed(record) => {
+                coland_storage::ConsentAdmissionOutcome::Committed(record) => {
                     (arkret_wire::AuthorityCommitStatus::Committed, record)
                 }
-                soland_storage::ConsentAdmissionOutcome::Duplicate(record) => {
+                coland_storage::ConsentAdmissionOutcome::Duplicate(record) => {
                     (arkret_wire::AuthorityCommitStatus::Duplicate, record)
                 }
             };
@@ -647,7 +647,7 @@ impl AuthorityProtocolPort for AppState {
 
     async fn submit_peer_authority_forward_event(
         &self,
-        peer: &soland_services::authority_commit::AuthenticatedPeerContext,
+        peer: &coland_services::authority_commit::AuthenticatedPeerContext,
         request: PeerAuthorityForwardEventRequest,
     ) -> ServiceResult<AuthoritySubmitOutcome> {
         super::authority_forward::admit_forwarded_event(self, peer, request, crate::wire::now())
@@ -656,7 +656,7 @@ impl AuthorityProtocolPort for AppState {
 
     async fn submit_peer_authority_forward_mls(
         &self,
-        peer: &soland_services::authority_commit::AuthenticatedPeerContext,
+        peer: &coland_services::authority_commit::AuthenticatedPeerContext,
         request: PeerAuthorityForwardMlsRequest,
     ) -> ServiceResult<AuthoritySubmitOutcome> {
         super::authority_forward::admit_forwarded_mls(self, peer, request, crate::wire::now()).await
@@ -664,7 +664,7 @@ impl AuthorityProtocolPort for AppState {
 
     async fn submit_peer_committed_replication(
         &self,
-        peer: &soland_services::authority_commit::AuthenticatedPeerContext,
+        peer: &coland_services::authority_commit::AuthenticatedPeerContext,
         request: arkret_models_collaboration::authority_commit::PeerCommittedReplicationRequest,
     ) -> ServiceResult<arkret_models_collaboration::authority_commit::PeerCommittedReplicationOutcome>
     {
@@ -673,7 +673,7 @@ impl AuthorityProtocolPort for AppState {
 
     async fn submit_peer_direct_conversation_founding(
         &self,
-        peer: &soland_services::authority_commit::AuthenticatedPeerContext,
+        peer: &coland_services::authority_commit::AuthenticatedPeerContext,
         request: arkret_models_collaboration::authority_commit::DirectConversationFoundingFederationSubmission,
     ) -> ServiceResult<DirectConversationFoundingAcceptanceOutcome> {
         super::authority_direct_conversation::submit_peer_direct_conversation_founding(
@@ -686,7 +686,7 @@ impl AuthorityProtocolPort for AppState {
         &self,
         account: &arkret_wire::AccountId,
         request: StreamScanRequest,
-    ) -> ServiceResult<soland_storage::AccountStreamScan> {
+    ) -> ServiceResult<coland_storage::AccountStreamScan> {
         self.authority_commits()
             .scan_stream_for_account(&request, account, &self.service_core_id())
             .await
@@ -694,9 +694,9 @@ impl AuthorityProtocolPort for AppState {
 
     async fn scan_stream_for_peer(
         &self,
-        peer: &soland_services::authority_commit::AuthenticatedPeerContext,
+        peer: &coland_services::authority_commit::AuthenticatedPeerContext,
         request: StreamScanRequest,
-    ) -> ServiceResult<soland_storage::PeerStreamScan> {
+    ) -> ServiceResult<coland_storage::PeerStreamScan> {
         self.authority_commits()
             .scan_stream_for_peer(&request, &peer.source_service_id, &self.service_core_id())
             .await
@@ -749,7 +749,7 @@ impl AuthorityProtocolPort for AppState {
 #[cfg(test)]
 mod tests {
     use arkret_wire::EventKind;
-    use soland_services::ServiceError;
+    use coland_services::ServiceError;
 
     use super::{
         SelfEventRoute, refuse_actor_private_event, require_guarded_unit_event, self_event_route,

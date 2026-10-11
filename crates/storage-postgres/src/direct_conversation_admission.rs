@@ -33,7 +33,7 @@ use arkret_models_collaboration::events_payloads::direct_conversation::{
 };
 use arkret_models_collaboration::objects::direct_conversation::DirectConversationAuthorizationBasis;
 use arkret_wire::{ActorId, AuthoritySourceId, EventId, EventKind, RealmId, ScopeRef};
-use soland_storage::ConflictCode;
+use coland_storage::ConflictCode;
 
 use super::{
     AsyncPgConnection, Jsonb, OptionalExtension, PersistenceError, PersistenceResult,
@@ -494,7 +494,7 @@ async fn pair_grants_direct_message(
     Ok(contact_grants_direct_message(contact.as_ref()))
 }
 
-fn contact_grants_direct_message(contact: Option<&soland_storage::ContactRecord>) -> bool {
+fn contact_grants_direct_message(contact: Option<&coland_storage::ContactRecord>) -> bool {
     let grants = |scopes: &[String]| scopes.iter().any(|scope| scope == DIRECT_MESSAGE_SCOPE);
     contact.is_some_and(|contact| {
         contact.status == "accepted"

@@ -10,7 +10,7 @@ pub fn router() -> Router {
     Router::new().push(authz::protocol_router())
 }
 
-/// Product surface mounted under `/_soland/self/...`: owner-scoped policy
+/// Product surface mounted under `/_coland/self/...`: owner-scoped policy
 /// document storage CRUD (deployment-local management, not a v1 protocol
 /// operation).
 pub fn product_router() -> Router {

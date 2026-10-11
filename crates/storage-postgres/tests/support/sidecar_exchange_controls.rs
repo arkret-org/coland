@@ -6,8 +6,8 @@ use arkret_wire::{
     ActorId, CommitStreamRef, CurrentSelector, EncryptedPayloadScheme, EventKind, ScopeRef,
     SemanticRef, SidecarId, TypedCurrentRow,
 };
-use soland_storage::{AuthorityCommitStore, EventCommitUnitOfWork, MlsGroupCurrentStore};
-use soland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
+use coland_storage::{AuthorityCommitStore, EventCommitUnitOfWork, MlsGroupCurrentStore};
+use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
 
 use super::{device_authorization_history, ordinary_realm, pcr_genesis};
 
@@ -15,7 +15,7 @@ pub(super) async fn assert_current(
     pool: &PgPool,
     principal: &pcr_genesis::PcrGenesisFixture,
     sidecar: &SidecarId,
-    head: &soland_storage::AuthorityCommitTransaction,
+    head: &coland_storage::AuthorityCommitTransaction,
     group: &mut arkret_mls::ArkretMlsGroup,
     agent: &arkret_wire::DidCoreId,
 ) {
@@ -50,7 +50,7 @@ pub(super) async fn assert_current(
     let arkret_wire::SidecarContextRef::Strand { strand_id } = &context else {
         panic!("fixture needs a Strand source")
     };
-    let current = soland_storage_postgres::PgMlsGroupCurrentStore { pool: pool.clone() }
+    let current = coland_storage_postgres::PgMlsGroupCurrentStore { pool: pool.clone() }
         .current(&scope)
         .await
         .unwrap()
@@ -91,7 +91,7 @@ pub(super) async fn assert_current(
         arkret_models_collaboration::events_payloads::message::MESSAGE_METADATA_MLS_CONTENT_TYPE,
         &serde_json::to_vec(&metadata).unwrap(),
     );
-    let make = async |previous: &soland_storage::AuthorityCommitTransaction,
+    let make = async |previous: &coland_storage::AuthorityCommitTransaction,
                       kind,
                       payload,
                       after: Vec<SemanticRef>| {

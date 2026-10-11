@@ -7,7 +7,7 @@ use arkret_models_collaboration::agent_operations::AgentLifecycleState;
 use arkret_wire::{AppletId, DidCoreId, EventKind};
 
 use super::{
-    CircleLifecycleState, MessageState, ObjectLifecycleState, SolandRelationState,
+    CircleLifecycleState, ColandRelationState, MessageState, ObjectLifecycleState,
     SpaceContainerLifecycleState,
 };
 
@@ -40,8 +40,8 @@ pub enum ProjectionEffect {
         target_ref: String,
         active: bool,
     },
-    RelationCreated(SolandRelationState),
-    RelationUpdated(SolandRelationState),
+    RelationCreated(ColandRelationState),
+    RelationUpdated(ColandRelationState),
     RelationDeleted {
         relation_id: String,
     },

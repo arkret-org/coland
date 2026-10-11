@@ -8,12 +8,12 @@ mod human_profile;
 mod ordinary_realm;
 
 use arkret_wire::{ActorId, EventKind};
+use coland_storage::{AuthorityCommitStore, EventCommitRequest, EventCommitUnitOfWork};
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
 use diesel::sql_types::{Jsonb, Text};
 use diesel_async::RunQueryDsl;
 use serde_json::{Value, json};
-use soland_storage::{AuthorityCommitStore, EventCommitRequest, EventCommitUnitOfWork};
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
 
 #[derive(diesel::QueryableByName)]
 struct ValueRow {
@@ -119,7 +119,7 @@ async fn terminal_states_supplied_call_ids_and_wrong_scope_have_no_writes() {
         let error = uow.commit_event(request).await.unwrap_err();
         assert_eq!(
             error.conflict_code(),
-            Some(soland_storage::ConflictCode::CallStateTransitionInvalid),
+            Some(coland_storage::ConflictCode::CallStateTransitionInvalid),
             "{state}: {error}"
         );
         assert_eq!(footprint(&pool).await, before);
@@ -140,7 +140,7 @@ async fn terminal_states_supplied_call_ids_and_wrong_scope_have_no_writes() {
         );
         let error = uow.commit_event(request).await.unwrap_err();
         assert!(
-            matches!(error, soland_storage::PersistenceError::SchemaViolation(_)),
+            matches!(error, coland_storage::PersistenceError::SchemaViolation(_)),
             "{error}"
         );
         assert_eq!(footprint(&pool).await, before);
@@ -206,7 +206,7 @@ async fn joined_account_needs_call_join_grant_and_other_station_cannot_borrow_it
     let error = uow.commit_event(no_grant).await.unwrap_err();
     assert_eq!(
         error.conflict_code(),
-        Some(soland_storage::ConflictCode::CapabilityDenied)
+        Some(coland_storage::ConflictCode::CapabilityDenied)
     );
     assert_eq!(footprint(&pool).await, before);
     let realm = head.authority_commit.event.realm_id.clone();

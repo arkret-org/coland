@@ -4,22 +4,22 @@
 //! pool, drops it, reconnects with a fresh pool (equivalent to a process
 //! restart) and verifies the rows survive.
 //!
-//! Every case requires `SOLAND_TEST_DATABASE_URL` or `DATABASE_URL`; without one
+//! Every case requires `COLAND_TEST_DATABASE_URL` or `DATABASE_URL`; without one
 //! they fail rather than skip, because a silent skip here would leave the
 //! durable planes unverified. The database they build is named for the
 //! migration it came from -- see `tests/support/mod.rs`.
 
 mod support;
 
-use soland_storage::contract_tests::{
+use coland_storage::contract_tests::{
     assert_device_key_store_contract, assert_member_identity_store_contract,
     assert_message_store_contract, assert_one_time_key_store_contract,
     assert_realm_meta_store_contract,
 };
-use soland_storage::{
+use coland_storage::{
     DeviceKeyStore, MessageRecord, MessageStore, OneTimeKeyStore, RealmMetaRecord, RealmMetaStore,
 };
-use soland_storage_postgres::{
+use coland_storage_postgres::{
     Db, PgDeviceKeyStore, PgMemberIdentityStore, PgMessageStore, PgOneTimeKeyStore, PgPool,
     PgRealmMetaStore,
 };
@@ -34,7 +34,7 @@ mod pcr_genesis;
 /// The founding device of a genuinely signed PCR genesis the Station admitted
 /// through its registered unit. Storage admission here does not stand in for
 /// HTTP admission coverage.
-async fn device_authority(pool: &PgPool) -> soland_storage::DeviceRevocationGateSelector {
+async fn device_authority(pool: &PgPool) -> coland_storage::DeviceRevocationGateSelector {
     use diesel::sql_query;
     use diesel::sql_types::Text;
     use diesel_async::RunQueryDsl;
@@ -53,7 +53,7 @@ async fn device_authority(pool: &PgPool) -> soland_storage::DeviceRevocationGate
     pcr_genesis::PcrGenesisFixture::new(device_authorization_history::did_web_station(
         &station.station_id.parse().unwrap(),
     ))
-    .admit_founding_device(&soland_storage_postgres::PgPersistenceStore::new(
+    .admit_founding_device(&coland_storage_postgres::PgPersistenceStore::new(
         pool.clone(),
     ))
     .await

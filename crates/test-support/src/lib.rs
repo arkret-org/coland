@@ -29,23 +29,23 @@ use arkret_models_identity::service_identity::{
 use arkret_wire::{DidCoreId, ServiceKind, project_did_to_core_id};
 use async_trait::async_trait;
 use bytes::Bytes;
+use coland_domain::reducer::ProjectionState;
+use coland_http::config::AppConfig;
+use coland_http::state::{AppState, AppStateRuntime, EventBroadcast};
+use coland_services::delivery::ObjectStoragePort;
+use coland_services::events::RealmDirectoryIndex;
+use coland_services::governance::RuntimeSettingsPort;
+use coland_services::jobs::RuntimeHealthPort;
+use coland_services::persistence::PersistenceHandle;
+use coland_services::projection::ProjectionService;
+use coland_storage::PersistenceStore;
+use coland_storage_postgres::PgPersistenceStore;
+use coland_storage_postgres::test_database::{TestDatabase, block_on_lease_runtime};
 use futures_util::stream::{self, BoxStream, StreamExt};
 use parking_lot::Mutex;
 use rand_core::SeedableRng;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use soland_domain::reducer::ProjectionState;
-use soland_http::config::AppConfig;
-use soland_http::state::{AppState, AppStateRuntime, EventBroadcast};
-use soland_services::delivery::ObjectStoragePort;
-use soland_services::events::RealmDirectoryIndex;
-use soland_services::governance::RuntimeSettingsPort;
-use soland_services::jobs::RuntimeHealthPort;
-use soland_services::persistence::PersistenceHandle;
-use soland_services::projection::ProjectionService;
-use soland_storage::PersistenceStore;
-use soland_storage_postgres::PgPersistenceStore;
-use soland_storage_postgres::test_database::{TestDatabase, block_on_lease_runtime};
 
 pub fn app_config() -> AppConfig {
     AppConfig {
@@ -56,7 +56,7 @@ pub fn app_config() -> AppConfig {
 
 /// Lease a database and seed the fixture service identity into it.
 ///
-/// Soland stores through one adapter, so a fixture takes a real database
+/// Coland stores through one adapter, so a fixture takes a real database
 /// rather than a second in-memory implementation. The lease is owned by the
 /// store, so the slot returns when the last holder drops.
 fn leased_fixture_persistence_with_pool(
@@ -64,7 +64,7 @@ fn leased_fixture_persistence_with_pool(
     identity: &DidCoreIdentityState,
     signing_seed: [u8; 32],
     seed_webvh_log: bool,
-) -> (Arc<dyn PersistenceStore>, soland_storage_postgres::PgPool) {
+) -> (Arc<dyn PersistenceStore>, coland_storage_postgres::PgPool) {
     let leased = Arc::new(TestDatabase::lease_blocking());
     let pool = leased
         .db()
@@ -113,9 +113,9 @@ async fn seed_demo_data(store: &dyn PersistenceStore) {
     let now = chrono::Utc::now();
     store
         .accounts()
-        .put(&soland_storage::AccountRecord {
+        .put(&coland_storage::AccountRecord {
             // The store assigns the primary key.
-            pk: soland_storage::AccountPk(0),
+            pk: coland_storage::AccountPk(0),
             principal_id: arkret_wire::DidCoreId::new("ak:did_core:web:alice.example".to_owned())
                 .expect("demo principal id is canonical"),
             station_id: arkret_wire::DidCoreId::new("ak:did_core:web:server.example".to_owned())
@@ -132,7 +132,7 @@ async fn seed_demo_data(store: &dyn PersistenceStore) {
         .realm_meta()
         .put(
             DEMO_REALM_ID,
-            &soland_storage::RealmMetaRecord {
+            &coland_storage::RealmMetaRecord {
                 owner: "ak:did_core:web:alice.example".to_owned(),
                 deleted: false,
                 discoverability: "public".to_owned(),
@@ -163,7 +163,7 @@ pub fn app_state(config: AppConfig) -> AppState {
 /// Construct a test state and retain direct access to its leased PostgreSQL
 /// pool. This is reserved for integration tests that must install a durable
 /// pre-crash state which no public protocol operation can construct directly.
-pub fn app_state_with_pool(config: AppConfig) -> (AppState, soland_storage_postgres::PgPool) {
+pub fn app_state_with_pool(config: AppConfig) -> (AppState, coland_storage_postgres::PgPool) {
     let identity = fixture_service_identity(&config);
     let signing_seed = fixture_signing_seed(&config, &identity);
     let (persistence, pool) =
@@ -248,7 +248,7 @@ pub fn fixture_content_bound_id(prefix: &str) -> String {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut hasher = sha2::Sha256::new();
-    hasher.update(b"soland:fixture-content-bound-id:v1:");
+    hasher.update(b"coland:fixture-content-bound-id:v1:");
     hasher.update(prefix.as_bytes());
     hasher.update(seq.to_be_bytes());
     hasher.update(std::process::id().to_be_bytes());
@@ -266,7 +266,7 @@ pub fn fixture_signing_seed(config: &AppConfig, identity: &DidCoreIdentityState)
 fn fixture_service_signing_seed(config: &AppConfig) -> [u8; 32] {
     config.notary_signing_key_seed.unwrap_or_else(|| {
         let mut hasher = Sha256::new();
-        hasher.update(b"soland:test-fixture-notary:");
+        hasher.update(b"coland:test-fixture-notary:");
         hasher.update(config.public_base_url.as_bytes());
         hasher.finalize().into()
     })
@@ -279,7 +279,7 @@ fn fixture_prepared_service_inception(
     let principal_endpoint = CanonicalServiceUrl::canonicalize(&config.public_base_url)
         .expect("test public base must be canonicalizable");
     let mut rng_seed = Sha256::new();
-    rng_seed.update(b"soland:test-fixture-webvh-update:");
+    rng_seed.update(b"coland:test-fixture-webvh-update:");
     rng_seed.update(config.public_base_url.as_bytes());
     let mut rng = rand_chacha::ChaCha20Rng::from_seed(rng_seed.finalize().into());
     let version_time = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
@@ -302,11 +302,11 @@ fn fixture_prepared_service_inception(
 fn fixture_service_webvh_log(
     config: &AppConfig,
     signing_seed: [u8; 32],
-) -> soland_storage::WebvhLogRecord {
+) -> coland_storage::WebvhLogRecord {
     let prepared = fixture_prepared_service_inception(config, signing_seed);
     let event_digest = arkret_canonical::canonical_sha256(&prepared.log_entry)
         .expect("fixture service WebVH history digest");
-    soland_storage::WebvhLogRecord {
+    coland_storage::WebvhLogRecord {
         event_digest,
         did: prepared.did.clone(),
         seq: 1,
@@ -352,7 +352,7 @@ fn app_state_with_identity_and_stores(
     };
     let projections = ProjectionService::new(&service_id);
     let projection = Box::leak(Box::new(projections.test_state().clone()));
-    let realm_directory = soland_http::state::build_realm_directory(
+    let realm_directory = coland_http::state::build_realm_directory(
         &config,
         &serving_identity.did,
         &serving_identity.service_id,
@@ -402,7 +402,7 @@ impl pcr_genesis::PcrGenesisFixture {
     pub async fn admit(
         &self,
         state: &AppState,
-    ) -> soland_storage::PersistenceResult<soland_storage::PcrGenesisCommitOutcome> {
+    ) -> coland_storage::PersistenceResult<coland_storage::PcrGenesisCommitOutcome> {
         self.admit_into(state.test_persistence().as_ref()).await
     }
 }
@@ -424,7 +424,7 @@ impl AppStateTestExt for AppState {
             .lock()
             .get(&app_state_key(self))
             .and_then(|resources| resources.persistence.upgrade())
-            .expect("AppState was not constructed by soland-test-support")
+            .expect("AppState was not constructed by coland-test-support")
     }
 
     fn test_projection(&self) -> &'static Arc<Mutex<ProjectionState>> {
@@ -492,7 +492,7 @@ fn fixture_service_identity_for_did_and_version(
     )
     .expect("station registration key");
     let signing_key_ref =
-        DidCoreIdentityKeyRef::new("fixture:soland:service-signing-key").expect("fixture key ref");
+        DidCoreIdentityKeyRef::new("fixture:coland:service-signing-key").expect("fixture key ref");
     let service_id =
         project_did_to_core_id(&did).expect("fixture service DID projects to a core id");
     DidCoreIdentityState::Ready {
@@ -503,7 +503,7 @@ fn fixture_service_identity_for_did_and_version(
             provider: None,
             signing_key_refs: vec![signing_key_ref.clone()],
             active_signing_key_ref: signing_key_ref,
-            control_key_ref: DidCoreIdentityKeyRef::new("fixture:soland:webvh-control-key")
+            control_key_ref: DidCoreIdentityKeyRef::new("fixture:coland:webvh-control-key")
                 .expect("fixture control key ref"),
             version_id,
             last_verified_at: chrono::Utc::now(),
@@ -672,7 +672,7 @@ struct NoRuntimeSettings;
 
 #[async_trait]
 impl RuntimeSettingsPort for NoRuntimeSettings {
-    async fn load_overrides(&self) -> soland_services::ServiceResult<Vec<(String, Value)>> {
+    async fn load_overrides(&self) -> coland_services::ServiceResult<Vec<(String, Value)>> {
         Ok(Vec::new())
     }
 
@@ -681,7 +681,7 @@ impl RuntimeSettingsPort for NoRuntimeSettings {
         _key: &str,
         _value: &Value,
         _updated_by: &str,
-    ) -> soland_services::ServiceResult<()> {
+    ) -> coland_services::ServiceResult<()> {
         Ok(())
     }
 }
@@ -718,7 +718,7 @@ pub mod historical_human;
 /// Counts only: actual native-control accepted/staging/history/outbox footprint.
 /// No identity, key, payload or protocol material is returned.
 pub async fn native_control_source_footprint(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
 ) -> serde_json::Value {
     use diesel_async::RunQueryDsl;
     #[derive(diesel::QueryableByName)]

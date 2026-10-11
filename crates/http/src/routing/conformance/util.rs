@@ -1,7 +1,7 @@
 //! Conformance primitives exposed over the HTTP resonance surface.
 //!
 //! Wire encoding must be the SDK production implementation, not a local fork:
-//! these handlers are used to prove soland and the shared SDK agree on the
+//! these handlers are used to prove coland and the shared SDK agree on the
 //! canonical protocol surface.
 
 use anyhow::Result;

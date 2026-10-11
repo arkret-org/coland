@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 
 use crate::state::AppState;
 
-/// Fixed latency buckets for `soland_request_duration_seconds`. Kept byte-for-byte
+/// Fixed latency buckets for `coland_request_duration_seconds`. Kept byte-for-byte
 /// identical to the historical hand-rolled exposition so `prometheus-alerts.yml`
 /// and the Grafana dashboard continue to match.
 const DURATION_BUCKETS: [f64; 11] = [
@@ -22,8 +22,8 @@ const DURATION_BUCKETS: [f64; 11] = [
 ];
 
 /// P5 (5.4 metrics cardinality cap) — soft cap on the number of distinct
-/// `op` label values we will emit on `soland_request_total` /
-/// `soland_request_duration_seconds`. Above this we still record (no
+/// `op` label values we will emit on `coland_request_total` /
+/// `coland_request_duration_seconds`. Above this we still record (no
 /// data loss) but emit a sticky warning so on-call can audit whether a
 /// path normalizer regressed and started leaking an unbounded id segment
 /// (e.g. forgot to fold `ak:...` ids in `normalize_path_for_metrics`).
@@ -36,36 +36,36 @@ const REQUEST_OP_LABEL_CARDINALITY_THRESHOLD: usize = 200;
 // referenced by `examples/prometheus-alerts.yml` and
 // `docs/grafana-operational-dashboard.json` and MUST stay byte-stable.
 // ─────────────────────────────────────────────────────────────────────────
-const REQUEST_COUNTER: &str = "soland_request_total";
-const REQUEST_DURATION: &str = "soland_request_duration_seconds";
-const STREAM_SCAN_BYTES: &str = "soland_stream_scan_response_bytes_total";
-const AUDIT_APPEND_FAILURES: &str = "soland_audit_append_failures_total";
-const FEDERATION_DLQ: &str = "soland_federation_outbox_dead_letter_total";
-const EGRESS_DENIED: &str = "soland_egress_denied_total";
-const DIGEST_MISMATCH: &str = "soland_digest_mismatch_total";
-const FEDERATION_RETRY: &str = "soland_federation_retry_total";
-const FEDERATION_RETRY_DELAY: &str = "soland_federation_retry_delay_seconds";
-const FEDERATION_LEASE_TAKEOVER: &str = "soland_federation_outbox_lease_takeover_total";
-const DB_POOL_IN_USE: &str = "soland_db_pool_in_use";
-const FEDERATION_OUTBOX_DEPTH: &str = "soland_federation_outbox_depth";
-const FEDERATION_OUTBOX_STATE_DEPTH: &str = "soland_federation_outbox_state_depth";
+const REQUEST_COUNTER: &str = "coland_request_total";
+const REQUEST_DURATION: &str = "coland_request_duration_seconds";
+const STREAM_SCAN_BYTES: &str = "coland_stream_scan_response_bytes_total";
+const AUDIT_APPEND_FAILURES: &str = "coland_audit_append_failures_total";
+const FEDERATION_DLQ: &str = "coland_federation_outbox_dead_letter_total";
+const EGRESS_DENIED: &str = "coland_egress_denied_total";
+const DIGEST_MISMATCH: &str = "coland_digest_mismatch_total";
+const FEDERATION_RETRY: &str = "coland_federation_retry_total";
+const FEDERATION_RETRY_DELAY: &str = "coland_federation_retry_delay_seconds";
+const FEDERATION_LEASE_TAKEOVER: &str = "coland_federation_outbox_lease_takeover_total";
+const DB_POOL_IN_USE: &str = "coland_db_pool_in_use";
+const FEDERATION_OUTBOX_DEPTH: &str = "coland_federation_outbox_depth";
+const FEDERATION_OUTBOX_STATE_DEPTH: &str = "coland_federation_outbox_state_depth";
 const FEDERATION_OUTBOX_OLDEST_PENDING_AGE: &str =
-    "soland_federation_outbox_oldest_pending_age_seconds";
+    "coland_federation_outbox_oldest_pending_age_seconds";
 
 // ─────────────────────────────────────────────────────────────────────────
 // DID boundary counters (`did-usage-and-verification.md` §6, DID-P1-A03).
 //
 // These two counters are deliberately independent: "verify one signature"
 // and "resolve one DID" are separate events, and only the first one is
-// allowed to scale with ordinary traffic. `soland_did_resolve_total` carries
+// allowed to scale with ordinary traffic. `coland_did_resolve_total` carries
 // a `source` label so a joint test can tell a local/binding-store hit from a
 // real outbound fetch; `authority_network_call_count` is by definition the
 // delta of the `source="network"` series.
 // ─────────────────────────────────────────────────────────────────────────
-const DID_RESOLVE: &str = "soland_did_resolve_total";
-const SIGNATURE_VERIFY: &str = "soland_signature_verify_total";
+const DID_RESOLVE: &str = "coland_did_resolve_total";
+const SIGNATURE_VERIFY: &str = "coland_signature_verify_total";
 
-/// The DID document came from soland's in-process document snapshot or its
+/// The DID document came from coland's in-process document snapshot or its
 /// durable local DID store. No outbound request.
 pub const DID_RESOLVE_SOURCE_LOCAL_SNAPSHOT: &str = "local_snapshot";
 /// The DID document came from an SDK resolver that performs no I/O
@@ -86,7 +86,7 @@ pub const SIGNATURE_SCHEME_AGENT_SESSION: &str = "ed25519_agent_session";
 pub const SIGNATURE_SCHEME_FEDERATED_SIGNER_EVIDENCE: &str = "ed25519_federated_signer_evidence";
 pub const SIGNATURE_SCHEME_DEVELOPMENT: &str = "ed25519_development";
 
-/// Buckets for `soland_federation_retry_delay_seconds` — spans the whole
+/// Buckets for `coland_federation_retry_delay_seconds` — spans the whole
 /// scheduling range from a 1s dependency resubmission to the 1h transport cap.
 const RETRY_DELAY_BUCKETS: [f64; 9] = [
     1.0, 5.0, 15.0, 60.0, 300.0, 900.0, 1_800.0, 3_600.0, 7_200.0,
@@ -346,7 +346,7 @@ pub async fn render_metrics(state: &AppState) -> String {
 
 /// Increment the audit-append-failure counter. Called from
 /// `routing::admin::audit::append_audit_log` when the persistence layer
-/// rejects the append; the counter feeds the `soland_audit_append_failures_total`
+/// rejects the append; the counter feeds the `coland_audit_append_failures_total`
 /// metric for alerting. Spec: C.3.7.
 pub fn record_audit_append_failure() {
     counter!(AUDIT_APPEND_FAILURES).increment(1);
@@ -356,7 +356,7 @@ pub fn record_audit_append_failure() {
 /// `routing::federation::outbox` at the *decision* boundary (we have given up
 /// on this row), not at the persistence outcome, so an alert fires even if the
 /// durable ledger write also failed. Feeds
-/// `soland_federation_outbox_dead_letter_total`.
+/// `coland_federation_outbox_dead_letter_total`.
 pub fn record_federation_outbox_dead_letter(reason: &str) {
     counter!(FEDERATION_DLQ, "reason" => normalize_label(reason)).increment(1);
 }
@@ -484,7 +484,7 @@ fn record_http_request(op: &str, status: u16, duration: Duration) {
             target: "metrics_cardinality",
             unique_op_labels = unique_ops,
             threshold = REQUEST_OP_LABEL_CARDINALITY_THRESHOLD,
-            "soland_request_total operation label cardinality crossed the warning threshold; \
+            "coland_request_total operation label cardinality crossed the warning threshold; \
              audit normalize_path_for_metrics for an id segment that is not being folded"
         );
     }
@@ -590,11 +590,11 @@ mod tests {
         let rendered = render();
 
         // Byte-stable wire names referenced by prometheus-alerts.yml + Grafana.
-        assert!(rendered.contains("soland_request_total"));
+        assert!(rendered.contains("coland_request_total"));
         assert!(rendered.contains("status=\"200\""));
-        assert!(rendered.contains("soland_request_duration_seconds_bucket"));
-        assert!(rendered.contains("soland_request_duration_seconds_sum"));
-        assert!(rendered.contains("soland_request_duration_seconds_count"));
+        assert!(rendered.contains("coland_request_duration_seconds_bucket"));
+        assert!(rendered.contains("coland_request_duration_seconds_sum"));
+        assert!(rendered.contains("coland_request_duration_seconds_count"));
         // Fixed bucket boundaries must survive the migration.
         assert!(rendered.contains("le=\"0.005\""));
         assert!(rendered.contains("le=\"10\"") || rendered.contains("le=\"10.0\""));
@@ -646,18 +646,18 @@ mod tests {
         let rendered = render();
 
         // Byte-stable wire names (counters carry the exporter `_total` suffix).
-        assert!(rendered.contains("soland_egress_denied_total"));
+        assert!(rendered.contains("coland_egress_denied_total"));
         assert!(rendered.contains("reason=\"blocked_address\""));
         assert!(rendered.contains("target_class=\"federation_outbox\""));
-        assert!(rendered.contains("soland_digest_mismatch_total"));
+        assert!(rendered.contains("coland_digest_mismatch_total"));
         assert!(rendered.contains("scope=\"blob_upload\""));
-        assert!(rendered.contains("soland_federation_retry_total"));
+        assert!(rendered.contains("coland_federation_retry_total"));
         assert!(rendered.contains("state=\"retry_scheduled\""));
-        assert!(rendered.contains("soland_audit_append_failures_total"));
-        assert!(rendered.contains("soland_federation_outbox_dead_letter_total"));
+        assert!(rendered.contains("coland_audit_append_failures_total"));
+        assert!(rendered.contains("coland_federation_outbox_dead_letter_total"));
         assert!(rendered.contains("reason=\"retry_budget_exhausted\""));
-        assert!(rendered.contains("soland_federation_retry_delay_seconds"));
-        assert!(rendered.contains("soland_federation_outbox_lease_takeover_total"));
+        assert!(rendered.contains("coland_federation_retry_delay_seconds"));
+        assert!(rendered.contains("coland_federation_outbox_lease_takeover_total"));
     }
 
     /// Read one Prometheus counter sample value out of a rendered exposition.
@@ -675,10 +675,10 @@ mod tests {
     #[test]
     fn did_boundary_counters_are_exposed_and_grow() {
         let _ = prometheus_handle();
-        let resolve_series = "soland_did_resolve_total{method=\"webvh\",source=\"network\"}";
+        let resolve_series = "coland_did_resolve_total{method=\"webvh\",source=\"network\"}";
         // The exporter renders labels in declaration order, so these series
         // names mirror the `counter!` call sites exactly.
-        let verify_series = "soland_signature_verify_total{scheme=\"ed25519_accepted_binding\",outcome=\"success\"}";
+        let verify_series = "coland_signature_verify_total{scheme=\"ed25519_accepted_binding\",outcome=\"success\"}";
 
         record_did_resolve("webvh", DID_RESOLVE_SOURCE_NETWORK);
         record_signature_verify(SIGNATURE_SCHEME_ACCEPTED_BINDING, true);
@@ -686,11 +686,11 @@ mod tests {
         let resolve_before = sample(&before, resolve_series);
         let verify_before = sample(&before, verify_series);
         assert!(
-            before.contains("soland_did_resolve_total"),
+            before.contains("coland_did_resolve_total"),
             "resolve counter must be exposed"
         );
         assert!(
-            before.contains("soland_signature_verify_total"),
+            before.contains("coland_signature_verify_total"),
             "signature counter must be exposed"
         );
         assert!(before.contains(resolve_series), "{before}");
@@ -728,11 +728,11 @@ mod tests {
         let state = AppState::new(
             crate::config::AppConfig {
                 object_storage: crate::config::ObjectStorageConfig::local(
-                    std::env::temp_dir().join("soland-metrics-endpoint-test"),
+                    std::env::temp_dir().join("coland-metrics-endpoint-test"),
                 ),
                 ..crate::config::AppConfig::test_default()
             },
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");
@@ -749,8 +749,8 @@ mod tests {
 
         let body = String::from_utf8_lossy(&body);
         assert!(body.starts_with("HTTP/1.1 200 OK"), "{body}");
-        assert!(body.contains("soland_did_resolve_total"), "{body}");
-        assert!(body.contains("soland_signature_verify_total"), "{body}");
+        assert!(body.contains("coland_did_resolve_total"), "{body}");
+        assert!(body.contains("coland_signature_verify_total"), "{body}");
         assert!(body.contains("source=\"sdk_cache\""), "{body}");
     }
 
@@ -758,9 +758,9 @@ mod tests {
     fn path_ids_are_normalized_for_operation_label() {
         assert_eq!(
             normalize_path_for_metrics(
-                "/_soland/self/realms/ak:realm:AS1N4QnbZ6JgVObAF-yTx1GWoK2XnO_vUaZ2qe0WCyQV/events"
+                "/_coland/self/realms/ak:realm:AS1N4QnbZ6JgVObAF-yTx1GWoK2XnO_vUaZ2qe0WCyQV/events"
             ),
-            "/_soland/self/realms/{id}/events"
+            "/_coland/self/realms/{id}/events"
         );
     }
 }

@@ -15,14 +15,14 @@ struct SettingRow {
 
 pub async fn load_settings_overrides(
     pool: &PgPool,
-) -> soland_storage::PersistenceResult<Vec<(String, Value)>> {
+) -> coland_storage::PersistenceResult<Vec<(String, Value)>> {
     let mut conn = pg_conn(pool)
         .await
-        .map_err(soland_storage::PersistenceError::database)?;
+        .map_err(coland_storage::PersistenceError::database)?;
     let rows = sql_query("SELECT key, value FROM server_settings")
         .get_results::<SettingRow>(&mut *conn)
         .await
-        .map_err(soland_storage::PersistenceError::database)?;
+        .map_err(coland_storage::PersistenceError::database)?;
     Ok(rows.into_iter().map(|row| (row.key, row.value)).collect())
 }
 
@@ -31,10 +31,10 @@ pub async fn store_settings_override(
     key: &str,
     value: &Value,
     updated_by: &str,
-) -> soland_storage::PersistenceResult<()> {
+) -> coland_storage::PersistenceResult<()> {
     let mut conn = pg_conn(pool)
         .await
-        .map_err(soland_storage::PersistenceError::database)?;
+        .map_err(coland_storage::PersistenceError::database)?;
     sql_query(
         "INSERT INTO server_settings (key, value, updated_by, updated_at) \
          VALUES ($1, $2, $3, NOW()) \
@@ -49,5 +49,5 @@ pub async fn store_settings_override(
     .execute(&mut *conn)
     .await
     .map(|_| ())
-    .map_err(soland_storage::PersistenceError::database)
+    .map_err(coland_storage::PersistenceError::database)
 }

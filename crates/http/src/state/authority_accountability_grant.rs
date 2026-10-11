@@ -10,8 +10,8 @@
 
 use arkret_wire::{AuthorityCommitStatus, AuthoritySubmitOutcome, EventAdmissionSubmission};
 use chrono::Utc;
-use soland_services::{ServiceError, ServiceResult};
-use soland_storage::{AccountabilityGrantAdmissionOutcome, AccountabilityGrantAdmissionWrite};
+use coland_services::{ServiceError, ServiceResult};
+use coland_storage::{AccountabilityGrantAdmissionOutcome, AccountabilityGrantAdmissionWrite};
 
 use super::AppState;
 

@@ -68,7 +68,7 @@ pub fn local_router() -> Router {
     Router::new()
     // NOTE: the MIMI provider facade is served only from its canonical
     // `/_arkret/open/mimi/*` surface (see `protocol_router` / `mimi.rs`).
-    // The historical `/_soland/open/mimi/*` duplicate mount had no caller and
+    // The historical `/_coland/open/mimi/*` duplicate mount had no caller and
     // was removed; MIMI providers discover the surface via the well-known
     // `mimi-protocol-directory`, not this vendor namespace.
 }

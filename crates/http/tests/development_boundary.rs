@@ -1,16 +1,16 @@
 //! Exercise the normal library artifact, not its cfg(test) compilation.
 
+use coland_http::config::AppConfig;
 use salvo::http::StatusCode;
 use salvo::prelude::Service;
 use salvo::test::{ResponseExt, TestClient};
-use soland_http::config::AppConfig;
 
 #[tokio::test]
 async fn development_network_config_does_not_relax_formal_verification() {
     for development_mode in [false, true] {
         let config = AppConfig {
             development_mode,
-            ..soland_test_support::app_config()
+            ..coland_test_support::app_config()
         };
         assert_eq!(config.proof_verifier_mode(), "production");
         assert_eq!(
@@ -25,9 +25,9 @@ async fn development_network_config_does_not_relax_formal_verification() {
                 "closed"
             },
         );
-        let state = soland_test_support::app_state(config);
-        let service = Service::new(soland_http::router(state));
-        let mut describe = TestClient::get("http://server/_soland/gate/auth/bridge/describe")
+        let state = coland_test_support::app_state(config);
+        let service = Service::new(coland_http::router(state));
+        let mut describe = TestClient::get("http://server/_coland/gate/auth/bridge/describe")
             .send(&service)
             .await;
         assert_eq!(describe.status_code, Some(StatusCode::OK));
@@ -38,7 +38,7 @@ async fn development_network_config_does_not_relax_formal_verification() {
         );
         // This syntactically invalid fixture credential must reach validation
         // only in the explicit harness; the normal artifact has no issuer route.
-        let login = TestClient::post("http://server/_soland/gate/auth/dev-login")
+        let login = TestClient::post("http://server/_coland/gate/auth/dev-login")
             .json(&serde_json::json!({"actor": "invalid", "device_id": "invalid"}))
             .send(&service)
             .await;
@@ -47,7 +47,7 @@ async fn development_network_config_does_not_relax_formal_verification() {
         } else {
             assert_eq!(login.status_code, Some(StatusCode::NOT_FOUND));
         }
-        let mut admin = TestClient::get("http://server/_soland/admin/settings")
+        let mut admin = TestClient::get("http://server/_coland/admin/settings")
             .send(&service)
             .await;
         assert_eq!(admin.status_code, Some(StatusCode::UNAUTHORIZED));
@@ -66,14 +66,14 @@ async fn development_network_config_does_not_relax_formal_verification() {
 /// development network configuration in a normal artifact must deny it.
 #[tokio::test]
 async fn stored_local_session_cannot_gain_synthetic_admin_scopes_in_a_normal_artifact() {
-    use soland_test_support::AppStateTestExt as _;
-    use soland_test_support::pcr_genesis::PcrGenesisFixture;
+    use coland_test_support::AppStateTestExt as _;
+    use coland_test_support::pcr_genesis::PcrGenesisFixture;
 
     let config = AppConfig {
         development_mode: true,
-        ..soland_test_support::app_config()
+        ..coland_test_support::app_config()
     };
-    let state = soland_test_support::app_state(config);
+    let state = coland_test_support::app_state(config);
     let fixture = PcrGenesisFixture::new(state.service_did());
     fixture
         .admit(&state)
@@ -83,8 +83,8 @@ async fn stored_local_session_cannot_gain_synthetic_admin_scopes_in_a_normal_art
     let now = chrono::Utc::now();
     let account_pk = store
         .accounts()
-        .put(&soland_storage::AccountRecord {
-            pk: soland_storage::AccountPk(0),
+        .put(&coland_storage::AccountRecord {
+            pk: coland_storage::AccountPk(0),
             principal_id: fixture.history.account.principal_id.clone(),
             station_id: state.service_core_id(),
             localpart: "development-boundary".to_owned(),
@@ -110,7 +110,7 @@ async fn stored_local_session_cannot_gain_synthetic_admin_scopes_in_a_normal_art
     );
     store
         .sessions()
-        .put(&soland_storage::SessionRecord {
+        .put(&coland_storage::SessionRecord {
             token_hash: token_hash.clone(),
             account_pk,
             actor: fixture.history.account.principal_id.to_string(),
@@ -132,8 +132,8 @@ async fn stored_local_session_cannot_gain_synthetic_admin_scopes_in_a_normal_art
             .unwrap()
             .is_some()
     );
-    let service = Service::new(soland_http::router(state));
-    let mut response = TestClient::get("http://server/_soland/admin/settings")
+    let service = Service::new(coland_http::router(state));
+    let mut response = TestClient::get("http://server/_coland/admin/settings")
         .add_header("Authorization", format!("Bearer {token}"), true)
         .send(&service)
         .await;

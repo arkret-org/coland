@@ -1,10 +1,10 @@
 //! Operator CLI for the durable federation outbox.
 //!
 //! ```text
-//! soland-federation-outbox list [--state pending|pending_route|leased|delivered|cancelled_authority_lost|policy_suppressed|dead_lettered|superseded] [--limit N]
-//! soland-federation-outbox list --dead-letters [--limit N]
-//! soland-federation-outbox inspect <outbox-id|dead-letter-id>
-//! soland-federation-outbox requeue <dead-letter-id> --operator <did> --reason <text>
+//! coland-federation-outbox list [--state pending|pending_route|leased|delivered|cancelled_authority_lost|policy_suppressed|dead_lettered|superseded] [--limit N]
+//! coland-federation-outbox list --dead-letters [--limit N]
+//! coland-federation-outbox inspect <outbox-id|dead-letter-id>
+//! coland-federation-outbox requeue <dead-letter-id> --operator <did> --reason <text>
 //! ```
 //!
 //! `requeue` never resurrects the terminal row: it re-validates the peer, the
@@ -12,17 +12,17 @@
 //! `Idempotency-Key` and stamps the operator audit onto the dead letter — all
 //! in one transaction. See `routing::federation::outbox_operator`.
 
-use soland::process_config::arg_value;
-use soland_http::config::{AppConfig, StartupOverrides};
-use soland_http::routing::federation::outbox_operator::{self, DEFAULT_LIST_LIMIT};
-use soland_storage::FederationOutboxState;
-use soland_storage_postgres::Db;
+use coland::process_config::arg_value;
+use coland_http::config::{AppConfig, StartupOverrides};
+use coland_http::routing::federation::outbox_operator::{self, DEFAULT_LIST_LIMIT};
+use coland_storage::FederationOutboxState;
+use coland_storage_postgres::Db;
 
 const USAGE: &str = "usage:\n  \
-    soland-federation-outbox list [--state <state>] [--limit N]\n  \
-    soland-federation-outbox list --dead-letters [--limit N]\n  \
-    soland-federation-outbox inspect <outbox-id|dead-letter-id>\n  \
-    soland-federation-outbox requeue <dead-letter-id> --operator <did> --reason <text>";
+    coland-federation-outbox list [--state <state>] [--limit N]\n  \
+    coland-federation-outbox list --dead-letters [--limit N]\n  \
+    coland-federation-outbox inspect <outbox-id|dead-letter-id>\n  \
+    coland-federation-outbox requeue <dead-letter-id> --operator <did> --reason <text>";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -32,11 +32,11 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("{USAGE}");
         std::process::exit(2);
     };
-    let values = soland::process_config::load(&raw_args)?;
+    let values = coland::process_config::load(&raw_args)?;
     let config = AppConfig::from_values(&values, StartupOverrides::default())?;
     let db = Db::connect(
         config.database_url.as_deref(),
-        soland_storage_postgres::PoolTuning {
+        coland_storage_postgres::PoolTuning {
             max_size: config.db_pool_max_size,
             acquire_timeout_seconds: config.db_pool_acquire_timeout_seconds,
         },
@@ -44,17 +44,17 @@ async fn main() -> anyhow::Result<()> {
     .await?;
     if db.pool.is_none() {
         eprintln!(
-            "soland-federation-outbox: DATABASE_URL is required; runtime persistence is \
+            "coland-federation-outbox: DATABASE_URL is required; runtime persistence is \
              PostgreSQL-only"
         );
         std::process::exit(2);
     }
-    let bootstrap = soland::bootstrap::resolve_and_build_persistence(&config, &db).await?;
+    let bootstrap = coland::bootstrap::resolve_and_build_persistence(&config, &db).await?;
     let resolution_commitment = bootstrap
         .resolution_commitment
         .clone()
         .ok_or_else(|| anyhow::anyhow!("serving service identity has no resolution commitment"))?;
-    let state = soland::runtime::build_app_state(
+    let state = coland::runtime::build_app_state(
         config,
         db,
         bootstrap.persistence,
@@ -104,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
             serde_json::to_value(outcome)?
         }
         other => {
-            eprintln!("soland-federation-outbox: unknown command {other}\n{USAGE}");
+            eprintln!("coland-federation-outbox: unknown command {other}\n{USAGE}");
             std::process::exit(2);
         }
     };

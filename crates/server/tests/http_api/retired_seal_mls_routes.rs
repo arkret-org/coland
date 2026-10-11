@@ -6,7 +6,7 @@ fn retired_seal_mls_read_routes_are_not_registered() {
 }
 
 async fn current_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let token = dev_token(state.clone()).await;
     for path in ["mls-accepted-artifact", "mls-welcome-refs"] {
         let response = TestClient::post(format!("http://server/_arkret/self/seals/{path}"))

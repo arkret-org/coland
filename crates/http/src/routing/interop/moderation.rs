@@ -9,17 +9,17 @@ use std::collections::BTreeSet;
 use arkret_identifiers::{EventId, RealmId};
 use arkret_models_collaboration::events_payloads::moderation::FrankingProof;
 use arkret_wire::{ActorId, EventKind, ScopeRef};
+use coland_http::error::AppError;
+#[cfg(test)]
+use coland_http::error::ErrorCode;
+use coland_http::result::{JsonResult, json_ok};
+use coland_services::runtime_guards::MODERATION_REPORT_EVIDENCE_MAX_TOTAL_BLOB_BYTES;
 #[cfg(test)]
 use ed25519_dalek::Signer as _;
 use salvo::oapi::endpoint;
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
 use serde_json::{Value, json};
-use soland_http::error::AppError;
-#[cfg(test)]
-use soland_http::error::ErrorCode;
-use soland_http::result::{JsonResult, json_ok};
-use soland_services::runtime_guards::MODERATION_REPORT_EVIDENCE_MAX_TOTAL_BLOB_BYTES;
 
 #[cfg(test)]
 use super::now;
@@ -232,9 +232,9 @@ fn moderation_target_effective_scope_value(
 
 #[cfg(test)]
 fn moderation_target_message<'a>(
-    projection: &'a soland_domain::reducer::ProjectionState,
+    projection: &'a coland_domain::reducer::ProjectionState,
     target_ref: &str,
-) -> Option<&'a soland_domain::reducer::MessageState> {
+) -> Option<&'a coland_domain::reducer::MessageState> {
     projection.messages.get(target_ref).or_else(|| {
         target_ref
             .strip_prefix("ak:message:")
@@ -491,7 +491,7 @@ async fn validate_franking_event_time_anchor(
 // and bind the exact envelope to the covering pair before using it as evidence.
 // This does not turn a signed received_at claim into an existence-time proof.
 fn franking_anchor_event(
-    record: &soland_storage::CanonicalEventRecord,
+    record: &coland_storage::CanonicalEventRecord,
 ) -> Result<arkret_wire::Event, AppError> {
     let event = crate::routing::events::event_log::canonical_event_for_read(record)
         .map_err(|error| franking_proof_invalid(error.message))?;
@@ -510,8 +510,8 @@ fn franking_anchor_event(
 }
 
 pub(crate) fn validate_franking_covering_commit(
-    record: &soland_storage::CanonicalEventRecord,
-    committed: &soland_storage::CommittedEventRecord,
+    record: &coland_storage::CanonicalEventRecord,
+    committed: &coland_storage::CommittedEventRecord,
     realm: &RealmId,
 ) -> Result<(), AppError> {
     let event = franking_anchor_event(record)?;
@@ -736,7 +736,7 @@ pub(crate) async fn moderation_management_view_for_session(
     state: &AppState,
     principal: &str,
     realm_filter: Option<&RealmId>,
-) -> Result<soland_storage::ModerationManagementView, AppError> {
+) -> Result<coland_storage::ModerationManagementView, AppError> {
     let principal = arkret_wire::DidCoreId::new(principal.to_owned())
         .map_err(|error| AppError::internal(format!("session principal is invalid: {error}")))?;
     let actor = ActorId::account(arkret_wire::AccountId::new(
@@ -754,8 +754,8 @@ pub(crate) async fn moderation_management_view_for_session(
 
 #[cfg(test)]
 mod report_safety_tests {
+    use coland_storage_postgres::Db;
     use serde_json::{Value, json};
-    use soland_storage_postgres::Db;
 
     use super::*;
     use crate::config::{AppConfig, ObjectStorageConfig};
@@ -769,7 +769,7 @@ mod report_safety_tests {
         let state = AppState::new(
             AppConfig {
                 object_storage: ObjectStorageConfig::local(
-                    std::env::temp_dir().join("soland-moderation-tests"),
+                    std::env::temp_dir().join("coland-moderation-tests"),
                 ),
                 development_mode: true,
                 ..AppConfig::test_default()
@@ -778,7 +778,7 @@ mod report_safety_tests {
         );
         state.test_projection().lock().messages.insert(
             TARGET.replacen("ak:message:", "ak:event:", 1),
-            soland_domain::reducer::MessageState {
+            coland_domain::reducer::MessageState {
                 event_id: TARGET.replacen("ak:message:", "ak:event:", 1),
                 message_id: TARGET.to_owned(),
                 realm_id: REALM.to_owned(),
@@ -815,7 +815,7 @@ mod report_safety_tests {
                 .content["scope_circle_id"] = json!(circle_id);
             projection.circles.insert(
                 circle_id.clone(),
-                soland_domain::reducer::CircleProjection {
+                coland_domain::reducer::CircleProjection {
                     circle_id: circle_id.clone(),
                     realm_id: REALM.into(),
                     profile_ref: None,
@@ -826,7 +826,7 @@ mod report_safety_tests {
                     join_rule: "invite".into(),
                     history_access: "since_join".into(),
                     mls_group_ref: None,
-                    state: soland_domain::reducer::CircleLifecycleState::Active,
+                    state: coland_domain::reducer::CircleLifecycleState::Active,
                     state_changed_at: None,
                     created_by: reporter.to_string(),
                     created_at: now(),
@@ -1015,8 +1015,8 @@ mod report_safety_tests {
     }
 
     fn anchor_fixture() -> (
-        soland_storage::CanonicalEventRecord,
-        soland_storage::CommittedEventRecord,
+        coland_storage::CanonicalEventRecord,
+        coland_storage::CommittedEventRecord,
     ) {
         let realm = RealmId::new(REALM).unwrap();
         let event = crate::test_event::raw_event_at(
@@ -1049,7 +1049,7 @@ mod report_safety_tests {
                 .with_timezone(&chrono::Utc),
         )
         .unwrap();
-        let record = soland_storage::CanonicalEventRecord {
+        let record = coland_storage::CanonicalEventRecord {
             event_id: event.event_id.to_string(),
             actor_id: event.actor_id.to_string(),
             realm_id: Some(realm.to_string()),
@@ -1068,7 +1068,7 @@ mod report_safety_tests {
         };
         // Structural-only accepted-read fixtures exercise commitment binding,
         // not producer admission or RealmCommit cryptographic verification.
-        let pair = soland_storage::CommittedEventRecord {
+        let pair = coland_storage::CommittedEventRecord {
             commit: arkret_wire::RealmCommit {
                 producer_signer_fact_digest: None,
                 commit_id: arkret_wire::RealmCommitId::from_digest([0x33; 32]),

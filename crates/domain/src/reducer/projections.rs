@@ -243,7 +243,7 @@ impl SpaceContainerLifecycleState {
 }
 
 /// Wire spelling of an [`ObjectStage`], taken from the SDK enum's own serde
-/// mapping. soland never re-declares the protocol-level 8-value stage
+/// mapping. coland never re-declares the protocol-level 8-value stage
 /// enumeration; both directions round-trip through the SDK type so the
 /// projection, the durable mirror and the read surface agree by construction.
 #[must_use]
@@ -621,7 +621,7 @@ pub struct PollState {
 }
 
 #[derive(Clone, Debug)]
-pub struct SolandRelationState {
+pub struct ColandRelationState {
     pub relation_id: String,
     pub realm_id: String,
     pub relation_kind: String,
@@ -648,7 +648,7 @@ pub struct RelationCurrentResultProjection {
     pub revision: arkret_wire::CurrentRevision,
 }
 
-impl SolandRelationState {
+impl ColandRelationState {
     /// Object-only traversal; an Actor endpoint is not an object id.
     pub fn from_object_ref(&self) -> Option<&str> {
         self.from_ref
@@ -668,7 +668,7 @@ impl SolandRelationState {
 }
 
 #[derive(Clone, Debug)]
-pub struct SolandMembershipState {
+pub struct ColandMembershipState {
     pub member: String,
     pub realm_id: String,
     /// Canonical transition state value (one of `invite` / `join` / `leave` /
@@ -694,7 +694,7 @@ pub struct SolandMembershipState {
 }
 
 #[derive(Clone, Debug)]
-pub struct SolandRealmState {
+pub struct ColandRealmState {
     pub realm_id: String,
     pub owner: Option<String>,
     pub title: Option<String>,

@@ -45,14 +45,10 @@ use arkret_models_crypto::{
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, TimeZone, Utc};
-use ed25519_dalek::Signer as _;
-use salvo::oapi::extract::JsonBody;
-use salvo::prelude::*;
-use serde_json::Value;
-use soland_domain::reducer::mls::KeyPackageTrustBinding;
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
-use soland_services::events::{
+use coland_domain::reducer::mls::KeyPackageTrustBinding;
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
+use coland_services::events::{
     ClaimMlsKeyPackageCommand, ClaimMlsKeyPackageTarget, MlsKeyPackageState as MlsKeyPackageRow,
     PeerKeyPackageClaimCommand as PeerKeyPackageClaimAttempt,
     PeerKeyPackageClaimLedgerState as PeerKeyPackageClaimLedgerRecord,
@@ -60,8 +56,12 @@ use soland_services::events::{
     PeerKeyPackageClaimResult as PeerKeyPackageClaimAttemptResult, PersistedKeyPackageClaimState,
     PersistedKeyPackageReusePolicy,
 };
-use soland_services::identity::SessionIdentityState as SessionRecord;
-use soland_services::projection::{MlsProjectionEffect, ProjectionEffectView};
+use coland_services::identity::SessionIdentityState as SessionRecord;
+use coland_services::projection::{MlsProjectionEffect, ProjectionEffectView};
+use ed25519_dalek::Signer as _;
+use salvo::oapi::extract::JsonBody;
+use salvo::prelude::*;
+use serde_json::Value;
 
 use crate::routing::system::extract::AuthArgs;
 use crate::state::AppState;
@@ -82,7 +82,7 @@ const LAST_RESORT_KEYPACKAGE_MAX_LIFETIME_SECS: i64 = 30 * 24 * 60 * 60;
 
 async fn ensure_keypackage_owner_account_active(
     state: &AppState,
-    owner_account_pk: soland_storage::AccountPk,
+    owner_account_pk: coland_storage::AccountPk,
 ) -> Result<(), AppError> {
     let account = state
         .identities()
@@ -101,7 +101,7 @@ async fn ensure_keypackage_owner_account_active(
 async fn local_keypackage_owner_account_pk(
     state: &AppState,
     session: &SessionRecord,
-) -> Result<soland_storage::AccountPk, AppError> {
+) -> Result<coland_storage::AccountPk, AppError> {
     if session.agent_session().is_some() {
         let principal_id = arkret_wire::DidCoreId::new(session.actor.clone())
             .map_err(|_| AppError::capability_denied("Agent principal id is invalid"))?;
@@ -321,17 +321,17 @@ struct MlsAttestAddHttpOutcome {
     attestation_digest: arkret_wire::Hash,
 }
 
-fn mls_attest_add_service_error(error: soland_services::ServiceError) -> AppError {
-    use soland_services::ServiceError;
+fn mls_attest_add_service_error(error: coland_services::ServiceError) -> AppError {
+    use coland_services::ServiceError;
     match error {
         ServiceError::NotFound(_) => AppError::not_found("MLS Add authority source unavailable"),
         ServiceError::Conflict(detail) => {
-            let code = soland_storage::ConflictCode::from_detail(&detail);
+            let code = coland_storage::ConflictCode::from_detail(&detail);
             let wire_code = match code {
-                Some(soland_storage::ConflictCode::DuplicateConflict) => {
+                Some(coland_storage::ConflictCode::DuplicateConflict) => {
                     arkret_wire::ErrorCode::DuplicateConflict
                 }
-                Some(soland_storage::ConflictCode::FailedPrecondition) => {
+                Some(coland_storage::ConflictCode::FailedPrecondition) => {
                     arkret_wire::ErrorCode::FailedPrecondition
                 }
                 _ => arkret_wire::ErrorCode::Conflict,
@@ -391,7 +391,7 @@ async fn peer_mls_attest_add(
         &request,
     )
     .await?;
-    let verified = soland_storage::VerifiedMlsAddAuthorityAttestation {
+    let verified = coland_storage::VerifiedMlsAddAuthorityAttestation {
         source_station_id: peer.source_service_id,
         request,
         attestor_resolution,
@@ -451,7 +451,7 @@ pub(crate) async fn read_member_group_state_material(
     arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialOutcome,
     AppError,
 > {
-    use soland_storage::MlsMemberGroupStateMaterialRead as Read;
+    use coland_storage::MlsMemberGroupStateMaterialRead as Read;
     let peer_request = request.as_peer_request();
     let local_read = state
         .authority_commits()
@@ -547,7 +547,7 @@ async fn resolve_peer_mls_group_state_material(
     let source = arkret_wire::DidCoreId::new(source_id.clone())
         .map_err(|_| mls_group_state_material_not_found())?;
     let event = if let Some(caller) = &request.caller_actor_id {
-        use soland_storage::MlsMemberGroupStateMaterialRead as Read;
+        use coland_storage::MlsMemberGroupStateMaterialRead as Read;
 
         if caller.route_service_id() != &source {
             return Err(mls_group_state_material_not_found());
@@ -817,7 +817,7 @@ async fn upload_keypackage(
             binding.agent_key_authorize_event_id.as_ref(),
         ) {
             (Some(event_id), None) => {
-                soland_domain::reducer::mls::MlsKeyPackagePublishTrustAnchor::DeviceAuthorize(
+                coland_domain::reducer::mls::MlsKeyPackagePublishTrustAnchor::DeviceAuthorize(
                     event_id.clone(),
                 )
             }
@@ -849,7 +849,7 @@ async fn upload_keypackage(
             Some(KeyPackageTrustBinding::agent_key_authorize(
                 event_id.as_str().to_owned(),
             )),
-            soland_domain::reducer::mls::MlsKeyPackagePublishTrustAnchor::AgentKeyAuthorize {
+            coland_domain::reducer::mls::MlsKeyPackagePublishTrustAnchor::AgentKeyAuthorize {
                 event_id: event_id.as_str().to_owned(),
                 verification_method: method.as_str().to_owned(),
             },
@@ -868,7 +868,7 @@ async fn upload_keypackage(
         (
             None,
             None,
-            soland_domain::reducer::mls::MlsKeyPackagePublishTrustAnchor::MinimalMetadataPairwise {
+            coland_domain::reducer::mls::MlsKeyPackagePublishTrustAnchor::MinimalMetadataPairwise {
                 verification_method: method.as_str().to_owned(),
                 intended_realm_id: realm_id.as_str().to_owned(),
             },
@@ -1027,14 +1027,14 @@ async fn upload_keypackage(
         // Event. Keep its reducer input typed instead of manufacturing a
         // `ProjectedEventOperation` with a synthetic Event identity.
         let trust_anchor = publish_trust_anchor.clone();
-        let projection = soland_domain::reducer::mls::MlsKeyPackagePublishProjection {
+        let projection = coland_domain::reducer::mls::MlsKeyPackagePublishProjection {
             keypackage_id: keypackage_id.clone(),
             keypackage_ref: keypackage_ref.clone(),
             keypackage_digest,
             owner_account_pk: owner_account_pk.get(),
             actor_id: actor_id.clone(),
             device_id: device_id.clone(),
-            lifetime: soland_domain::reducer::KeyPackageLifetimeProjection {
+            lifetime: coland_domain::reducer::KeyPackageLifetimeProjection {
                 not_before: created_at,
                 not_after: expires_at,
             },
@@ -2541,7 +2541,7 @@ fn claim_record_names_reader(record: &KeyPackageClaimRecord, reader: &ClaimReade
 /// session names no current endpoint.
 async fn claim_reader(state: &AppState, session: &SessionRecord) -> Option<ClaimReader> {
     match crate::routing::identity::device_messages::recipient_queue_selector(session).ok()? {
-        soland_services::delivery::RecipientQueueSelector::HumanDevice { device_id, .. } => {
+        coland_services::delivery::RecipientQueueSelector::HumanDevice { device_id, .. } => {
             let actor =
                 crate::routing::identity::session_actor::validated_session_actor(state, session)
                     .await
@@ -2549,7 +2549,7 @@ async fn claim_reader(state: &AppState, session: &SessionRecord) -> Option<Claim
             actor.as_account_id()?;
             Some(ClaimReader::Device { actor, device_id })
         }
-        soland_services::delivery::RecipientQueueSelector::AgentRuntime {
+        coland_services::delivery::RecipientQueueSelector::AgentRuntime {
             agent_id,
             verification_method,
             authorization_event_ref,
@@ -2927,7 +2927,7 @@ pub(crate) async fn capture_relayed_keypackage_claim_query(
         if state
             .mls_key_packages()
             .transition_peer_claim_terminal(
-                soland_services::events::PeerClaimTerminalTransitionCommand {
+                coland_services::events::PeerClaimTerminalTransitionCommand {
                     source_id: state.service_id(),
                     claim_request_id: request.claim_request_id.as_str(),
                     request_digest: &record.request_digest,
@@ -3447,7 +3447,7 @@ async fn verify_keypackage_consumer_signature(
 }
 
 fn keypackage_record_matches_consumer(
-    record: &soland_services::events::MlsKeyPackageState,
+    record: &coland_services::events::MlsKeyPackageState,
     body: &KeyPackagesConsumeRequestBody,
     session: &SessionRecord,
 ) -> bool {
@@ -3668,9 +3668,9 @@ async fn revoke_keypackages(
             Ok(Some(record)) => {
                 match state
                     .mls_key_packages()
-                    .claim_key_package(soland_services::events::ClaimMlsKeyPackageCommand {
+                    .claim_key_package(coland_services::events::ClaimMlsKeyPackageCommand {
                         id: &record.id,
-                        target: soland_services::events::ClaimMlsKeyPackageTarget::Revoke,
+                        target: coland_services::events::ClaimMlsKeyPackageTarget::Revoke,
                         intended_realm_id: None,
                         device_authorize_event_id: None,
                         agent_key_authorize_event_id: None,
@@ -3741,7 +3741,7 @@ async fn keypackage_device_revocation_gate(
     actor_id: &str,
     device_id: &str,
     device_authorize_event_id: Option<&str>,
-) -> Result<Option<soland_storage::DeviceRevocationGateSelector>, AppError> {
+) -> Result<Option<coland_storage::DeviceRevocationGateSelector>, AppError> {
     let Some(device_authorize_event_id) = device_authorize_event_id else {
         return Ok(None);
     };
@@ -4022,7 +4022,7 @@ async fn validate_device_keypackage_leaf(
 ) -> Result<(), String> {
     let device = state
         .identities()
-        .find_device(soland_services::identity::FindDeviceQuery {
+        .find_device(coland_services::identity::FindDeviceQuery {
             actor_id: principal.to_string(),
             device_id: device_id.to_owned(),
         })
@@ -4060,7 +4060,7 @@ async fn verify_device_keypackage_signature(
 ) -> Result<(), AppError> {
     let device = state
         .identities()
-        .find_device(soland_services::identity::FindDeviceQuery {
+        .find_device(coland_services::identity::FindDeviceQuery {
             actor_id: principal.to_string(),
             device_id: device_id.to_owned(),
         })
@@ -4391,7 +4391,7 @@ async fn current_keypackage_trust_binding(
     }
     let device = state
         .identities()
-        .find_device(soland_services::identity::FindDeviceQuery {
+        .find_device(coland_services::identity::FindDeviceQuery {
             actor_id: principal.to_string(),
             device_id: device_id.to_owned(),
         })
@@ -4479,7 +4479,7 @@ async fn current_keypackage_claim_trust_selector(
         for device_id in target_device_ids {
             if let Some(device) = state
                 .identities()
-                .find_device(soland_services::identity::FindDeviceQuery {
+                .find_device(coland_services::identity::FindDeviceQuery {
                     actor_id: principal.to_string(),
                     device_id: device_id.clone(),
                 })
@@ -4495,7 +4495,7 @@ async fn current_keypackage_claim_trust_selector(
 }
 
 fn device_authorize_trust_binding(
-    device: &soland_services::identity::DeviceIdentity,
+    device: &coland_services::identity::DeviceIdentity,
 ) -> Option<KeyPackageTrustBinding> {
     if device.revoked_at.is_some() || device.verification_state != "verified" {
         return None;
@@ -5031,11 +5031,11 @@ mod trust_binding_tests {
     async fn local_claim_verifier_never_lends_same_principal_device_to_foreign_station() {
         let state = AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         // The requester stands on a genuinely accepted PCR genesis: its founding
         // device is the only authority a claim authorization may cite.
-        let fixture = soland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
+        let fixture = coland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
         fixture
             .admit_into(state.test_persistence().as_ref())
             .await
@@ -5213,7 +5213,7 @@ mod trust_binding_tests {
             id: "keypackage-fixture".into(),
             keypackage_ref: format!("sha256:{}", "1".repeat(64)),
             keypackage_digest: format!("sha256:{}", "2".repeat(64)),
-            owner_account_pk: soland_storage::AccountPk(1),
+            owner_account_pk: coland_storage::AccountPk(1),
             actor_id: "ak:did_core:web:agent.example".into(),
             device_id: None,
             endpoint_verification_method: Some("did:web:agent.example#runtime-1".into()),

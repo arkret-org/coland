@@ -15,17 +15,17 @@ use arkret_models_collaboration::device_messages::{
     DeviceMessageDeliveredRow, DeviceMessageDeliveredStatus, DeviceMessageTarget,
     DeviceMessageUnknownRow, DeviceMessageUnknownStatus,
 };
-use salvo::oapi::extract::{JsonBody, QueryParam};
-use salvo::prelude::*;
-use serde_json::{Value, json};
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
-use soland_services::delivery::{
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
+use coland_services::delivery::{
     DeviceMessageBatchCommitOutcome, DeviceMessageBatchInspection, DeviceMessageBatchItemRecord,
     DeviceMessageBatchRecord, DeviceMessageIntentRecord, DeviceMessageState,
     RecipientQueueSelector,
 };
-use soland_services::identity::{DeviceIdentity, SessionIdentityState};
+use coland_services::identity::{DeviceIdentity, SessionIdentityState};
+use salvo::oapi::extract::{JsonBody, QueryParam};
+use salvo::prelude::*;
+use serde_json::{Value, json};
 
 use super::{SyncCursorError, now};
 use crate::routing::events::sync::{device_messages_cursor, parse_device_messages_cursor};
@@ -200,8 +200,8 @@ struct DeviceMessageIntentPreimage<'a> {
 /// never reachable from this client surface.
 struct SendingEndpoint {
     sender: DeviceMessageSender,
-    device_revocation_gate: Option<soland_storage::DeviceRevocationGateSelector>,
-    agent_guard: Option<soland_storage::AgentEndpointGuard>,
+    device_revocation_gate: Option<coland_storage::DeviceRevocationGateSelector>,
+    agent_guard: Option<coland_storage::AgentEndpointGuard>,
 }
 
 async fn sending_endpoint(
@@ -252,7 +252,7 @@ async fn sending_endpoint(
                 sender_agent_key_authorize_event_id: agent_key_authorization_ref.clone(),
             },
             device_revocation_gate: None,
-            agent_guard: Some(soland_storage::AgentEndpointGuard {
+            agent_guard: Some(coland_storage::AgentEndpointGuard {
                 pcr_realm_id: current.stream_ref.realm_id().clone(),
                 agent_id: agent_id.clone(),
                 authorization_ref: current,
@@ -454,7 +454,7 @@ async fn send_device_messages(
     let sender_verified = if has_fresh_targets && sender_agent_guard.is_none() {
         let sender_device = state
             .identities()
-            .find_device(soland_services::identity::FindDeviceQuery {
+            .find_device(coland_services::identity::FindDeviceQuery {
                 actor_id: session.actor.clone(),
                 device_id: session.require_human_device_id().clone(),
             })
@@ -479,7 +479,7 @@ async fn send_device_messages(
             let secret_message = prepared.target.kind.starts_with("ak.secret.");
             let target_record = state
                 .identities()
-                .find_device(soland_services::identity::FindDeviceQuery {
+                .find_device(coland_services::identity::FindDeviceQuery {
                     actor_id: prepared.recipient.clone(),
                     device_id: prepared.device_id.clone(),
                 })
@@ -1058,7 +1058,7 @@ fn device_is_active_verified(record: Option<&DeviceIdentity>) -> bool {
 async fn recipient_authorization(
     state: &AppState,
     record: &DeviceIdentity,
-) -> Result<soland_storage::DeviceRevocationGateSelector, AppError> {
+) -> Result<coland_storage::DeviceRevocationGateSelector, AppError> {
     if !device_is_active_verified(Some(record)) {
         return Err(AppError::capability_denied(
             "recipient device authorization is unavailable",
@@ -1109,10 +1109,10 @@ fn device_message_envelope_from_record(
 
 #[cfg(test)]
 mod tests {
+    use coland_services::identity::AccountProfileState;
+    use coland_test_support::AppStateTestExt as _;
+    use coland_test_support::pcr_genesis::PcrGenesisFixture;
     use serde_json::json;
-    use soland_services::identity::AccountProfileState;
-    use soland_test_support::AppStateTestExt as _;
-    use soland_test_support::pcr_genesis::PcrGenesisFixture;
 
     use super::*;
 
@@ -1123,7 +1123,7 @@ mod tests {
     fn station_config(development_mode: bool) -> crate::config::AppConfig {
         crate::config::AppConfig {
             object_storage: crate::config::ObjectStorageConfig::local(
-                std::env::temp_dir().join("soland-device-messages-test-blobs"),
+                std::env::temp_dir().join("coland-device-messages-test-blobs"),
             ),
             development_mode,
             seed_demo_data: false,
@@ -1134,14 +1134,14 @@ mod tests {
     fn station(development_mode: bool) -> AppState {
         let config = station_config(development_mode);
         let service_did =
-            AppState::new(config.clone(), soland_storage_postgres::Db { pool: None }).service_did();
-        let persisted = soland_test_support::app_state_with_service_did(
-            soland_test_support::app_config(),
+            AppState::new(config.clone(), coland_storage_postgres::Db { pool: None }).service_did();
+        let persisted = coland_test_support::app_state_with_service_did(
+            coland_test_support::app_config(),
             service_did,
         );
         let state = AppState::new_with_persistence(
             config,
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
             persisted.test_persistence(),
         );
         assert_eq!(state.service_id(), persisted.service_id());
@@ -1247,7 +1247,7 @@ mod tests {
         state
             .identities()
             .save_account(AccountProfileState {
-                pk: soland_storage::AccountPk(0),
+                pk: coland_storage::AccountPk(0),
                 account_id: account_id.clone(),
                 principal_id: arkret_wire::DidCoreId::new(holder.clone()).unwrap(),
                 localpart: "holder".to_owned(),
@@ -1265,7 +1265,7 @@ mod tests {
         let registered_at = now();
         state
             .identities()
-            .save_device(soland_services::identity::SaveDeviceCommand {
+            .save_device(coland_services::identity::SaveDeviceCommand {
                 actor_id: holder.clone(),
                 device_id: unauthorized_device.to_owned(),
                 display_name: None,
@@ -1356,7 +1356,7 @@ mod tests {
         // unacknowledged envelope: the queue is durable, never process state.
         let restarted = AppState::new_with_persistence(
             station_config(false),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
             state.test_persistence(),
         );
         let requeued = restarted

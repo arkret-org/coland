@@ -143,14 +143,14 @@ async fn snapshot_only_foreign_space_parent_uses_exact_verified_current_proof() 
 }
 
 async fn snapshot_only_parent_cases() {
-    let mut governor_config = soland_test_support::app_config();
+    let mut governor_config = coland_test_support::app_config();
     governor_config.public_base_url = "https://parent-snapshot-governor.example".into();
     governor_config.notary_signing_key_seed = Some([83; 32]);
-    let (governor_state, governor_pool) = soland_test_support::app_state_with_pool(governor_config);
-    let mut origin_config = soland_test_support::app_config();
+    let (governor_state, governor_pool) = coland_test_support::app_state_with_pool(governor_config);
+    let mut origin_config = coland_test_support::app_config();
     origin_config.public_base_url = "https://parent-snapshot-origin.example".into();
     origin_config.notary_signing_key_seed = Some([83; 32]);
-    let (origin_state, source_pool) = soland_test_support::app_state_with_pool(origin_config);
+    let (origin_state, source_pool) = coland_test_support::app_state_with_pool(origin_config);
     let caller = Box::pin(ordinary_realm::human_profile::admit_for_station_did(
         &source_pool,
         origin_state.service_did(),
@@ -256,7 +256,7 @@ async fn snapshot_only_parent_cases() {
     .await
     .unwrap()
     .unwrap();
-    let snapshot = soland_services::authority_commit::build_signed_realm_state_snapshot(
+    let snapshot = coland_services::authority_commit::build_signed_realm_state_snapshot(
         &material,
         governor_state
             .service_verification_method("notary-key")
@@ -276,7 +276,7 @@ async fn snapshot_only_parent_cases() {
     }))
     .await
     .unwrap();
-    let read = Box::pin(soland_storage_postgres::account_snapshot_material(
+    let read = Box::pin(coland_storage_postgres::account_snapshot_material(
         &source_pool,
         &foreign_realm,
         &caller,
@@ -410,7 +410,7 @@ async fn snapshot_only_parent_cases() {
         .await
         .unwrap();
     assert!(
-        Box::pin(soland_storage_postgres::account_snapshot_material(
+        Box::pin(coland_storage_postgres::account_snapshot_material(
             &source_pool,
             &foreign_realm,
             &caller,
@@ -452,14 +452,14 @@ async fn snapshot_parent_footprint(
 // A remote Human stays in its origin inventory; only verified forwarded proof
 // accompanies the governance request.
 async fn snapshot_forwarded_request(
-    origin: &soland_http::state::AppState,
+    origin: &coland_http::state::AppState,
     origin_pool: &PgPool,
     governing_did: &arkret_wire::Did,
     governing_station: &arkret_wire::DidCoreId,
     request: EventCommitRequest,
 ) -> EventCommitRequest {
     let mut request = Box::pin(ordinary_realm::source_request(origin_pool, request)).await;
-    let evidence = Box::pin(soland_http::test_fresh_producer_device_evidence(
+    let evidence = Box::pin(coland_http::test_fresh_producer_device_evidence(
         origin,
         &request.authority_commit.event,
         governing_station,
@@ -490,7 +490,7 @@ async fn snapshot_forwarded_request(
     request.authority_commit.commit.committed_at = core.attested_at;
     request.self_producer_guard = None;
     request.forwarded_producer_evidence =
-        Some(soland_storage::ForwardedProducerDeviceEvidence::new(evidence, fact).unwrap());
+        Some(coland_storage::ForwardedProducerDeviceEvidence::new(evidence, fact).unwrap());
     request.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
         request.authority_commit.event.clone(),
     ));

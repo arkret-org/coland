@@ -1,16 +1,16 @@
+use coland_services::hydration::HydrationProjectionAdapter;
 use sha2::{Digest as _, Sha256};
-use soland_services::hydration::HydrationProjectionAdapter;
 
 pub struct BootstrapHydrationAdapter;
 
 impl HydrationProjectionAdapter for BootstrapHydrationAdapter {
     fn operation_from_canonical_record(
         &self,
-        record: &soland_services::events::AcceptedEvent,
+        record: &coland_services::events::AcceptedEvent,
     ) -> Option<arkret_event_draft::ProjectedEventOperation> {
         let event = serde_json::from_value::<arkret_wire::Event>(record.envelope.clone()).ok()?;
         let mut hasher = Sha256::new();
-        hasher.update(b"ak:operation:soland-event-projection:v1:");
+        hasher.update(b"ak:operation:coland-event-projection:v1:");
         hasher.update(record.event_id.as_bytes());
         let digest = hasher.finalize();
         let mut bytes = [0_u8; 16];

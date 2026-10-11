@@ -1,5 +1,5 @@
+use coland_storage::AccountPk;
 use diesel_async::AsyncConnection;
-use soland_storage::AccountPk;
 
 use super::{
     BigInt, Jsonb, Nullable, OptionalExtension, PersistenceError, PersistenceResult, PgPool,
@@ -78,7 +78,7 @@ impl SessionStore for PgSessionStore {
     async fn device_authorization(
         &self,
         token: &str,
-    ) -> PersistenceResult<Option<soland_storage::DeviceRevocationGateSelector>> {
+    ) -> PersistenceResult<Option<coland_storage::DeviceRevocationGateSelector>> {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;

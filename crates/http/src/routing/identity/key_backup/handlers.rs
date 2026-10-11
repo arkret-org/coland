@@ -356,7 +356,7 @@ async fn persist_key_backup_idempotency(
             return;
         }
     };
-    let record = soland_services::jobs::IdempotencyState {
+    let record = coland_services::jobs::IdempotencyState {
         authenticated_actor: arkret_wire::ActorId::account(arkret_wire::AccountId::new(
             principal_id.clone(),
             state.service_core_id(),
@@ -456,13 +456,13 @@ pub(super) async fn unlock_key_backup(
     anchor_key_backup_auth_data_trust_root(state, &session.actor, &backup).await?;
     let basis = match &body.proof.authority {
         arkret_models_crypto::KeyBackupUnlockAuthority::CurrentDevice { .. } => {
-            soland_storage::KeyBackupUnlockBasis::CurrentDevice {
+            coland_storage::KeyBackupUnlockBasis::CurrentDevice {
                 basis: unlock_active_basis(state, &body.proof.account_id, &backup).await?,
                 device_id: body.proof.requesting_device_id.clone(),
             }
         }
         arkret_models_crypto::KeyBackupUnlockAuthority::RecoverySession { .. } => {
-            soland_storage::KeyBackupUnlockBasis::RecoverySession
+            coland_storage::KeyBackupUnlockBasis::RecoverySession
         }
     };
     let authority_id = match &body.proof.authority {
@@ -475,7 +475,7 @@ pub(super) async fn unlock_key_backup(
     };
     let backup = state
         .key_backups()
-        .consume_unlock(soland_storage::KeyBackupUnlockCommand {
+        .consume_unlock(coland_storage::KeyBackupUnlockCommand {
             basis: &basis,
             authority_id,
             backup,
@@ -643,7 +643,7 @@ async fn record_delete_idempotency(
         return;
     };
     let created_at = chrono::Utc::now();
-    let record = soland_services::jobs::IdempotencyState {
+    let record = coland_services::jobs::IdempotencyState {
         authenticated_actor: arkret_wire::ActorId::account(arkret_wire::AccountId::new(
             actor_id.clone(),
             state.service_core_id(),
@@ -666,8 +666,8 @@ async fn record_delete_idempotency(
 /// registered failures: a moved pointer, series or generation is
 /// `backup_revision_stale`, and a device that stopped being current keeps its
 /// device code.
-fn unlock_consumption_error(error: soland_services::ServiceError) -> AppError {
-    use soland_storage::ConflictCode;
+fn unlock_consumption_error(error: coland_services::ServiceError) -> AppError {
+    use coland_storage::ConflictCode;
 
     match error.conflict_code() {
         Some(ConflictCode::BackupRevisionStale) => {

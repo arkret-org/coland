@@ -7,9 +7,9 @@ use arkret_signatures::http_signature::{
     HttpMessageVerificationError, HttpSignatureScenario, SignatureError, SignatureInput,
     SignaturePolicyError, SignatureVerificationPolicy,
 };
+use coland_http::error::AppError;
+use coland_http::http_signature;
 use salvo::prelude::*;
-use soland_http::error::AppError;
-use soland_http::http_signature;
 
 use super::record::{applet_id_param, applet_records};
 use super::types::AppletRecord;
@@ -685,7 +685,7 @@ mod tests {
     fn development_mode_does_not_derive_an_applet_fallback_key() {
         let state = AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let error = applet_resolve_verifying_key(
             &state,
@@ -800,7 +800,7 @@ mod delivery_freshness_tests {
         let problem = applet_verification_error(HttpMessageVerificationError::Policy(error));
         assert_eq!(
             problem.code,
-            soland_http::error::ErrorCode::SignatureWindowInvalid
+            coland_http::error::ErrorCode::SignatureWindowInvalid
         );
     }
 }

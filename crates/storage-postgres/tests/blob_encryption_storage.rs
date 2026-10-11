@@ -3,10 +3,10 @@ mod support;
 use arkret_models_collaboration::objects::blob::{
     BlobStorageEncryption, BlobStorageEncryptionScheme, BlobVisibility,
 };
+use coland_storage::{BlobRecord, BlobStore};
+use coland_storage_postgres::{Db, PgBlobStore};
 use diesel::sql_types::{Jsonb, Text};
 use diesel_async::RunQueryDsl;
-use soland_storage::{BlobRecord, BlobStore};
-use soland_storage_postgres::{Db, PgBlobStore};
 
 #[tokio::test]
 async fn blob_encryption_survives_reconnect_and_sql_rejects_private_descriptors() {

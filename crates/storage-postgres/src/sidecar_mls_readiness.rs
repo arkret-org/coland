@@ -41,10 +41,10 @@ pub(crate) async fn tree_authorized_in_connection(
     cut: &crate::sidecar_authority_cut::SidecarParticipantAuthorityCut,
     current: &arkret_wire::MlsGroupCurrent,
     public_state: &[u8],
-    candidate: Option<&soland_storage::AuthorityCommitTransaction>,
-) -> soland_storage::PersistenceResult<bool> {
+    candidate: Option<&coland_storage::AuthorityCommitTransaction>,
+) -> coland_storage::PersistenceResult<bool> {
+    use coland_storage::PersistenceError;
     use diesel::sql_types::Jsonb;
-    use soland_storage::PersistenceError;
     let scope = ScopeRef::Sidecar {
         realm_id: cut.realm_id.clone(),
         sidecar_id: cut.sidecar_id.clone(),
@@ -202,11 +202,11 @@ async fn leaf_origin_in_connection(
     conn: &mut crate::AsyncPgConnection,
     current: &arkret_wire::MlsGroupCurrent,
     leaf: &arkret_mls::MlsPublicEndpointLeaf,
-    candidate: Option<&soland_storage::AuthorityCommitTransaction>,
-) -> soland_storage::PersistenceResult<Option<(MlsWelcomeRecipientEndpoint, EventId)>> {
+    candidate: Option<&coland_storage::AuthorityCommitTransaction>,
+) -> coland_storage::PersistenceResult<Option<(MlsWelcomeRecipientEndpoint, EventId)>> {
     use arkret_models_collaboration::mls_roster_authority::MlsAttestAddRequestBody;
+    use coland_storage::PersistenceError;
     use diesel::sql_types::{BigInt, Jsonb};
-    use soland_storage::PersistenceError;
     if let Some(candidate) = candidate {
         if candidate.event.kind == arkret_wire::EventKind::MlsGenesis {
             let payload: arkret_models_collaboration::events_payloads::MlsGenesisPayload =
@@ -328,8 +328,8 @@ pub(crate) async fn controller_device_ready_in_connection(
     cut: &crate::sidecar_authority_cut::SidecarParticipantAuthorityCut,
     current: &arkret_wire::MlsGroupCurrent,
     device: &arkret_wire::DeviceId,
-) -> soland_storage::PersistenceResult<bool> {
-    use soland_storage::PersistenceError;
+) -> coland_storage::PersistenceResult<bool> {
+    use coland_storage::PersistenceError;
     let Some(status) =
         crate::pcr_device_status_reader::confirmed_pcr_device_status_cut_in_connection(
             conn,
@@ -465,9 +465,9 @@ pub(crate) async fn consumed_endpoint_in_connection(
     authorization_ref: &EventId,
     signature_key: &arkret_wire::Base64UrlString,
     current_epoch: u64,
-) -> soland_storage::PersistenceResult<bool> {
+) -> coland_storage::PersistenceResult<bool> {
     use arkret_models_crypto::http_bodies::{KeyPackageConsumeReceipt, RecipientMlsDurableSigner};
-    use soland_storage::PersistenceError;
+    use coland_storage::PersistenceError;
     let invalid = |message: &str| PersistenceError::SchemaViolation(message.to_owned());
     let scope_key = crate::mls_group_current_results::scope_key(scope)?;
     let group = scope

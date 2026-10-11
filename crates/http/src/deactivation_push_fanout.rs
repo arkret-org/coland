@@ -26,7 +26,7 @@
 //! the local push-route purge already performed by the fanout IS the complete
 //! Push-route action; we neither raise `deactivation_partial` nor invent an
 //! unreachable retry loop that could never succeed. Deployments running
-//! floria MUST set `SOLAND_DEACTIVATION_PUSH_GATEWAY_URL` (and the bearer) —
+//! floria MUST set `COLAND_DEACTIVATION_PUSH_GATEWAY_URL` (and the bearer) —
 //! see the config docs.
 //!
 //! **Idempotency / retry identity**: the first broadcast for an account uses
@@ -78,7 +78,7 @@ pub fn base_fanout_id(service_id: &str, did: &str) -> String {
     input.push(0);
     input.extend_from_slice(did.as_bytes());
     format!(
-        "soland:deactivation:{}",
+        "coland:deactivation:{}",
         arkret_canonical::sha256_digest(&input)
     )
 }
@@ -112,9 +112,9 @@ async fn store_completion(
     let created_at = Utc::now();
     state
         .jobs()
-        .store_idempotency_record(soland_services::jobs::IdempotencyState {
+        .store_idempotency_record(coland_services::jobs::IdempotencyState {
             authenticated_actor: arkret_wire::ActorId::service(completion_principal_id(state)),
-            operation_id: soland_services::jobs::INTERNAL_IDEMPOTENCY_OPERATION.to_owned(),
+            operation_id: coland_services::jobs::INTERNAL_IDEMPOTENCY_OPERATION.to_owned(),
             idempotency_key: completion_key(did),
             request_hash: base_fanout_id(state.service_id(), did),
             response_status: 200,
@@ -383,6 +383,6 @@ mod tests {
         let b = base_fanout_id("did:web:server.example", "did:web:bob.example");
         assert_eq!(a1, a2);
         assert_ne!(a1, b);
-        assert!(a1.starts_with("soland:deactivation:"));
+        assert!(a1.starts_with("coland:deactivation:"));
     }
 }

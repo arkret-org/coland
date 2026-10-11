@@ -38,7 +38,7 @@ pub fn local_router() -> Router {
 
 /// `find`-segment directory discovery surface (`/_arkret/find/directory/*`).
 ///
-/// The historical `/_soland/find/directory/*` mirror has been retired;
+/// The historical `/_coland/find/directory/*` mirror has been retired;
 /// directory discovery is served only from the canonical `/_arkret/find/...`
 /// protocol tree.
 pub fn find_router() -> Router {

@@ -344,7 +344,7 @@ fn morph_stage_set_matches_the_strand_contract() {
 }
 
 /// The projected stage round-trips through the SDK enum's own serde mapping;
-/// soland never re-declares the protocol enumeration and rejects any spelling
+/// coland never re-declares the protocol enumeration and rejects any spelling
 /// outside it.
 #[test]
 fn stage_wire_values_round_trip_through_the_sdk_enum() {

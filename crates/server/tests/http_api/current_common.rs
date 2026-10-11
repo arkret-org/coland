@@ -1,6 +1,6 @@
 // Current HTTP integration helpers. Legacy Seal/Cell fixtures remain in common.rs for migration
 // reference.
-//! Shared helpers, fixtures, and imports for the soland HTTP-API integration test binary.
+//! Shared helpers, fixtures, and imports for the coland HTTP-API integration test binary.
 //!
 //! Originally lived inline at the top of the monolithic `http_api` test before the
 //! file was split into per-domain submodules. All items are reachable
@@ -17,22 +17,22 @@ pub(crate) use std::time::Duration;
 pub(crate) use arkret_identifiers::{Did, DidCoreId, RealmId, new_prefixed_uuid7};
 pub(crate) use base64::Engine;
 pub(crate) use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+pub(crate) use coland_domain::artifacts;
+pub(crate) use coland_http::config::{AppConfig, IceServersConfig};
+pub(crate) use coland_http::ratelimit::RateLimiterConfig;
+pub(crate) use coland_http::state::{AppState, RealmDirectoryEntry};
+pub(crate) use coland_http::{
+    service, service_with_rate_limiter_config, service_with_request_size_limit,
+};
+pub(crate) use coland_storage::{RealmMetaRecord, WebvhDocumentRecord};
+pub(crate) use coland_storage_postgres::Db;
+pub(crate) use coland_test_support::AppStateTestExt;
 pub(crate) use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 pub(crate) use futures_util::StreamExt;
 pub(crate) use salvo::http::StatusCode;
 pub(crate) use salvo::test::ResponseExt;
 pub(crate) use serde_json::Value;
 pub(crate) use sha2::{Digest, Sha256};
-pub(crate) use soland_domain::artifacts;
-pub(crate) use soland_http::config::{AppConfig, IceServersConfig};
-pub(crate) use soland_http::ratelimit::RateLimiterConfig;
-pub(crate) use soland_http::state::{AppState, RealmDirectoryEntry};
-pub(crate) use soland_http::{
-    service, service_with_rate_limiter_config, service_with_request_size_limit,
-};
-pub(crate) use soland_storage::{RealmMetaRecord, WebvhDocumentRecord};
-pub(crate) use soland_storage_postgres::Db;
-pub(crate) use soland_test_support::AppStateTestExt;
 
 /// Protocol-aware test request factory. Production clients choose an exact
 /// operation before sending; the integration harness derives that same exact
@@ -135,7 +135,7 @@ impl TestClient {
 /// moves with any `arkret-spec` change that touches the genesis payload.
 pub(crate) fn demo_realm_id() -> &'static str {
     static ID: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        soland_test_support::app_state(test_config())
+        coland_test_support::app_state(test_config())
             .development_demo_realm_id()
             .to_string()
     });
@@ -143,9 +143,9 @@ pub(crate) fn demo_realm_id() -> &'static str {
 }
 /// Fixed REST-style TURN shared secret installed by `test_config()` so the
 /// derived TURN credential is deterministic in assertions. Mirrors
-/// `SOLAND_TURN_SHARED_SECRET`.
-pub(crate) const SOLAND_TEST_TURN_SHARED_SECRET: &str = "soland-test-turn-shared-secret-0123456789";
-pub(crate) const ACCOUNT_REGISTER_BEARER: &str = "soland-test-account-register-bearer";
+/// `COLAND_TURN_SHARED_SECRET`.
+pub(crate) const COLAND_TEST_TURN_SHARED_SECRET: &str = "coland-test-turn-shared-secret-0123456789";
+pub(crate) const ACCOUNT_REGISTER_BEARER: &str = "coland-test-account-register-bearer";
 
 /// Project a fixture's DID onto its signing principal. Account-scoped payloads
 /// and projection keys use the complete Account/Actor helpers below.
@@ -177,21 +177,21 @@ pub(crate) fn test_config() -> AppConfig {
         ice: IceServersConfig {
             // `webrtc-signaling.md` §4.1 — fix the REST-style TURN shared secret
             // so the derived credential is deterministic for assertions.
-            turn_shared_secret: Some(SOLAND_TEST_TURN_SHARED_SECRET.to_owned()),
+            turn_shared_secret: Some(COLAND_TEST_TURN_SHARED_SECRET.to_owned()),
             ..IceServersConfig::default()
         },
         development_mode: true,
         embedded_webvh_registration_bearer: Some(ACCOUNT_REGISTER_BEARER.to_owned()),
         // Tests use fixed-time HLC fixtures; window=0 disables replay-window
         // enforcement so they keep passing.
-        resumable_upload_dir: std::env::temp_dir().join("soland-test-resumable-uploads"),
+        resumable_upload_dir: std::env::temp_dir().join("coland-test-resumable-uploads"),
         seed_demo_data: true,
-        ..soland_test_support::app_config()
+        ..coland_test_support::app_config()
     }
 }
 
 pub(crate) fn app() -> salvo::Service {
-    service(soland_test_support::app_state(test_config()))
+    service(coland_test_support::app_state(test_config()))
 }
 
 pub(crate) fn app_from_state(state: AppState) -> salvo::Service {
@@ -239,7 +239,7 @@ pub(crate) async fn dev_token_for_device(
         &Did::new(actor.to_owned()).expect("fixture actor DID"),
     )
     .expect("fixture actor core id");
-    let login: Value = TestClient::post("http://server/_soland/gate/auth/dev-login")
+    let login: Value = TestClient::post("http://server/_coland/gate/auth/dev-login")
         .json(&serde_json::json!({
             "actor": actor_core,
             "device_id": device_id,
@@ -287,7 +287,7 @@ pub(crate) async fn register_account(
 ) -> String {
     let did = Did::new(did.to_owned()).expect("fixture account DID");
     let principal_id = fixture_actor_core_id(did.as_str());
-    let registered: Value = TestClient::post("http://server/_soland/gate/account/project")
+    let registered: Value = TestClient::post("http://server/_coland/gate/account/project")
         .json(&serde_json::json!({
             "principal_id": principal_id,
             "did": did,
@@ -310,7 +310,7 @@ pub(crate) async fn register_account(
         "register response: {registered}"
     );
 
-    let login: Value = TestClient::post("http://server/_soland/gate/auth/dev-login")
+    let login: Value = TestClient::post("http://server/_coland/gate/auth/dev-login")
         .json(&serde_json::json!({
             "actor": principal_id,
             "device_id": device_id,

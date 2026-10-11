@@ -26,9 +26,9 @@ use arkret_wire::{
     MlsCommitSubmission,
 };
 use chrono::{DateTime, Utc};
-use soland_services::authority_commit::AuthenticatedPeerContext;
-use soland_services::{ServiceError, ServiceResult};
-use soland_storage::{ConflictCode, ForwardAttemptStatus, ForwardedProducerDeviceEvidence};
+use coland_services::authority_commit::AuthenticatedPeerContext;
+use coland_services::{ServiceError, ServiceResult};
+use coland_storage::{ConflictCode, ForwardAttemptStatus, ForwardedProducerDeviceEvidence};
 
 use super::AppState;
 
@@ -621,7 +621,7 @@ pub(crate) async fn forward_self_event_with_session(
     state: &AppState,
     governance: &DidCoreId,
     submission: EventAdmissionSubmission,
-    session: &soland_services::identity::SessionIdentityState,
+    session: &coland_services::identity::SessionIdentityState,
 ) -> ServiceResult<AuthoritySubmitOutcome> {
     forward_self_event_inner(state, governance, submission, Some(session)).await
 }
@@ -630,7 +630,7 @@ async fn forward_self_event_inner(
     state: &AppState,
     governance: &DidCoreId,
     submission: EventAdmissionSubmission,
-    session: Option<&soland_services::identity::SessionIdentityState>,
+    session: Option<&coland_services::identity::SessionIdentityState>,
 ) -> ServiceResult<AuthoritySubmitOutcome> {
     // Device admission and Genesis material are preflight gates.  In
     // particular, a revoked/pending/fenced producer must leave no queued
@@ -690,7 +690,7 @@ pub(super) async fn forward_self_mls(
     state: &AppState,
     governance: &DidCoreId,
     submission: MlsCommitSubmission,
-    session: &soland_services::identity::SessionIdentityState,
+    session: &coland_services::identity::SessionIdentityState,
 ) -> ServiceResult<AuthoritySubmitOutcome> {
     // Match ordinary forwarding: the live device gate precedes every durable
     // forwarding effect, including the local queued Event.
@@ -736,7 +736,7 @@ pub(super) async fn forward_self_mls(
 /// The HTTP boundary still authenticates the full Account and standard holder.
 pub(crate) async fn recover_forwarded_original(
     state: &AppState,
-    session: &soland_services::identity::SessionIdentityState,
+    session: &coland_services::identity::SessionIdentityState,
     submission: &SelfAuthoritySubmitRequest,
 ) -> ServiceResult<Option<AuthoritySubmitOutcome>> {
     let event = match submission {
@@ -827,7 +827,7 @@ pub(crate) async fn recover_forwarded_original(
 
 pub(super) async fn validate_recovery_caller(
     state: &AppState,
-    session: &soland_services::identity::SessionIdentityState,
+    session: &coland_services::identity::SessionIdentityState,
     event: &Event,
 ) -> ServiceResult<()> {
     use arkret_models_identity::session_credential::{
@@ -888,7 +888,7 @@ async fn send_forward(
     state: &AppState,
     governance: &DidCoreId,
     request: PeerAuthoritySubmitRequest,
-    session: &soland_services::identity::SessionIdentityState,
+    session: &coland_services::identity::SessionIdentityState,
 ) -> ServiceResult<AuthoritySubmitOutcome> {
     let event = match &request {
         PeerAuthoritySubmitRequest::AuthorityForwardEvent(request) => {
@@ -981,7 +981,7 @@ async fn verify_bound_invite_claim(
     event: &Event,
     commit: &arkret_wire::RealmCommit,
     located: &crate::routing::realm_join::LocatedRealmAuthority,
-    session: &soland_services::identity::SessionIdentityState,
+    session: &coland_services::identity::SessionIdentityState,
 ) -> ServiceResult<bool> {
     if event.kind != arkret_wire::EventKind::InviteClaim {
         return Ok(false);
@@ -1012,11 +1012,11 @@ async fn verify_bound_invite_claim(
         .ok_or_else(|| {
             temporarily_unavailable("bound claim historical producer source is unavailable")
         })?;
-    soland_services::committed_receipt::verify_committed_event_receipt_with_source(
+    coland_services::committed_receipt::verify_committed_event_receipt_with_source(
         state.persistence(),
         event,
         commit,
-        soland_services::committed_receipt::CommitContinuity::Standalone,
+        coland_services::committed_receipt::CommitContinuity::Standalone,
         &located.authority,
         &located.keys,
         &state.service_core_id(),
@@ -1228,7 +1228,7 @@ pub(super) async fn prepare_control_source(
 
 pub(super) async fn stage_control_source(
     state: &AppState,
-    transaction: &soland_storage::AuthorityCommitTransaction,
+    transaction: &coland_storage::AuthorityCommitTransaction,
     original: Option<(
         arkret_models_identity::AgentSignerDependency,
         arkret_models_identity::AuthenticatedServiceResolution,
@@ -1273,7 +1273,7 @@ impl AppState {
     }
     pub(crate) async fn stage_agent_control_original_source(
         &self,
-        transaction: &soland_storage::AuthorityCommitTransaction,
+        transaction: &coland_storage::AuthorityCommitTransaction,
         original: Option<(
             arkret_models_identity::AgentSignerDependency,
             arkret_models_identity::AuthenticatedServiceResolution,

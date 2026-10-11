@@ -2,14 +2,14 @@
 //!
 //! Provisioning accepts only the closed controller-signed Event pair carried
 //! by the SDK request type. Older aggregate operations that do not yet carry a
-//! signed Event fail closed instead of asking Soland to impersonate a
+//! signed Event fail closed instead of asking Coland to impersonate a
 //! controller or writing a development-only proof shape into durable history.
 
 use arkret_wire::Event;
 #[cfg(test)]
 use chrono::Utc;
+use coland_http::error::AppError;
 use serde_json::Value;
-use soland_http::error::AppError;
 
 use super::SessionRecord;
 use crate::state::AppState;
@@ -85,10 +85,10 @@ fn verification_method_rooted_in(verification_method: &str, root: &str) -> bool 
 /// `failed_precondition` with their registered reason; signer, schema and
 /// head refusals share the PCR self-Event mapping.
 fn agent_provision_admission_error(
-    code: Option<soland_storage::ConflictCode>,
+    code: Option<coland_storage::ConflictCode>,
     detail: &str,
 ) -> AppError {
-    use soland_storage::ConflictCode;
+    use coland_storage::ConflictCode;
     match code {
         Some(
             reason @ (ConflictCode::AgentProvisioningAlreadyDeclared
@@ -165,7 +165,7 @@ pub(super) async fn submit_provision_event(
         .map_err(|error| agent_provision_admission_error(error.conflict_code(), error.detail()))?;
     state
         .persistence()
-        .admit_agent_provision(soland_storage::AgentProvisionAdmissionWrite {
+        .admit_agent_provision(coland_storage::AgentProvisionAdmissionWrite {
             commit: transaction,
             queued_at: committed_at,
         })
@@ -314,7 +314,7 @@ pub(super) async fn submit_signed_agent_event(
         .map_err(|error| agent_control_admission_error(error.conflict_code(), error.detail()))?;
     state
         .persistence()
-        .admit_agent_control_event(soland_storage::AgentControlAdmissionWrite {
+        .admit_agent_control_event(coland_storage::AgentControlAdmissionWrite {
             commit: transaction,
             queued_at: committed_at,
         })
@@ -331,10 +331,10 @@ pub(super) async fn submit_signed_agent_event(
 /// `failed_precondition` with their reason; the rest share the PCR self-Event
 /// mapping.
 fn agent_control_admission_error(
-    code: Option<soland_storage::ConflictCode>,
+    code: Option<coland_storage::ConflictCode>,
     detail: &str,
 ) -> AppError {
-    use soland_storage::ConflictCode;
+    use coland_storage::ConflictCode;
     match code {
         Some(ConflictCode::ReducerProjectionFailed) => {
             crate::app_error!(FailedPrecondition, detail)
@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn runtime_agent_key_scope_service_actions_are_registered() {
-        let registry = soland_services::protocol_artifacts::operation_ids();
+        let registry = coland_services::protocol_artifacts::operation_ids();
         for action in [
             ServiceOperationId::SELF_COMMITTED_EVENT_STREAM_SUBSCRIBE_V1,
             ServiceOperationId::SELF_COMMITTED_EVENT_READ_SCAN_V1,
@@ -394,7 +394,7 @@ mod tests {
 
     #[test]
     fn deprecated_self_events_scope_tokens_are_not_registered() {
-        let registry = soland_services::protocol_artifacts::operation_ids();
+        let registry = coland_services::protocol_artifacts::operation_ids();
         for action in [
             "events.subscribe",
             "ak.self.events.subscribe",

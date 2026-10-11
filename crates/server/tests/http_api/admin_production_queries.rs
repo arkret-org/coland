@@ -1,7 +1,7 @@
 //! Contract tests for the D14 production admin query endpoints
-//! (`GET /_soland/admin/{actors,audit,capabilities,devices}`).
+//! (`GET /_coland/admin/{actors,audit,capabilities,devices}`).
 //!
-//! Locks the typed wire shape (`soland_contracts::admin`), the
+//! Locks the typed wire shape (`coland_contracts::admin`), the
 //! resume-by-id cursor semantics, server-side filtering with filter echo,
 //! and the auth gates (401 unauthenticated; the 403 admin-principal
 //! decision is unit-tested next to the handler where a production-mode
@@ -25,7 +25,7 @@ fn admin_actors_query_returns_typed_rows_and_walks_cursor() {
 }
 
 async fn admin_actors_query_returns_typed_rows_and_walks_cursor_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let token = dev_token(state.clone()).await;
     let _bob = register_account(
         state.clone(),
@@ -46,7 +46,7 @@ async fn admin_actors_query_returns_typed_rows_and_walks_cursor_body() {
         .await
         .unwrap()
         .unwrap();
-    foreign_bob.pk = soland_storage::AccountPk(0);
+    foreign_bob.pk = coland_storage::AccountPk(0);
     foreign_bob.station_id = DidCoreId::new("ak:did_core:web:000-foreign-station.example").unwrap();
     foreign_bob.localpart.clear();
     foreign_bob.display_name = Some("Foreign Bob must not inherit local lifecycle".to_owned());
@@ -78,9 +78,9 @@ async fn admin_actors_query_returns_typed_rows_and_walks_cursor_body() {
         );
         let url = match &cursor {
             Some(cursor) => {
-                format!("http://server/_soland/admin/actors?limit=1&cursor={cursor}")
+                format!("http://server/_coland/admin/actors?limit=1&cursor={cursor}")
             }
-            None => "http://server/_soland/admin/actors?limit=1".to_owned(),
+            None => "http://server/_coland/admin/actors?limit=1".to_owned(),
         };
         let page: Value = TestClient::get(&url)
             .add_header("authorization", format!("Bearer {token}"), true)
@@ -95,7 +95,7 @@ async fn admin_actors_query_returns_typed_rows_and_walks_cursor_body() {
         assert!(actors.len() <= 1);
         for actor in actors {
             // Contract: security-relevant fields are answered
-            // authoritatively by soland (never fabricated defaults).
+            // authoritatively by coland (never fabricated defaults).
             assert!(actor["id"].as_str().is_some(), "row without id: {actor}");
             assert!(actor["principal_id"].as_str().is_some());
             let account: arkret_wire::AccountId =
@@ -142,7 +142,7 @@ async fn admin_actors_query_returns_typed_rows_and_walks_cursor_body() {
     );
 
     let detail: Value = TestClient::get(format!(
-        "http://server/_soland/admin/actors/{}",
+        "http://server/_coland/admin/actors/{}",
         bob_account.principal_id
     ))
     .add_header("authorization", format!("Bearer {token}"), true)
@@ -164,7 +164,7 @@ fn admin_actors_query_excludes_foreign_only_accounts() {
 }
 
 async fn admin_actors_query_excludes_foreign_only_accounts_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let token = dev_token(state.clone()).await;
     let alice_account = arkret_wire::AccountId::new(
         fixture_actor_core_id("did:web:alice.example"),
@@ -177,7 +177,7 @@ async fn admin_actors_query_excludes_foreign_only_accounts_body() {
         .await
         .unwrap()
         .unwrap();
-    foreign.pk = soland_storage::AccountPk(0);
+    foreign.pk = coland_storage::AccountPk(0);
     foreign.principal_id = fixture_actor_core_id("did:web:foreign-only.example");
     foreign.station_id = DidCoreId::new("ak:did_core:web:foreign-station.example").unwrap();
     foreign.localpart.clear();
@@ -189,7 +189,7 @@ async fn admin_actors_query_excludes_foreign_only_accounts_body() {
         .unwrap();
 
     let page: Value = TestClient::get(
-        "http://server/_soland/admin/actors?filter[search]=web:foreign-only.example&limit=1",
+        "http://server/_coland/admin/actors?filter[search]=web:foreign-only.example&limit=1",
     )
     .add_header("authorization", format!("Bearer {token}"), true)
     .send(&app_from_state(state.clone()))
@@ -203,7 +203,7 @@ async fn admin_actors_query_excludes_foreign_only_accounts_body() {
     assert!(page["next_cursor"].is_null());
 
     let missing = TestClient::get(format!(
-        "http://server/_soland/admin/actors/{}",
+        "http://server/_coland/admin/actors/{}",
         foreign.principal_id
     ))
     .add_header("authorization", format!("Bearer {token}"), true)
@@ -221,7 +221,7 @@ fn admin_actors_query_applies_and_echoes_filters() {
 }
 
 async fn admin_actors_query_applies_and_echoes_filters_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let token = dev_token(state.clone()).await;
     let _bob = register_account(
         state.clone(),
@@ -232,7 +232,7 @@ async fn admin_actors_query_applies_and_echoes_filters_body() {
     .await;
 
     let page: Value =
-        TestClient::get("http://server/_soland/admin/actors?filter[search]=web:bob.example")
+        TestClient::get("http://server/_coland/admin/actors?filter[search]=web:bob.example")
             .add_header("authorization", format!("Bearer {token}"), true)
             .send(&app_from_state(state.clone()))
             .await
@@ -251,7 +251,7 @@ async fn admin_actors_query_applies_and_echoes_filters_body() {
     assert_eq!(page["filters"]["search"], "web:bob.example", "filter echo");
 
     // Unknown status filter value is a hard 400, not an ignored parameter.
-    let response = TestClient::get("http://server/_soland/admin/actors?filter[status]=bogus")
+    let response = TestClient::get("http://server/_coland/admin/actors?filter[status]=bogus")
         .add_header("authorization", format!("Bearer {token}"), true)
         .send(&app_from_state(state.clone()))
         .await;
@@ -267,11 +267,11 @@ fn admin_actors_query_rejects_expired_cursor_with_gone() {
 }
 
 async fn admin_actors_query_rejects_expired_cursor_with_gone_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let token = dev_token(state.clone()).await;
 
     let response =
-        TestClient::get("http://server/_soland/admin/actors?cursor=did:web:vanished.example")
+        TestClient::get("http://server/_coland/admin/actors?cursor=did:web:vanished.example")
             .add_header("authorization", format!("Bearer {token}"), true)
             .send(&app_from_state(state.clone()))
             .await;
@@ -291,9 +291,9 @@ fn admin_queries_require_authentication() {
 }
 
 async fn admin_queries_require_authentication_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     for resource in ["actors", "audit", "capabilities", "devices"] {
-        let response = TestClient::get(format!("http://server/_soland/admin/{resource}"))
+        let response = TestClient::get(format!("http://server/_coland/admin/{resource}"))
             .send(&app_from_state(state.clone()))
             .await;
         assert_eq!(
@@ -313,12 +313,12 @@ fn admin_audit_query_is_typed_newest_first_and_filterable() {
 }
 
 async fn admin_audit_query_is_typed_newest_first_and_filterable_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let token = dev_token(state.clone()).await;
 
     // Generate two audited admin actions to query back.
     for _ in 0..2 {
-        let _: Value = TestClient::get("http://server/_soland/admin/actors")
+        let _: Value = TestClient::get("http://server/_coland/admin/actors")
             .add_header("authorization", format!("Bearer {token}"), true)
             .send(&app_from_state(state.clone()))
             .await
@@ -328,7 +328,7 @@ async fn admin_audit_query_is_typed_newest_first_and_filterable_body() {
     }
 
     let page: Value =
-        TestClient::get("http://server/_soland/admin/audit?filter[action]=admin.actors.query")
+        TestClient::get("http://server/_coland/admin/audit?filter[action]=admin.actors.query")
             .add_header("authorization", format!("Bearer {token}"), true)
             .send(&app_from_state(state.clone()))
             .await
@@ -358,7 +358,7 @@ async fn admin_audit_query_is_typed_newest_first_and_filterable_body() {
     assert!(entries[0]["request_id"].as_str().is_some());
 
     // Malformed time bound is a hard 400.
-    let response = TestClient::get("http://server/_soland/admin/audit?since=yesterday")
+    let response = TestClient::get("http://server/_coland/admin/audit?since=yesterday")
         .add_header("authorization", format!("Bearer {token}"), true)
         .send(&app_from_state(state.clone()))
         .await;
@@ -374,10 +374,10 @@ fn admin_capabilities_query_reports_tombstones_and_validates_state_filter() {
 }
 
 async fn admin_capabilities_query_reports_tombstones_and_validates_state_filter_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let token = dev_token(state.clone()).await;
 
-    let page: Value = TestClient::get("http://server/_soland/admin/capabilities")
+    let page: Value = TestClient::get("http://server/_coland/admin/capabilities")
         .add_header("authorization", format!("Bearer {token}"), true)
         .send(&app_from_state(state.clone()))
         .await
@@ -389,7 +389,7 @@ async fn admin_capabilities_query_reports_tombstones_and_validates_state_filter_
     assert!(page["has_more"].is_boolean());
     assert!(page["total"].is_u64());
 
-    let response = TestClient::get("http://server/_soland/admin/capabilities?filter[state]=paused")
+    let response = TestClient::get("http://server/_coland/admin/capabilities?filter[state]=paused")
         .add_header("authorization", format!("Bearer {token}"), true)
         .send(&app_from_state(state.clone()))
         .await;
@@ -409,7 +409,7 @@ fn admin_devices_query_filters_by_name_or_id() {
 }
 
 async fn admin_devices_query_filters_by_name_or_id_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let token = dev_token(state.clone()).await;
     let _bob = register_account(
         state.clone(),
@@ -420,7 +420,7 @@ async fn admin_devices_query_filters_by_name_or_id_body() {
     .await;
 
     let page: Value =
-        TestClient::get("http://server/_soland/admin/devices?filter[name_or_id]=b0b0b0000002")
+        TestClient::get("http://server/_coland/admin/devices?filter[name_or_id]=b0b0b0000002")
             .add_header("authorization", format!("Bearer {token}"), true)
             .send(&app_from_state(state.clone()))
             .await
@@ -456,7 +456,7 @@ fn admin_collection_no_longer_serves_migrated_resources() {
 }
 
 async fn admin_collection_no_longer_serves_migrated_resources_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let token = dev_token(state.clone()).await;
 
     // The dev collection must not shadow the production endpoints: the
@@ -464,7 +464,7 @@ async fn admin_collection_no_longer_serves_migrated_resources_body() {
     // devices/actors resolve to the typed handlers instead, which do not
     // carry the dev marker).
     for resource in ["actors", "audit", "capabilities", "devices"] {
-        let page: Value = TestClient::get(format!("http://server/_soland/admin/{resource}"))
+        let page: Value = TestClient::get(format!("http://server/_coland/admin/{resource}"))
             .add_header("authorization", format!("Bearer {token}"), true)
             .send(&app_from_state(state.clone()))
             .await
@@ -474,7 +474,7 @@ async fn admin_collection_no_longer_serves_migrated_resources_body() {
         assert_no_production_gap(&page);
     }
     // A resource that stays dev-only still reports its production gap.
-    let realms: Value = TestClient::get("http://server/_soland/admin/realms")
+    let realms: Value = TestClient::get("http://server/_coland/admin/realms")
         .add_header("authorization", format!("Bearer {token}"), true)
         .send(&app_from_state(state.clone()))
         .await

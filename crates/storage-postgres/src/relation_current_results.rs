@@ -159,7 +159,7 @@ struct EndpointHomeRow {
 fn precondition(detail: &str) -> PersistenceError {
     PersistenceError::Conflict(format!(
         "{}: {detail}",
-        soland_storage::ConflictCode::FailedPrecondition
+        coland_storage::ConflictCode::FailedPrecondition
     ))
 }
 
@@ -285,7 +285,7 @@ pub(crate) async fn require_relation_value_scope_in_connection(
         {
             return Err(PersistenceError::Conflict(format!(
                 "{}: structural Relation endpoint {endpoint} is not an object of this Realm",
-                soland_storage::ConflictCode::CrossRealmStructuralRelation
+                coland_storage::ConflictCode::CrossRealmStructuralRelation
             )));
         }
         if floored

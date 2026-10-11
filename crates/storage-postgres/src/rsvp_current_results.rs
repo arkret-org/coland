@@ -3,11 +3,11 @@
 //! never decides whether a basis is the current plaintext schedule winner.
 
 use arkret_event_draft::EventPayloadExt as _;
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::OptionalExtension as _;
 use diesel::sql_types::{BigInt, Binary, Bool, Jsonb, Text, Timestamptz};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::Value;
-use soland_storage::{PersistenceError, PersistenceResult};
 
 #[derive(diesel::QueryableByName)]
 struct StrandRow {

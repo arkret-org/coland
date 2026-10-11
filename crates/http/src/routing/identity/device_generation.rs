@@ -4,9 +4,9 @@ use std::hash::{Hash as _, Hasher};
 use std::sync::{Arc, OnceLock};
 
 use arkret_identifiers::RealmId;
+use coland_services::ServiceError;
 pub(crate) use confirmed::{ConfirmedDeviceHistory, load_confirmed_device_history};
 use serde_json::Value;
-use soland_services::ServiceError;
 
 use crate::state::AppState;
 
@@ -69,7 +69,7 @@ pub async fn active_device_revocation_gate_selector(
     state: &AppState,
     principal_id: &str,
     device_id: &str,
-) -> Result<soland_storage::DeviceRevocationGateSelector, ServiceError> {
+) -> Result<coland_storage::DeviceRevocationGateSelector, ServiceError> {
     let principal_id =
         arkret_identifiers::DidCoreId::new(principal_id.to_owned()).map_err(|error| {
             ServiceError::SchemaViolation(format!("principal id is invalid: {error}"))
@@ -133,7 +133,7 @@ pub async fn active_device_revocation_gate_selector(
         .ok_or_else(|| {
             ServiceError::Conflict("device authorization has no accepted RealmCommit".to_owned())
         })?;
-    Ok(soland_storage::DeviceRevocationGateSelector {
+    Ok(coland_storage::DeviceRevocationGateSelector {
         principal_id,
         station_id,
         device_id: device_id.to_string(),
@@ -147,7 +147,7 @@ pub async fn active_device_revocation_gate_selector(
 }
 
 pub(crate) fn verified_device_authorization_binding(
-    device: &soland_services::identity::DeviceIdentity,
+    device: &coland_services::identity::DeviceIdentity,
 ) -> Result<Option<(arkret_identifiers::EventId, u64)>, ServiceError> {
     if device.verification_state != "verified" || device.revoked_at.is_some() {
         return Ok(None);
@@ -219,8 +219,8 @@ mod tests {
     fn device(
         verification_state: &str,
         payload: Value,
-    ) -> soland_services::identity::DeviceIdentity {
-        soland_services::identity::DeviceIdentity {
+    ) -> coland_services::identity::DeviceIdentity {
+        coland_services::identity::DeviceIdentity {
             actor_id: "ak:did_core:webvh:z6mkfixture:alice.example".to_owned(),
             device_id: "ak:device:01904100-0000-7000-8000-000000000030".to_owned(),
             display_name: None,

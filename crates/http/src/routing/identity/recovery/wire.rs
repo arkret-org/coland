@@ -11,6 +11,6 @@ pub(super) const ALLOWED_PROOF_KINDS: &[&str] = &[
 
 #[derive(salvo::oapi::ToSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct SolandRecoveryPoliciesOutcome {
+pub(super) struct ColandRecoveryPoliciesOutcome {
     pub(super) policies: Vec<RecoveryPolicySummary>,
 }

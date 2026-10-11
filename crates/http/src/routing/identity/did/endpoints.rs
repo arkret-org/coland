@@ -45,7 +45,7 @@ pub(crate) async fn identity_describe(
     description
         .extensions
         .insert(
-            "x_soland_identity_registry".to_owned(),
+            "x_coland_identity_registry".to_owned(),
             json!({
                 "supported_did_methods": supported_did_methods,
                 "resolver_allow_methods": state.config().did_resolver_allow_methods,
@@ -106,10 +106,10 @@ pub struct EmbeddedWebvhRegisterOutcome {
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.identity.webvh.register",
+    operation_id = "org.arkret.coland.identity.webvh.register",
     tags("identity")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.identity.webvh.register"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.identity.webvh.register"))]
 pub(crate) async fn embedded_webvh_register(
     depot: &mut Depot,
     req: &mut Request,
@@ -288,7 +288,7 @@ pub(crate) async fn embedded_webvh_register(
         seq: 1,
         method_evidence: json!({
             "mode": "embedded_webvh_provider",
-            "provider_id": "soland.embedded",
+            "provider_id": "coland.embedded",
             "local_id": local_id,
             "document_url": location.document_url,
             "log_url": location.log_url,
@@ -343,7 +343,7 @@ pub(crate) async fn embedded_webvh_register(
         json!({
             "did": location.did,
             "local_id": local_id,
-            "provider_id": "soland.embedded",
+            "provider_id": "coland.embedded",
             "version_id": version_id,
             "accepted_entry_digest": event_digest,
         }),
@@ -353,7 +353,7 @@ pub(crate) async fn embedded_webvh_register(
     res.status_code(StatusCode::CREATED);
     json_ok(EmbeddedWebvhRegisterOutcome {
         status: "created".to_owned(),
-        provider_id: "soland.embedded".to_owned(),
+        provider_id: "coland.embedded".to_owned(),
         did: location.did,
         did_key_id,
         update_key_id,
@@ -379,10 +379,10 @@ fn ensure_webvh_document_id(did: &str, document: &Value) -> Result<(), AppError>
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.identity.webvh.document.get",
+    operation_id = "org.arkret.coland.identity.webvh.document.get",
     tags("identity")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.identity.webvh.document.get"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.identity.webvh.document.get"))]
 pub(crate) async fn embedded_webvh_document(
     depot: &mut Depot,
     req: &mut Request,
@@ -400,10 +400,10 @@ pub(crate) async fn embedded_webvh_document(
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.identity.webvh.log.get",
+    operation_id = "org.arkret.coland.identity.webvh.log.get",
     tags("identity")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.identity.webvh.log.get"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.identity.webvh.log.get"))]
 pub(crate) async fn embedded_webvh_log(depot: &mut Depot, req: &mut Request, res: &mut Response) {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let Some(record) = embedded_webvh_record_for_request(state, req, res).await else {
@@ -459,7 +459,7 @@ async fn resolve_identity(
         // when witness quorum is missing.
         // `degraded_no_witness` is a spec-defined health state
         // (identity-did.md health-status section): hosting stays reachable
-        // but witness evidence is missing or expired. No soland code path
+        // but witness evidence is missing or expired. No coland code path
         // currently enters that state because witness verification and the
         // degradation window remain unimplemented.
         // Rotation control authorisation accepts a previous-controller

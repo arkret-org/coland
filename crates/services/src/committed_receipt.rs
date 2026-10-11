@@ -12,7 +12,7 @@ use arkret_identity::{
     RealmAuthorityChainError, RealmAuthorityKeyDirectory, VerifiedRealmAuthority,
 };
 use arkret_wire::{CommitStreamRef, DidCoreId, ErrorCode, Event, HumanDeviceProducer, RealmCommit};
-use soland_storage::DeviceRevocationStore;
+use coland_storage::DeviceRevocationStore;
 
 use crate::{ServiceError, ServiceResult};
 

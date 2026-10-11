@@ -10,7 +10,7 @@ use arkret_wire::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use soland_storage::{MonotonicRouteWrite, ServiceResolutionForkEvidence, ServiceRouteStore};
+use coland_storage::{MonotonicRouteWrite, ServiceResolutionForkEvidence, ServiceRouteStore};
 
 use crate::{ServiceError, ServiceResult};
 #[derive(Clone, Debug)]
@@ -297,7 +297,7 @@ mod tests {
         ResolutionMethodHistoryEvidence, ServiceMethodState,
     };
     use async_trait::async_trait;
-    use soland_storage::{PersistenceResult, ServiceRouteStoredKey};
+    use coland_storage::{PersistenceResult, ServiceRouteStoredKey};
 
     use super::*;
 

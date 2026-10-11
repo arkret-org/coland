@@ -8,10 +8,10 @@ use arkret_models_collaboration::governance::realm_join_intake::{
     SelfRealmJoinPrepareRequestBody,
 };
 use arkret_wire::{ActorId, AuthorityBundleRequest, Base64UrlString, CommitStreamRef, EventKind};
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
 use salvo::prelude::*;
 use serde_json::Value;
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
 
 use crate::routing::system::extract::AuthArgs;
 use crate::state::AppState;
@@ -81,7 +81,7 @@ pub(crate) async fn local_authority_bundle(
         )
         .await
         .map_err(|error| match error {
-            soland_services::ServiceError::NotFound(_) => {
+            coland_services::ServiceError::NotFound(_) => {
                 AppError::not_found("Realm authority not found")
             }
             other => unavailable(other),
@@ -210,7 +210,7 @@ async fn peer_bootstrap(
     if material.visible_stream_heads.is_empty() {
         return Err(unavailable("Realm stream head is unavailable"));
     }
-    let snapshot = soland_services::authority_commit::build_signed_realm_state_snapshot(
+    let snapshot = coland_services::authority_commit::build_signed_realm_state_snapshot(
         &material,
         state
             .service_verification_method("notary-key")

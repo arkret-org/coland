@@ -11,10 +11,10 @@ use arkret_wire::{
     ActorId, Base64UrlString, CommitStreamRef, DidCoreId, EventId, EventKind, MlsGroupCurrent,
     MlsWelcomeDelivery,
 };
-use diesel::sql_types::{BigInt, Binary, Integer, Jsonb, Text};
-use soland_storage::{
+use coland_storage::{
     MlsMemberGroupStateMaterialRead, MlsRosterAuthorityFacts, MlsRosterAuthorityRead,
 };
+use diesel::sql_types::{BigInt, Binary, Integer, Jsonb, Text};
 
 use crate::{
     AsyncConnection, AsyncPgConnection, OptionalExtension, PersistenceError, PersistenceResult,
@@ -49,7 +49,7 @@ pub(crate) async fn member_selector(
     pool: &PgPool,
     request: &arkret_models_collaboration::mls_roster_authority::MlsMemberRosterAuthorityReadRequestBody,
     issuer: &DidCoreId,
-) -> PersistenceResult<soland_storage::MlsMemberRosterSelectorRead> {
+) -> PersistenceResult<coland_storage::MlsMemberRosterSelectorRead> {
     request
         .validate()
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
@@ -70,8 +70,8 @@ async fn member_selector_in_connection(
     conn: &mut AsyncPgConnection,
     request: &arkret_models_collaboration::mls_roster_authority::MlsMemberRosterAuthorityReadRequestBody,
     issuer: &DidCoreId,
-) -> PersistenceResult<soland_storage::MlsMemberRosterSelectorRead> {
-    use soland_storage::MlsMemberRosterSelectorRead as Selected;
+) -> PersistenceResult<coland_storage::MlsMemberRosterSelectorRead> {
+    use coland_storage::MlsMemberRosterSelectorRead as Selected;
 
     use crate::mls_group_state_material_read::MemberMlsTargetSelector;
     if request.caller_actor_id.route_service_id() != issuer {

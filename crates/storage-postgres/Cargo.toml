@@ -1,5 +1,5 @@
 [package]
-name = "soland-storage-postgres"
+name = "coland-storage-postgres"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,15 +7,15 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "PostgreSQL storage adapter and database bootstrap for Soland."
+description = "PostgreSQL storage adapter and database bootstrap for Coland."
 
 [features]
 default = []
 conformance-harness = []
-# Leased test databases (`test_database`). Soland has one storage
+# Leased test databases (`test_database`). Coland has one storage
 # implementation, so every test that needs storage takes a real database from
 # this module instead of a second in-memory adapter.
-test-support = ["soland-storage/test-support", "arkret-wire/test-support", "arkret-signatures/signer", "dep:arkret-bootstrap", "dep:ed25519-dalek"]
+test-support = ["coland-storage/test-support", "arkret-wire/test-support", "arkret-signatures/signer", "dep:arkret-bootstrap", "dep:ed25519-dalek"]
 
 [dependencies]
 arkret.workspace = true
@@ -47,7 +47,7 @@ parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2.workspace = true
-soland-storage = { workspace = true }
+coland-storage = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
 tokio-postgres = { workspace = true }
 tracing = { workspace = true }
@@ -56,8 +56,8 @@ uuid = { workspace = true }
 [dev-dependencies]
 salvo = { workspace = true, features = ["test"] }
 url.workspace = true
-soland-test-support.workspace = true
-soland-http = { workspace = true, features = ["test-support"] }
+coland-test-support.workspace = true
+coland-http = { workspace = true, features = ["test-support"] }
 arkret-schema-conformance.workspace = true
 rand_chacha = "0.10.0"
 rand_core = "0.10.1"
@@ -66,10 +66,10 @@ arkret-signatures = { workspace = true, features = ["signer"] }
 ed25519-dalek.workspace = true
 arkret-mls = { workspace = true, features = ["test-utils"] }
 arkret-wire = { workspace = true, features = ["diesel", "test-support"] }
-soland-domain = { workspace = true }
-soland-services = { workspace = true }
-soland-storage = { workspace = true, features = ["test-support"] }
-soland-storage-postgres = { version = "0.3.0", path = ".", features = ["test-support"] }
+coland-domain = { workspace = true }
+coland-services = { workspace = true }
+coland-storage = { workspace = true, features = ["test-support"] }
+coland-storage-postgres = { version = "0.3.0", path = ".", features = ["test-support"] }
 
 [lints]
 workspace = true

@@ -5,7 +5,7 @@ use arkret_models_integration::{
     AppletAuthoringTransactionRequestBody, AppletManagedActorCommittedRequest,
     AppletTransactionRequestBody, AppletTransactionStatus,
 };
-use soland_storage::AppletAuthoringCompletion;
+use coland_storage::AppletAuthoringCompletion;
 
 use super::AppState;
 

@@ -2,7 +2,7 @@
 use arkret_models_collaboration::governance::membership_invite::{
     InviteSubjectProofBody, invite_binding_proof_transcript_bytes,
 };
-use soland_storage::InviteClaimProofCommit;
+use coland_storage::InviteClaimProofCommit;
 
 use super::*;
 

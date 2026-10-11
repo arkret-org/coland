@@ -1,7 +1,7 @@
 # Federation server-to-server (S2S) onboarding
 
-This document covers what an operator needs to wire two soland (or
-soland-compatible) deployments together. The wire contract is the
+This document covers what an operator needs to wire two coland (or
+coland-compatible) deployments together. The wire contract is the
 canonical Arkret v1 federation surface; this file restates the
 operator-visible pieces — header semantics, trust-domain binding, and
 peer onboarding.
@@ -14,7 +14,7 @@ inside the signature transcript; any mismatch rejects the request.
 
 | Header | Source | Verified into |
 | --- | --- | --- |
-| `Source-Trust-Domain` | The sender's `SOLAND_TRUST_DOMAIN` | Signature transcript + `cross_domain_replay_rejected` guard on receive |
+| `Source-Trust-Domain` | The sender's `COLAND_TRUST_DOMAIN` | Signature transcript + `cross_domain_replay_rejected` guard on receive |
 | `Destination-Trust-Domain` | The intended peer's published `trust_domain` (from the peer's `/_arkret/describe`) | Signature transcript — protects against on-path mis-routing |
 | `Content-Digest` | RFC 9530 `sha-256` over the exact canonical JSON bytes | Signature transcript — pins the body the signature covered |
 
@@ -28,7 +28,7 @@ A Realm's `trust_domain` is locked at creation (`ak.realm.create`) and
 cannot change. Wire events whose `trust_domain` does not match the
 locked value reject with `cross_domain_replay_rejected`. This means:
 
-- An operator who renames `SOLAND_TRUST_DOMAIN` mid-lifetime invalidates
+- An operator who renames `COLAND_TRUST_DOMAIN` mid-lifetime invalidates
   peer header pins and previously assembled federated device-signing evidence.
   A receiver accepts a remote signer only after replaying the complete accepted
   PCR device-control chain from its signed genesis receipt through a covering
@@ -48,13 +48,13 @@ locked value reject with `cross_domain_replay_rejected`. This means:
    - `protocol_version` is mutually supported.
    - The peer's signing key (advertised via the canonical DID method
      listed in `did_resolver_allow_methods`) resolves successfully.
-2. **Add the peer to `SOLAND_FEDERATION_PEERS`.** Mesh deployments
+2. **Add the peer to `COLAND_FEDERATION_PEERS`.** Mesh deployments
    list every peer; hub deployments list only the upstream. Restart
    each side (or hot-reload via `routing::admin::federation` once it
    lands).
 3. **Smoke-test a low-impact event.** Send a `ak.directory.refresh`
    (or any other read-side event) and confirm it lands on the peer.
-   Watch the peer's `soland_federation_outbox_depth` gauge return to
+   Watch the peer's `coland_federation_outbox_depth` gauge return to
    zero and the per-peer trace span close cleanly.
 4. **Configure backpressure budgets.** Confirm the peer's reverse
    proxy / API gateway is not stricter than your outbox dispatcher's
@@ -64,7 +64,7 @@ locked value reject with `cross_domain_replay_rejected`. This means:
    `Retry-After` (header, or `retry_after_ms` in the error envelope) as
    a floor, so a peer that paces us explicitly is respected.
 5. **Wire alerts.** Subscribe to
-   `soland_federation_outbox_dead_letter_total` on your side — any
+   `coland_federation_outbox_dead_letter_total` on your side — any
    non-zero rate against a freshly-onboarded peer typically means the
    `Source-Trust-Domain` / `Destination-Trust-Domain` pair is
    misconfigured.
@@ -84,7 +84,7 @@ basis can return its cached outcome without a second reducer write.
   transport-retry vs semantic-resubmission classification, dead-letter
   ledger entry.
 - `crates/http/src/routing/federation/outbox_operator.rs` — list / inspect / requeue,
-  driven by the `soland-federation-outbox` binary.
+  driven by the `coland-federation-outbox` binary.
 - `crates/http/src/routing/federation/federation/mod.rs` — receive-side header
   verification, idempotency cache, trust-domain guard.
 - `docs/architecture.md` §2 — outbox enqueue / dispatch pipeline.

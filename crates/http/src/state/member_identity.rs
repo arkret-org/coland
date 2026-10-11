@@ -6,11 +6,11 @@ use std::collections::BTreeSet;
 use arkret_models_identity::HandleClaim;
 #[cfg(test)]
 use arkret_models_identity::HandleClaimStatus;
-#[cfg(any(test, feature = "test-support"))]
-use serde_json::Value;
-pub use soland_storage::{
+pub use coland_storage::{
     HandleClaimEvidenceRecord, MemberIdentityEventRecord, MemberIdentitySubjectKey,
 };
+#[cfg(any(test, feature = "test-support"))]
+use serde_json::Value;
 
 /// Disposable Realm/member identity projection. Hydration rebuilds every
 /// assertion from accepted canonical Events joined to their RealmCommits.
@@ -85,7 +85,7 @@ impl MemberIdentityRegistry {
 
     /// Snapshot every locally-cached handle-claim evidence record keyed by
     /// claim `subject`. Drives the operator handles admin surface
-    /// (`GET /_soland/admin/handles`). The cache is durable through the
+    /// (`GET /_coland/admin/handles`). The cache is durable through the
     /// `MemberIdentityStore` write-through; the directory-side handle CRDT
     /// projection is still not wired, so this evidence cache remains the
     /// authoritative read source until it lands.
@@ -248,7 +248,7 @@ pub(crate) fn test_handle_claim(
     };
     let mut core = HandleClaimCore {
         schema: HandleClaimCore::SCHEMA.to_owned(),
-        handle: Handle::parse("alice:soland.local").unwrap(),
+        handle: Handle::parse("alice:coland.local").unwrap(),
         handle_aliases,
         subject_account_id: subject_account_id.clone(),
         issuer_id: issuer_id.clone(),

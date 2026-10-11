@@ -5,11 +5,11 @@ use arkret_identity::{
 };
 use arkret_models_collaboration::events_payloads::moderation::FrankingProof;
 use arkret_wire::{ActorId, Base64UrlString, EventKind};
-use ed25519_dalek::Signer as _;
-use soland_services::committed_receipt::{
+use coland_services::committed_receipt::{
     CommitContinuity, ReceivedProducer, verify_committed_event_receipt_with_source,
 };
-use soland_services::{ServiceError, ServiceResult};
+use coland_services::{ServiceError, ServiceResult};
+use ed25519_dalek::Signer as _;
 
 use super::AppState;
 
@@ -75,8 +75,8 @@ async fn historical_key(
 /// use a current device-revocation verdict to reject its historical proof.
 pub(crate) async fn verify_franking_committed_pair(
     state: &AppState,
-    record: &soland_services::events::AcceptedEvent,
-    pair: &soland_storage::CommittedEventRecord,
+    record: &coland_services::events::AcceptedEvent,
+    pair: &coland_storage::CommittedEventRecord,
 ) -> ServiceResult<()> {
     let realm = &pair.event.realm_id;
     crate::routing::validate_franking_covering_commit(record, pair, realm).map_err(refused)?;
@@ -220,9 +220,9 @@ pub(crate) async fn verify_franking_committed_pair(
 
 async fn author_proof(
     state: &AppState,
-    job: &soland_storage::PendingFrankingProof,
-    target: &soland_services::events::AcceptedEvent,
-) -> ServiceResult<soland_storage::PreparedFrankingProof> {
+    job: &coland_storage::PendingFrankingProof,
+    target: &coland_services::events::AcceptedEvent,
+) -> ServiceResult<coland_storage::PreparedFrankingProof> {
     if job.received_by != state.service_core_id() {
         return Err(refused("this Station did not record the target receipt"));
     }
@@ -286,7 +286,7 @@ async fn author_proof(
         arkret_signatures::SignEventOptions::new().with_created_at(created_at),
     )
     .map_err(refused)?;
-    Ok(soland_storage::PreparedFrankingProof {
+    Ok(coland_storage::PreparedFrankingProof {
         realm_id: job.realm_id.clone(),
         target_event_id: job.target_event_id.clone(),
         received_by: job.received_by.clone(),
@@ -297,7 +297,7 @@ async fn author_proof(
 
 async fn publish_one(
     state: &AppState,
-    job: soland_storage::PendingFrankingProof,
+    job: coland_storage::PendingFrankingProof,
 ) -> ServiceResult<()> {
     let target = state
         .event_queries()
@@ -367,7 +367,7 @@ async fn publish_one(
     let envelope = serde_json::to_value(&event).map_err(refused)?;
     state
         .events()
-        .commit_accepted_event(soland_services::events::CommitAcceptedEventCommand {
+        .commit_accepted_event(coland_services::events::CommitAcceptedEventCommand {
             authority_commit: transaction,
             self_producer_guard: None,
             applet_producer_guard: None,
@@ -375,7 +375,7 @@ async fn publish_one(
             forwarded_producer_evidence: None,
             forwarded_agent_producer: None,
             agent_deployment_ceiling: arkret_models_collaboration::governance::agent_participation::ParticipationBits::ALL,
-            event: soland_storage::CanonicalEventRecord {
+            event: coland_storage::CanonicalEventRecord {
                 event_id: event.event_id.to_string(),
                 actor_id: event.actor_id.to_string(),
                 realm_id: Some(event.realm_id.to_string()),

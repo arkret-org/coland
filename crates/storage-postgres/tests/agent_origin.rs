@@ -17,17 +17,17 @@ use arkret_wire::{
     DetachedSignatureContext, Did, DidCoreId, DidUrl, EventKind, RealmCommitId, RealmId,
 };
 use chrono::{Duration, Utc};
+use coland_storage::{
+    ActorProfileStore, AgentControlAdmissionWrite, AgentPcrGenesisAdmissionWrite,
+    AgentProvisionAdmissionWrite, AuthorityCommitStore, AuthorityCommitTransaction,
+};
+use coland_storage_postgres::{
+    PgActorProfileStore, PgAuthorityCommitStore, PgPersistenceStore, PgPool,
+};
 use diesel::sql_types::{BigInt, Text};
 use diesel_async::RunQueryDsl;
 use ed25519_dalek::SigningKey;
 use rand_core::SeedableRng;
-use soland_storage::{
-    ActorProfileStore, AgentControlAdmissionWrite, AgentPcrGenesisAdmissionWrite,
-    AgentProvisionAdmissionWrite, AuthorityCommitStore, AuthorityCommitTransaction,
-};
-use soland_storage_postgres::{
-    PgActorProfileStore, PgAuthorityCommitStore, PgPersistenceStore, PgPool,
-};
 fn agent_provision_event(
     controller: &arkret_wire::AccountId,
     realm_id: &RealmId,
@@ -204,7 +204,7 @@ fn station_successor(
 }
 
 struct OriginFixture {
-    _lease: soland_storage_postgres::test_database::TestDatabase,
+    _lease: coland_storage_postgres::test_database::TestDatabase,
     pool: PgPool,
     controller: pcr_genesis_fixture::PcrGenesisFixture,
     station: DidCoreId,
@@ -224,7 +224,7 @@ fn origin_tx(
     station: &DidCoreId,
 ) -> AuthorityCommitTransaction {
     AuthorityCommitTransaction {
-        expected_authority: soland_storage::CurrentRealmAuthority {
+        expected_authority: coland_storage::CurrentRealmAuthority {
             realm_id: commit.realm_id.clone(),
             generation: commit.governance_generation,
             service_id: station.clone(),
@@ -332,7 +332,7 @@ impl OriginFixture {
         use arkret_models_identity::service_identity::{
             CanonicalServiceUrl, ServiceRegistrationKey,
         };
-        let lease = soland_storage_postgres::test_database::TestDatabase::lease().await;
+        let lease = coland_storage_postgres::test_database::TestDatabase::lease().await;
         let pool = lease.pool();
         let mut rng = rand_chacha::ChaCha20Rng::from_seed([99; 32]);
         let registration = ServiceRegistrationKey::new(
@@ -546,7 +546,7 @@ impl OriginFixture {
     }
     async fn admit_genesis(
         &self,
-    ) -> Result<soland_storage::AgentPcrGenesisAdmissionOutcome, soland_storage::PersistenceError>
+    ) -> Result<coland_storage::AgentPcrGenesisAdmissionOutcome, coland_storage::PersistenceError>
     {
         PgActorProfileStore {
             pool: self.pool.clone(),
@@ -660,11 +660,11 @@ async fn agent_slug_is_reserved_until_accepted_terminal_lifecycle() {
     let accepted = store.admit_agent_provision(write.clone()).await.unwrap();
     assert!(matches!(
         accepted,
-        soland_storage::AgentProvisionAdmissionOutcome::Committed(_)
+        coland_storage::AgentProvisionAdmissionOutcome::Committed(_)
     ));
     assert!(matches!(
         store.admit_agent_provision(write).await.unwrap(),
-        soland_storage::AgentProvisionAdmissionOutcome::Duplicate(_)
+        coland_storage::AgentProvisionAdmissionOutcome::Duplicate(_)
     ));
     // Replaying the old immutable provision must not retake the replacement's
     // selector binding or make its independent pairing depend on old history.
@@ -676,7 +676,7 @@ async fn agent_slug_is_reserved_until_accepted_terminal_lifecycle() {
             })
             .await
             .unwrap(),
-        soland_storage::AgentProvisionAdmissionOutcome::Duplicate(_)
+        coland_storage::AgentProvisionAdmissionOutcome::Duplicate(_)
     ));
 
     // A late old runtime authorization must still hit the terminal Agent's
@@ -824,7 +824,7 @@ async fn different_controllers_can_reserve_the_same_agent_slug() {
     .unwrap();
     assert!(matches!(
         outcome,
-        soland_storage::AgentProvisionAdmissionOutcome::Committed(_)
+        coland_storage::AgentProvisionAdmissionOutcome::Committed(_)
     ));
 }
 

@@ -35,7 +35,7 @@ pub use timeline::*;
 pub fn retention_tombstone_for_event(
     state: &crate::state::AppState,
     event_id: &str,
-) -> Option<soland_services::governance::RetentionTombstoneRecord> {
+) -> Option<coland_services::governance::RetentionTombstoneRecord> {
     state.governance().cached_retention_tombstone(event_id)
 }
 
@@ -105,7 +105,7 @@ mod tests {
         let created_at = chrono::DateTime::parse_from_rfc3339("2026-06-24T10:00:00.000Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
-        let event = soland_services::events::ProjectedEvent {
+        let event = coland_services::events::ProjectedEvent {
             event_id: "ak:event:AUAf2-oZl31wupPqnQLO-zloaqgMoX5xk2tpVSbi8zjD".to_owned(),
             realm_id: REALM_ID.to_owned(),
             event_kind: arkret_wire::EventKind::StrandUpdate,

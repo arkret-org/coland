@@ -347,8 +347,8 @@ async fn management_reader_waits_for_policy_writer_and_observes_committed_deny()
         );
         let actor = arkret_wire::ActorId::account(agent.clone());
         let target = arkret_wire::WireResourceSelector::realm(realm());
-        let facts = soland_storage::OperationFacts::default();
-        let operation = soland_storage::AuthorizationOperation {
+        let facts = coland_storage::OperationFacts::default();
+        let operation = coland_storage::AuthorizationOperation {
             actor: &actor,
             actions: &["ak.message.create"],
             target: &target,

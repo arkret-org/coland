@@ -3,7 +3,7 @@
 //!
 //! The SDK provides a typed view of an OAuth-style introspection
 //! response carrying `(principal_id, admin_scopes, expires_at,
-//! device_id)`. This module wires that into soland:
+//! device_id)`. This module wires that into coland:
 //!
 //! 1. [`introspect_admin_scopes`] talks to the configured `session_grant_introspection_url` over
 //!    HTTP, returning the typed [`SessionGrantIntrospection`]. Results are cached per-token-hash
@@ -28,10 +28,10 @@ use arkret_models_collaboration::session_grants::{
 use arkret_models_identity::admin_grant::{
     SessionGrantAdminIntrospectionStatus, SessionGrantIntrospection,
 };
+use coland_http::error::AppError;
+use coland_services::identity::SessionIdentityState as SessionRecord;
 use parking_lot::Mutex;
 use salvo::prelude::Request;
-use soland_http::error::AppError;
-use soland_services::identity::SessionIdentityState as SessionRecord;
 
 use crate::state::AppState;
 
@@ -161,8 +161,8 @@ fn admin_grant_from_introspection_outcome(
 /// introspection names the exact credential the request authenticated with;
 /// its DPoP proof was already verified (and consumed) by `RequireAdmin`.
 fn session_credential_from_request(req: &Request) -> Option<String> {
-    soland_http::util::dpop_token(req)
-        .or_else(|| soland_http::util::bearer_token(req))
+    coland_http::util::dpop_token(req)
+        .or_else(|| coland_http::util::bearer_token(req))
         .map(|token| token.trim().to_owned())
 }
 
@@ -205,7 +205,7 @@ fn synthetic_dev_grant(state: &AppState, session: &SessionRecord) -> SessionGran
 
 /// Resolve the caller's [`SessionGrantIntrospection`]. An explicit development harness
 /// uses a local synthetic grant even when the joint harness also wires a
-/// coauth introspection URL; dev-login bearers are local soland sessions,
+/// coauth introspection URL; dev-login bearers are local coland sessions,
 /// not upstream session-grant tokens. Production mode POSTs the caller's
 /// bearer token to `session_grant_introspection_url`.
 pub(crate) async fn introspect_admin_scopes(
@@ -220,7 +220,7 @@ pub(crate) async fn introspect_admin_scopes(
 
     let Some(url) = state.config().session_grant_introspection_url.as_deref() else {
         return Err(crate::app_error!(CapabilityDenied,
-            "admin scope check requires SOLAND_SESSION_GRANT_INTROSPECTION_URL outside the explicit development harness"
+            "admin scope check requires COLAND_SESSION_GRANT_INTROSPECTION_URL outside the explicit development harness"
                 .to_owned(),
         ));
     };

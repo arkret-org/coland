@@ -11,11 +11,11 @@ use arkret_models_integration::{
     AppletManagedActorProvisionPayload, AppletManagedActorRole, AppletRegistrationPayload,
 };
 use arkret_wire::{ActorId, Event, EventId, EventKind, GrantId};
+use coland_storage::{AppletEventProducerGuard, PersistenceError, PersistenceResult};
 use diesel::sql_types::{Binary, Jsonb, Text};
 use diesel::{OptionalExtension as _, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::Value;
-use soland_storage::{AppletEventProducerGuard, PersistenceError, PersistenceResult};
 
 use crate::capability_grant_current_results::{
     CapabilityGrantCurrentResultReadRow, RealmAuthorityRootReadRow, decode_authority_root,
@@ -116,7 +116,7 @@ async fn require_applet_producer_inner(
         .registration_epoch_evidence
         .validate_against_did_document(&guard.service_did_document)
         .map_err(denied)?;
-    let scope = soland_storage::applet_effective_scope_key(&event.scope_ref)?;
+    let scope = coland_storage::applet_effective_scope_key(&event.scope_ref)?;
     let install=sql_query("SELECT i.record AS value FROM applet_installations i JOIN applet_registration_current_results r ON r.realm_id=$3 AND r.applet_id=i.applet_id JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref AND a.registration_event_ref=i.record#>>'{registration_event,event_id}' WHERE i.applet_id=$1 AND i.effective_scope_key=$2 FOR UPDATE OF i")
         .bind::<Text,_>(registration.applet_id.as_str()).bind::<Text,_>(scope).bind::<Text,_>(event.realm_id.as_str())
         .get_result::<ValueRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
@@ -331,7 +331,7 @@ async fn require_applet_producer_inner(
             })
             .map(|descriptor| descriptor.action.as_str())
             .collect::<Vec<_>>();
-        let facts = soland_storage::OperationFacts {
+        let facts = coland_storage::OperationFacts {
             applet_id: Some(registration.applet_id.to_string()),
             // A native Service write has no delegated executed_by carrier.
             // Both native and delegated producers were bound to this exact
@@ -351,8 +351,8 @@ async fn require_applet_producer_inner(
             object_kind: (event.kind == EventKind::MessageCreate).then(|| "message".to_owned()),
             ..Default::default()
         };
-        let evaluation = soland_storage::evaluate_grants(
-            &soland_storage::AuthorizationOperation {
+        let evaluation = coland_storage::evaluate_grants(
+            &coland_storage::AuthorizationOperation {
                 actor: grant_actor,
                 actions: &actions,
                 target: &resource,
@@ -384,15 +384,15 @@ async fn require_applet_producer_inner(
         {
             return Err(denied("managed Actor permission source differs"));
         }
-        let facts = soland_storage::OperationFacts {
+        let facts = coland_storage::OperationFacts {
             applet_id: Some(registration.applet_id.to_string()),
             executed_by: Some(service.clone()),
             registration_epoch: Some(registration.registration_epoch.to_string()),
             ..Default::default()
         };
         let actions = grant.actions.iter().map(String::as_str).collect::<Vec<_>>();
-        if soland_storage::evaluate_grants(
-            &soland_storage::AuthorizationOperation {
+        if coland_storage::evaluate_grants(
+            &coland_storage::AuthorizationOperation {
                 actor: &service,
                 actions: &actions,
                 target: &resource,

@@ -1,20 +1,20 @@
 # Storage port boundary
 
-`soland-storage` is a permanent backend-neutral port and contract crate. It is
+`coland-storage` is a permanent backend-neutral port and contract crate. It is
 not a temporary indirection around PostgreSQL.
 
 ## Ownership
 
-- `soland-storage` owns persistence records, capability-oriented traits,
+- `coland-storage` owns persistence records, capability-oriented traits,
   cross-adapter result/error semantics, exact-replay outcomes, unit-of-work
   inputs, and reusable adapter contract tests.
-- `soland-storage-postgres` owns Diesel, SQL, migrations, PostgreSQL locking,
+- `coland-storage-postgres` owns Diesel, SQL, migrations, PostgreSQL locking,
   transaction implementation, row codecs, pooling, and database lifecycle.
-- `soland-services` and `soland-http` depend on storage ports. They must not
+- `coland-services` and `coland-http` depend on storage ports. They must not
   downcast an adapter or import database client, row, query, or transaction
   types.
 - A future SQLite or other durable adapter is a sibling of
-  `soland-storage-postgres` and implements the same ports and contract suite.
+  `coland-storage-postgres` and implements the same ports and contract suite.
 
 ## Interface rules
 
@@ -34,7 +34,7 @@ not a temporary indirection around PostgreSQL.
 ## Automated guard
 
 `cargo run -p xtask --bin check_layering --locked` rejects direct backend
-dependencies from `soland-storage` and rejects adapter dependencies from the
+dependencies from `coland-storage` and rejects adapter dependencies from the
 HTTP/services/domain layers. This deliberately bans both current PostgreSQL
 libraries and likely future SQLite/SQLx libraries from the port crate; an
 adapter adds them in its own crate instead.

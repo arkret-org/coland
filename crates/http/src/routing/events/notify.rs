@@ -27,8 +27,8 @@ use arkret_wire::{
     AccountId, ActorId, DidCoreId, EventId, NotificationKind, NotificationPriority,
     NotificationState, RealmId, StrandId,
 };
+use coland_services::delivery::NotificationFanoutBasis;
 use serde_json::Value;
-use soland_services::delivery::NotificationFanoutBasis;
 
 use crate::routing::agent_participation::{
     circle_scope_key, realm_scope_key, resolve_agent_participation_for_scope_keys, strand_scope_key,
@@ -447,7 +447,7 @@ async fn put_notification(
         notification
             .validate()
             .map_err(|error| format!("notification is invalid: {error}"))?;
-        Ok::<_, String>(soland_services::delivery::RecipientNotificationRecord {
+        Ok::<_, String>(coland_services::delivery::RecipientNotificationRecord {
             notification,
             event_kind: source.kind.clone(),
             source_actor_id: Some(source.sender.clone()),
@@ -462,7 +462,7 @@ async fn put_notification(
     };
     if let Err(error) = state
         .deliveries()
-        .store_notification(soland_services::delivery::StoreNotificationCommand { record })
+        .store_notification(coland_services::delivery::StoreNotificationCommand { record })
         .await
     {
         tracing::warn!(%error, "failed to persist notification");
@@ -473,9 +473,9 @@ async fn put_notification(
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
+    use coland_services::delivery::NotificationStrandScope;
+    use coland_storage_postgres::Db;
     use serde_json::{Value, json};
-    use soland_services::delivery::NotificationStrandScope;
-    use soland_storage_postgres::Db;
 
     use super::*;
 
@@ -492,7 +492,7 @@ mod tests {
     fn test_config() -> crate::config::AppConfig {
         crate::config::AppConfig {
             object_storage: crate::config::ObjectStorageConfig::local(
-                std::env::temp_dir().join("soland-agent-notify-test-blobs"),
+                std::env::temp_dir().join("coland-agent-notify-test-blobs"),
             ),
             development_mode: true,
             did_resolver_allow_methods: vec!["web".to_owned(), "key".to_owned()],
@@ -840,7 +840,7 @@ mod tests {
         state
             .deliveries()
             .list_recipient_notifications(
-                soland_services::delivery::ListRecipientNotificationsQuery {
+                coland_services::delivery::ListRecipientNotificationsQuery {
                     recipient_id: recipient.to_string(),
                 },
             )
@@ -880,9 +880,9 @@ mod tests {
         let controller_account = actor(controller).as_account_id().unwrap().clone();
         state
             .identities()
-            .save_account(soland_services::identity::AccountProfileState {
+            .save_account(coland_services::identity::AccountProfileState {
                 // The store assigns the primary key.
-                pk: soland_storage::AccountPk(0),
+                pk: coland_storage::AccountPk(0),
                 principal_id: controller_account.principal_id.clone(),
                 account_id: controller_account.clone(),
                 localpart: "controller".to_owned(),
@@ -893,7 +893,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let mut record = soland_services::identity::AgentPairingState::new(
+        let mut record = coland_services::identity::AgentPairingState::new(
             agent.to_owned(),
             controller.to_owned(),
             REALM.to_owned(),

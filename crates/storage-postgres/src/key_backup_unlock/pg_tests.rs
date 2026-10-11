@@ -290,7 +290,7 @@ impl Fixture {
             .unwrap();
         session["accepted_stream_head"] = accepted_stream_head.clone();
         session["authority_context"] =
-            serde_json::to_value(soland_storage::RecoveryAuthorityContext {
+            serde_json::to_value(coland_storage::RecoveryAuthorityContext {
                 realm_id: realm.clone(),
                 authority_generation: 0,
                 authority_ref: basis_commit.authority_ref.clone(),
@@ -377,8 +377,8 @@ impl Fixture {
 
     async fn consume(&self, now: chrono::DateTime<Utc>) -> PersistenceResult<Value> {
         self.store
-            .consume_unlock_entry(soland_storage::KeyBackupUnlockCommand {
-                basis: &soland_storage::KeyBackupUnlockBasis::RecoverySession,
+            .consume_unlock_entry(coland_storage::KeyBackupUnlockCommand {
+                basis: &coland_storage::KeyBackupUnlockBasis::RecoverySession,
                 authority_id: SESSION,
                 backup: self.backup.clone(),
                 request_digest: REQUEST,

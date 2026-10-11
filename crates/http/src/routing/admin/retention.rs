@@ -7,13 +7,13 @@
 
 use arkret_wire::ActorId;
 use chrono::{DateTime, Duration, Utc};
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
+use coland_services::governance::{RetentionPolicyRecord, RetentionTombstoneRecord};
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
-use soland_services::governance::{RetentionPolicyRecord, RetentionTombstoneRecord};
 
 use super::AdminAuth;
 use super::audit::append_audit_log;
@@ -80,12 +80,12 @@ pub(super) fn router() -> Router {
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.retention.policy.configure",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.retention.policy.configure",
+    tags("coland_admin")
 )]
 #[tracing::instrument(
     skip_all,
-    fields(op = "org.arkret.soland.admin.retention.policy.configure")
+    fields(op = "org.arkret.coland.admin.retention.policy.configure")
 )]
 async fn configure_retention_policy(
     admin: AdminAuth,
@@ -114,7 +114,7 @@ async fn configure_retention_policy(
     append_audit_log(
         state,
         Some(&session.actor),
-        "org.arkret.soland.audit.retention_policy.updated",
+        "org.arkret.coland.audit.retention_policy.updated",
         json!({
             "realm_id": realm_id,
             "ttl_seconds": ttl_seconds,
@@ -126,10 +126,10 @@ async fn configure_retention_policy(
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.retention.sweep",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.retention.sweep",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.retention.sweep"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.retention.sweep"))]
 async fn sweep_retention_policy(
     admin: AdminAuth,
     depot: &mut Depot,
@@ -212,7 +212,7 @@ async fn sweep_retention_policy(
     append_audit_log(
         state,
         Some(&session.actor),
-        "org.arkret.soland.audit.retention_sweep",
+        "org.arkret.coland.audit.retention_sweep",
         json!({
             "realm_id": realm_id,
             "examined": examined,

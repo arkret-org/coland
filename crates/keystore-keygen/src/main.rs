@@ -1,4 +1,4 @@
-//! Generate a Soland encrypted-file KeyStore master key.
+//! Generate a Coland encrypted-file KeyStore master key.
 //!
 //! The command is intentionally separate from the server startup path: an
 //! operator must provision the master key explicitly, while local tooling may
@@ -13,7 +13,7 @@ use base64::Engine as _;
 use zeroize::Zeroizing;
 
 const KEY_BYTES: usize = 32;
-const USAGE: &str = "usage: soland-keystore-keygen --output <path> [--if-missing]\n\
+const USAGE: &str = "usage: coland-keystore-keygen --output <path> [--if-missing]\n\
 \n\
 options:\n\
   --output <path>  destination for the base64-encoded 32-byte master key\n\
@@ -194,7 +194,7 @@ mod tests {
     impl TestDir {
         fn new() -> Self {
             let path = std::env::temp_dir()
-                .join(format!("soland-keystore-keygen-{}", uuid::Uuid::new_v4()));
+                .join(format!("coland-keystore-keygen-{}", uuid::Uuid::new_v4()));
             Self(path)
         }
 

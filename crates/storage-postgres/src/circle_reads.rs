@@ -5,10 +5,10 @@ use arkret_models_collaboration::governance::circle::{
     CirclePreviewDisplay, CirclePreviewVisibility, CircleReadView, CircleState, CircleView,
 };
 use arkret_wire::{ActorId, CircleId, RealmId};
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{Bool, Jsonb, Nullable, Text};
 use diesel_async::{AsyncConnection as _, AsyncPgConnection, RunQueryDsl};
 use sha2::{Digest, Sha256};
-use soland_storage::{PersistenceError, PersistenceResult};
 
 use crate::{PgPool, PgTransactionError, pg_conn};
 

@@ -3,16 +3,16 @@ mod historical_human;
 
 use arkret_models_identity::{HistoricalSignerKeyQuerySender, SignerKeyQuerySelector};
 use arkret_wire::{CommittedEventRef, Did};
-use diesel::sql_types::BigInt;
-use diesel_async::RunQueryDsl;
-use soland_storage::{
+use coland_storage::{
     AuthorityCommitStore, AuthorityCommitWriteOutcome, DeviceRevocationStore,
     EventCommitUnitOfWork, SelfProducerCommitGuard,
 };
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{
     PgAuthorityCommitStore, PgDeviceRevocationStore, PgEventCommitUnitOfWork,
 };
+use diesel::sql_types::BigInt;
+use diesel_async::RunQueryDsl;
 
 #[derive(diesel::QueryableByName, Debug, PartialEq)]
 struct Footprint {
@@ -29,7 +29,7 @@ struct Footprint {
     #[diesel(sql_type = BigInt)]
     event_outbox: i64,
 }
-async fn footprint(pool: &soland_storage_postgres::PgPool) -> Footprint {
+async fn footprint(pool: &coland_storage_postgres::PgPool) -> Footprint {
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query("SELECT (SELECT count(*) FROM canonical_events) AS events,(SELECT count(*) FROM realm_commits) AS commits,(SELECT count(*) FROM agent_producer_signer_keys) AS keys,(SELECT count(*) FROM agent_producer_signer_keys WHERE producer_source_fact IS NOT NULL) AS full_source_facts,(SELECT count(*) FROM federation_outbox) AS federation_outbox,(SELECT count(*) FROM event_federation_outbox) AS event_outbox")
         .get_result(&mut *conn).await.unwrap()
@@ -237,7 +237,7 @@ async fn historical_human_frozen_fact_survives_current_device_gate_revocation() 
     // This test exercises the real durable terminal gate, rather than claiming
     // to execute the separate complete SecurityRotation ceremony.
     PgDeviceRevocationStore { pool: pool.clone() }
-        .commit_revocation(&soland_storage::DeviceRevocationTransition {
+        .commit_revocation(&coland_storage::DeviceRevocationTransition {
             selector: fixture.guard.clone(),
             revoke_ref: CommittedEventRef {
                 event_id: arkret_wire::EventId::from_digest(
@@ -385,7 +385,7 @@ async fn peer_full_scan_carries_each_original_fact_and_never_repairs_missing_arc
         direction: arkret_wire::StreamScanDirection::After(None),
         limit: 32,
     };
-    let soland_storage::PeerStreamScan::Page(page) = store
+    let coland_storage::PeerStreamScan::Page(page) = store
         .scan_stream_for_peer(&request, &issuer, &issuer)
         .await
         .unwrap()
@@ -507,7 +507,7 @@ async fn production_uow_exact_accepted_retry_precedes_current_revocation_and_nev
         .await
         .unwrap();
     PgDeviceRevocationStore { pool: pool.clone() }
-        .commit_revocation(&soland_storage::DeviceRevocationTransition {
+        .commit_revocation(&coland_storage::DeviceRevocationTransition {
             selector: fixture.guard.clone(),
             revoke_ref: CommittedEventRef {
                 event_id: arkret_wire::EventId::from_digest(
@@ -553,16 +553,16 @@ async fn production_uow_exact_accepted_retry_precedes_current_revocation_and_nev
 #[tokio::test]
 async fn withheld_full_upgrade_atomically_retains_original_human_fact_without_head_or_current_rewrite()
  {
-    use soland_storage::{
+    use coland_storage::{
         CommittedChainNode, CommittedReplica, CommittedReplicaOutcome, CommittedReplicaRole,
         ReplicaAnchorInstall,
     };
-    let mut source_config = soland_test_support::app_config();
+    let mut source_config = coland_test_support::app_config();
     source_config.public_base_url = "https://full-upgrade-governance.example".into();
-    let (source_state, pool) = soland_test_support::app_state_with_pool(source_config);
-    let mut member_config = soland_test_support::app_config();
+    let (source_state, pool) = coland_test_support::app_state_with_pool(source_config);
+    let mut member_config = coland_test_support::app_config();
     member_config.public_base_url = "https://full-upgrade-member.example".into();
-    let (member_state, member_pool) = soland_test_support::app_state_with_pool(member_config);
+    let (member_state, member_pool) = coland_test_support::app_state_with_pool(member_config);
     let source = historical_human::HumanFixture::new(&pool, source_state.service_did()).await;
     source.admit(&pool).await;
     // The foreign PCR is accepted only by its true Origin; governance receives
@@ -581,7 +581,7 @@ async fn withheld_full_upgrade_atomically_retains_original_human_fact_without_he
         at,
     );
     let mut join = historical_human::request_for_event(&joining, previous, event, at);
-    let evidence = soland_http::test_fresh_producer_device_evidence(
+    let evidence = coland_http::test_fresh_producer_device_evidence(
         &member_state,
         &join.authority_commit.event,
         &source.pcr.history.account.station_id,
@@ -606,7 +606,7 @@ async fn withheld_full_upgrade_atomically_retains_original_human_fact_without_he
     join.authority_commit.commit.committed_at = core.attested_at;
     join.self_producer_guard = None;
     join.forwarded_producer_evidence =
-        Some(soland_storage::ForwardedProducerDeviceEvidence::new(evidence, fact).unwrap());
+        Some(coland_storage::ForwardedProducerDeviceEvidence::new(evidence, fact).unwrap());
     // The author is the member; the governance Station seals the actual target.
     historical_human::seal_commit(
         &mut join.authority_commit.commit,
@@ -622,7 +622,7 @@ async fn withheld_full_upgrade_atomically_retains_original_human_fact_without_he
         pool: member_pool.clone(),
     };
     let authority = join.authority_commit.expected_authority.clone();
-    let replica = |request: &soland_storage::EventCommitRequest, role| CommittedReplica {
+    let replica = |request: &coland_storage::EventCommitRequest, role| CommittedReplica {
         local_service_id: member_account.station_id.clone(),
         authority: authority.clone(),
         event: request.authority_commit.event.clone(),
@@ -645,10 +645,10 @@ async fn withheld_full_upgrade_atomically_retains_original_human_fact_without_he
             .unwrap(),
         CommittedReplicaOutcome::Stored
     );
-    let anchor = |material: soland_storage::RealmStateSnapshotMaterial| {
+    let anchor = |material: coland_storage::RealmStateSnapshotMaterial| {
         let key =
             ed25519_dalek::SigningKey::from_bytes(&historical_human::station_authority_seed());
-        let snapshot = soland_services::authority_commit::build_signed_realm_state_snapshot(
+        let snapshot = coland_services::authority_commit::build_signed_realm_state_snapshot(
             &material,
             arkret_wire::DidUrl::new(format!("{}#authority", source.pcr.history.station_did))
                 .unwrap(),
@@ -796,12 +796,12 @@ mod forward_retention {
     //! witnesses. These PG ports do not establish peer HTTP authority verification.
     use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
     use arkret_wire::{Did, EventAdmissionSubmission};
+    use coland_storage::{AuthorityCommitStore, ForwardAttemptStatus, QueuedEventStatus};
+    use coland_storage_postgres::test_database::TestDatabase;
+    use coland_storage_postgres::{PgAuthorityCommitStore, PgPool};
     use diesel::sql_query;
     use diesel::sql_types::Jsonb;
     use diesel_async::RunQueryDsl;
-    use soland_storage::{AuthorityCommitStore, ForwardAttemptStatus, QueuedEventStatus};
-    use soland_storage_postgres::test_database::TestDatabase;
-    use soland_storage_postgres::{PgAuthorityCommitStore, PgPool};
 
     use super::historical_human;
 
@@ -866,7 +866,7 @@ mod forward_retention {
                 .unwrap_err();
             assert_eq!(
                 missing_intent.conflict_code(),
-                Some(soland_storage::ConflictCode::DuplicateConflict)
+                Some(coland_storage::ConflictCode::DuplicateConflict)
             );
             assert!(
                 store
@@ -932,7 +932,7 @@ mod forward_retention {
                 .unwrap_err();
             assert_eq!(
                 error.conflict_code(),
-                Some(soland_storage::ConflictCode::DuplicateConflict)
+                Some(coland_storage::ConflictCode::DuplicateConflict)
             );
             let unchanged = reopened
                 .queued_event(&transaction.event.event_id)

@@ -7,11 +7,11 @@ use arkret_wire::{
     CapabilityActionId, CommitStreamRef, CurrentRevision, Event, EventKind, PolicyKind,
     RealmCommit, WireResourceSelector,
 };
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Bool, Jsonb, Text, Timestamptz};
 use diesel::{OptionalExtension, QueryableByName, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::Value;
-use soland_storage::{PersistenceError, PersistenceResult};
 
 #[derive(QueryableByName)]
 struct Stored {

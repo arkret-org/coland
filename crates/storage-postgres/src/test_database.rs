@@ -1,6 +1,6 @@
 //! Leased PostgreSQL databases for tests.
 //!
-//! Soland persists through one adapter. A test that needs storage leases a real
+//! Coland persists through one adapter. A test that needs storage leases a real
 //! database instead of reaching for a second, in-memory implementation, so the
 //! suite exercises exactly what production runs.
 //!
@@ -75,7 +75,7 @@ use crate::db::{Db, PgPool};
 /// a fixture that builds a second state to model a restart holds two leases at
 /// once, and the deep-stack runners give each test its own thread. A 12-thread
 /// run of the current suite peaks near 50 slots. Size
-/// `SOLAND_TEST_DATABASE_SLOTS` against that product with headroom.
+/// `COLAND_TEST_DATABASE_SLOTS` against that product with headroom.
 ///
 /// Exhaustion panics rather than waiting. One `cargo test` process is the only
 /// shape in use, and for it the ceiling is reachable only by mis-sizing. Change
@@ -95,7 +95,7 @@ const CREATE_LOCK_KEY: i32 = -1;
 
 /// Tables the reset must never empty: they carry the migration ledger and the
 /// schema-contract fence, not test rows.
-const PRESERVED_TABLES: &[&str] = &["__diesel_schema_migrations", "soland_schema_contract"];
+const PRESERVED_TABLES: &[&str] = &["__diesel_schema_migrations", "coland_schema_contract"];
 
 /// An exclusive lease on a migrated, empty PostgreSQL database.
 ///
@@ -164,7 +164,7 @@ impl TestDatabase {
 
         panic!(
             "every one of the {max_slots} test database slots named {slot_prefix}NN is leased; \
-             raise SOLAND_TEST_DATABASE_SLOTS above the test thread count"
+             raise COLAND_TEST_DATABASE_SLOTS above the test thread count"
         );
     }
 
@@ -341,7 +341,7 @@ fn lease_runtime() -> &'static tokio::runtime::Handle {
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(workers)
                 .enable_all()
-                .thread_name("soland-test-database-lease")
+                .thread_name("coland-test-database-lease")
                 .build()
                 .expect("building the test database lease runtime")
         })
@@ -350,10 +350,10 @@ fn lease_runtime() -> &'static tokio::runtime::Handle {
 
 /// The database URL every test storage lease is derived from.
 ///
-/// `SOLAND_TEST_DATABASE_URL` wins so a developer can point the suite at a
+/// `COLAND_TEST_DATABASE_URL` wins so a developer can point the suite at a
 /// throwaway server while `DATABASE_URL` still names the one their tools use.
 fn configured_url() -> String {
-    for key in ["SOLAND_TEST_DATABASE_URL", "DATABASE_URL"] {
+    for key in ["COLAND_TEST_DATABASE_URL", "DATABASE_URL"] {
         if let Ok(value) = std::env::var(key)
             && !value.trim().is_empty()
         {
@@ -361,15 +361,15 @@ fn configured_url() -> String {
         }
     }
     panic!(
-        "no test database is configured: set SOLAND_TEST_DATABASE_URL or DATABASE_URL to a \
-         PostgreSQL instance. Soland has one storage implementation, so a test without a \
+        "no test database is configured: set COLAND_TEST_DATABASE_URL or DATABASE_URL to a \
+         PostgreSQL instance. Coland has one storage implementation, so a test without a \
          database proves nothing and fails here instead of silently passing."
     );
 }
 
 /// Slot ceiling, raised for a run with more test threads than the default.
 fn configured_max_slots() -> u32 {
-    std::env::var("SOLAND_TEST_DATABASE_SLOTS")
+    std::env::var("COLAND_TEST_DATABASE_SLOTS")
         .ok()
         .and_then(|value| value.trim().parse::<u32>().ok())
         .filter(|slots| *slots > 0)
@@ -383,7 +383,7 @@ fn configured_max_slots() -> u32 {
 /// identifiers instead of leasing a slot. Four copies of this function used to
 /// live in `store_contracts.rs`, `durable_plane_restart.rs`, `account_status.rs`
 /// and the former threshold-signature store tests, and all four read `DATABASE_URL` alone -- so
-/// running the suite the way this module documents (`SOLAND_TEST_DATABASE_URL`, which
+/// running the suite the way this module documents (`COLAND_TEST_DATABASE_URL`, which
 /// [`configured_url`] prefers) produced 48 hard failures whose message told you
 /// to set the other variable. One resolver, both variables, one message.
 ///

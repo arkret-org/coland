@@ -5,14 +5,14 @@ mod ordinary_realm;
 use arkret_models_collaboration::strand_watch_operations::{
     StrandWatchCurrentOutcome, StrandWatchCurrentRequestBody,
 };
+use coland_storage::{
+    AuthorityCommitStore, EventCommitRequest, EventCommitUnitOfWork, SelfExactCurrentRead,
+};
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
 use diesel::sql_types::{Jsonb, Text};
 use diesel_async::{RunQueryDsl, SimpleAsyncConnection};
 use serde_json::{Value, json};
-use soland_storage::{
-    AuthorityCommitStore, EventCommitRequest, EventCommitUnitOfWork, SelfExactCurrentRead,
-};
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
 
 #[derive(diesel::QueryableByName)]
 struct Footprint {
@@ -27,7 +27,7 @@ async fn footprint(pool: &PgPool) -> Value {
 async fn write(
     pool: &PgPool,
     discussion: &ordinary_realm::Discussion,
-    previous: &soland_storage::AuthorityCommitTransaction,
+    previous: &coland_storage::AuthorityCommitTransaction,
     level: Value,
     public: Option<bool>,
     expected: Option<Value>,
@@ -194,7 +194,7 @@ async fn current_read_distinguishes_never_written_cleared_and_complete_cas() {
         let error = uow.commit_event(refused).await.unwrap_err();
         assert_eq!(
             error.conflict_code(),
-            Some(soland_storage::ConflictCode::FailedPrecondition)
+            Some(coland_storage::ConflictCode::FailedPrecondition)
         );
         assert_eq!(footprint(&pool).await, baseline);
     }

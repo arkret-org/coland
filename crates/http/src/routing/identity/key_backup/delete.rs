@@ -127,7 +127,7 @@ pub(super) async fn issue_key_backup_delete_challenge(
         expires_at: issued_at + Duration::seconds(DELETE_CHALLENGE_TTL_SECONDS),
     };
 
-    let record = soland_services::identity::KeyBackupDeleteChallengeRecord {
+    let record = coland_services::identity::KeyBackupDeleteChallengeRecord {
         challenge_id: challenge.challenge_id.as_str().to_owned(),
         account_id: challenge.account_id.clone(),
         backup_id: challenge.backup_id.as_str().to_owned(),
@@ -194,7 +194,7 @@ fn current_device_delete_proof_rejected() -> AppError {
 /// The verified challenge a DELETE is authorized against.
 pub(super) struct AuthorizedKeyBackupDelete {
     pub(super) challenge_id: String,
-    pub(super) gate: soland_storage::KeyBackupDeleteGate,
+    pub(super) gate: coland_storage::KeyBackupDeleteGate,
     pub(super) recovery_session_id: Option<String>,
     pub(super) proof_branch: &'static str,
 }
@@ -273,8 +273,8 @@ pub(super) async fn authorize_key_backup_delete(
     quorum_devices.sort_unstable();
     quorum_devices.dedup();
     Ok(AuthorizedKeyBackupDelete {
-        gate: soland_storage::KeyBackupDeleteGate {
-            basis: soland_storage::KeyBackupPointerBasis {
+        gate: coland_storage::KeyBackupDeleteGate {
+            basis: coland_storage::KeyBackupPointerBasis {
                 account_id: pointers.account_id,
                 secret_storage: pointers.secret_storage,
             },
@@ -467,7 +467,7 @@ async fn verify_recovery_unlock_delete(
 fn ensure_recovery_unlock_session_eligible(
     principal_id: &arkret_wire::DidCoreId,
     station_id: &arkret_wire::DidCoreId,
-    lifecycle: soland_storage::RecoverySessionLifecycle,
+    lifecycle: coland_storage::RecoverySessionLifecycle,
     transaction_id: Option<&str>,
     created_at: chrono::DateTime<chrono::Utc>,
     expires_at: chrono::DateTime<chrono::Utc>,
@@ -479,7 +479,7 @@ fn ensure_recovery_unlock_session_eligible(
             "key backup delete recovery session belongs to another account",
         ));
     }
-    if lifecycle != soland_storage::RecoverySessionLifecycle::Verified || transaction_id.is_some() {
+    if lifecycle != coland_storage::RecoverySessionLifecycle::Verified || transaction_id.is_some() {
         return Err(AppError::capability_denied(
             "key backup delete recovery session is not verified and unconsumed",
         ));
@@ -531,7 +531,7 @@ mod recovery_unlock_session_tests {
             };
         check(
             &owner,
-            soland_storage::RecoverySessionLifecycle::Verified,
+            coland_storage::RecoverySessionLifecycle::Verified,
             None,
             proof_at,
         )
@@ -539,7 +539,7 @@ mod recovery_unlock_session_tests {
         assert!(
             check(
                 &other,
-                soland_storage::RecoverySessionLifecycle::Verified,
+                coland_storage::RecoverySessionLifecycle::Verified,
                 None,
                 proof_at,
             )
@@ -548,7 +548,7 @@ mod recovery_unlock_session_tests {
         assert!(
             check(
                 &owner,
-                soland_storage::RecoverySessionLifecycle::Pending,
+                coland_storage::RecoverySessionLifecycle::Pending,
                 None,
                 proof_at,
             )
@@ -557,7 +557,7 @@ mod recovery_unlock_session_tests {
         assert!(
             check(
                 &owner,
-                soland_storage::RecoverySessionLifecycle::Verified,
+                coland_storage::RecoverySessionLifecycle::Verified,
                 Some("ak:security_transaction:consumed"),
                 proof_at,
             )
@@ -566,7 +566,7 @@ mod recovery_unlock_session_tests {
         assert!(
             check(
                 &owner,
-                soland_storage::RecoverySessionLifecycle::Verified,
+                coland_storage::RecoverySessionLifecycle::Verified,
                 None,
                 "2026-09-27T00:05:00.001Z".parse().unwrap(),
             )
@@ -660,7 +660,7 @@ fn verify_detached_jws(key: &ed25519_dalek::VerifyingKey, canonical: &[u8], jws:
 async fn current_recovery_policy(
     state: &AppState,
     account_id: &arkret_wire::AccountId,
-) -> Result<soland_services::identity::RecoveryPolicyState, AppError> {
+) -> Result<coland_services::identity::RecoveryPolicyState, AppError> {
     state
         .recovery_policies()
         .active_policy(account_id)

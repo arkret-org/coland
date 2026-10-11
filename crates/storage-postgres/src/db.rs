@@ -24,7 +24,7 @@ pub struct Db {
 /// Operators match these to their Postgres `max_connections` and to how long a
 /// request may block before failing instead of waiting forever. `None` keeps
 /// the deadpool defaults (`max_size = cpu_count * 4`, no wait timeout). The
-/// values used to be read from `SOLAND_DB_POOL_*` inside this crate, which
+/// values used to be read from `COLAND_DB_POOL_*` inside this crate, which
 /// meant a storage library knew the name of the application hosting it.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PoolTuning {
@@ -40,7 +40,7 @@ fn migrations_applied_flag() -> &'static AtomicBool {
 
 impl Db {
     /// Connect using an already-resolved URL. `None`, or a blank string, leaves
-    /// the pool absent for test-only composition; the Soland executable rejects
+    /// the pool absent for test-only composition; the Coland executable rejects
     /// that shape before building runtime persistence.
     ///
     /// This is the only constructor. The `from_env` variant it replaced read
@@ -106,7 +106,7 @@ async fn run_migrations(database_url: &str) -> anyhow::Result<()> {
                 anyhow::anyhow!("failed to establish migration connection: {error}")
             })?;
         diesel::sql_query(
-            "SELECT pg_advisory_lock(hashtextextended('soland-schema-migrations', 0))",
+            "SELECT pg_advisory_lock(hashtextextended('coland-schema-migrations', 0))",
         )
         .execute(&mut wrapper)
         .map_err(|error| anyhow::anyhow!("failed to lock database migrations: {error}"))?;
@@ -132,7 +132,7 @@ fn verify_schema_contract(
     use diesel::RunQueryDsl;
 
     let row = diesel::sql_query(
-        "SELECT contract_version FROM public.soland_schema_contract WHERE singleton = TRUE",
+        "SELECT contract_version FROM public.coland_schema_contract WHERE singleton = TRUE",
     )
     .get_result::<SchemaContractRow>(connection)
     .map_err(|error| {

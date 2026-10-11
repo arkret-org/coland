@@ -1,6 +1,6 @@
 use arkret_models_identity::{CurrentPrincipalOutcome, CurrentPrincipalRequestBody};
 use arkret_wire::ErrorCode;
-use soland_storage::CurrentPrincipalRead;
+use coland_storage::CurrentPrincipalRead;
 
 use super::*;
 

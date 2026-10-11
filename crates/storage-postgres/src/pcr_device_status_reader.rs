@@ -232,7 +232,7 @@ struct GenerationCutRow {
 pub(crate) async fn confirmed_pcr_generation(
     pool: &PgPool,
     account: &AccountId,
-) -> PersistenceResult<Option<soland_storage::PcrDeviceGeneration>> {
+) -> PersistenceResult<Option<coland_storage::PcrDeviceGeneration>> {
     let mut conn = pg_conn(pool).await?;
     conn.transaction::<_, PgTransactionError, _>(async |conn| {
         sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
@@ -286,7 +286,7 @@ pub(crate) async fn confirmed_pcr_generation(
             .as_u64()
             .filter(|value| *value > 0)
             .ok_or_else(|| incomplete("PCR generation value is invalid"))?;
-        Ok(Some(soland_storage::PcrDeviceGeneration {
+        Ok(Some(coland_storage::PcrDeviceGeneration {
             current_device_generation_ref: current,
         }))
     })

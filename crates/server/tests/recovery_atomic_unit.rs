@@ -8,24 +8,24 @@ use arkret_models_collaboration::events_payloads::{
 };
 use arkret_models_crypto::*;
 use arkret_wire::*;
-use diesel::sql_types::Jsonb;
-use diesel_async::{RunQueryDsl, SimpleAsyncConnection};
-use ed25519_dalek::{Signer, SigningKey};
-use serde_json::{Value, json};
-use soland_storage::{
+use coland_storage::{
     RecoveryAuthorityContext, RecoveryPolicyPublicationWrite, RecoverySessionLifecycle,
     RecoverySessionRecord, RecoveryUnitCommitWrite, SecurityTransactionRecord,
     SecurityTransactionStepOutcomeRecord,
 };
-use soland_test_support::AppStateTestExt as _;
-use soland_test_support::device_authorization_history::{
+use coland_test_support::AppStateTestExt as _;
+use coland_test_support::device_authorization_history::{
     DeviceAuthorizationSpec, possession_with, sign_event,
 };
-use soland_test_support::pcr_genesis::PcrGenesisFixture;
+use coland_test_support::pcr_genesis::PcrGenesisFixture;
+use diesel::sql_types::Jsonb;
+use diesel_async::{RunQueryDsl, SimpleAsyncConnection};
+use ed25519_dalek::{Signer, SigningKey};
+use serde_json::{Value, json};
 
 struct Fixture {
-    state: soland_http::state::AppState,
-    pool: soland_storage_postgres::PgPool,
+    state: coland_http::state::AppState,
+    pool: coland_storage_postgres::PgPool,
     pcr: PcrGenesisFixture,
     initial: SecurityTransactionRecord,
     write: RecoveryUnitCommitWrite,
@@ -43,7 +43,7 @@ fn signature(seed: [u8; 32], bytes: &[u8]) -> Base64UrlString {
 }
 
 async fn fixture() -> Fixture {
-    let (state, pool) = soland_test_support::app_state_with_pool(soland_test_support::app_config());
+    let (state, pool) = coland_test_support::app_state_with_pool(coland_test_support::app_config());
     // A killed test can leave its DDL in a reused, exclusively leased database.
     let mut conn = pool.get().await.unwrap();
     conn.batch_execute("DROP FUNCTION IF EXISTS fail_policy_boundary() CASCADE; DROP FUNCTION IF EXISTS fail_recovery_boundary() CASCADE;").await.unwrap();
@@ -79,7 +79,7 @@ async fn fixture() -> Fixture {
     store
         .recovery_policies()
         .commit_publication(RecoveryPolicyPublicationWrite {
-            commit: soland_storage::AuthorityCommitTransaction {
+            commit: coland_storage::AuthorityCommitTransaction {
                 expected_authority: pcr.unit.transactions[1].expected_authority.clone(),
                 event: policy_event,
                 commit: policy_commit.clone(),
@@ -330,8 +330,8 @@ async fn fixture() -> Fixture {
         .await
         .unwrap()
         .unwrap();
-    let commits = soland_services::authority_commit::AuthorityCommitApplication::new(
-        soland_services::persistence::PersistenceHandle::from_shared(store.clone()),
+    let commits = coland_services::authority_commit::AuthorityCommitApplication::new(
+        coland_services::persistence::PersistenceHandle::from_shared(store.clone()),
         0,
     )
     .prepare_recovery_unit_commits(
@@ -340,7 +340,7 @@ async fn fixture() -> Fixture {
         &predecessor,
         pcr.history.authority_method(),
         &SigningKey::from_bytes(
-            &soland_test_support::device_authorization_history::STATION_AUTHORITY_SEED,
+            &coland_test_support::device_authorization_history::STATION_AUTHORITY_SEED,
         ),
         now,
     )
@@ -440,7 +440,7 @@ async fn fixture() -> Fixture {
     )
     .unwrap();
     let completion_signature = signature(
-        soland_test_support::device_authorization_history::STATION_AUTHORITY_SEED,
+        coland_test_support::device_authorization_history::STATION_AUTHORITY_SEED,
         &unsigned.signing_bytes().unwrap(),
     );
     let completion = unsigned.attach_signature(completion_signature).unwrap();
@@ -535,7 +535,7 @@ async fn assert_old_device_fenced(fixture: &Fixture) {
         fixture.pcr.history.founding_device_signing_seed,
     );
     let before = footprint(fixture).await;
-    let error = soland_http::test_forward_self_event(
+    let error = coland_http::test_forward_self_event(
         &fixture.state,
         &DidCoreId::new("ak:did_core:web:remote.example").unwrap(),
         EventAdmissionSubmission::new(event.clone()),
@@ -545,7 +545,7 @@ async fn assert_old_device_fenced(fixture: &Fixture) {
     assert_eq!(
         error
             .conflict_code()
-            .map(soland_storage::ConflictCode::as_str),
+            .map(coland_storage::ConflictCode::as_str),
         Some("device_generation_fenced"),
         "{error}"
     );
@@ -588,10 +588,10 @@ async fn recovery_terminal_unit_fences_old_device_and_replays_after_response_los
         .await
         .unwrap();
     let before = footprint(&fixture).await;
-    let restarted = soland_storage_postgres::PgSecurityTransactionStore {
+    let restarted = coland_storage_postgres::PgSecurityTransactionStore {
         pool: fixture.pool.clone(),
     };
-    use soland_storage::SecurityTransactionStore as _;
+    use coland_storage::SecurityTransactionStore as _;
     let replay = restarted
         .commit_recovery_unit(fixture.write.clone())
         .await
@@ -632,7 +632,7 @@ async fn recovery_terminal_unit_fences_old_device_and_replays_after_response_los
         arkret_canonical::canonical_json_bytes(&request).unwrap();
     assert!(matches!(
         restarted.commit_recovery_unit(changed).await,
-        Err(soland_storage::PersistenceError::Conflict(_))
+        Err(coland_storage::PersistenceError::Conflict(_))
     ));
     assert_eq!(footprint(&fixture).await, before);
 }
@@ -661,7 +661,7 @@ async fn completed_recovery_device_is_admitted_without_inventory_projection() {
         missing.is_none(),
         "the fixture must not supply an authorization mirror"
     );
-    let selector = soland_http::test_active_device_revocation_gate_selector(
+    let selector = coland_http::test_active_device_revocation_gate_selector(
         &fixture.state,
         account.principal_id.as_str(),
         payload.device_id.as_str(),
@@ -678,7 +678,7 @@ async fn completed_recovery_device_is_admitted_without_inventory_projection() {
             stream_position: committed.commit.stream_position,
         }
     );
-    let gates = soland_storage_postgres::PgDeviceRevocationStore {
+    let gates = coland_storage_postgres::PgDeviceRevocationStore {
         pool: fixture.pool.clone(),
     };
     assert_eq!(
@@ -686,7 +686,7 @@ async fn completed_recovery_device_is_admitted_without_inventory_projection() {
             .test_gate_status_in_transaction(&selector)
             .await
             .unwrap(),
-        soland_storage::DeviceRevocationGateStatus::Active
+        coland_storage::DeviceRevocationGateStatus::Active
     );
     let mut wrong = selector;
     wrong.authorization_ref = CommittedEventRef {
@@ -697,7 +697,7 @@ async fn completed_recovery_device_is_admitted_without_inventory_projection() {
     };
     assert_eq!(
         gates.test_gate_status_in_transaction(&wrong).await.unwrap(),
-        soland_storage::DeviceRevocationGateStatus::GenerationMismatch
+        coland_storage::DeviceRevocationGateStatus::GenerationMismatch
     );
     assert_old_device_fenced(&fixture).await;
 }
@@ -752,7 +752,7 @@ async fn recovery_terminal_metadata_must_bind_the_exact_receipt_and_response() {
                     .security_transactions()
                     .commit_recovery_unit(write)
                     .await,
-                Err(soland_storage::PersistenceError::SchemaViolation(_))
+                Err(coland_storage::PersistenceError::SchemaViolation(_))
             ),
             "case {case}"
         );
@@ -796,7 +796,7 @@ async fn policy_revocation_write(fixture: &mut Fixture) -> RecoveryPolicyPublica
     fixture.pcr.history.append(vec![event.clone()]);
     let commit = fixture.pcr.history.commits.last().unwrap().clone();
     RecoveryPolicyPublicationWrite {
-        commit: soland_storage::AuthorityCommitTransaction {
+        commit: coland_storage::AuthorityCommitTransaction {
             expected_authority: fixture.pcr.unit.transactions[1].expected_authority.clone(),
             event,
             commit: commit.clone(),
@@ -891,19 +891,19 @@ async fn policy_revocation_boundaries_roll_back_and_response_loss_replays_withou
         .await
         .unwrap();
     let accepted = footprint(&fixture).await;
-    use soland_storage::RecoveryPolicyStore as _;
-    let restarted = soland_storage_postgres::PgRecoveryPolicyStore {
+    use coland_storage::RecoveryPolicyStore as _;
+    let restarted = coland_storage_postgres::PgRecoveryPolicyStore {
         pool: fixture.pool.clone(),
     };
     let replay = restarted.commit_publication(write.clone()).await.unwrap();
-    let soland_storage::RecoveryPolicyPublicationOutcome::Duplicate(policy) = replay else {
+    let coland_storage::RecoveryPolicyPublicationOutcome::Duplicate(policy) = replay else {
         panic!("policy replay created a second acceptance")
     };
     assert_eq!(policy.acceptance_basis, write.commit.commit.commit_id);
     assert_eq!(footprint(&fixture).await, accepted);
     assert!(matches!(
         restarted.commit_publication(conflicting).await,
-        Err(soland_storage::PersistenceError::Conflict(_))
+        Err(coland_storage::PersistenceError::Conflict(_))
     ));
     assert_eq!(footprint(&fixture).await, accepted);
     let session = fixture

@@ -29,18 +29,18 @@ use arkret_wire::{Did, DidCoreId, ServiceKind, TrustDomainId};
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use ed25519_dalek::{Signature, SigningKey, Verifier as _, VerifyingKey};
-use sha2::{Digest, Sha256};
-use soland_http::config::{AppConfig, ObjectStorageConfig};
-use soland_http::routing::federation::outbox::{FederationDispatcher, enqueue_outbound};
-use soland_http::routing::federation::outbox_operator;
-use soland_http::state::AppState;
-use soland_services::ServiceResult;
-use soland_services::service_route::{
+use coland_http::config::{AppConfig, ObjectStorageConfig};
+use coland_http::routing::federation::outbox::{FederationDispatcher, enqueue_outbound};
+use coland_http::routing::federation::outbox_operator;
+use coland_http::state::AppState;
+use coland_services::ServiceResult;
+use coland_services::service_route::{
     ServiceRouteFetcher, VerifiedRouteCandidate, VerifiedServiceDescribeMetadata,
 };
-use soland_storage::FederationOutboxState;
-use soland_test_support::AppStateTestExt as _;
+use coland_storage::FederationOutboxState;
+use coland_test_support::AppStateTestExt as _;
+use ed25519_dalek::{Signature, SigningKey, Verifier as _, VerifyingKey};
+use sha2::{Digest, Sha256};
 
 const PEER_SERVICE_DID: &str = "did:web:peer.example";
 const PEER_SERVICE_ID: &str = "ak:did_core:web:peer.example";
@@ -434,12 +434,12 @@ fn spawn_mock_peer_responses(responses: Vec<MockResponse>) -> (String, mpsc::Rec
 
 fn outbox_test_config() -> AppConfig {
     AppConfig {
-        object_storage: ObjectStorageConfig::local(std::env::temp_dir().join("soland-outbox-test")),
+        object_storage: ObjectStorageConfig::local(std::env::temp_dir().join("coland-outbox-test")),
         development_mode: true,
         did_resolver_allow_methods: vec!["web".to_owned(), "key".to_owned()],
-        trust_domain: arkret_identifiers::TrustDomainId::new("ak:trust_domain:soland-outbox.local")
+        trust_domain: arkret_identifiers::TrustDomainId::new("ak:trust_domain:coland-outbox.local")
             .unwrap(),
-        ..soland_test_support::app_config()
+        ..coland_test_support::app_config()
     }
 }
 
@@ -475,7 +475,7 @@ async fn enqueue_then_dispatch_delivers_payload_with_spec_headers() {
         captured.captured
     );
     assert!(
-        lower.contains("source-trust-domain: ak:trust_domain:soland-outbox.local"),
+        lower.contains("source-trust-domain: ak:trust_domain:coland-outbox.local"),
         "captured request missing Source-Trust-Domain binding; got: {}",
         captured.captured
     );
@@ -576,7 +576,7 @@ async fn outbound_signature_rejects_body_digest_tamper() {
 async fn permanent_4xx_routes_to_dead_letter() {
     let (peer_url, request_rx) =
         spawn_mock_peer_with_status("404 Not Found", br#"{"error":"unknown_peer"}"#);
-    let state = soland_test_support::app_state(outbox_test_config());
+    let state = coland_test_support::app_state(outbox_test_config());
     install_verified_routes(&state, &[standard_peer_route(&peer_url)]);
     let row = enqueue_outbound(
         &state,
@@ -652,7 +652,7 @@ async fn permanent_4xx_routes_to_dead_letter() {
 async fn retryable_5xx_keeps_the_same_transport_identity_and_backs_off() {
     let (peer_url, request_rx) =
         spawn_mock_peer_with_status("503 Service Unavailable", br#"{"error":"unavailable"}"#);
-    let state = soland_test_support::app_state(outbox_test_config());
+    let state = coland_test_support::app_state(outbox_test_config());
     install_verified_routes(&state, &[standard_peer_route(&peer_url)]);
     let row = enqueue_outbound(
         &state,
@@ -705,7 +705,7 @@ async fn peer_retry_after_is_a_floor_the_dispatcher_never_undercuts() {
         "retry-after: 900\r\n",
         br#"{"error":{"code":"rate_limited"}}"#,
     )]);
-    let state = soland_test_support::app_state(outbox_test_config());
+    let state = coland_test_support::app_state(outbox_test_config());
     install_verified_routes(&state, &[standard_peer_route(&peer_url)]);
     let row = enqueue_outbound(
         &state,
@@ -748,7 +748,7 @@ async fn dependency_missing_supersedes_the_attempt_with_a_fresh_key() {
         .unwrap()
     });
     let (peer_url, request_rx) = spawn_mock_peer_with_status("409 Conflict", &PROBLEM);
-    let state = soland_test_support::app_state(outbox_test_config());
+    let state = coland_test_support::app_state(outbox_test_config());
     install_verified_routes(&state, &[standard_peer_route(&peer_url)]);
     let row = enqueue_outbound(
         &state,
@@ -810,7 +810,7 @@ async fn dependency_missing_supersedes_the_attempt_with_a_fresh_key() {
 
 #[tokio::test]
 async fn egress_policy_denial_is_policy_suppressed_rather_than_delivered() {
-    let state = soland_test_support::app_state(outbox_test_config());
+    let state = coland_test_support::app_state(outbox_test_config());
     install_verified_routes(&state, &[denied_peer_route()]);
     // The cloud metadata endpoint is hard-blocked regardless of posture, so
     // this exercises a denial without depending on env-var configuration.
@@ -872,7 +872,7 @@ async fn egress_policy_denial_is_policy_suppressed_rather_than_delivered() {
 
 #[tokio::test]
 async fn persisted_peer_url_is_not_service_resolution_evidence() {
-    let state = soland_test_support::app_state(outbox_test_config());
+    let state = coland_test_support::app_state(outbox_test_config());
     let row = enqueue_outbound(
         &state,
         "https://127.0.0.1:9",
@@ -903,11 +903,11 @@ async fn persisted_peer_url_is_not_service_resolution_evidence() {
 
 #[tokio::test]
 async fn a_stale_lease_holder_cannot_overwrite_the_new_holders_state() {
-    use soland_storage::{
+    use coland_storage::{
         FederationOutboxClaim, FederationOutboxOutcome, FederationOutboxTransition,
     };
 
-    let state = soland_test_support::app_state(outbox_test_config());
+    let state = coland_test_support::app_state(outbox_test_config());
     let outbox = state.test_persistence();
     let outbox = outbox.federation_outbox();
     let row = enqueue_outbound(
@@ -986,7 +986,7 @@ async fn a_stale_lease_holder_cannot_overwrite_the_new_holders_state() {
 async fn operator_requeue_mints_a_new_intent_and_records_the_audit() {
     let (peer_url, request_rx) =
         spawn_mock_peer_with_status("404 Not Found", br#"{"error":"unknown_peer"}"#);
-    let state = soland_test_support::app_state(outbox_test_config());
+    let state = coland_test_support::app_state(outbox_test_config());
     install_verified_routes(&state, &[standard_peer_route(&peer_url)]);
     // The private operations rail carries its own envelope, so requeue
     // revalidation only requires the stored body to still be parseable JSON.
@@ -997,7 +997,7 @@ async fn operator_requeue_mints_a_new_intent_and_records_the_audit() {
         &state,
         &peer_url,
         PEER_SERVICE_ID,
-        "/_soland/peer/federation/operations",
+        "/_coland/peer/federation/operations",
         IDEMPOTENCY_KEY,
         &PAYLOAD_JSON,
     )
@@ -1081,7 +1081,7 @@ async fn operator_requeue_mints_a_new_intent_and_records_the_audit() {
     );
 }
 
-async fn outbox_row(state: &AppState, id: &str) -> soland_storage::FederationOutboxRecord {
+async fn outbox_row(state: &AppState, id: &str) -> coland_storage::FederationOutboxRecord {
     state
         .test_persistence()
         .federation_outbox()
@@ -1102,25 +1102,25 @@ async fn outbox_row(state: &AppState, id: &str) -> soland_storage::FederationOut
 
 /// A fresh `AppState` over the same PostgreSQL pool — the test's "restart".
 async fn pg_restart(
-    database: &soland_storage_postgres::TestDatabase,
+    database: &coland_storage_postgres::TestDatabase,
     routes: &[VerifiedPeerRoute],
 ) -> AppState {
     let db = database.db();
     let pool = db.pool.clone().expect("a leased test database has a pool");
     let config = outbox_test_config();
-    let persistence_store: std::sync::Arc<dyn soland_storage::PersistenceStore> =
-        std::sync::Arc::new(soland_storage_postgres::PgPersistenceStore::new(pool));
+    let persistence_store: std::sync::Arc<dyn coland_storage::PersistenceStore> =
+        std::sync::Arc::new(coland_storage_postgres::PgPersistenceStore::new(pool));
     let persistence =
-        soland_services::persistence::PersistenceHandle::from_shared(persistence_store.clone());
-    let identity = soland_test_support::fixture_service_identity(&config);
-    let signing_seed = soland_test_support::fixture_signing_seed(&config, &identity);
+        coland_services::persistence::PersistenceHandle::from_shared(persistence_store.clone());
+    let identity = coland_test_support::fixture_service_identity(&config);
+    let signing_seed = coland_test_support::fixture_signing_seed(&config, &identity);
     let fixture_identity = identity.identity().expect("fixture serving identity");
     let resolution_commitment = arkret_models_identity::ResolutionCommitment {
         did: fixture_identity.did.clone(),
         method_history_head: format!("sha256:{}", "0".repeat(64)),
         version_id: "fixture-v1".to_owned(),
     };
-    let state = soland::runtime::build_app_state(
+    let state = coland::runtime::build_app_state(
         config,
         db,
         persistence,
@@ -1129,7 +1129,7 @@ async fn pg_restart(
         signing_seed,
     )
     .expect("postgres AppState");
-    soland_test_support::register_persistence(&state, &persistence_store);
+    coland_test_support::register_persistence(&state, &persistence_store);
     if !routes.is_empty() {
         install_verified_routes(&state, routes);
     }
@@ -1144,7 +1144,7 @@ fn unique_key(prefix: &str) -> String {
 
 #[tokio::test]
 async fn postgres_pending_row_is_delivered_by_a_restarted_dispatcher() {
-    let database = soland_storage_postgres::TestDatabase::lease().await;
+    let database = coland_storage_postgres::TestDatabase::lease().await;
     let state = pg_restart(&database, &[]).await;
     let (peer_url, request_rx) = spawn_mock_peer();
     let route = unique_peer_route("restart-pending", &peer_url);
@@ -1176,7 +1176,7 @@ async fn postgres_pending_row_is_delivered_by_a_restarted_dispatcher() {
 
 #[tokio::test]
 async fn postgres_future_next_attempt_is_not_sent_early_after_restart() {
-    let database = soland_storage_postgres::TestDatabase::lease().await;
+    let database = coland_storage_postgres::TestDatabase::lease().await;
     let state = pg_restart(&database, &[]).await;
     let (peer_url, request_rx) =
         spawn_mock_peer_with_status("503 Service Unavailable", br#"{"error":"unavailable"}"#);
@@ -1223,7 +1223,7 @@ async fn postgres_future_next_attempt_is_not_sent_early_after_restart() {
 
 #[tokio::test]
 async fn postgres_crash_before_recording_resends_the_same_transport_identity() {
-    let database = soland_storage_postgres::TestDatabase::lease().await;
+    let database = coland_storage_postgres::TestDatabase::lease().await;
     let state = pg_restart(&database, &[]).await;
     // Model a peer that accepted the abandoned first transport: the restarted
     // sender receives the formal duplicate outcome for the unchanged
@@ -1248,7 +1248,7 @@ async fn postgres_crash_before_recording_resends_the_same_transport_identity() {
     let claimed = state
         .test_persistence()
         .federation_outbox()
-        .claim_due(&soland_storage::FederationOutboxClaim {
+        .claim_due(&coland_storage::FederationOutboxClaim {
             now_unix_secs: chrono::Utc::now().timestamp(),
             limit: 8,
             lease_owner: "crashed-worker".to_owned(),
@@ -1282,7 +1282,7 @@ async fn postgres_crash_before_recording_resends_the_same_transport_identity() {
 
 #[tokio::test]
 async fn postgres_terminal_rows_are_not_resent_after_restart() {
-    let database = soland_storage_postgres::TestDatabase::lease().await;
+    let database = coland_storage_postgres::TestDatabase::lease().await;
     let state = pg_restart(&database, &[]).await;
     let (peer_url, request_rx) =
         spawn_mock_peer_with_status("404 Not Found", br#"{"error":"unknown_peer"}"#);
@@ -1378,7 +1378,7 @@ async fn outbound_signature_rejects_trust_domain_mismatch() {
 
 #[tokio::test]
 async fn outbound_enqueue_is_idempotent_for_same_peer_and_key() {
-    let state = soland_test_support::app_state(outbox_test_config());
+    let state = coland_test_support::app_state(outbox_test_config());
 
     let first = enqueue_outbound(
         &state,
@@ -1437,7 +1437,7 @@ async fn outbound_signature_fails_after_service_key_rotation() {
 
 async fn capture_signed_request() -> CapturedSignedRequestBody {
     let (peer_url, request_rx) = spawn_mock_peer();
-    let state = soland_test_support::app_state(outbox_test_config());
+    let state = coland_test_support::app_state(outbox_test_config());
     install_verified_routes(&state, &[standard_peer_route(&peer_url)]);
 
     // Enqueue one outbound row through the standard peer-event delivery path.

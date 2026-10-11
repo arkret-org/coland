@@ -4,11 +4,11 @@ use arkret_models_collaboration::governance::agent_participation::{
     AgentParticipationEntry, AgentParticipationPolicy, ParticipationBits,
 };
 use arkret_wire::{DidCoreId, Event, EventKind, RealmCommit};
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{Array, Jsonb, Text};
 use diesel::{OptionalExtension, QueryableByName, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::Value;
-use soland_storage::{PersistenceError, PersistenceResult};
 
 #[derive(QueryableByName)]
 struct ValueRow {

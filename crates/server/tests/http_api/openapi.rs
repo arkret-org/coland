@@ -107,12 +107,12 @@ fn assert_component_refs_resolve(root: &Value, value: &Value) {
 fn assert_required_migrated_operations(root: &Value) {
     let operation_ids = operation_ids(root);
     for expected in [
-        "org.arkret.soland.system.health",
+        "org.arkret.coland.system.health",
         "ak.server.read.describe",
         "ak.self.realm_state_snapshot.read.manifest_head",
         "ak.self.blob.command.presign",
-        "org.arkret.soland.interop.mimi.protocol_directory",
-        "org.arkret.soland.well_known.arkret",
+        "org.arkret.coland.interop.mimi.protocol_directory",
+        "org.arkret.coland.well_known.arkret",
     ] {
         assert!(
             operation_ids.contains(&expected),

@@ -9,13 +9,13 @@
 //!
 //! Wire shapes mirror `cotest/e2e/scenarios/conformance/encoding-vectors.md`
 //! Pre-conditions §:
-//!   POST /_soland/self/conformance/encode    { vector_id, input }                              → {
-//! canonical_json, digest }   POST /_soland/self/conformance/sign      { vector_id, event,
+//!   POST /_coland/self/conformance/encode    { vector_id, input }                              → {
+//! canonical_json, digest }   POST /_coland/self/conformance/sign      { vector_id, event,
 //! signing_key_ref }             → { canonical_bytes, digest, signature, public_key }   POST /api/
 //! v1/conformance/hlc-merge { vector_id, clocks: [{actor, hlc, payload_hint}] } → { ordered: [...]
-//! }   POST /_soland/self/conformance/cursor    { vector_id, events, reduce_round }               →
-//! { cursor }   POST /_soland/self/conformance/envelope  { vector_id, envelope }
-//! → { canonical_bytes, digest }   POST /_soland/self/conformance/redact    { vector_id, event,
+//! }   POST /_coland/self/conformance/cursor    { vector_id, events, reduce_round }               →
+//! { cursor }   POST /_coland/self/conformance/envelope  { vector_id, envelope }
+//! → { canonical_bytes, digest }   POST /_coland/self/conformance/redact    { vector_id, event,
 //! redaction, viewer_did }       → { projected_event }
 //!
 //! Reject paths (`vector_id` starts with `reject_`) return HTTP 4xx with
@@ -34,15 +34,15 @@ use arkret_hlc::{Cursor, CursorPurpose};
 use arkret_server::{CursorAuthority, CursorAuthorityError, CursorBindingContext};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use coland_http::error::{AppError, ErrorCode};
+use coland_http::util::query_param;
+use coland_services::events::{AcceptedEvent, ProjectedEvent as ProjectionEventRecord};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use soland_http::error::{AppError, ErrorCode};
-use soland_http::util::query_param;
-use soland_services::events::{AcceptedEvent, ProjectedEvent as ProjectionEventRecord};
 
 use super::util::{canonical_json, order_hlc_clocks, sha256_digest};
 use crate::state::AppState;
@@ -298,10 +298,10 @@ fn encode_reject_for_vector(vector: &str) -> Option<(ErrorCode, &'static str)> {
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.conformance.encode",
+    operation_id = "org.arkret.coland.conformance.encode",
     tags("conformance")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.conformance.encode"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.conformance.encode"))]
 pub async fn encode(body: JsonBody<EncodeVectorRequest>) -> JsonResult<CanonicalJsonDigestOutcome> {
     super::ensure_enabled()?;
     let body = body.into_inner();
@@ -319,10 +319,10 @@ pub async fn encode(body: JsonBody<EncodeVectorRequest>) -> JsonResult<Canonical
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.conformance.sign",
+    operation_id = "org.arkret.coland.conformance.sign",
     tags("conformance")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.conformance.sign"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.conformance.sign"))]
 pub async fn sign(body: JsonBody<SignVectorRequest>) -> JsonResult<SignVectorOutcome> {
     super::ensure_enabled()?;
     let body = body.into_inner();
@@ -337,7 +337,7 @@ pub async fn sign(body: JsonBody<SignVectorRequest>) -> JsonResult<SignVectorOut
     // validity under the returned `public_key`. Production-grade signing
     // for service-identity custody lives outside this conformance surface.
     let mut hasher = Sha256::new();
-    hasher.update(b"soland:conformance:sign:");
+    hasher.update(b"coland:conformance:sign:");
     hasher.update(signing_key_ref.as_bytes());
     let seed: [u8; 32] = hasher.finalize().into();
     let signing_key = SigningKey::from_bytes(&seed);
@@ -363,10 +363,10 @@ pub async fn sign(body: JsonBody<SignVectorRequest>) -> JsonResult<SignVectorOut
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.conformance.hlc_merge",
+    operation_id = "org.arkret.coland.conformance.hlc_merge",
     tags("conformance")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.conformance.hlc_merge"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.conformance.hlc_merge"))]
 pub async fn hlc_merge(body: JsonBody<HlcMergeVectorRequest>) -> JsonResult<HlcMergeVectorOutcome> {
     super::ensure_enabled()?;
     let body = body.into_inner();
@@ -403,10 +403,10 @@ pub async fn hlc_merge(body: JsonBody<HlcMergeVectorRequest>) -> JsonResult<HlcM
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.conformance.cursor",
+    operation_id = "org.arkret.coland.conformance.cursor",
     tags("conformance")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.conformance.cursor"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.conformance.cursor"))]
 pub async fn cursor(body: JsonBody<CursorVectorRequest>) -> JsonResult<CursorVectorOutcome> {
     super::ensure_enabled()?;
     let body = body.into_inner();
@@ -452,10 +452,10 @@ pub async fn cursor(body: JsonBody<CursorVectorRequest>) -> JsonResult<CursorVec
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.conformance.envelope",
+    operation_id = "org.arkret.coland.conformance.envelope",
     tags("conformance")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.conformance.envelope"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.conformance.envelope"))]
 pub async fn envelope(
     body: JsonBody<EnvelopeVectorRequest>,
 ) -> JsonResult<CanonicalBytesDigestOutcome> {
@@ -482,10 +482,10 @@ pub async fn envelope(
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.conformance.redact",
+    operation_id = "org.arkret.coland.conformance.redact",
     tags("conformance")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.conformance.redact"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.conformance.redact"))]
 pub async fn redact(body: JsonBody<RedactVectorRequest>) -> JsonResult<RedactVectorOutcome> {
     super::ensure_enabled()?;
     let body = body.into_inner();
@@ -538,10 +538,10 @@ pub async fn redact(body: JsonBody<RedactVectorRequest>) -> JsonResult<RedactVec
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.conformance.erase_receipt",
+    operation_id = "org.arkret.coland.conformance.erase_receipt",
     tags("conformance")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.conformance.erase_receipt"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.conformance.erase_receipt"))]
 pub async fn erase_receipt(
     body: JsonBody<EraseReceiptVectorRequest>,
 ) -> JsonResult<EraseReceiptVectorOutcome> {
@@ -650,12 +650,12 @@ fn projected_event_carries_plaintext(projected: &Value, original: &Value) -> boo
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.conformance.realm_state_snapshot",
+    operation_id = "org.arkret.coland.conformance.realm_state_snapshot",
     tags("conformance")
 )]
 #[tracing::instrument(
     skip_all,
-    fields(op = "org.arkret.soland.conformance.realm_state_snapshot")
+    fields(op = "org.arkret.coland.conformance.realm_state_snapshot")
 )]
 pub async fn snapshot(
     body: JsonBody<RealmStateSnapshotVectorRequest>,
@@ -717,7 +717,7 @@ pub async fn snapshot(
         .and_then(|sig| sig.get("signer_did"))
         .and_then(Value::as_str)
         .or_else(|| manifest.get("created_by").and_then(Value::as_str))
-        .unwrap_or("did:web:soland.conformance");
+        .unwrap_or("did:web:coland.conformance");
     if vector.contains("revoked")
         || signature
             .and_then(|sig| sig.get("revoked"))
@@ -748,10 +748,10 @@ pub async fn snapshot(
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.conformance.query",
+    operation_id = "org.arkret.coland.conformance.query",
     tags("conformance")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.conformance.query"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.conformance.query"))]
 pub async fn query(
     body: JsonBody<QueryVectorRequest>,
     depot: &mut Depot,
@@ -820,10 +820,10 @@ pub async fn query(
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.conformance.chaos_operation",
+    operation_id = "org.arkret.coland.conformance.chaos_operation",
     tags("conformance")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.conformance.chaos_operation"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.conformance.chaos_operation"))]
 pub async fn chaos_operation(
     depot: &mut Depot,
     req: &Request,
@@ -1198,7 +1198,7 @@ fn query_cursor_context(state: &AppState, query_digest: &str) -> CursorBindingCo
 
 async fn persist_query_cursor_row(
     state: &AppState,
-    row: soland_services::sync::CursorState,
+    row: coland_services::sync::CursorState,
 ) -> Result<(), AppError> {
     state
         .sync()
@@ -1220,7 +1220,7 @@ async fn mint_query_cursor(
     .map_err(conformance_cursor_error)?;
     persist_query_cursor_row(
         state,
-        soland_services::sync::CursorState {
+        coland_services::sync::CursorState {
             handle: record.handle,
             binding_subject: Some(record.context.binding_subject),
             device_id: record.context.device_id,
@@ -1252,7 +1252,7 @@ async fn mint_query_barrier_cursor(
     let context = query_cursor_context(state, query_digest);
     persist_query_cursor_row(
         state,
-        soland_services::sync::CursorState {
+        coland_services::sync::CursorState {
             handle: minted.h.clone(),
             binding_subject: Some(context.binding_subject),
             device_id: context.device_id,
@@ -1290,7 +1290,7 @@ async fn resolve_query_cursor(
             AppError::internal(format!("cursor binding lookup failed: {error}"))
         })?;
     let record = stored
-        .map(soland_http::util::cursor_binding_record_from_state)
+        .map(coland_http::util::cursor_binding_record_from_state)
         .transpose()
         .map_err(conformance_cursor_error)?;
     let positions = CursorAuthority::resolve_stream(
@@ -1405,7 +1405,7 @@ mod tests {
     async fn query_cursor_round_trip_is_bound_to_query_digest() {
         let state = AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let first_query = json!({"filter": [{"field": "kind", "op": "eq", "value": "task"}]});
         let first_digest = digest_json(&query_digest_value(&first_query));
@@ -1472,7 +1472,7 @@ mod tests {
         assert_eq!(err.wire_code(), "schema_violation");
         assert_eq!(
             err.http_status(),
-            soland_http::error::error_http_status(err.code)
+            coland_http::error::error_http_status(err.code)
         );
     }
 

@@ -189,7 +189,7 @@ async fn signer_keys_query_rejects_foreign_recipients_with_one_not_found_shape()
 }
 
 async fn recipient_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let token = dev_token(state.clone()).await;
     let app = app_from_state(state.clone());
     let realm_id = RealmId::new(demo_realm_id().to_owned()).unwrap();
@@ -255,7 +255,7 @@ async fn signer_keys_query_scopes_selectors_to_the_request_realm() {
 }
 
 async fn realm_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let token = dev_token(state.clone()).await;
     let app = app_from_state(state.clone());
     let own = fixture_account_id(&state, CALLER);
@@ -308,7 +308,7 @@ async fn signer_keys_query_enforces_the_closed_selector_union() {
 }
 
 async fn selector_union_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let token = dev_token(state.clone()).await;
     let app = app_from_state(state.clone());
     let own = fixture_account_id(&state, CALLER);
@@ -490,7 +490,7 @@ async fn signer_keys_query_enforces_selector_count_uniqueness_and_byte_budget() 
 }
 
 async fn budget_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let token = dev_token(state.clone()).await;
     let app = app_from_state(state.clone());
     let own = fixture_account_id(&state, CALLER);
@@ -613,8 +613,8 @@ async fn signer_keys_query_resolves_frozen_human_and_rejects_unproven_foreign_co
 }
 
 async fn human_frozen_body() {
-    use soland_storage::AuthorityCommitStore as _;
-    let (state, pool) = soland_test_support::app_state_with_pool(test_config());
+    use coland_storage::AuthorityCommitStore as _;
+    let (state, pool) = coland_test_support::app_state_with_pool(test_config());
     let fixture = historical_human::HumanFixture::new(&pool, state.service_did()).await;
     fixture.admit(&pool).await;
     let token = dev_token_for_device(
@@ -627,7 +627,7 @@ async fn human_frozen_body() {
     let app = app_from_state(state);
     let target = fixture.unit.transactions.last().unwrap();
     let selector = fixture.selector(target);
-    let durable = soland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() }
+    let durable = coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() }
         .historical_producer_signer_key(&target.event.realm_id, &selector)
         .await
         .unwrap()

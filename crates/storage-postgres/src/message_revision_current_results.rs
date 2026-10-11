@@ -10,11 +10,11 @@
 //! under the Realm authority lock, and redaction lives in its own
 //! `object_redaction` family (`crate::object_redaction_current_results`).
 
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::OptionalExtension as _;
 use diesel::sql_types::{BigInt, Bool, Jsonb, Text, Timestamptz};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::Value;
-use soland_storage::{PersistenceError, PersistenceResult};
 
 #[derive(diesel::QueryableByName)]
 struct RootRow {
@@ -50,7 +50,7 @@ fn conflict(detail: &'static str) -> PersistenceError {
     PersistenceError::Conflict(detail.to_owned())
 }
 
-fn strand_lifecycle_conflict(code: soland_storage::ConflictCode, detail: &str) -> PersistenceError {
+fn strand_lifecycle_conflict(code: coland_storage::ConflictCode, detail: &str) -> PersistenceError {
     PersistenceError::Conflict(format!("{}: {detail}", code.as_str()))
 }
 
@@ -515,13 +515,13 @@ async fn require_active_strand_track(
         Some("active") => {}
         Some("redacted") => {
             return Err(strand_lifecycle_conflict(
-                soland_storage::ConflictCode::StrandAlreadyTerminal,
+                coland_storage::ConflictCode::StrandAlreadyTerminal,
                 "Message target Strand is redacted",
             ));
         }
         _ => {
             return Err(strand_lifecycle_conflict(
-                soland_storage::ConflictCode::StrandNotActive,
+                coland_storage::ConflictCode::StrandNotActive,
                 "Message target Strand is not active",
             ));
         }
@@ -777,7 +777,7 @@ pub(crate) fn require_message_write_carrier(
     if event.executed_by.is_some() || event.applet_id.is_some() {
         return Err(PersistenceError::Conflict(format!(
             "{}: a Message revise or redact must be directly authored by its actor",
-            soland_storage::ConflictCode::CapabilityDenied
+            coland_storage::ConflictCode::CapabilityDenied
         )));
     }
     Ok(())
@@ -853,7 +853,7 @@ pub(crate) async fn commit_message_revise_current_result_in_connection(
     if message_is_redacted(conn, &event.realm_id, &target.message_id).await? {
         return Err(PersistenceError::Conflict(format!(
             "{}: a redacted Message cannot be revised",
-            soland_storage::ConflictCode::FailedPrecondition
+            coland_storage::ConflictCode::FailedPrecondition
         )));
     }
     require_active_discussion_strand(conn, &event.realm_id, &target.strand_id, &event.scope_ref)

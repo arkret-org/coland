@@ -2,9 +2,9 @@ use arkret_event_draft::ProjectedEventOperation as Operation;
 use arkret_models_collaboration::events_payloads::call::ParticipantBinding;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use coland_storage_postgres::Db;
 use ed25519_dalek::Signer as _;
 use serde_json::{Value, json};
-use soland_storage_postgres::Db;
 
 use super::*;
 
@@ -13,7 +13,7 @@ const CALL_ID: &str = "ak:call:Aa5NVuAPR6HTlIsZAgPhBnb3iRqz7fRvyOkiCWbdOaLa";
 const FOCUS_ID: &str = "arkret_native_green";
 const ACTOR_ID: &str = "ak:did_core:webvh:z6mkalice";
 const DEVICE_ID: &str = "ak:device:01904100-0000-7000-8000-a11ce0000001";
-const ISSUER_KID: &str = "did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:soland.local:webvh:service#notary-key";
+const ISSUER_KID: &str = "did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:coland.local:webvh:service#notary-key";
 const PARTICIPANT_ID: &str = "ak:rtc_participant:01904100-0000-7000-8000-aaaaaaaaaaaa";
 
 fn participant_actor(principal: &str) -> arkret_wire::ActorId {
@@ -26,7 +26,7 @@ fn participant_actor(principal: &str) -> arkret_wire::ActorId {
 fn test_config() -> crate::config::AppConfig {
     crate::config::AppConfig {
         object_storage: crate::config::ObjectStorageConfig::local(
-            std::env::temp_dir().join("soland-participant-binding-crypto-test-blobs"),
+            std::env::temp_dir().join("coland-participant-binding-crypto-test-blobs"),
         ),
         development_mode: true,
         did_resolver_allow_methods: vec!["web".to_owned(), "key".to_owned()],
@@ -40,21 +40,21 @@ fn test_config() -> crate::config::AppConfig {
 fn install_media_service_with_service_id(state: &AppState, service_id: &str, _issuer_kid: &str) {
     state.test_projection().lock().set_realm_facet(
         REALM_ID,
-        soland_domain::reducer::facet::REALM_MEDIA_SERVICE,
+        coland_domain::reducer::facet::REALM_MEDIA_SERVICE,
         json!({
             "service_id": service_id,
             "foci": [{
                 "focus_id": FOCUS_ID,
                 "focus_kind": "arkret_native",
-                "token_endpoint": "https://media.soland.local/_arkret/self/rtc/token",
-                "connect_url": "wss://media.soland.local/native"
+                "token_endpoint": "https://media.coland.local/_arkret/self/rtc/token",
+                "connect_url": "wss://media.coland.local/native"
             }]
         }),
     );
 }
 
 /// Install the current media-service facet anchoring `issuer_kid` under
-/// the soland self service_id (the arkret_native self-signed deployment).
+/// the coland self service_id (the arkret_native self-signed deployment).
 fn install_media_service(state: &AppState, issuer_kid: &str) {
     install_media_service_with_service_id(
         state,
@@ -183,7 +183,7 @@ fn issuer_not_anchored_in_current_epoch_is_rejected_token_issuer_unauthorised() 
     // Epoch anchors a different service DID + issuer_kid than the binding
     // carries, so neither the focus issuer_kids set nor the service_id
     // prefix admits
-    // `did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:soland.local:webvh:service#
+    // `did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:coland.local:webvh:service#
     // media-2026-06`.
     install_media_service_with_service_id(
         &state,

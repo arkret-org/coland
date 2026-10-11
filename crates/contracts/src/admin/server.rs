@@ -1,13 +1,13 @@
-//! Operator dashboard projections for `GET /_soland/admin/server/*`.
+//! Operator dashboard projections for `GET /_coland/admin/server/*`.
 //!
-//! Shared by the soland producer
-//! (`soland/crates/http/src/routing/admin/server_ops.rs`) and the sodmin
+//! Shared by the coland producer
+//! (`coland/crates/http/src/routing/admin/server_ops.rs`) and the codmin
 //! operator console.
 
 use arkret_identifiers::DidCoreId;
 use serde::{Deserialize, Serialize};
 
-/// `GET /_soland/admin/server/info` — node version / build / key config the
+/// `GET /_coland/admin/server/info` — node version / build / key config the
 /// operator dashboard surfaces at a glance.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(salvo_oapi::ToSchema))]
@@ -16,7 +16,7 @@ pub struct AdminServerInfo {
     pub server_version: String,
     pub protocol_version: Option<String>,
     pub server_name: Option<String>,
-    /// Process uptime in seconds. `None` — soland does not track a start
+    /// Process uptime in seconds. `None` — coland does not track a start
     /// instant, so the field is reported as unknown rather than as `0`.
     pub uptime: Option<u64>,
     pub service_id: DidCoreId,
@@ -27,7 +27,7 @@ pub struct AdminServerInfo {
     pub allow_public_registration: bool,
 }
 
-/// `GET /_soland/admin/server/stats` — best-effort snapshot counters off the
+/// `GET /_coland/admin/server/stats` — best-effort snapshot counters off the
 /// live persistence / projection stores. Unavailable counters fall back to 0.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(salvo_oapi::ToSchema))]
@@ -56,7 +56,7 @@ pub struct AdminServerStatusCounts {
     pub realms: usize,
 }
 
-/// `GET /_soland/admin/server/status` — reachability probe plus the
+/// `GET /_coland/admin/server/status` — reachability probe plus the
 /// deployment posture the console banners depend on.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(salvo_oapi::ToSchema))]
@@ -92,7 +92,7 @@ mod tests {
     fn status_counts_keep_unavailable_stores_distinct_from_zero() {
         let status: AdminServerStatus = serde_json::from_value(serde_json::json!({
             "status": "ok",
-            "service_id": "ak:did_core:web:soland.local",
+            "service_id": "ak:did_core:web:coland.local",
             "storage": "postgres",
             "development_mode": false,
             "checked_by": "ak:did_core:web:alice.example",
@@ -112,10 +112,10 @@ mod tests {
         let wire = serde_json::json!({
             "server_version": "0.3.0",
             "protocol_version": "1.0",
-            "server_name": "soland.local",
+            "server_name": "coland.local",
             "uptime": null,
-            "service_id": "ak:did_core:web:soland.local",
-            "trust_domain": "ak:trust_domain:soland.local",
+            "service_id": "ak:did_core:web:coland.local",
+            "trust_domain": "ak:trust_domain:coland.local",
             "development_mode": false,
             "allow_public_registration": true,
             "surprise": 1,

@@ -21,7 +21,7 @@ use arkret_wire::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub(super) const SOLAND_EDGE_APPLET_ID: &str = "ak:applet:00000000-0000-7000-8000-000000000000";
+pub(super) const COLAND_EDGE_APPLET_ID: &str = "ak:applet:00000000-0000-7000-8000-000000000000";
 
 fn event_payload_value(event: &Event) -> Value {
     Value::Object(event.payload.clone().into_iter().collect())

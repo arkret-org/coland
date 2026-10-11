@@ -117,7 +117,7 @@ mod tests {
     fn state() -> AppState {
         let mut config = crate::config::AppConfig::test_default();
         config.development_mode = true;
-        AppState::new(config, soland_storage_postgres::Db { pool: None })
+        AppState::new(config, coland_storage_postgres::Db { pool: None })
     }
 
     fn requester_id() -> DidCoreId {

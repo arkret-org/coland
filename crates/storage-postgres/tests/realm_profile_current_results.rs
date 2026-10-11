@@ -4,13 +4,13 @@
 #[allow(dead_code)]
 mod ordinary_realm;
 
+use coland_storage::{AuthorityCommitStore, EventCommitUnitOfWork};
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork};
 use diesel::sql_types::{BigInt, Jsonb, Text};
 use diesel_async::RunQueryDsl;
 use ordinary_realm::{next_request, open_discussion};
 use serde_json::{Value, json};
-use soland_storage::{AuthorityCommitStore, EventCommitUnitOfWork};
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork};
 
 #[derive(diesel::QueryableByName, Debug, PartialEq)]
 struct Current {
@@ -29,7 +29,7 @@ struct Count {
 }
 
 async fn family_current(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     realm: &arkret_wire::RealmId,
     family: &str,
 ) -> Current {
@@ -45,11 +45,11 @@ async fn family_current(
     .unwrap()
 }
 
-async fn current(pool: &soland_storage_postgres::PgPool, realm: &arkret_wire::RealmId) -> Current {
+async fn current(pool: &coland_storage_postgres::PgPool, realm: &arkret_wire::RealmId) -> Current {
     family_current(pool, realm, "realm_profile").await
 }
 
-async fn commits(pool: &soland_storage_postgres::PgPool, realm: &arkret_wire::RealmId) -> i64 {
+async fn commits(pool: &coland_storage_postgres::PgPool, realm: &arkret_wire::RealmId) -> i64 {
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query("SELECT COUNT(*) AS count FROM realm_commits WHERE realm_id=$1")
         .bind::<Text, _>(realm.as_str())

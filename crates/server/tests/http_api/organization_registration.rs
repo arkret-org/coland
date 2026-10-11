@@ -10,12 +10,12 @@ use arkret_models_identity::{
 use arkret_signatures::{Ed25519DetachedJwsSigner, EventSigner};
 use arkret_wire::{PayloadProof, ProofContextId};
 use chrono::Duration;
-use parking_lot::RwLock;
-use salvo::test::ResponseExt;
-use soland_services::identity::{PinnedDidDocumentState, PinnedDidVersionStatus};
-use soland_services::organization_registration::{
+use coland_services::identity::{PinnedDidDocumentState, PinnedDidVersionStatus};
+use coland_services::organization_registration::{
     OrganizationDidResolutionPort, OrganizationRegistrationService,
 };
+use parking_lot::RwLock;
+use salvo::test::ResponseExt;
 
 use super::common::*;
 
@@ -141,7 +141,7 @@ fn organization_registration_http_round_trip_and_get_are_non_enumerable() {
 async fn organization_registration_http_round_trip_and_get_are_non_enumerable_body() {
     let mut config = test_config();
     config.admin_principal_ids = vec![fixture_actor_core_id("did:web:alice.example")];
-    let mut state = soland_test_support::app_state(config);
+    let mut state = coland_test_support::app_state(config);
     let persistence = state.test_persistence();
     let (organization_id, did, admin_id, pinned, control_signer) = organization_fixture();
     state.test_set_organization_registration_service(

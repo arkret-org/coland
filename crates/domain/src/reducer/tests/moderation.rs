@@ -91,7 +91,7 @@ fn moderation_decision_identity_uses_accepted_event_context() {
         arkret_identifiers::OperationId::new(format!("ak:operation:{}", uuid::Uuid::now_v7()))
             .unwrap();
     assert_ne!(operation.operation_id, replay.operation_id);
-    let hlc = ServerHlc::new("ak:did_core:web:test.soland");
+    let hlc = ServerHlc::new("ak:did_core:web:test.coland");
     let mut original_state = ProjectionState::new();
     let mut replay_state = ProjectionState::new();
     for (state, input) in [
@@ -114,7 +114,7 @@ fn moderation_decision_identity_uses_accepted_event_context() {
 #[test]
 fn moderation_decision_then_lift_converges_on_the_target_facet() {
     let mut state = ProjectionState::new();
-    let hlc = ServerHlc::new("ak:did_core:web:test.soland");
+    let hlc = ServerHlc::new("ak:did_core:web:test.coland");
     seed_decision(&mut state, &hlc, "ak:did_core:web:mod.example");
     assert!(state.moderation_decision_is_live(MOD_DECISION_ID));
     assert!(!state.moderation_decision_is_lifted(MOD_DECISION_ID));
@@ -160,7 +160,7 @@ fn lifting_one_review_never_lifts_another_issuers_decision() {
     // the same target; the lift removes exactly the entry its `decision_ref`
     // wrote.
     let mut state = ProjectionState::new();
-    let hlc = ServerHlc::new("ak:did_core:web:test.soland");
+    let hlc = ServerHlc::new("ak:did_core:web:test.coland");
     seed_decision(&mut state, &hlc, "ak:did_core:web:mod.example");
     let other = moderation_decision_operation(
         OTHER_DECISION_ID,

@@ -4,8 +4,8 @@ use super::{
     Text, Timestamptz, Utc, Value, async_trait, pg_conn, sql_query, sql_types,
 };
 pub(crate) mod retention;
+use coland_storage::RealmJoinDownload;
 use diesel_async::AsyncConnection;
-use soland_storage::RealmJoinDownload;
 pub struct PgSyncCursorStore {
     pub pool: PgPool,
 }
@@ -63,10 +63,10 @@ struct SummaryReadRow {
     #[diesel(sql_type = sql_types::Bool)]
     current_available: bool,
 }
-impl From<SummaryReadRow> for soland_storage::AccountSummaryVersion {
+impl From<SummaryReadRow> for coland_storage::AccountSummaryVersion {
     fn from(row: SummaryReadRow) -> Self {
         Self {
-            key: soland_storage::AccountSummaryKey {
+            key: coland_storage::AccountSummaryKey {
                 realm_id: row.realm_id,
                 revision: row.revision,
                 activity_position: row.activity_position,
@@ -213,7 +213,7 @@ impl SyncCursorStore for PgSyncCursorStore {
         after_key: &str,
         after_revision: Option<i64>,
         limit: usize,
-    ) -> PersistenceResult<Vec<soland_storage::AccountGlobalVersion>> {
+    ) -> PersistenceResult<Vec<coland_storage::AccountGlobalVersion>> {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
@@ -227,7 +227,7 @@ impl SyncCursorStore for PgSyncCursorStore {
             .map(|row| {
                 let mut payload = row.payload;
                 if payload.get("_budget_boundary").is_some() {
-                    return Ok(soland_storage::AccountGlobalVersion {
+                    return Ok(coland_storage::AccountGlobalVersion {
                         item_key: row.item_key,
                         channel_position: row.channel_position,
                         revision: row.revision,
@@ -238,7 +238,7 @@ impl SyncCursorStore for PgSyncCursorStore {
                 if channel == "notifications" {
                     payload = crate::notifications::global_notification_payload(payload)?;
                 }
-                Ok(soland_storage::AccountGlobalVersion {
+                Ok(coland_storage::AccountGlobalVersion {
                     item_key: row.item_key,
                     channel_position: row.channel_position,
                     revision: row.revision,
@@ -267,9 +267,9 @@ impl SyncCursorStore for PgSyncCursorStore {
         &self,
         actor_key: &str,
         watermark: i64,
-        after: Option<&soland_storage::AccountSummaryKey>,
+        after: Option<&coland_storage::AccountSummaryKey>,
         limit: usize,
-    ) -> PersistenceResult<Vec<soland_storage::AccountSummaryVersion>> {
+    ) -> PersistenceResult<Vec<coland_storage::AccountSummaryVersion>> {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
@@ -316,7 +316,7 @@ impl SyncCursorStore for PgSyncCursorStore {
         actor_key: &str,
         after: i64,
         limit: usize,
-    ) -> PersistenceResult<Vec<soland_storage::AccountSummaryVersion>> {
+    ) -> PersistenceResult<Vec<coland_storage::AccountSummaryVersion>> {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;

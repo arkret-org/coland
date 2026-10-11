@@ -7,10 +7,10 @@ use arkret_models_integration::{
     AppletManagedActorPurpose, AppletManagedActorRole,
 };
 use arkret_wire::{ActorId, CapabilityActionId, Hash, RealmId};
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
 
 use super::endpoints::{applet_authoring_preview_subject_key, issue_applet_authoring_preview};
 use super::install::{
@@ -233,8 +233,8 @@ pub(super) async fn provision(
     });
     let replacement = encode_applet_record(&record)?;
     let epoch = registration_epoch_evidence_from_event(&record.registration_event)?;
-    let input = soland_storage::AppletAuthoringUnitWrite {
-        request: soland_storage::AppletAdmissionRequest::Managed(
+    let input = coland_storage::AppletAuthoringUnitWrite {
+        request: coland_storage::AppletAdmissionRequest::Managed(
             AppletManagedActorCommittedRequest::Bot(Box::new(body.clone())),
         ),
         package: record.package.clone(),
@@ -267,7 +267,7 @@ pub(super) async fn provision(
     let display = basis.display_name.clone();
     let actor = p.actor_id;
     let auth = p.applet_authority_ref;
-    let finalizer: soland_storage::AppletUnitFinalizer = std::sync::Arc::new(move |refs| {
+    let finalizer: coland_storage::AppletUnitFinalizer = std::sync::Arc::new(move |refs| {
         let bundle = &body.managed_actor_bundle;
         let outcome = AppletBotProvisionOutcome {
             bot_actor_id: actor.clone(),
@@ -291,11 +291,11 @@ pub(super) async fn provision(
             display_name: display.clone(),
         };
         let response_body =
-            serde_json::to_value(&outcome).map_err(soland_storage::PersistenceError::database)?;
-        Ok(soland_storage::AppletUnitFinalization {
-            applet_record: soland_storage::AppletRecordCommit {
+            serde_json::to_value(&outcome).map_err(coland_storage::PersistenceError::database)?;
+        Ok(coland_storage::AppletUnitFinalization {
+            applet_record: coland_storage::AppletRecordCommit {
                 applet_id: record.applet_id.clone(),
-                identity: soland_storage::AppletIdentityCommit {
+                identity: coland_storage::AppletIdentityCommit {
                     target_station_id: station.clone(),
                     expected_record: Some(identity.clone()),
                     record: identity.clone(),
@@ -303,7 +303,7 @@ pub(super) async fn provision(
                 expected_record: Some(expected.clone()),
                 record: replacement.clone(),
             },
-            idempotency_record: soland_storage::IdempotencyRecord {
+            idempotency_record: coland_storage::IdempotencyRecord {
                 authenticated_actor: service.clone(),
                 operation_id: "ak.self.applet.bot.command.provision".to_owned(),
                 idempotency_key: key.clone(),

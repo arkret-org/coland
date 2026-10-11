@@ -271,7 +271,7 @@ impl EventStore for PgEventStore {
         &self,
         realm: &arkret_wire::RealmId,
         caller: &arkret_wire::ActorId,
-    ) -> PersistenceResult<Option<soland_storage::ForeignDirectMlsInput>> {
+    ) -> PersistenceResult<Option<coland_storage::ForeignDirectMlsInput>> {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -286,8 +286,8 @@ impl EventStore for PgEventStore {
     }
     async fn install_foreign_direct_mls_public_state(
         &self,
-        input: &soland_storage::ForeignDirectMlsInput,
-        result: &soland_storage::ForeignDirectMlsBase,
+        input: &coland_storage::ForeignDirectMlsInput,
+        result: &coland_storage::ForeignDirectMlsBase,
         exact_pair: bool,
     ) -> PersistenceResult<bool> {
         let mut conn = pg_conn(&self.pool).await?;

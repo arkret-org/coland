@@ -4,12 +4,12 @@ use arkret_models_identity::ServiceResolutionCarrier;
 use arkret_wire::{DidCoreId, ServiceKind};
 use async_trait::async_trait;
 use chrono::Utc;
-use soland_services::identity::DidService;
-use soland_services::service_route::{
+use coland_services::identity::DidService;
+use coland_services::service_route::{
     ServiceRouteFetcher, VerifiedRouteCandidate, VerifiedServiceDescribeMetadata,
 };
-use soland_services::{ServiceError, ServiceResult};
-use soland_storage::ServiceRouteStore;
+use coland_services::{ServiceError, ServiceResult};
+use coland_storage::ServiceRouteStore;
 pub(crate) struct VerifiedBindingRouteFetcher {
     dids: DidService,
     route_store: Arc<dyn ServiceRouteStore>,

@@ -23,20 +23,20 @@ mod pcr_genesis;
 mod support;
 
 use arkret_models_crypto::{MlsCommitEnvelope, MlsCommitPayload, MlsGovernanceBindingPayload};
-use diesel::sql_types::{BigInt, Binary, Jsonb, Text, Timestamptz};
-use diesel_async::RunQueryDsl;
-use soland_storage::{
+use coland_storage::{
     AuthorityCommitStore, ConflictCode, DeviceMessageStore, DeviceRevocationGateSelector,
     EventCommitRequest, EventCommitUnitOfWork, IdentityStoreRegistry,
     MlsConsumedProposalInstallation, MlsGroupCurrentStore, MlsInstalledBase, MlsKeyPackageStore,
     MlsProposalLeafProvenance, MlsStateInstallation, MlsWelcomeClaimLedgerKey,
     RecipientQueueSelector, VerifiedMlsWelcome,
 };
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{
     PgAuthorityCommitStore, PgDeviceMessageStore, PgEventCommitUnitOfWork, PgMlsGroupCurrentStore,
     PgPool,
 };
+use diesel::sql_types::{BigInt, Binary, Jsonb, Text, Timestamptz};
+use diesel_async::RunQueryDsl;
 
 fn realm_scope(realm_id: &arkret_wire::RealmId) -> arkret_wire::ScopeRef {
     arkret_wire::ScopeRef::Realm {
@@ -117,7 +117,7 @@ fn with_installation(
         consumed_proposals: Vec::new(),
         public_blobs: if base.is_some() {
             let sha256 = format!("{epoch:064x}");
-            vec![soland_storage::MlsPublicBlob {
+            vec![coland_storage::MlsPublicBlob {
                 blob_ref: arkret_wire::BlobRef::new(format!("ak:blob:sha256:{sha256}")).unwrap(),
                 sha256: sha256.clone(),
                 size_bytes: 11,
@@ -304,11 +304,11 @@ async fn assert_zero_write_refusal(
     let before = groups.current(scope).await.unwrap();
     let welcomes = welcome_count(pool).await;
     let provenance = provenance_count(pool).await;
-    let blobs = soland_storage_postgres::PgBlobStore { pool: pool.clone() };
+    let blobs = coland_storage_postgres::PgBlobStore { pool: pool.clone() };
     let mut public_blobs_before = Vec::new();
     if let Some(installation) = &request.authority_commit.mls_state {
         for blob in &installation.public_blobs {
-            let before = soland_storage::BlobStore::get(&blobs, blob.blob_ref.as_str())
+            let before = coland_storage::BlobStore::get(&blobs, blob.blob_ref.as_str())
                 .await
                 .unwrap()
                 .map(|row| row.storage_key);
@@ -328,7 +328,7 @@ async fn assert_zero_write_refusal(
     assert_eq!(welcome_count(pool).await, welcomes);
     assert_eq!(provenance_count(pool).await, provenance);
     for (reference, before) in public_blobs_before {
-        let after = soland_storage::BlobStore::get(&blobs, reference.as_str())
+        let after = coland_storage::BlobStore::get(&blobs, reference.as_str())
             .await
             .unwrap()
             .map(|row| row.storage_key);
@@ -372,7 +372,7 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
     );
     // encryption-and-audit.md §5.1.2: a forwarded Genesis stores the two
     // Blobs it carried with its Commit.
-    let carried = |seed: char| soland_storage::MlsPublicBlob {
+    let carried = |seed: char| coland_storage::MlsPublicBlob {
         blob_ref: arkret_wire::BlobRef::new(blob(seed)).unwrap(),
         sha256: seed.to_string().repeat(64),
         size_bytes: 11,
@@ -386,9 +386,9 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
         .unwrap()
         .public_blobs = vec![carried('3'), carried('4')];
     uow.commit_event(genesis.clone()).await.unwrap();
-    let blobs = soland_storage_postgres::PgBlobStore { pool: pool.clone() };
+    let blobs = coland_storage_postgres::PgBlobStore { pool: pool.clone() };
     for seed in ['3', '4'] {
-        let stored = soland_storage::BlobStore::get(&blobs, &blob(seed))
+        let stored = coland_storage::BlobStore::get(&blobs, &blob(seed))
             .await
             .unwrap()
             .expect("the carried Blob is stored with the Genesis Commit");
@@ -496,7 +496,7 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
         advanced.value.public_tree_ref,
         installed.value.public_tree_ref
     );
-    let stored_tree = soland_storage::BlobStore::get(&blobs, tree.blob_ref.as_str())
+    let stored_tree = coland_storage::BlobStore::get(&blobs, tree.blob_ref.as_str())
         .await
         .unwrap()
         .expect("the post-Commit tree row is committed with the current cut");
@@ -509,7 +509,7 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
     assert_eq!(advanced.value.genesis_event_ref, genesis_ref);
     for seed in ['3', '4'] {
         assert!(
-            soland_storage::BlobStore::get(&blobs, &blob(seed))
+            coland_storage::BlobStore::get(&blobs, &blob(seed))
                 .await
                 .unwrap()
                 .is_some(),
@@ -788,7 +788,7 @@ async fn consumed_proposals_freeze_with_winning_commit_and_same_tuple_replacemen
 #[tokio::test]
 async fn realm_mls_material_read_authorizes_exact_member_and_target_cut() {
     use arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialRequestBody;
-    use soland_storage::MlsMemberGroupStateMaterialRead as Read;
+    use coland_storage::MlsMemberGroupStateMaterialRead as Read;
 
     let database = TestDatabase::lease().await;
     let pool = database.pool();
@@ -883,7 +883,7 @@ async fn realm_mls_material_read_authorizes_exact_member_and_target_cut() {
 #[tokio::test]
 async fn realm_mls_material_peer_uses_joined_target_cut_not_prejoin_genesis_cut() {
     use arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialRequestBody;
-    use soland_storage::MlsMemberGroupStateMaterialRead as Read;
+    use coland_storage::MlsMemberGroupStateMaterialRead as Read;
 
     let database = TestDatabase::lease().await;
     let pool = database.pool();
@@ -1039,7 +1039,7 @@ async fn realm_mls_material_peer_uses_joined_target_cut_not_prejoin_genesis_cut(
         Read::Authorized { genesis: None }
     ));
     use arkret_models_collaboration::mls_roster_authority::MlsMemberRosterAuthorityReadRequestBody;
-    use soland_storage::MlsMemberRosterSelectorRead as Selected;
+    use coland_storage::MlsMemberRosterSelectorRead as Selected;
     let member = MlsMemberRosterAuthorityReadRequestBody {
         realm_id: realm_id.clone(),
         effective_scope: realm_scope(&realm_id),
@@ -1146,7 +1146,7 @@ async fn realm_mls_material_peer_uses_joined_target_cut_not_prejoin_genesis_cut(
 #[tokio::test]
 async fn realm_mls_material_read_rejects_wrong_genesis_ref() {
     use arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialRequestBody;
-    use soland_storage::MlsMemberGroupStateMaterialRead as Read;
+    use coland_storage::MlsMemberGroupStateMaterialRead as Read;
 
     let database = TestDatabase::lease().await;
     let pool = database.pool();
@@ -1234,7 +1234,7 @@ async fn realm_mls_material_read_rejects_wrong_genesis_ref() {
 #[tokio::test]
 async fn realm_mls_material_read_rejects_target_retention_and_redaction() {
     use arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialRequestBody;
-    use soland_storage::MlsMemberGroupStateMaterialRead as Read;
+    use coland_storage::MlsMemberGroupStateMaterialRead as Read;
 
     let database = TestDatabase::lease().await;
     let pool = database.pool();
@@ -1344,7 +1344,7 @@ async fn mls_commit_welcome_queue_is_atomic_exact_endpoint_and_revocation_gated(
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let station = local_station(&pool).await;
-    let persistence = soland_storage_postgres::PgPersistenceStore::new(pool.clone());
+    let persistence = coland_storage_postgres::PgPersistenceStore::new(pool.clone());
     let mut source = pcr_genesis::PcrGenesisFixture::new(
         device_authorization_history::did_web_station(&station),
     );
@@ -1415,11 +1415,11 @@ async fn mls_commit_welcome_queue_is_atomic_exact_endpoint_and_revocation_gated(
     // decision 0121: the queueing transaction binds the claim to its Welcome.
     let queued = &commit.authority_commit.welcomes[0].delivery;
     assert_eq!(
-        soland_storage_postgres::PgMlsKeyPackageStore { pool: pool.clone() }
+        coland_storage_postgres::PgMlsKeyPackageStore { pool: pool.clone() }
             .get_claim_welcome_binding(&first_claim)
             .await
             .unwrap(),
-        Some(soland_storage::MlsWelcomeClaimBinding {
+        Some(coland_storage::MlsWelcomeClaimBinding {
             claim_id: first_claim.clone(),
             source_id: first_key.source_id.clone(),
             claim_request_id: first_key.claim_request_id.clone(),
@@ -1521,7 +1521,7 @@ async fn mls_commit_welcome_queue_is_atomic_exact_endpoint_and_revocation_gated(
 
     persistence
         .device_revocations()
-        .commit_revocation(&soland_storage::DeviceRevocationTransition {
+        .commit_revocation(&coland_storage::DeviceRevocationTransition {
             selector: recipient.clone(),
             revoke_ref: arkret_wire::CommittedEventRef {
                 event_id: arkret_wire::EventId::from_digest(
@@ -1576,7 +1576,7 @@ fn ciphertext_message(
 /// A Message by the account of `device`, signed by that device and guarded
 /// by its exact revocation-gate selector as the self submit preflight pins it.
 fn device_message(
-    previous: &soland_storage::AuthorityCommitTransaction,
+    previous: &coland_storage::AuthorityCommitTransaction,
     device: &DeviceRevocationGateSelector,
     payload: serde_json::Value,
     did: &arkret_wire::Did,
@@ -1596,7 +1596,7 @@ fn device_message(
     );
     let mut request =
         ordinary_realm::request_for_event(previous, signed, previous.commit.committed_at);
-    request.self_producer_guard = Some(soland_storage::SelfProducerCommitGuard::HumanDevice(
+    request.self_producer_guard = Some(coland_storage::SelfProducerCommitGuard::HumanDevice(
         device.clone(),
     ));
     request.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
@@ -1608,7 +1608,7 @@ fn device_message(
 /// The Realm root's grant of `ak.message.create` to `subject`.
 async fn grant_message_create(
     pool: &PgPool,
-    previous: &soland_storage::AuthorityCommitTransaction,
+    previous: &coland_storage::AuthorityCommitTransaction,
     subject: &arkret_wire::ActorId,
 ) -> EventCommitRequest {
     #[derive(diesel::QueryableByName)]
@@ -1673,7 +1673,7 @@ async fn the_send_gate_refuses_a_revoked_device_at_the_mls_group_cut() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let station = governing_station(&pool).await;
-    let persistence = soland_storage_postgres::PgPersistenceStore::new(pool.clone());
+    let persistence = coland_storage_postgres::PgPersistenceStore::new(pool.clone());
     let mut source = pcr_genesis::PcrGenesisFixture::new(
         device_authorization_history::did_web_station(&station),
     );
@@ -1758,7 +1758,7 @@ async fn the_send_gate_refuses_a_revoked_device_at_the_mls_group_cut() {
     }
     persistence
         .device_revocations()
-        .commit_revocation(&soland_storage::DeviceRevocationTransition {
+        .commit_revocation(&coland_storage::DeviceRevocationTransition {
             selector: revoked.clone(),
             revoke_ref: arkret_wire::CommittedEventRef {
                 event_id: arkret_wire::EventId::from_digest(
@@ -2131,7 +2131,7 @@ async fn same_station_add_installs_signed_history_atomically() {
         .await
         .unwrap();
     drop(conn);
-    let persistence = soland_storage_postgres::PgPersistenceStore::new(pool.clone());
+    let persistence = coland_storage_postgres::PgPersistenceStore::new(pool.clone());
     let recipient = pcr_genesis::PcrGenesisFixture::new(station_did.clone())
         .admit_founding_device(&persistence)
         .await
@@ -2305,7 +2305,7 @@ async fn same_station_add_installs_signed_history_atomically() {
     .unwrap();
     drop(conn);
     local.claim = Some(key);
-    local.roster_witness = Some(soland_storage::VerifiedMlsRecipientRosterWitness {
+    local.roster_witness = Some(coland_storage::VerifiedMlsRecipientRosterWitness {
         accepted_genesis_event_ref: genesis_ref.clone(),
         signed_attest_add_request_canonical_json: arkret_canonical::canonical_json_bytes(&proof)
             .unwrap(),
@@ -2576,9 +2576,9 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
             .mls_roster_authority_read(&roster_request, &station, None)
             .await
             .unwrap(),
-        soland_storage::MlsRosterAuthorityRead::RevisionUnavailable
+        coland_storage::MlsRosterAuthorityRead::RevisionUnavailable
     ));
-    let verified = soland_storage::VerifiedMlsAddAuthorityAttestation {
+    let verified = coland_storage::VerifiedMlsAddAuthorityAttestation {
         source_station_id: arkret_wire::DidCoreId::new(remote_station).unwrap(),
         request: proof.clone(),
         attestor_resolution: attestor,
@@ -2640,7 +2640,7 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
     .unwrap()
     .key_package_record()
     .unwrap();
-    let wrong_keypackage = soland_storage::VerifiedMlsAddAuthorityAttestation {
+    let wrong_keypackage = coland_storage::VerifiedMlsAddAuthorityAttestation {
         source_station_id: verified.source_station_id.clone(),
         attestor_resolution: verified.attestor_resolution.clone(),
         request: signed_remote_add_attestation(
@@ -2660,7 +2660,7 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
         "a newly signed claim for another KeyPackage cannot match the frozen Add"
     );
     let unknown_welcome = remote_welcome(&commit, &first);
-    let wrong_welcome = soland_storage::VerifiedMlsAddAuthorityAttestation {
+    let wrong_welcome = coland_storage::VerifiedMlsAddAuthorityAttestation {
         source_station_id: verified.source_station_id.clone(),
         attestor_resolution: verified.attestor_resolution.clone(),
         request: signed_remote_add_attestation(
@@ -2718,7 +2718,7 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
         .mls_roster_authority_read(&roster_request, &station, None)
         .await
         .unwrap();
-    let soland_storage::MlsRosterAuthorityRead::Authorized { facts: Some(facts) } = roster else {
+    let coland_storage::MlsRosterAuthorityRead::Authorized { facts: Some(facts) } = roster else {
         panic!("complete installed Add history is authorized for the founder")
     };
     assert_eq!(facts.records.len(), 2);
@@ -2744,7 +2744,7 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
                 && *consumed_proposal_ordinal == 0
                 && arkret_canonical::canonical_json_bytes(attestor_resolution).unwrap() == original_resolution
     ));
-    let conflicting_replay = soland_storage::VerifiedMlsAddAuthorityAttestation {
+    let conflicting_replay = coland_storage::VerifiedMlsAddAuthorityAttestation {
         source_station_id: verified.source_station_id.clone(),
         attestor_resolution: verified.attestor_resolution.clone(),
         request: signed_remote_add_attestation(
@@ -2778,7 +2778,7 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
             .mls_roster_authority_read(&roster_request, &station, None)
             .await
             .unwrap(),
-        soland_storage::MlsRosterAuthorityRead::RevisionUnavailable
+        coland_storage::MlsRosterAuthorityRead::RevisionUnavailable
     ));
     assert!(
         governance
@@ -2888,7 +2888,7 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
                 .mls_roster_authority_read(&roster_request, &station, None)
                 .await
                 .unwrap(),
-            soland_storage::MlsRosterAuthorityRead::RevisionUnavailable
+            coland_storage::MlsRosterAuthorityRead::RevisionUnavailable
         ),
         "an installed Add with missing signed historical proof cannot be disclosed"
     );

@@ -19,13 +19,13 @@ mod pcr_genesis;
 use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
 use arkret_models_identity::{HistoricalSignerKeyQuerySender, SignerKeyQuerySelector};
 use arkret_wire::{ActorId, CommittedEventRef, Did, EventKind};
-use diesel::sql_types::Text;
-use diesel_async::RunQueryDsl;
-use soland_storage::{
+use coland_storage::{
     AuthorityCommitStore, AuthorityCommitTransaction, DeviceRevocationGateSelector,
     EventCommitRequest, OrdinaryRealmBootstrapCommitUnit, SelfProducerCommitGuard,
 };
-use soland_storage_postgres::{PgAuthorityCommitStore, PgPersistenceStore, PgPool};
+use coland_storage_postgres::{PgAuthorityCommitStore, PgPersistenceStore, PgPool};
+use diesel::sql_types::Text;
+use diesel_async::RunQueryDsl;
 
 pub struct HumanFixture {
     pub pcr: pcr_genesis::PcrGenesisFixture,

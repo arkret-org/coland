@@ -1,8 +1,8 @@
-# Account lifecycle (soland)
+# Account lifecycle (coland)
 
-Reference for the soland implementation of the Arkret account lifecycle
+Reference for the coland implementation of the Arkret account lifecycle
 state machine. The wire surface is `/_arkret/self/account/*`; this document
-covers the soland-side behaviours: the lifecycle states, the audit
+covers the coland-side behaviours: the lifecycle states, the audit
 contract, and the GDPR erasure cascade.
 
 ## States
@@ -12,22 +12,22 @@ contract, and the GDPR erasure cascade.
 | `active`       | default                                 | normal session issuance       |
 | `locked`       | `set_account_lifecycle_record`           | 403 `account_locked`          |
 | `suspended`    | `set_account_lifecycle_record`           | 403 `account_suspended`       |
-| `deactivated`  | `POST /_soland/admin/accounts/{did}/deactivate` | 403 `account_deactivated`     |
+| `deactivated`  | `POST /_coland/admin/accounts/{did}/deactivate` | 403 `account_deactivated`     |
 | `erased`       | `POST /_arkret/local/account/erase`           | 401 `account_erased`          |
 
 Lifecycle records are durable through `AccountLifecycleStore`. The identity
 application hydrates its bounded read projection during startup and persists a
 change before publishing it to request handlers. Credential-failure throttling
-belongs to the Account Authority because Soland does not verify account
+belongs to the Account Authority because Coland does not verify account
 credentials; the former unwired local failed-login counter has been removed.
 
 ## GDPR erasure cascade
 
 `POST /_arkret/local/account/erase` is the Arkret exit-point for an erased
-principal. Soland performs the following actions atomically per
+principal. Coland performs the following actions atomically per
 request, using durable application/storage ports:
 
-1. Append a `org.arkret.soland.audit.erasure_initiated` audit row.
+1. Append a `org.arkret.coland.audit.erasure_initiated` audit row.
 2. Pseudonymize the account record — replace `display_name` with
    `"[user erased]"`, null `bio` and `avatar_url`, and rotate `handle`
    to `@erased-<short-tag>`. The previous handle enters the release
@@ -41,8 +41,8 @@ request, using durable application/storage ports:
    returned as `memberships_removed`.
 6. Persist the actor's lifecycle state as `erased` so future authenticated
    requests resolve to 401 `account_erased`.
-7. Append an `org.arkret.soland.account.state_change` audit row.
-8. Append a single `org.arkret.soland.audit.actor_audit_redacted` row that catalogues
+7. Append an `org.arkret.coland.account.state_change` audit row.
+8. Append a single `org.arkret.coland.audit.actor_audit_redacted` row that catalogues
    every prior audit entry by `audit_id` + `created_at` only, marking
    each body as `redacted: true`. The append-only audit store still
    carries the historical rows so chain-of-custody is preserved.
@@ -53,7 +53,7 @@ request, using durable application/storage ports:
 10. Mint a per-realm `ak.schema.erasure_receipt.realm.v1` proof for
     every realm the actor was active in (`affected_erasure_realms_for_actor`)
     and emit each as a realm-scoped operation (best-effort fanout —
-    failures are audited under `org.arkret.soland.audit.erasure_receipt.fanout_failed`).
+    failures are audited under `org.arkret.coland.audit.erasure_receipt.fanout_failed`).
 11. Return the response envelope:
 
     ```json
@@ -77,11 +77,11 @@ view of the actor's audit trail; subsequent reads will 401.
 
 ## Audit redaction marker contract
 
-The `org.arkret.soland.audit.actor_audit_redacted` row written during erasure carries:
+The `org.arkret.coland.audit.actor_audit_redacted` row written during erasure carries:
 
 ```json
 {
-  "action": "org.arkret.soland.audit.actor_audit_redacted",
+  "action": "org.arkret.coland.audit.actor_audit_redacted",
   "outcome": "accepted",
   "payload": {
     "actor": "did:web:alice.example",
@@ -95,6 +95,6 @@ The `org.arkret.soland.audit.actor_audit_redacted` row written during erasure ca
 ```
 
 Renderers MUST treat any audit entry whose `audit_id` appears in a
-later `org.arkret.soland.audit.actor_audit_redacted` row as redacted — replace the
+later `org.arkret.coland.audit.actor_audit_redacted` row as redacted — replace the
 body with `[redacted]` while preserving `audit_id`, `created_at`, and
 `action` for forensic reconstruction.

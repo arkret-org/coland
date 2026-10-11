@@ -95,7 +95,7 @@ pub(crate) async fn validate_device_authorization_binding(
             }
             let record = state
                 .identities()
-                .find_device(soland_services::identity::FindDeviceQuery {
+                .find_device(coland_services::identity::FindDeviceQuery {
                     actor_id: actor_id.to_owned(),
                     device_id: authorizer.to_string(),
                 })
@@ -412,7 +412,7 @@ mod applet_managed_delegation_tests {
     async fn delegation_fails_closed_without_a_provisioned_managed_principal() {
         let state = AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let event = delegation_event(MANAGED_PRINCIPAL, MANAGED_PRINCIPAL);
         let error = validate_device_authorization_binding(
@@ -436,7 +436,7 @@ mod applet_managed_delegation_tests {
     async fn delegation_rejects_borrowed_applet_envelope_authority() {
         let state = AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let mut event = delegation_event(MANAGED_PRINCIPAL, MANAGED_PRINCIPAL);
         // The envelope schema pairs the two fields, so a borrowed Applet
@@ -467,7 +467,7 @@ mod applet_managed_delegation_tests {
     async fn delegation_rejects_a_cross_principal_authorizer() {
         let state = AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let event = delegation_event(MANAGED_PRINCIPAL, OTHER_PRINCIPAL);
         let error = validate_device_authorization_binding(

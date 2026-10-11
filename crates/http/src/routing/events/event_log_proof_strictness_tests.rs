@@ -1,4 +1,4 @@
-use soland_storage_postgres::Db;
+use coland_storage_postgres::Db;
 
 use super::*;
 use crate::config::{AppConfig, ObjectStorageConfig};
@@ -6,7 +6,7 @@ use crate::routing::events::operations::validate_operation_policy;
 
 pub(super) fn make_state(development_mode: bool) -> AppState {
     let config = AppConfig {
-        object_storage: ObjectStorageConfig::local(std::env::temp_dir().join("soland-test")),
+        object_storage: ObjectStorageConfig::local(std::env::temp_dir().join("coland-test")),
         development_mode,
         did_resolver_allow_methods: vec!["web".to_owned(), "key".to_owned()],
         seed_demo_data: true,
@@ -65,7 +65,7 @@ fn dev_proof_envelope() -> serde_json::Map<String, Value> {
 fn install_collaboration_realm(state: &AppState, realm_id: &str) {
     state.test_projection().lock().set_realm_facet(
         realm_id,
-        soland_domain::reducer::facet::REALM_GENESIS,
+        coland_domain::reducer::facet::REALM_GENESIS,
         json!({
             "schema": "ak.schema.realm_genesis.v1",
             "purpose": "collaboration",
@@ -85,7 +85,7 @@ fn session() -> SessionRecord {
         account_pk: None,
         token_hash: "hash".to_owned(),
         actor: "ak:did_core:web:alice.example".to_owned(),
-        endpoint: soland_services::identity::SessionEndpointState::HumanDevice {
+        endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
             device_id: "ak:device:01904100-0000-7000-8000-a11ce0000001".to_owned(),
         },
         audience: crate::test_event::station_id().to_string(),
@@ -106,7 +106,7 @@ async fn media_plaintext_service_is_not_read_from_the_realm_meta_mirror() {
         .realms()
         .store_realm_metadata(
             realm_id,
-            soland_services::events::RealmMetadata {
+            coland_services::events::RealmMetadata {
                 owner: "did:web:alice.example".to_owned(),
                 deleted: false,
                 discoverability: "restricted".to_owned(),
@@ -166,7 +166,7 @@ async fn circle_scoped_write_requires_circle_membership() {
         let mut projection = state.test_projection().lock();
         projection.circles.insert(
             circle_id.to_owned(),
-            soland_domain::reducer::CircleProjection {
+            coland_domain::reducer::CircleProjection {
                 circle_id: circle_id.to_owned(),
                 realm_id: realm_id.to_owned(),
                 profile_ref: None,
@@ -177,7 +177,7 @@ async fn circle_scoped_write_requires_circle_membership() {
                 join_rule: "invite".to_owned(),
                 history_access: "since_join".to_owned(),
                 mls_group_ref: None,
-                state: soland_domain::reducer::CircleLifecycleState::Active,
+                state: coland_domain::reducer::CircleLifecycleState::Active,
                 state_changed_at: None,
                 created_by: member.to_owned(),
                 created_at: now,
@@ -251,7 +251,7 @@ async fn circle_scoped_reaction_requires_circle_membership() {
         let mut projection = state.test_projection().lock();
         projection.circles.insert(
             circle_id.to_owned(),
-            soland_domain::reducer::CircleProjection {
+            coland_domain::reducer::CircleProjection {
                 circle_id: circle_id.to_owned(),
                 realm_id: realm_id.to_owned(),
                 profile_ref: None,
@@ -262,7 +262,7 @@ async fn circle_scoped_reaction_requires_circle_membership() {
                 join_rule: "invite".to_owned(),
                 history_access: "since_join".to_owned(),
                 mls_group_ref: None,
-                state: soland_domain::reducer::CircleLifecycleState::Active,
+                state: coland_domain::reducer::CircleLifecycleState::Active,
                 state_changed_at: None,
                 created_by: member.to_owned(),
                 created_at: now,
@@ -274,7 +274,7 @@ async fn circle_scoped_reaction_requires_circle_membership() {
         // A Strand scoped to the Circle, and a Message inside it.
         projection.strands.insert(
             strand_id.to_owned(),
-            soland_domain::reducer::StrandProjection {
+            coland_domain::reducer::StrandProjection {
                 strand_id: strand_id.to_owned(),
                 realm_id: realm_id.to_owned(),
                 tracks: std::collections::BTreeMap::from([(
@@ -288,7 +288,7 @@ async fn circle_scoped_reaction_requires_circle_membership() {
                 content: None,
                 encrypted_content: None,
                 fields: std::collections::BTreeMap::new(),
-                state: soland_domain::reducer::ObjectLifecycleState::Active,
+                state: coland_domain::reducer::ObjectLifecycleState::Active,
                 state_changed_at: None,
                 stage: None,
                 stage_changed_at: None,
@@ -303,9 +303,9 @@ async fn circle_scoped_reaction_requires_circle_membership() {
         );
         projection.messages.insert(
             event_id.to_owned(),
-            soland_domain::reducer::MessageState {
+            coland_domain::reducer::MessageState {
                 event_id: event_id.to_owned(),
-                message_id: soland_domain::reducer::message_id_from_event_id(event_id),
+                message_id: coland_domain::reducer::message_id_from_event_id(event_id),
                 realm_id: realm_id.to_owned(),
                 sender: member.to_owned(),
                 thread_id: strand_id.to_owned(),
@@ -362,7 +362,7 @@ async fn circle_scoped_morph_update_requires_circle_membership() {
         let mut projection = state.test_projection().lock();
         projection.circles.insert(
             circle_id.to_owned(),
-            soland_domain::reducer::CircleProjection {
+            coland_domain::reducer::CircleProjection {
                 circle_id: circle_id.to_owned(),
                 realm_id: realm_id.to_owned(),
                 profile_ref: None,
@@ -373,7 +373,7 @@ async fn circle_scoped_morph_update_requires_circle_membership() {
                 join_rule: "invite".to_owned(),
                 history_access: "since_join".to_owned(),
                 mls_group_ref: None,
-                state: soland_domain::reducer::CircleLifecycleState::Active,
+                state: coland_domain::reducer::CircleLifecycleState::Active,
                 state_changed_at: None,
                 created_by: member.to_owned(),
                 created_at: now,
@@ -388,7 +388,7 @@ async fn circle_scoped_morph_update_requires_circle_membership() {
         ] {
             projection.morphs.insert(
                 morph_id.to_owned(),
-                soland_domain::reducer::MorphProjection {
+                coland_domain::reducer::MorphProjection {
                     morph_id: morph_id.to_owned(),
                     realm_id: realm_id.to_owned(),
                     scope_circle_id,
@@ -400,7 +400,7 @@ async fn circle_scoped_morph_update_requires_circle_membership() {
                     versions: Vec::new(),
                     content: None,
                     encrypted_content: None,
-                    state: soland_domain::reducer::ObjectLifecycleState::Active,
+                    state: coland_domain::reducer::ObjectLifecycleState::Active,
                     state_changed_at: None,
                     stage: None,
                     stage_changed_at: None,
@@ -470,7 +470,7 @@ async fn applet_registration_requires_realm_admin() {
         .realms()
         .store_realm_metadata(
             realm_id,
-            soland_services::events::RealmMetadata {
+            coland_services::events::RealmMetadata {
                 owner: owner.to_owned(),
                 deleted: false,
                 discoverability: "restricted".to_owned(),
@@ -525,7 +525,7 @@ async fn applet_registration_requires_realm_admin() {
         .await
         .unwrap();
     grants
-        .seed_test_grant(&soland_storage::TestCapabilityGrant {
+        .seed_test_grant(&coland_storage::TestCapabilityGrant {
             realm_id: realm.clone(),
             subject: projected_fixture_actor(owner),
             actions: vec![arkret_wire::CapabilityActionId::REALM_ADMIN.to_owned()],
@@ -829,7 +829,7 @@ fn event_payload_validator_catalog_covers_active_standard_durable_events() {
         arkret_wire::EventKind::RelationTombstone.as_str(),
     ];
     let catalog = arkret_schema_conformance::event_payload_validator_catalog().unwrap();
-    let event_kinds = soland_services::protocol_artifacts::active_durable_event_kinds()
+    let event_kinds = coland_services::protocol_artifacts::active_durable_event_kinds()
         .iter()
         .map(String::as_str)
         .filter(|kind| arkret_wire::events::is_standard_event_kind(kind))

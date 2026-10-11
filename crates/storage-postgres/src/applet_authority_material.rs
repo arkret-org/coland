@@ -16,11 +16,11 @@ use arkret_wire::{
     ActorId, AppletId, CommitStreamHead, CommitStreamRef, CommittedEventFullView, DidCoreId,
     EventId, EventKind, GrantId,
 };
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Binary, Jsonb, Text};
 use diesel::{OptionalExtension, QueryableByName, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::Value;
-use soland_storage::{PersistenceError, PersistenceResult};
 
 use crate::capability_grant_current_results::{CapabilityGrantCurrentResultReadRow, decode_row};
 
@@ -125,7 +125,7 @@ pub(crate) async fn read(
         return Err(unavailable());
     }
     let realm = request.effective_scope.realm_id();
-    let scope_key = soland_storage::applet_effective_scope_key(&request.effective_scope)?;
+    let scope_key = coland_storage::applet_effective_scope_key(&request.effective_scope)?;
     let install=sql_query("SELECT i.record AS value FROM applet_installations i JOIN applet_managed_identities d ON d.applet_id=i.applet_id AND d.target_station_id=$3 WHERE i.applet_id=$1 AND i.effective_scope_key=$2 AND d.record#>>'{initial_package,service_id}'=$4")
         .bind::<Text,_>(applet.as_str()).bind::<Text,_>(scope_key).bind::<Text,_>(station.as_str()).bind::<Text,_>(service.as_str()).get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(unavailable)?;
     if install
@@ -237,10 +237,10 @@ pub(crate) async fn read(
             return Err(unavailable());
         }
         match current.status {
-            soland_storage::CapabilityGrantCurrentStatus::Active
+            coland_storage::CapabilityGrantCurrentStatus::Active
                 if current_full.event.kind == EventKind::CapabilityGrant
                     && current_full.event.event_id.token_bytes() == id.token_bytes() => {}
-            soland_storage::CapabilityGrantCurrentStatus::Revoked
+            coland_storage::CapabilityGrantCurrentStatus::Revoked
                 if current_full.event.kind == EventKind::CapabilityRevoke
                     && current_full
                         .event
@@ -248,7 +248,7 @@ pub(crate) async fn read(
                         .get("grant_id")
                         .and_then(Value::as_str)
                         == Some(id.as_str()) => {}
-            soland_storage::CapabilityGrantCurrentStatus::Relinquished
+            coland_storage::CapabilityGrantCurrentStatus::Relinquished
                 if current_full.event.kind == EventKind::CapabilityRelinquish
                     && current_full
                         .event

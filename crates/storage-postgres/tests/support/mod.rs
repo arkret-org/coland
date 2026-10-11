@@ -2,7 +2,7 @@
 //!
 //! These tests link the library *without* `cfg(test)`, and a crate cannot
 //! enable its own `test-support` feature for its own `tests/` targets, so
-//! `soland_storage_postgres::test_database` is not visible here. This module is
+//! `coland_storage_postgres::test_database` is not visible here. This module is
 //! the one place the rules it would otherwise provide are spelled for the
 //! integration tests -- shared between them rather than copied into each.
 //!
@@ -11,12 +11,12 @@
 /// The migration this repository rewrites in place.
 const INITIAL_MIGRATION_SQL: &str = include_str!("../../migrations/00000000000000_initial/up.sql");
 
-/// `SOLAND_TEST_DATABASE_URL` wins, `DATABASE_URL` is the fallback -- the same
+/// `COLAND_TEST_DATABASE_URL` wins, `DATABASE_URL` is the fallback -- the same
 /// order `test_database::configured_url` uses. Reading only `DATABASE_URL`, as
 /// these tests did until 2026-09-05, made the documented way of running the
 /// suite fail every storage contract with a message naming the other variable.
 fn configured_url() -> String {
-    for key in ["SOLAND_TEST_DATABASE_URL", "DATABASE_URL"] {
+    for key in ["COLAND_TEST_DATABASE_URL", "DATABASE_URL"] {
         if let Ok(value) = std::env::var(key)
             && !value.trim().is_empty()
         {
@@ -26,7 +26,7 @@ fn configured_url() -> String {
     panic!(
         "{}",
         concat!(
-            "no test database is configured: set SOLAND_TEST_DATABASE_URL or DATABASE_URL ",
+            "no test database is configured: set COLAND_TEST_DATABASE_URL or DATABASE_URL ",
             "to a PostgreSQL instance. These contract tests are the only proof the Postgres ",
             "adapters honour the storage contracts, so they fail rather than skip."
         )

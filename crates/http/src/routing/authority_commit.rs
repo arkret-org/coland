@@ -7,10 +7,10 @@
 
 use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
 use arkret_wire::{AuthorityBundleRequest, ErrorCode, StreamScanRequest};
+use coland_services::{ServiceError, ServiceResult};
 use salvo::http::StatusCode;
 use salvo::prelude::*;
 use serde::Serialize;
-use soland_services::{ServiceError, ServiceResult};
 
 use crate::state::AppState;
 
@@ -162,13 +162,13 @@ fn render_result<T: Serialize + Send>(res: &mut Response, result: ServiceResult<
 }
 
 pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
-    if error.conflict_code() == Some(soland_storage::ConflictCode::SnapshotCapacityExceeded) {
+    if error.conflict_code() == Some(coland_storage::ConflictCode::SnapshotCapacityExceeded) {
         return crate::error::render_error_with_reason_code(
             res,
             StatusCode::CONFLICT,
             "failed_precondition",
             &error.to_string(),
-            soland_storage::ConflictCode::SnapshotCapacityExceeded.as_str(),
+            coland_storage::ConflictCode::SnapshotCapacityExceeded.as_str(),
             None,
         );
     }
@@ -180,7 +180,7 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
             return crate::error::render_error_code(code, res, detail);
         }
         match error.conflict_code() {
-            Some(soland_storage::ConflictCode::EventIdDigestMismatch) => {
+            Some(coland_storage::ConflictCode::EventIdDigestMismatch) => {
                 return crate::error::render_error_with_reason_code(
                     res,
                     crate::error::error_http_status(ErrorCode::SchemaViolation),
@@ -190,7 +190,7 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
                     None,
                 );
             }
-            Some(soland_storage::ConflictCode::ApprovalRequired) => {
+            Some(coland_storage::ConflictCode::ApprovalRequired) => {
                 return crate::error::render_error_with_reason_code(
                     res,
                     crate::error::error_http_status(arkret_wire::ErrorCode::ClaimRequired),
@@ -200,35 +200,35 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
                     None,
                 );
             }
-            Some(soland_storage::ConflictCode::DuplicateConflict) => {
+            Some(coland_storage::ConflictCode::DuplicateConflict) => {
                 return crate::error::render_error_code(
                     arkret_wire::ErrorCode::DuplicateConflict,
                     res,
                     detail,
                 );
             }
-            Some(soland_storage::ConflictCode::EpochMismatch) => {
+            Some(coland_storage::ConflictCode::EpochMismatch) => {
                 return crate::error::render_error_code(
                     arkret_wire::ErrorCode::EpochMismatch,
                     res,
                     detail,
                 );
             }
-            Some(soland_storage::ConflictCode::TemporarilyUnavailable) => {
+            Some(coland_storage::ConflictCode::TemporarilyUnavailable) => {
                 return crate::error::render_error_code(
                     arkret_wire::ErrorCode::TemporarilyUnavailable,
                     res,
                     detail,
                 );
             }
-            Some(soland_storage::ConflictCode::FailedPrecondition) => {
+            Some(coland_storage::ConflictCode::FailedPrecondition) => {
                 return crate::error::render_error_code(
                     arkret_wire::ErrorCode::FailedPrecondition,
                     res,
                     detail,
                 );
             }
-            Some(soland_storage::ConflictCode::InvalidMembershipTransition) => {
+            Some(coland_storage::ConflictCode::InvalidMembershipTransition) => {
                 return crate::error::render_error_with_reason_code(
                     res,
                     crate::error::error_http_status(ErrorCode::FailedPrecondition),
@@ -238,7 +238,7 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
                     None,
                 );
             }
-            Some(soland_storage::ConflictCode::InviteLiveTargetOccupied) => {
+            Some(coland_storage::ConflictCode::InviteLiveTargetOccupied) => {
                 // The detail is the occupant's exact create Event id; the
                 // closed details are derived from it alone.
                 if let Ok(create_event_id) = arkret_wire::EventId::new(detail.to_owned()) {
@@ -252,7 +252,7 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
                     );
                 }
             }
-            Some(soland_storage::ConflictCode::CapabilityDenied) => {
+            Some(coland_storage::ConflictCode::CapabilityDenied) => {
                 return crate::error::render_error_code(
                     arkret_wire::ErrorCode::CapabilityDenied,
                     res,
@@ -261,7 +261,7 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
             }
             // capabilities.md §10.4: relinquish is subject-only; the refusal
             // does not reveal whether the target grant exists.
-            Some(soland_storage::ConflictCode::GrantRelinquishNotSubject) => {
+            Some(coland_storage::ConflictCode::GrantRelinquishNotSubject) => {
                 return crate::error::render_error_with_reason_code(
                     res,
                     crate::error::error_http_status(arkret_wire::ErrorCode::CapabilityDenied),
@@ -271,14 +271,14 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
                     None,
                 );
             }
-            Some(soland_storage::ConflictCode::CasConflict) => {
+            Some(coland_storage::ConflictCode::CasConflict) => {
                 return crate::error::render_error_code(
                     arkret_wire::ErrorCode::CasConflict,
                     res,
                     detail,
                 );
             }
-            Some(soland_storage::ConflictCode::PolicyRevisionRollback) => {
+            Some(coland_storage::ConflictCode::PolicyRevisionRollback) => {
                 return crate::error::render_error_code(
                     arkret_wire::ErrorCode::PolicyRevisionRollback,
                     res,
@@ -287,14 +287,14 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
             }
             // constraint-schema.md section 8.1: an exhausted hard quota is
             // refused before any business effect, as `rate_limited`.
-            Some(soland_storage::ConflictCode::RateLimited) => {
+            Some(coland_storage::ConflictCode::RateLimited) => {
                 return crate::error::render_error_code(
                     arkret_wire::ErrorCode::RateLimited,
                     res,
                     detail,
                 );
             }
-            Some(soland_storage::ConflictCode::RealmFrozen) => {
+            Some(coland_storage::ConflictCode::RealmFrozen) => {
                 return crate::error::render_error_code(
                     arkret_wire::ErrorCode::RealmFrozen,
                     res,
@@ -303,7 +303,7 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
             }
             // join-policy.md §4: an entry refused by its rule or gates is one
             // non-enumerating `gate_check_failed`, whatever gate failed.
-            Some(soland_storage::ConflictCode::GateCheckFailed) => {
+            Some(coland_storage::ConflictCode::GateCheckFailed) => {
                 return crate::error::render_error_with_reason_code(
                     res,
                     crate::error::error_http_status(arkret_wire::ErrorCode::CapabilityDenied),
@@ -315,48 +315,48 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
             }
             // contact-and-direct-conversation.md section 5.5: another unit
             // already closed the founder's slot; carried under `conflict`.
-            Some(soland_storage::ConflictCode::DirectConversationSlotAlreadyCommitted) => {
+            Some(coland_storage::ConflictCode::DirectConversationSlotAlreadyCommitted) => {
                 return crate::error::render_error_with_reason_code(
                     res,
                     StatusCode::CONFLICT,
                     "conflict",
                     detail,
-                    soland_storage::ConflictCode::DirectConversationSlotAlreadyCommitted.as_str(),
+                    coland_storage::ConflictCode::DirectConversationSlotAlreadyCommitted.as_str(),
                     None,
                 );
             }
             Some(
-                code @ (soland_storage::ConflictCode::DirectConversationFoundingUnitInvalid
-                | soland_storage::ConflictCode::DirectConversationSpaceForbidden
-                | soland_storage::ConflictCode::CallStateTransitionInvalid
-                | soland_storage::ConflictCode::EpochUpdateRequired
-                | soland_storage::ConflictCode::MlsActivationRequired
-                | soland_storage::ConflictCode::MlsActivationIrreversible
-                | soland_storage::ConflictCode::GovernanceBindingMismatch
-                | soland_storage::ConflictCode::JoinRulePolicyMismatch
-                | soland_storage::ConflictCode::PolicyRevisionGap
-                | soland_storage::ConflictCode::PinTargetNotPinned
-                | soland_storage::ConflictCode::MimiRoomBindingMigrationProofInvalid
-                | soland_storage::ConflictCode::InviteDirectedInviteeMismatch
-                | soland_storage::ConflictCode::InviteKindRequiresRevoke
-                | soland_storage::ConflictCode::InviteAlreadyTerminal
-                | soland_storage::ConflictCode::StrandNotActive
-                | soland_storage::ConflictCode::StrandNotArchived
-                | soland_storage::ConflictCode::StrandAlreadyTerminal
-                | soland_storage::ConflictCode::SpaceNotActive
-                | soland_storage::ConflictCode::SpaceNotArchived
-                | soland_storage::ConflictCode::SpaceAlreadyTerminal
-                | soland_storage::ConflictCode::SpaceHasLiveDependents
-                | soland_storage::ConflictCode::SpaceParentMismatch
-                | soland_storage::ConflictCode::SpaceParentUnreadable
-                | soland_storage::ConflictCode::SpaceRealmMismatch
-                | soland_storage::ConflictCode::CrossRealmStructuralRelation
-                | soland_storage::ConflictCode::GrantExceedsIssuerAuthority
-                | soland_storage::ConflictCode::AuthorityCycle
-                | soland_storage::ConflictCode::AuthorityExpiryWidening
-                | soland_storage::ConflictCode::AccountabilityGrantMissing
-                | soland_storage::ConflictCode::AgentPcrGenesisDeclarationMissing
-                | soland_storage::ConflictCode::ReducerProjectionFailed),
+                code @ (coland_storage::ConflictCode::DirectConversationFoundingUnitInvalid
+                | coland_storage::ConflictCode::DirectConversationSpaceForbidden
+                | coland_storage::ConflictCode::CallStateTransitionInvalid
+                | coland_storage::ConflictCode::EpochUpdateRequired
+                | coland_storage::ConflictCode::MlsActivationRequired
+                | coland_storage::ConflictCode::MlsActivationIrreversible
+                | coland_storage::ConflictCode::GovernanceBindingMismatch
+                | coland_storage::ConflictCode::JoinRulePolicyMismatch
+                | coland_storage::ConflictCode::PolicyRevisionGap
+                | coland_storage::ConflictCode::PinTargetNotPinned
+                | coland_storage::ConflictCode::MimiRoomBindingMigrationProofInvalid
+                | coland_storage::ConflictCode::InviteDirectedInviteeMismatch
+                | coland_storage::ConflictCode::InviteKindRequiresRevoke
+                | coland_storage::ConflictCode::InviteAlreadyTerminal
+                | coland_storage::ConflictCode::StrandNotActive
+                | coland_storage::ConflictCode::StrandNotArchived
+                | coland_storage::ConflictCode::StrandAlreadyTerminal
+                | coland_storage::ConflictCode::SpaceNotActive
+                | coland_storage::ConflictCode::SpaceNotArchived
+                | coland_storage::ConflictCode::SpaceAlreadyTerminal
+                | coland_storage::ConflictCode::SpaceHasLiveDependents
+                | coland_storage::ConflictCode::SpaceParentMismatch
+                | coland_storage::ConflictCode::SpaceParentUnreadable
+                | coland_storage::ConflictCode::SpaceRealmMismatch
+                | coland_storage::ConflictCode::CrossRealmStructuralRelation
+                | coland_storage::ConflictCode::GrantExceedsIssuerAuthority
+                | coland_storage::ConflictCode::AuthorityCycle
+                | coland_storage::ConflictCode::AuthorityExpiryWidening
+                | coland_storage::ConflictCode::AccountabilityGrantMissing
+                | coland_storage::ConflictCode::AgentPcrGenesisDeclarationMissing
+                | coland_storage::ConflictCode::ReducerProjectionFailed),
             ) => {
                 return crate::error::render_error_with_reason_code(
                     res,
@@ -373,22 +373,22 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
             // Station.
             Some(code) => {
                 let registered = match code {
-                    soland_storage::ConflictCode::DeviceRevoked => {
+                    coland_storage::ConflictCode::DeviceRevoked => {
                         Some(arkret_wire::ErrorCode::DeviceRevoked)
                     }
-                    soland_storage::ConflictCode::DeviceRevocationPending => {
+                    coland_storage::ConflictCode::DeviceRevocationPending => {
                         Some(arkret_wire::ErrorCode::DeviceRevocationPending)
                     }
-                    soland_storage::ConflictCode::DeviceGenerationFenced => {
+                    coland_storage::ConflictCode::DeviceGenerationFenced => {
                         Some(arkret_wire::ErrorCode::DeviceGenerationFenced)
                     }
-                    soland_storage::ConflictCode::DeviceUnauthorized => {
+                    coland_storage::ConflictCode::DeviceUnauthorized => {
                         Some(arkret_wire::ErrorCode::DeviceUnauthorized)
                     }
-                    soland_storage::ConflictCode::SignatureInvalid => {
+                    coland_storage::ConflictCode::SignatureInvalid => {
                         Some(arkret_wire::ErrorCode::SignatureInvalid)
                     }
-                    soland_storage::ConflictCode::SchemaViolation => {
+                    coland_storage::ConflictCode::SchemaViolation => {
                         Some(arkret_wire::ErrorCode::SchemaViolation)
                     }
                     _ => None,
@@ -404,7 +404,7 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
         ServiceError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
         ServiceError::Conflict(_)
             if error.conflict_code()
-                == Some(soland_storage::ConflictCode::RecipientQueueAtCapacity) =>
+                == Some(coland_storage::ConflictCode::RecipientQueueAtCapacity) =>
         {
             (StatusCode::FORBIDDEN, "quota_exceeded")
         }
@@ -667,17 +667,17 @@ async fn scan_stream(req: &mut Request, depot: &Depot, res: &mut Response) {
 fn render_stream_scan(
     res: &mut Response,
     request: &StreamScanRequest,
-    result: ServiceResult<soland_storage::AccountStreamScan>,
+    result: ServiceResult<coland_storage::AccountStreamScan>,
 ) {
     match result {
-        Ok(soland_storage::AccountStreamScan::Page(outcome)) => {
+        Ok(coland_storage::AccountStreamScan::Page(outcome)) => {
             if let Err(error) = outcome.validate_for_request(request) {
                 return render_service_error(res, invalid_application_output(error));
             }
             no_store(res);
             res.render(Json(outcome));
         }
-        Ok(soland_storage::AccountStreamScan::NotAuthorized) => {
+        Ok(coland_storage::AccountStreamScan::NotAuthorized) => {
             #[cfg(feature = "conformance-harness")]
             trace_stream_read_refusal(
                 "stream_readability",
@@ -690,7 +690,7 @@ fn render_stream_scan(
                 "the stream is not readable by this caller",
             );
         }
-        Ok(soland_storage::AccountStreamScan::Unproved(reason)) => {
+        Ok(coland_storage::AccountStreamScan::Unproved(reason)) => {
             #[cfg(feature = "conformance-harness")]
             trace_stream_read_refusal(
                 "interval_unproved",
@@ -721,17 +721,17 @@ fn render_stream_scan(
 fn render_peer_stream_scan(
     res: &mut Response,
     request: &StreamScanRequest,
-    result: ServiceResult<soland_storage::PeerStreamScan>,
+    result: ServiceResult<coland_storage::PeerStreamScan>,
 ) {
     match result {
-        Ok(soland_storage::PeerStreamScan::Page(outcome)) => {
+        Ok(coland_storage::PeerStreamScan::Page(outcome)) => {
             if let Err(error) = outcome.validate_for_request(request) {
                 return render_service_error(res, invalid_application_output(error));
             }
             no_store(res);
             res.render(Json(outcome));
         }
-        Ok(soland_storage::PeerStreamScan::NotAuthorized) => {
+        Ok(coland_storage::PeerStreamScan::NotAuthorized) => {
             #[cfg(feature = "conformance-harness")]
             trace_stream_read_refusal(
                 "stream_readability",
@@ -744,7 +744,7 @@ fn render_peer_stream_scan(
                 "the stream is not readable by this caller",
             );
         }
-        Ok(soland_storage::PeerStreamScan::Unproved(reason)) => {
+        Ok(coland_storage::PeerStreamScan::Unproved(reason)) => {
             #[cfg(feature = "conformance-harness")]
             trace_stream_read_refusal(
                 "interval_unproved",
@@ -1000,7 +1000,7 @@ mod tests {
 
     #[tokio::test]
     async fn precondition_refusals_render_their_registered_identities() {
-        use soland_storage::ConflictCode;
+        use coland_storage::ConflictCode;
         for (code, status, wire_code, reason_code) in [
             (
                 ConflictCode::EpochMismatch,
@@ -1141,7 +1141,7 @@ mod tests {
             &mut res,
             ServiceError::Conflict(format!(
                 "{}: Call genesis cannot enter active",
-                soland_storage::ConflictCode::CallStateTransitionInvalid
+                coland_storage::ConflictCode::CallStateTransitionInvalid
             )),
         );
         assert_eq!(res.status_code, Some(StatusCode::CONFLICT));
@@ -1165,7 +1165,7 @@ mod tests {
     async fn mounted_authority_reads_gate_before_delegating() {
         let service = crate::service(AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         ));
         let post = |path: &str, operation: &str| {
             TestClient::post(format!("http://server{path}")).add_header(

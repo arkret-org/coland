@@ -2,28 +2,28 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: soland
+  name: coland
   labels:
-    app: soland
+    app: coland
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: soland
+      app: coland
   template:
     metadata:
       labels:
-        app: soland
+        app: coland
     spec:
       containers:
-        - name: soland
-          image: ghcr.io/arkret/soland:latest
+        - name: coland
+          image: ghcr.io/arkret/coland:latest
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 8698
           env:
-            - name: SOLAND_BIND
+            - name: COLAND_BIND
               value: "0.0.0.0:8698"
           readinessProbe:
             httpGet:

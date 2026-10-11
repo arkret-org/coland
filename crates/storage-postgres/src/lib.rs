@@ -1,7 +1,7 @@
 #![recursion_limit = "256"]
 
 #[cfg(feature = "test-support")]
-extern crate self as soland_storage_postgres;
+extern crate self as coland_storage_postgres;
 
 #[cfg(feature = "test-support")]
 pub mod pin_conformance;
@@ -12,6 +12,7 @@ pub(crate) use arkret_event_draft::ProjectedEventOperation;
 pub(crate) use arkret_identifiers::BlobRef;
 pub(crate) use async_trait::async_trait;
 pub(crate) use chrono::Utc;
+pub(crate) use coland_storage::*;
 pub(crate) use diesel::sql_types::{
     Array, BigInt, Binary, Bool, Integer, Jsonb, Nullable, Text, Timestamptz,
 };
@@ -19,7 +20,6 @@ pub(crate) use diesel::{OptionalExtension, QueryableByName, sql_query, sql_types
 pub(crate) use diesel_async::pooled_connection::deadpool::Object;
 pub(crate) use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 pub(crate) use serde_json::Value;
-pub(crate) use soland_storage::*;
 pub(crate) use uuid::Uuid;
 
 pub mod db;
@@ -312,7 +312,7 @@ impl From<diesel::result::Error> for PgTransactionError {
 }
 
 mod ids {
-    pub use soland_storage::ids::*;
+    pub use coland_storage::ids::*;
 }
 
 mod mimi_admission;

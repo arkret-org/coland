@@ -4,8 +4,8 @@ use arkret_models_identity::session_credential::{
     SessionGrantCredentialClass, SessionGrantHolderBinding,
 };
 use arkret_wire::{AccountId, ActorId, DidCoreId};
-use soland_http::error::AppError;
-use soland_services::identity::SessionIdentityState;
+use coland_http::error::AppError;
+use coland_services::identity::SessionIdentityState;
 
 use crate::state::AppState;
 
@@ -137,7 +137,7 @@ mod tests {
     fn state() -> AppState {
         AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         )
     }
 
@@ -146,7 +146,7 @@ mod tests {
             token_hash: "test".into(),
             account_pk: None,
             actor: "ak:did_core:web:alice.example".into(),
-            endpoint: soland_services::identity::SessionEndpointState::HumanDevice {
+            endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
                 device_id: "device".into(),
             },
             audience: state.service_id().clone(),
@@ -180,8 +180,8 @@ mod tests {
     async fn verified_agent_session_uses_account_identity_without_a_human_account_row() {
         let state = state();
         let mut session = session(&state);
-        session.endpoint = soland_services::identity::SessionEndpointState::AgentRuntime {
-            state: soland_services::identity::AgentSessionState {
+        session.endpoint = coland_services::identity::SessionEndpointState::AgentRuntime {
+            state: coland_services::identity::AgentSessionState {
                 granted_scope: vec![],
                 scope_details: serde_json::json!({}),
                 freshness_state: arkret_wire::FreshnessState::Fresh,
@@ -220,9 +220,9 @@ mod tests {
         ] {
             state
                 .identities()
-                .save_account(soland_services::identity::AccountProfileState {
+                .save_account(coland_services::identity::AccountProfileState {
                     // The store assigns the primary key.
-                    pk: soland_storage::AccountPk(0),
+                    pk: coland_storage::AccountPk(0),
                     principal_id: account_id.principal_id.clone(),
                     account_id,
                     localpart: format!("account-{label}"),

@@ -13,13 +13,13 @@ mod ordinary_realm;
 #[allow(dead_code)]
 mod pcr_genesis;
 
-use soland_storage::{AuthorityCommitStore, EventCommitUnitOfWork, ModerationStore};
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgModerationStore};
+use coland_storage::{AuthorityCommitStore, EventCommitUnitOfWork, ModerationStore};
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgModerationStore};
 
 async fn bootstrap(
-    pool: &soland_storage_postgres::PgPool,
-) -> soland_storage::OrdinaryRealmBootstrapCommitUnit {
+    pool: &coland_storage_postgres::PgPool,
+) -> coland_storage::OrdinaryRealmBootstrapCommitUnit {
     let did = ordinary_realm::human_profile::station_did(&ordinary_realm::station());
     let account = ordinary_realm::human_profile::admit_for_station_did(
         pool,
@@ -104,7 +104,7 @@ async fn pending_review_without_report_is_exact_accepted_event_and_lift_removes_
             .await
             .unwrap_err()
             .conflict_code(),
-        Some(soland_storage::ConflictCode::CasConflict)
+        Some(coland_storage::ConflictCode::CasConflict)
     );
     assert_eq!(
         queue
@@ -133,13 +133,13 @@ async fn pending_review_without_report_is_exact_accepted_event_and_lift_removes_
 }
 
 async fn circle_request(
-    pool: &soland_storage_postgres::PgPool,
-    previous: &soland_storage::AuthorityCommitTransaction,
+    pool: &coland_storage_postgres::PgPool,
+    previous: &coland_storage::AuthorityCommitTransaction,
     kind: arkret_wire::EventKind,
     actor: arkret_wire::ActorId,
     circle: &arkret_wire::CircleId,
     payload: serde_json::Value,
-) -> soland_storage::EventCommitRequest {
+) -> coland_storage::EventCommitRequest {
     let scope = arkret_wire::ScopeRef::Circle {
         realm_id: previous.event.realm_id.clone(),
         circle_id: circle.clone(),
@@ -338,7 +338,7 @@ async fn circle_report_decision_lift_require_exact_circle_grant_and_source_cut()
     .await;
     assert_eq!(
         uow.commit_event(stale).await.unwrap_err().conflict_code(),
-        Some(soland_storage::ConflictCode::CasConflict)
+        Some(coland_storage::ConflictCode::CasConflict)
     );
     let lift = circle_request(
         &pool,

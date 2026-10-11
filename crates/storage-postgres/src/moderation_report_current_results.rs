@@ -7,11 +7,11 @@
 //! Membership and target visibility are read at the accepting authority cut;
 //! MIMI facade reports remain outside this self-ingress.
 
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::OptionalExtension as _;
 use diesel::sql_types::{BigInt, Bool, Jsonb, Text, Timestamptz};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::Value;
-use soland_storage::{PersistenceError, PersistenceResult};
 
 #[derive(diesel::QueryableByName)]
 struct PresentRow {
@@ -346,7 +346,7 @@ pub(crate) async fn scope_moderator(
         }
         _ => return Ok(false),
     };
-    let facts = soland_storage::OperationFacts::default();
+    let facts = coland_storage::OperationFacts::default();
     Ok(!cut
         .evaluate(actions, &target, &facts, at)
         .unreserved()

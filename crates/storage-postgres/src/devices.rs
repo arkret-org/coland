@@ -131,7 +131,7 @@ impl DeviceMessageStore for PgDeviceMessageStore {
             {
                 return Err(PersistenceError::Conflict(format!(
                     "{}: recipient queue is at capacity",
-                    soland_storage::ConflictCode::RecipientQueueAtCapacity
+                    coland_storage::ConflictCode::RecipientQueueAtCapacity
                 ))
                 .into());
             }
@@ -411,7 +411,7 @@ impl DeviceMessageStore for PgDeviceMessageStore {
                     // path so none of those writes can commit.
                     return Err(PersistenceError::Conflict(format!(
                         "{}: recipient queue is at capacity",
-                        soland_storage::ConflictCode::RecipientQueueAtCapacity
+                        coland_storage::ConflictCode::RecipientQueueAtCapacity
                     ))
                     .into());
                 }
@@ -455,7 +455,7 @@ impl DeviceMessageStore for PgDeviceMessageStore {
         .await
         .map_err(PgTransactionError::into_persistence)
         .or_else(|error| {
-            if error.conflict_code() == Some(soland_storage::ConflictCode::RecipientQueueAtCapacity) {
+            if error.conflict_code() == Some(coland_storage::ConflictCode::RecipientQueueAtCapacity) {
                 Ok(DeviceMessageBatchCommitOutcome::QueueAtCapacity)
             } else {
                 Err(error)
@@ -566,7 +566,7 @@ impl DeviceInventoryStore for PgDeviceInventoryStore {
 
     async fn put_metadata(
         &self,
-        record: &soland_storage::DeviceInventoryMetadata,
+        record: &coland_storage::DeviceInventoryMetadata,
     ) -> PersistenceResult<()> {
         let mut payload = serde_json::json!({"device_id": record.device_id});
         let object = payload.as_object_mut().expect("metadata is an object");

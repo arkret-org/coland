@@ -10,9 +10,9 @@ use arkret_identifiers::{DeviceId, Did, DidCoreId};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-pub const ACCOUNT_PROJECTION_PATH: &str = "/_soland/gate/account/project";
+pub const ACCOUNT_PROJECTION_PATH: &str = "/_coland/gate/account/project";
 
-/// Route below the deployment-private `/_soland` root used to synchronize an
+/// Route below the deployment-private `/_coland` root used to synchronize an
 /// Account Authority's localpart projection into its Station.
 ///
 /// The Station router consumes this template directly. HTTP clients should use
@@ -43,7 +43,7 @@ pub fn account_localparts_endpoint(
     let mut segments = station_base
         .path_segments_mut()
         .map_err(|_| AccountLocalpartsBaseUrlError)?;
-    segments.clear().push("_soland");
+    segments.clear().push("_coland");
     for segment in ACCOUNT_LOCALPARTS_ROUTE.split('/') {
         if segment == "{account_principal_id}" {
             segments.push(principal_id.as_str());
@@ -91,7 +91,7 @@ mod tests {
 
         assert_eq!(
             endpoint.as_str(),
-            "https://station.example/_soland/accounts/ak:did_core:web:station.example%252Falice/localparts"
+            "https://station.example/_coland/accounts/ak:did_core:web:station.example%252Falice/localparts"
         );
         assert_eq!(
             ACCOUNT_LOCALPARTS_ROUTE,

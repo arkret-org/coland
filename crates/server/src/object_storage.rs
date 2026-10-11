@@ -9,14 +9,14 @@ use std::path::Path as FsPath;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use coland_http::config::ObjectStorageConfig;
+use coland_services::delivery::ObjectStoragePort;
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use object_store::aws::AmazonS3Builder;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
 use object_store::{GetOptions, ObjectStore, ObjectStoreExt};
-use soland_http::config::ObjectStorageConfig;
-use soland_services::delivery::ObjectStoragePort;
 use tokio::io::AsyncReadExt as _;
 
 #[derive(Debug, thiserror::Error)]
@@ -206,7 +206,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_storage_round_trips_bytes_with_prefix() {
-        let root = std::env::temp_dir().join(format!("soland-object-storage-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("coland-object-storage-{}", Uuid::new_v4()));
         let config = ObjectStorageConfig::Local {
             root: root.clone(),
             prefix: "tenant-a".to_owned(),

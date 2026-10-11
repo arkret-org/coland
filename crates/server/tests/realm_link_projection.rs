@@ -8,9 +8,9 @@
 
 use arkret_event_draft::ProjectedEventOperation as Operation;
 use arkret_models_collaboration::governance::realm_governance::RealmLinkDirection;
+use coland_domain::hlc::ServerHlc;
+use coland_domain::reducer::{ProjectionEffect, ProjectionState};
 use serde_json::{Value, json};
-use soland_domain::hlc::ServerHlc;
-use soland_domain::reducer::{ProjectionEffect, ProjectionState};
 
 const REALM_A: &str = "ak:realm:ATYL-87CDhaLQem29G2JQCXbZ_8zuu7khej2MbrsGLK6";
 const REALM_B: &str = "ak:realm:AS1N4QnbZ6JgVObAF-yTx1GWoK2XnO_vUaZ2qe0WCyQV";
@@ -165,7 +165,7 @@ fn realm_link_facet_value_projected() {
     let mut state = ProjectionState::new();
     let hlc = ServerHlc::new("test");
     state.apply(&link_op(REALM_A, REALM_B, "join_gate_from", None), &hlc);
-    let facet = soland_domain::reducer::realm_links::realm_link_facet(REALM_B, "join_gate_from");
+    let facet = coland_domain::reducer::realm_links::realm_link_facet(REALM_B, "join_gate_from");
     let value = state
         .facet_value(REALM_A, &facet)
         .expect("Realm link facet must be projected");

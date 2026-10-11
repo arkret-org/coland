@@ -1,4 +1,4 @@
-use soland_storage::SidecarLifecycleState;
+use coland_storage::SidecarLifecycleState;
 
 use super::{
     AgentSidecarContextRecord, AgentSidecarRecord, AsyncPgConnection, BigInt, Binary, Jsonb,

@@ -1,7 +1,7 @@
 //! Applet record storage and request helpers.
 
+use coland_http::error::AppError;
 use salvo::prelude::*;
-use soland_http::error::AppError;
 
 use super::types::{AppletIdentityRecord, AppletInstallationRecord, AppletRecord};
 use crate::state::AppState;
@@ -72,7 +72,7 @@ pub(crate) async fn applet_record(
     applet_id: &str,
     effective_scope: &arkret_wire::ScopeRef,
 ) -> Result<Option<AppletRecord>, AppError> {
-    let effective_scope_key = soland_storage::applet_effective_scope_key(effective_scope)
+    let effective_scope_key = coland_storage::applet_effective_scope_key(effective_scope)
         .map_err(|error| AppError::internal(format!("effective scope key failed: {error}")))?;
     let Some(value) = state
         .event_queries()
@@ -138,7 +138,7 @@ pub(super) async fn persist_applet_record(
         ));
     }
     let effective_scope_key =
-        soland_storage::applet_effective_scope_key(&replacement.effective_scope)
+        coland_storage::applet_effective_scope_key(&replacement.effective_scope)
             .map_err(|error| AppError::internal(format!("effective scope key failed: {error}")))?;
     let expected_value = encode_applet_record(expected)?;
     let replacement_value = encode_applet_record(replacement)?;
@@ -162,7 +162,7 @@ pub(super) async fn fence_applet_record(
     expected: &AppletRecord,
     replacement: &AppletRecord,
     fenced_at: chrono::DateTime<chrono::Utc>,
-) -> Result<soland_storage::AppletInstallationFenceOutcome, AppError> {
+) -> Result<coland_storage::AppletInstallationFenceOutcome, AppError> {
     if expected.applet_id != replacement.applet_id
         || expected.effective_scope != replacement.effective_scope
     {
@@ -171,7 +171,7 @@ pub(super) async fn fence_applet_record(
         ));
     }
     let effective_scope_key =
-        soland_storage::applet_effective_scope_key(&replacement.effective_scope)
+        coland_storage::applet_effective_scope_key(&replacement.effective_scope)
             .map_err(|error| AppError::internal(format!("effective scope key failed: {error}")))?;
     let expected_value = encode_applet_record(expected)?;
     let replacement_value = encode_applet_record(replacement)?;

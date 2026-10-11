@@ -1,4 +1,4 @@
-use soland_http::error::AppError;
+use coland_http::error::AppError;
 
 use super::*;
 
@@ -11,7 +11,7 @@ fn trust_domain(value: &str) -> arkret_identifiers::TrustDomainId {
 fn federation_headers() -> FederationTrustHeaders {
     FederationTrustHeaders {
         source_trust_domain: trust_domain("ak:trust_domain:peer.example"),
-        destination_trust_domain: trust_domain("ak:trust_domain:soland.local"),
+        destination_trust_domain: trust_domain("ak:trust_domain:coland.local"),
     }
 }
 
@@ -19,7 +19,7 @@ fn federation_headers() -> FederationTrustHeaders {
 fn federation_headers_accept_destination_match() {
     validate_federation_headers(
         &federation_headers(),
-        &trust_domain("ak:trust_domain:soland.local"),
+        &trust_domain("ak:trust_domain:coland.local"),
     )
     .expect("matching destination accepted");
 }
@@ -82,7 +82,7 @@ fn signature_input_rejects_mismatched_federation_key() {
 }
 
 fn assert_auth_rejection_is_minimal(error: AppError) {
-    assert_eq!(error.code, soland_http::error::ErrorCode::Unauthenticated);
+    assert_eq!(error.code, coland_http::error::ErrorCode::Unauthenticated);
     assert_eq!(error.wire_code(), "unauthenticated");
     assert_eq!(error.http_status(), StatusCode::UNAUTHORIZED);
     assert_eq!(

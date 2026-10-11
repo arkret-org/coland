@@ -64,7 +64,7 @@ fn state_with_successor() -> ProjectionState {
     let successor = account_actor_string(SUCCESSOR);
     state.members.insert(
         (REALM.to_owned(), successor.clone()),
-        SolandMembershipState {
+        ColandMembershipState {
             member: successor,
             realm_id: REALM.to_owned(),
             state: "join".to_owned(),

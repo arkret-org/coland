@@ -14,12 +14,12 @@ use arkret_wire::{
     ActorId, CircleId, CommitStreamRef, ObjectState, RealmId, ScopeRef, SpaceId, SpaceState,
     StrandId,
 };
+use coland_storage::{
+    ObjectCurrentSnapshot, ObjectCurrentSnapshotStore, PersistenceError, PersistenceResult,
+};
 use diesel::sql_types::{Jsonb, Text};
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use serde_json::Value;
-use soland_storage::{
-    ObjectCurrentSnapshot, ObjectCurrentSnapshotStore, PersistenceError, PersistenceResult,
-};
 
 use crate::{PgPool, PgTransactionError};
 

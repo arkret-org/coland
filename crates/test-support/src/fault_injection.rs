@@ -1,7 +1,7 @@
 //! Durable-boundary fault injection for fixtures.
 //!
 //! A crash-consistency fixture needs to interrupt a durable commit at an exact
-//! boundary and then prove the retry converges. Soland has one storage
+//! boundary and then prove the retry converges. Coland has one storage
 //! implementation, so the interruption is a decorator around the store rather
 //! than a second adapter that grows its own injection points.
 //!
@@ -15,14 +15,14 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use parking_lot::Mutex;
-use soland_storage::{
+use coland_storage::{
     AgentPairingCommitIntent, AgentPrincipalRecord, AgentRuntimeActivation,
     AgentRuntimeApprovalWrite, AgentRuntimeEnqueueOutcome, AgentStore, EnqueueAgentRuntimeMessage,
     EventBatchCommitRequest, EventCommitOutcome, EventCommitRequest, EventCommitUnitOfWork,
     PersistenceError, PersistenceResult, PersistenceStore, ServiceRegistrationCommitOutcome,
     WebvhDocumentRecord, WebvhLogCommitOutcome, WebvhLogRecord, WebvhStore,
 };
+use parking_lot::Mutex;
 
 /// The durable boundaries a fixture may interrupt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -131,21 +131,21 @@ impl FaultInjectingStore {
 }
 
 impl PersistenceStore for FaultInjectingStore {
-    fn authority_commits(&self) -> &dyn soland_storage::AuthorityCommitStore {
+    fn authority_commits(&self) -> &dyn coland_storage::AuthorityCommitStore {
         self.inner.authority_commits()
     }
 
     fn account_device_signer_evidence(
         &self,
-    ) -> &dyn soland_storage::AccountDeviceSignerEvidenceStore {
+    ) -> &dyn coland_storage::AccountDeviceSignerEvidenceStore {
         self.inner.account_device_signer_evidence()
     }
 
-    fn read_cursors(&self) -> &dyn soland_storage::ReadCursorStore {
+    fn read_cursors(&self) -> &dyn coland_storage::ReadCursorStore {
         self.inner.read_cursors()
     }
 
-    fn actor_private_events(&self) -> &dyn soland_storage::ActorPrivateEventStore {
+    fn actor_private_events(&self) -> &dyn coland_storage::ActorPrivateEventStore {
         self.inner.actor_private_events()
     }
 }
@@ -210,7 +210,7 @@ impl WebvhStore for FaultWebvhStore {
         expected_current_head: Option<String>,
         document: WebvhDocumentRecord,
         event: WebvhLogRecord,
-        service_identity: Option<soland_storage::ServiceIdentitySuccessor>,
+        service_identity: Option<coland_storage::ServiceIdentitySuccessor>,
     ) -> PersistenceResult<WebvhLogCommitOutcome> {
         self.injector
             .check(FaultPoint::WebvhLogCommit, FaultTiming::Before)?;
@@ -255,7 +255,7 @@ impl AgentStore for FaultAgentStore {
     async fn pairing_receipt(
         &self,
         event_id: &str,
-    ) -> PersistenceResult<Option<soland_storage::AgentPairingReceipt>> {
+    ) -> PersistenceResult<Option<coland_storage::AgentPairingReceipt>> {
         self.inner.agents().pairing_receipt(event_id).await
     }
     async fn pending_pairings_after(
@@ -357,239 +357,239 @@ impl AgentStore for FaultAgentStore {
     }
 }
 
-impl soland_storage::IdentityStoreRegistry for FaultInjectingStore {
-    fn accounts(&self) -> &dyn soland_storage::AccountStore {
+impl coland_storage::IdentityStoreRegistry for FaultInjectingStore {
+    fn accounts(&self) -> &dyn coland_storage::AccountStore {
         self.inner.accounts()
     }
-    fn account_localparts(&self) -> &dyn soland_storage::AccountLocalpartStore {
+    fn account_localparts(&self) -> &dyn coland_storage::AccountLocalpartStore {
         self.inner.account_localparts()
     }
-    fn account_lifecycle(&self) -> &dyn soland_storage::AccountLifecycleStore {
+    fn account_lifecycle(&self) -> &dyn coland_storage::AccountLifecycleStore {
         self.inner.account_lifecycle()
     }
-    fn sessions(&self) -> &dyn soland_storage::SessionStore {
+    fn sessions(&self) -> &dyn coland_storage::SessionStore {
         self.inner.sessions()
     }
-    fn account_data(&self) -> &dyn soland_storage::AccountDataStore {
+    fn account_data(&self) -> &dyn coland_storage::AccountDataStore {
         self.inner.account_data()
     }
-    fn contacts(&self) -> &dyn soland_storage::ContactStore {
+    fn contacts(&self) -> &dyn coland_storage::ContactStore {
         self.inner.contacts()
     }
-    fn contact_verified_mirrors(&self) -> &dyn soland_storage::ContactVerifiedMirrorStore {
+    fn contact_verified_mirrors(&self) -> &dyn coland_storage::ContactVerifiedMirrorStore {
         self.inner.contact_verified_mirrors()
     }
-    fn invite_receive_policies(&self) -> &dyn soland_storage::InviteReceivePolicyStore {
+    fn invite_receive_policies(&self) -> &dyn coland_storage::InviteReceivePolicyStore {
         self.inner.invite_receive_policies()
     }
-    fn invite_locators(&self) -> &dyn soland_storage::InviteLocatorStore {
+    fn invite_locators(&self) -> &dyn coland_storage::InviteLocatorStore {
         self.inner.invite_locators()
     }
-    fn invite_new_source_ledger(&self) -> &dyn soland_storage::InviteNewSourceLedgerStore {
+    fn invite_new_source_ledger(&self) -> &dyn coland_storage::InviteNewSourceLedgerStore {
         self.inner.invite_new_source_ledger()
     }
-    fn consent_request_quarantine(&self) -> &dyn soland_storage::ConsentRequestQuarantineStore {
+    fn consent_request_quarantine(&self) -> &dyn coland_storage::ConsentRequestQuarantineStore {
         self.inner.consent_request_quarantine()
     }
 
-    fn consent_current(&self) -> &dyn soland_storage::ConsentCurrentStore {
+    fn consent_current(&self) -> &dyn coland_storage::ConsentCurrentStore {
         self.inner.consent_current()
     }
-    fn mimi_consent_correlations(&self) -> &dyn soland_storage::MimiConsentCorrelationStore {
+    fn mimi_consent_correlations(&self) -> &dyn coland_storage::MimiConsentCorrelationStore {
         self.inner.mimi_consent_correlations()
     }
-    fn realm_meta(&self) -> &dyn soland_storage::RealmMetaStore {
+    fn realm_meta(&self) -> &dyn coland_storage::RealmMetaStore {
         self.inner.realm_meta()
     }
-    fn messages(&self) -> &dyn soland_storage::MessageStore {
+    fn messages(&self) -> &dyn coland_storage::MessageStore {
         self.inner.messages()
     }
-    fn member_identity(&self) -> &dyn soland_storage::MemberIdentityStore {
+    fn member_identity(&self) -> &dyn coland_storage::MemberIdentityStore {
         self.inner.member_identity()
     }
-    fn blobs(&self) -> &dyn soland_storage::BlobStore {
+    fn blobs(&self) -> &dyn coland_storage::BlobStore {
         self.inner.blobs()
     }
-    fn devices(&self) -> &dyn soland_storage::DeviceInventoryStore {
+    fn devices(&self) -> &dyn coland_storage::DeviceInventoryStore {
         self.inner.devices()
     }
-    fn device_revocations(&self) -> &dyn soland_storage::DeviceRevocationStore {
+    fn device_revocations(&self) -> &dyn coland_storage::DeviceRevocationStore {
         self.inner.device_revocations()
     }
 }
 
-impl soland_storage::FederationGovernanceStoreRegistry for FaultInjectingStore {
-    fn federation_outbox(&self) -> &dyn soland_storage::FederationOutboxStore {
+impl coland_storage::FederationGovernanceStoreRegistry for FaultInjectingStore {
+    fn federation_outbox(&self) -> &dyn coland_storage::FederationOutboxStore {
         self.inner.federation_outbox()
     }
-    fn handle_releases(&self) -> &dyn soland_storage::HandleReleaseStore {
+    fn handle_releases(&self) -> &dyn coland_storage::HandleReleaseStore {
         self.inner.handle_releases()
     }
-    fn retention_policies(&self) -> &dyn soland_storage::RetentionPolicyStore {
+    fn retention_policies(&self) -> &dyn coland_storage::RetentionPolicyStore {
         self.inner.retention_policies()
     }
-    fn retention_tombstones(&self) -> &dyn soland_storage::RetentionTombstoneStore {
+    fn retention_tombstones(&self) -> &dyn coland_storage::RetentionTombstoneStore {
         self.inner.retention_tombstones()
     }
-    fn organizations(&self) -> &dyn soland_storage::OrganizationStore {
+    fn organizations(&self) -> &dyn coland_storage::OrganizationStore {
         self.inner.organizations()
     }
-    fn organization_registrations(&self) -> &dyn soland_storage::OrganizationRegistrationStore {
+    fn organization_registrations(&self) -> &dyn coland_storage::OrganizationRegistrationStore {
         self.inner.organization_registrations()
     }
-    fn realm_organizations(&self) -> &dyn soland_storage::RealmOrganizationStore {
+    fn realm_organizations(&self) -> &dyn coland_storage::RealmOrganizationStore {
         self.inner.realm_organizations()
     }
     fn realm_organization_statements(
         &self,
-    ) -> &dyn soland_storage::RealmOrganizationStatementStore {
+    ) -> &dyn coland_storage::RealmOrganizationStatementStore {
         self.inner.realm_organization_statements()
     }
-    fn audit(&self) -> &dyn soland_storage::AuditStore {
+    fn audit(&self) -> &dyn coland_storage::AuditStore {
         self.inner.audit()
     }
 }
 
-impl soland_storage::DeliveryPolicyStoreRegistry for FaultInjectingStore {
-    fn moderation(&self) -> &dyn soland_storage::ModerationStore {
+impl coland_storage::DeliveryPolicyStoreRegistry for FaultInjectingStore {
+    fn moderation(&self) -> &dyn coland_storage::ModerationStore {
         self.inner.moderation()
     }
-    fn federation_operations(&self) -> &dyn soland_storage::FederationOperationsStore {
+    fn federation_operations(&self) -> &dyn coland_storage::FederationOperationsStore {
         self.inner.federation_operations()
     }
-    fn push_devices(&self) -> &dyn soland_storage::PushDeviceStore {
+    fn push_devices(&self) -> &dyn coland_storage::PushDeviceStore {
         self.inner.push_devices()
     }
-    fn push_registration_handoffs(&self) -> &dyn soland_storage::PushRegistrationHandoffStore {
+    fn push_registration_handoffs(&self) -> &dyn coland_storage::PushRegistrationHandoffStore {
         self.inner.push_registration_handoffs()
     }
-    fn signal_relay(&self) -> &dyn soland_storage::SignalRelayStore {
+    fn signal_relay(&self) -> &dyn coland_storage::SignalRelayStore {
         self.inner.signal_relay()
     }
-    fn policy_documents(&self) -> &dyn soland_storage::PolicyDocumentStore {
+    fn policy_documents(&self) -> &dyn coland_storage::PolicyDocumentStore {
         self.inner.policy_documents()
     }
-    fn recovery_policies(&self) -> &dyn soland_storage::RecoveryPolicyStore {
+    fn recovery_policies(&self) -> &dyn coland_storage::RecoveryPolicyStore {
         self.inner.recovery_policies()
     }
-    fn actor_profiles(&self) -> &dyn soland_storage::ActorProfileStore {
+    fn actor_profiles(&self) -> &dyn coland_storage::ActorProfileStore {
         self.inner.actor_profiles()
     }
-    fn recovery_sessions(&self) -> &dyn soland_storage::RecoverySessionStore {
+    fn recovery_sessions(&self) -> &dyn coland_storage::RecoverySessionStore {
         self.inner.recovery_sessions()
     }
-    fn security_transactions(&self) -> &dyn soland_storage::SecurityTransactionStore {
+    fn security_transactions(&self) -> &dyn coland_storage::SecurityTransactionStore {
         self.inner.security_transactions()
     }
-    fn webvh(&self) -> &dyn soland_storage::WebvhStore {
+    fn webvh(&self) -> &dyn coland_storage::WebvhStore {
         &self.webvh
     }
-    fn service_identity(&self) -> &dyn soland_storage::ServiceIdentityStore {
+    fn service_identity(&self) -> &dyn coland_storage::ServiceIdentityStore {
         self.inner.service_identity()
     }
 }
 
-impl soland_storage::EventProjectionStoreRegistry for FaultInjectingStore {
-    fn events(&self) -> &dyn soland_storage::EventStore {
+impl coland_storage::EventProjectionStoreRegistry for FaultInjectingStore {
+    fn events(&self) -> &dyn coland_storage::EventStore {
         self.inner.events()
     }
-    fn projection_events(&self) -> &dyn soland_storage::ProjectionEventStore {
+    fn projection_events(&self) -> &dyn coland_storage::ProjectionEventStore {
         self.inner.projection_events()
     }
-    fn applets(&self) -> &dyn soland_storage::AppletStore {
+    fn applets(&self) -> &dyn coland_storage::AppletStore {
         self.inner.applets()
     }
-    fn device_messages(&self) -> &dyn soland_storage::DeviceMessageStore {
+    fn device_messages(&self) -> &dyn coland_storage::DeviceMessageStore {
         self.inner.device_messages()
     }
-    fn device_keys(&self) -> &dyn soland_storage::DeviceKeyStore {
+    fn device_keys(&self) -> &dyn coland_storage::DeviceKeyStore {
         self.inner.device_keys()
     }
-    fn one_time_keys(&self) -> &dyn soland_storage::OneTimeKeyStore {
+    fn one_time_keys(&self) -> &dyn coland_storage::OneTimeKeyStore {
         self.inner.one_time_keys()
     }
-    fn key_backups(&self) -> &dyn soland_storage::KeyBackupStore {
+    fn key_backups(&self) -> &dyn coland_storage::KeyBackupStore {
         self.inner.key_backups()
     }
-    fn space_container_projections(&self) -> &dyn soland_storage::SpaceContainerProjectionStore {
+    fn space_container_projections(&self) -> &dyn coland_storage::SpaceContainerProjectionStore {
         self.inner.space_container_projections()
     }
-    fn circle_projections(&self) -> &dyn soland_storage::CircleProjectionStore {
+    fn circle_projections(&self) -> &dyn coland_storage::CircleProjectionStore {
         self.inner.circle_projections()
     }
-    fn strand_projections(&self) -> &dyn soland_storage::StrandProjectionStore {
+    fn strand_projections(&self) -> &dyn coland_storage::StrandProjectionStore {
         self.inner.strand_projections()
     }
-    fn object_current_snapshot(&self) -> &dyn soland_storage::ObjectCurrentSnapshotStore {
+    fn object_current_snapshot(&self) -> &dyn coland_storage::ObjectCurrentSnapshotStore {
         self.inner.object_current_snapshot()
     }
-    fn morph_projections(&self) -> &dyn soland_storage::MorphProjectionStore {
+    fn morph_projections(&self) -> &dyn coland_storage::MorphProjectionStore {
         self.inner.morph_projections()
     }
-    fn relation_current_results(&self) -> &dyn soland_storage::RelationCurrentResultStore {
+    fn relation_current_results(&self) -> &dyn coland_storage::RelationCurrentResultStore {
         self.inner.relation_current_results()
     }
     fn capability_grant_current_results(
         &self,
-    ) -> &dyn soland_storage::CapabilityGrantCurrentResultStore {
+    ) -> &dyn coland_storage::CapabilityGrantCurrentResultStore {
         self.inner.capability_grant_current_results()
     }
 
-    fn invite_current_results(&self) -> &dyn soland_storage::InviteCurrentResultStore {
+    fn invite_current_results(&self) -> &dyn coland_storage::InviteCurrentResultStore {
         self.inner.invite_current_results()
     }
-    fn publication_evidence(&self) -> &dyn soland_storage::PublicationEvidenceStore {
+    fn publication_evidence(&self) -> &dyn coland_storage::PublicationEvidenceStore {
         self.inner.publication_evidence()
     }
 }
 
-impl soland_storage::MlsAgentStoreRegistry for FaultInjectingStore {
-    fn mls_key_packages(&self) -> &dyn soland_storage::MlsKeyPackageStore {
+impl coland_storage::MlsAgentStoreRegistry for FaultInjectingStore {
+    fn mls_key_packages(&self) -> &dyn coland_storage::MlsKeyPackageStore {
         self.inner.mls_key_packages()
     }
-    fn mls_groups(&self) -> &dyn soland_storage::MlsGroupCurrentStore {
+    fn mls_groups(&self) -> &dyn coland_storage::MlsGroupCurrentStore {
         self.inner.mls_groups()
     }
-    fn agent_participation(&self) -> &dyn soland_storage::AgentParticipationStore {
+    fn agent_participation(&self) -> &dyn coland_storage::AgentParticipationStore {
         self.inner.agent_participation()
     }
-    fn agents(&self) -> &dyn soland_storage::AgentStore {
+    fn agents(&self) -> &dyn coland_storage::AgentStore {
         &self.agents
     }
-    fn agent_membership_cascades(&self) -> &dyn soland_storage::AgentMembershipCascadeStore {
+    fn agent_membership_cascades(&self) -> &dyn coland_storage::AgentMembershipCascadeStore {
         self.inner.agent_membership_cascades()
     }
-    fn agent_draft_pending_intents(&self) -> &dyn soland_storage::AgentDraftPendingIntentStore {
+    fn agent_draft_pending_intents(&self) -> &dyn coland_storage::AgentDraftPendingIntentStore {
         self.inner.agent_draft_pending_intents()
     }
-    fn sidecars(&self) -> &dyn soland_storage::SidecarStore {
+    fn sidecars(&self) -> &dyn coland_storage::SidecarStore {
         self.inner.sidecars()
     }
-    fn notifications(&self) -> &dyn soland_storage::NotificationStore {
+    fn notifications(&self) -> &dyn coland_storage::NotificationStore {
         self.inner.notifications()
     }
 }
 
-impl soland_storage::SyncStoreRegistry for FaultInjectingStore {
-    fn sync_cursors(&self) -> &dyn soland_storage::SyncCursorStore {
+impl coland_storage::SyncStoreRegistry for FaultInjectingStore {
+    fn sync_cursors(&self) -> &dyn coland_storage::SyncCursorStore {
         self.inner.sync_cursors()
     }
-    fn idempotency_keys(&self) -> &dyn soland_storage::IdempotencyStore {
+    fn idempotency_keys(&self) -> &dyn coland_storage::IdempotencyStore {
         self.inner.idempotency_keys()
     }
-    fn websocket_auth(&self) -> &dyn soland_storage::WebsocketAuthStore {
+    fn websocket_auth(&self) -> &dyn coland_storage::WebsocketAuthStore {
         self.inner.websocket_auth()
     }
-    fn account_status_replicas(&self) -> &dyn soland_storage::AccountStatusReplicaStore {
+    fn account_status_replicas(&self) -> &dyn coland_storage::AccountStatusReplicaStore {
         self.inner.account_status_replicas()
     }
 }
 
-impl soland_storage::ResolutionStoreRegistry for FaultInjectingStore {
-    fn principal_resolutions(&self) -> &dyn soland_storage::PrincipalResolutionStore {
+impl coland_storage::ResolutionStoreRegistry for FaultInjectingStore {
+    fn principal_resolutions(&self) -> &dyn coland_storage::PrincipalResolutionStore {
         self.inner.principal_resolutions()
     }
-    fn service_routes(&self) -> &dyn soland_storage::ServiceRouteStore {
+    fn service_routes(&self) -> &dyn coland_storage::ServiceRouteStore {
         self.inner.service_routes()
     }
 }

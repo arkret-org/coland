@@ -20,11 +20,11 @@
 //! Event id, the public RFC 9420 tracker); a member Station keeps none of
 //! them and never reads them.
 
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::OptionalExtension as _;
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::Value;
-use soland_storage::{PersistenceError, PersistenceResult};
 
 /// Every table a member Station projects a replica Realm into.
 const MEMBER_STATION_FAMILIES: &[&str] = &[

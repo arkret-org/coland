@@ -10,7 +10,7 @@ use ed25519_dalek::{Signer as _, SigningKey};
 use super::*;
 
 async fn member_snapshot(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     realm: &arkret_wire::RealmId,
 ) -> serde_json::Value {
     #[derive(diesel::QueryableByName)]
@@ -41,7 +41,7 @@ fn claim_request(
     subject_key: &SigningKey,
     verifier_key: &SigningKey,
     mutate: impl FnOnce(&mut serde_json::Value),
-) -> (EventCommitRequest, soland_storage::InviteClaimProofCommit) {
+) -> (EventCommitRequest, coland_storage::InviteClaimProofCommit) {
     let material:arkret_models_collaboration::governance::membership_invite::InviteThirdPartyCreatePayload=serde_json::from_value(serde_json::to_value(&create.authority_commit.event.payload).unwrap()).unwrap();
     let invite_id = arkret_wire::InviteId::from_event_id(&create.authority_commit.event.event_id);
     let token = material
@@ -103,7 +103,7 @@ fn claim_request(
         arkret_wire::EventKind::InviteClaim,
         payload,
     );
-    let proof = soland_storage::InviteClaimProofCommit {
+    let proof = coland_storage::InviteClaimProofCommit {
         event_id: request.authority_commit.event.event_id.clone(),
         event_digest: request.event.canonical_digest.clone(),
         committed_at: request.authority_commit.commit.committed_at,
@@ -122,9 +122,9 @@ fn claim_request(
 }
 fn claim_batch(
     request: EventCommitRequest,
-    proof: Option<soland_storage::InviteClaimProofCommit>,
-) -> soland_storage::EventBatchCommitRequest {
-    soland_storage::EventBatchCommitRequest {
+    proof: Option<coland_storage::InviteClaimProofCommit>,
+) -> coland_storage::EventBatchCommitRequest {
+    coland_storage::EventBatchCommitRequest {
         events: vec![request],
         invite_claim_proof: proof,
         event_approvals: None,
@@ -145,7 +145,7 @@ async fn native_subject_claim_binds_prepared_history_to_the_exact_commit_time() 
         PrincipalInceptionInput, PrincipalRotationInput, prepare_principal_inception,
         prepare_principal_rotation,
     };
-    use soland_storage::DeliveryPolicyStoreRegistry as _;
+    use coland_storage::DeliveryPolicyStoreRegistry as _;
 
     let database = TestDatabase::lease().await;
     let pool = database.pool();
@@ -215,7 +215,7 @@ async fn native_subject_claim_binds_prepared_history_to_the_exact_commit_time() 
     )
     .unwrap();
     let selected =
-        soland_services::identity::select_did_webvh_state_at(&did, &history, proof.committed_at)
+        coland_services::identity::select_did_webvh_state_at(&did, &history, proof.committed_at)
             .unwrap();
     proof.subject_native_control = Some(
         native_identity_control_key_from_verified_selection(
@@ -285,14 +285,14 @@ async fn native_subject_claim_binds_prepared_history_to_the_exact_commit_time() 
         state: &inception.log_entry["state"],
     })
     .unwrap();
-    let persistence = soland_storage_postgres::PgPersistenceStore::new(pool.clone());
+    let persistence = coland_storage_postgres::PgPersistenceStore::new(pool.clone());
     for (index, entry) in [inception.log_entry, rotation.log_entry]
         .into_iter()
         .enumerate()
     {
         persistence
             .webvh()
-            .append_log_event(soland_storage::WebvhLogRecord {
+            .append_log_event(coland_storage::WebvhLogRecord {
                 event_digest: arkret_canonical::canonical_sha256(&entry).unwrap(),
                 did: did.to_string(),
                 seq: index as u64 + 1,
@@ -390,7 +390,7 @@ async fn prepared_claim_racing_verifier_withdrawal_preserves_the_accepting_cut()
     };
     assert_eq!(
         loser.conflict_code(),
-        Some(soland_storage::ConflictCode::TemporarilyUnavailable)
+        Some(coland_storage::ConflictCode::TemporarilyUnavailable)
     );
     if claimed.is_ok() {
         assert_eq!(

@@ -1,13 +1,13 @@
-//! Soland adapters for the SDK-owned did:webvh verifier.
+//! Coland adapters for the SDK-owned did:webvh verifier.
 //!
 //! Cryptographic construction and verification live in `arkret-identity`.
-//! This module only preserves Soland's HTTP error mapping and the small
+//! This module only preserves Coland's HTTP error mapping and the small
 //! `WebvhLogEntry` wrapper used by routing code.
 
+use coland_http::error::{AppError, ErrorCode};
 use ed25519_dalek::VerifyingKey;
 use salvo::http::StatusCode;
 use serde_json::Value;
-use soland_http::error::{AppError, ErrorCode};
 
 #[derive(Clone, Debug)]
 pub struct WebvhLogEntry {
@@ -404,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn soland_adapter_accepts_standard_did_webvh_witness_documents() {
+    fn coland_adapter_accepts_standard_did_webvh_witness_documents() {
         let fixture: Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/did-webvh-witness-official.json"
         ))
@@ -426,7 +426,7 @@ mod tests {
             serde_json::to_vec(&fixture["did_witness_json"]).expect("witness file serializes");
 
         let verified = verify_log_and_witness_bytes(&did, did_jsonl.as_bytes(), &did_witness_json)
-            .expect("Soland must consume the SDK verifier for standard witness documents");
+            .expect("Coland must consume the SDK verifier for standard witness documents");
 
         assert_eq!(verified.log.entries.len(), 1);
         assert_eq!(verified.witness_sets[0].threshold, 1);

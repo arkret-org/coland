@@ -138,9 +138,9 @@ pub(in crate::routing) fn submit_applet_revoke_event_submission<'a>(
 }
 
 /// Map a guarded unit failure onto the registered top-level wire codes.
-fn guarded_unit_error(error: soland_services::ServiceError) -> SubmitOneError {
-    use soland_services::ServiceError;
-    use soland_storage::ConflictCode;
+fn guarded_unit_error(error: coland_services::ServiceError) -> SubmitOneError {
+    use coland_services::ServiceError;
+    use coland_storage::ConflictCode;
     let message = error.to_string();
     let (status, code) = match &error {
         ServiceError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),

@@ -262,7 +262,7 @@ pub async fn account_snapshot_material(
     pool: &PgPool,
     realm_id: &RealmId,
     account: &AccountId,
-) -> PersistenceResult<Option<soland_storage::RealmStateSnapshotMaterial>> {
+) -> PersistenceResult<Option<coland_storage::RealmStateSnapshotMaterial>> {
     let mut conn = pg_conn(pool).await?;
     conn.transaction::<_, PgTransactionError, _>(async move |conn| {
         sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -350,7 +350,7 @@ pub(crate) async fn account_continuation_heads_covered(
 pub(crate) async fn continuation_heads_covered_in_material(
     conn: &mut AsyncPgConnection,
     realm_id: &RealmId,
-    material: &soland_storage::RealmStateSnapshotMaterial,
+    material: &coland_storage::RealmStateSnapshotMaterial,
     minimum_heads: &[arkret_wire::CommitStreamHead],
 ) -> PersistenceResult<bool> {
     for required in minimum_heads {
@@ -425,7 +425,7 @@ pub async fn issue_account_snapshot(
     realm_id: &RealmId,
     account: &AccountId,
     issuer: &arkret_wire::DidCoreId,
-    sign: soland_storage::RealmStateSnapshotSigner<'_>,
+    sign: coland_storage::RealmStateSnapshotSigner<'_>,
 ) -> PersistenceResult<Option<arkret_wire::RealmStateSnapshot>> {
     let mut conn =
         crate::issued_realm_snapshots::SnapshotIssuanceConnection::acquire(pool, realm_id).await?;
@@ -474,13 +474,13 @@ pub async fn issue_account_snapshot(
                 });
             }
             let snapshot = sign(&material)?;
-            if !soland_storage::signed_snapshot_matches_material(&snapshot, &material) {
+            if !coland_storage::signed_snapshot_matches_material(&snapshot, &material) {
                 return Err(PersistenceError::Internal(
                     "snapshot signer changed the proved disclosure material".to_owned(),
                 )
                 .into());
             }
-            soland_storage::enforce_inline_realm_state_snapshot_capacity(&snapshot)?;
+            coland_storage::enforce_inline_realm_state_snapshot_capacity(&snapshot)?;
             let issued = crate::issued_realm_snapshots::issue_head_in_connection(
                 conn, account, &material, snapshot,
             )
@@ -652,7 +652,7 @@ pub async fn member_station_bootstrap_material(
     realm_id: &RealmId,
     account: &AccountId,
     membership_commit_id: &arkret_wire::RealmCommitId,
-) -> PersistenceResult<Option<soland_storage::RealmStateSnapshotMaterial>> {
+) -> PersistenceResult<Option<coland_storage::RealmStateSnapshotMaterial>> {
     let mut conn = pg_conn(pool).await?;
     conn.transaction::<_, PgTransactionError, _>(async move |conn| {
         sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -698,7 +698,7 @@ pub async fn member_station_bootstrap_material(
 /// A bootstrap prefix anchors only its exact stream; other readable streams
 /// retain their independent positions and history floors.
 fn anchor_bootstrap_join(
-    material: &mut soland_storage::RealmStateSnapshotMaterial,
+    material: &mut coland_storage::RealmStateSnapshotMaterial,
     stream: &CommitStreamRef,
     commit_id: &arkret_wire::RealmCommitId,
     position: u64,
@@ -743,7 +743,7 @@ pub(crate) async fn account_snapshot_material_in_connection(
     conn: &mut AsyncPgConnection,
     realm_id: &RealmId,
     account: &AccountId,
-) -> PersistenceResult<Option<soland_storage::RealmStateSnapshotMaterial>> {
+) -> PersistenceResult<Option<coland_storage::RealmStateSnapshotMaterial>> {
     let Some(material) =
         crate::authority_commit::realm_state_snapshot_material_in_connection(conn, realm_id)
             .await?
@@ -771,7 +771,7 @@ async fn disclosure_facts_in_connection(
     conn: &mut AsyncPgConnection,
     realm_id: &RealmId,
     account: &AccountId,
-    material: &soland_storage::RealmStateSnapshotMaterial,
+    material: &coland_storage::RealmStateSnapshotMaterial,
 ) -> PersistenceResult<DisclosureFacts> {
     let undisclosed_family_row = sql_query(
         "SELECT (EXISTS(SELECT 1 FROM realm_link_current_results WHERE realm_id=$1) \
@@ -1216,10 +1216,10 @@ async fn call_creation_fact(
 /// it whole. Invisible families are omitted, and content rows respect the
 /// Account's independent readable floor on each disclosed stream.
 pub(crate) fn disclose_to_account(
-    mut material: soland_storage::RealmStateSnapshotMaterial,
+    mut material: coland_storage::RealmStateSnapshotMaterial,
     account: &AccountId,
     facts: &DisclosureFacts,
-) -> PersistenceResult<soland_storage::RealmStateSnapshotMaterial> {
+) -> PersistenceResult<coland_storage::RealmStateSnapshotMaterial> {
     if facts.undisclosed_family_row {
         return Err(rejected(
             "a current family outside the disclosure subset has a row",
@@ -2188,7 +2188,7 @@ mod tests {
     /// The founder's cut after bootstrap, a default Strand and one message.
     fn fixture() -> (
         AccountId,
-        soland_storage::RealmStateSnapshotMaterial,
+        coland_storage::RealmStateSnapshotMaterial,
         DisclosureFacts,
     ) {
         let founder = account("alice");
@@ -2244,7 +2244,7 @@ mod tests {
         let realm_stream = CommitStreamRef::Realm {
             realm_id: realm_id(),
         };
-        let material = soland_storage::RealmStateSnapshotMaterial {
+        let material = coland_storage::RealmStateSnapshotMaterial {
             realm_id: realm_id(),
             governance_generation: 0,
             visible_stream_heads: vec![CommitStreamHead {
@@ -2293,7 +2293,7 @@ mod tests {
     /// `since_join` floor is his accepting Commit.
     fn joined_fixture() -> (
         AccountId,
-        soland_storage::RealmStateSnapshotMaterial,
+        coland_storage::RealmStateSnapshotMaterial,
         DisclosureFacts,
     ) {
         let (_, mut material, _) = fixture();
@@ -2982,7 +2982,7 @@ mod tests {
 
     fn circle_fixture() -> (
         AccountId,
-        soland_storage::RealmStateSnapshotMaterial,
+        coland_storage::RealmStateSnapshotMaterial,
         DisclosureFacts,
     ) {
         let (caller, mut material, mut facts) = fixture();

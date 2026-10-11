@@ -1,4 +1,4 @@
-use soland_services::identity::RecoverySessionState as RecoverySessionServiceState;
+use coland_services::identity::RecoverySessionState as RecoverySessionServiceState;
 
 use super::*;
 
@@ -1050,7 +1050,7 @@ pub(super) async fn recovery_session_create(
             AppError::conflict("PCR Realm has no current governance authority")
                 .with_internal_reason("device_reanchor_frontier_mismatch")
         })?;
-    let authority_context = soland_storage::RecoveryAuthorityContext {
+    let authority_context = coland_storage::RecoveryAuthorityContext {
         realm_id: realm_id.clone(),
         authority_generation: current_authority.generation,
         authority_ref: current_authority.authority_ref,
@@ -1092,7 +1092,7 @@ pub(super) async fn recovery_session_create(
         .create_session(record.clone())
         .await
     {
-        if error.conflict_code() == Some(soland_storage::ConflictCode::RecoverySessionAlreadyExists)
+        if error.conflict_code() == Some(coland_storage::ConflictCode::RecoverySessionAlreadyExists)
         {
             if let Some(existing) = state
                 .recovery_sessions()

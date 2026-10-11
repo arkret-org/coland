@@ -1,10 +1,10 @@
 //! Production admin query projections (D14).
 //!
 //! Frozen wire contract for the operator-facing read endpoints served by a
-//! Station under `/_soland/admin/{actors,audit,capabilities,devices}`
+//! Station under `/_coland/admin/{actors,audit,capabilities,devices}`
 //! (deployment-local `/admin/*` namespace, no `/_arkret/` protocol prefix).
 //! These replace the dev-only `admin/{resource}` snapshot collection for the
-//! four resources sodmin manages.
+//! four resources codmin manages.
 //!
 //! Contract rules (D14-001):
 //!

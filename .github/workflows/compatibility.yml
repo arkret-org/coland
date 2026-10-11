@@ -100,9 +100,9 @@ jobs:
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
       - uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository_owner }}/soland
-          path: soland
-          ref: ${{ steps.manifest.outputs.soland }}
+          repository: ${{ github.repository_owner }}/coland
+          path: coland
+          ref: ${{ steps.manifest.outputs.coland }}
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
       - uses: actions/checkout@v4
         with:
@@ -149,7 +149,7 @@ jobs:
         with:
           workspaces: |
             arkret-rust-sdk
-            soland
+            coland
             coauth
             garth
             inkson
@@ -184,10 +184,10 @@ jobs:
           npm ci
           npx playwright install --with-deps chromium
 
-      - name: Build exact Soland candidate image
+      - name: Build exact Coland candidate image
         working-directory: cotest
         shell: pwsh
-        run: ./scripts/build-soland-image.ps1 -ImageTag cotest-soland:compatibility
+        run: ./scripts/build-coland-image.ps1 -ImageTag cotest-coland:compatibility
 
       - name: Prepare Linux joint prerequisites
         id: joint_prerequisites

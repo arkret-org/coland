@@ -1,5 +1,5 @@
 [package]
-name = "soland-storage"
+name = "coland-storage"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "Persistence records and storage ports for Soland."
+description = "Persistence records and storage ports for Coland."
 
 [features]
 default = []
@@ -32,7 +32,7 @@ chrono = { workspace = true, features = ["serde"] }
 chrono-tz = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-soland-domain = { workspace = true }
+coland-domain = { workspace = true }
 subtle = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }

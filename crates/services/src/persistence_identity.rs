@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use coland_storage::*;
 use serde_json::Value;
-use soland_storage::*;
 
 use crate::identity::*;
 
@@ -54,7 +54,7 @@ impl crate::identity::AccountLookupPort for PersistenceAccountLookup {
         &self,
         command: crate::identity::RegisterAccountCommand,
     ) -> crate::ServiceResult<crate::identity::AccountIdentity> {
-        let account = soland_storage::AccountRecord {
+        let account = coland_storage::AccountRecord {
             pk: AccountPk(0),
             principal_id: command.account_id.principal_id.clone(),
             station_id: command.account_id.station_id.clone(),
@@ -208,7 +208,7 @@ impl crate::identity::AccountLookupPort for PersistenceAccountLookup {
 }
 
 fn application_account_profile(
-    account: soland_storage::AccountRecord,
+    account: coland_storage::AccountRecord,
 ) -> crate::identity::AccountProfileState {
     crate::identity::AccountProfileState {
         pk: account.pk,
@@ -227,8 +227,8 @@ fn application_account_profile(
 
 fn persistence_account_profile(
     account: crate::identity::AccountProfileState,
-) -> soland_storage::AccountRecord {
-    soland_storage::AccountRecord {
+) -> coland_storage::AccountRecord {
+    coland_storage::AccountRecord {
         pk: account.pk,
         principal_id: account.principal_id,
         station_id: account.account_id.station_id,
@@ -334,7 +334,7 @@ impl crate::identity::AccountDataPort for PersistenceAccountData {
             .0
             .account_data()
             .compare_and_set(
-                &soland_storage::AccountDataRecord {
+                &coland_storage::AccountDataRecord {
                     actor: entry.actor_id,
                     account_data_key: entry.account_data_key,
                     revision: entry.revision,
@@ -346,10 +346,10 @@ impl crate::identity::AccountDataPort for PersistenceAccountData {
             )
             .await?;
         Ok(match outcome {
-            soland_storage::AccountDataCasResult::Applied(record) => {
+            coland_storage::AccountDataCasResult::Applied(record) => {
                 crate::identity::AccountDataCasOutcome::Applied(application_account_data(record))
             }
-            soland_storage::AccountDataCasResult::Conflict(record) => {
+            coland_storage::AccountDataCasResult::Conflict(record) => {
                 crate::identity::AccountDataCasOutcome::Conflict(
                     record.map(application_account_data),
                 )
@@ -359,7 +359,7 @@ impl crate::identity::AccountDataPort for PersistenceAccountData {
 }
 
 fn application_account_data(
-    record: soland_storage::AccountDataRecord,
+    record: coland_storage::AccountDataRecord,
 ) -> crate::identity::AccountDataState {
     crate::identity::AccountDataState {
         actor_id: record.actor,
@@ -463,7 +463,7 @@ impl crate::identity::InviteReceivePolicyPort for PersistenceInviteReceivePolici
 impl crate::identity::DeviceKeyPort for PersistenceDeviceKeys {
     async fn save_bundle(
         &self,
-        authorization: &soland_storage::DeviceRevocationGateSelector,
+        authorization: &coland_storage::DeviceRevocationGateSelector,
         payload: Value,
     ) -> crate::ServiceResult<()> {
         self.0.device_keys().put(authorization, payload).await?;
@@ -479,7 +479,7 @@ impl crate::identity::DeviceKeyPort for PersistenceDeviceKeys {
 impl crate::identity::OneTimeKeyPort for PersistenceOneTimeKeys {
     async fn save_keys(
         &self,
-        authorization: &soland_storage::DeviceRevocationGateSelector,
+        authorization: &coland_storage::DeviceRevocationGateSelector,
         keys: Vec<Value>,
     ) -> crate::ServiceResult<()> {
         self.0.one_time_keys().put(authorization, keys).await?;
@@ -539,7 +539,7 @@ impl crate::identity::DeviceDirectoryPort for PersistenceDeviceDirectory {
     ) -> crate::ServiceResult<()> {
         self.0
             .devices()
-            .put_metadata(&soland_storage::DeviceInventoryMetadata {
+            .put_metadata(&coland_storage::DeviceInventoryMetadata {
                 actor: command.actor_id,
                 device_id: command.device_id,
                 display_name: command.display_name,
@@ -600,7 +600,7 @@ impl crate::identity::DeviceDirectoryPort for PersistenceDeviceDirectory {
 }
 
 fn application_device_identity(
-    device: soland_storage::DeviceInventoryRecord,
+    device: coland_storage::DeviceInventoryRecord,
 ) -> crate::identity::DeviceIdentity {
     crate::identity::DeviceIdentity {
         actor_id: device.actor,
@@ -616,8 +616,8 @@ fn application_device_identity(
 
 fn persistence_device_identity(
     device: crate::identity::DeviceIdentity,
-) -> soland_storage::DeviceInventoryRecord {
-    soland_storage::DeviceInventoryRecord {
+) -> coland_storage::DeviceInventoryRecord {
+    coland_storage::DeviceInventoryRecord {
         actor: device.actor_id,
         device_id: device.device_id,
         display_name: device.display_name,
@@ -651,7 +651,7 @@ impl crate::identity::AgentPairingPort for PersistenceAgentPairing {
     async fn pairing_receipt(
         &self,
         event_id: &str,
-    ) -> crate::ServiceResult<Option<soland_storage::AgentPairingReceipt>> {
+    ) -> crate::ServiceResult<Option<coland_storage::AgentPairingReceipt>> {
         Ok(self.0.agents().pairing_receipt(event_id).await?)
     }
     async fn pending_pairings_after(
@@ -722,7 +722,7 @@ impl crate::identity::AgentPairingPort for PersistenceAgentPairing {
         &self,
         command: &crate::identity::StoreAgentRuntimeApprovalCommand,
     ) -> crate::ServiceResult<Option<crate::identity::AgentPairingState>> {
-        let write = soland_storage::AgentRuntimeApprovalWrite {
+        let write = coland_storage::AgentRuntimeApprovalWrite {
             agent_id: command.agent_id.clone(),
             pairing_request_id: command.pairing_request_id.clone(),
             approval_request_id: command.approval_request_id.clone(),
@@ -748,7 +748,7 @@ impl crate::identity::AgentPairingPort for PersistenceAgentPairing {
         &self,
         command: &crate::identity::ActivateAgentRuntimeCommand,
     ) -> crate::ServiceResult<bool> {
-        let activation = soland_storage::AgentRuntimeActivation {
+        let activation = coland_storage::AgentRuntimeActivation {
             agent_id: command.agent_id.clone(),
             approval_request_id: command.approval_request_id.clone(),
             runtime_key_binding_digest: command.runtime_key_binding_digest.clone(),
@@ -776,7 +776,7 @@ impl crate::identity::AgentPairingPort for PersistenceAgentPairing {
         &self,
         command: &crate::identity::RecordAgentPairingCommitIntentCommand,
     ) -> crate::ServiceResult<Option<crate::identity::AgentPairingState>> {
-        let intent = soland_storage::AgentPairingCommitIntent {
+        let intent = coland_storage::AgentPairingCommitIntent {
             agent_id: command.agent_id.clone(),
             approval_request_id: command.approval_request_id.clone(),
             runtime_key_binding_digest: command.runtime_key_binding_digest.clone(),
@@ -818,7 +818,7 @@ impl crate::identity::AgentPairingPort for PersistenceAgentPairing {
 }
 
 fn application_agent_pairing(
-    record: soland_storage::AgentPrincipalRecord,
+    record: coland_storage::AgentPrincipalRecord,
 ) -> crate::identity::AgentPairingState {
     crate::identity::AgentPairingState {
         id: record.id,
@@ -862,8 +862,8 @@ fn application_agent_pairing(
 
 fn persistence_agent_pairing(
     record: crate::identity::AgentPairingState,
-) -> soland_storage::AgentPrincipalRecord {
-    soland_storage::AgentPrincipalRecord {
+) -> coland_storage::AgentPrincipalRecord {
+    coland_storage::AgentPrincipalRecord {
         id: record.id,
         controller_principal_id: record.controller_principal_id,
         principal_control_realm_id: record.principal_control_realm_id,
@@ -994,7 +994,7 @@ impl crate::identity::KeyBackupPort for PersistenceKeyBackups {
         &self,
         account_id: &arkret_wire::AccountId,
         query: &crate::identity::KeyBackupListQuery,
-    ) -> crate::ServiceResult<soland_storage::ConfirmedKeyBackupListPage> {
+    ) -> crate::ServiceResult<coland_storage::ConfirmedKeyBackupListPage> {
         Ok(self
             .0
             .key_backups()
@@ -1008,7 +1008,7 @@ impl crate::identity::KeyBackupPort for PersistenceKeyBackups {
         device_id: &arkret_wire::DeviceId,
         now: chrono::DateTime<Utc>,
         query: &crate::identity::KeyBackupListQuery,
-    ) -> crate::ServiceResult<soland_storage::ConfirmedKeyBackupListPage> {
+    ) -> crate::ServiceResult<coland_storage::ConfirmedKeyBackupListPage> {
         Ok(self
             .0
             .key_backups()
@@ -1031,8 +1031,8 @@ impl crate::identity::KeyBackupPort for PersistenceKeyBackups {
 
     async fn commit_active_series_pointer(
         &self,
-        write: soland_storage::KeyBackupActiveSeriesCommitWrite,
-    ) -> crate::ServiceResult<soland_storage::KeyBackupActiveSeriesCommitOutcome> {
+        write: coland_storage::KeyBackupActiveSeriesCommitWrite,
+    ) -> crate::ServiceResult<coland_storage::KeyBackupActiveSeriesCommitOutcome> {
         Ok(self
             .0
             .key_backups()
@@ -1089,7 +1089,7 @@ impl crate::identity::KeyBackupPort for PersistenceKeyBackups {
     }
     async fn consume_unlock(
         &self,
-        command: soland_storage::KeyBackupUnlockCommand<'_>,
+        command: coland_storage::KeyBackupUnlockCommand<'_>,
     ) -> crate::ServiceResult<Value> {
         Ok(self.0.key_backups().consume_unlock(command).await?)
     }
@@ -1106,8 +1106,8 @@ impl crate::identity::KeyBackupPort for PersistenceKeyBackups {
 
     async fn list_page(
         &self,
-        query: &soland_storage::KeyBackupListQuery,
-    ) -> crate::ServiceResult<soland_storage::KeyBackupListPage> {
+        query: &coland_storage::KeyBackupListQuery,
+    ) -> crate::ServiceResult<coland_storage::KeyBackupListPage> {
         Ok(self.0.key_backups().list_page(query).await?)
     }
 
@@ -1126,9 +1126,9 @@ impl crate::identity::KeyBackupPort for PersistenceKeyBackups {
 
     async fn issue_delete_challenge(
         &self,
-        record: soland_storage::KeyBackupDeleteChallengeRecord,
+        record: coland_storage::KeyBackupDeleteChallengeRecord,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> crate::ServiceResult<soland_storage::KeyBackupDeleteChallengeRecord> {
+    ) -> crate::ServiceResult<coland_storage::KeyBackupDeleteChallengeRecord> {
         Ok(self
             .0
             .key_backups()
@@ -1139,13 +1139,13 @@ impl crate::identity::KeyBackupPort for PersistenceKeyBackups {
     async fn delete_challenge(
         &self,
         challenge_id: &str,
-    ) -> crate::ServiceResult<Option<soland_storage::KeyBackupDeleteChallengeRecord>> {
+    ) -> crate::ServiceResult<Option<coland_storage::KeyBackupDeleteChallengeRecord>> {
         Ok(self.0.key_backups().delete_challenge(challenge_id).await?)
     }
 
     async fn consume_delete_challenge(
         &self,
-        gate: &soland_storage::KeyBackupDeleteGate,
+        gate: &coland_storage::KeyBackupDeleteGate,
         challenge_id: &str,
         backup: Value,
         recovery_session_id: Option<&str>,
@@ -1264,7 +1264,7 @@ impl PersistenceSessions {
 }
 
 fn application_session_identity(
-    session: soland_storage::SessionRecord,
+    session: coland_storage::SessionRecord,
 ) -> crate::ServiceResult<crate::identity::SessionIdentityState> {
     // Local bearers are Human device sessions. Agent sessions are accepted
     // only as request-scoped SessionGrants; a legacy empty DeviceId must not
@@ -1292,7 +1292,7 @@ fn application_session_identity(
 
 fn persistence_session_identity(
     session: crate::identity::SessionIdentityState,
-) -> crate::ServiceResult<soland_storage::SessionRecord> {
+) -> crate::ServiceResult<coland_storage::SessionRecord> {
     debug_assert!(
         session.session_grant.is_none(),
         "request-scoped session grants must never be persisted"
@@ -1302,7 +1302,7 @@ fn persistence_session_identity(
             "only Human device sessions may be stored as local bearers".to_owned(),
         ));
     };
-    Ok(soland_storage::SessionRecord {
+    Ok(coland_storage::SessionRecord {
         token_hash: session.token_hash,
         account_pk: session
             .account_pk
@@ -1344,8 +1344,8 @@ impl crate::identity::RecoveryPolicyPort for PersistenceRecoveryPolicies {
 
     async fn commit_publication(
         &self,
-        write: soland_storage::RecoveryPolicyPublicationWrite,
-    ) -> crate::ServiceResult<soland_storage::RecoveryPolicyPublicationOutcome> {
+        write: coland_storage::RecoveryPolicyPublicationWrite,
+    ) -> crate::ServiceResult<coland_storage::RecoveryPolicyPublicationOutcome> {
         Ok(self.0.recovery_policies().commit_publication(write).await?)
     }
 }
@@ -1650,13 +1650,13 @@ impl crate::identity::DidDocumentPort for PersistenceDidDocuments {
                 .commit_service_registration(key, outcome, document, event)
                 .await?
             {
-                soland_storage::ServiceRegistrationCommitOutcome::Created(outcome) => {
+                coland_storage::ServiceRegistrationCommitOutcome::Created(outcome) => {
                     crate::identity::ServiceRegistrationCommitResult::Created(outcome)
                 }
-                soland_storage::ServiceRegistrationCommitOutcome::Existing(outcome) => {
+                coland_storage::ServiceRegistrationCommitOutcome::Existing(outcome) => {
                     crate::identity::ServiceRegistrationCommitResult::Existing(outcome)
                 }
-                soland_storage::ServiceRegistrationCommitOutcome::Conflict => {
+                coland_storage::ServiceRegistrationCommitOutcome::Conflict => {
                     crate::identity::ServiceRegistrationCommitResult::Conflict
                 }
             },
@@ -1676,13 +1676,13 @@ impl crate::identity::DidDocumentPort for PersistenceDidDocuments {
                 .commit_log_operation(expected_current_head, document, event, None)
                 .await?
             {
-                soland_storage::WebvhLogCommitOutcome::Accepted => {
+                coland_storage::WebvhLogCommitOutcome::Accepted => {
                     crate::identity::DidLogCommitResult::Accepted
                 }
-                soland_storage::WebvhLogCommitOutcome::Duplicate => {
+                coland_storage::WebvhLogCommitOutcome::Duplicate => {
                     crate::identity::DidLogCommitResult::Duplicate
                 }
-                soland_storage::WebvhLogCommitOutcome::Conflict => {
+                coland_storage::WebvhLogCommitOutcome::Conflict => {
                     crate::identity::DidLogCommitResult::Conflict
                 }
             },

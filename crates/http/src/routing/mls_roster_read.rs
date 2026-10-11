@@ -5,7 +5,7 @@ use arkret_models_collaboration::mls_roster_authority::{
     MlsRosterAuthorityReadRequestBody,
 };
 use arkret_wire::DidCoreId;
-use soland_services::authority_commit::{
+use coland_services::authority_commit::{
     MlsRosterAuthorityApplicationRead as Read, MlsRosterAuthorityPreflight as Preflight,
 };
 
@@ -38,7 +38,7 @@ fn validate_request(request: &MlsRosterAuthorityReadRequestBody) -> Result<(), A
     })
 }
 
-fn internal_read_error(_: soland_services::ServiceError) -> AppError {
+fn internal_read_error(_: coland_services::ServiceError) -> AppError {
     AppError::internal("MLS roster authority read unavailable")
 }
 
@@ -131,7 +131,7 @@ async fn recheck_self_cut(
     state: &AppState,
     member: &MlsMemberRosterAuthorityReadRequestBody,
     selected: &MlsRosterAuthorityReadRequestBody,
-    authority: &soland_storage::CurrentRealmAuthority,
+    authority: &coland_storage::CurrentRealmAuthority,
 ) -> Result<(), AppError> {
     let cut = state
         .authority_commits()
@@ -139,8 +139,8 @@ async fn recheck_self_cut(
         .await
         .map_err(internal_read_error)?;
     match cut {
-        soland_storage::MlsMemberRosterSelectorRead::NotFound => return Err(not_found()),
-        soland_storage::MlsMemberRosterSelectorRead::Authorized {
+        coland_storage::MlsMemberRosterSelectorRead::NotFound => return Err(not_found()),
+        coland_storage::MlsMemberRosterSelectorRead::Authorized {
             request,
             governance_station_id,
         } if request.as_ref() == selected && governance_station_id == authority.service_id => {}
@@ -193,11 +193,11 @@ pub(super) async fn resolve_self_mls_roster_authority(
         .await
         .map_err(internal_read_error)?
     {
-        soland_storage::MlsMemberRosterSelectorRead::NotFound => return Err(not_found()),
-        soland_storage::MlsMemberRosterSelectorRead::RevisionUnavailable => {
+        coland_storage::MlsMemberRosterSelectorRead::NotFound => return Err(not_found()),
+        coland_storage::MlsMemberRosterSelectorRead::RevisionUnavailable => {
             return Err(unavailable());
         }
-        soland_storage::MlsMemberRosterSelectorRead::Authorized {
+        coland_storage::MlsMemberRosterSelectorRead::Authorized {
             request,
             governance_station_id,
         } => (request, governance_station_id),

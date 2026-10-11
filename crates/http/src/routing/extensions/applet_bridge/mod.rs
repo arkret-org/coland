@@ -1,7 +1,7 @@
 //! Applet package install, bot/ghost provisioning, and portal routing.
 //!
 //! Formal `/_arkret` operations consume SDK-owned Applet types and
-//! caller-authored protocol Events. Soland never mints Applet-managed actor
+//! caller-authored protocol Events. Coland never mints Applet-managed actor
 //! identities and exposes no deployment-local Applet protocol.
 
 mod authority_material;

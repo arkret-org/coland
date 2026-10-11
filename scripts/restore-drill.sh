@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# soland production restore drill.
+# coland production restore drill.
 #
 # Inverse of `backup-drill.sh`. Accepts a tarball produced by that script,
 # restores the database, identity bundle, and keystore.
@@ -17,24 +17,24 @@ if [ ! -f "$TARBALL" ]; then
     exit 2
 fi
 
-DATABASE_URL="${SOLAND_DATABASE_URL:-${DATABASE_URL:-}}"
-BUNDLE_DIR="${SOLAND_SERVICE_IDENTITY_BUNDLE_DIR:-}"
-KEYSTORE_BACKEND="${SOLAND_KEYSTORE_BACKEND:-}"
-WORKDIR="$(mktemp -d -t soland-restore-XXXXXX)"
+DATABASE_URL="${COLAND_DATABASE_URL:-${DATABASE_URL:-}}"
+BUNDLE_DIR="${COLAND_SERVICE_IDENTITY_BUNDLE_DIR:-}"
+KEYSTORE_BACKEND="${COLAND_KEYSTORE_BACKEND:-}"
+WORKDIR="$(mktemp -d -t coland-restore-XXXXXX)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
 if [ -z "$DATABASE_URL" ]; then
-    echo "[restore-drill] FATAL: SOLAND_DATABASE_URL or DATABASE_URL is unset" >&2
+    echo "[restore-drill] FATAL: COLAND_DATABASE_URL or DATABASE_URL is unset" >&2
     exit 2
 fi
 if [ -z "$BUNDLE_DIR" ]; then
-    echo "[restore-drill] FATAL: SOLAND_SERVICE_IDENTITY_BUNDLE_DIR is unset" >&2
+    echo "[restore-drill] FATAL: COLAND_SERVICE_IDENTITY_BUNDLE_DIR is unset" >&2
     exit 2
 fi
 case "$KEYSTORE_BACKEND" in
     platform|encrypted_file) ;;
     *)
-        echo "[restore-drill] FATAL: SOLAND_KEYSTORE_BACKEND must be platform or encrypted_file" >&2
+        echo "[restore-drill] FATAL: COLAND_KEYSTORE_BACKEND must be platform or encrypted_file" >&2
         exit 2
         ;;
 esac
@@ -60,7 +60,7 @@ while IFS=$'\t' read -r name sha; do
     EXPECTED_SHA[$name]="$sha"
 done < <(jq -r '.artifacts | to_entries[] | "\(.key)\t\(.value.sha256)"' "$MANIFEST")
 
-for name in soland-database.dump service-identity-bundle.json keystore.json; do
+for name in coland-database.dump service-identity-bundle.json keystore.json; do
     f="$WORKDIR/$name"
     if [ ! -f "$f" ]; then
         echo "[restore-drill] FATAL: tarball missing artifact '$name'" >&2
@@ -106,14 +106,14 @@ echo "[restore-drill] service_id=$SERVICE_ID identity_bundle_backend_file=$BUNDL
 
 echo "[restore-drill] step 1/3: pg_restore (clean+if-exists)"
 pg_restore --clean --if-exists --no-owner --no-acl \
-    --dbname="$DATABASE_URL" "$WORKDIR/soland-database.dump"
+    --dbname="$DATABASE_URL" "$WORKDIR/coland-database.dump"
 
 echo "[restore-drill] step 2/3: restore SDK identity bundle"
 mkdir -p "$BUNDLE_DIR"
 cp "$BUNDLE_PATH" "$BUNDLE_DIR/$BUNDLE_BACKEND_FILE"
 
-echo "[restore-drill] step 3/3: keystore restore via soland-keystore-snapshot --import-only"
-cargo run --quiet --bin soland-keystore-snapshot -- \
+echo "[restore-drill] step 3/3: keystore restore via coland-keystore-snapshot --import-only"
+cargo run --quiet --bin coland-keystore-snapshot -- \
     --import-only \
     --identity-bundle "$BUNDLE_PATH" \
     --input "$WORKDIR/keystore.json"

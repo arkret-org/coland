@@ -9,13 +9,13 @@
 //! complete accepted operation or none of it, and a rolled-back commit leaves
 //! no projection a reader could mistake for accepted state.
 
-use diesel::sql_types::{Array, BigInt, Binary, Bool, Jsonb, Nullable, Text, Timestamptz};
-use diesel::{OptionalExtension, sql_query};
-use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
-use soland_storage::{
+use coland_storage::{
     AuthorityCommitWriteOutcome, EventBatchCommitRequest, EventCommitOutcome, EventCommitRequest,
     EventCommitUnitOfWork, PersistenceError, PersistenceResult, ids,
 };
+use diesel::sql_types::{Array, BigInt, Binary, Bool, Jsonb, Nullable, Text, Timestamptz};
+use diesel::{OptionalExtension, sql_query};
+use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 
 use crate::agent_draft_pending_intents::{
     AgentDraftConsumptionLock, lock_agent_draft_consumption_source, mark_agent_draft_consumed,
@@ -190,7 +190,7 @@ mod snapshot_capacity_tests {
         let error = enforce_inline_snapshot_capacity(&snapshot(exact_payload + 1)).unwrap_err();
         assert_eq!(
             error.conflict_code(),
-            Some(soland_storage::ConflictCode::SnapshotCapacityExceeded)
+            Some(coland_storage::ConflictCode::SnapshotCapacityExceeded)
         );
     }
 }
@@ -448,7 +448,7 @@ async fn lock_authorities_for_parent_membership(
     conn: &mut AsyncPgConnection,
     target: &arkret_wire::RealmId,
     sources: &[arkret_wire::RealmId],
-    expected_target: &soland_storage::CurrentRealmAuthority,
+    expected_target: &coland_storage::CurrentRealmAuthority,
 ) -> PersistenceResult<()> {
     let mut realms = sources.to_vec();
     realms.push(target.clone());
@@ -1090,14 +1090,14 @@ pub(crate) async fn commit_parent_membership_current_results(
                 .bind::<Text,_>(event.realm_id.as_str()).get_result::<ParentMembershipPolicyRow>(&mut *conn)
                 .await.optional().map_err(PersistenceError::database)?;
             if let Some(policy) = payload_value.get("join_policy") {
-                soland_storage::validate_join_policy_payload(policy)
+                coland_storage::validate_join_policy_payload(policy)
                     .map_err(|error| PersistenceError::SchemaViolation(error.to_owned()))?;
             }
             if join_rule
                 .as_ref()
                 .and_then(|row| row.value.as_str())
-                .is_some_and(soland_storage::join_rule_requires_an_automatic_gate)
-                && !soland_storage::join_policy_declares_an_automatic_gate(
+                .is_some_and(coland_storage::join_rule_requires_an_automatic_gate)
+                && !coland_storage::join_policy_declares_an_automatic_gate(
                     payload_value.get("join_policy"),
                 )
             {
@@ -1217,7 +1217,7 @@ pub(crate) async fn commit_parent_membership_current_results(
 async fn ensure_applet_admission_in_transaction(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
-    applet_record: Option<&soland_storage::AppletRecordCommit>,
+    applet_record: Option<&coland_storage::AppletRecordCommit>,
 ) -> PersistenceResult<()> {
     if closed_applet_install_contains_event(
         event.event_id.as_str(),
@@ -1250,7 +1250,7 @@ async fn ensure_applet_admission_in_transaction(
     let Some(applet_id) = &event.applet_id else {
         return Ok(());
     };
-    let scope_key = soland_storage::applet_effective_scope_key(&event.scope_ref)?;
+    let scope_key = coland_storage::applet_effective_scope_key(&event.scope_ref)?;
     let install = sql_query(
         "SELECT record FROM applet_installations \
          WHERE applet_id = $1 AND effective_scope_key = $2 FOR UPDATE",
@@ -1307,7 +1307,7 @@ async fn ensure_applet_admission_in_transaction(
 fn closed_applet_install_contains_event(
     event_id: &str,
     event_applet_id: Option<&str>,
-    mutation: Option<&soland_storage::AppletRecordCommit>,
+    mutation: Option<&coland_storage::AppletRecordCommit>,
 ) -> bool {
     let Some(mutation) = mutation.filter(|mutation| mutation.expected_record.is_none()) else {
         return false;
@@ -1352,7 +1352,7 @@ fn contact_event_ref(
 pub(crate) async fn commit_contact_projection(
     conn: &mut AsyncPgConnection,
     committed_ref: Option<&arkret_wire::CommittedEventRef>,
-    commit: soland_storage::ContactProjectionCommit,
+    commit: coland_storage::ContactProjectionCommit,
 ) -> PersistenceResult<()> {
     if let Some(intent) = commit.completion_intent.as_ref() {
         let committed_ref = committed_ref.ok_or_else(|| {
@@ -1557,7 +1557,7 @@ enum AccountDataCommitOutcome {
 /// the surrounding Event transaction.
 async fn commit_account_data_cas(
     conn: &mut AsyncPgConnection,
-    cas: soland_storage::AccountDataCasCommit,
+    cas: coland_storage::AccountDataCasCommit,
     source_event_id: Option<&arkret_wire::EventId>,
 ) -> PersistenceResult<AccountDataCommitOutcome> {
     let record = cas.record;
@@ -1569,8 +1569,8 @@ async fn commit_account_data_cas(
     )
     .await?
     {
-        soland_storage::AccountDataCasResult::Applied(_) => Ok(AccountDataCommitOutcome::Applied),
-        soland_storage::AccountDataCasResult::Conflict(_) => {
+        coland_storage::AccountDataCasResult::Applied(_) => Ok(AccountDataCommitOutcome::Applied),
+        coland_storage::AccountDataCasResult::Conflict(_) => {
             let exact_replay = if let Some(event_id) = source_event_id {
                 sql_query(
                     "SELECT EXISTS ( \
@@ -1629,8 +1629,8 @@ struct ActorPrivateLedgerRow {
 /// CAS it sources, all in the caller's transaction.
 pub(crate) async fn admit_actor_private_account_data_in_connection(
     conn: &mut AsyncPgConnection,
-    admission: &soland_storage::ActorPrivateAccountDataAdmission,
-) -> PersistenceResult<soland_storage::ActorPrivateAccountDataOutcome> {
+    admission: &coland_storage::ActorPrivateAccountDataAdmission,
+) -> PersistenceResult<coland_storage::ActorPrivateAccountDataOutcome> {
     let event = &admission.event;
     if event.kind != arkret_wire::EventKind::AccountDataSet
         || admission.cas.record.actor != event.actor_id.to_string()
@@ -1655,7 +1655,7 @@ pub(crate) async fn admit_actor_private_account_data_in_connection(
             .map_err(PersistenceError::database)?
     {
         return if existing.canonical_event_digest == admission.canonical_event_digest {
-            Ok(soland_storage::ActorPrivateAccountDataOutcome::Replayed)
+            Ok(coland_storage::ActorPrivateAccountDataOutcome::Replayed)
         } else {
             Err(conflict(
                 "duplicate_conflict: the actor-private Event identity carries other bytes",
@@ -1713,7 +1713,7 @@ pub(crate) async fn admit_actor_private_account_data_in_connection(
     .await?
     {
         AccountDataCommitOutcome::Applied => {
-            Ok(soland_storage::ActorPrivateAccountDataOutcome::Applied)
+            Ok(coland_storage::ActorPrivateAccountDataOutcome::Applied)
         }
         // A fresh ledger row cannot already be the published source.
         AccountDataCommitOutcome::ExactReplay => Err(PersistenceError::Internal(
@@ -1728,7 +1728,7 @@ pub(crate) async fn admit_actor_private_account_data_in_connection(
 /// holder CAS writes and never consume the source again.
 async fn commit_actor_private_account_data(
     conn: &mut AsyncPgConnection,
-    cas: soland_storage::AccountDataCasCommit,
+    cas: coland_storage::AccountDataCasCommit,
     event: &arkret_wire::Event,
     protocol_time: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<AccountDataCommitOutcome> {
@@ -1900,10 +1900,10 @@ async fn cascade_membership_prestate(
 /// justify it.
 async fn stage_agent_membership_cascade(
     conn: &mut AsyncPgConnection,
-    transition: Option<&soland_storage::AgentMembershipCascadeCommit>,
+    transition: Option<&coland_storage::AgentMembershipCascadeCommit>,
     events: &[EventCommitRequest],
 ) -> PersistenceResult<()> {
-    use soland_storage::{
+    use coland_storage::{
         AgentCleanupRecord, AgentMembershipCascadeCommit, MAX_AGENT_MEMBERSHIP_CASCADE_TRANSITIONS,
     };
 
@@ -1949,7 +1949,7 @@ async fn stage_agent_membership_cascade(
             let submitted_agent_ids = events
                 .iter()
                 .filter(|request| request.event.event_id != controller_transition_event_id.as_str())
-                .map(|request| soland_storage::admitted_cascade_agent_id(&request.event))
+                .map(|request| coland_storage::admitted_cascade_agent_id(&request.event))
                 .collect::<PersistenceResult<std::collections::BTreeSet<_>>>()?;
             let expected_agent_count = expected_agent_ids.len();
             let expected_agent_ids = expected_agent_ids
@@ -2109,7 +2109,7 @@ async fn stage_agent_membership_cascade(
                 .collect::<std::collections::BTreeSet<_>>();
             let actor_ids = events
                 .iter()
-                .map(|request| soland_storage::admitted_cascade_agent_id(&request.event))
+                .map(|request| coland_storage::admitted_cascade_agent_id(&request.event))
                 .collect::<PersistenceResult<std::collections::BTreeSet<_>>>()?;
             let expected_actor_ids = record
                 .expected_agent_ids
@@ -2164,9 +2164,9 @@ async fn stage_agent_membership_cascade(
 /// Consume one moderation franking replay nonce.
 async fn commit_franking_replay_nonce(
     conn: &mut AsyncPgConnection,
-    nonce: &soland_storage::FrankingReplayNonceCommit,
+    nonce: &coland_storage::FrankingReplayNonceCommit,
 ) -> PersistenceResult<()> {
-    let expires_at = soland_storage::franking_replay_nonce_expires_at(nonce.consumed_at)?;
+    let expires_at = coland_storage::franking_replay_nonce_expires_at(nonce.consumed_at)?;
     let scope_lock = format!(
         "moderation_franking_replay_nonces.capacity.v1|{}:{}|{}:{}",
         nonce.realm_id.len(),
@@ -2200,7 +2200,7 @@ async fn commit_franking_replay_nonce(
     .map_err(PersistenceError::database)?
     .count;
     if active
-        >= i64::try_from(soland_storage::LOCAL_FRANKING_REPLAY_NONCE_MAX_ACTIVE_PER_SCOPE)
+        >= i64::try_from(coland_storage::LOCAL_FRANKING_REPLAY_NONCE_MAX_ACTIVE_PER_SCOPE)
             .expect("franking replay ledger per-scope bound fits i64")
     {
         return Err(conflict("duplicate_conflict"));
@@ -2230,11 +2230,11 @@ async fn commit_franking_replay_nonce(
 /// authority anchor it introduces.
 pub(crate) async fn commit_applet_record(
     conn: &mut AsyncPgConnection,
-    mutation: soland_storage::AppletRecordCommit,
+    mutation: coland_storage::AppletRecordCommit,
 ) -> PersistenceResult<()> {
-    soland_storage::validate_applet_installation_record(&mutation.record)?;
+    coland_storage::validate_applet_installation_record(&mutation.record)?;
     if let Some(expected) = mutation.expected_record.as_ref() {
-        soland_storage::validate_applet_installation_record(expected)?;
+        coland_storage::validate_applet_installation_record(expected)?;
     }
     let replacing = mutation.expected_record.is_some();
     sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
@@ -2243,14 +2243,14 @@ pub(crate) async fn commit_applet_record(
         .await
         .map_err(PersistenceError::database)?;
     let effective_scope_key =
-        soland_storage::applet_effective_scope_key_from_record(&mutation.record)?;
+        coland_storage::applet_effective_scope_key_from_record(&mutation.record)?;
     if mutation
         .record
         .get("target_station_id")
         .and_then(serde_json::Value::as_str)
         != Some(mutation.identity.target_station_id.as_str())
-        || soland_storage::applet_id_from_record(&mutation.record)? != mutation.applet_id.as_str()
-        || soland_storage::applet_id_from_record(&mutation.identity.record)?
+        || coland_storage::applet_id_from_record(&mutation.record)? != mutation.applet_id.as_str()
+        || coland_storage::applet_id_from_record(&mutation.identity.record)?
             != mutation.applet_id.as_str()
         || mutation
             .identity
@@ -2299,15 +2299,15 @@ pub(crate) async fn commit_applet_record(
             "duplicate_conflict: Applet identity winner is not the accepted winner",
         ));
     }
-    let canonical_namespaces = soland_storage::applet_namespaces_from_record(&mutation.record)?;
+    let canonical_namespaces = coland_storage::applet_namespaces_from_record(&mutation.record)?;
     if let Some(expected_record) = mutation.expected_record.as_ref()
-        && canonical_namespaces != soland_storage::applet_namespaces_from_record(expected_record)?
+        && canonical_namespaces != coland_storage::applet_namespaces_from_record(expected_record)?
     {
         return Err(PersistenceError::SchemaViolation(
             "Applet package.namespaces are immutable".to_owned(),
         ));
     }
-    let managed_authorities = soland_storage::applet_managed_authorities_from_record(
+    let managed_authorities = coland_storage::applet_managed_authorities_from_record(
         &mutation.identity.record,
         &mutation.record,
     )?;
@@ -2315,7 +2315,7 @@ pub(crate) async fn commit_applet_record(
         .expected_record
         .as_ref()
         .map(|record| {
-            soland_storage::applet_managed_authorities_from_record(
+            coland_storage::applet_managed_authorities_from_record(
                 &mutation.identity.record,
                 record,
             )
@@ -2454,10 +2454,10 @@ pub(crate) async fn commit_applet_record(
 fn commit_one_in_connection<'a>(
     conn: &'a mut AsyncPgConnection,
     request: EventCommitRequest,
-    applet_record: Option<&'a soland_storage::AppletRecordCommit>,
-    realm_organization_proof: Option<&'a soland_storage::RealmOrganizationProofCommit>,
-    invite_claim_proof: Option<&'a soland_storage::InviteClaimProofCommit>,
-    event_approvals: Option<&'a soland_storage::EventApprovalCommit>,
+    applet_record: Option<&'a coland_storage::AppletRecordCommit>,
+    realm_organization_proof: Option<&'a coland_storage::RealmOrganizationProofCommit>,
+    invite_claim_proof: Option<&'a coland_storage::InviteClaimProofCommit>,
+    event_approvals: Option<&'a coland_storage::EventApprovalCommit>,
     outcome: &'a mut EventCommitOutcome,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PgTransactionError>> + Send + 'a>>
 {
@@ -2476,10 +2476,10 @@ fn commit_one_in_connection<'a>(
 async fn commit_one_inner(
     conn: &mut AsyncPgConnection,
     request: EventCommitRequest,
-    applet_record: Option<&soland_storage::AppletRecordCommit>,
-    realm_organization_proof: Option<&soland_storage::RealmOrganizationProofCommit>,
-    invite_claim_proof: Option<&soland_storage::InviteClaimProofCommit>,
-    event_approvals: Option<&soland_storage::EventApprovalCommit>,
+    applet_record: Option<&coland_storage::AppletRecordCommit>,
+    realm_organization_proof: Option<&coland_storage::RealmOrganizationProofCommit>,
+    invite_claim_proof: Option<&coland_storage::InviteClaimProofCommit>,
+    event_approvals: Option<&coland_storage::EventApprovalCommit>,
     outcome: &mut EventCommitOutcome,
 ) -> Result<(), PgTransactionError> {
     if request.event.event_id != request.authority_commit.event.event_id.as_str() {
@@ -2497,7 +2497,7 @@ async fn commit_one_inner(
     if mimi
         && !matches!(
             request.self_producer_guard,
-            Some(soland_storage::SelfProducerCommitGuard::MimiFacade { .. })
+            Some(coland_storage::SelfProducerCommitGuard::MimiFacade { .. })
         )
     {
         return Err(PersistenceError::Conflict(
@@ -2705,10 +2705,10 @@ async fn commit_one_inner(
 fn commit_prepared_event<'a>(
     conn: &'a mut AsyncPgConnection,
     request: EventCommitRequest,
-    applet_record: Option<&'a soland_storage::AppletRecordCommit>,
-    realm_organization_proof: Option<&'a soland_storage::RealmOrganizationProofCommit>,
-    invite_claim_proof: Option<&'a soland_storage::InviteClaimProofCommit>,
-    event_approvals: Option<&'a soland_storage::EventApprovalCommit>,
+    applet_record: Option<&'a coland_storage::AppletRecordCommit>,
+    realm_organization_proof: Option<&'a coland_storage::RealmOrganizationProofCommit>,
+    invite_claim_proof: Option<&'a coland_storage::InviteClaimProofCommit>,
+    event_approvals: Option<&'a coland_storage::EventApprovalCommit>,
     outcome: &'a mut EventCommitOutcome,
     prepared_human: Option<
         arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact,
@@ -2738,10 +2738,10 @@ fn commit_prepared_event<'a>(
 async fn commit_prepared_event_inner(
     conn: &mut AsyncPgConnection,
     request: EventCommitRequest,
-    applet_record: Option<&soland_storage::AppletRecordCommit>,
-    realm_organization_proof: Option<&soland_storage::RealmOrganizationProofCommit>,
-    invite_claim_proof: Option<&soland_storage::InviteClaimProofCommit>,
-    event_approvals: Option<&soland_storage::EventApprovalCommit>,
+    applet_record: Option<&coland_storage::AppletRecordCommit>,
+    realm_organization_proof: Option<&coland_storage::RealmOrganizationProofCommit>,
+    invite_claim_proof: Option<&coland_storage::InviteClaimProofCommit>,
+    event_approvals: Option<&coland_storage::EventApprovalCommit>,
     outcome: &mut EventCommitOutcome,
     prepared_human: Option<
         arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact,
@@ -2756,8 +2756,8 @@ async fn commit_prepared_event_inner(
         if !matches!(
             request.self_producer_guard,
             Some(
-                soland_storage::SelfProducerCommitGuard::HumanDevice(_)
-                    | soland_storage::SelfProducerCommitGuard::HumanDeviceEvidence { .. }
+                coland_storage::SelfProducerCommitGuard::HumanDevice(_)
+                    | coland_storage::SelfProducerCommitGuard::HumanDeviceEvidence { .. }
             )
         ) && request.forwarded_producer_evidence.is_none()
         {
@@ -2942,7 +2942,7 @@ async fn commit_prepared_event_inner(
             crate::agent_producer_evidence::retain_in_connection(conn, event, commit, producer)
                 .await?;
         }
-        if let Some(guard @ soland_storage::SelfProducerCommitGuard::MimiFacade { .. }) =
+        if let Some(guard @ coland_storage::SelfProducerCommitGuard::MimiFacade { .. }) =
             request.self_producer_guard.as_ref()
         {
             crate::mimi_admission::persist_mapping_receipt_in_connection(
@@ -3007,7 +3007,7 @@ async fn commit_prepared_event_inner(
                 .await?
                 .into_iter()
                 .filter(|appended| {
-                    *appended == soland_storage::ProjectionEventAppendOutcome::Inserted
+                    *appended == coland_storage::ProjectionEventAppendOutcome::Inserted
                 })
                 .count();
     }
@@ -3019,7 +3019,7 @@ async fn commit_prepared_event_inner(
     if let Some(record) = request.idempotency.as_ref() {
         if matches!(
             request.self_producer_guard,
-            Some(soland_storage::SelfProducerCommitGuard::MimiFacade { .. })
+            Some(coland_storage::SelfProducerCommitGuard::MimiFacade { .. })
         ) && event.kind == arkret_wire::EventKind::SelfModerationReport
         {
             crate::mimi_admission::record_report_idempotency_in_connection(conn, record).await?;
@@ -3034,9 +3034,9 @@ async fn commit_prepared_event_inner(
 fn commit_event_current_results_in_connection<'a>(
     conn: &'a mut AsyncPgConnection,
     request: &'a EventCommitRequest,
-    realm_organization_proof: Option<&'a soland_storage::RealmOrganizationProofCommit>,
-    invite_claim_proof: Option<&'a soland_storage::InviteClaimProofCommit>,
-    event_approvals: Option<&'a soland_storage::EventApprovalCommit>,
+    realm_organization_proof: Option<&'a coland_storage::RealmOrganizationProofCommit>,
+    invite_claim_proof: Option<&'a coland_storage::InviteClaimProofCommit>,
+    event_approvals: Option<&'a coland_storage::EventApprovalCommit>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PgTransactionError>> + Send + 'a>>
 {
     Box::pin(commit_event_current_results_inner(
@@ -3051,9 +3051,9 @@ fn commit_event_current_results_in_connection<'a>(
 async fn commit_event_current_results_inner(
     conn: &mut AsyncPgConnection,
     request: &EventCommitRequest,
-    realm_organization_proof: Option<&soland_storage::RealmOrganizationProofCommit>,
-    invite_claim_proof: Option<&soland_storage::InviteClaimProofCommit>,
-    event_approvals: Option<&soland_storage::EventApprovalCommit>,
+    realm_organization_proof: Option<&coland_storage::RealmOrganizationProofCommit>,
+    invite_claim_proof: Option<&coland_storage::InviteClaimProofCommit>,
+    event_approvals: Option<&coland_storage::EventApprovalCommit>,
 ) -> Result<(), PgTransactionError> {
     Box::pin(commit_scope_current_results(
         conn,
@@ -3077,8 +3077,8 @@ async fn commit_event_current_results_inner(
 fn commit_scope_current_results<'a>(
     conn: &'a mut AsyncPgConnection,
     request: &'a EventCommitRequest,
-    realm_organization_proof: Option<&'a soland_storage::RealmOrganizationProofCommit>,
-    invite_claim_proof: Option<&'a soland_storage::InviteClaimProofCommit>,
+    realm_organization_proof: Option<&'a coland_storage::RealmOrganizationProofCommit>,
+    invite_claim_proof: Option<&'a coland_storage::InviteClaimProofCommit>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PgTransactionError>> + Send + 'a>>
 {
     Box::pin(commit_scope_current_results_inner(
@@ -3092,8 +3092,8 @@ fn commit_scope_current_results<'a>(
 async fn commit_scope_current_results_inner(
     conn: &mut AsyncPgConnection,
     request: &EventCommitRequest,
-    realm_organization_proof: Option<&soland_storage::RealmOrganizationProofCommit>,
-    invite_claim_proof: Option<&soland_storage::InviteClaimProofCommit>,
+    realm_organization_proof: Option<&coland_storage::RealmOrganizationProofCommit>,
+    invite_claim_proof: Option<&coland_storage::InviteClaimProofCommit>,
 ) -> Result<(), PgTransactionError> {
     let event = &request.authority_commit.event;
     let commit = &request.authority_commit.commit;
@@ -3187,7 +3187,7 @@ async fn commit_scope_current_results_inner(
 fn commit_object_current_results<'a>(
     conn: &'a mut AsyncPgConnection,
     request: &'a EventCommitRequest,
-    event_approvals: Option<&'a soland_storage::EventApprovalCommit>,
+    event_approvals: Option<&'a coland_storage::EventApprovalCommit>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PgTransactionError>> + Send + 'a>>
 {
     Box::pin(commit_object_current_results_inner(
@@ -3200,7 +3200,7 @@ fn commit_object_current_results<'a>(
 async fn commit_object_current_results_inner(
     conn: &mut AsyncPgConnection,
     request: &EventCommitRequest,
-    event_approvals: Option<&soland_storage::EventApprovalCommit>,
+    event_approvals: Option<&coland_storage::EventApprovalCommit>,
 ) -> Result<(), PgTransactionError> {
     let event = &request.authority_commit.event;
     let commit = &request.authority_commit.commit;
@@ -3382,7 +3382,7 @@ async fn commit_batch_in_connection(
     if request.events.is_empty() {
         return Err(PersistenceError::SchemaViolation("empty event batch".to_owned()).into());
     }
-    soland_storage::validate_franking_replay_nonce_commit(
+    coland_storage::validate_franking_replay_nonce_commit(
         &request.events,
         request.franking_replay_nonce.as_ref(),
     )?;
@@ -3495,13 +3495,13 @@ impl EventCommitUnitOfWork for PgEventCommitUnitOfWork {
 
 #[cfg(test)]
 mod agent_draft_consumption_tests {
-    use diesel::sql_types::{Binary, Jsonb, Nullable, Text};
-    use diesel_async::{AsyncConnection, RunQueryDsl};
-    use soland_storage::{
+    use coland_storage::{
         AccountDataRecord, AccountDataStore, AgentDraftPendingIntentCommit,
         AgentDraftPendingIntentRecord, AgentDraftPendingIntentState, AgentDraftPendingIntentStore,
         PersistenceError, SyncCursorStore,
     };
+    use diesel::sql_types::{Binary, Jsonb, Nullable, Text};
+    use diesel_async::{AsyncConnection, RunQueryDsl};
 
     use super::*;
     use crate::agent_draft_pending_intents::commit_agent_draft_pending_intent_in_connection;
@@ -3625,8 +3625,8 @@ mod agent_draft_consumption_tests {
         event: &arkret_wire::Event,
         key: &str,
         encrypted_payload: serde_json::Value,
-    ) -> soland_storage::AccountDataCasCommit {
-        soland_storage::AccountDataCasCommit {
+    ) -> coland_storage::AccountDataCasCommit {
+        coland_storage::AccountDataCasCommit {
             record: AccountDataRecord {
                 actor: event.actor_id.to_string(),
                 account_data_key: key.to_owned(),
@@ -3677,9 +3677,9 @@ mod agent_draft_consumption_tests {
     async fn apply_account_data_in_transaction(
         conn: &mut AsyncPgConnection,
         event: arkret_wire::Event,
-        mutation: soland_storage::AccountDataCasCommit,
-    ) -> Result<soland_storage::ActorPrivateAccountDataOutcome, PersistenceError> {
-        let admission = soland_storage::ActorPrivateAccountDataAdmission {
+        mutation: coland_storage::AccountDataCasCommit,
+    ) -> Result<coland_storage::ActorPrivateAccountDataOutcome, PersistenceError> {
+        let admission = coland_storage::ActorPrivateAccountDataAdmission {
             canonical_event_digest: arkret_canonical::sha256_bytes(
                 &arkret_canonical::canonical_json_bytes(&event).unwrap(),
             )
@@ -3785,7 +3785,7 @@ mod agent_draft_consumption_tests {
             apply_account_data_in_transaction(&mut conn, replay_event, replay_mutation)
                 .await
                 .expect("byte-identical replay returns the original outcome"),
-            soland_storage::ActorPrivateAccountDataOutcome::Replayed
+            coland_storage::ActorPrivateAccountDataOutcome::Replayed
         );
         assert_eq!(
             sync.account_global_watermark().await.unwrap(),
@@ -3805,7 +3805,7 @@ mod agent_draft_consumption_tests {
             .unwrap_err();
         assert_eq!(
             error.conflict_code(),
-            Some(soland_storage::ConflictCode::DuplicateConflict)
+            Some(coland_storage::ConflictCode::DuplicateConflict)
         );
         let second_count =
             sql_query("SELECT count(*)::bigint AS count FROM actor_private_events WHERE id=$1")
@@ -3877,7 +3877,7 @@ mod agent_draft_consumption_tests {
             .unwrap_err();
         assert_eq!(
             error.conflict_code(),
-            Some(soland_storage::ConflictCode::CasConflict)
+            Some(coland_storage::ConflictCode::CasConflict)
         );
         let source = crate::PgAgentDraftPendingIntentStore { pool: pool.clone() }
             .get_by_source_event(&controller, &source_event_id, event.created_at)
@@ -3920,7 +3920,7 @@ mod agent_draft_consumption_tests {
             .unwrap_err();
         assert_eq!(
             error.conflict_code(),
-            Some(soland_storage::ConflictCode::FailedPrecondition)
+            Some(coland_storage::ConflictCode::FailedPrecondition)
         );
         let foreign_count =
             sql_query("SELECT count(*)::bigint AS count FROM actor_private_events WHERE id=$1")
@@ -3960,7 +3960,7 @@ mod agent_draft_consumption_tests {
                 .unwrap_err();
         assert_eq!(
             error.conflict_code(),
-            Some(soland_storage::ConflictCode::FailedPrecondition)
+            Some(coland_storage::ConflictCode::FailedPrecondition)
         );
         let wrong_key_count =
             sql_query("SELECT count(*)::bigint AS count FROM actor_private_events WHERE id=$1")

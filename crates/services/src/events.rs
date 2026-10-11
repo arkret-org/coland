@@ -5,9 +5,9 @@ use arkret_identifiers::{DidCoreId, RealmId};
 use arkret_models_collaboration::events_payloads::ContentBlock;
 use arkret_wire::ScopeRef;
 use chrono::{DateTime, Utc};
+pub use coland_storage::PublicationEvidenceRecord;
+use coland_storage::RealmEventStats;
 use serde_json::Value;
-pub use soland_storage::PublicationEvidenceRecord;
-use soland_storage::RealmEventStats;
 
 use crate::ServiceResult;
 
@@ -20,7 +20,7 @@ pub struct RealmDirectoryQuery {
     pub limit: Option<usize>,
 }
 
-pub use soland_storage::{
+pub use coland_storage::{
     CircleMemberProjectionRecord, CircleProjectionRecord, RealmOrganizationStatementRecord,
 };
 
@@ -34,7 +34,7 @@ pub struct MorphProjectionRecord {
     pub fields: BTreeMap<String, Value>,
     pub schema_refs: Vec<String>,
     pub facets: BTreeMap<String, BTreeMap<String, Value>>,
-    pub versions: Vec<soland_domain::reducer::DocumentVersionProjection>,
+    pub versions: Vec<coland_domain::reducer::DocumentVersionProjection>,
     /// Canonical content slot; exactly one of the two is present on an active
     /// object and both are absent once `state=redacted` (common-fields.md 5.2).
     /// Typed as the SDK [`ContentBlock`], matching
@@ -297,7 +297,7 @@ fn realm_directory_score(entry: &RealmDirectoryEntry, query: &RealmDirectoryQuer
     score
 }
 
-pub use soland_storage::CanonicalEventRecord as AcceptedEvent;
+pub use coland_storage::CanonicalEventRecord as AcceptedEvent;
 
 /// Recompute the replacement authorize payload commitment in a re-anchor.
 ///
@@ -336,7 +336,7 @@ pub struct ProjectedEvent {
     pub received_at: DateTime<Utc>,
 }
 
-pub use soland_storage::MessageRecord as MessageState;
+pub use coland_storage::MessageRecord as MessageState;
 
 #[async_trait::async_trait]
 pub trait MessagePort: Send + Sync {
@@ -349,7 +349,7 @@ pub trait MessagePort: Send + Sync {
     ) -> ServiceResult<Vec<MessageState>>;
 }
 
-pub use soland_storage::{
+pub use coland_storage::{
     AppletAuthoringPreviewRecord as AppletAuthoringPreviewState,
     AppletTransactionReplayBegin as AppletTransactionReplayResult,
     AppletTransactionReplayRecord as AppletTransactionReplayState,
@@ -359,9 +359,9 @@ pub use soland_storage::{
 pub trait AppletPort: Send + Sync {
     async fn issue_widget_token(
         &self,
-        _record: soland_storage::AppletWidgetTokenRecord,
+        _record: coland_storage::AppletWidgetTokenRecord,
     ) -> ServiceResult<bool> {
-        Err(soland_storage::PersistenceError::Internal(
+        Err(coland_storage::PersistenceError::Internal(
             "widget token inventory is unavailable".into(),
         )
         .into())
@@ -369,10 +369,10 @@ pub trait AppletPort: Send + Sync {
 
     async fn widget_tokens(
         &self,
-        _install: &soland_storage::AppletWidgetInstallSelector,
+        _install: &coland_storage::AppletWidgetInstallSelector,
         _at: chrono::DateTime<chrono::Utc>,
-    ) -> ServiceResult<Vec<soland_storage::AppletWidgetTokenRecord>> {
-        Err(soland_storage::PersistenceError::Internal(
+    ) -> ServiceResult<Vec<coland_storage::AppletWidgetTokenRecord>> {
+        Err(coland_storage::PersistenceError::Internal(
             "widget token inventory is unavailable".into(),
         )
         .into())
@@ -380,10 +380,10 @@ pub trait AppletPort: Send + Sync {
 
     async fn check_widget_token(
         &self,
-        _gate: &soland_storage::AppletWidgetTokenGateSelector,
+        _gate: &coland_storage::AppletWidgetTokenGateSelector,
         _at: chrono::DateTime<chrono::Utc>,
-    ) -> ServiceResult<soland_storage::AppletWidgetTokenRecord> {
-        Err(soland_storage::PersistenceError::Internal(
+    ) -> ServiceResult<coland_storage::AppletWidgetTokenRecord> {
+        Err(coland_storage::PersistenceError::Internal(
             "widget token inventory is unavailable".into(),
         )
         .into())
@@ -391,11 +391,11 @@ pub trait AppletPort: Send + Sync {
 
     async fn invalidate_widget_token(
         &self,
-        _install: &soland_storage::AppletWidgetInstallSelector,
+        _install: &coland_storage::AppletWidgetInstallSelector,
         _token_ref: &str,
         _at: chrono::DateTime<chrono::Utc>,
-    ) -> ServiceResult<soland_storage::AppletWidgetTokenInvalidation> {
-        Err(soland_storage::PersistenceError::Internal(
+    ) -> ServiceResult<coland_storage::AppletWidgetTokenInvalidation> {
+        Err(coland_storage::PersistenceError::Internal(
             "widget token inventory is unavailable".into(),
         )
         .into())
@@ -403,11 +403,11 @@ pub trait AppletPort: Send + Sync {
 
     async fn admit_applet_authoring_unit(
         &self,
-        input: soland_storage::AppletAuthoringUnitWrite,
-        author: soland_storage::AppletCommitAuthor,
-        attester: soland_storage::AppletResolutionAttester,
-        finalize: soland_storage::AppletUnitFinalizer,
-    ) -> ServiceResult<soland_storage::AppletAuthoringUnitOutcome>;
+        input: coland_storage::AppletAuthoringUnitWrite,
+        author: coland_storage::AppletCommitAuthor,
+        attester: coland_storage::AppletResolutionAttester,
+        finalize: coland_storage::AppletUnitFinalizer,
+    ) -> ServiceResult<coland_storage::AppletAuthoringUnitOutcome>;
     async fn applet_identity(
         &self,
         applet_id: &str,
@@ -434,7 +434,7 @@ pub trait AppletPort: Send + Sync {
         expected: &Value,
         replacement: Value,
         fenced_at: DateTime<Utc>,
-    ) -> ServiceResult<soland_storage::AppletInstallationFenceOutcome>;
+    ) -> ServiceResult<coland_storage::AppletInstallationFenceOutcome>;
     async fn begin_applet_transaction(
         &self,
         replay: AppletTransactionReplayState,
@@ -457,8 +457,8 @@ pub trait AppletPort: Send + Sync {
     async fn pending_applet_authoring_completions(
         &self,
         _limit: u32,
-    ) -> ServiceResult<Vec<soland_storage::AppletAuthoringCompletion>> {
-        Err(soland_storage::PersistenceError::Internal(
+    ) -> ServiceResult<Vec<coland_storage::AppletAuthoringCompletion>> {
+        Err(coland_storage::PersistenceError::Internal(
             "durable Applet completion delivery is unavailable".to_owned(),
         )
         .into())
@@ -469,14 +469,14 @@ pub trait AppletPort: Send + Sync {
         _request_digest: &arkret_wire::Hash,
         _at: DateTime<Utc>,
     ) -> ServiceResult<()> {
-        Err(soland_storage::PersistenceError::Internal(
+        Err(coland_storage::PersistenceError::Internal(
             "durable Applet completion acknowledgement is unavailable".to_owned(),
         )
         .into())
     }
 }
 
-pub use soland_storage::ProjectionEventAppendOutcome as ProjectedEventAppendResult;
+pub use coland_storage::ProjectionEventAppendOutcome as ProjectedEventAppendResult;
 
 #[derive(Clone, Debug)]
 pub struct IdempotentResponse {
@@ -500,22 +500,22 @@ pub struct CommitAcceptedEventCommand {
     /// Current-authority transaction that orders this Event on its Realm,
     /// Circle or Sidecar stream. One `RealmCommit` accepts exactly one Event,
     /// so the signed commit travels with the Event it admits.
-    pub authority_commit: soland_storage::AuthorityCommitTransaction,
-    pub self_producer_guard: Option<soland_storage::SelfProducerCommitGuard>,
-    pub applet_producer_guard: Option<soland_storage::AppletEventProducerGuard>,
-    pub widget_token_gate: Option<soland_storage::AppletWidgetTokenGateSelector>,
+    pub authority_commit: coland_storage::AuthorityCommitTransaction,
+    pub self_producer_guard: Option<coland_storage::SelfProducerCommitGuard>,
+    pub applet_producer_guard: Option<coland_storage::AppletEventProducerGuard>,
+    pub widget_token_gate: Option<coland_storage::AppletWidgetTokenGateSelector>,
     /// Verified `producer_device_evidence` of a cross-Station human-device
     /// producer, retained for audit with the Event's first Commit.
-    pub forwarded_producer_evidence: Option<soland_storage::ForwardedProducerDeviceEvidence>,
+    pub forwarded_producer_evidence: Option<coland_storage::ForwardedProducerDeviceEvidence>,
     pub forwarded_agent_producer:
         Option<arkret_identity::agent_authority_evidence::VerifiedAgentProducer>,
     pub agent_deployment_ceiling:
         arkret_models_collaboration::governance::agent_participation::ParticipationBits,
     pub event: AcceptedEvent,
-    pub parent_membership_admission: Option<soland_storage::ParentMembershipAdmissionCheck>,
+    pub parent_membership_admission: Option<coland_storage::ParentMembershipAdmissionCheck>,
     pub contact_projection: Option<CommitContactProjection>,
-    pub device_revocation_transition: Option<soland_storage::DeviceRevocationTransition>,
-    pub device_revocation_gate: Option<soland_storage::DeviceRevocationGateSelector>,
+    pub device_revocation_transition: Option<coland_storage::DeviceRevocationTransition>,
+    pub device_revocation_gate: Option<coland_storage::DeviceRevocationGateSelector>,
     pub projections: Vec<ProjectedEvent>,
     pub idempotency: Option<IdempotentResponse>,
     pub deliveries: Vec<FederationDeliveryRecord>,
@@ -532,7 +532,7 @@ pub struct CommitAccountDataCas {
     pub conflict_code: String,
 }
 
-pub use soland_storage::{
+pub use coland_storage::{
     AppletAuthoringPreviewCommit as CommitAppletAuthoringPreview,
     AppletIdentityCommit as CommitAppletIdentity, AppletRecordCommit as CommitAppletRecord,
     ContactProjectionCommit as CommitContactProjection,
@@ -541,13 +541,13 @@ pub use soland_storage::{
 #[derive(Clone, Debug)]
 pub struct CommitAcceptedEventBatchCommand {
     pub events: Vec<CommitAcceptedEventCommand>,
-    pub franking_replay_nonce: Option<soland_storage::FrankingReplayNonceCommit>,
-    pub realm_organization_proof: Option<soland_storage::RealmOrganizationProofCommit>,
-    pub invite_claim_proof: Option<soland_storage::InviteClaimProofCommit>,
-    pub event_approvals: Option<soland_storage::EventApprovalCommit>,
+    pub franking_replay_nonce: Option<coland_storage::FrankingReplayNonceCommit>,
+    pub realm_organization_proof: Option<coland_storage::RealmOrganizationProofCommit>,
+    pub invite_claim_proof: Option<coland_storage::InviteClaimProofCommit>,
+    pub event_approvals: Option<coland_storage::EventApprovalCommit>,
     pub applet_record: Option<CommitAppletRecord>,
     pub applet_authoring_preview: Option<CommitAppletAuthoringPreview>,
-    pub agent_membership_cascade: Option<soland_storage::AgentMembershipCascadeCommit>,
+    pub agent_membership_cascade: Option<coland_storage::AgentMembershipCascadeCommit>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -563,27 +563,27 @@ pub trait EventReadPort: Send + Sync {
         founder_id: &str,
         trust_domain_id: &str,
         pair_key: &str,
-    ) -> ServiceResult<Option<soland_storage::DirectConversationFoundingSlotRecord>>;
+    ) -> ServiceResult<Option<coland_storage::DirectConversationFoundingSlotRecord>>;
     async fn direct_conversation_durable_state(
         &self,
         trust_domain_id: &str,
         pair_key: &str,
-    ) -> ServiceResult<Option<soland_storage::DirectConversationDurableState>>;
+    ) -> ServiceResult<Option<coland_storage::DirectConversationDurableState>>;
     async fn direct_conversation_durable_state_for_realm(
         &self,
         realm_id: &str,
-    ) -> ServiceResult<Option<soland_storage::DirectConversationDurableState>>;
+    ) -> ServiceResult<Option<coland_storage::DirectConversationDurableState>>;
     async fn foreign_direct_mls_input(
         &self,
         _realm: &arkret_wire::RealmId,
         _caller: &arkret_wire::ActorId,
-    ) -> ServiceResult<Option<soland_storage::ForeignDirectMlsInput>> {
+    ) -> ServiceResult<Option<coland_storage::ForeignDirectMlsInput>> {
         Ok(None)
     }
     async fn install_foreign_direct_mls_public_state(
         &self,
-        _input: &soland_storage::ForeignDirectMlsInput,
-        _result: &soland_storage::ForeignDirectMlsBase,
+        _input: &coland_storage::ForeignDirectMlsInput,
+        _result: &coland_storage::ForeignDirectMlsBase,
         _exact: bool,
     ) -> ServiceResult<bool> {
         Ok(false)
@@ -602,7 +602,7 @@ pub trait EventReadPort: Send + Sync {
     async fn identity_anchor_account_slot(
         &self,
         account_id: &arkret_wire::AccountId,
-    ) -> ServiceResult<Option<soland_storage::IdentityAnchorAccountSlot>>;
+    ) -> ServiceResult<Option<coland_storage::IdentityAnchorAccountSlot>>;
     async fn realm_event_stats(&self, realm_id: &str) -> ServiceResult<RealmEventStats>;
     async fn realm_events_newest_first(&self, realm_id: &str) -> ServiceResult<Vec<AcceptedEvent>>;
     async fn accepted_event(&self, event_id: &str) -> ServiceResult<Option<AcceptedEvent>>;
@@ -682,7 +682,7 @@ impl EventQueryService {
         founder_id: &str,
         trust_domain_id: &str,
         pair_key: &str,
-    ) -> ServiceResult<Option<soland_storage::DirectConversationFoundingSlotRecord>> {
+    ) -> ServiceResult<Option<coland_storage::DirectConversationFoundingSlotRecord>> {
         self.events
             .direct_conversation_founding_slot(founder_id, trust_domain_id, pair_key)
             .await
@@ -691,7 +691,7 @@ impl EventQueryService {
         &self,
         trust_domain_id: &str,
         pair_key: &str,
-    ) -> ServiceResult<Option<soland_storage::DirectConversationDurableState>> {
+    ) -> ServiceResult<Option<coland_storage::DirectConversationDurableState>> {
         self.events
             .direct_conversation_durable_state(trust_domain_id, pair_key)
             .await
@@ -699,7 +699,7 @@ impl EventQueryService {
     pub async fn direct_conversation_durable_state_for_realm(
         &self,
         realm_id: &str,
-    ) -> ServiceResult<Option<soland_storage::DirectConversationDurableState>> {
+    ) -> ServiceResult<Option<coland_storage::DirectConversationDurableState>> {
         self.events
             .direct_conversation_durable_state_for_realm(realm_id)
             .await
@@ -708,13 +708,13 @@ impl EventQueryService {
         &self,
         realm: &arkret_wire::RealmId,
         caller: &arkret_wire::ActorId,
-    ) -> ServiceResult<Option<soland_storage::ForeignDirectMlsInput>> {
+    ) -> ServiceResult<Option<coland_storage::ForeignDirectMlsInput>> {
         self.events.foreign_direct_mls_input(realm, caller).await
     }
     pub async fn install_foreign_direct_mls_public_state(
         &self,
-        input: &soland_storage::ForeignDirectMlsInput,
-        result: &soland_storage::ForeignDirectMlsBase,
+        input: &coland_storage::ForeignDirectMlsInput,
+        result: &coland_storage::ForeignDirectMlsBase,
         exact: bool,
     ) -> ServiceResult<bool> {
         self.events
@@ -749,7 +749,7 @@ impl EventQueryService {
     pub async fn identity_anchor_account_slot(
         &self,
         account_id: &arkret_wire::AccountId,
-    ) -> ServiceResult<Option<soland_storage::IdentityAnchorAccountSlot>> {
+    ) -> ServiceResult<Option<coland_storage::IdentityAnchorAccountSlot>> {
         self.events.identity_anchor_account_slot(account_id).await
     }
     pub async fn realm_event_stats(&self, realm_id: &str) -> ServiceResult<RealmEventStats> {
@@ -897,11 +897,11 @@ impl EventQueryService {
     }
     pub async fn admit_applet_authoring_unit(
         &self,
-        input: soland_storage::AppletAuthoringUnitWrite,
-        author: soland_storage::AppletCommitAuthor,
-        attester: soland_storage::AppletResolutionAttester,
-        finalize: soland_storage::AppletUnitFinalizer,
-    ) -> ServiceResult<soland_storage::AppletAuthoringUnitOutcome> {
+        input: coland_storage::AppletAuthoringUnitWrite,
+        author: coland_storage::AppletCommitAuthor,
+        attester: coland_storage::AppletResolutionAttester,
+        finalize: coland_storage::AppletUnitFinalizer,
+    ) -> ServiceResult<coland_storage::AppletAuthoringUnitOutcome> {
         self.applets
             .admit_applet_authoring_unit(input, author, attester, finalize)
             .await
@@ -929,7 +929,7 @@ impl EventQueryService {
         expected: &Value,
         replacement: Value,
         fenced_at: DateTime<Utc>,
-    ) -> ServiceResult<soland_storage::AppletInstallationFenceOutcome> {
+    ) -> ServiceResult<coland_storage::AppletInstallationFenceOutcome> {
         self.applets
             .fence_applet_installation(
                 applet_id,
@@ -977,8 +977,8 @@ impl EventQueryService {
     /// Local host issuer. Return the opaque secret once; durable state contains only its digest.
     pub async fn issue_widget_credential(
         &self,
-        mut record: soland_storage::AppletWidgetTokenRecord,
-    ) -> ServiceResult<(String, soland_storage::AppletWidgetTokenRecord)> {
+        mut record: coland_storage::AppletWidgetTokenRecord,
+    ) -> ServiceResult<(String, coland_storage::AppletWidgetTokenRecord)> {
         let mut entropy = [0u8; 32];
         getrandom::fill(&mut entropy).map_err(|error| {
             crate::ServiceError::Internal(format!("widget credential entropy failed: {error}"))
@@ -999,30 +999,30 @@ impl EventQueryService {
     }
     pub async fn issue_widget_token(
         &self,
-        record: soland_storage::AppletWidgetTokenRecord,
+        record: coland_storage::AppletWidgetTokenRecord,
     ) -> ServiceResult<bool> {
         self.applets.issue_widget_token(record).await
     }
     pub async fn widget_tokens(
         &self,
-        install: &soland_storage::AppletWidgetInstallSelector,
+        install: &coland_storage::AppletWidgetInstallSelector,
         at: chrono::DateTime<chrono::Utc>,
-    ) -> ServiceResult<Vec<soland_storage::AppletWidgetTokenRecord>> {
+    ) -> ServiceResult<Vec<coland_storage::AppletWidgetTokenRecord>> {
         self.applets.widget_tokens(install, at).await
     }
     pub async fn check_widget_token(
         &self,
-        gate: &soland_storage::AppletWidgetTokenGateSelector,
+        gate: &coland_storage::AppletWidgetTokenGateSelector,
         at: chrono::DateTime<chrono::Utc>,
-    ) -> ServiceResult<soland_storage::AppletWidgetTokenRecord> {
+    ) -> ServiceResult<coland_storage::AppletWidgetTokenRecord> {
         self.applets.check_widget_token(gate, at).await
     }
     pub async fn invalidate_widget_token(
         &self,
-        install: &soland_storage::AppletWidgetInstallSelector,
+        install: &coland_storage::AppletWidgetInstallSelector,
         token_ref: &str,
         at: chrono::DateTime<chrono::Utc>,
-    ) -> ServiceResult<soland_storage::AppletWidgetTokenInvalidation> {
+    ) -> ServiceResult<coland_storage::AppletWidgetTokenInvalidation> {
         self.applets
             .invalidate_widget_token(install, token_ref, at)
             .await
@@ -1030,7 +1030,7 @@ impl EventQueryService {
     pub async fn pending_applet_authoring_completions(
         &self,
         limit: u32,
-    ) -> ServiceResult<Vec<soland_storage::AppletAuthoringCompletion>> {
+    ) -> ServiceResult<Vec<coland_storage::AppletAuthoringCompletion>> {
         self.applets
             .pending_applet_authoring_completions(limit)
             .await
@@ -1081,15 +1081,15 @@ pub trait MlsGroupReadPort: Send + Sync {
     async fn current(
         &self,
         effective_scope: &ScopeRef,
-    ) -> ServiceResult<Option<soland_storage::MlsGroupCurrentRecord>>;
+    ) -> ServiceResult<Option<coland_storage::MlsGroupCurrentRecord>>;
     async fn realm_currents(
         &self,
         realm_id: &arkret_wire::RealmId,
-    ) -> ServiceResult<Vec<soland_storage::MlsGroupCurrentRecord>>;
+    ) -> ServiceResult<Vec<coland_storage::MlsGroupCurrentRecord>>;
     #[cfg(any(test, feature = "test-support"))]
     async fn seed_test_current(
         &self,
-        record: &soland_storage::MlsGroupCurrentRecord,
+        record: &coland_storage::MlsGroupCurrentRecord,
     ) -> ServiceResult<()>;
 }
 
@@ -1108,7 +1108,7 @@ impl MlsGroupQueryService {
     pub async fn current(
         &self,
         effective_scope: &ScopeRef,
-    ) -> ServiceResult<Option<soland_storage::MlsGroupCurrentRecord>> {
+    ) -> ServiceResult<Option<coland_storage::MlsGroupCurrentRecord>> {
         self.groups.current(effective_scope).await
     }
 
@@ -1116,7 +1116,7 @@ impl MlsGroupQueryService {
     pub async fn realm_currents(
         &self,
         realm_id: &arkret_wire::RealmId,
-    ) -> ServiceResult<Vec<soland_storage::MlsGroupCurrentRecord>> {
+    ) -> ServiceResult<Vec<coland_storage::MlsGroupCurrentRecord>> {
         self.groups.realm_currents(realm_id).await
     }
 
@@ -1124,7 +1124,7 @@ impl MlsGroupQueryService {
     #[cfg(any(test, feature = "test-support"))]
     pub async fn seed_test_current(
         &self,
-        record: &soland_storage::MlsGroupCurrentRecord,
+        record: &coland_storage::MlsGroupCurrentRecord,
     ) -> ServiceResult<()> {
         self.groups.seed_test_current(record).await
     }
@@ -1136,7 +1136,7 @@ pub struct ClaimMlsKeyPackageCommand<'a> {
     pub intended_realm_id: Option<&'a str>,
     pub device_authorize_event_id: Option<&'a str>,
     pub agent_key_authorize_event_id: Option<&'a str>,
-    pub device_revocation_gate: Option<&'a soland_storage::DeviceRevocationGateSelector>,
+    pub device_revocation_gate: Option<&'a coland_storage::DeviceRevocationGateSelector>,
     pub claimed_at: i64,
     pub claim_expires_at_unix_ms: Option<i64>,
 }
@@ -1147,7 +1147,7 @@ pub enum ClaimMlsKeyPackageTarget<'a> {
     Revoke,
 }
 
-pub use soland_storage::{
+pub use coland_storage::{
     MlsKeyPackageRow as MlsKeyPackageState,
     PeerKeyPackageClaimLedgerRecord as PeerKeyPackageClaimLedgerState,
     PersistedKeyPackageClaimState, PersistedKeyPackageReusePolicy,
@@ -1158,7 +1158,7 @@ pub struct PeerKeyPackageClaimCommand<'a> {
     pub mls_group_id: &'a str,
     pub device_authorize_event_id: Option<&'a str>,
     pub agent_key_authorize_event_id: Option<&'a str>,
-    pub device_revocation_gate: Option<&'a soland_storage::DeviceRevocationGateSelector>,
+    pub device_revocation_gate: Option<&'a coland_storage::DeviceRevocationGateSelector>,
     pub claimed_at_unix_ms: i64,
     pub claim_expires_at_unix_ms: i64,
     pub ledger: &'a PeerKeyPackageClaimLedgerState,
@@ -1174,7 +1174,7 @@ pub struct PeerClaimTerminalTransitionCommand<'a> {
     pub now_unix_ms: i64,
 }
 
-pub use soland_storage::{
+pub use coland_storage::{
     PeerKeyPackageClaimAttemptResult as PeerKeyPackageClaimResult,
     PeerKeyPackageClaimLedgerWriteResult,
 };
@@ -1214,7 +1214,7 @@ pub trait MlsKeyPackageMaintenancePort: Send + Sync {
     async fn claim_welcome_binding(
         &self,
         claim_id: &str,
-    ) -> ServiceResult<Option<soland_storage::MlsWelcomeClaimBinding>>;
+    ) -> ServiceResult<Option<coland_storage::MlsWelcomeClaimBinding>>;
     async fn claim_peer_key_package(
         &self,
         attempt: PeerKeyPackageClaimCommand<'_>,
@@ -1260,7 +1260,7 @@ pub trait MlsKeyPackageMaintenancePort: Send + Sync {
     ) -> ServiceResult<Vec<MlsKeyPackageState>>;
     async fn retire_owner_account_keypackages(
         &self,
-        owner_account_pk: soland_storage::AccountPk,
+        owner_account_pk: coland_storage::AccountPk,
         retired_at: i64,
     ) -> ServiceResult<usize>;
 }
@@ -1277,7 +1277,7 @@ impl MlsKeyPackageService {
 
     pub async fn retire_owner_account_keypackages(
         &self,
-        owner_account_pk: soland_storage::AccountPk,
+        owner_account_pk: coland_storage::AccountPk,
         retired_at: i64,
     ) -> ServiceResult<usize> {
         self.key_packages
@@ -1336,7 +1336,7 @@ impl MlsKeyPackageService {
     pub async fn claim_welcome_binding(
         &self,
         claim_id: &str,
-    ) -> ServiceResult<Option<soland_storage::MlsWelcomeClaimBinding>> {
+    ) -> ServiceResult<Option<coland_storage::MlsWelcomeClaimBinding>> {
         self.key_packages.claim_welcome_binding(claim_id).await
     }
     pub async fn peer_claim_by_keypackage_id(
@@ -1441,7 +1441,7 @@ impl MlsKeyPackageService {
     }
 }
 
-pub use soland_storage::RealmMetaRecord as RealmMetadata;
+pub use coland_storage::RealmMetaRecord as RealmMetadata;
 
 #[async_trait::async_trait]
 pub trait RealmMetadataPort: Send + Sync {
@@ -1485,7 +1485,7 @@ impl RealmQueryService {
     }
 }
 
-pub use soland_storage::{
+pub use coland_storage::{
     InviteLocatorInsertOutcome as InviteLocatorInsertResult,
     InviteLocatorRecord as InviteLocatorState,
     InviteLocatorRotateMutation as InviteLocatorRotateCommand,
@@ -1652,14 +1652,14 @@ mod tests {
         event_id: &arkret_identifiers::EventId,
         realm_id: &arkret_identifiers::RealmId,
         now: DateTime<Utc>,
-    ) -> soland_storage::AuthorityCommitTransaction {
+    ) -> coland_storage::AuthorityCommitTransaction {
         let stream_ref = arkret_wire::CommitStreamRef::Realm {
             realm_id: realm_id.clone(),
         };
         let authority_ref =
             arkret_wire::RealmCommitAuthorityRef::GenesisOrChangeEvent(event_id.clone());
-        soland_storage::AuthorityCommitTransaction {
-            expected_authority: soland_storage::CurrentRealmAuthority {
+        coland_storage::AuthorityCommitTransaction {
+            expected_authority: coland_storage::CurrentRealmAuthority {
                 realm_id: realm_id.clone(),
                 generation: 0,
                 service_id: DidCoreId::new("ak:did_core:web:station.example").unwrap(),

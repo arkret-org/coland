@@ -1,7 +1,7 @@
 //! Dev-only admin collection surfaces.
 //!
 //! Surfaces:
-//! - `GET /_soland/admin/{resource}` — paginated dev snapshot of one of the builtin admin
+//! - `GET /_coland/admin/{resource}` — paginated dev snapshot of one of the builtin admin
 //!   collections (`realms`, `spaces`, `federation`, `applets`, `agents`, `reports`,
 //!   `invite-tokens`, `policy`, `media`, `handles`). `realms` are security boundaries; `spaces` are
 //!   authorization-transparent navigation containers.
@@ -19,18 +19,18 @@ use std::collections::BTreeMap;
 
 use arkret_identifiers::{DidCoreId, RealmId};
 use arkret_wire::JoinRule;
+use coland_contracts::admin::{
+    AdminFederationOperation, AdminMediaRow, AdminRealmItem, AdminSpaceRow, RealmClass, SpaceHealth,
+};
+use coland_domain::reducer::SpaceContainerLifecycleState;
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
+use coland_services::events::RealmMetadata as RealmMetaRecord;
+use coland_services::operation_semantics as kinds;
 use salvo::oapi::extract::{JsonBody, PathParam, QueryParam};
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use soland_contracts::admin::{
-    AdminFederationOperation, AdminMediaRow, AdminRealmItem, AdminSpaceRow, RealmClass, SpaceHealth,
-};
-use soland_domain::reducer::SpaceContainerLifecycleState;
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
-use soland_services::events::RealmMetadata as RealmMetaRecord;
-use soland_services::operation_semantics as kinds;
 
 use super::{
     AdminAuth, append_audit_log, discussion_track_for_projection_event,
@@ -53,10 +53,10 @@ pub(super) struct AdminCollectionOutcome {
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.collection",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.collection",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.collection"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.collection"))]
 pub(super) async fn admin_collection(
     admin: AdminAuth,
     resource: PathParam<String>,
@@ -69,7 +69,7 @@ pub(super) async fn admin_collection(
     let session = admin.session()?;
     if !state.config().development_harness_enabled() && !state.is_admin_principal(&session.actor) {
         return Err(AppError::capability_denied(
-            "admin collection API requires the caller principal ID to be listed in SOLAND_ADMIN_PRINCIPAL_IDS",
+            "admin collection API requires the caller principal ID to be listed in COLAND_ADMIN_PRINCIPAL_IDS",
         ));
     }
     let grant = super::introspect_admin_scopes(state, req, &session)
@@ -189,10 +189,10 @@ pub(super) struct AdminCreateRealmRequestBody {
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.realm.create",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.realm.create",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.realm.create"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.realm.create"))]
 pub(super) async fn admin_create_realm(
     admin: AdminAuth,
     body: JsonBody<AdminCreateRealmRequestBody>,
@@ -228,10 +228,10 @@ pub(super) async fn admin_create_realm(
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.realm.get",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.realm.get",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.realm.get"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.realm.get"))]
 pub(super) async fn admin_get_realm(
     realm_id: PathParam<String>,
     depot: &mut Depot,
@@ -452,7 +452,7 @@ fn admin_applet_items(state: &AppState) -> Vec<Value> {
 
 pub(super) async fn admin_invite_items(
     state: &AppState,
-) -> Vec<soland_contracts::admin::invite_tokens::AdminInviteTokenItem> {
+) -> Vec<coland_contracts::admin::invite_tokens::AdminInviteTokenItem> {
     state
         .persistence()
         .invites_in_realm(None)
@@ -464,8 +464,8 @@ pub(super) async fn admin_invite_items(
 }
 
 pub(super) fn admin_invite_item(
-    invite: &soland_storage::InviteCurrent,
-) -> soland_contracts::admin::invite_tokens::AdminInviteTokenItem {
+    invite: &coland_storage::InviteCurrent,
+) -> coland_contracts::admin::invite_tokens::AdminInviteTokenItem {
     let inviter = invite.inviter.signing_principal_id().clone();
     let invitee = invite
         .invitee_account_id
@@ -477,7 +477,7 @@ pub(super) fn admin_invite_item(
                 .map(|claim| &claim.subject_account_id)
         })
         .map(|account| account.principal_id.clone());
-    soland_contracts::admin::invite_tokens::AdminInviteTokenItem {
+    coland_contracts::admin::invite_tokens::AdminInviteTokenItem {
         kind: "invite_token".to_owned(),
         id: invite.invite_id.to_string(),
         invite_id: invite.invite_id.to_string(),

@@ -1,13 +1,13 @@
 //! Operator handle-management admin surface (Wave 3 / T6.2 §2).
 //!
-//! Endpoints (product-local operator surface, `org.arkret.soland.*` op IDs):
+//! Endpoints (product-local operator surface, `org.arkret.coland.*` op IDs):
 //!
-//! - `GET  /_soland/admin/handles` — paginated list of handle rows.
-//! - `GET  /_soland/admin/handles/{id}` — single handle row.
-//! - `GET  /_soland/admin/handles/{id}/audit` — handle audit trail from the shared audit table.
-//! - `POST /_soland/admin/handles/{id}/revoke` — operator-level handle revocation (releases the
+//! - `GET  /_coland/admin/handles` — paginated list of handle rows.
+//! - `GET  /_coland/admin/handles/{id}` — single handle row.
+//! - `GET  /_coland/admin/handles/{id}/audit` — handle audit trail from the shared audit table.
+//! - `POST /_coland/admin/handles/{id}/revoke` — operator-level handle revocation (releases the
 //!   durable account binding + records the audit trail).
-//! - `POST /_soland/admin/handles/{id}/reassign` — operator-level re-bind of a handle to a new
+//! - `POST /_coland/admin/handles/{id}/reassign` — operator-level re-bind of a handle to a new
 //!   subject DID.
 //!
 //! Authoritative data source: the durable `account_localparts` table. Each row
@@ -15,22 +15,22 @@
 //! handle id surfaced to operators is the localpart (stable and URL-safe).
 //! The local handle-claim evidence cache
 //! ([`crate::state::MemberIdentityRegistry`]) enriches rows with
-//! issuer / binding-state metadata when present. Wire shapes mirror sodmin's
+//! issuer / binding-state metadata when present. Wire shapes mirror codmin's
 //! `HandleRecord` / `HandleAuditEvent` / `HandleReassignRequest` DTOs
-//! (`sodmin/src/types/handles.rs`).
+//! (`codmin/src/types/handles.rs`).
 //!
-//! The collection list (`GET /_soland/admin/handles`) is also reachable via
-//! the generic `/_soland/admin/{resource}` snapshot — both share
+//! The collection list (`GET /_coland/admin/handles`) is also reachable via
+//! the generic `/_coland/admin/{resource}` snapshot — both share
 //! [`admin_handle_items`].
 
-use salvo::oapi::extract::{JsonBody, PathParam, QueryParam};
-use salvo::prelude::*;
-use serde_json::{Value, json};
-use soland_contracts::admin::handles::{
+use coland_contracts::admin::handles::{
     AdminHandleAuditEvent, AdminHandleAuditListOutcome, AdminHandleListOutcome,
     AdminHandleReassignBody, AdminHandleRecord, AdminHandleRevokeBody,
 };
-use soland_http::error::AppError;
+use coland_http::error::AppError;
+use salvo::oapi::extract::{JsonBody, PathParam, QueryParam};
+use salvo::prelude::*;
+use serde_json::{Value, json};
 
 use super::{AdminAuth, append_audit_log, require_admin_principal};
 use crate::state::AppState;
@@ -84,7 +84,7 @@ pub(super) fn router() -> Router {
 
 /// Build the full handle row set off the durable accounts table, enriched
 /// with local handle-claim evidence. Shared with the generic admin
-/// collection snapshot (`/_soland/admin/handles`).
+/// collection snapshot (`/_coland/admin/handles`).
 pub(super) async fn admin_handle_items(state: &AppState) -> Vec<AdminHandleRecord> {
     // Index handle-claim evidence by subject DID so account rows can pick
     // up issuer / status metadata when a directory-issued claim is
@@ -148,10 +148,10 @@ async fn handle_record_by_id(
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.handles.list",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.handles.list",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.handles.list"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.handles.list"))]
 async fn list_handles(
     admin: AdminAuth,
     page: QueryParam<u64, false>,
@@ -200,10 +200,10 @@ async fn list_handles(
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.handles.get",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.handles.get",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.handles.get"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.handles.get"))]
 async fn get_handle(
     admin: AdminAuth,
     handle_id: PathParam<String>,
@@ -216,10 +216,10 @@ async fn get_handle(
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.handles.audit",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.handles.audit",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.handles.audit"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.handles.audit"))]
 async fn get_handle_audit(
     admin: AdminAuth,
     handle_id: PathParam<String>,
@@ -301,10 +301,10 @@ fn audit_entry_to_handle_event(entry: Value) -> AdminHandleAuditEvent {
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.handles.revoke",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.handles.revoke",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.handles.revoke"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.handles.revoke"))]
 async fn revoke_handle(
     admin: AdminAuth,
     handle_id: PathParam<String>,
@@ -359,10 +359,10 @@ async fn revoke_handle(
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.handles.reassign",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.handles.reassign",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.handles.reassign"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.handles.reassign"))]
 async fn reassign_handle(
     admin: AdminAuth,
     handle_id: PathParam<String>,

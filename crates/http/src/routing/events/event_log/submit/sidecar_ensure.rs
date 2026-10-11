@@ -55,7 +55,7 @@ pub(crate) async fn submit_sidecar_ensure_batch(
                 .conflict_code()
                 .map(|code| code.to_string())
                 .unwrap_or_else(|| match error {
-                    soland_services::ServiceError::SchemaViolation(_) => "schema_violation".into(),
+                    coland_services::ServiceError::SchemaViolation(_) => "schema_violation".into(),
                     _ => "internal_error".into(),
                 });
             SubmitOneError::new(StatusCode::CONFLICT, code, error.to_string())

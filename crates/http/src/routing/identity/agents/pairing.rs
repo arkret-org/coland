@@ -185,7 +185,7 @@ pub(super) async fn submit_agent_runtime_key_request(
     let controller_principal_id = agent_record.controller_principal_id.clone();
     let account = state
         .identities()
-        .find_account_by_actor(soland_services::identity::FindAccountByActorQuery {
+        .find_account_by_actor(coland_services::identity::FindAccountByActorQuery {
             account_id: arkret_wire::AccountId::new(
                 arkret_wire::DidCoreId::new(controller_principal_id.clone()).map_err(|error| {
                     AppError::internal(format!("controller account id is invalid: {error}"))
@@ -212,7 +212,7 @@ pub(super) async fn submit_agent_runtime_key_request(
         .approval_requested_at
         .unwrap_or_else(chrono::Utc::now);
     let expires_at = required_pairing_expires_at(&agent_record)?;
-    let write = soland_services::identity::StoreAgentRuntimeApprovalCommand {
+    let write = coland_services::identity::StoreAgentRuntimeApprovalCommand {
         agent_id: agent_id.to_string(),
         pairing_request_id: body.pairing_request_id.clone(),
         approval_request_id: proposed_approval_request_id.clone(),
@@ -285,8 +285,8 @@ pub(super) async fn submit_agent_runtime_key_request(
     state
         .deliveries()
         .store_account_delta(
-            soland_services::delivery::StoreAccountNotificationDeltaCommand {
-                record: soland_services::delivery::AccountNotificationDeltaWrite {
+            coland_services::delivery::StoreAccountNotificationDeltaCommand {
+                record: coland_services::delivery::AccountNotificationDeltaWrite {
                     delta,
                     recipient_actor_id: arkret_wire::ActorId::account(arkret_wire::AccountId::new(
                         arkret_identifiers::DidCoreId::new(controller_principal_id).map_err(
@@ -756,7 +756,7 @@ pub(super) async fn reconcile_accepted_agent_authorization(
         };
 
     let terminal_notification = account_notification_context(&agent_record);
-    let activation = soland_services::identity::ActivateAgentRuntimeCommand {
+    let activation = coland_services::identity::ActivateAgentRuntimeCommand {
         agent_id: agent_id.clone(),
         approval_request_id: approval_request_id.clone(),
         runtime_key_binding_digest: agent_record
@@ -1117,7 +1117,7 @@ pub(super) async fn agent_key_pair(
                 "authorize Event controller signature invalid: {error}"
             ))
         })?;
-    let commit_intent = soland_services::identity::RecordAgentPairingCommitIntentCommand {
+    let commit_intent = coland_services::identity::RecordAgentPairingCommitIntentCommand {
         agent_id: agent_id.to_owned(),
         approval_request_id: agent_record.approval_request_id.clone().ok_or_else(|| {
             pairing_failed_precondition("agent pairing approval metadata is incomplete")
@@ -1423,7 +1423,7 @@ fn ensure_current_runtime_key_request_matches(
 pub(super) struct AccountNotificationContext {
     notification_id: arkret_wire::NotificationId,
     recipient_actor_id: arkret_wire::ActorId,
-    controller_account_pk: soland_storage::AccountPk,
+    controller_account_pk: coland_storage::AccountPk,
     recipient_id: arkret_wire::DidCoreId,
     approval_request_id: arkret_wire::OpaqueLocalId,
 }
@@ -1481,8 +1481,8 @@ pub(super) async fn persist_terminal_account_notification(
     state
         .deliveries()
         .store_account_delta(
-            soland_services::delivery::StoreAccountNotificationDeltaCommand {
-                record: soland_services::delivery::AccountNotificationDeltaWrite {
+            coland_services::delivery::StoreAccountNotificationDeltaCommand {
+                record: coland_services::delivery::AccountNotificationDeltaWrite {
                     delta,
                     recipient_actor_id: context.recipient_actor_id,
                     controller_account_pk: context.controller_account_pk,
@@ -2225,8 +2225,8 @@ mod requested_scope_tests {
             uuid::Uuid::parse_str("019f6131-3dc4-76f1-ade6-00f4225a8528")
                 .expect("valid notification uuid"),
         );
-        record.controller_account_pk = Some(soland_storage::AccountPk(1));
-        record.recipient_id = Some("ak:did_core:web:soland.example".to_owned());
+        record.controller_account_pk = Some(coland_storage::AccountPk(1));
+        record.recipient_id = Some("ak:did_core:web:coland.example".to_owned());
         record.approval_request_id =
             Some(arkret_wire::OpaqueLocalId::new("agent_runtime_approval:test").unwrap());
 

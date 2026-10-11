@@ -2,11 +2,11 @@ use arkret_wire::{
     AuthorityCommitStatus, AuthorityRejectionStatus, AuthoritySubmitOutcome,
     AuthoritySubmitRequest, EventAdmissionSubmission,
 };
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
+use coland_services::ServiceErrorKind;
+use coland_services::authority_commit::AuthorityEventAdmissionOutcome;
 use salvo::prelude::*;
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
-use soland_services::ServiceErrorKind;
-use soland_services::authority_commit::AuthorityEventAdmissionOutcome;
 
 use crate::state::AppState;
 
@@ -72,7 +72,7 @@ pub(super) async fn read_agent_participation(
 /// authorization, so this private edge refuses it before any storage access
 /// instead of committing it without that authorization.
 #[handler]
-#[tracing::instrument(skip_all, fields(op = "soland.account_authority.events.admit"))]
+#[tracing::instrument(skip_all, fields(op = "coland.account_authority.events.admit"))]
 pub(super) async fn admit_event(
     depot: &mut Depot,
     req: &mut Request,
@@ -131,9 +131,9 @@ pub(super) async fn admit_event(
 /// carries its registered reason; a lost head race or an unavailable store is
 /// retryable and leaves the reservation in place.
 fn accepted_device_outcome(
-    admission: soland_services::ServiceResult<AuthorityEventAdmissionOutcome>,
+    admission: coland_services::ServiceResult<AuthorityEventAdmissionOutcome>,
 ) -> AuthoritySubmitOutcome {
-    use soland_storage::ConflictCode;
+    use coland_storage::ConflictCode;
 
     let rejected = |reason_code: &str| AuthoritySubmitOutcome::Rejected {
         status: AuthorityRejectionStatus::Rejected,
@@ -185,14 +185,14 @@ fn accepted_device_outcome(
 
 #[cfg(test)]
 mod tests {
-    use soland_storage::ConflictCode;
+    use coland_storage::ConflictCode;
 
     use super::*;
 
     fn conflict(
         code: ConflictCode,
-    ) -> soland_services::ServiceResult<AuthorityEventAdmissionOutcome> {
-        Err(soland_services::ServiceError::Conflict(format!(
+    ) -> coland_services::ServiceResult<AuthorityEventAdmissionOutcome> {
+        Err(coland_services::ServiceError::Conflict(format!(
             "{code}: diagnostic"
         )))
     }
@@ -216,7 +216,7 @@ mod tests {
         }
         for retryable in [
             conflict(ConflictCode::CasConflict),
-            Err(soland_services::ServiceError::Database("down".to_owned())),
+            Err(coland_services::ServiceError::Database("down".to_owned())),
         ] {
             assert!(matches!(
                 accepted_device_outcome(retryable),
@@ -253,21 +253,21 @@ mod tests {
     fn private_channel_state() -> AppState {
         let values = std::collections::BTreeMap::from([
             (
-                "SOLAND_TRUST_DOMAIN".to_owned(),
-                "ak:trust_domain:soland.example".to_owned(),
+                "COLAND_TRUST_DOMAIN".to_owned(),
+                "ak:trust_domain:coland.example".to_owned(),
             ),
-            ("SOLAND_DEVELOPMENT_MODE".to_owned(), "true".to_owned()),
+            ("COLAND_DEVELOPMENT_MODE".to_owned(), "true".to_owned()),
             (
-                "SOLAND_ACCOUNT_AUTHORITY_URL".to_owned(),
-                "https://auth.soland.example".to_owned(),
+                "COLAND_ACCOUNT_AUTHORITY_URL".to_owned(),
+                "https://auth.coland.example".to_owned(),
             ),
             (
-                "SOLAND_INTERNAL_AUTHORITY_SHARED_SECRET".to_owned(),
+                "COLAND_INTERNAL_AUTHORITY_SHARED_SECRET".to_owned(),
                 CREDENTIAL.to_owned(),
             ),
             (
-                "SOLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN".to_owned(),
-                "ak:trust_domain:auth.soland.example".to_owned(),
+                "COLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN".to_owned(),
+                "ak:trust_domain:auth.coland.example".to_owned(),
             ),
         ]);
         let mut config = crate::config::AppConfig::from_values(
@@ -276,7 +276,7 @@ mod tests {
         )
         .unwrap();
         config.seed_demo_data = false;
-        AppState::new(config, soland_storage_postgres::Db { pool: None })
+        AppState::new(config, coland_storage_postgres::Db { pool: None })
     }
 
     fn submission(

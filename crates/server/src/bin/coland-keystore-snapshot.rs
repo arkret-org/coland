@@ -1,4 +1,4 @@
-//! `cargo run --bin soland-keystore-snapshot -- ...`
+//! `cargo run --bin coland-keystore-snapshot -- ...`
 //!
 //! Service-identity KeyStore backup/restore helper.
 //!
@@ -13,7 +13,7 @@
 //!
 //! Both modes resolve the service DID and active signing `KeyRef` from a
 //! verified SDK identity bundle:
-//!   - `SOLAND_SERVICE_IDENTITY_BUNDLE` (or `--identity-bundle`)
+//!   - `COLAND_SERVICE_IDENTITY_BUNDLE` (or `--identity-bundle`)
 //!
 //! The helper is self-contained and shares only the configured KeyStore
 //! with the server process.
@@ -41,7 +41,7 @@ struct Args {
 fn parse_args(raw: &[String], values: &BTreeMap<String, String>) -> anyhow::Result<Args> {
     let mut mode = None;
     let mut identity_bundle = values
-        .get("SOLAND_SERVICE_IDENTITY_BUNDLE")
+        .get("COLAND_SERVICE_IDENTITY_BUNDLE")
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
     let mut output = None;
@@ -89,7 +89,7 @@ fn parse_args(raw: &[String], values: &BTreeMap<String, String>) -> anyhow::Resu
             value if value.starts_with("--config=") => {}
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: soland-keystore-snapshot (--export-only | --import-only)\n\
+                    "usage: coland-keystore-snapshot (--export-only | --import-only)\n\
                      \n\
                      mode flags (exactly one):\n\
                        --export-only    write KeyStore-persisted seed to --output\n\
@@ -110,7 +110,7 @@ fn parse_args(raw: &[String], values: &BTreeMap<String, String>) -> anyhow::Resu
     let mode = mode.ok_or_else(|| anyhow::anyhow!("choose --export-only or --import-only"))?;
     let identity_bundle = identity_bundle.ok_or_else(|| {
         anyhow::anyhow!(
-            "--identity-bundle (or SOLAND_SERVICE_IDENTITY_BUNDLE) is required; the snapshot helper must not accept a configured service DID"
+            "--identity-bundle (or COLAND_SERVICE_IDENTITY_BUNDLE) is required; the snapshot helper must not accept a configured service DID"
         )
     })?;
     Ok(Args {
@@ -123,7 +123,7 @@ fn parse_args(raw: &[String], values: &BTreeMap<String, String>) -> anyhow::Resu
 
 fn main() -> ExitCode {
     let raw: Vec<String> = std::env::args().collect();
-    let values = match soland::process_config::load(&raw) {
+    let values = match coland::process_config::load(&raw) {
         Ok(values) => values,
         Err(error) => {
             eprintln!("[keystore-snapshot] config load failed: {error}");
@@ -169,18 +169,18 @@ enum DrillError {
     Assertion(String),
 }
 
-use soland_http::config::SERVICE_IDENTITY_KEYSTORE_APP;
+use coland_http::config::SERVICE_IDENTITY_KEYSTORE_APP;
 
 fn open_service_identity_key_store(
     values: &BTreeMap<String, String>,
 ) -> Result<Box<dyn arkret_keystore::KeyStore>, DrillError> {
-    soland_http::config::KeyStoreConfig::from_values(values)
+    coland_http::config::KeyStoreConfig::from_values(values)
         .map_err(|error| DrillError::Io(format!("invalid KeyStore configuration: {error}")))?
         .open(SERVICE_IDENTITY_KEYSTORE_APP)
         .map_err(|error| DrillError::Io(format!("durable KeyStore unavailable: {error}")))?
         .ok_or_else(|| {
             DrillError::Io(
-                "SOLAND_KEYSTORE_BACKEND must select a durable backend for this snapshot"
+                "COLAND_KEYSTORE_BACKEND must select a durable backend for this snapshot"
                     .to_owned(),
             )
         })
@@ -270,7 +270,7 @@ fn run_export_only(
     validate_seed_binding(identity, &bytes)?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     let payload = serde_json::json!({
-        "schema": "soland-rotate-drill.keystore-snapshot.v1",
+        "schema": "coland-rotate-drill.keystore-snapshot.v1",
         "service_id": identity.service_id,
         "key_id": key_id,
         "seed_b64": b64,
@@ -305,7 +305,7 @@ fn run_import_only(
         return Ok(());
     }
     let schema = parsed.get("schema").and_then(|v| v.as_str());
-    if schema != Some("soland-rotate-drill.keystore-snapshot.v1") {
+    if schema != Some("coland-rotate-drill.keystore-snapshot.v1") {
         return Err(DrillError::Assertion(format!(
             "snapshot schema is unsupported: {}",
             schema.unwrap_or("<missing>")

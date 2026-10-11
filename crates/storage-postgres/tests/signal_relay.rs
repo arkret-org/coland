@@ -2,11 +2,11 @@
 use std::sync::Arc;
 
 use arkret_wire::*;
+use coland_storage::{SignalRelayRecord, SignalRelayStore};
+use coland_storage_postgres::PgSignalRelayStore;
+use coland_storage_postgres::test_database::TestDatabase;
 use diesel::sql_types::{BigInt, Text};
 use diesel_async::RunQueryDsl;
-use soland_storage::{SignalRelayRecord, SignalRelayStore};
-use soland_storage_postgres::PgSignalRelayStore;
-use soland_storage_postgres::test_database::TestDatabase;
 
 fn record() -> SignalRelayRecord {
     let realm = RealmId::from_event_id(&EventId::from_digest(

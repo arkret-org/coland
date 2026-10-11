@@ -8,11 +8,11 @@ use arkret_models_collaboration::events_payloads::message::{
 use arkret_models_collaboration::events_payloads::poll::PollContentBlock;
 use arkret_models_collaboration::poll::{PollPartition, VerifiedPollResponse};
 use arkret_wire::{CommittedEventRef, Event, EventId, EventKind, RealmCommit};
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::OptionalExtension as _;
 use diesel::sql_types::{Binary, Jsonb, Text};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::Value;
-use soland_storage::{PersistenceError, PersistenceResult};
 
 #[derive(diesel::QueryableByName)]
 struct AcceptedRow {

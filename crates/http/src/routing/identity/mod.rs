@@ -123,7 +123,7 @@ pub fn local_router() -> Router {
                 .push(account::local_gate_router()),
         )
         // Server-to-server device signing-key directory read at
-        // `/_soland/gate/account/device-signing-keys/query`. The Account Authority process
+        // `/_coland/gate/account/device-signing-keys/query`. The Account Authority process
         // (coauth) calls this while verifying a device holder proof
         // (session-grant refresh / soft-logout restore): the holder key is the
         // `ak.device.authorize`-authorized device signing key projected into

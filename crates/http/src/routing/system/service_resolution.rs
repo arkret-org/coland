@@ -1,9 +1,9 @@
 use arkret_models_identity::{AuthenticatedServiceResolution, DidDocument};
 use arkret_wire::DidCoreId;
 use chrono::Utc;
+use coland_http::error::AppError;
 use salvo::oapi::extract::PathParam;
 use salvo::prelude::*;
-use soland_http::error::AppError;
 
 use crate::AppResult;
 use crate::state::AppState;

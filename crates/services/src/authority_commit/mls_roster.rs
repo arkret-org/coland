@@ -10,9 +10,9 @@ use arkret_wire::{
     project_did_to_core_id,
 };
 use chrono::{DateTime, Utc};
+use coland_storage::{MlsRosterAuthorityFacts, MlsRosterAuthorityRead};
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
-use soland_storage::{MlsRosterAuthorityFacts, MlsRosterAuthorityRead};
 
 use super::AuthorityCommitApplication;
 use crate::{ServiceError, ServiceResult};
@@ -116,7 +116,7 @@ impl AuthorityCommitApplication {
         &self,
         request: &arkret_models_collaboration::mls_roster_authority::MlsMemberRosterAuthorityReadRequestBody,
         issuer: &DidCoreId,
-    ) -> ServiceResult<soland_storage::MlsMemberRosterSelectorRead> {
+    ) -> ServiceResult<coland_storage::MlsMemberRosterSelectorRead> {
         request
             .validate()
             .map_err(|error| invalid(error.to_string()))?;

@@ -12,7 +12,7 @@ use arkret_models_identity::device_push_route::{
     DevicePushRoutePayload, ServerRevisionCasDecision, decide_server_revision_cas,
 };
 use arkret_wire::ActorPrivateEventSubmitOutcome;
-use soland_storage::{
+use coland_storage::{
     ActorPrivateEventEffect, ActorPrivateEventRefusal, ActorPrivateEventStore,
     ActorPrivateEventSubmission, ActorPrivateEventSubmitResult,
 };

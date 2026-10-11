@@ -21,16 +21,16 @@ use arkret_models_collaboration::governance::accountability::{
 };
 use arkret_models_identity::ActorProfile;
 use arkret_wire::{AccountId, CommitStreamRef, DidCoreId, Event, EventKind, RealmCommit, ScopeRef};
-use diesel::sql_types::{BigInt, Binary, Jsonb, Nullable, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncConnection, RunQueryDsl};
-use serde_json::Value;
-use soland_storage::{
+use coland_storage::{
     AccountabilityGrantAdmissionOutcome, AccountabilityGrantAdmissionWrite,
     ActorProfileAdmissionOutcome, ActorProfileAdmissionWrite, ActorProfileResultRecord,
     AuthorityCommitTransaction, AuthorityCommitWriteOutcome, ConflictCode,
     IdentityAccountabilityRecord, PersistenceError, PersistenceResult,
 };
+use diesel::sql_types::{BigInt, Binary, Jsonb, Nullable, Text, Timestamptz};
+use diesel::{OptionalExtension, QueryableByName, sql_query};
+use diesel_async::{AsyncConnection, RunQueryDsl};
+use serde_json::Value;
 
 use crate::pcr_device_status_fold::PcrDeviceLifecycle;
 use crate::{AsyncPgConnection, PgPool, PgTransactionError, ids, pg_conn};
@@ -815,7 +815,7 @@ async fn accountability_result_at(
 }
 
 #[async_trait::async_trait]
-impl soland_storage::ActorProfileStore for PgActorProfileStore {
+impl coland_storage::ActorProfileStore for PgActorProfileStore {
     async fn admit_profile(
         &self,
         write: ActorProfileAdmissionWrite,
@@ -856,8 +856,8 @@ impl soland_storage::ActorProfileStore for PgActorProfileStore {
 
     async fn admit_agent_provision(
         &self,
-        write: soland_storage::AgentProvisionAdmissionWrite,
-    ) -> PersistenceResult<soland_storage::AgentProvisionAdmissionOutcome> {
+        write: coland_storage::AgentProvisionAdmissionWrite,
+    ) -> PersistenceResult<coland_storage::AgentProvisionAdmissionOutcome> {
         write.commit.validate().map_err(|error| {
             PersistenceError::SchemaViolation(format!(
                 "invalid Agent provision authority transaction: {error}"
@@ -875,8 +875,8 @@ impl soland_storage::ActorProfileStore for PgActorProfileStore {
 
     async fn admit_agent_pcr_genesis(
         &self,
-        write: soland_storage::AgentPcrGenesisAdmissionWrite,
-    ) -> PersistenceResult<soland_storage::AgentPcrGenesisAdmissionOutcome> {
+        write: coland_storage::AgentPcrGenesisAdmissionWrite,
+    ) -> PersistenceResult<coland_storage::AgentPcrGenesisAdmissionOutcome> {
         write.commit.validate().map_err(|error| {
             PersistenceError::SchemaViolation(format!(
                 "invalid Agent PCR genesis authority transaction: {error}"
@@ -894,8 +894,8 @@ impl soland_storage::ActorProfileStore for PgActorProfileStore {
 
     async fn admit_agent_control_event(
         &self,
-        write: soland_storage::AgentControlAdmissionWrite,
-    ) -> PersistenceResult<soland_storage::AgentControlAdmissionOutcome> {
+        write: coland_storage::AgentControlAdmissionWrite,
+    ) -> PersistenceResult<coland_storage::AgentControlAdmissionOutcome> {
         write.commit.validate().map_err(|error| {
             PersistenceError::SchemaViolation(format!(
                 "invalid Agent control authority transaction: {error}"

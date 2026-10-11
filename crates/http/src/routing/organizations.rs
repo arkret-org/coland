@@ -8,12 +8,12 @@ use std::collections::BTreeSet;
 
 use arkret_wire::DidCoreId;
 use chrono::Utc;
+use coland_http::error::AppError;
+use coland_services::governance::OrganizationRecord;
 use salvo::oapi::endpoint;
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
-use soland_http::error::AppError;
-use soland_services::governance::OrganizationRecord;
 
 use crate::routing::system::extract::AuthArgs;
 use crate::state::AppState;
@@ -79,7 +79,7 @@ fn ensure_organization_registry_admin(state: &AppState, actor: &str) -> Result<(
 
 pub(crate) async fn refresh_organization_projection(
     state: &AppState,
-) -> soland_services::ServiceResult<()> {
+) -> coland_services::ServiceResult<()> {
     let organizations = state.governance().organizations().await?;
     let links = state.governance().realm_organization_links().await?;
     state
@@ -90,11 +90,11 @@ pub(crate) async fn refresh_organization_projection(
 }
 
 #[endpoint(
-    operation_id = "org.arkret.soland.organization.query.list",
+    operation_id = "org.arkret.coland.organization.query.list",
     summary = "List organizations",
     tags("organizations")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.organization.query.list"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.organization.query.list"))]
 async fn list_organizations(
     aa: AuthArgs,
     depot: &mut Depot,
@@ -120,11 +120,11 @@ async fn list_organizations(
 }
 
 #[endpoint(
-    operation_id = "org.arkret.soland.organization.command.upsert",
+    operation_id = "org.arkret.coland.organization.command.upsert",
     summary = "Create or update an organization",
     tags("organizations")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.organization.command.upsert"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.organization.command.upsert"))]
 async fn upsert_organization(
     aa: AuthArgs,
     depot: &mut Depot,
@@ -186,7 +186,7 @@ pub(crate) fn realm_organization_ids(state: &AppState, realm_id: &str) -> Vec<Di
 pub(crate) async fn prepare_realm_organization_proof(
     state: &AppState,
     event: &arkret_wire::Event,
-) -> Result<Option<soland_storage::RealmOrganizationProofCommit>, &'static str> {
+) -> Result<Option<coland_storage::RealmOrganizationProofCommit>, &'static str> {
     if event.kind != arkret_wire::EventKind::RealmOrganization {
         return Ok(None);
     }
@@ -241,7 +241,7 @@ pub(crate) async fn prepare_realm_organization_proof(
             .map_err(|_| "organization_statement_unverified")?;
     key.verify_strict(&transcript, &signature)
         .map_err(|_| "organization_statement_unverified")?;
-    Ok(Some(soland_storage::RealmOrganizationProofCommit {
+    Ok(Some(coland_storage::RealmOrganizationProofCommit {
         event_id: event.event_id.clone(),
         verification_method: payload.authorization.verification_method,
         signed_at: payload.authorization.signed_at,

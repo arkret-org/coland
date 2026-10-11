@@ -58,7 +58,7 @@ fn forwarded_request(seed: u8) -> PeerAuthoritySubmitRequest {
         at,
     )
     .unwrap();
-    let event = soland_test_support::signed_event::sign_fixture_event(
+    let event = coland_test_support::signed_event::sign_fixture_event(
         event,
         "did:web:relay-producer.example",
         device.as_str(),
@@ -327,7 +327,7 @@ async fn store_blob(state: &AppState, blob_ref: &str, bytes: &[u8]) {
         .deliveries()
         .store_blob(
             blob_ref,
-            soland_services::delivery::BlobState {
+            coland_services::delivery::BlobState {
                 sha256,
                 size_bytes: bytes.len() as i64,
                 storage_backend: state.deliveries().object_storage_backend_name(),
@@ -358,7 +358,7 @@ async fn a_forwarded_genesis_carries_its_local_blobs_only_when_they_address_thei
             seed_demo_data: false,
             ..crate::config::AppConfig::test_default()
         },
-        soland_storage_postgres::Db { pool: None },
+        coland_storage_postgres::Db { pool: None },
     );
     let realm_id = RealmId::from_event_id(&arkret_wire::EventId::from_digest(
         arkret_canonical::DigestSuite::Sha256,
@@ -454,7 +454,7 @@ async fn agent_origin_registered_gate_http_refusal_and_malformed_success_never_m
             ..crate::config::AppConfig::test_default()
         };
         config.register_test_internal_authority_channel("public-fixture-edge-secret");
-        let state = AppState::new(config, soland_storage_postgres::Db { pool: None });
+        let state = AppState::new(config, coland_storage_postgres::Db { pool: None });
         let principal = DidCoreId::new("ak:did_core:web:controller.example").unwrap();
         let request = arkret_wire::RequestId::new_v7_at(1791165600000);
         let expected =

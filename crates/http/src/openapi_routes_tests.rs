@@ -69,7 +69,7 @@ async fn wait_carriers_are_closed_and_duplicates_are_rejected() {
     // declaring a registered Account operation on its request.
     for path in [
         "/_arkret/ws",
-        "/_soland/self/strands/unknown",
+        "/_coland/self/strands/unknown",
         "/unregistered",
     ] {
         let response = TestClient::get(format!("http://localhost{path}"))
@@ -122,18 +122,18 @@ fn pattern_matches_concrete_path() {
 #[test]
 fn pattern_matches_param_segment() {
     assert!(pattern_matches_path(
-        "/_soland/self/spaces/{space_id}",
-        "/_soland/self/spaces/ak:space:01"
+        "/_coland/self/spaces/{space_id}",
+        "/_coland/self/spaces/ak:space:01"
     ));
     // Different segment count → no match.
     assert!(!pattern_matches_path(
-        "/_soland/self/spaces/{space_id}",
-        "/_soland/self/spaces/ak:space:01/policy"
+        "/_coland/self/spaces/{space_id}",
+        "/_coland/self/spaces/ak:space:01/policy"
     ));
     // Param must be non-empty.
     assert!(!pattern_matches_path(
-        "/_soland/self/spaces/{space_id}",
-        "/_soland/self/spaces/"
+        "/_coland/self/spaces/{space_id}",
+        "/_coland/self/spaces/"
     ));
 }
 
@@ -169,7 +169,7 @@ fn known_routes_map_resolves_known_path() {
             vec![Method::GET, Method::POST],
         ),
         (
-            "/_soland/self/spaces/{space_id}".to_owned(),
+            "/_coland/self/spaces/{space_id}".to_owned(),
             vec![Method::GET],
         ),
     ]);
@@ -180,12 +180,12 @@ fn known_routes_map_resolves_known_path() {
         .expect("/_arkret/self/events is registered with at least one method");
     assert_eq!(methods, vec![Method::GET, Method::POST]);
 
-    let methods = allow_methods_for_path("/_soland/self/spaces/ak:space:abc")
-        .expect("/_soland/self/spaces/{id} resolves with a concrete id");
+    let methods = allow_methods_for_path("/_coland/self/spaces/ak:space:abc")
+        .expect("/_coland/self/spaces/{id} resolves with a concrete id");
     assert_eq!(methods, vec![Method::GET]);
 
     // Unknown path → `None`, which is the cue for `api_not_found`
     // to emit `unrecognized_endpoint` instead of `method_not_allowed`.
     assert!(allow_methods_for_path("/_arkret/self/does-not-exist").is_none());
-    assert!(allow_methods_for_path("/_soland/peer/does-not-exist").is_none());
+    assert!(allow_methods_for_path("/_coland/peer/does-not-exist").is_none());
 }

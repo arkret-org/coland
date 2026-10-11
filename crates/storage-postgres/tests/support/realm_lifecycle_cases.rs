@@ -1,6 +1,6 @@
 use super::*;
 
-async fn terminal_persistent_rows(pool: &soland_storage_postgres::PgPool) -> serde_json::Value {
+async fn terminal_persistent_rows(pool: &coland_storage_postgres::PgPool) -> serde_json::Value {
     use diesel_async::RunQueryDsl as _;
     #[derive(diesel::QueryableByName)]
     struct Table {
@@ -56,7 +56,7 @@ async fn terminal_persistent_rows(pool: &soland_storage_postgres::PgPool) -> ser
 }
 
 async fn lifecycle_write_counts(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     _realm: &arkret_wire::RealmId,
 ) -> serde_json::Value {
     terminal_persistent_rows(pool).await

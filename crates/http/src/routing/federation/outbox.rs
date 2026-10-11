@@ -34,7 +34,7 @@
 //!
 //! - DOES NOT touch `reducer.rs` — G3.Y0 / G3.S3 own that.
 //! - DOES NOT change the inbound federation handler shape — G2.T1 owns that.
-//! - DOES NOT introduce a new HTTP client — reuses the existing `reqwest` async client soland
+//! - DOES NOT introduce a new HTTP client — reuses the existing `reqwest` async client coland
 //!   already pulls in.
 
 use std::sync::Arc;
@@ -44,12 +44,12 @@ use arkret_signatures::http_signature::{
     Component, SignedRequestParts, canonical_message, format_signature_input_component_list,
     parse_signature_input,
 };
-use rand::RngExt;
-use soland_services::federation::{
+use coland_services::federation::{
     ClaimFederationDeliveriesCommand, FederationDeadLetter, FederationDeliveryOutcome,
     FederationDeliveryRecord, PendingFederationDelivery, RecordFederationAttemptCommand,
 };
-use soland_storage::FederationOutboxPolicyResolution;
+use coland_storage::FederationOutboxPolicyResolution;
+use rand::RngExt;
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -127,7 +127,7 @@ pub async fn enqueue_outbound(
     endpoint: &str,
     idempotency_key: &str,
     payload_json: &str,
-) -> soland_services::ServiceResult<soland_services::federation::FederationDeliveryRecord> {
+) -> coland_services::ServiceResult<coland_services::federation::FederationDeliveryRecord> {
     enqueue_outbound_with_lane(
         state,
         Some(peer_url),
@@ -152,7 +152,7 @@ pub async fn enqueue_coalesced_outbound(
     payload_json: &str,
     coalescing_key: &str,
     coalescing_position: i64,
-) -> soland_services::ServiceResult<soland_services::federation::FederationDeliveryRecord> {
+) -> coland_services::ServiceResult<coland_services::federation::FederationDeliveryRecord> {
     enqueue_outbound_with_lane(
         state,
         peer_url,
@@ -174,9 +174,9 @@ async fn enqueue_outbound_with_lane(
     idempotency_key: &str,
     payload_json: &str,
     coalescing_lane: Option<(&str, i64)>,
-) -> soland_services::ServiceResult<soland_services::federation::FederationDeliveryRecord> {
+) -> coland_services::ServiceResult<coland_services::federation::FederationDeliveryRecord> {
     let peer_id = arkret_wire::DidCoreId::new(peer_id.to_owned()).map_err(|error| {
-        soland_services::ServiceError::SchemaViolation(format!("invalid peer service id: {error}"))
+        coland_services::ServiceError::SchemaViolation(format!("invalid peer service id: {error}"))
     })?;
     let now = now_unix_secs();
     let (coalescing_key, coalescing_position) = coalescing_lane
@@ -185,8 +185,8 @@ async fn enqueue_outbound_with_lane(
     let result = state
         .federation()
         .enqueue_delivery(
-            soland_services::federation::EnqueueFederationDeliveryCommand {
-                delivery: soland_services::federation::FederationDeliveryRecord {
+            coland_services::federation::EnqueueFederationDeliveryCommand {
+                delivery: coland_services::federation::FederationDeliveryRecord {
                     id: Uuid::new_v4().to_string(),
                     peer_id,
                     peer_url: peer_url.map(|url| url.trim_end_matches('/').to_owned()),
@@ -573,7 +573,7 @@ fn peer_event_application_failure(
             }
         };
     }
-    if endpoint == "/_soland/peer/federation/operations" {
+    if endpoint == "/_coland/peer/federation/operations" {
         return match serde_json::from_str::<serde_json::Value>(response_body)
             .ok()
             .and_then(|value| {
@@ -1309,7 +1309,7 @@ impl FederationDispatcher {
         // transcript, which does not cover Idempotency-Key. Outbox persistence
         // still deduplicates the delivery by this key; only the HTTP header is
         // omitted for that wire profile.
-        if row.delivery.endpoint != "/_soland/peer/federation/operations"
+        if row.delivery.endpoint != "/_coland/peer/federation/operations"
             && let Ok(value) = reqwest::header::HeaderValue::from_str(&row.delivery.idempotency_key)
         {
             headers.insert("idempotency-key", value);

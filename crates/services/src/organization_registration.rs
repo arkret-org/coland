@@ -12,13 +12,13 @@ use arkret_models_identity::{
 use arkret_signatures::{Ed25519DetachedJwsVerifier, PublicKeyMaterial};
 use arkret_wire::{Did, DidCoreId, DidUrl, Hash, PayloadProof, ProofContextId, TrustDomainId};
 use chrono::{DateTime, Duration, Utc};
-use serde_json::{Map, Value, json};
-use soland_storage::{
+use coland_storage::{
     OrganizationRegistrationCurrent, OrganizationRegistrationEnsureCommit,
     OrganizationRegistrationLifecycleCommit, OrganizationRegistrationRefreshCommit,
     OrganizationRegistrationStore, OrganizationRegistrationTerminalReason, PersistenceError,
     PersistenceStore,
 };
+use serde_json::{Map, Value, json};
 
 use crate::identity::{DidService, PinnedDidDocumentState, PinnedDidVersionStatus};
 
@@ -1386,16 +1386,16 @@ fn map_storage(error: PersistenceError) -> OrganizationRegistrationError {
     match error {
         PersistenceError::NotFound(detail) => not_found(detail),
         PersistenceError::Conflict(detail) => match conflict_code {
-            Some(soland_storage::ConflictCode::OrganizationRegistrationChallengeInvalid) => {
+            Some(coland_storage::ConflictCode::OrganizationRegistrationChallengeInvalid) => {
                 OrganizationRegistrationError::challenge(detail)
             }
-            Some(soland_storage::ConflictCode::OrganizationRegistrationRevoked) => {
+            Some(coland_storage::ConflictCode::OrganizationRegistrationRevoked) => {
                 OrganizationRegistrationError::new(
                     OrganizationRegistrationErrorCode::Revoked,
                     detail,
                 )
             }
-            Some(soland_storage::ConflictCode::OrganizationRegistrationStale) => {
+            Some(coland_storage::ConflictCode::OrganizationRegistrationStale) => {
                 OrganizationRegistrationError::new(OrganizationRegistrationErrorCode::Stale, detail)
             }
             _ => internal(detail),
@@ -1427,8 +1427,8 @@ mod tests {
     };
     use arkret_signatures::{Ed25519DetachedJwsSigner, EventSigner};
     use arkret_wire::PayloadProof;
+    use coland_storage::PersistenceStore;
     use parking_lot::RwLock;
-    use soland_storage::PersistenceStore;
 
     use super::*;
 
@@ -2514,13 +2514,13 @@ mod tests {
     }
 
     /// The 19 semantic outcomes, run against the one storage implementation
-    /// Soland has. The lease fails rather than skips when no database is
+    /// Coland has. The lease fails rather than skips when no database is
     /// configured, so an unconfigured run breaks the build instead of
     /// emptying this suite.
     #[tokio::test]
     async fn embedded_fixture_runner_executes_all_19_semantic_outcomes() {
-        let database = soland_storage_postgres::test_database::TestDatabase::lease().await;
-        run_embedded_fixture(Arc::new(soland_storage_postgres::PgPersistenceStore::new(
+        let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+        run_embedded_fixture(Arc::new(coland_storage_postgres::PgPersistenceStore::new(
             database.pool(),
         )))
         .await;

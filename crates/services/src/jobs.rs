@@ -3,7 +3,7 @@ use std::sync::Arc;
 use arkret_identifiers::DidCoreId;
 use arkret_wire::ActorId;
 
-pub const INTERNAL_IDEMPOTENCY_OPERATION: &str = "soland://internal/idempotency";
+pub const INTERNAL_IDEMPOTENCY_OPERATION: &str = "coland://internal/idempotency";
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
@@ -35,7 +35,7 @@ pub trait RuntimeHealthPort: Send + Sync {
     fn database_pool_in_use(&self) -> u32;
 }
 
-pub use soland_storage::IdempotencyRecord as IdempotencyState;
+pub use coland_storage::IdempotencyRecord as IdempotencyState;
 
 #[derive(Clone)]
 pub struct JobsService {

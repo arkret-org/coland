@@ -1,8 +1,8 @@
 //! Producer-guarded Sidecar create/attach commits as one accepted batch.
 
 use arkret_wire::{Event, EventAdmissionSubmission};
-use soland_services::identity::SessionIdentityState;
-use soland_services::{ServiceError, ServiceResult};
+use coland_services::identity::SessionIdentityState;
+use coland_services::{ServiceError, ServiceResult};
 
 use super::AppState;
 
@@ -58,7 +58,7 @@ pub(crate) async fn commit_sidecar_ensure_unit(
         let canonical_digest = event
             .event_digest_with_digest_suite(arkret_canonical::DigestSuite::Sha256)
             .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
-        let record = soland_storage::CanonicalEventRecord {
+        let record = coland_storage::CanonicalEventRecord {
             event_id: event.event_id.to_string(),
             actor_id: event.actor_id.to_string(),
             realm_id: Some(event.realm_id.to_string()),
@@ -70,7 +70,7 @@ pub(crate) async fn commit_sidecar_ensure_unit(
             envelope,
             received_at: committed_at,
         };
-        commands.push(soland_services::events::CommitAcceptedEventCommand {
+        commands.push(coland_services::events::CommitAcceptedEventCommand {
             authority_commit: transaction,
             self_producer_guard: Some(producer),
             applet_producer_guard: None,
@@ -83,7 +83,7 @@ pub(crate) async fn commit_sidecar_ensure_unit(
             contact_projection: None,
             device_revocation_transition: None,
             device_revocation_gate: None,
-            projections: vec![soland_services::events::ProjectedEvent {
+            projections: vec![coland_services::events::ProjectedEvent {
                 event_id: event.event_id.to_string(),
                 realm_id: event.realm_id.to_string(),
                 event_kind: event.kind.clone(),
@@ -102,7 +102,7 @@ pub(crate) async fn commit_sidecar_ensure_unit(
     }
     state
         .events()
-        .commit_accepted_event_batch(soland_services::events::CommitAcceptedEventBatchCommand {
+        .commit_accepted_event_batch(coland_services::events::CommitAcceptedEventBatchCommand {
             events: commands,
             franking_replay_nonce: None,
             realm_organization_proof: None,

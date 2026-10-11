@@ -2,9 +2,9 @@
 
 use arkret_wire::WebOrigin;
 use chrono::{Duration, Utc};
-use soland_storage::{WebsocketAuthChallengeRecord, WebsocketAuthReplayRecord, WebsocketAuthStore};
-use soland_storage_postgres::PgWebsocketAuthStore;
-use soland_storage_postgres::test_database::TestDatabase;
+use coland_storage::{WebsocketAuthChallengeRecord, WebsocketAuthReplayRecord, WebsocketAuthStore};
+use coland_storage_postgres::PgWebsocketAuthStore;
+use coland_storage_postgres::test_database::TestDatabase;
 
 fn challenge(connection: &str, nonce: &str) -> WebsocketAuthChallengeRecord {
     let issued_at = arkret_canonical::normalize_timestamp_canonical(Utc::now());
@@ -171,7 +171,7 @@ async fn expired_or_unknown_challenge_consumes_no_replay_entry() {
 
 #[tokio::test]
 async fn connection_quotas_are_shared_atomic_and_expired_leases_are_reusable() {
-    use soland_storage::WebsocketConnectionLease;
+    use coland_storage::WebsocketConnectionLease;
     let database = TestDatabase::lease().await;
     let first = PgWebsocketAuthStore {
         pool: database.pool(),

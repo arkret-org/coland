@@ -2,9 +2,9 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ include "soland.fullname" . }}
+  name: {{ include "coland.fullname" . }}
   labels:
-    {{- include "soland.labels" . | nindent 4 }}
+    {{- include "coland.labels" . | nindent 4 }}
 spec:
   {{- if .Values.ingress.className }}
   ingressClassName: {{ .Values.ingress.className }}
@@ -23,7 +23,7 @@ spec:
             pathType: {{ .pathType }}
             backend:
               service:
-                name: {{ include "soland.fullname" $ }}
+                name: {{ include "coland.fullname" $ }}
                 port:
                   name: http
           {{- end }}

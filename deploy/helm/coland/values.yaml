@@ -1,0 +1,94 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/arkret/coland
+  tag: latest
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  create: true
+  name: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+service:
+  type: ClusterIP
+  port: 8698
+
+ingress:
+  enabled: false
+  className: ""
+  hosts:
+    - host: coland.example
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+env:
+  COLAND_BIND: 0.0.0.0:8698
+  COLAND_PUBLIC_BASE_URL: https://coland.example
+  COLAND_FIRST_PROVISIONING: "false"
+  COLAND_KEYSTORE_BACKEND: encrypted_file
+  COLAND_KEYSTORE_PATH: /var/lib/coland/keystore/coland.v1
+  COLAND_SERVICE_IDENTITY_BUNDLE_DIR: /var/lib/coland/identity-bundle
+  COLAND_ACCOUNT_AUTHORITY_URL: https://coauth.example
+  COLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN: ak:trust_domain:coauth.example
+  COLAND_OBJECT_STORAGE_BACKEND: s3-compatible
+  COLAND_OBJECT_STORAGE_S3_BUCKET: coland
+  COLAND_OBJECT_STORAGE_S3_REGION: us-east-1
+  COLAND_OBJECT_STORAGE_S3_FORCE_PATH_STYLE: "true"
+  COLAND_OBJECT_STORAGE_PREFIX: prod
+  COLAND_CORS_ALLOW_ORIGIN: https://app.example
+  RUST_LOG: coland=info,salvo=info,warn
+
+secretEnv:
+  DATABASE_URL: ""
+  COLAND_KEYSTORE_MASTER_KEY: ""
+  COLAND_SESSION_GRANT_INTROSPECTION_URL: ""
+  COLAND_AUTH_SESSION_LOGOUT_URL: ""
+  COLAND_INTERNAL_AUTHORITY_SHARED_SECRET: ""
+  COLAND_OBJECT_STORAGE_S3_ENDPOINT: ""
+  COLAND_OBJECT_STORAGE_S3_ACCESS_KEY_ID: ""
+  COLAND_OBJECT_STORAGE_S3_SECRET_ACCESS_KEY: ""
+
+existingSecret: ""
+
+persistence:
+  enabled: true
+  existingClaim: ""
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 1Gi
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+networkPolicy:
+  enabled: false
+  ingressCidrs: []
+  egress:
+    databaseCidrs: []
+    objectStorageCidrs: []
+    oauthCidrs: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

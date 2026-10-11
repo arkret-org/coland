@@ -1,10 +1,10 @@
 //! Real forwarded Human device evidence freezes with the first governance Commit.
 #[path = "support/historical_human.rs"]
 mod historical_human;
+use coland_storage::{EventCommitUnitOfWork, ForwardedProducerDeviceEvidence, PersistenceStore};
+use coland_storage_postgres::{PgEventCommitUnitOfWork, PgPersistenceStore, PgPool};
 use diesel::sql_types::{BigInt, Text};
 use diesel_async::RunQueryDsl;
-use soland_storage::{EventCommitUnitOfWork, ForwardedProducerDeviceEvidence, PersistenceStore};
-use soland_storage_postgres::{PgEventCommitUnitOfWork, PgPersistenceStore, PgPool};
 
 async fn evidence_rows(pool: &PgPool) -> Vec<(String, String)> {
     #[derive(diesel::QueryableByName)]
@@ -43,12 +43,12 @@ async fn commit_count(pool: &PgPool, commit_id: &str) -> i64 {
 
 #[tokio::test]
 async fn forwarded_evidence_is_retained_with_the_first_commit_or_not_at_all() {
-    let mut source_config = soland_test_support::app_config();
+    let mut source_config = coland_test_support::app_config();
     source_config.public_base_url = "https://forward-evidence-governance.example".into();
-    let (source_state, pool) = soland_test_support::app_state_with_pool(source_config);
-    let mut origin_config = soland_test_support::app_config();
+    let (source_state, pool) = coland_test_support::app_state_with_pool(source_config);
+    let mut origin_config = coland_test_support::app_config();
     origin_config.public_base_url = "https://forward-evidence-origin.example".into();
-    let (origin_state, origin_pool) = soland_test_support::app_state_with_pool(origin_config);
+    let (origin_state, origin_pool) = coland_test_support::app_state_with_pool(origin_config);
     let governing = historical_human::HumanFixture::new(&pool, source_state.service_did()).await;
     governing.admit(&pool).await;
     let origin =
@@ -64,7 +64,7 @@ async fn forwarded_evidence_is_retained_with_the_first_commit_or_not_at_all() {
     );
     let mut request =
         historical_human::request_for_event(&origin, previous, event, previous.commit.committed_at);
-    let evidence = soland_http::test_fresh_producer_device_evidence(
+    let evidence = coland_http::test_fresh_producer_device_evidence(
         &origin_state,
         &request.authority_commit.event,
         &governing.pcr.history.account.station_id,
@@ -172,7 +172,7 @@ async fn forwarded_evidence_is_retained_with_the_first_commit_or_not_at_all() {
     assert_eq!(commit_count(&pool, &commit_id).await, 0);
     assert!(evidence_rows(&pool).await.is_empty());
     let mut both = request.clone();
-    both.self_producer_guard = Some(soland_storage::SelfProducerCommitGuard::HumanDevice(
+    both.self_producer_guard = Some(coland_storage::SelfProducerCommitGuard::HumanDevice(
         origin.guard.clone(),
     ));
     assert!(uow.commit_event(both).await.is_err());

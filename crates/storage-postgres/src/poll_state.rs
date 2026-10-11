@@ -8,11 +8,11 @@ use arkret_models_collaboration::events_payloads::message::PollResponseHead;
 use arkret_models_collaboration::events_payloads::poll::PollContentBlock;
 use arkret_models_collaboration::poll::{PollPartition, VerifiedPollResponse};
 use arkret_wire::{CommittedEventRef, Event, EventId, RealmCommit};
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::OptionalExtension;
 use diesel::sql_types::{BigInt, Binary, Jsonb, Text};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::Value;
-use soland_storage::{PersistenceError, PersistenceResult};
 
 fn refusal(reason: &str) -> PersistenceError {
     PersistenceError::Conflict(format!("failed_precondition: Poll admission: {reason}"))

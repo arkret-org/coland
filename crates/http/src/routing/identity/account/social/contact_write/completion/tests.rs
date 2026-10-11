@@ -75,7 +75,7 @@ fn confirmed_contact_receipt_uses_historical_key_after_rotation_and_keystore_reo
             .any(|(_, key)| key == current.verifying_key().as_bytes())
     );
     let path = std::env::temp_dir().join(format!(
-        "soland-contact-receipt-{}.keys",
+        "coland-contact-receipt-{}.keys",
         uuid::Uuid::now_v7()
     ));
     let mut config = crate::config::AppConfig::test_default();

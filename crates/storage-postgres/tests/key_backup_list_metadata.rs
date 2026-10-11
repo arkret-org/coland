@@ -18,11 +18,11 @@ use arkret_models_crypto::{BackupActiveSeriesPointer, KeyBackupSummary, KeysBack
 use arkret_schema::ProtocolSchemaRegistry;
 use arkret_schema_conformance::{default_spec_artifacts_dir, schema_registry_from_spec_artifacts};
 use arkret_wire::{AccountId, ActorId, DidCoreId};
+use coland_storage::{KeyBackupListQuery, KeyBackupStore};
+use coland_storage_postgres::{Db, PgKeyBackupStore, PgPool};
 use diesel::sql_types::{Jsonb, Text, Uuid};
 use diesel_async::RunQueryDsl;
 use serde_json::{Value, json};
-use soland_storage::{KeyBackupListQuery, KeyBackupStore};
-use soland_storage_postgres::{Db, PgKeyBackupStore, PgPool};
 
 static TEST_POOL: OnceLock<PgPool> = OnceLock::new();
 
@@ -256,7 +256,7 @@ async fn list_row_is_generated_and_cannot_be_supplied_or_widened() {
     let series = format!("ak:backup_series:{}", uuid::Uuid::now_v7());
     let backup_id = format!("ak:backup:{}", uuid::Uuid::now_v7());
     let envelope = genesis(&backup_id, &actor, &series);
-    let row_id = soland_storage::ids::typed_uuid_part_expect_internal(&backup_id);
+    let row_id = coland_storage::ids::typed_uuid_part_expect_internal(&backup_id);
     let mut conn = pool.get().await.unwrap();
 
     // The legacy "envelope minus ciphertext" row cannot be written: the list

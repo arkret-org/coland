@@ -1,5 +1,5 @@
 [package]
-name = "soland-contracts"
+name = "coland-contracts"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "Shared deployment-local contracts for Soland integrations."
+description = "Shared deployment-local contracts for Coland integrations."
 
 [features]
 default = []

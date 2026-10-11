@@ -82,10 +82,10 @@ pub fn operation_policy_reason_code(message: &str) -> (salvo::http::StatusCode, 
             salvo::http::StatusCode::PRECONDITION_FAILED,
             arkret_wire::ReasonCode::ACCOUNTABILITY_GRANT_MISSING,
         )
-    } else if message == soland_services::operation_semantics::REASON_KEYPACKAGE_NOT_FOUND {
+    } else if message == coland_services::operation_semantics::REASON_KEYPACKAGE_NOT_FOUND {
         (
             salvo::http::StatusCode::PRECONDITION_FAILED,
-            soland_services::operation_semantics::REASON_KEYPACKAGE_NOT_FOUND,
+            coland_services::operation_semantics::REASON_KEYPACKAGE_NOT_FOUND,
         )
     } else if message == "sidecar_create_denied" {
         (salvo::http::StatusCode::FORBIDDEN, "sidecar_create_denied")
@@ -297,7 +297,7 @@ async fn validate_agent_operation_membership(
     reason = "focused policy tests stay adjacent to the public policy entry point"
 )]
 mod tests {
-    use soland_storage_postgres::Db;
+    use coland_storage_postgres::Db;
 
     use super::*;
 

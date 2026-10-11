@@ -23,10 +23,10 @@ use arkret_models_collaboration::sidecar_operations::{
 use arkret_models_crypto::MlsGovernanceBindingPayload;
 use arkret_models_crypto::SidecarMlsBinding;
 use arkret_wire::NonEmptyString;
-use salvo::oapi::extract::QueryParam;
-use soland_services::identity::{
+use coland_services::identity::{
     AgentSidecarContextState as AgentSidecarContextRecord, AgentSidecarState as AgentSidecarRecord,
 };
+use salvo::oapi::extract::QueryParam;
 
 use super::*;
 
@@ -235,9 +235,9 @@ fn sidecar_from_record(record: &AgentSidecarRecord) -> Result<AgentSidecar, AppE
             .map_err(|error| AppError::internal(format!("stored Realm id: {error}")))?,
         controller_account_id: record.controller_account_id.clone(),
         state: match record.state {
-            soland_storage::SidecarLifecycleState::Active => AgentSidecarState::Active,
-            soland_storage::SidecarLifecycleState::Suspended => AgentSidecarState::Suspended,
-            soland_storage::SidecarLifecycleState::Tombstoned => AgentSidecarState::Tombstoned,
+            coland_storage::SidecarLifecycleState::Active => AgentSidecarState::Active,
+            coland_storage::SidecarLifecycleState::Suspended => AgentSidecarState::Suspended,
+            coland_storage::SidecarLifecycleState::Tombstoned => AgentSidecarState::Tombstoned,
         },
         state_changed_at: record.state_changed_at,
         created_at: record.created_at,
@@ -449,7 +449,7 @@ async fn store_sidecar_prepare(
     ] {
         state
             .jobs()
-            .store_idempotency_record(soland_services::jobs::IdempotencyState {
+            .store_idempotency_record(coland_services::jobs::IdempotencyState {
                 authenticated_actor: arkret_wire::ActorId::account(arkret_wire::AccountId::new(
                     principal_id.clone(),
                     state.service_core_id(),
@@ -480,7 +480,7 @@ async fn store_sidecar_final_outcome(
         .map_err(|error| AppError::internal(format!("Sidecar principal id invalid: {error}")))?;
     state
         .jobs()
-        .store_idempotency_record(soland_services::jobs::IdempotencyState {
+        .store_idempotency_record(coland_services::jobs::IdempotencyState {
             authenticated_actor: arkret_wire::ActorId::account(arkret_wire::AccountId::new(
                 principal_id,
                 state.service_core_id(),
@@ -499,7 +499,7 @@ async fn store_sidecar_final_outcome(
 }
 
 fn next_sidecar_context_version(
-    current: Option<&soland_storage::AgentSidecarContextRecord>,
+    current: Option<&coland_storage::AgentSidecarContextRecord>,
 ) -> Result<(u64, Option<arkret_wire::EventId>), AppError> {
     match current {
         None => Ok((1, None)),
@@ -823,7 +823,7 @@ async fn finalize_sidecar_projection_records(
                 })?,
                 state.service_core_id().clone(),
             ),
-            state: soland_storage::SidecarLifecycleState::Active,
+            state: coland_storage::SidecarLifecycleState::Active,
             state_changed_at: None,
             created_at,
             updated_at: None,
@@ -1136,7 +1136,7 @@ mod tests {
 
     #[tokio::test]
     async fn sidecar_source_strand_reads_durable_current_without_a_reducer_mirror() {
-        let database = soland_storage_postgres::test_database::TestDatabase::lease().await;
+        let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
         let pool = database.pool();
         let discussion = source_context_test_realm::open_human_discussion(
             &pool,
@@ -1145,7 +1145,7 @@ mod tests {
         .await;
         let state = AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: Some(pool) },
+            coland_storage_postgres::Db { pool: Some(pool) },
         );
         state.test_projection().lock().strands.clear();
         let realm = discussion.head.authority_commit.event.realm_id;
@@ -1179,10 +1179,10 @@ mod tests {
 
     #[tokio::test]
     async fn existing_sidecar_prepare_uses_accepted_context_and_signed_successor_cas() {
+        use coland_storage::{AuthorityCommitStore, EventCommitUnitOfWork};
+        use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork};
         use diesel_async::RunQueryDsl;
-        use soland_storage::{AuthorityCommitStore, EventCommitUnitOfWork};
-        use soland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork};
-        let database = soland_storage_postgres::test_database::TestDatabase::lease().await;
+        let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
         let pool = database.pool();
         let discussion = Box::pin(source_context_test_realm::open_human_discussion(
             &pool,
@@ -1478,7 +1478,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        let mut overflow = soland_storage::AgentSidecarContextRecord {
+        let mut overflow = coland_storage::AgentSidecarContextRecord {
             sidecar_id: sidecar.to_string(),
             normalized_context_ref_digest: String::new(),
             normalized_context_ref: json!({}),
@@ -1564,7 +1564,7 @@ mod tests {
     fn sidecar_membership_uses_exact_projected_actor_not_directory_principal() {
         let state = AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let realm_id = "ak:realm:AQcksDTzb8Sxrn1BUVVlHtH4vBOy99RKUB4EwOq_413b";
         let principal = DidCoreId::new("ak:did_core:web:alice.example").unwrap();
@@ -1576,10 +1576,10 @@ mod tests {
             principal.clone(),
             DidCoreId::new("ak:did_core:web:other-station.example").unwrap(),
         ));
-        let mut directory = soland_services::events::RealmDirectoryEntry::new(
+        let mut directory = coland_services::events::RealmDirectoryEntry::new(
             RealmId::new(realm_id).unwrap(),
             "discovery only",
-            soland_services::events::DirectoryProvenance::LocalOnly,
+            coland_services::events::DirectoryProvenance::LocalOnly,
         );
         directory.members.insert(principal.clone());
         state.realm_directory().upsert(directory);
@@ -1591,7 +1591,7 @@ mod tests {
         let now = chrono::Utc::now();
         state.test_projection().lock().members.insert(
             (realm_id.to_owned(), local_actor.to_string()),
-            soland_domain::reducer::SolandMembershipState {
+            coland_domain::reducer::ColandMembershipState {
                 member: local_actor.to_string(),
                 realm_id: realm_id.to_owned(),
                 state: "join".to_owned(),

@@ -206,7 +206,7 @@ impl EventCommitUnitOfWork for PgPersistenceStore {
 
     async fn commit_event_batch(
         &self,
-        request: soland_storage::EventBatchCommitRequest,
+        request: coland_storage::EventBatchCommitRequest,
     ) -> PersistenceResult<EventCommitOutcome> {
         self.event_commits.commit_event_batch(request).await
     }
@@ -357,7 +357,7 @@ impl DeliveryPolicyStoreRegistry for PgPersistenceStore {
         &self.recovery_policies
     }
 
-    fn actor_profiles(&self) -> &dyn soland_storage::ActorProfileStore {
+    fn actor_profiles(&self) -> &dyn coland_storage::ActorProfileStore {
         &self.actor_profiles
     }
 
@@ -435,7 +435,7 @@ impl EventProjectionStoreRegistry for PgPersistenceStore {
         &self.capability_grant_current_results
     }
 
-    fn invite_current_results(&self) -> &dyn soland_storage::InviteCurrentResultStore {
+    fn invite_current_results(&self) -> &dyn coland_storage::InviteCurrentResultStore {
         &self.invite_current_results
     }
 
@@ -449,7 +449,7 @@ impl MlsAgentStoreRegistry for PgPersistenceStore {
         &self.mls_key_packages
     }
 
-    fn mls_groups(&self) -> &dyn soland_storage::MlsGroupCurrentStore {
+    fn mls_groups(&self) -> &dyn coland_storage::MlsGroupCurrentStore {
         &self.mls_groups
     }
 

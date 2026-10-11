@@ -28,10 +28,10 @@ use arkret_signatures::http_signature::{
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use coland_http::error::AppError;
+use coland_http::util::{bearer_token, dpop_token};
 use ed25519_dalek::VerifyingKey;
 use salvo::prelude::*;
-use soland_http::error::AppError;
-use soland_http::util::{bearer_token, dpop_token};
 
 use crate::routing::federation::{signature_authority, signature_target_uri};
 use crate::routing::identity::auth::session_credential_hash;
@@ -69,7 +69,7 @@ pub async fn verify_session_pop(
 /// rejection to `unauthenticated` did exactly that.
 fn auth_rejection(rejection: (StatusCode, &'static str, &'static str)) -> AppError {
     let (status, code, message) = rejection;
-    match soland_http::error::ErrorCode::from_wire(code) {
+    match coland_http::error::ErrorCode::from_wire(code) {
         Some(code) => AppError::from_rejection(code, message),
         None if status.is_server_error() => AppError::internal(message).with_internal_reason(code),
         None => AppError::unauthenticated(message).with_internal_reason(code),
@@ -95,7 +95,7 @@ async fn enforce_session_pop(state: &AppState, req: &mut Request) -> Result<(), 
     let jwk = session_signing_key_jwk(state, req).await?;
     let (public_key, explicit_kid, thumbprint) = parse_session_jwk(&jwk)?;
 
-    soland_http::http_signature::reject_content_encoding(req, || {
+    coland_http::http_signature::reject_content_encoding(req, || {
         AppError::unauthenticated("PoP-signed JSON requests must not use Content-Encoding")
     })?;
     let body = req

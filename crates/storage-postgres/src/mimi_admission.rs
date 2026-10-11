@@ -1,9 +1,9 @@
 //! Independent MIMI service authorship and attribution, rechecked before writes.
+use coland_storage::{PersistenceError, PersistenceResult, SelfProducerCommitGuard};
 use diesel::OptionalExtension as _;
 use diesel::sql_types::{Jsonb, Text};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::Value;
-use soland_storage::{PersistenceError, PersistenceResult, SelfProducerCommitGuard};
 
 #[derive(diesel::QueryableByName)]
 struct JsonRow {
@@ -337,7 +337,7 @@ pub(crate) async fn check_facade_producer_in_connection(
 /// A losing concurrent report must roll back its Event as well as its response.
 pub(crate) async fn record_report_idempotency_in_connection(
     conn: &mut AsyncPgConnection,
-    record: &soland_storage::IdempotencyRecord,
+    record: &coland_storage::IdempotencyRecord,
 ) -> PersistenceResult<()> {
     use diesel::sql_types::{Integer, Timestamptz};
     let actor_key = record

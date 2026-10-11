@@ -2,10 +2,10 @@
 mod historical_human;
 
 use arkret_wire::{ActorId, CommitStreamRef, EventKind};
+use coland_storage::{AuthorityCommitStore, AuthorityCommitTransaction, EventCommitUnitOfWork};
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork};
 use historical_human::ordinary_realm;
-use soland_storage::{AuthorityCommitStore, AuthorityCommitTransaction, EventCommitUnitOfWork};
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork};
 
 fn membership(
     previous: &AuthorityCommitTransaction,
@@ -14,7 +14,7 @@ fn membership(
     state: &str,
     expected: Option<&str>,
     parent: Option<serde_json::Value>,
-) -> soland_storage::EventCommitRequest {
+) -> coland_storage::EventCommitRequest {
     let scope = arkret_wire::ScopeRef::Circle {
         realm_id: previous.event.realm_id.clone(),
         circle_id: circle.clone(),
@@ -201,7 +201,7 @@ async fn check_circle_convenience(visibility: &str) {
 }
 
 async fn check_snapshot_current_without_create_history(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     store: &PgAuthorityCommitStore,
     id: &arkret_wire::CircleId,
     actor: &ActorId,

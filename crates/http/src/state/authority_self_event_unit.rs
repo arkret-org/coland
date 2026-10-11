@@ -18,9 +18,9 @@
 
 use arkret_wire::{AuthorityCommitStatus, AuthoritySubmitOutcome, Event, EventAdmissionSubmission};
 use chrono::Utc;
-use soland_services::identity::SessionIdentityState;
-use soland_services::{ServiceError, ServiceResult};
-use soland_storage::SelfProducerCommitGuard;
+use coland_services::identity::SessionIdentityState;
+use coland_services::{ServiceError, ServiceResult};
+use coland_storage::SelfProducerCommitGuard;
 
 use super::AppState;
 
@@ -85,10 +85,10 @@ pub(crate) async fn refresh_direct_conversation_peer_claim(
 pub(super) enum AdmittedProducer {
     /// Same-Station producer; the guard is rechecked in the unit.
     Local(Box<SelfProducerCommitGuard>),
-    Applet(soland_storage::AppletEventProducerGuard),
+    Applet(coland_storage::AppletEventProducerGuard),
     /// Cross-Station human device; the verified evidence is retained with
     /// the Event's first Commit.
-    Forwarded(Box<soland_storage::ForwardedProducerDeviceEvidence>),
+    Forwarded(Box<coland_storage::ForwardedProducerDeviceEvidence>),
     ForwardedAgent(Box<arkret_identity::agent_authority_evidence::VerifiedAgentProducer>),
 }
 
@@ -97,7 +97,7 @@ pub(super) enum AdmittedProducer {
 pub(super) struct SelfEventUnitEffects {
     /// The report's embedded franking proof nonce; its `consumed_at` is set to
     /// the accepting Commit time inside the unit.
-    pub(super) franking_replay_nonce: Option<soland_storage::FrankingReplayNonceCommit>,
+    pub(super) franking_replay_nonce: Option<coland_storage::FrankingReplayNonceCommit>,
     /// The verified public MLS transition and Welcomes of an `ak.mls.genesis`
     /// or `ak.mls.commit` (`authority_mls_unit`).
     pub(super) mls: Option<super::authority_mls_unit::MlsUnitInstallation>,
@@ -188,7 +188,7 @@ pub(super) fn validate_replay_event_identity(event: &Event) -> ServiceResult<()>
         .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
     if derived != event.event_id {
         return Err(ServiceError::Conflict(
-            soland_storage::ConflictCode::EventIdDigestMismatch.to_string(),
+            coland_storage::ConflictCode::EventIdDigestMismatch.to_string(),
         ));
     }
     if event.kind == arkret_wire::EventKind::MlsGenesis {
@@ -238,7 +238,7 @@ pub(super) async fn exact_replay(
         }));
     }
     if event.kind == arkret_wire::EventKind::MlsCommit
-        && existing.status == soland_storage::QueuedEventStatus::Rejected
+        && existing.status == coland_storage::QueuedEventStatus::Rejected
     {
         return Ok(Some(AuthoritySubmitOutcome::Rejected {
             status: arkret_wire::AuthorityRejectionStatus::Rejected,
@@ -269,7 +269,7 @@ pub(super) fn commit_event_unit_with_idempotency<'a>(
     submission: &'a EventAdmissionSubmission,
     producer: AdmittedProducer,
     effects: SelfEventUnitEffects,
-    idempotency: Option<soland_services::events::IdempotentResponse>,
+    idempotency: Option<coland_services::events::IdempotentResponse>,
 ) -> impl std::future::Future<Output = ServiceResult<AuthoritySubmitOutcome>> + Send + 'a {
     Box::pin(async move {
         let claim = submission.event.kind == arkret_wire::EventKind::InviteClaim;
@@ -282,7 +282,7 @@ pub(super) fn commit_event_unit_with_idempotency<'a>(
         )
         .await;
         if let Err(error) = &result
-            && error.conflict_code() == Some(soland_storage::ConflictCode::TemporarilyUnavailable)
+            && error.conflict_code() == Some(coland_storage::ConflictCode::TemporarilyUnavailable)
         {
             tracing::warn!(event_id = %submission.event.event_id, %error,
             "accepting cut temporarily unavailable for exact Event");
@@ -297,7 +297,7 @@ pub(super) fn commit_event_unit_with_idempotency<'a>(
 
 fn private_claim_refusal(error: ServiceError) -> ServiceError {
     // A moved accepting cut remains retryable; it is no claim verdict.
-    if error.conflict_code() == Some(soland_storage::ConflictCode::TemporarilyUnavailable) {
+    if error.conflict_code() == Some(coland_storage::ConflictCode::TemporarilyUnavailable) {
         return error;
     }
     match error {
@@ -315,7 +315,7 @@ fn commit_event_unit_with_idempotency_impl<'a>(
     submission: &'a EventAdmissionSubmission,
     producer: AdmittedProducer,
     effects: SelfEventUnitEffects,
-    idempotency: Option<soland_services::events::IdempotentResponse>,
+    idempotency: Option<coland_services::events::IdempotentResponse>,
 ) -> impl std::future::Future<Output = ServiceResult<AuthoritySubmitOutcome>> + Send + 'a {
     // Construct the large accepting state machine outside its caller's poll frame.
     Box::pin(async move {
@@ -350,11 +350,11 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             .direct_conversation_admission(event)
             .await?
         {
-            soland_storage::DirectConversationAdmissionCut::Refused(code) => {
+            coland_storage::DirectConversationAdmissionCut::Refused(code) => {
                 return super::authority_direct_conversation::direct_conversation_refusal(code);
             }
-            soland_storage::DirectConversationAdmissionCut::Passed => true,
-            soland_storage::DirectConversationAdmissionCut::NotDirectConversation => false,
+            coland_storage::DirectConversationAdmissionCut::Passed => true,
+            coland_storage::DirectConversationAdmissionCut::NotDirectConversation => false,
         };
         if !direct_conversation {
             crate::routing::events::operations::validate_operation_semantics(
@@ -469,7 +469,7 @@ fn commit_event_unit_with_idempotency_impl<'a>(
         let canonical_digest = event
             .event_digest_with_digest_suite(arkret_canonical::DigestSuite::Sha256)
             .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
-        let record = soland_storage::CanonicalEventRecord {
+        let record = coland_storage::CanonicalEventRecord {
             event_id: event.event_id.to_string(),
             actor_id: event.actor_id.to_string(),
             realm_id: Some(event.realm_id.to_string()),
@@ -492,7 +492,7 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             AdmittedProducer::ForwardedAgent(evidence) => (None, None, Some(*evidence), None),
             AdmittedProducer::Applet(guard) => (None, None, None, Some(guard)),
         };
-        let command = soland_services::events::CommitAcceptedEventCommand {
+        let command = coland_services::events::CommitAcceptedEventCommand {
             authority_commit: transaction.clone(),
             self_producer_guard,
             applet_producer_guard,
@@ -506,7 +506,7 @@ fn commit_event_unit_with_idempotency_impl<'a>(
 
             device_revocation_transition: None,
             device_revocation_gate: None,
-            projections: vec![soland_services::events::ProjectedEvent {
+            projections: vec![coland_services::events::ProjectedEvent {
                 event_id: event.event_id.to_string(),
                 realm_id: event.realm_id.to_string(),
                 event_kind: event.kind.clone(),
@@ -550,7 +550,7 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             state
                 .events()
                 .commit_accepted_event_batch(
-                    soland_services::events::CommitAcceptedEventBatchCommand {
+                    coland_services::events::CommitAcceptedEventBatchCommand {
                         events: vec![command],
                         franking_replay_nonce,
                         realm_organization_proof,
@@ -601,11 +601,11 @@ fn commit_event_unit_with_idempotency_impl<'a>(
         tracing::warn!(phase = "projection_installed", kind = %event.kind.as_str(), "self Event execution boundary");
         let needs_repair = matches!(
             effect,
-            soland_services::projection::ProjectionEffectView::Rejected { .. }
+            coland_services::projection::ProjectionEffectView::Rejected { .. }
         ) || (!poll_at_cut
             && matches!(
                 effect,
-                soland_services::projection::ProjectionEffectView::Ignored
+                coland_services::projection::ProjectionEffectView::Ignored
             ));
         if needs_repair {
             let repair_state = state.clone();
@@ -674,7 +674,7 @@ pub(crate) async fn submit_self_moderation_report(
     let franking_replay_nonce =
         payload
             .franking_proof
-            .map(|proof| soland_storage::FrankingReplayNonceCommit {
+            .map(|proof| coland_storage::FrankingReplayNonceCommit {
                 realm_id: event.realm_id.to_string(),
                 received_by: proof.received_by,
                 replay_nonce: proof.replay_nonce,
@@ -723,7 +723,7 @@ pub(crate) async fn submit_applet_event(
     commit_event_unit(
         state,
         &submission,
-        AdmittedProducer::Applet(soland_storage::AppletEventProducerGuard {
+        AdmittedProducer::Applet(coland_storage::AppletEventProducerGuard {
             service_did_document,
         }),
         SelfEventUnitEffects::default(),
@@ -824,7 +824,7 @@ mod claim_privacy_tests {
             } else {
                 assert_eq!(
                     result.unwrap_err().conflict_code(),
-                    Some(soland_storage::ConflictCode::FailedPrecondition),
+                    Some(coland_storage::ConflictCode::FailedPrecondition),
                     "outer={outer_delta}ms, inner={inner_delta}ms",
                 );
             }
@@ -854,7 +854,7 @@ mod claim_privacy_tests {
         let error = validate_replay_event_identity(&event).unwrap_err();
         assert_eq!(
             error.conflict_code(),
-            Some(soland_storage::ConflictCode::EventIdDigestMismatch)
+            Some(coland_storage::ConflictCode::EventIdDigestMismatch)
         );
         assert_eq!(event.event_id, original_id);
         event.event_id = event
@@ -888,7 +888,7 @@ mod claim_privacy_tests {
         ));
         assert_eq!(
             error.conflict_code(),
-            Some(soland_storage::ConflictCode::TemporarilyUnavailable),
+            Some(coland_storage::ConflictCode::TemporarilyUnavailable),
         );
         let database = private_claim_refusal(ServiceError::Database("unavailable".to_owned()));
         assert!(matches!(database, ServiceError::Database(_)));

@@ -21,9 +21,9 @@ use arkret_wire::{
     JoinRule, RealmId, TypedCurrentRow,
 };
 use base64::Engine as _;
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
 use salvo::prelude::*;
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
 
 use super::{AuthArgs, invalid_request};
 use crate::state::AppState;

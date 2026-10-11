@@ -29,10 +29,10 @@ enum InventoryRecord {
 
 #[test]
 fn inventory_tracks_every_noncanonical_product_route_once() {
-    let actual = soland_http::openapi::product_registered_routes()
+    let actual = coland_http::openapi::product_registered_routes()
         .expect("production route tree must be inspectable")
         .into_iter()
-        .filter(|(path, _)| path.starts_with("/_soland/"))
+        .filter(|(path, _)| path.starts_with("/_coland/"))
         .map(|(path, methods)| {
             (
                 path,
@@ -71,10 +71,10 @@ fn inventory_tracks_every_noncanonical_product_route_once() {
             InventoryRecord::Route { .. } => None,
         })
         .expect("inventory metadata is required");
-    assert_eq!(metadata.0, "soland.noncanonical_route_inventory.v1");
+    assert_eq!(metadata.0, "coland.noncanonical_route_inventory.v1");
     assert_eq!(metadata.1, "closed");
     assert_eq!(metadata.2, "arkret-work/review_code.md");
-    assert_eq!(metadata.3, "soland-http live Salvo router/OpenAPI");
+    assert_eq!(metadata.3, "coland-http live Salvo router/OpenAPI");
     assert_eq!(metadata.4, 127);
     let mut inventoried = BTreeMap::new();
     for record in records {
@@ -121,7 +121,7 @@ fn inventory_tracks_every_noncanonical_product_route_once() {
 
     assert_eq!(
         actual, inventoried,
-        "the committed inventory must exactly match every current /_soland route and method"
+        "the committed inventory must exactly match every current /_coland route and method"
     );
     assert_eq!(metadata.5, actual.len());
 }

@@ -7,8 +7,8 @@ use arkret_wire::{
     AccountId, Audience, Hash, PayloadProof, PayloadProofPurpose, SchemaId, proof_kind,
 };
 use chrono::{DateTime, Utc};
+use coland_http::error::AppError;
 use serde_json::{Value, json};
-use soland_http::error::AppError;
 
 use crate::routing::now;
 use crate::state::AppState;
@@ -33,7 +33,7 @@ async fn signed_handle_claim(
     principal_id: &str,
     audience: &str,
 ) -> Result<SdkHandleClaim, AppError> {
-    if let Err(rejection) = soland_http::wire_validators::handle_claim_subject::validate_subject(
+    if let Err(rejection) = coland_http::wire_validators::handle_claim_subject::validate_subject(
         &json!({ "subject_id": principal_id }),
     ) {
         return Err(crate::app_error!(SchemaViolation, rejection.message));
@@ -137,7 +137,7 @@ fn service_handle_domain(state: &AppState) -> String {
         .ok()
         .and_then(|url| url.host_str().map(ToOwned::to_owned))
         .and_then(|host| arkret_wire::string_profiles::prepare_idna_domain(&host).ok())
-        .unwrap_or_else(|| "soland.local".to_owned())
+        .unwrap_or_else(|| "coland.local".to_owned())
 }
 
 async fn require_local_handle_binding(

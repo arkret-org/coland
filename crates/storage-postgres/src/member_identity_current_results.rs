@@ -5,11 +5,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use arkret_models_identity::{MemberIdentityUpdatePayload, member_identity_effective_set_digest};
 use arkret_wire::{CommitStreamRef, Event, EventId, EventKind, RealmCommit, ScopeRef};
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
 use diesel::{OptionalExtension as _, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::{Value, json};
-use soland_storage::{PersistenceError, PersistenceResult};
 
 #[derive(diesel::QueryableByName)]
 struct CurrentRow {

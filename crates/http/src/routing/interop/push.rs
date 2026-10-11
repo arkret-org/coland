@@ -10,11 +10,11 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
 use serde_json::json;
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
 
 use super::audit::append_audit_log;
 use super::{authenticated_session, hmac_sha256, now, sha256_hex};
@@ -110,8 +110,8 @@ pub(super) async fn push_register(
         Ok(session) => session,
         Err((_status, code, message)) => {
             return Err(AppError::from_rejection(
-                soland_http::error::ErrorCode::from_wire(code)
-                    .unwrap_or(soland_http::error::ErrorCode::InternalError),
+                coland_http::error::ErrorCode::from_wire(code)
+                    .unwrap_or(coland_http::error::ErrorCode::InternalError),
                 message,
             ));
         }
@@ -289,7 +289,7 @@ mod tests {
             &root_key,
             &arkret_wire::AccountId::new(
                 arkret_wire::DidCoreId::new("ak:did_core:web:alice.example").unwrap(),
-                arkret_wire::DidCoreId::new("ak:did_core:web:soland.example").unwrap(),
+                arkret_wire::DidCoreId::new("ak:did_core:web:coland.example").unwrap(),
             ),
             "ak:device:01904100-0000-7000-8000-000000000001",
             "inkson.web",
@@ -300,7 +300,7 @@ mod tests {
             &root_key,
             &arkret_wire::AccountId::new(
                 arkret_wire::DidCoreId::new("ak:did_core:web:alice.example").unwrap(),
-                arkret_wire::DidCoreId::new("ak:did_core:web:soland.example").unwrap(),
+                arkret_wire::DidCoreId::new("ak:did_core:web:coland.example").unwrap(),
             ),
             "ak:device:01904100-0000-7000-8000-000000000001",
             "inkson.web",
@@ -311,7 +311,7 @@ mod tests {
             &root_key,
             &arkret_wire::AccountId::new(
                 arkret_wire::DidCoreId::new("ak:did_core:web:alice.example").unwrap(),
-                arkret_wire::DidCoreId::new("ak:did_core:web:soland.example").unwrap(),
+                arkret_wire::DidCoreId::new("ak:did_core:web:coland.example").unwrap(),
             ),
             "ak:device:01904100-0000-7000-8000-000000000001",
             "inkson.voip",

@@ -1,7 +1,7 @@
 //! Deployment-local device signing-key directory contracts.
 //!
 //! Nothing in this module is part of the `/_arkret/` protocol surface. These
-//! DTOs are shared by Arkret products (soland serves the directory, coauth
+//! DTOs are shared by Arkret products (coland serves the directory, coauth
 //! consumes it) so producers and consumers still use one strong type without
 //! presenting product-local endpoints as protocol models.
 
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(salvo_oapi::ToSchema))]
 pub struct DeviceSigningKeyDirectoryQueryRequestBody {
-    /// Stable principal identity used by Soland's account/device projection.
+    /// Stable principal identity used by Coland's account/device projection.
     /// Resolution-bearing DIDs are deliberately rejected at this
     /// deployment-local boundary.
     pub principal_id: DidCoreId,

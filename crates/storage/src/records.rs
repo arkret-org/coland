@@ -316,7 +316,7 @@ pub struct WebvhLogRecord {
 ///
 /// One row per `(actor, account_data_key)`. `account_data_key` is the canonical wire key
 /// (e.g. `ak.read_receipt.preferences`, `ak.contacts.actor.did:web:alice.example`,
-/// `ak.contacts.realm.ak:realm:AZAySZA7XRDeJ9cO4MqaDWrJD-rqPk6Cudk7CCzsDQz1`). Soland
+/// `ak.contacts.realm.ak:realm:AZAySZA7XRDeJ9cO4MqaDWrJD-rqPk6Cudk7CCzsDQz1`). Coland
 /// treats the `payload` as an opaque encrypted blob — no schema validation
 /// happens server-side; clients are responsible for canonical encoding.
 ///
@@ -373,7 +373,7 @@ pub struct RealmMetaRecord {
     /// (`crypto-media/encryption-and-audit.md` §2.9). Projected from the
     /// canonical genesis `schema_refs[]` carrier on `ak.realm.create`. Once
     /// observed it latches true:
-    /// soland is not the committer and never relaxes a minimal-metadata Realm
+    /// coland is not the committer and never relaxes a minimal-metadata Realm
     /// back to a wider profile on its own. Drives the server-side
     pub minimal_metadata_realm: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,

@@ -5,13 +5,13 @@ use arkret_models_identity::service_identity::{
     ServiceRegistrationOutcome, ServiceRegistrationReceipt,
 };
 use arkret_wire::{DidCoreId, PayloadProof, ServiceKind, project_did_to_core_id, proof_kind};
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
+use coland_services::identity::{DidDocumentState, DidLogEvent, ServiceRegistrationCommitResult};
 use salvo::oapi::endpoint;
 use salvo::oapi::extract::{JsonBody, QueryParam};
 use salvo::prelude::*;
 use serde_json::{Value, json};
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
-use soland_services::identity::{DidDocumentState, DidLogEvent, ServiceRegistrationCommitResult};
 
 use super::did::require_embedded_webvh_registration_bearer;
 use super::webvh_validation::{

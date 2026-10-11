@@ -107,7 +107,7 @@ pub(crate) async fn resolved_peer_route(
     service_id: &str,
     service_kind: &str,
     force_refresh: bool,
-) -> Result<soland_services::service_route::ResolvedServiceRoute, String> {
+) -> Result<coland_services::service_route::ResolvedServiceRoute, String> {
     let core = arkret_wire::DidCoreId::new(service_id.to_owned())
         .map_err(|error| format!("federation destination is not a service core id: {error}"))?;
     let resolver = state.service_route_resolver().map_err(str::to_owned)?;
@@ -117,7 +117,7 @@ pub(crate) async fn resolved_peer_route(
         .await
     {
         Ok(route) => route,
-        Err(soland_services::ServiceError::NotFound(_)) => {
+        Err(coland_services::ServiceError::NotFound(_)) => {
             // Configuration and endpoint discovery supply only a candidate
             // locator. The expected identity comes from the business target;
             // the shared resolver independently verifies the native DID evidence,

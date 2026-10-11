@@ -1,25 +1,25 @@
-//! Owner-scoped policy document CRUD on the Soland product surface.
+//! Owner-scoped policy document CRUD on the Coland product surface.
 //!
-//! `/_soland/self/...` stores deployment-local policy documents
+//! `/_coland/self/...` stores deployment-local policy documents
 //! CRUD is deployment-local document management, not a v1 protocol operation.
 //! These documents do not participate in protocol authorization decisions.
 //! This product surface is served off the protocol root and
-//! uses reverse-domain `org.arkret.soland.policy_document.*` operation ids
+//! uses reverse-domain `org.arkret.coland.policy_document.*` operation ids
 //! rather than the `ak.*` protocol namespace:
-//! - `GET    /_soland/self/policies`            list owner-scoped policies
-//! - `POST   /_soland/self/policies`            upsert one policy document
-//! - `GET    /_soland/self/policies/{id}`       read one policy document
-//! - `DELETE /_soland/self/policies/{id}`       remove one policy document
+//! - `GET    /_coland/self/policies`            list owner-scoped policies
+//! - `POST   /_coland/self/policies`            upsert one policy document
+//! - `GET    /_coland/self/policies/{id}`       read one policy document
+//! - `DELETE /_coland/self/policies/{id}`       remove one policy document
 //!
 //! `policy_document_to_response`, `is_valid_generated_or_custom_id`, and the
 //! supported-effect/scope/type validators are `pub` so product handlers
 //! can reuse them via the `crate::routing::*` re-exports.
 use arkret_identifiers::{Did, DidCoreId, RealmId, project_did_to_core_id};
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
+use coland_services::governance::PolicyDocumentRecord;
 use salvo::oapi::extract::{JsonBody, PathParam, QueryParam};
 use salvo::prelude::*;
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
-use soland_services::governance::PolicyDocumentRecord;
 
 use super::{now, validate_canonical_json_value};
 use crate::ids;
@@ -30,7 +30,7 @@ use crate::wire::{
     UpsertPolicyDocumentRequestBody,
 };
 
-/// Product surface (`/_soland/self/...`): owner-scoped policy document storage
+/// Product surface (`/_coland/self/...`): owner-scoped policy document storage
 /// CRUD, kept outside the protocol root.
 pub(super) fn product_router() -> Router {
     Router::new()
@@ -47,10 +47,10 @@ pub(super) fn product_router() -> Router {
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.policy_document.query.list",
+    operation_id = "org.arkret.coland.policy_document.query.list",
     tags("access")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.policy_document.query.list"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.policy_document.query.list"))]
 async fn list_policy_documents(
     aa: AuthArgs,
     scope: QueryParam<String, false>,
@@ -86,12 +86,12 @@ async fn list_policy_documents(
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.policy_document.resource.get",
+    operation_id = "org.arkret.coland.policy_document.resource.get",
     tags("access")
 )]
 #[tracing::instrument(
     skip_all,
-    fields(op = "org.arkret.soland.policy_document.resource.get")
+    fields(op = "org.arkret.coland.policy_document.resource.get")
 )]
 async fn get_policy_document(
     aa: AuthArgs,
@@ -114,12 +114,12 @@ async fn get_policy_document(
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.policy_document.command.upsert",
+    operation_id = "org.arkret.coland.policy_document.command.upsert",
     tags("access")
 )]
 #[tracing::instrument(
     skip_all,
-    fields(op = "org.arkret.soland.policy_document.command.upsert")
+    fields(op = "org.arkret.coland.policy_document.command.upsert")
 )]
 async fn upsert_policy_document(
     aa: AuthArgs,
@@ -194,12 +194,12 @@ async fn upsert_policy_document(
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.policy_document.resource.delete",
+    operation_id = "org.arkret.coland.policy_document.resource.delete",
     tags("access")
 )]
 #[tracing::instrument(
     skip_all,
-    fields(op = "org.arkret.soland.policy_document.resource.delete")
+    fields(op = "org.arkret.coland.policy_document.resource.delete")
 )]
 async fn delete_policy_document(
     aa: AuthArgs,

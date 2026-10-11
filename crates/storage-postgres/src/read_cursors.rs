@@ -14,7 +14,7 @@ use arkret_models_collaboration::objects::read_receipts::{
     ReadCursor, ReadCursorCausalRelation, ReadMarkerOutcome, merge_read_cursors,
 };
 use arkret_wire::{AccountId, ActorId, CommitStreamRef, RealmId};
-use soland_storage::{
+use coland_storage::{
     ReadCursorAdvance, ReadCursorAdvanceOutcome, ReadCursorAdvanceRefusal, ReadCursorStore,
 };
 

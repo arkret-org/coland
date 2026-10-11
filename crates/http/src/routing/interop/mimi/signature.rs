@@ -165,7 +165,7 @@ mod signature_boundary_tests {
     async fn bearer_does_not_replace_provider_transport_signature() {
         let mut config = crate::config::AppConfig::test_default();
         config.development_mode = true;
-        let state = AppState::new(config, soland_storage_postgres::Db { pool: None });
+        let state = AppState::new(config, coland_storage_postgres::Db { pool: None });
         let mut request = Request::default();
         request
             .headers_mut()
@@ -180,7 +180,7 @@ mod signature_boundary_tests {
     fn unavailable_provider_key_is_not_synthesized_in_development() {
         let mut config = crate::config::AppConfig::test_default();
         config.development_mode = true;
-        let state = AppState::new(config, soland_storage_postgres::Db { pool: None });
+        let state = AppState::new(config, coland_storage_postgres::Db { pool: None });
         let error =
             mimi_resolve_verifying_key(&state, "did:web:unresolved-provider.invalid#provider-key")
                 .unwrap_err();

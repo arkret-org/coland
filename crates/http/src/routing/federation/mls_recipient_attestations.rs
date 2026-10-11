@@ -47,7 +47,7 @@ async fn deliver(state: &AppState, request: &MlsAttestAddRequestBody) -> Result<
         state
             .authority_commits()
             .install_mls_add_authority_attestation(
-                &soland_storage::VerifiedMlsAddAuthorityAttestation {
+                &coland_storage::VerifiedMlsAddAuthorityAttestation {
                     source_station_id: state.service_core_id(),
                     request: request.clone(),
                     attestor_resolution: resolution,

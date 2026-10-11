@@ -1,25 +1,25 @@
-//! Product-local soland operator endpoints.
+//! Product-local coland operator endpoints.
 //!
 //! The public Arkret protocol namespace does not define admin operations.
-//! soland serves operator-only controls under `/_soland/admin/*`
-//! with local `org.arkret.soland.*` operation IDs and the `soland-admin`
+//! coland serves operator-only controls under `/_coland/admin/*`
+//! with local `org.arkret.coland.*` operation IDs and the `coland-admin`
 //! OpenAPI tag. These endpoints share that
-//! namespace with the soland operator infrastructure (seal DAG, bottom-cell
+//! namespace with the coland operator infrastructure (seal DAG, bottom-cell
 //! repair -- see [`super::seal`]) and the admin collection snapshot
 //! (see [`super::collection`]); salvo router fallthrough keeps the three
 //! sub-trees from colliding.
 
 use arkret_identifiers::DidCoreId;
+use coland_contracts::admin::{
+    AdminServerInfo, AdminServerStats, AdminServerStatus, AdminServerStatusCounts,
+};
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
 use salvo::oapi::endpoint;
 use salvo::oapi::extract::{JsonBody, PathParam};
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use soland_contracts::admin::{
-    AdminServerInfo, AdminServerStats, AdminServerStatus, AdminServerStatusCounts,
-};
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
 
 use super::audit::append_audit_log;
 use super::{AdminAuth, require_admin_principal};
@@ -27,7 +27,7 @@ use crate::routing::identity::account::{AccountLifecycleChange, set_account_life
 use crate::state::AppState;
 
 #[derive(Clone, Debug, Serialize, Deserialize, salvo::oapi::ToSchema)]
-struct SolandAdminAccountStatusRequestBody {
+struct ColandAdminAccountStatusRequestBody {
     status: String,
     #[serde(default)]
     reason: Option<String>,
@@ -79,16 +79,16 @@ pub(super) fn router() -> Router {
         .push(Router::with_path("accounts/{account_id}/suspend").post(suspend_account))
         .push(Router::with_path("accounts/{account_id}/unsuspend").post(unsuspend_account))
         .push(Router::with_path("accounts/{account_id}/deactivate").post(deactivate_account))
-        // `GET /_soland/admin/moderation/queue` is the caller's moderation
+        // `GET /_coland/admin/moderation/queue` is the caller's moderation
         // queue View; the queue holds no writable state of its own.
         .push(Router::with_path("moderation/queue").get(get_moderation_queue))
 }
 
 #[endpoint(
-    operation_id = "org.arkret.soland.admin.get_server_status",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.get_server_status",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.get_server_status"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.get_server_status"))]
 async fn get_server_status(admin: AdminAuth, depot: &mut Depot) -> JsonResult<AdminServerStatus> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = admin.session()?;
@@ -128,10 +128,10 @@ async fn get_server_status(admin: AdminAuth, depot: &mut Depot) -> JsonResult<Ad
 }
 
 #[endpoint(
-    operation_id = "org.arkret.soland.admin.get_server_info",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.get_server_info",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.get_server_info"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.get_server_info"))]
 async fn get_server_info(admin: AdminAuth, depot: &mut Depot) -> JsonResult<AdminServerInfo> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = admin.session()?;
@@ -150,10 +150,10 @@ async fn get_server_info(admin: AdminAuth, depot: &mut Depot) -> JsonResult<Admi
 }
 
 #[endpoint(
-    operation_id = "org.arkret.soland.admin.get_server_stats",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.get_server_stats",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.get_server_stats"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.get_server_stats"))]
 async fn get_server_stats(admin: AdminAuth, depot: &mut Depot) -> JsonResult<AdminServerStats> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = admin.session()?;
@@ -205,15 +205,15 @@ async fn get_server_stats(admin: AdminAuth, depot: &mut Depot) -> JsonResult<Adm
 }
 
 #[endpoint(
-    operation_id = "org.arkret.soland.admin.update_account_status",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.update_account_status",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.update_account_status"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.update_account_status"))]
 async fn update_account_status(
     admin: AdminAuth,
     depot: &mut Depot,
     account_id: PathParam<String>,
-    body: JsonBody<SolandAdminAccountStatusRequestBody>,
+    body: JsonBody<ColandAdminAccountStatusRequestBody>,
 ) -> JsonResult<AdminAccountLifecycleOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = admin.session()?;
@@ -229,10 +229,10 @@ async fn update_account_status(
 }
 
 #[endpoint(
-    operation_id = "org.arkret.soland.admin.lock_account",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.lock_account",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.lock_account"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.lock_account"))]
 async fn lock_account(
     admin: AdminAuth,
     depot: &mut Depot,
@@ -243,10 +243,10 @@ async fn lock_account(
 }
 
 #[endpoint(
-    operation_id = "org.arkret.soland.admin.unlock_account",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.unlock_account",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.unlock_account"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.unlock_account"))]
 async fn unlock_account(
     admin: AdminAuth,
     depot: &mut Depot,
@@ -257,10 +257,10 @@ async fn unlock_account(
 }
 
 #[endpoint(
-    operation_id = "org.arkret.soland.admin.suspend_account",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.suspend_account",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.suspend_account"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.suspend_account"))]
 async fn suspend_account(
     admin: AdminAuth,
     depot: &mut Depot,
@@ -271,10 +271,10 @@ async fn suspend_account(
 }
 
 #[endpoint(
-    operation_id = "org.arkret.soland.admin.unsuspend_account",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.unsuspend_account",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.unsuspend_account"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.unsuspend_account"))]
 async fn unsuspend_account(
     admin: AdminAuth,
     depot: &mut Depot,
@@ -285,10 +285,10 @@ async fn unsuspend_account(
 }
 
 #[endpoint(
-    operation_id = "org.arkret.soland.admin.deactivate_account",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.deactivate_account",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.deactivate_account"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.deactivate_account"))]
 async fn deactivate_account(
     admin: AdminAuth,
     depot: &mut Depot,
@@ -425,10 +425,10 @@ fn account_lifecycle_change_response(
 }
 
 #[endpoint(
-    operation_id = "org.arkret.soland.admin.get_moderation_queue",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.get_moderation_queue",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.get_moderation_queue"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.get_moderation_queue"))]
 async fn get_moderation_queue(
     admin: AdminAuth,
     depot: &mut Depot,

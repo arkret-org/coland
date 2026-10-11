@@ -1,5 +1,5 @@
 use arkret_event_draft::ProjectedEventOperation as Operation;
-use soland_services::events::ProjectedEvent as ProjectionEventRecord;
+use coland_services::events::ProjectedEvent as ProjectionEventRecord;
 
 use super::*;
 

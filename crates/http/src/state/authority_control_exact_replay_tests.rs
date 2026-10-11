@@ -7,19 +7,19 @@ use arkret_wire::{
     EventAdmissionSubmission, EventKind, RealmCommit, ScopeRef,
 };
 use chrono::{DateTime, Duration, Utc};
-use ed25519_dalek::SigningKey;
-use soland_services::authority_commit::AuthorityProtocolPort;
-use soland_services::identity::{SessionEndpointState, SessionIdentityState};
-use soland_storage::{
+use coland_services::authority_commit::AuthorityProtocolPort;
+use coland_services::identity::{SessionEndpointState, SessionIdentityState};
+use coland_storage::{
     AccountPk, AccountRecord, ActorProfileStore, AgentControlAdmissionWrite,
     AgentPcrGenesisAdmissionWrite, AgentProvisionAdmissionWrite, AuthorityCommitStore,
     AuthorityCommitTransaction, IdentityStoreRegistry,
 };
-use soland_storage_postgres::{
+use coland_storage_postgres::{
     PgActorProfileStore, PgAuthorityCommitStore, PgPersistenceStore, PgPool,
 };
-use soland_test_support::device_authorization_history::sign_event;
-use soland_test_support::pcr_genesis::PcrGenesisFixture;
+use coland_test_support::device_authorization_history::sign_event;
+use coland_test_support::pcr_genesis::PcrGenesisFixture;
+use ed25519_dalek::SigningKey;
 
 use crate::state::AppState;
 
@@ -59,11 +59,11 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
-        let mut config = soland_test_support::app_config();
+        let mut config = coland_test_support::app_config();
         config.notary_signing_key_seed = Some([83; 32]);
         config.seed_demo_data = false;
-        let (leased_state, pool) = soland_test_support::app_state_with_pool(config.clone());
-        let identity = soland_test_support::fixture_service_identity(&config);
+        let (leased_state, pool) = coland_test_support::app_state_with_pool(config.clone());
+        let identity = coland_test_support::fixture_service_identity(&config);
         let commitment = leased_state
             .service_resolution_commitment()
             .as_ref()
@@ -80,7 +80,7 @@ impl Fixture {
         assert_eq!(local_config.trust_domain, config.trust_domain);
         let state = AppState::new_with_service_identity(
             local_config,
-            soland_storage_postgres::Db {
+            coland_storage_postgres::Db {
                 pool: Some(pool.clone()),
             },
             std::sync::Arc::new(PgPersistenceStore::new(pool.clone())),
@@ -388,7 +388,7 @@ async fn native_control_exact_replay_uses_originals_after_runtime_revocation_and
             .is_none(),
         "the serving pairing pin is absent despite actual immutable provision/genesis acceptance"
     );
-    let before = soland_test_support::native_control_source_footprint(&f.pool).await;
+    let before = coland_test_support::native_control_source_footprint(&f.pool).await;
     for (event, commit) in &f.originals {
         let outcome = f
             .state
@@ -400,7 +400,7 @@ async fn native_control_exact_replay_uses_originals_after_runtime_revocation_and
         );
     }
     assert_eq!(
-        soland_test_support::native_control_source_footprint(&f.pool).await,
+        coland_test_support::native_control_source_footprint(&f.pool).await,
         before
     );
     let (event, _) = f.originals.last().unwrap();
@@ -415,7 +415,7 @@ async fn native_control_exact_replay_uses_originals_after_runtime_revocation_and
         .unwrap_err();
     assert_eq!(
         error.conflict_code(),
-        Some(soland_storage::ConflictCode::EventIdDigestMismatch)
+        Some(coland_storage::ConflictCode::EventIdDigestMismatch)
     );
     // A genuinely different Event has no accepted witness, and must run the
     // original new-admission/current source path rather than inheriting a key.
@@ -427,7 +427,7 @@ async fn native_control_exact_replay_uses_originals_after_runtime_revocation_and
             .is_err()
     );
     assert_eq!(
-        soland_test_support::native_control_source_footprint(&f.pool).await,
+        coland_test_support::native_control_source_footprint(&f.pool).await,
         before
     );
     let mut foreign = f.session.clone();
@@ -439,7 +439,7 @@ async fn native_control_exact_replay_uses_originals_after_runtime_revocation_and
             .is_err()
     );
     assert_eq!(
-        soland_test_support::native_control_source_footprint(&f.pool).await,
+        coland_test_support::native_control_source_footprint(&f.pool).await,
         before
     );
 }

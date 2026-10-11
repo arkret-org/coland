@@ -9,12 +9,12 @@ use arkret_models_crypto::{
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
 use ed25519_dalek::{Signature, Verifier as _};
 use salvo::oapi::extract::{JsonBody, PathParam, QueryParam};
 use salvo::prelude::*;
 use serde_json::{Value, json};
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
 
 use super::append_audit_log;
 use crate::routing::system::extract::AuthArgs;
@@ -103,8 +103,8 @@ fn backup_actor_matches(backup: &Value, actor_id: &arkret_wire::ActorId) -> bool
 #[cfg(test)]
 mod tests {
     use arkret_identifiers::DidCoreId;
+    use coland_http::error::ErrorCode;
     use serde_json::json;
-    use soland_http::error::ErrorCode;
 
     use super::*;
 
@@ -323,7 +323,7 @@ mod tests {
             .expect_err("passphrase_kdf without kdf metadata is invalid");
         assert_eq!(err.code, ErrorCode::SchemaViolation);
         // The SDK encryption type validation gate fires first and rejects the
-        // missing kdf ("passphrase_kdf requires `kdf`") before soland's domain check.
+        // missing kdf ("passphrase_kdf requires `kdf`") before coland's domain check.
         assert!(err.message.contains("kdf"));
     }
 
@@ -333,7 +333,7 @@ mod tests {
         body["plaintext"] = json!("raw group state");
 
         let err = validate_key_backup_body(BACKUP_ID, ACTOR, &body)
-            .expect_err("soland must store only opaque backup ciphertext");
+            .expect_err("coland must store only opaque backup ciphertext");
         assert_eq!(err.code, ErrorCode::SchemaViolation);
     }
 
@@ -351,7 +351,7 @@ mod tests {
         assert_eq!(err.code, ErrorCode::CapabilityDenied);
         assert_eq!(
             err.http_status(),
-            soland_http::error::error_http_status(err.code)
+            coland_http::error::error_http_status(err.code)
         );
     }
 
@@ -412,11 +412,11 @@ mod tests {
             operation: "ak.self.keys.backups.resource.delete.v1".to_owned(),
             account_id: arkret_wire::AccountId::new(
                 DidCoreId::new(ACTOR.to_owned()).unwrap(),
-                DidCoreId::new("ak:did_core:web:soland.test".to_owned()).unwrap(),
+                DidCoreId::new("ak:did_core:web:coland.test".to_owned()).unwrap(),
             ),
             backup_id: BackupId::new(BACKUP_ID.to_owned()).unwrap(),
-            audience: arkret_wire::NonEmptyString::new("https://soland.test").unwrap(),
-            service_id: DidCoreId::new("ak:did_core:web:soland.test".to_owned()).unwrap(),
+            audience: arkret_wire::NonEmptyString::new("https://coland.test").unwrap(),
+            service_id: DidCoreId::new("ak:did_core:web:coland.test".to_owned()).unwrap(),
             request_id: arkret_wire::Base64UrlString::new("cmVxdWVzdC1pZA").unwrap(),
             issued_at: "2026-08-01T00:00:00.000Z".parse().unwrap(),
             expires_at: "2026-08-01T00:05:00.000Z".parse().unwrap(),
@@ -576,30 +576,30 @@ mod tests {
 
     #[test]
     fn download_limit_defaults_and_clamps_to_spec_range() {
-        use soland_services::runtime_guards::{
+        use coland_services::runtime_guards::{
             KEY_BACKUP_DAILY_DOWNLOAD_LIMIT_DEFAULT, KEY_BACKUP_DAILY_DOWNLOAD_LIMIT_MAX,
             KEY_BACKUP_DAILY_DOWNLOAD_LIMIT_MIN,
         };
 
         // Unset → spec default (64).
         assert_eq!(
-            soland_services::runtime_guards::clamp_key_backup_daily_download_limit(None),
+            coland_services::runtime_guards::clamp_key_backup_daily_download_limit(None),
             KEY_BACKUP_DAILY_DOWNLOAD_LIMIT_DEFAULT
         );
         // In-range values are honored as-is.
         assert_eq!(
-            soland_services::runtime_guards::clamp_key_backup_daily_download_limit(Some(100)),
+            coland_services::runtime_guards::clamp_key_backup_daily_download_limit(Some(100)),
             100
         );
         // Outside the spec-allowed [16, 256] range the value is clamped —
         // §7.8 forbids relaxing past the ceiling, and a sub-floor value
         // would break a single legitimate long-series restore.
         assert_eq!(
-            soland_services::runtime_guards::clamp_key_backup_daily_download_limit(Some(1)),
+            coland_services::runtime_guards::clamp_key_backup_daily_download_limit(Some(1)),
             KEY_BACKUP_DAILY_DOWNLOAD_LIMIT_MIN
         );
         assert_eq!(
-            soland_services::runtime_guards::clamp_key_backup_daily_download_limit(Some(100_000)),
+            coland_services::runtime_guards::clamp_key_backup_daily_download_limit(Some(100_000)),
             KEY_BACKUP_DAILY_DOWNLOAD_LIMIT_MAX
         );
     }
@@ -617,7 +617,7 @@ pub(crate) async fn recovery_unlock_manifest(
         .ok_or_else(|| AppError::internal("confirmed PCR pointer basis is absent"))?;
     let pointers = basis.state;
     let actor = arkret_wire::ActorId::account(account.clone()).to_string();
-    let query = soland_services::identity::KeyBackupListQuery {
+    let query = coland_services::identity::KeyBackupListQuery {
         actor_id: actor.clone(),
         backup_kind: None,
         series_id: None,

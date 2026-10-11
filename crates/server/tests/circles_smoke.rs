@@ -1,10 +1,10 @@
-//! AKP-0007 (P2A.6) — soland reducer-level smoke test for the Circle
+//! AKP-0007 (P2A.6) — coland reducer-level smoke test for the Circle
 //! primitive lifecycle and membership invariants.
 //!
 //! The full HTTP integration round-trip
 //! (create → add member → emit Strand with scope_circle_id → archive)
 //! is exercised by the cotest joint-test suite (P5). This smoke test
-//! seals the reducer's invariants in soland-local CI so a regression
+//! seals the reducer's invariants in coland-local CI so a regression
 //! on the projection-side state machine surfaces immediately:
 //!
 //! 1. `ak.circle.create` writes a live Circle into the projection;
@@ -19,11 +19,11 @@
 
 use arkret_event_draft::ProjectedEventOperation as Operation;
 use arkret_identifiers::{OperationId, RealmId};
-use serde_json::{Value, json};
-use soland_domain::hlc::ServerHlc;
-use soland_domain::reducer::{
-    CircleLifecycleState, ProjectionEffect, ProjectionState, SolandMembershipState,
+use coland_domain::hlc::ServerHlc;
+use coland_domain::reducer::{
+    CircleLifecycleState, ColandMembershipState, ProjectionEffect, ProjectionState,
 };
+use serde_json::{Value, json};
 
 const REALM_A: &str = "ak:realm:ATYL-87CDhaLQem29G2JQCXbZ_8zuu7khej2MbrsGLK6";
 const REALM_B: &str = "ak:realm:AS1N4QnbZ6JgVObAF-yTx1GWoK2XnO_vUaZ2qe0WCyQV";
@@ -38,7 +38,7 @@ const MALLORY: &str = "ak:did_core:web:mallory.example";
 fn member_actor(principal: &str) -> arkret_wire::ActorId {
     arkret_wire::ActorId::account(arkret_wire::AccountId::new(
         arkret_identifiers::DidCoreId::new(principal.to_owned()).unwrap(),
-        soland_test_support::fixture_station_id(),
+        coland_test_support::fixture_station_id(),
     ))
 }
 
@@ -60,7 +60,7 @@ fn op(kind: impl AsRef<str>, realm_id: &str, mut payload: Value) -> Operation {
         .and_then(|id| id.split_once(':').map(|(_, tail)| tail))
         .and_then(|tail| tail.split_once(':').map(|(_, token)| token))
         .map(|token| format!("ak:event:{token}"))
-        .unwrap_or_else(|| soland_test_support::fixture_content_bound_id("ak:event:"));
+        .unwrap_or_else(|| coland_test_support::fixture_content_bound_id("ak:event:"));
     if let Some(object) = object {
         object.remove("id");
         object.remove("created_by");
@@ -106,7 +106,7 @@ fn seed_realm_projection(
     let now = chrono::Utc::now();
     state.realm_states.insert(
         realm_id.to_owned(),
-        soland_domain::reducer::SolandRealmState {
+        coland_domain::reducer::ColandRealmState {
             realm_id: realm_id.to_owned(),
             owner: Some(owner.to_owned()),
             title: Some("Test Realm".to_owned()),
@@ -122,7 +122,7 @@ fn seed_realm_projection(
     );
     state.set_realm_facet(
         realm_id,
-        soland_domain::reducer::facet::REALM_GENESIS,
+        coland_domain::reducer::facet::REALM_GENESIS,
         json!({
             "purpose": "collaboration",
             "encryption_profile": encryption_profile,
@@ -149,7 +149,7 @@ fn add_realm_member(state: &mut ProjectionState, _hlc: &ServerHlc, realm_id: &st
     let now = chrono::Utc::now();
     state.members.insert(
         (realm_id.to_owned(), member_key(actor)),
-        SolandMembershipState {
+        ColandMembershipState {
             member: member_key(actor),
             realm_id: realm_id.to_owned(),
             state: "join".to_owned(),

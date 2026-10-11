@@ -1,4 +1,4 @@
-//! Soland I/O adapter for cotest's `verified-profiles.json` artifact.
+//! Coland I/O adapter for cotest's `verified-profiles.json` artifact.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -6,13 +6,13 @@ use std::sync::Arc;
 pub use arkret_models_discovery::VerifiedProfileArtifactEntry;
 use arkret_models_discovery::parse_verified_profiles_artifact;
 
-pub const VERIFIED_PROFILES_ARTIFACT_ENV: &str = "SOLAND_VERIFIED_PROFILES_ARTIFACT";
-pub const SOLAND_SERVICE_ROLE: &str = "station";
+pub const VERIFIED_PROFILES_ARTIFACT_ENV: &str = "COLAND_VERIFIED_PROFILES_ARTIFACT";
+pub const COLAND_SERVICE_ROLE: &str = "station";
 
 /// Load the descriptors named by the configured artifact path.
 ///
 /// The path arrives from `AppConfig::verified_profiles_artifact`; this module
-/// used to read `SOLAND_VERIFIED_PROFILES_ARTIFACT` itself, which made the
+/// used to read `COLAND_VERIFIED_PROFILES_ARTIFACT` itself, which made the
 /// artifact the one piece of deployment configuration that did not appear in
 /// `AppConfig` at all.
 pub fn load_from_configured_path(path: Option<&str>) -> Arc<Vec<VerifiedProfileArtifactEntry>> {
@@ -41,7 +41,7 @@ pub fn load_from_path(path: impl AsRef<Path>) -> Vec<VerifiedProfileArtifactEntr
             return Vec::new();
         }
     };
-    let report = match parse_verified_profiles_artifact(&bytes, SOLAND_SERVICE_ROLE) {
+    let report = match parse_verified_profiles_artifact(&bytes, COLAND_SERVICE_ROLE) {
         Ok(report) => report,
         Err(error) => {
             tracing::warn!(
@@ -68,7 +68,7 @@ pub fn load_from_path(path: impl AsRef<Path>) -> Vec<VerifiedProfileArtifactEntr
         run_id = report.run_id.as_deref().unwrap_or(""),
         loaded = report.entries.len(),
         total_in_artifact = report.total_entries,
-        service_role = SOLAND_SERVICE_ROLE,
+        service_role = COLAND_SERVICE_ROLE,
         "loaded verified-profile entries from artifact"
     );
     report.entries
@@ -86,7 +86,7 @@ mod tests {
     #[test]
     fn malformed_json_yields_empty() {
         let path = std::env::temp_dir().join(format!(
-            "soland-verified-profiles-{}.json",
+            "coland-verified-profiles-{}.json",
             std::process::id()
         ));
         std::fs::write(&path, b"{ not json").unwrap();
@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn filters_to_station_role() {
         let path = std::env::temp_dir().join(format!(
-            "soland-verified-profiles-role-{}.json",
+            "coland-verified-profiles-role-{}.json",
             std::process::id()
         ));
         std::fs::write(

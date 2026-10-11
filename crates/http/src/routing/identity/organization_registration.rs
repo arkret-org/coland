@@ -6,17 +6,17 @@ use arkret_models_identity::{
     OrganizationRegistrationScope,
 };
 use arkret_signatures::Ed25519DetachedJwsSigner;
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
+use coland_services::organization_registration::{
+    OrganizationRegistrationError, OrganizationRegistrationErrorCode,
+    OrganizationRegistrationReceiptSigner,
+};
 use salvo::oapi::endpoint;
 use salvo::oapi::extract::{JsonBody, QueryParam};
 use salvo::prelude::*;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
-use soland_services::organization_registration::{
-    OrganizationRegistrationError, OrganizationRegistrationErrorCode,
-    OrganizationRegistrationReceiptSigner,
-};
 
 use super::AuthArgs;
 use crate::state::AppState;

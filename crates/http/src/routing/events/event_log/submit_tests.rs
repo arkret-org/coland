@@ -26,7 +26,7 @@ mod event_collision_reason_tests {
     fn storage_collision_maps_to_registered_witness_disagreement_reason() {
         let error = map_event_hash_collision(
             "ak:event:fixture",
-            &soland_services::ServiceError::Conflict("event_hash_collision".to_owned()),
+            &coland_services::ServiceError::Conflict("event_hash_collision".to_owned()),
         )
         .expect("storage collision must be externally quarantined");
 
@@ -67,7 +67,7 @@ mod circle_error_mapping_tests {
         assert_eq!(error.code, ErrorCode::FailedPrecondition);
         assert_eq!(
             error.http_status(),
-            soland_http::error::error_http_status(error.code)
+            coland_http::error::error_http_status(error.code)
         );
         assert_eq!(
             error.reason_code.as_deref(),
@@ -111,7 +111,7 @@ mod relation_error_mapping_tests {
         assert_eq!(error.code, ErrorCode::FailedPrecondition);
         assert_eq!(
             error.http_status(),
-            soland_http::error::error_http_status(error.code)
+            coland_http::error::error_http_status(error.code)
         );
         assert_eq!(
             error.reason_code.as_deref(),
@@ -135,7 +135,7 @@ mod grant_error_mapping_tests {
         assert_eq!(error.code, ErrorCode::FailedPrecondition);
         assert_eq!(
             error.http_status(),
-            soland_http::error::error_http_status(error.code)
+            coland_http::error::error_http_status(error.code)
         );
         assert_eq!(
             error.reason_code.as_deref(),
@@ -153,7 +153,7 @@ mod applet_formal_admission_tests {
             account_pk: None,
             token_hash: "fixture".to_owned(),
             actor: actor_id.to_owned(),
-            endpoint: soland_services::identity::SessionEndpointState::ServiceSynthetic,
+            endpoint: coland_services::identity::SessionEndpointState::ServiceSynthetic,
             audience: "ak:did_core:web:ps.example".to_owned(),
             session_public_key: None,
             session_grant: None,
@@ -245,7 +245,7 @@ mod applet_formal_admission_tests {
 
         let mut wrong_session_device = session.clone();
         wrong_session_device.endpoint =
-            soland_services::identity::SessionEndpointState::HumanDevice {
+            coland_services::identity::SessionEndpointState::HumanDevice {
                 device_id: "device-other".to_owned(),
             };
         assert!(

@@ -7,15 +7,15 @@ use arkret_models_collaboration::governance::holder_quarantine::{
 use arkret_models_collaboration::governance::invite_addressing::InviteReceivePolicy;
 use arkret_wire::{AccountDataKey, ActorId, Hash};
 use chrono::{DateTime, Duration, Utc};
-use diesel::sql_types::{BigInt, Bool, Jsonb, Nullable, Text, Timestamptz};
-use diesel::{OptionalExtension as _, sql_query};
-use diesel_async::{AsyncConnection, RunQueryDsl};
-use serde_json::{Value, json};
-use soland_storage::{
+use coland_storage::{
     AccountDataCasResult, AccountDataRecord, ConsentRequestQuarantineInput,
     ConsentRequestQuarantineOutcome, ConsentRequestQuarantineStore, PersistenceError,
     PersistenceResult,
 };
+use diesel::sql_types::{BigInt, Bool, Jsonb, Nullable, Text, Timestamptz};
+use diesel::{OptionalExtension as _, sql_query};
+use diesel_async::{AsyncConnection, RunQueryDsl};
+use serde_json::{Value, json};
 
 use crate::accounts::compare_account_data_in_transaction;
 use crate::{PgPool, PgTransactionError, pg_conn};

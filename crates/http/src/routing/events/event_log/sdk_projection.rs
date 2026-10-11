@@ -77,7 +77,7 @@ pub(in crate::routing) fn event_semantic_refs(
 fn event_for_canonical_digest(envelope: &Value) -> Result<Event, EventValidationError> {
     // `canonical_*` are storage adapter metadata, not Event fields. All
     // protocol exclusions (`proofs`, `unsigned`, reducer-stamped fields) are
-    // owned by SDK `Event::digest_payload`; Soland must not mirror that list.
+    // owned by SDK `Event::digest_payload`; Coland must not mirror that list.
     let mut value = envelope.clone();
     if let Value::Object(object) = &mut value {
         object.remove("canonical_digest");
@@ -181,10 +181,10 @@ pub(crate) fn projection_operation_from_canonical_record(
     projection_operation_from_wire(&record.kind, &record.event_id, &record.envelope)
 }
 
-/// Domain separator for the Operation handle soland derives for an accepted
+/// Domain separator for the Operation handle coland derives for an accepted
 /// Event. Versioned and distinct from protocol identity domains. This is a
-/// Soland-local operation handle and is not a Realm identity derivation.
-const EVENT_PROJECTION_OPERATION_DOMAIN: &[u8] = b"ak:operation:soland-event-projection:v1:";
+/// Coland-local operation handle and is not a Realm identity derivation.
+const EVENT_PROJECTION_OPERATION_DOMAIN: &[u8] = b"ak:operation:coland-event-projection:v1:";
 
 fn event_projection_operation_uuid(event_id: &str) -> uuid::Uuid {
     let mut hasher = Sha256::new();
@@ -206,7 +206,7 @@ pub(crate) fn event_operation_id(envelope: &Value, event_id: &str) -> Option<Ope
     //
     // The alias lives in `unsigned`, which is outside the signed canonical
     // Event transcript, so it is routinely absent: a federated Event, a
-    // non-SDK submitter, and every Event soland authors itself carry none.
+    // non-SDK submitter, and every Event coland authors itself carry none.
     // Server correctness MUST NOT depend on it — returning `None` here drops
     // the entire projection chain for the Event, and with it
     // `validate_operation_semantics`, so a payload the kind's registered
@@ -220,7 +220,7 @@ pub(crate) fn event_operation_id(envelope: &Value, event_id: &str) -> Option<Ope
     {
         return Some(operation_id);
     }
-    // Otherwise soland allocates the handle. `Operation` is
+    // Otherwise coland allocates the handle. `Operation` is
     // `ak.local.operation_draft.v1` — an SDK-local reducer DTO, not a wire
     // fact — so its id is the receiver's to mint, and `id-kind-registry.json`
     // makes `operation` producer-allocated (UUIDv7). Deriving it from the
@@ -326,7 +326,7 @@ pub(crate) async fn canonical_event_read_row(
             {
                 continue;
             }
-            let target = soland_domain::reducer::message_redaction_target_ref(
+            let target = coland_domain::reducer::message_redaction_target_ref(
                 &candidate.envelope["payload"],
             );
             if target.as_deref().is_some_and(|target| {
@@ -451,13 +451,13 @@ pub(crate) async fn event_visible_to_session(
         .committed_event_for_member(&event_id, &session_actor, &state.service_core_id())
         .await
     {
-        Ok(soland_storage::MemberCommittedEventRead::Read(view)) => {
+        Ok(coland_storage::MemberCommittedEventRead::Read(view)) => {
             return matches!(*view, arkret_wire::CommittedEventView::Full(_));
         }
-        Ok(soland_storage::MemberCommittedEventRead::OutsideOrdinaryRealmStream) => {}
+        Ok(coland_storage::MemberCommittedEventRead::OutsideOrdinaryRealmStream) => {}
         Ok(
-            soland_storage::MemberCommittedEventRead::NotVisible
-            | soland_storage::MemberCommittedEventRead::PendingAnchor,
+            coland_storage::MemberCommittedEventRead::NotVisible
+            | coland_storage::MemberCommittedEventRead::PendingAnchor,
         )
         | Err(_) => return false,
     }
@@ -539,13 +539,13 @@ mod refs_limit_tests {
     async fn own_event_visibility_never_crosses_station_accounts() {
         let state = AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let session = SessionRecord {
             token_hash: "test".into(),
             account_pk: None,
             actor: "ak:did_core:web:alice.example".into(),
-            endpoint: soland_services::identity::SessionEndpointState::HumanDevice {
+            endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
                 device_id: "device".into(),
             },
             audience: state.service_id().clone(),
@@ -598,13 +598,13 @@ mod refs_limit_tests {
     async fn accepted_contact_exposes_only_exact_pair_events() {
         let state = AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let session = SessionRecord {
             token_hash: "contact-visibility".into(),
             account_pk: None,
             actor: "ak:did_core:web:alice.example".into(),
-            endpoint: soland_services::identity::SessionEndpointState::HumanDevice {
+            endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
                 device_id: "device".into(),
             },
             audience: state.service_id().clone(),
@@ -621,7 +621,7 @@ mod refs_limit_tests {
         ));
         let mut record = visibility_record("ak.contact.requested", json!({}));
         record.actor_id = bob.to_string();
-        let mut contact = soland_domain::identity::ContactRecord {
+        let mut contact = coland_domain::identity::ContactRecord {
             requester_id: bob,
             target_id: alice,
             contact_round_id: None,

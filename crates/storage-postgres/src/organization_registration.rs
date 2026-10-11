@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use arkret_models_identity::{OrganizationRegistrationChallenge, OrganizationRegistrationOutcome};
 use arkret_wire::{DidCoreId, Hash};
-use soland_storage::{
+use coland_storage::{
     OrganizationRegistrationChallengeRecord, OrganizationRegistrationCurrent,
     OrganizationRegistrationEnsureCommit, OrganizationRegistrationGenerationRecord,
     OrganizationRegistrationLifecycleCommit, OrganizationRegistrationRefreshCommit,

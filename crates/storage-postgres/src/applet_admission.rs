@@ -14,7 +14,7 @@ use arkret_wire::{
     ActorId, CommitStreamHead, CommitStreamRef, DidUrl, Event, EventKind, RealmCommit, RealmId,
     ScopeRef,
 };
-use soland_storage::{
+use coland_storage::{
     AppletAuthoringUnitOutcome, AppletAuthoringUnitWrite, AppletCommitAuthor,
     AppletResolutionAttester, AppletUnitFinalizer, AuthorityCommitTransaction,
     AuthorityCommitWriteOutcome, PersistenceError, PersistenceResult,
@@ -38,31 +38,31 @@ fn request(
     input: &AppletAuthoringUnitWrite,
 ) -> PersistenceResult<&AppletManagedActorAuthoringRequest> {
     match &input.request {
-        soland_storage::AppletAdmissionRequest::Managed(
+        coland_storage::AppletAdmissionRequest::Managed(
             AppletManagedActorCommittedRequest::Bot(body),
         ) => Ok(&body.authoring_request),
-        soland_storage::AppletAdmissionRequest::Managed(
+        coland_storage::AppletAdmissionRequest::Managed(
             AppletManagedActorCommittedRequest::Ghost(body),
         ) => Ok(&body.authoring_request),
-        soland_storage::AppletAdmissionRequest::Install(_) => Err(rejected(
+        coland_storage::AppletAdmissionRequest::Install(_) => Err(rejected(
             "Service installation has no managed authoring request",
         )),
     }
 }
 fn bundle(input: &AppletAuthoringUnitWrite) -> Option<&AppletManagedActorAuthoringBundle> {
     match &input.request {
-        soland_storage::AppletAdmissionRequest::Managed(
+        coland_storage::AppletAdmissionRequest::Managed(
             AppletManagedActorCommittedRequest::Bot(body),
         ) => Some(&body.managed_actor_bundle),
-        soland_storage::AppletAdmissionRequest::Managed(
+        coland_storage::AppletAdmissionRequest::Managed(
             AppletManagedActorCommittedRequest::Ghost(body),
         ) => body.managed_actor_bundle.as_ref(),
-        soland_storage::AppletAdmissionRequest::Install(_) => None,
+        coland_storage::AppletAdmissionRequest::Install(_) => None,
     }
 }
 fn target_station(input: &AppletAuthoringUnitWrite) -> PersistenceResult<&arkret_wire::DidCoreId> {
     match &input.request {
-        soland_storage::AppletAdmissionRequest::Install(body) => {
+        coland_storage::AppletAdmissionRequest::Install(body) => {
             Ok(&body.authoring_request_basis.target_station_id)
         }
         _ => Ok(request(input)?.basis.target_station_id()),
@@ -70,7 +70,7 @@ fn target_station(input: &AppletAuthoringUnitWrite) -> PersistenceResult<&arkret
 }
 fn effective_scope(input: &AppletAuthoringUnitWrite) -> PersistenceResult<&ScopeRef> {
     match &input.request {
-        soland_storage::AppletAdmissionRequest::Install(body) => {
+        coland_storage::AppletAdmissionRequest::Install(body) => {
             Ok(&body.authoring_request_basis.effective_scope)
         }
         _ => {
@@ -195,7 +195,7 @@ pub(crate) fn validate_input(
         return Err(rejected("canonical request identity changed"));
     }
     input.package.validate().map_err(rejected)?;
-    if let soland_storage::AppletAdmissionRequest::Install(body) = &input.request {
+    if let coland_storage::AppletAdmissionRequest::Install(body) = &input.request {
         let basis = &body.authoring_request_basis;
         basis.validate().map_err(rejected)?;
         if body.applet_package != input.package {
@@ -713,7 +713,7 @@ async fn admit_in_connection(
     }
     let mut validated = validate_input(input)?;
     let managed_request = match &input.request {
-        soland_storage::AppletAdmissionRequest::Install(_) => None,
+        coland_storage::AppletAdmissionRequest::Install(_) => None,
         _ => Some(request(input)?),
     };
     if let Some(req) = managed_request {
@@ -761,7 +761,7 @@ async fn admit_in_connection(
     }
     if admin_count == 0 && validated.provision.is_none() {
         let body = match &input.request {
-            soland_storage::AppletAdmissionRequest::Managed(
+            coland_storage::AppletAdmissionRequest::Managed(
                 AppletManagedActorCommittedRequest::Ghost(body),
             ) => body,
             _ => return Err(rejected("only Ghost mapping can reuse accepted provenance")),
@@ -874,7 +874,7 @@ async fn admit_in_connection(
             } => arkret_wire::WireResourceSelector::circle(realm_id.clone(), circle_id.clone()),
             _ => return Err(rejected("unsupported creation scope")),
         };
-        let facts = soland_storage::OperationFacts {
+        let facts = coland_storage::OperationFacts {
             applet_id: Some(registration.applet_id.to_string()),
             executed_by: Some(ActorId::service(registration.service_id)),
             registration_epoch: Some(registration.registration_epoch.to_string()),
@@ -1204,7 +1204,7 @@ fn managed_signing_key(
 async fn verify_admin_producer(
     conn: &mut AsyncPgConnection,
     event: &Event,
-    guard: &soland_storage::SelfProducerCommitGuard,
+    guard: &coland_storage::SelfProducerCommitGuard,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
     if controller(
@@ -1226,11 +1226,11 @@ async fn verify_admin_producer(
         .verify_event_id_matches_content_with_digest_suite(suite)
         .map_err(rejected)?;
     match guard {
-        soland_storage::SelfProducerCommitGuard::MimiFacade { .. } => {
+        coland_storage::SelfProducerCommitGuard::MimiFacade { .. } => {
             return Err(rejected("MIMI facade is not an Applet admin producer"));
         }
-        soland_storage::SelfProducerCommitGuard::HumanDevice(selector)
-        | soland_storage::SelfProducerCommitGuard::HumanDeviceEvidence { selector, .. } => {
+        coland_storage::SelfProducerCommitGuard::HumanDevice(selector)
+        | coland_storage::SelfProducerCommitGuard::HumanDeviceEvidence { selector, .. } => {
             let account = event
                 .actor_id
                 .as_account_id()
@@ -1250,7 +1250,7 @@ async fn verify_admin_producer(
             .await
             .map_err(PgTransactionError::into_persistence)?;
         }
-        soland_storage::SelfProducerCommitGuard::Agent {
+        coland_storage::SelfProducerCommitGuard::Agent {
             authorization_ref, ..
         } => {
             let (source, _) = accepted_pair(conn, authorization_ref).await?;
@@ -1322,7 +1322,7 @@ fn validate_finalized_refs(
     response: &Value,
 ) -> PersistenceResult<()> {
     match &input.request {
-        soland_storage::AppletAdmissionRequest::Install(body) => {
+        coland_storage::AppletAdmissionRequest::Install(body) => {
             let outcome: arkret_models_integration::AppletInstallOutcome =
                 decode(response.clone())?;
             let grants = body
@@ -1344,7 +1344,7 @@ fn validate_finalized_refs(
                 ));
             }
         }
-        soland_storage::AppletAdmissionRequest::Managed(body) => {
+        coland_storage::AppletAdmissionRequest::Managed(body) => {
             let p = provision.ok_or_else(|| rejected("managed provision absent"))?;
             let (actor, provision_ref, pcr, accountability, profile, authorization) = match body {
                 AppletManagedActorCommittedRequest::Bot(_) => {

@@ -22,11 +22,11 @@ use arkret_models_collaboration::device_pairing::{
     DevicePairingStageRequestBody, DevicePairingStatusOutcome, DevicePairingStatusRequestBody,
 };
 use arkret_models_collaboration::governance::agent_artifacts::PublicKey;
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
 use salvo::oapi::endpoint;
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
 
 use crate::state::AppState;
 

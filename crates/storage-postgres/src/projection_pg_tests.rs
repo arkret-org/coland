@@ -4,7 +4,7 @@
 #[allow(dead_code)]
 mod ordinary_realm;
 
-use soland_storage::{ProjectionEventAppendOutcome, ProjectionEventRecord, ProjectionEventStore};
+use coland_storage::{ProjectionEventAppendOutcome, ProjectionEventRecord, ProjectionEventStore};
 
 use super::PgProjectionEventStore;
 
@@ -14,8 +14,8 @@ async fn hydration_does_not_overwrite_a_concurrent_realm_projection() {
     use std::sync::{Mutex, mpsc};
     use std::time::Duration;
 
-    use soland_services::hydration::HydrationProjectionAdapter;
-    use soland_services::projection::ProjectionService;
+    use coland_services::hydration::HydrationProjectionAdapter;
+    use coland_services::projection::ProjectionService;
 
     struct PausingAdapter {
         first: AtomicBool,
@@ -25,7 +25,7 @@ async fn hydration_does_not_overwrite_a_concurrent_realm_projection() {
     impl HydrationProjectionAdapter for PausingAdapter {
         fn operation_from_canonical_record(
             &self,
-            record: &soland_services::events::AcceptedEvent,
+            record: &coland_services::events::AcceptedEvent,
         ) -> Option<arkret_event_draft::ProjectedEventOperation> {
             if self.first.swap(false, Ordering::SeqCst) {
                 self.entered
@@ -146,7 +146,7 @@ async fn submicrosecond_receipt_roundtrip_preserves_exact_projection_retry() {
     changed.received_at += chrono::TimeDelta::milliseconds(1);
     assert!(matches!(
         store.append(changed).await,
-        Err(soland_storage::PersistenceError::Conflict(reason))
+        Err(coland_storage::PersistenceError::Conflict(reason))
             if reason.starts_with("duplicate_conflict:")
     ));
 }

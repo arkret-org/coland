@@ -1,6 +1,6 @@
 use arkret_event_draft::ProjectedEventOperation as Operation;
+use coland_services::identity::AccountDataState;
 use serde_json::Value;
-use soland_services::identity::AccountDataState;
 
 use crate::routing::identity::device_messages::{
     ActorPrivateAccountDataOperation, ActorPrivateAccountDataUpdate, ActorPrivateDeviceUpdate,
@@ -133,7 +133,7 @@ mod tests {
     async fn asynchronous_account_data_projection_cannot_accept_or_replace_cas() {
         let state = AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let actor = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
             arkret_wire::DidCoreId::new("ak:did_core:web:holder.example").unwrap(),

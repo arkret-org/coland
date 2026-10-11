@@ -36,12 +36,12 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use coland_services::delivery::BlobState as BlobRecord;
 use parking_lot::Mutex;
 use salvo::http::{HeaderValue, StatusCode};
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use soland_services::delivery::BlobState as BlobRecord;
 use tokio::io::AsyncReadExt as _;
 
 use super::blob::{
@@ -252,7 +252,7 @@ fn parse_upload_metadata(raw: &str) -> Result<HashMap<String, Option<String>>, &
 }
 
 #[handler]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.blob.resumable.options"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.blob.resumable.options"))]
 async fn tus_options(res: &mut Response) {
     set_tus_header(res);
     let headers = res.headers_mut();
@@ -318,7 +318,7 @@ fn validate_upload_metadata(
 }
 
 #[handler]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.blob.resumable.create"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.blob.resumable.create"))]
 async fn tus_create(depot: &mut Depot, req: &mut Request, res: &mut Response) {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let Some(session) = auth_or_render(state, req, res).await else {
@@ -551,7 +551,7 @@ async fn load_gated(
 }
 
 #[handler]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.blob.resumable.head"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.blob.resumable.head"))]
 async fn tus_head(depot: &mut Depot, req: &mut Request, res: &mut Response) {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let Some(session) = auth_or_render(state, req, res).await else {
@@ -585,7 +585,7 @@ async fn tus_head(depot: &mut Depot, req: &mut Request, res: &mut Response) {
 }
 
 #[handler]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.blob.resumable.patch"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.blob.resumable.patch"))]
 async fn tus_patch(depot: &mut Depot, req: &mut Request, res: &mut Response) {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let Some(session) = auth_or_render(state, req, res).await else {
@@ -720,7 +720,7 @@ async fn tus_patch(depot: &mut Depot, req: &mut Request, res: &mut Response) {
 }
 
 #[handler]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.blob.resumable.finalize"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.blob.resumable.finalize"))]
 async fn tus_finalize(depot: &mut Depot, req: &mut Request, res: &mut Response) {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let Some(session) = auth_or_render(state, req, res).await else {
@@ -736,7 +736,7 @@ async fn tus_finalize(depot: &mut Depot, req: &mut Request, res: &mut Response) 
 }
 
 #[handler]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.blob.resumable.delete"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.blob.resumable.delete"))]
 async fn tus_delete(depot: &mut Depot, req: &mut Request, res: &mut Response) {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let Some(session) = auth_or_render(state, req, res).await else {
@@ -759,7 +759,7 @@ async fn tus_delete(depot: &mut Depot, req: &mut Request, res: &mut Response) {
 
 async fn complete_resumable_upload(
     state: &AppState,
-    session: &soland_services::identity::SessionIdentityState,
+    session: &coland_services::identity::SessionIdentityState,
     id: &str,
     meta: &StagedUpload,
     res: &mut Response,

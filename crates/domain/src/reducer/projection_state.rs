@@ -38,7 +38,7 @@ pub struct ProjectionState {
     /// shared Realm cache.
     pub pins: BTreeMap<(String, String), PinProjection>,
     /// Materialized Relation history keyed by event-derived relation_id.
-    pub relations: BTreeMap<String, SolandRelationState>,
+    pub relations: BTreeMap<String, ColandRelationState>,
     /// Current Relation identity for each canonical
     /// `(realm_id, primary_conflict_domain)` subject. The durable authority
     /// transaction is the CAS authority; this rebuildable index keeps reducer
@@ -61,7 +61,7 @@ pub struct ProjectionState {
     ///
     /// Banned and knocking members are derived via `members_in_state`
     /// against the transition state field, not stored as separate collections.
-    pub members: BTreeMap<(String, String), SolandMembershipState>,
+    pub members: BTreeMap<(String, String), ColandMembershipState>,
     /// Exact controller authority and controller join generation carried by a
     /// Agent membership Event. Effective Agent membership is
     /// derived by joining this binding with the current controller member cell.
@@ -77,7 +77,7 @@ pub struct ProjectionState {
     /// `ak.invite.claim` converts them into DID-targeted claimed invites.
     pub invites: BTreeMap<String, InviteProjection>,
     /// Realm lifecycle state keyed by realm_id.
-    pub realm_states: BTreeMap<String, SolandRealmState>,
+    pub realm_states: BTreeMap<String, ColandRealmState>,
     /// Redacted event IDs (tombstones). This stays as a flat
     /// fast-lookup index over the parallel [`Self::redaction_cells`] map.
     pub redactions: BTreeSet<String>,
@@ -150,7 +150,7 @@ pub struct ProjectionState {
     /// Applets. Populated by
     /// `ak.applet.registration` (initial registration / re-registration)
     /// and updated by `ak.applet.discovery` (freshness only). Used by
-    /// `GET /_soland/admin/applets` admin snapshot. Runtime-private applet
+    /// `GET /_coland/admin/applets` admin snapshot. Runtime-private applet
     /// session progress is not a durable Arkret event and is not mirrored here.
     pub applets: BTreeMap<AppletId, AppletProjection>,
     /// R3 spec-sync (2026-05-27, arkret-spec b47ff6ec) — transition lifecycle
@@ -380,7 +380,7 @@ impl ProjectionState {
         let relation = self
             .relations
             .entry(relation_id.clone())
-            .or_insert_with(|| SolandRelationState {
+            .or_insert_with(|| ColandRelationState {
                 relation_id: relation_id.clone(),
                 realm_id: realm_id.to_owned(),
                 relation_kind: "contains".to_owned(),

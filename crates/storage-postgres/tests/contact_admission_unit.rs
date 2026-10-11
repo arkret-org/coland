@@ -22,18 +22,18 @@ use arkret_models_collaboration::governance::peer_contact::{
 use arkret_models_identity::ServiceResolutionCarrier;
 use arkret_wire::{DidUrl, EventId, EventKind, Hash};
 use chrono::{DateTime, Duration, Utc};
-use diesel::sql_types::{BigInt, Text};
-use diesel_async::RunQueryDsl;
-use soland_storage::{
+use coland_storage::{
     AuthorityCommitStore, AuthorityCommitTransaction, ContactCompletionAction,
     ContactCompletionBinding, ContactCompletionDraft, ContactCompletionIntent,
     ContactDeliveryTarget, ContactProjectionCommit, ContactRecord, ContactRequestSlotState,
     ContactStore, EventCommitRequest, EventCommitUnitOfWork,
 };
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{
     PgAuthorityCommitStore, PgContactStore, PgEventCommitUnitOfWork, PgPersistenceStore, PgPool,
 };
+use diesel::sql_types::{BigInt, Text};
+use diesel_async::RunQueryDsl;
 
 #[derive(diesel::QueryableByName)]
 struct CountRow {
@@ -85,7 +85,7 @@ fn producer(holder: &ContactPeer) -> ContactProducerSigner {
 /// The next Contact Event on the fixture stream, authored by `holder`.
 async fn contact_request(
     pool: &PgPool,
-    guard: &soland_storage::DeviceRevocationGateSelector,
+    guard: &coland_storage::DeviceRevocationGateSelector,
     previous: &AuthorityCommitTransaction,
     kind: EventKind,
     holder: &ContactPeer,
@@ -107,7 +107,7 @@ async fn contact_request(
         fact.is_none(),
         "native PCR forbids the ordinary Human signer fact"
     );
-    request.self_producer_guard = Some(soland_storage::SelfProducerCommitGuard::HumanDevice(
+    request.self_producer_guard = Some(coland_storage::SelfProducerCommitGuard::HumanDevice(
         guard.clone(),
     ));
     ordinary_realm::seal_final_commit(&mut request.authority_commit.commit);
@@ -176,7 +176,7 @@ fn slot(
         peer_id: peer.contact_actor_id(),
         accepted_sequence: sequence,
         head_digest: head,
-        accepted_event_refs: soland_domain::identity::contact_event_prefix(refs.iter().copied()),
+        accepted_event_refs: coland_domain::identity::contact_event_prefix(refs.iter().copied()),
     }
 }
 
@@ -187,7 +187,7 @@ struct Requested {
     request_intent: ContactCompletionIntent,
     row: ContactRecord,
     responder_head: AuthorityCommitTransaction,
-    responder_guard: soland_storage::DeviceRevocationGateSelector,
+    responder_guard: coland_storage::DeviceRevocationGateSelector,
 }
 
 async fn requested(database: &TestDatabase) -> Requested {
@@ -386,7 +386,7 @@ async fn response(
         peer_id: alice().contact_actor_id(),
         accepted_sequence: absence.cas_sequence,
         head_digest: absence.digest().unwrap(),
-        accepted_event_refs: soland_domain::identity::contact_event_prefix(
+        accepted_event_refs: coland_domain::identity::contact_event_prefix(
             absence.cas_revision.iter().chain([&event.event_id]),
         ),
     });
@@ -511,7 +511,7 @@ async fn request_and_normal_response_commit_with_the_slot_cas_they_sign() {
     assert_eq!(responder_slot.accepted_sequence, 1);
     assert_eq!(
         responder_slot.accepted_event_refs,
-        soland_domain::identity::contact_event_prefix([&request_id, &response_id])
+        coland_domain::identity::contact_event_prefix([&request_id, &response_id])
     );
     assert_eq!(
         contacts

@@ -34,19 +34,19 @@ use arkret_wire::{
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use coland_http::error::{AppError, ErrorCode};
+use coland_http::result::{JsonResult, json_ok};
+use coland_services::ServiceError as PersistenceError;
+use coland_services::identity::{
+    RecoveryPolicyState, SecurityTransactionRecord, SessionIdentityState as SessionRecord,
+};
+use coland_storage::RecoverySessionLifecycle as SessionState;
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use salvo::http::StatusCode;
 use salvo::oapi::extract::{JsonBody, PathParam, QueryParam};
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use soland_http::error::{AppError, ErrorCode};
-use soland_http::result::{JsonResult, json_ok};
-use soland_services::ServiceError as PersistenceError;
-use soland_services::identity::{
-    RecoveryPolicyState, SecurityTransactionRecord, SessionIdentityState as SessionRecord,
-};
-use soland_storage::RecoverySessionLifecycle as SessionState;
 
 use super::{AuthArgs, append_audit_log};
 use crate::state::AppState;
@@ -74,7 +74,7 @@ use wire::*;
 /// Recovery-key possession is rooted in the signed policy, not in a DID
 /// document that may contain no device methods after every device is lost.
 pub(super) fn recovery_session_unlock_verifying_key(
-    record: &soland_services::identity::RecoverySessionState,
+    record: &coland_services::identity::RecoverySessionState,
     verification_method: &str,
 ) -> Result<VerifyingKey, AppError> {
     let summary = recovery_proof_summary(record).ok_or_else(|| {

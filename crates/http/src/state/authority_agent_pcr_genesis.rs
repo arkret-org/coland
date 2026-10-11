@@ -11,9 +11,9 @@
 use arkret_event_draft::EventPayloadExt;
 use arkret_wire::{AuthorityCommitStatus, AuthoritySubmitOutcome, EventAdmissionSubmission};
 use chrono::Utc;
-use soland_services::identity::SessionIdentityState;
-use soland_services::{ServiceError, ServiceResult};
-use soland_storage::{AgentPcrGenesisAdmissionOutcome, AgentPcrGenesisAdmissionWrite};
+use coland_services::identity::SessionIdentityState;
+use coland_services::{ServiceError, ServiceResult};
+use coland_storage::{AgentPcrGenesisAdmissionOutcome, AgentPcrGenesisAdmissionWrite};
 
 use super::AppState;
 
@@ -31,7 +31,7 @@ pub(super) fn is_agent_pcr_genesis(event: &arkret_wire::Event) -> bool {
 fn precondition(detail: &str) -> ServiceError {
     ServiceError::Conflict(format!(
         "{}: {detail}",
-        soland_storage::ConflictCode::FailedPrecondition
+        coland_storage::ConflictCode::FailedPrecondition
     ))
 }
 

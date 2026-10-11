@@ -1,4 +1,4 @@
--- Squashed initial migration (soland).
+-- Squashed initial migration (coland).
 --
 -- Event references in this file appear as `<role>_event_id` and
 -- `<role>_event_ref`. That is not drift: the suffix is normative and comes from
@@ -22,16 +22,16 @@
 -- layout.  Startup verifies this singleton after Diesel migrations run, so a
 -- database that recorded the old squashed migration version but still has the
 -- UUID schema cannot be opened silently.
-CREATE TABLE public.soland_schema_contract (
+CREATE TABLE public.coland_schema_contract (
     singleton boolean PRIMARY KEY DEFAULT true,
     contract_version text NOT NULL,
-    CONSTRAINT soland_schema_contract_singleton_check CHECK (singleton),
-    CONSTRAINT soland_schema_contract_version_check CHECK (
+    CONSTRAINT coland_schema_contract_singleton_check CHECK (singleton),
+    CONSTRAINT coland_schema_contract_version_check CHECK (
         contract_version = 'authority-commit-v1'
     )
 );
 
-INSERT INTO public.soland_schema_contract (singleton, contract_version)
+INSERT INTO public.coland_schema_contract (singleton, contract_version)
 VALUES (true, 'authority-commit-v1');
 
 -- Realm wire identities are event-derived protocol values, not

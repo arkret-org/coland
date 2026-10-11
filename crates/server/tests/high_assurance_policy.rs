@@ -1,9 +1,9 @@
 //! `security_class=high_assurance` federation-policy enforcement.
 
 use arkret_event_draft::ProjectedEventOperation as Operation;
+use coland_domain::hlc::ServerHlc;
+use coland_domain::reducer::{ProjectionEffect, ProjectionState};
 use serde_json::json;
-use soland_domain::hlc::ServerHlc;
-use soland_domain::reducer::{ProjectionEffect, ProjectionState};
 
 const REALM: &str = "ak:realm:ATYL-87CDhaLQem29G2JQCXbZ_8zuu7khej2MbrsGLK6";
 
@@ -24,7 +24,7 @@ fn state_with_security_class(security_class: &str) -> ProjectionState {
     let mut state = ProjectionState::new();
     state.set_realm_facet(
         REALM,
-        soland_domain::reducer::facet::REALM_GENESIS,
+        coland_domain::reducer::facet::REALM_GENESIS,
         json!({"security_class": security_class}),
     );
     state

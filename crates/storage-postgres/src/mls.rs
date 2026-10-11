@@ -359,7 +359,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
     async fn get_claim_welcome_binding(
         &self,
         claim_id: &str,
-    ) -> PersistenceResult<Option<soland_storage::MlsWelcomeClaimBinding>> {
+    ) -> PersistenceResult<Option<coland_storage::MlsWelcomeClaimBinding>> {
         #[derive(QueryableByName)]
         struct BindingRow {
             #[diesel(sql_type = Text)]
@@ -387,7 +387,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
         .await
         .optional()
         .map_err(PersistenceError::database)?
-        .map(|row| soland_storage::MlsWelcomeClaimBinding {
+        .map(|row| coland_storage::MlsWelcomeClaimBinding {
             claim_id: row.claim_id,
             source_id: row.source_id,
             claim_request_id: row.claim_request_id,
@@ -444,10 +444,10 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
                         )
                     })?;
                     match crate::gate_status_in_transaction(conn, selector).await? {
-                        soland_storage::DeviceRevocationGateStatus::Active => {}
-                        soland_storage::DeviceRevocationGateStatus::Revoked { .. }
-                        | soland_storage::DeviceRevocationGateStatus::AuthorityMismatch
-                        | soland_storage::DeviceRevocationGateStatus::GenerationMismatch => {
+                        coland_storage::DeviceRevocationGateStatus::Active => {}
+                        coland_storage::DeviceRevocationGateStatus::Revoked { .. }
+                        | coland_storage::DeviceRevocationGateStatus::AuthorityMismatch
+                        | coland_storage::DeviceRevocationGateStatus::GenerationMismatch => {
                             return Ok(PeerKeyPackageClaimAttemptResult::KeyPackageUnavailable);
                         }
                     }
@@ -1000,7 +1000,7 @@ impl From<MlsKeyPackagePgRow> for MlsKeyPackageRow {
             id: row.id,
             keypackage_ref: row.keypackage_ref,
             keypackage_digest: row.keypackage_digest,
-            owner_account_pk: soland_storage::AccountPk(row.owner_account_pk),
+            owner_account_pk: coland_storage::AccountPk(row.owner_account_pk),
             actor_id: row.actor_id.to_string(),
             device_id: row.device_id,
             endpoint_verification_method: row.endpoint_verification_method,

@@ -58,6 +58,7 @@ pub(crate) use authority_self_event_unit::{
     refresh_direct_conversation_peer_claim, submit_applet_event, submit_mimi_binding_event,
     submit_self_moderation_report,
 };
+pub use coland_services::events::{RealmDirectoryEntry, RealmDirectoryIndex, RealmDirectoryQuery};
 pub(crate) use member_identity::HandleClaimEvidenceRecord;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use member_identity::MemberIdentityEventRecord;
@@ -67,7 +68,6 @@ pub use notification::{
 pub(crate) use replica_anchor::refresh_account_snapshot;
 pub use replica_anchor::spawn_pending_anchor_sweeper;
 pub(crate) use service_route_fetcher::VerifiedBindingRouteFetcher;
-pub use soland_services::events::{RealmDirectoryEntry, RealmDirectoryIndex, RealmDirectoryQuery};
 
 mod authority_mimi_unit;
 pub(crate) use authority_mimi_unit::{

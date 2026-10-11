@@ -1,4 +1,4 @@
-use soland_storage::AccountPk;
+use coland_storage::AccountPk;
 
 use super::{
     AccountDataCasResult, AccountDataChangeRecord, AccountDataRecord, AccountDataStore,
@@ -456,8 +456,8 @@ impl AccountDataStore for PgAccountDataStore {
     }
     async fn admit_actor_private_event(
         &self,
-        admission: &soland_storage::ActorPrivateAccountDataAdmission,
-    ) -> PersistenceResult<soland_storage::ActorPrivateAccountDataOutcome> {
+        admission: &coland_storage::ActorPrivateAccountDataAdmission,
+    ) -> PersistenceResult<coland_storage::ActorPrivateAccountDataOutcome> {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;

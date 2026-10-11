@@ -4,7 +4,7 @@ use arkret_models_collaboration::governance::operation_wire::{
 };
 use arkret_policy::agent_management::{AgentManagementContext, evaluate_agent_management};
 use arkret_wire::{AccountId, CapabilityActionId, PolicyEffect, RealmId, ServiceOperationId};
-use soland_storage::{AuthorizationOperation, PersistenceError, PersistenceResult};
+use coland_storage::{AuthorizationOperation, PersistenceError, PersistenceResult};
 
 fn unavailable(detail: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Conflict(format!("failed_precondition: {detail}"))

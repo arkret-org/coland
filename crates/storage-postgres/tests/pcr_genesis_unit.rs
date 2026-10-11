@@ -33,21 +33,21 @@ use arkret_wire::{
     Hash, IdempotencyKey, PcrGenesisUnit, RealmCommitAuthorityRef, RealmCommitId, RealmId,
     TransactionId, TrustDomainId, WebOrigin,
 };
-use device_history_fixture::{DeviceHistoryFixture, DeviceHistoryFixtureOptions};
-use diesel::sql_types::{BigInt, Jsonb, Text, Uuid};
-use diesel_async::RunQueryDsl;
-use ed25519_dalek::{Signer, SigningKey};
-use soland_storage::{
+use coland_storage::{
     AcceptedDeviceAuthorizationOutcome, AuthorityCommitStore, AuthorityCommitTransaction,
     ConflictCode, CurrentRealmAuthority, DeviceRevocationStore, KeyBackupListPosition,
     KeyBackupListQuery, KeyBackupStore, PcrGenesisCommitOutcome, PcrGenesisCommitUnit,
     PersistenceError, RevokeCommandTerminalWrite, RevokeProposalCommitWrite,
     SecurityTransactionRecord, SecurityTransactionStepOutcomeRecord, SecurityTransactionStore,
 };
-use soland_storage_postgres::{
+use coland_storage_postgres::{
     Db, PgAuthorityCommitStore, PgDeviceRevocationStore, PgKeyBackupStore, PgPool,
     PgSecurityTransactionStore,
 };
+use device_history_fixture::{DeviceHistoryFixture, DeviceHistoryFixtureOptions};
+use diesel::sql_types::{BigInt, Jsonb, Text, Uuid};
+use diesel_async::RunQueryDsl;
+use ed25519_dalek::{Signer, SigningKey};
 
 #[derive(diesel::QueryableByName)]
 struct StationRow {
@@ -772,7 +772,7 @@ async fn reused_genesis_realm_or_idempotency_key_is_a_zero_write_duplicate_confl
 
 #[tokio::test]
 async fn evicted_principal_resolution_index_is_rebuilt_from_the_genesis_anchor() {
-    use soland_storage::{CurrentPrincipalRead, PrincipalResolutionStore};
+    use coland_storage::{CurrentPrincipalRead, PrincipalResolutionStore};
 
     let (pool, station) = contract_store().await;
     let store = PgAuthorityCommitStore { pool: pool.clone() };
@@ -787,7 +787,7 @@ async fn evicted_principal_resolution_index_is_rebuilt_from_the_genesis_anchor()
         accepted.submission.principal_id.clone(),
         accepted.submission.account_authority_id.clone(),
     );
-    let resolutions = soland_storage_postgres::PgPrincipalResolutionStore { pool: pool.clone() };
+    let resolutions = coland_storage_postgres::PgPrincipalResolutionStore { pool: pool.clone() };
     let initial = resolutions.current_principal(&account).await.unwrap();
     assert_eq!(
         initial,
@@ -1145,7 +1145,7 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
             .await
             .unwrap_err()
             .conflict_code(),
-        Some(soland_storage::ConflictCode::FailedPrecondition),
+        Some(coland_storage::ConflictCode::FailedPrecondition),
         "a producer other than the authorizing device is a registered precondition failure"
     );
     let mut bad_proof = write.clone();
@@ -1460,7 +1460,7 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
             .await
             .unwrap_err()
             .conflict_code(),
-        Some(soland_storage::ConflictCode::DuplicateConflict),
+        Some(coland_storage::ConflictCode::DuplicateConflict),
         "a different terminal for the same proposal is a duplicate conflict"
     );
     assert_eq!(
@@ -1612,7 +1612,7 @@ async fn pointer_footprint(pool: &PgPool, realm_id: &RealmId) -> (i64, i64, i64)
 
 #[tokio::test]
 async fn key_backup_active_series_pointer_unit_commits_only_at_the_active_device_cut() {
-    use soland_storage::{KeyBackupActiveSeriesCommitOutcome, KeyBackupActiveSeriesCommitWrite};
+    use coland_storage::{KeyBackupActiveSeriesCommitOutcome, KeyBackupActiveSeriesCommitWrite};
 
     let (pool, station) = contract_store().await;
     let fixture = fixture(&station);
@@ -2182,7 +2182,7 @@ async fn accepted_device_unit_admits_only_a_current_active_approver() {
             .pcr_device_generation(&account)
             .await
             .unwrap(),
-        Some(soland_storage::PcrDeviceGeneration {
+        Some(coland_storage::PcrDeviceGeneration {
             current_device_generation_ref: 1,
         })
     );
@@ -2343,7 +2343,7 @@ async fn accepted_revoke_terminal_stops_only_the_target_of_two_active_devices() 
     use arkret_models_collaboration::events_payloads::{
         DeviceAuthorizationBindingKind, DeviceOrPrincipalRef,
     };
-    use soland_storage::{KeyBackupActiveSeriesCommitOutcome, KeyBackupActiveSeriesCommitWrite};
+    use coland_storage::{KeyBackupActiveSeriesCommitOutcome, KeyBackupActiveSeriesCommitWrite};
 
     let (pool, station) = contract_store().await;
     let fixture = fixture(&station);
@@ -2984,7 +2984,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
     use arkret_models_collaboration::events_payloads::{
         DeviceAuthorizationBindingKind, DeviceOrPrincipalRef,
     };
-    use soland_storage::{
+    use coland_storage::{
         KeyBackupActiveSeriesCommitOutcome, KeyBackupActiveSeriesCommitWrite,
         RotationPointerSwitchWrite, RotationUploadCommitWrite,
     };
@@ -3295,7 +3295,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
         .unwrap_err();
     assert_eq!(
         refused.conflict_code(),
-        Some(soland_storage::ConflictCode::SignatureInvalid),
+        Some(coland_storage::ConflictCode::SignatureInvalid),
         "{refused}"
     );
     assert_eq!(
@@ -3390,7 +3390,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
         .unwrap_err();
     assert_eq!(
         squatted.conflict_code(),
-        Some(soland_storage::ConflictCode::DuplicateConflict),
+        Some(coland_storage::ConflictCode::DuplicateConflict),
         "{squatted}"
     );
     assert_eq!(
@@ -3473,7 +3473,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
         .unwrap_err();
     assert_eq!(
         moved.conflict_code(),
-        Some(soland_storage::ConflictCode::TemporarilyUnavailable),
+        Some(coland_storage::ConflictCode::TemporarilyUnavailable),
         "{moved}"
     );
     assert_eq!(pointer_footprint(&pool, &realm_id).await, pointers);
@@ -3551,7 +3551,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
         .await
         .unwrap()
         .unwrap();
-    let erase_request = soland_storage::BackupSeriesEraseWorkerRequest {
+    let erase_request = coland_storage::BackupSeriesEraseWorkerRequest {
         transaction_id: transaction_id.clone(),
         transaction_request_digest: switched_record.resource.request_digest.clone(),
         prepared_plan_digest: switched_record.resource.prepared_plan_digest.clone(),
@@ -3560,19 +3560,19 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
         authority_commit_id: after.authority_commit_id.clone(),
     };
     let erase_bytes = arkret_canonical::canonical_json_bytes(&erase_request).unwrap();
-    let erase_progress = soland_storage::BackupSeriesEraseProgressRecord {
+    let erase_progress = coland_storage::BackupSeriesEraseProgressRecord {
         transaction_id: transaction_id.to_string(),
         canonical_request: erase_bytes.clone(),
-        outcome: soland_storage::BackupSeriesEraseOutcome {
+        outcome: coland_storage::BackupSeriesEraseOutcome {
             transaction_id: transaction_id.clone(),
             request_digest: Hash::new(arkret_canonical::canonical_sha256(&erase_request).unwrap())
                 .unwrap(),
-            status: soland_storage::BackupSeriesEraseStatus::Partial,
-            series_records: vec![soland_storage::BackupSeriesEraseRow {
+            status: coland_storage::BackupSeriesEraseStatus::Partial,
+            series_records: vec![coland_storage::BackupSeriesEraseRow {
                 backup_kind: BackupRotationKind::SecretStorage,
                 previous_series_id: series_one.clone(),
                 new_series_id: series.clone(),
-                status: soland_storage::BackupSeriesEraseRowStatus::Pending,
+                status: coland_storage::BackupSeriesEraseRowStatus::Pending,
                 erased_backups: vec![],
                 remaining_backups: erase_request.series[0].old_backups.clone(),
                 reason_code: None,
@@ -3609,7 +3609,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
         reloaded.outcome
     );
     transactions
-        .begin_step(soland_storage::SecurityTransactionStepAttemptRecord {
+        .begin_step(coland_storage::SecurityTransactionStepAttemptRecord {
             transaction_id: transaction_id.to_string(),
             step: SecurityTransactionStep::EraseOldMaterial,
             canonical_request: erase_bytes.clone(),
@@ -3709,7 +3709,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
             expected_accepted_step_count: 4,
             client_attestation: attestation.clone(),
         };
-        soland_storage::RotationLocalCommitWrite {
+        coland_storage::RotationLocalCommitWrite {
             step_outcome: SecurityTransactionStepOutcomeRecord {
                 transaction_id: transaction_id.to_string(),
                 step: SecurityTransactionStep::LocalCommit,
@@ -3724,7 +3724,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
     };
     let committed_at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let footprint = rotation_footprint(&pool, &series, &transaction_id).await;
-    let refused_with = async |write: soland_storage::RotationLocalCommitWrite| {
+    let refused_with = async |write: coland_storage::RotationLocalCommitWrite| {
         let error = transactions
             .commit_rotation_local_commit(write)
             .await
@@ -3754,7 +3754,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
             committed_at
         ))
         .await,
-        Some(soland_storage::ConflictCode::SignatureInvalid)
+        Some(coland_storage::ConflictCode::SignatureInvalid)
     );
     // A method naming another device, or not a DID of this principal.
     assert_eq!(
@@ -3765,7 +3765,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
             committed_at
         ))
         .await,
-        Some(soland_storage::ConflictCode::SignatureInvalid)
+        Some(coland_storage::ConflictCode::SignatureInvalid)
     );
     assert_eq!(
         refused_with(local_commit(
@@ -3775,7 +3775,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
             committed_at
         ))
         .await,
-        Some(soland_storage::ConflictCode::SignatureInvalid)
+        Some(coland_storage::ConflictCode::SignatureInvalid)
     );
     // The revoked device B, even with its own authorized key and method.
     assert_eq!(
@@ -3786,7 +3786,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
             committed_at
         ))
         .await,
-        Some(soland_storage::ConflictCode::DeviceRevoked)
+        Some(coland_storage::ConflictCode::DeviceRevoked)
     );
     assert_eq!(
         rotation_footprint(&pool, &series, &transaction_id).await,
@@ -3829,7 +3829,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
             .await
             .unwrap_err()
             .conflict_code(),
-        Some(soland_storage::ConflictCode::DuplicateConflict)
+        Some(coland_storage::ConflictCode::DuplicateConflict)
     );
     assert_eq!(
         transactions
@@ -3955,7 +3955,7 @@ fn recovery_policy_event(
 
 #[tokio::test]
 async fn recovery_policy_publication_unit_ratchets_under_the_pcr_cut() {
-    use soland_storage::{
+    use coland_storage::{
         RecoveryPolicyPublicationOutcome, RecoveryPolicyPublicationWrite, RecoveryPolicyStore,
     };
 
@@ -3994,7 +3994,7 @@ async fn recovery_policy_publication_unit_ratchets_under_the_pcr_cut() {
         .await
         .unwrap();
     let method_d = DidUrl::new(format!("{did}#{device_d}")).unwrap();
-    let policies = soland_storage_postgres::PgRecoveryPolicyStore { pool: pool.clone() };
+    let policies = coland_storage_postgres::PgRecoveryPolicyStore { pool: pool.clone() };
     let publish = async |event: &arkret_wire::Event, commit: arkret_wire::RealmCommit| {
         policies
             .commit_publication(RecoveryPolicyPublicationWrite {
@@ -4370,7 +4370,7 @@ fn accountability_grant_event(
 
 #[tokio::test]
 async fn profile_update_commits_actor_profile_current_and_rejects_forbidden_patch() {
-    use soland_storage::{
+    use coland_storage::{
         ActorProfileAdmissionOutcome, ActorProfileAdmissionWrite, ActorProfileStore,
     };
 
@@ -4397,7 +4397,7 @@ async fn profile_update_commits_actor_profile_current_and_rejects_forbidden_patc
             welcomes: Vec::new(),
             recipient_queue_capacity: 0,
         };
-    let profiles = soland_storage_postgres::PgActorProfileStore { pool: pool.clone() };
+    let profiles = coland_storage_postgres::PgActorProfileStore { pool: pool.clone() };
     let admit = async |event: &arkret_wire::Event, commit: arkret_wire::RealmCommit| {
         profiles
             .admit_profile(ActorProfileAdmissionWrite {
@@ -4584,7 +4584,7 @@ async fn profile_update_commits_actor_profile_current_and_rejects_forbidden_patc
 
 #[tokio::test]
 async fn profile_accountability_requires_active_grant_at_commit_cut() {
-    use soland_storage::{
+    use coland_storage::{
         AccountabilityGrantAdmissionOutcome, AccountabilityGrantAdmissionWrite,
         ActorProfileAdmissionOutcome, ActorProfileAdmissionWrite, ActorProfileStore,
     };
@@ -4613,7 +4613,7 @@ async fn profile_accountability_requires_active_grant_at_commit_cut() {
     let subject_seed = subject_fixture.founding_device_signing_seed;
     let subject_genesis = admit_genesis(subject_fixture).await;
 
-    let tx = |authority: &soland_storage::CurrentRealmAuthority,
+    let tx = |authority: &coland_storage::CurrentRealmAuthority,
               event: arkret_wire::Event,
               commit: arkret_wire::RealmCommit| AuthorityCommitTransaction {
         expected_authority: authority.clone(),
@@ -4628,7 +4628,7 @@ async fn profile_accountability_requires_active_grant_at_commit_cut() {
     let subject_authority = subject_genesis.transactions[1].expected_authority.clone();
     let issuer_head = issuer_genesis.transactions[1].commit.clone();
     let subject_head = subject_genesis.transactions[1].commit.clone();
-    let profiles = soland_storage_postgres::PgActorProfileStore { pool: pool.clone() };
+    let profiles = coland_storage_postgres::PgActorProfileStore { pool: pool.clone() };
     let admit_profile = async |event: &arkret_wire::Event, commit: arkret_wire::RealmCommit| {
         profiles
             .admit_profile(ActorProfileAdmissionWrite {
@@ -4925,7 +4925,7 @@ fn agent_provision_event(
 
 #[tokio::test]
 async fn agent_provision_commits_four_families_or_none() {
-    use soland_storage::{
+    use coland_storage::{
         ActorProfileStore, AgentProvisionAdmissionOutcome, AgentProvisionAdmissionWrite,
     };
 
@@ -4953,7 +4953,7 @@ async fn agent_provision_commits_four_families_or_none() {
     let other_seed = other_fixture.founding_device_signing_seed;
     let other_genesis = admit_genesis(other_fixture).await;
 
-    let tx = |authority: &soland_storage::CurrentRealmAuthority,
+    let tx = |authority: &coland_storage::CurrentRealmAuthority,
               event: arkret_wire::Event,
               commit: arkret_wire::RealmCommit| AuthorityCommitTransaction {
         expected_authority: authority.clone(),
@@ -4970,8 +4970,8 @@ async fn agent_provision_commits_four_families_or_none() {
     let other_authority = other_genesis.transactions[1].expected_authority.clone();
     let head = controller_genesis.transactions[1].commit.clone();
     let other_head = other_genesis.transactions[1].commit.clone();
-    let profiles = soland_storage_postgres::PgActorProfileStore { pool: pool.clone() };
-    let admit = async |authority: &soland_storage::CurrentRealmAuthority,
+    let profiles = coland_storage_postgres::PgActorProfileStore { pool: pool.clone() };
+    let admit = async |authority: &coland_storage::CurrentRealmAuthority,
                        event: &arkret_wire::Event,
                        commit: arkret_wire::RealmCommit| {
         profiles
@@ -5156,7 +5156,7 @@ async fn agent_provision_commits_four_families_or_none() {
 
 #[tokio::test]
 async fn agent_profile_accountability_follows_the_provision_projection() {
-    use soland_storage::{
+    use coland_storage::{
         AccountabilityGrantAdmissionOutcome, AccountabilityGrantAdmissionWrite,
         ActorProfileAdmissionOutcome, ActorProfileAdmissionWrite, ActorProfileStore,
         AgentProvisionAdmissionOutcome, AgentProvisionAdmissionWrite,
@@ -5188,7 +5188,7 @@ async fn agent_profile_accountability_follows_the_provision_projection() {
     let agent_seed = agent_fixture.founding_device_signing_seed;
     let agent_genesis = admit_genesis(agent_fixture).await;
 
-    let tx = |authority: &soland_storage::CurrentRealmAuthority,
+    let tx = |authority: &coland_storage::CurrentRealmAuthority,
               event: arkret_wire::Event,
               commit: arkret_wire::RealmCommit| AuthorityCommitTransaction {
         expected_authority: authority.clone(),
@@ -5205,7 +5205,7 @@ async fn agent_profile_accountability_follows_the_provision_projection() {
     let agent_authority = agent_genesis.transactions[1].expected_authority.clone();
     let controller_head = controller_genesis.transactions[1].commit.clone();
     let agent_head = agent_genesis.transactions[1].commit.clone();
-    let profiles = soland_storage_postgres::PgActorProfileStore { pool: pool.clone() };
+    let profiles = coland_storage_postgres::PgActorProfileStore { pool: pool.clone() };
     let realms = [&controller_realm, &agent_realm];
     let t0 = agent_head.committed_at;
 
@@ -5444,12 +5444,12 @@ async fn agent_pcr_footprint(pool: &PgPool, realm: &RealmId) -> AgentPcrFootprin
 
 #[tokio::test]
 async fn agent_pcr_genesis_requires_its_provision_declaration() {
-    use soland_storage::{
+    use coland_storage::{
         ActorProfileStore, AgentPcrGenesisAdmissionOutcome, AgentPcrGenesisAdmissionWrite,
         AgentProvisionAdmissionOutcome, AgentProvisionAdmissionWrite,
     };
 
-    let database = soland_storage_postgres::test_database::TestDatabase::lease().await;
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     let pool = database.pool();
     let historical_station =
         historical_control_source::HistoricalControlStation::new("pcr-native-control", [83; 32]);
@@ -5491,7 +5491,7 @@ async fn agent_pcr_genesis_requires_its_provision_declaration() {
         .expected_authority
         .clone();
     let head = controller_genesis.transactions[1].commit.clone();
-    let profiles = soland_storage_postgres::PgActorProfileStore { pool: pool.clone() };
+    let profiles = coland_storage_postgres::PgActorProfileStore { pool: pool.clone() };
 
     let agent_did = arkret_wire::Did::new(format!(
         "did:web:agent-{}.example",
@@ -5534,7 +5534,7 @@ async fn agent_pcr_genesis_requires_its_provision_declaration() {
     };
     let genesis = author(arkret_wire::ActorId::account(controller.clone()), seed);
     let agent_pcr = RealmId::from_event_id(&genesis.event_id);
-    let authority = soland_storage::CurrentRealmAuthority {
+    let authority = coland_storage::CurrentRealmAuthority {
         realm_id: agent_pcr.clone(),
         generation: 0,
         service_id: station.clone(),
@@ -5546,7 +5546,7 @@ async fn agent_pcr_genesis_requires_its_provision_declaration() {
     let admit = async |event: &arkret_wire::Event| {
         let commit = station_genesis_commit(&head, event, &station_did, genesis_at);
         let transaction = AuthorityCommitTransaction {
-            expected_authority: soland_storage::CurrentRealmAuthority {
+            expected_authority: coland_storage::CurrentRealmAuthority {
                 realm_id: RealmId::from_event_id(&event.event_id),
                 authority_ref: arkret_wire::RealmCommitAuthorityRef::GenesisOrChangeEvent(
                     event.event_id.clone(),
@@ -5770,12 +5770,12 @@ async fn agent_control_footprint(pool: &PgPool, realm: &RealmId) -> AgentControl
 
 #[tokio::test]
 async fn agent_key_and_lifecycle_commit_only_through_the_control_unit() {
-    use soland_storage::{
+    use coland_storage::{
         ActorProfileStore, AgentControlAdmissionOutcome, AgentControlAdmissionWrite,
         AgentPcrGenesisAdmissionWrite, AgentProvisionAdmissionWrite,
     };
 
-    let database = soland_storage_postgres::test_database::TestDatabase::lease().await;
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     let pool = database.pool();
     let historical_station =
         historical_control_source::HistoricalControlStation::new("pcr-native-control", [83; 32]);
@@ -5832,9 +5832,9 @@ async fn agent_key_and_lifecycle_commit_only_through_the_control_unit() {
     let stranger_seed = stranger_fixture.founding_device_signing_seed;
     admit_genesis(stranger_fixture).await;
     let head = controller_genesis.transactions[1].commit.clone();
-    let profiles = soland_storage_postgres::PgActorProfileStore { pool: pool.clone() };
+    let profiles = coland_storage_postgres::PgActorProfileStore { pool: pool.clone() };
     let tx = |event: arkret_wire::Event, commit: arkret_wire::RealmCommit| {
-        let authority = soland_storage::CurrentRealmAuthority {
+        let authority = coland_storage::CurrentRealmAuthority {
             realm_id: commit.realm_id.clone(),
             generation: 0,
             service_id: station.clone(),
@@ -5934,7 +5934,7 @@ async fn agent_key_and_lifecycle_commit_only_through_the_control_unit() {
     .await
     .unwrap();
 
-    let historical_store = soland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() };
+    let historical_store = coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() };
     let producer_selector = |event: &arkret_wire::Event, commit: &arkret_wire::RealmCommit| {
         arkret_models_identity::SignerKeyQuerySelector::HistoricalEvent {
             sender: arkret_models_identity::HistoricalSignerKeyQuerySender::AccountDevice {
@@ -5952,7 +5952,7 @@ async fn agent_key_and_lifecycle_commit_only_through_the_control_unit() {
     };
     for (original, accepted) in [(&provision, &provision_commit), (&genesis, &genesis_commit)] {
         let selector = producer_selector(original, accepted);
-        let frozen = soland_storage::AuthorityCommitStore::historical_self_pcr_producer_signer_key(
+        let frozen = coland_storage::AuthorityCommitStore::historical_self_pcr_producer_signer_key(
             &historical_store,
             &original.realm_id,
             &selector,
@@ -5974,7 +5974,7 @@ async fn agent_key_and_lifecycle_commit_only_through_the_control_unit() {
         foreign.station_id =
             arkret_wire::DidCoreId::new("ak:did_core:web:foreign-history.example").unwrap();
         assert!(
-            soland_storage::AuthorityCommitStore::historical_self_pcr_producer_signer_key(
+            coland_storage::AuthorityCommitStore::historical_self_pcr_producer_signer_key(
                 &historical_store,
                 &original.realm_id,
                 &selector,
@@ -5997,7 +5997,7 @@ async fn agent_key_and_lifecycle_commit_only_through_the_control_unit() {
             committed_event_ref.stream_position += 1;
         }
         assert!(
-            soland_storage::AuthorityCommitStore::historical_self_pcr_producer_signer_key(
+            coland_storage::AuthorityCommitStore::historical_self_pcr_producer_signer_key(
                 &historical_store,
                 &original.realm_id,
                 &wrong,
@@ -6032,7 +6032,7 @@ async fn agent_key_and_lifecycle_commit_only_through_the_control_unit() {
         .unwrap();
         drop(conn);
         assert!(
-            soland_storage::AuthorityCommitStore::historical_self_pcr_producer_signer_key(
+            coland_storage::AuthorityCommitStore::historical_self_pcr_producer_signer_key(
                 &historical_store,
                 &genesis.realm_id,
                 &producer_selector(&genesis, &genesis_commit),
@@ -6047,7 +6047,7 @@ async fn agent_key_and_lifecycle_commit_only_through_the_control_unit() {
         diesel::sql_query("UPDATE agent_producer_signer_keys SET self_admission_provenance=NULL,self_admission_account=NULL,self_admission_kind=NULL WHERE commit_id=$1").bind::<diesel::sql_types::Text,_>(genesis_commit.commit_id.as_str()).execute(&mut *conn).await.unwrap();
         drop(conn);
         assert!(
-            soland_storage::AuthorityCommitStore::historical_self_pcr_producer_signer_key(
+            coland_storage::AuthorityCommitStore::historical_self_pcr_producer_signer_key(
                 &historical_store,
                 &genesis.realm_id,
                 &producer_selector(&genesis, &genesis_commit),
@@ -6126,7 +6126,7 @@ async fn agent_key_and_lifecycle_commit_only_through_the_control_unit() {
     );
     let first_commit = committed(admit(&first, &genesis_commit).await);
     assert!(
-        soland_storage::AuthorityCommitStore::historical_self_pcr_producer_signer_key(
+        coland_storage::AuthorityCommitStore::historical_self_pcr_producer_signer_key(
             &historical_store,
             &agent_pcr,
             &producer_selector(&first, &first_commit),

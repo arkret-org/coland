@@ -80,7 +80,7 @@ async fn prepare_challenge(
     state
         .sync()
         .websocket_auth()
-        .prepare_challenge(&soland_services::sync::WebsocketChallengeState {
+        .prepare_challenge(&coland_services::sync::WebsocketChallengeState {
             connection_id: record.connection_id.clone(),
             nonce: record.nonce.clone(),
             canonical_origin: record.canonical_origin.clone(),
@@ -177,7 +177,7 @@ async fn authenticate(
         .consume_challenge(
             connection_id,
             &challenge.nonce,
-            &soland_services::sync::WebsocketReplayState {
+            &coland_services::sync::WebsocketReplayState {
                 cnf_jkt: key.cnf_jkt,
                 jti: key.jti,
                 proof_context: key.context,
@@ -424,7 +424,7 @@ async fn current_delivery(
                 .list_realm_streams_for_account(&commit.realm_id, account, &state.service_core_id())
                 .await
                 .map_err(|_| ErrorCode::TemporarilyUnavailable)?;
-            let soland_storage::AccountRealmStreamList::Listed(rows) = rows else {
+            let coland_storage::AccountRealmStreamList::Listed(rows) = rows else {
                 return Err(ErrorCode::CapabilityDenied);
             };
             let Some(row) = rows.iter().find(|r| r.stream_ref == commit.stream_ref) else {
@@ -455,7 +455,7 @@ async fn current_delivery(
                         .list_realm_streams_for_account(&realm, account, &state.service_core_id())
                         .await
                         .map_err(|_| ErrorCode::TemporarilyUnavailable)?;
-                    let soland_storage::AccountRealmStreamList::Listed(rows) = rows else {
+                    let coland_storage::AccountRealmStreamList::Listed(rows) = rows else {
                         return Err(ErrorCode::CapabilityDenied);
                     };
                     for window in detail.streams.as_deref().unwrap_or_default() {
@@ -508,7 +508,7 @@ async fn response_for(
         WebSocketOpenParameters::Account(p) => {
             let mut depot = Depot::new();
             if let Some(wait_for) = p.wait_for.as_ref() {
-                depot.insert_typed(soland_http::openapi_routes::WaitForSyncToken(
+                depot.insert_typed(coland_http::openapi_routes::WaitForSyncToken(
                     wait_for.clone(),
                 ));
             }
@@ -756,7 +756,7 @@ fn connection_lease(
     id: &str,
     state: &AppState,
     credential: &Credential,
-) -> Result<soland_services::sync::WebsocketConnectionLease, WebSocketCloseCode> {
+) -> Result<coland_services::sync::WebsocketConnectionLease, WebSocketCloseCode> {
     let grant = credential
         .session
         .session_grant
@@ -769,7 +769,7 @@ fn connection_lease(
             arkret_canonical::sha256_bytes(&bytes),
         ))
     };
-    Ok(soland_services::sync::WebsocketConnectionLease {
+    Ok(coland_services::sync::WebsocketConnectionLease {
         connection_id: id.to_owned(),
         session_binding: digest(serde_json::json!([
             state.service_id(),

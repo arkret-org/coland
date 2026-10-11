@@ -4,7 +4,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $configure = Join-Path $PSScriptRoot '..\configure-windows-openssl.ps1'
-$temporary = Join-Path ([System.IO.Path]::GetTempPath()) ('soland-openssl-tests-' + [guid]::NewGuid().ToString('N'))
+$temporary = Join-Path ([System.IO.Path]::GetTempPath()) ('coland-openssl-tests-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $temporary | Out-Null
 
 function Assert-Refusal([scriptblock] $Action, [string] $Message, [string] $OutputFile) {

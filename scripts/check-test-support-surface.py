@@ -7,7 +7,7 @@ Two shapes:
   `#[cfg(any(test, feature = "test-support"))]`.
 * `GATED_MODULES` — a whole module that must not be compiled into a default
   build. The development conformance harness is the case this exists for:
-  `soland_http::routing::conformance` is the isolated HTTP fixture surface.
+  `coland_http::routing::conformance` is the isolated HTTP fixture surface.
   The removed legacy `conformance_basis` module must not return.
   `development_mode` decides whether the namespace is *mounted*; these
   attributes decide whether it is *compiled*, which is what keeps the seed

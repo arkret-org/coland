@@ -10,16 +10,16 @@
 #[path = "support/historical_human.rs"]
 mod historical_human;
 use arkret_wire::{ActorId, CircleId, CommitStreamRef, EventKind, ScopeRef};
+use coland_storage::{
+    AccountStreamScan, AuthorityCommitStore, AuthorityCommitTransaction, ConflictCode,
+    EventCommitRequest, EventCommitUnitOfWork, PersistenceError,
+};
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
 use diesel::sql_types::{BigInt, Bool, Jsonb, Text};
 use diesel_async::RunQueryDsl;
 use historical_human::ordinary_realm;
 use serde_json::{Value, json};
-use soland_storage::{
-    AccountStreamScan, AuthorityCommitStore, AuthorityCommitTransaction, ConflictCode,
-    EventCommitRequest, EventCommitUnitOfWork, PersistenceError,
-};
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
 
 // Construct large native fixture futures in a separate synchronous frame.
 // Returning the pinned allocation before polling avoids stacking construction
@@ -409,7 +409,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
         ));
         let mut genesis = heap_future(|| ordinary_realm::source_request(&pool, genesis)).await;
         genesis.authority_commit.commit.stream_ref = stream.clone();
-        genesis.authority_commit.mls_state = Some(soland_storage::MlsStateInstallation {
+        genesis.authority_commit.mls_state = Some(coland_storage::MlsStateInstallation {
             effective_scope: ScopeRef::Circle {
                 realm_id: realm.clone(),
                 circle_id: circle.clone(),
@@ -470,12 +470,12 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                     )
                     .await
                     .unwrap(),
-                soland_storage::MlsMemberGroupStateMaterialRead::Authorized { genesis: Some(_) }
+                coland_storage::MlsMemberGroupStateMaterialRead::Authorized { genesis: Some(_) }
             ));
             let signal_at =
                 genesis.authority_commit.commit.committed_at + chrono::TimeDelta::seconds(1);
             let authority = store
-                .signal_scope_authority(soland_storage::SignalScopeAuthorityQuery {
+                .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
                     scope: &material_request.effective_scope,
                     authority_commit_id: &genesis.authority_commit.commit.commit_id,
                     parent_realm_authority_commit_id: Some(&grant.authority_commit.commit.commit_id),
@@ -499,7 +499,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             ] {
                 assert!(
                     store
-                        .signal_scope_authority(soland_storage::SignalScopeAuthorityQuery {
+                        .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
                             scope: &material_request.effective_scope,
                             authority_commit_id: &genesis.authority_commit.commit.commit_id,
                             parent_realm_authority_commit_id: parent,
@@ -531,7 +531,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             // A later grant cannot retroactively authorize an older parent cut.
             assert!(
                 store
-                    .signal_scope_authority(soland_storage::SignalScopeAuthorityQuery {
+                    .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
                         scope: &material_request.effective_scope,
                         authority_commit_id: &genesis.authority_commit.commit.commit_id,
                         parent_realm_authority_commit_id: Some(
@@ -548,7 +548,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             );
             assert!(
                 store
-                    .signal_scope_authority(soland_storage::SignalScopeAuthorityQuery {
+                    .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
                         scope: &material_request.effective_scope,
                         authority_commit_id: &genesis.authority_commit.commit.commit_id,
                         parent_realm_authority_commit_id: Some(
@@ -580,7 +580,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                     uow.commit_event(reset).await.unwrap();
                     assert!(
                         store
-                            .signal_scope_authority(soland_storage::SignalScopeAuthorityQuery {
+                            .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
                                 scope,
                                 authority_commit_id: scope_head,
                                 parent_realm_authority_commit_id: Some(original_parent),
@@ -607,7 +607,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                     uow.commit_event(transfer.clone()).await.unwrap();
                     assert!(
                         store
-                            .signal_scope_authority(soland_storage::SignalScopeAuthorityQuery {
+                            .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
                                 scope,
                                 authority_commit_id: scope_head,
                                 parent_realm_authority_commit_id: Some(original_parent),
@@ -646,7 +646,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                     uow.commit_event(transfer_back).await.unwrap();
                     assert!(
                         store
-                            .signal_scope_authority(soland_storage::SignalScopeAuthorityQuery {
+                            .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
                                 scope,
                                 authority_commit_id: scope_head,
                                 parent_realm_authority_commit_id: Some(original_parent),
@@ -753,7 +753,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                         .unwrap();
                     assert!(
                         store
-                            .signal_scope_authority(soland_storage::SignalScopeAuthorityQuery {
+                            .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
                                 scope,
                                 authority_commit_id: scope_head,
                                 parent_realm_authority_commit_id: Some(original_parent),
@@ -785,7 +785,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                     drop(conn);
                     assert!(
                         store
-                            .signal_scope_authority(soland_storage::SignalScopeAuthorityQuery {
+                            .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
                                 scope,
                                 authority_commit_id: scope_head,
                                 parent_realm_authority_commit_id: Some(original_parent),
@@ -821,7 +821,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             uow.commit_event(revoke.clone()).await.unwrap();
             assert!(
                 store
-                    .signal_scope_authority(soland_storage::SignalScopeAuthorityQuery {
+                    .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
                         scope: &material_request.effective_scope,
                         authority_commit_id: &genesis.authority_commit.commit.commit_id,
                         parent_realm_authority_commit_id: Some(
@@ -843,7 +843,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                     .mls_roster_authority_read(&roster_request, &ordinary_realm::station(), None)
                     .await
                     .unwrap(),
-                soland_storage::MlsRosterAuthorityRead::Authorized { facts: Some(_) }
+                coland_storage::MlsRosterAuthorityRead::Authorized { facts: Some(_) }
             ));
             false
         }).await;
@@ -889,11 +889,11 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
         {
             assert!(matches!(
                 answer,
-                soland_storage::MlsMemberGroupStateMaterialRead::NotFound
+                coland_storage::MlsMemberGroupStateMaterialRead::NotFound
             ));
             assert!(matches!(
                 roster,
-                soland_storage::MlsRosterAuthorityRead::NotFound
+                coland_storage::MlsRosterAuthorityRead::NotFound
             ));
             let member = arkret_models_collaboration::mls_roster_authority::MlsMemberRosterAuthorityReadRequestBody {
                 realm_id: roster_request.realm_id.clone(), effective_scope: roster_request.effective_scope.clone(),
@@ -905,7 +905,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                     .mls_member_roster_selector(&member, &ordinary_realm::station())
                     .await
                     .unwrap(),
-                soland_storage::MlsMemberRosterSelectorRead::NotFound
+                coland_storage::MlsMemberRosterSelectorRead::NotFound
             ));
         }
         let joined = circle_member(&pool, &circle, &alice).await;
@@ -922,7 +922,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                 realm_leave.authority_commit.commit.committed_at + chrono::TimeDelta::seconds(1);
             assert!(
                 store
-                    .signal_scope_authority(soland_storage::SignalScopeAuthorityQuery {
+                    .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
                         scope: &material_request.effective_scope,
                         authority_commit_id: &genesis.authority_commit.commit.commit_id,
                         parent_realm_authority_commit_id: Some(
@@ -956,14 +956,14 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                 )
                 .await
                 .unwrap(),
-            soland_storage::MlsMemberGroupStateMaterialRead::NotFound
+            coland_storage::MlsMemberGroupStateMaterialRead::NotFound
         ));
         assert!(matches!(
             store
                 .mls_roster_authority_read(&roster_request, &ordinary_realm::station(), None)
                 .await
                 .unwrap(),
-            soland_storage::MlsRosterAuthorityRead::NotFound
+            coland_storage::MlsRosterAuthorityRead::NotFound
         ));
 
         // Parent rejoin: a new revision never revives the old Circle join.
@@ -983,7 +983,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             let signal_at = rejoin.authority_commit.commit.committed_at + chrono::TimeDelta::seconds(1);
             assert!(
                 store
-                    .signal_scope_authority(soland_storage::SignalScopeAuthorityQuery {
+                    .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
                         scope: &material_request.effective_scope,
                         authority_commit_id: &genesis.authority_commit.commit.commit_id,
                         parent_realm_authority_commit_id: Some(
@@ -1016,14 +1016,14 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                 )
                 .await
                 .unwrap(),
-            soland_storage::MlsMemberGroupStateMaterialRead::NotFound
+            coland_storage::MlsMemberGroupStateMaterialRead::NotFound
         ));
         assert!(matches!(
             store
                 .mls_roster_authority_read(&roster_request, &ordinary_realm::station(), None)
                 .await
                 .unwrap(),
-            soland_storage::MlsRosterAuthorityRead::NotFound
+            coland_storage::MlsRosterAuthorityRead::NotFound
         ));
         // The old revision is no longer the parent current join.
         let stale = circle_request(
@@ -1093,14 +1093,14 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                 )
                 .await
                 .unwrap(),
-            soland_storage::MlsMemberGroupStateMaterialRead::NotFound
+            coland_storage::MlsMemberGroupStateMaterialRead::NotFound
         ));
         assert!(matches!(
             store
                 .mls_roster_authority_read(&roster_request, &ordinary_realm::station(), None)
                 .await
                 .unwrap(),
-            soland_storage::MlsRosterAuthorityRead::NotFound
+            coland_storage::MlsRosterAuthorityRead::NotFound
         ));
         assert!(circle_scan_authorized(&store, &stream, &alice).await);
 
@@ -1131,14 +1131,14 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                 )
                 .await
                 .unwrap(),
-            soland_storage::MlsMemberGroupStateMaterialRead::NotFound
+            coland_storage::MlsMemberGroupStateMaterialRead::NotFound
         ));
         assert!(matches!(
             store
                 .mls_roster_authority_read(&roster_request, &ordinary_realm::station(), None)
                 .await
                 .unwrap(),
-            soland_storage::MlsRosterAuthorityRead::NotFound
+            coland_storage::MlsRosterAuthorityRead::NotFound
         ));
     }).await;
 }

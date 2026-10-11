@@ -1,10 +1,10 @@
 //! Egress guard behaviour that holds under the default (empty) egress policy.
 //!
 //! The sovereign-enclave cases that used to live here configured the gate by
-//! mutating `SOLAND_SOVEREIGN_ENCLAVE*` in the process environment behind an
+//! mutating `COLAND_SOVEREIGN_ENCLAVE*` in the process environment behind an
 //! `unsafe` block and a process-wide lock. The gate now reads a typed
 //! `EgressPolicy` installed once at startup, so those cases belong with the
-//! parameterised checks in `soland_http::security`
+//! parameterised checks in `coland_http::security`
 //! (`federation_outbound_trust_domain_denial_with_policy`), which take the
 //! policy as an argument and need no globals at all.
 
@@ -28,7 +28,7 @@ fn production_egress_rejects_private_targets() {
         "http://[2001:0000::f5ff:fffe]/sink",
     ] {
         let url = Url::parse(raw).unwrap();
-        assert!(soland_http::security::validate_url_for_egress(&url, "test", false).is_err());
+        assert!(coland_http::security::validate_url_for_egress(&url, "test", false).is_err());
     }
 }
 
@@ -41,7 +41,7 @@ fn production_egress_rejects_transition_dns_private_answers() {
         IpAddr::V6("2001:0000::f5ff:fffe".parse().unwrap()),
     ] {
         assert!(
-            soland_http::security::validate_url_for_egress_with_resolved_ips(
+            coland_http::security::validate_url_for_egress_with_resolved_ips(
                 &url,
                 "test",
                 false,
@@ -56,13 +56,13 @@ fn production_egress_rejects_transition_dns_private_answers() {
 #[test]
 fn production_egress_allows_public_ip_literal() {
     let url = Url::parse("https://93.184.216.34/federation").unwrap();
-    assert!(soland_http::security::validate_url_for_egress(&url, "test", false).is_ok());
+    assert!(coland_http::security::validate_url_for_egress(&url, "test", false).is_ok());
 }
 
 #[test]
 fn production_egress_rejects_dns_private_answers() {
     let url = Url::parse("https://relay.example/federation").unwrap();
-    let error = soland_http::security::validate_url_for_egress_with_resolved_ips(
+    let error = coland_http::security::validate_url_for_egress_with_resolved_ips(
         &url,
         "test",
         false,
@@ -78,7 +78,7 @@ fn production_egress_rejects_dns_private_answers() {
 #[test]
 fn production_egress_rejects_mixed_dns_answers_to_limit_rebinding() {
     let url = Url::parse("https://relay.example/federation").unwrap();
-    let error = soland_http::security::validate_url_for_egress_with_resolved_ips(
+    let error = coland_http::security::validate_url_for_egress_with_resolved_ips(
         &url,
         "test",
         false,
@@ -94,5 +94,5 @@ fn production_egress_rejects_mixed_dns_answers_to_limit_rebinding() {
 #[test]
 fn development_egress_can_allow_loopback() {
     let url = Url::parse("http://127.0.0.1:8698/health").unwrap();
-    assert!(soland_http::security::validate_url_for_egress(&url, "test", true).is_ok());
+    assert!(coland_http::security::validate_url_for_egress(&url, "test", true).is_ok());
 }

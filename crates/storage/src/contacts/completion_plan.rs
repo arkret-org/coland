@@ -321,7 +321,7 @@ impl ContactCompletionIntent {
         let expected_predecessor = pre_slot.as_ref().map(|current| current.head_digest.clone());
         let pre_prefix = |observed: &[arkret_wire::EventId]| match &pre_slot {
             Some(current) => current.prefix_with(observed),
-            None => soland_domain::identity::contact_event_prefix(observed),
+            None => coland_domain::identity::contact_event_prefix(observed),
         };
         let mismatch = || {
             crate::PersistenceError::Conflict(
@@ -375,7 +375,7 @@ impl ContactCompletionIntent {
                     peer_id: peer.clone(),
                     accepted_sequence: absence.cas_sequence,
                     head_digest: absence.digest().map_err(invalid)?,
-                    accepted_event_refs: soland_domain::identity::contact_event_prefix(
+                    accepted_event_refs: coland_domain::identity::contact_event_prefix(
                         &accepted_event_refs,
                     ),
                 })

@@ -1,5 +1,5 @@
-pub const SERVICE_IDENTITY_KEYSTORE_APP: &str = "soland.service-identity";
-pub const CONFIGURED_SIGNING_KEY_REF: &str = "secret:SOLAND_NOTARY_SIGNING_KEY";
+pub const SERVICE_IDENTITY_KEYSTORE_APP: &str = "coland.service-identity";
+pub const CONFIGURED_SIGNING_KEY_REF: &str = "secret:COLAND_NOTARY_SIGNING_KEY";
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -21,7 +21,7 @@ pub const DEFAULT_TO_DEVICE_QUEUE_CAPACITY: usize = 10_000;
 /// as per-event `queue_full` rejections with `retry_after_ms`, not as a
 /// timeout or an unbounded backlog.
 pub const DEFAULT_APPLET_TRANSACTION_INFLIGHT_CAPACITY: usize = 64;
-pub const PQ_HYBRID_TLS_DEPLOYMENT_PROBE_ENV: &str = "SOLAND_PQ_TLS_DEPLOYMENT_PROBE";
+pub const PQ_HYBRID_TLS_DEPLOYMENT_PROBE_ENV: &str = "COLAND_PQ_TLS_DEPLOYMENT_PROBE";
 
 /// STUN URL shipped as the [`IceServersConfig::default`] value. A production
 /// deployment still advertising this Google public STUN server leaks client
@@ -31,7 +31,7 @@ pub const PLACEHOLDER_STUN_URL: &str = "stun:stun.l.google.com:19302";
 /// TURN URL shipped as the [`IceServersConfig::default`] value. It points at a
 /// non-existent host, so a production deployment still advertising it has no
 /// working relay; surfaced as a hardening warning.
-pub const PLACEHOLDER_TURN_HOST: &str = "turn.soland.local";
+pub const PLACEHOLDER_TURN_HOST: &str = "turn.coland.local";
 
 /// Command-line-only startup choices supplied by the executable layer.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -40,7 +40,7 @@ pub struct StartupOverrides {
     pub first_provisioning: bool,
 }
 
-/// Durable key-custody backend used by every Soland KeyStore namespace.
+/// Durable key-custody backend used by every Coland KeyStore namespace.
 #[derive(Clone, Default)]
 pub enum KeyStoreConfig {
     /// No durable key custody. This is valid only for fully in-memory tests and
@@ -74,12 +74,12 @@ impl KeyStoreConfig {
     /// Parse and validate key-store settings from already-resolved values.
     pub fn from_values(values: &BTreeMap<String, String>) -> anyhow::Result<Self> {
         Self::resolve(
-            env_non_empty(values, "SOLAND_KEYSTORE_BACKEND")
+            env_non_empty(values, "COLAND_KEYSTORE_BACKEND")
                 .map(|value| value.to_ascii_lowercase())
                 .as_deref(),
-            env_non_empty(values, "SOLAND_KEYSTORE_PATH").map(PathBuf::from),
-            env_non_empty(values, "SOLAND_KEYSTORE_MASTER_KEY_FILE").as_deref(),
-            env_non_empty(values, "SOLAND_KEYSTORE_MASTER_KEY").map(Zeroizing::new),
+            env_non_empty(values, "COLAND_KEYSTORE_PATH").map(PathBuf::from),
+            env_non_empty(values, "COLAND_KEYSTORE_MASTER_KEY_FILE").as_deref(),
+            env_non_empty(values, "COLAND_KEYSTORE_MASTER_KEY").map(Zeroizing::new),
         )
     }
 
@@ -97,7 +97,7 @@ impl KeyStoreConfig {
             None => {
                 if path.is_some() || raw_master_key.is_some() {
                     anyhow::bail!(
-                        "SOLAND_KEYSTORE_BACKEND is required when encrypted-file KeyStore settings are configured"
+                        "COLAND_KEYSTORE_BACKEND is required when encrypted-file KeyStore settings are configured"
                     );
                 }
                 Ok(Self::Disabled)
@@ -105,7 +105,7 @@ impl KeyStoreConfig {
             Some("platform") => {
                 if path.is_some() || raw_master_key.is_some() {
                     anyhow::bail!(
-                        "SOLAND_KEYSTORE_PATH and SOLAND_KEYSTORE_MASTER_KEY(_FILE) are only valid with SOLAND_KEYSTORE_BACKEND=encrypted_file"
+                        "COLAND_KEYSTORE_PATH and COLAND_KEYSTORE_MASTER_KEY(_FILE) are only valid with COLAND_KEYSTORE_BACKEND=encrypted_file"
                     );
                 }
                 Ok(Self::Platform)
@@ -113,7 +113,7 @@ impl KeyStoreConfig {
             Some("encrypted_file") => {
                 let path = path.ok_or_else(|| {
                     anyhow::anyhow!(
-                        "SOLAND_KEYSTORE_PATH is required with SOLAND_KEYSTORE_BACKEND=encrypted_file"
+                        "COLAND_KEYSTORE_PATH is required with COLAND_KEYSTORE_BACKEND=encrypted_file"
                     )
                 })?;
                 if master_key_file
@@ -121,12 +121,12 @@ impl KeyStoreConfig {
                     .is_some_and(|key_path| paths_refer_to_same_file(Path::new(key_path), &path))
                 {
                     anyhow::bail!(
-                        "SOLAND_KEYSTORE_MASTER_KEY_FILE must be separate from SOLAND_KEYSTORE_PATH"
+                        "COLAND_KEYSTORE_MASTER_KEY_FILE must be separate from COLAND_KEYSTORE_PATH"
                     );
                 }
                 let raw_master_key = raw_master_key.ok_or_else(|| {
                     anyhow::anyhow!(
-                        "SOLAND_KEYSTORE_MASTER_KEY or SOLAND_KEYSTORE_MASTER_KEY_FILE is required with SOLAND_KEYSTORE_BACKEND=encrypted_file"
+                        "COLAND_KEYSTORE_MASTER_KEY or COLAND_KEYSTORE_MASTER_KEY_FILE is required with COLAND_KEYSTORE_BACKEND=encrypted_file"
                     )
                 })?;
                 use base64::Engine as _;
@@ -139,13 +139,13 @@ impl KeyStoreConfig {
                         })
                         .map_err(|error| {
                             anyhow::anyhow!(
-                                "SOLAND_KEYSTORE_MASTER_KEY must be base64 (standard or url-safe-no-pad): {error}"
+                                "COLAND_KEYSTORE_MASTER_KEY must be base64 (standard or url-safe-no-pad): {error}"
                             )
                         })?,
                 );
                 if decoded.len() != 32 {
                     anyhow::bail!(
-                        "SOLAND_KEYSTORE_MASTER_KEY must decode to exactly 32 bytes (got {})",
+                        "COLAND_KEYSTORE_MASTER_KEY must decode to exactly 32 bytes (got {})",
                         decoded.len()
                     );
                 }
@@ -158,7 +158,7 @@ impl KeyStoreConfig {
                 })
             }
             Some(other) => anyhow::bail!(
-                "SOLAND_KEYSTORE_BACKEND must be platform or encrypted_file; got {other}"
+                "COLAND_KEYSTORE_BACKEND must be platform or encrypted_file; got {other}"
             ),
         }
     }
@@ -214,7 +214,7 @@ fn validate_persistence_key_store(
 ) -> anyhow::Result<()> {
     if database_url.is_some() && !key_store.is_durable() {
         anyhow::bail!(
-            "DATABASE_URL requires a durable KeyStore; set SOLAND_KEYSTORE_BACKEND=platform or encrypted_file"
+            "DATABASE_URL requires a durable KeyStore; set COLAND_KEYSTORE_BACKEND=platform or encrypted_file"
         );
     }
     Ok(())
@@ -292,7 +292,7 @@ pub struct AppConfig {
     /// copied back into configuration.
     pub first_provisioning: bool,
     /// Optional TLS certificate PEM path. When both this and
-    /// [`tls_key_path`] are configured, soland starts an HTTPS listener using
+    /// [`tls_key_path`] are configured, coland starts an HTTPS listener using
     /// Salvo's rustls integration instead of plain TCP.
     pub tls_cert_path: Option<PathBuf>,
     /// Optional TLS private-key PEM path paired with [`tls_cert_path`].
@@ -300,15 +300,15 @@ pub struct AppConfig {
     pub database_url: Option<String>,
     pub object_storage: ObjectStorageConfig,
     /// ICE/STUN/TURN servers and credential lifetimes advertised by the
-    /// RTC ice-config endpoint. Externalized via `SOLAND_ICE_*` /
-    /// `SOLAND_TURN_*` env vars; defaults preserve the historical
+    /// RTC ice-config endpoint. Externalized via `COLAND_ICE_*` /
+    /// `COLAND_TURN_*` env vars; defaults preserve the historical
     /// hardcoded values.
     pub ice: IceServersConfig,
     /// LiveKit API Key/Secret for `bindings/livekit.md` §2 backend tokens.
     /// When set, the `livekit` media focus issues a standard LiveKit JWT
     /// (`HS256` over `header.payload`, signed with the API Secret) instead
-    /// of failing closed. `SOLAND_LIVEKIT_API_KEY` /
-    /// `SOLAND_LIVEKIT_API_SECRET` (secret also accepts `_FILE`). v1
+    /// of failing closed. `COLAND_LIVEKIT_API_KEY` /
+    /// `COLAND_LIVEKIT_API_SECRET` (secret also accepts `_FILE`). v1
     /// supports a single API Key/Secret pair; multi-deployment LiveKit
     /// (one pair per LiveKit cluster, keyed by focus `issuer_kid`) is a
     /// follow-up.
@@ -326,7 +326,7 @@ pub struct AppConfig {
     /// Public Account Authority base URL advertised to browser clients in
     /// `/_arkret/describe.auth_metadata.account_authority`. Registration,
     /// password recovery, passkey, OIDC, and email verification live there;
-    /// soland consumes the resulting session grants and may expose DID provider
+    /// coland consumes the resulting session grants and may expose DID provider
     /// primitives for trusted server-to-server calls.
     pub account_authority_url: Option<String>,
     /// Explicit destination trust domain for signed Station -> Account
@@ -337,7 +337,7 @@ pub struct AppConfig {
     /// Public assertion key delegated in this Station's signed DID inception.
     /// Changing this pin requires an authorized DID history update.
     pub account_authority_public_key_multibase: Option<String>,
-    /// OAuth/OIDC `client_id` this soland deployment is registered as at the
+    /// OAuth/OIDC `client_id` this coland deployment is registered as at the
     /// Authentication Method Provider, advertised to browser clients in
     /// `/_arkret/describe.auth_metadata.methods[].oidc.client_id`. The web
     /// client uses it verbatim as the `client_id` in its OIDC authorize
@@ -348,7 +348,7 @@ pub struct AppConfig {
     pub oidc_client_id: Option<String>,
     pub development_mode: bool,
     /// Typed fault-injection points for durable-workflow crash-consistency
-    /// tests. Parsed once here from `SOLAND_FAILPOINTS` and always empty
+    /// tests. Parsed once here from `COLAND_FAILPOINTS` and always empty
     /// unless `development_mode` is on. See [`crate::failpoints`].
     pub failpoints: crate::failpoints::FailpointRegistry,
     pub session_grant_introspection_url: Option<String>,
@@ -370,10 +370,10 @@ pub struct AppConfig {
     pub agent_participation_ceiling:
         arkret_models_collaboration::governance::agent_participation::ParticipationBits,
     pub did_resolver_allow_methods: Vec<String>,
-    /// Enable soland's built-in `did:webvh` provider. This is intended for
+    /// Enable coland's built-in `did:webvh` provider. This is intended for
     /// ordinary self-hosted deployments and tests: coauth can discover it via
-    /// `/_arkret/root/identity/describe`, register a user DID through soland, then
-    /// resolve the resulting document through soland's local identity store.
+    /// `/_arkret/root/identity/describe`, register a user DID through coland, then
+    /// resolve the resulting document through coland's local identity store.
     pub embedded_webvh_provider_enabled: bool,
     /// Shared bearer token required to write embedded `did:webvh` records.
     /// Read endpoints remain public because DID resolution needs them, but
@@ -387,17 +387,17 @@ pub struct AppConfig {
     /// Registration credential for using the configured external WebVH
     /// service as this deployment's Service Identity Provider. When present,
     /// service identity is class-A/provider-backed and first provisioning does
-    /// not require `SOLAND_FIRST_PROVISIONING`.
+    /// not require `COLAND_FIRST_PROVISIONING`.
     pub external_webvh_registration_bearer: Option<String>,
     /// Runtime liveness for the external provider. `true` only when the
     /// external provider's `/describe` probe succeeds at boot.
     pub external_webvh_provider_active: bool,
-    /// Provider id coauth should preselect. When unset, soland chooses
-    /// `soland.embedded` if the embedded provider is enabled, otherwise the
+    /// Provider id coauth should preselect. When unset, coland chooses
+    /// `coland.embedded` if the embedded provider is enabled, otherwise the
     /// first configured external provider.
     pub default_webvh_provider_id: Option<String>,
     /// Base64-encoded 32-byte ed25519 seed for the NotaryWorker
-    /// signing identity (env `SOLAND_NOTARY_SIGNING_KEY`). When `Some(_)`
+    /// signing identity (env `COLAND_NOTARY_SIGNING_KEY`). When `Some(_)`
     /// the worker uses a deterministic ed25519-dalek signing key derived
     /// from this seed; when `None` the worker boots with an in-process
     /// random ephemeral key and a sticky-warn log line on every signing
@@ -413,7 +413,7 @@ pub struct AppConfig {
     /// the verified `LocalDidCoreIdentity`; AppState neither derives a key id
     /// from the service DID nor independently mints a runtime signer.
     ///
-    /// When disabled, an explicit `SOLAND_NOTARY_SIGNING_KEY` may supply the
+    /// When disabled, an explicit `COLAND_NOTARY_SIGNING_KEY` may supply the
     /// signing secret, but WebVH control-key custody still requires a durable
     /// KeyStore. Service signing-key rotation fails closed until the WebVH
     /// history, DID document, stored identity, KeyStore, and recovery bundle
@@ -440,7 +440,7 @@ pub struct AppConfig {
     /// Gateways.  Each entry binds one canonical HTTPS origin to the exact
     /// Gateway service DID and its current receipt assertion method/key.
     ///
-    /// Env: `SOLAND_TRUSTED_PUSH_GATEWAYS`, a closed JSON array.  This is not
+    /// Env: `COLAND_TRUSTED_PUSH_GATEWAYS`, a closed JSON array.  This is not
     /// derived from `federation_peers`: that registry admits only Station peers
     /// and does not establish Push Gateway receipt trust.
     pub trusted_push_gateways: crate::push_gateway_registry::TrustedPushGatewayRegistry,
@@ -448,81 +448,81 @@ pub struct AppConfig {
     /// `FederationDispatcher` background worker that drains the
     /// `federation_outbox` table and POSTs each pending row to its peer
     /// with `Idempotency-Key` + `Content-Digest` headers. Set
-    /// `SOLAND_FEDERATION_OUTBOUND=0` to disable for integration tests
+    /// `COLAND_FEDERATION_OUTBOUND=0` to disable for integration tests
     /// that don't want background HTTP traffic (the in-process `enqueue`
     /// path still writes outbox rows so cotest can observe the boundary).
     pub federation_outbound_enabled: bool,
     /// Maximum time the source Station waits for every affected Station to
     /// acknowledge an exact deactivation record before the mutable
     /// propagation projection becomes `incomplete`.
-    /// Env: `SOLAND_DEACTIVATION_PROPAGATION_WINDOW_MS` (default 86_400_000).
+    /// Env: `COLAND_DEACTIVATION_PROPAGATION_WINDOW_MS` (default 86_400_000).
     pub deactivation_propagation_window_ms: u64,
     /// Operator-triggered federation frontier diagnostic cadence in seconds.
     /// Zero disables the full-history worker, which is the production
     /// default until its probe and fallback paths are incrementally bounded.
-    /// Env: `SOLAND_FEDERATION_FRONTIER_INTERVAL_SECONDS` (default `0`).
+    /// Env: `COLAND_FEDERATION_FRONTIER_INTERVAL_SECONDS` (default `0`).
     pub federation_frontier_interval_seconds: u64,
     /// Cadence of the durable SecurityRotation worker sweep in seconds.
-    /// Env: `SOLAND_SECURITY_ROTATION_WORKER_INTERVAL_SECONDS` (default `5`,
+    /// Env: `COLAND_SECURITY_ROTATION_WORKER_INTERVAL_SECONDS` (default `5`,
     /// `1..=3600`).
     pub security_rotation_worker_interval_seconds: u64,
-    /// Default page size for `GET /_soland/admin/cells` and the rest of
+    /// Default page size for `GET /_coland/admin/cells` and the rest of
     /// the admin paginated read surfaces when the caller omits `limit`.
-    /// Env: `SOLAND_ADMIN_PAGE_LIMIT` (default `100`).
+    /// Env: `COLAND_ADMIN_PAGE_LIMIT` (default `100`).
     pub admin_default_page_limit: usize,
     /// Hard cap on `limit` query for the admin paginated read surfaces;
     /// requests asking for a larger page are clamped down. Defends
     /// against a misbehaving client exhausting in-memory projection state.
-    /// Env: `SOLAND_ADMIN_MAX_PAGE_LIMIT` (default `1000`).
+    /// Env: `COLAND_ADMIN_MAX_PAGE_LIMIT` (default `1000`).
     pub admin_max_page_limit: usize,
-    /// Stable principal IDs allowed to call `GET /_soland/admin/{resource}` and the
+    /// Stable principal IDs allowed to call `GET /_coland/admin/{resource}` and the
     /// other production-gated admin read surfaces when `development_mode` is
     /// false. Empty (default) keeps the previous "dev-mode only" posture for
-    /// these endpoints. Env: `SOLAND_ADMIN_PRINCIPAL_IDS` (comma-separated).
+    /// these endpoints. Env: `COLAND_ADMIN_PRINCIPAL_IDS` (comma-separated).
     pub admin_principal_ids: Vec<DidCoreId>,
     /// Maximum unacknowledged to-device messages retained per
     /// `(recipient_account_id, device_id)`. Older messages beyond this
     /// capacity are dropped, and the device lost watermark is advanced so the
     /// next to-device response can carry `lost=true`.
-    /// Env: `SOLAND_TO_DEVICE_QUEUE_CAPACITY` (default 10_000).
+    /// Env: `COLAND_TO_DEVICE_QUEUE_CAPACITY` (default 10_000).
     pub to_device_queue_capacity: usize,
     /// Concurrent `ak.edge.applet.command.transaction.v1` deliveries this
     /// Station processes before shedding load with `queue_full`.
-    /// Env: `SOLAND_APPLET_TRANSACTION_INFLIGHT_CAPACITY` (default 64).
+    /// Env: `COLAND_APPLET_TRANSACTION_INFLIGHT_CAPACITY` (default 64).
     pub applet_transaction_inflight_capacity: usize,
     /// Rolling-24h per-principal cap on full-ciphertext key-backup downloads
     /// (`key-management.md` §7.8), already clamped to the range
-    /// `soland_services::runtime_guards` allows.
-    /// Env: `SOLAND_KEY_BACKUP_DAILY_DOWNLOAD_LIMIT`.
+    /// `coland_services::runtime_guards` allows.
+    /// Env: `COLAND_KEY_BACKUP_DAILY_DOWNLOAD_LIMIT`.
     pub key_backup_daily_download_limit: u32,
     /// Directory holding the service-identity bundle, when the deployment
     /// provisions identity from files rather than from the database.
-    /// Env: `SOLAND_SERVICE_IDENTITY_BUNDLE_DIR`.
+    /// Env: `COLAND_SERVICE_IDENTITY_BUNDLE_DIR`.
     pub service_identity_bundle_dir: Option<String>,
     /// Path to the verified-profile artifact. Absence is the feature flag:
     /// no artifact keeps the dev-mode `verified_profiles = []` invariant.
-    /// Env: `SOLAND_VERIFIED_PROFILES_ARTIFACT`.
+    /// Env: `COLAND_VERIFIED_PROFILES_ARTIFACT`.
     pub verified_profiles_artifact: Option<String>,
     /// Trust domain the external webvh provider's `/describe` must present.
     /// Falls back to this deployment's own trust domain when unset.
-    /// Env: `SOLAND_EXTERNAL_WEBVH_PROVIDER_TRUST_DOMAIN`.
+    /// Env: `COLAND_EXTERNAL_WEBVH_PROVIDER_TRUST_DOMAIN`.
     pub external_webvh_provider_trust_domain: Option<String>,
     /// Per-class rate-limit ceilings, parsed once so the enforced quota and
     /// the ceilings `describe` advertises cannot disagree.
-    /// Env: `SOLAND_RATE_LIMIT_*`.
+    /// Env: `COLAND_RATE_LIMIT_*`.
     pub rate_limiter: crate::ratelimit::RateLimiterConfig,
-    /// Env: `SOLAND_MAX_REQUEST_SIZE`, clamped up to the v1 interoperability
+    /// Env: `COLAND_MAX_REQUEST_SIZE`, clamped up to the v1 interoperability
     /// floor.
     pub max_request_size_bytes: usize,
     /// Result of the deployment's PQ-hybrid TLS handshake probe.
-    /// Env: `SOLAND_PQ_TLS_DEPLOYMENT_PROBE`.
+    /// Env: `COLAND_PQ_TLS_DEPLOYMENT_PROBE`.
     pub pq_hybrid_tls_probe: Option<String>,
     /// Bounded drain: how long a graceful shutdown waits for in-flight
     /// requests. `None` keeps the "wait indefinitely" behaviour.
-    /// Env: `SOLAND_SHUTDOWN_GRACE_SECS`.
+    /// Env: `COLAND_SHUTDOWN_GRACE_SECS`.
     pub shutdown_grace_seconds: Option<u64>,
     /// Maximum physical WebSocket lifetime before bounded drain (1..=600s).
-    /// Env: `SOLAND_WEBSOCKET_MAX_LIFETIME_SECS`.
+    /// Env: `COLAND_WEBSOCKET_MAX_LIFETIME_SECS`.
     pub websocket_max_lifetime_seconds: u64,
     /// Resolved `RUST_LOG` directive.
     ///
@@ -530,16 +530,16 @@ pub struct AppConfig {
     /// `RUST_LOG` supplied through `--config` is honoured: the file never
     /// reaches the process environment, so the subscriber cannot find it there.
     pub log_filter: Option<String>,
-    /// Env: `SOLAND_LOG_FILE`. Logs are teed to this path when set.
+    /// Env: `COLAND_LOG_FILE`. Logs are teed to this path when set.
     pub log_file: Option<PathBuf>,
     /// OpenTelemetry export settings.
     pub otel: OtelConfig,
     /// Connection-pool sizing for the Postgres backend. Held as plain values
-    /// rather than `soland_storage_postgres::PoolTuning` because `soland-http`
-    /// must not depend on a storage backend; `soland-server` assembles them.
-    /// Env: `SOLAND_DB_POOL_MAX_SIZE`.
+    /// rather than `coland_storage_postgres::PoolTuning` because `coland-http`
+    /// must not depend on a storage backend; `coland-server` assembles them.
+    /// Env: `COLAND_DB_POOL_MAX_SIZE`.
     pub db_pool_max_size: Option<usize>,
-    /// Env: `SOLAND_DB_POOL_ACQUIRE_TIMEOUT_SECS`.
+    /// Env: `COLAND_DB_POOL_ACQUIRE_TIMEOUT_SECS`.
     pub db_pool_acquire_timeout_seconds: Option<u64>,
     /// Base URL of the push gateway (floria) this deployment notifies over
     /// the registered internal channel when an account is deactivated
@@ -553,36 +553,36 @@ pub struct AppConfig {
     /// complete Push-route fanout action and `deactivation_partial` is never
     /// raised for the gateway leg. Deployments that run floria MUST set this,
     /// or the spec's gateway-side stop-delivery guarantee silently does not
-    /// exist. Env: `SOLAND_DEACTIVATION_PUSH_GATEWAY_URL`.
+    /// exist. Env: `COLAND_DEACTIVATION_PUSH_GATEWAY_URL`.
     pub deactivation_push_gateway_url: Option<String>,
     /// Bearer token for floria's `http.internal_auth` profile on the
     /// deactivation fanout endpoint. When the gateway URL is set but this is
     /// missing, the fanout is still attempted (and honestly fails with 401,
     /// keeping `deactivation_partial=true`) rather than being silently
-    /// skipped. Env: `SOLAND_DEACTIVATION_PUSH_GATEWAY_BEARER`.
+    /// skipped. Env: `COLAND_DEACTIVATION_PUSH_GATEWAY_BEARER`.
     pub deactivation_push_gateway_bearer: Option<String>,
     /// Resumable (tus) blob upload — staging directory for in-progress
     /// upload parts before they are completed into the blob store. See
     /// spec crypto-media/media-and-blob.md §2.1.
-    /// Env: `SOLAND_RESUMABLE_UPLOAD_DIR` (default `./soland-resumable-uploads`).
+    /// Env: `COLAND_RESUMABLE_UPLOAD_DIR` (default `./coland-resumable-uploads`).
     pub resumable_upload_dir: PathBuf,
     /// Resumable (tus) blob upload — maximum lifetime of an incomplete
     /// upload part, in seconds. Expired parts are garbage-collected and
     /// never produce a referencable `blob_ref`. Advertised in
     /// `describe.limits.resumable_upload_incomplete_ttl_seconds`.
-    /// Env: `SOLAND_RESUMABLE_UPLOAD_TTL_SECS` (default 86_400 = 24h).
+    /// Env: `COLAND_RESUMABLE_UPLOAD_TTL_SECS` (default 86_400 = 24h).
     pub resumable_upload_incomplete_ttl_seconds: u64,
     /// Deployment trust domain id, used to bind peer authorization and
     /// recovery transcripts to this Station so the same proof bytes
     /// cannot be replayed cross-domain. Loaded from
-    /// `SOLAND_TRUST_DOMAIN` (must match `ak:trust_domain:<scope>`,
+    /// `COLAND_TRUST_DOMAIN` (must match `ak:trust_domain:<scope>`,
     /// scope = lowercase alphanumerics/dot/dash/underscore/colon ≤128 chars).
     /// This is explicit deployment identity configuration: a stable service
     /// core id cannot be reversed into a host or trust domain.
     pub trust_domain: TrustDomainId,
     /// Deployment/admin upper bound for invite/contact receive policies.
     /// Constraints can only reduce holder reachability. Loaded from
-    /// `SOLAND_RECEIVE_POLICY_*` env vars and advertised on ServiceDescribe.
+    /// `COLAND_RECEIVE_POLICY_*` env vars and advertised on ServiceDescribe.
     pub receive_policy_constraints: Option<arkret_wire::receive_policy::ReceivePolicyConstraints>,
     /// When true, `AppState::new` seeds a deterministic demo Realm
     /// (`ak:realm:<44-char event token>`), demo account (`did:web:alice.example`),
@@ -590,19 +590,19 @@ pub struct AppConfig {
     /// production deployments don't ship a globally-shared demo Realm
     /// that collides across federated peers. Test harnesses opt in via
     /// `test_config()` to keep their fixture IDs stable.
-    /// Env: `SOLAND_SEED_DEMO_DATA` (default false).
+    /// Env: `COLAND_SEED_DEMO_DATA` (default false).
     pub seed_demo_data: bool,
     /// Enables the sovereign-enclave startup and egress security posture.
     /// Startup validates it through [`crate::security::assert_enclave_invariants`]:
     /// outbound federation OFF, DID resolver method allow-list
     /// non-empty, every outbound HTTP call gated through the shared
     /// [`crate::security`] egress validation layer.
-    /// Env: `SOLAND_SOVEREIGN_ENCLAVE` (default false).
+    /// Env: `COLAND_SOVEREIGN_ENCLAVE` (default false).
     pub sovereign_enclave_enabled: bool,
     /// Host allow-list for outbound HTTP when the enclave security posture
     /// is enabled. Hosts are matched case-insensitively.
     /// Comma-separated env var
-    /// `SOLAND_SOVEREIGN_ENCLAVE_ALLOWED_OUTBOUND_HOSTS`.
+    /// `COLAND_SOVEREIGN_ENCLAVE_ALLOWED_OUTBOUND_HOSTS`.
     ///
     /// This is a read-back of the list
     /// [`crate::security::validate_url_for_egress`] enforces, not a parallel
@@ -610,9 +610,9 @@ pub struct AppConfig {
     /// [`crate::security::sovereign_enclave_allowed_outbound_hosts`].
     pub sovereign_enclave_allowed_outbound_hosts: Vec<String>,
     /// P5 (5.4) — structured-logging output format. Defaults to
-    /// [`LogFormat::Json`] in production (`SOLAND_DEVELOPMENT_MODE=false`)
+    /// [`LogFormat::Json`] in production (`COLAND_DEVELOPMENT_MODE=false`)
     /// and [`LogFormat::Plain`] in development. Override at any time via
-    /// `SOLAND_LOG_FORMAT=json|plain`. JSON output is the format on-call
+    /// `COLAND_LOG_FORMAT=json|plain`. JSON output is the format on-call
     /// runbooks assume (the `runbook.md` log-search recipes use
     /// `jq`-friendly field names).
     pub log_format: LogFormat,
@@ -625,15 +625,15 @@ pub struct AppConfig {
 /// process environment itself.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OtelConfig {
-    /// Env: `SOLAND_OTEL_EXPORTER` — `otlp` / `1` / `true` enables export.
+    /// Env: `COLAND_OTEL_EXPORTER` — `otlp` / `1` / `true` enables export.
     pub exporter_enabled: bool,
-    /// Env: `SOLAND_OTEL_ENDPOINT`.
+    /// Env: `COLAND_OTEL_ENDPOINT`.
     pub endpoint: String,
-    /// Env: `SOLAND_OTEL_TIMEOUT_SECS`, at least 1.
+    /// Env: `COLAND_OTEL_TIMEOUT_SECS`, at least 1.
     pub timeout_seconds: u64,
-    /// Env: `SOLAND_OTEL_SAMPLE_RATIO`, validated to `0.0..=1.0` at load.
+    /// Env: `COLAND_OTEL_SAMPLE_RATIO`, validated to `0.0..=1.0` at load.
     pub sample_ratio: f64,
-    /// Env: `SOLAND_OTEL_SERVICE_NAME`; the caller's default when unset.
+    /// Env: `COLAND_OTEL_SERVICE_NAME`; the caller's default when unset.
     pub service_name: Option<String>,
 }
 
@@ -662,7 +662,7 @@ pub enum LogFormat {
 
 impl LogFormat {
     fn from_values(values: &BTreeMap<String, String>, development_mode: bool) -> Self {
-        match lookup(values, "SOLAND_LOG_FORMAT").ok().as_deref() {
+        match lookup(values, "COLAND_LOG_FORMAT").ok().as_deref() {
             Some("json") | Some("JSON") => LogFormat::Json,
             Some("plain") | Some("PLAIN") | Some("text") | Some("TEXT") => LogFormat::Plain,
             _ => {
@@ -769,7 +769,7 @@ impl Default for IceServersConfig {
     fn default() -> Self {
         Self {
             stun_urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-            turn_urls: vec!["turn:turn.soland.local:3478?transport=udp".to_owned()],
+            turn_urls: vec!["turn:turn.coland.local:3478?transport=udp".to_owned()],
             ttl_seconds: 300,
             refresh_lead_seconds: 75,
             turn_secret_rotation_window_seconds: 86_400,
@@ -831,8 +831,8 @@ impl MediaIssuerConfig {
 /// deployment needs no extra environment variable.
 fn load_media_issuer_config(values: &BTreeMap<String, String>) -> MediaIssuerConfig {
     MediaIssuerConfig {
-        issuer_kid: env_non_empty(values, "SOLAND_MEDIA_ISSUER_KID").unwrap_or_default(),
-        token_ttl_seconds: env_non_empty(values, "SOLAND_MEDIA_TOKEN_TTL_SECONDS")
+        issuer_kid: env_non_empty(values, "COLAND_MEDIA_ISSUER_KID").unwrap_or_default(),
+        token_ttl_seconds: env_non_empty(values, "COLAND_MEDIA_TOKEN_TTL_SECONDS")
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|ttl| *ttl > 0)
             .unwrap_or(arkret_wire::MEDIA_TOKEN_TTL_SHOULD_SECS),
@@ -842,8 +842,8 @@ fn load_media_issuer_config(values: &BTreeMap<String, String>) -> MediaIssuerCon
 /// Load LiveKit API credentials. The secret accepts the `_FILE` indirection
 /// so operators can mount it via Kubernetes / Docker / systemd secrets.
 fn load_livekit_config(values: &BTreeMap<String, String>) -> LiveKitConfig {
-    let api_key = env_non_empty(values, "SOLAND_LIVEKIT_API_KEY");
-    let api_secret = env_non_empty(values, "SOLAND_LIVEKIT_API_SECRET");
+    let api_key = env_non_empty(values, "COLAND_LIVEKIT_API_KEY");
+    let api_secret = env_non_empty(values, "COLAND_LIVEKIT_API_SECRET");
     LiveKitConfig {
         api_key,
         api_secret,
@@ -851,7 +851,7 @@ fn load_livekit_config(values: &BTreeMap<String, String>) -> LiveKitConfig {
 }
 
 /// Federation fanout topology. Selected at config-load
-/// time via `SOLAND_FEDERATION_FANOUT_TOPOLOGY` env var (`mesh` | `hub`).
+/// time via `COLAND_FEDERATION_FANOUT_TOPOLOGY` env var (`mesh` | `hub`).
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, salvo::oapi::ToSchema,
 )]
@@ -885,7 +885,7 @@ impl FederationFanoutTopology {
 /// on each signing pass so logs flag the dev-only ephemeral path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotarySigningKeyOrigin {
-    /// Loaded from `SOLAND_NOTARY_SIGNING_KEY` (production-grade
+    /// Loaded from `COLAND_NOTARY_SIGNING_KEY` (production-grade
     /// persistent identity).
     Configured,
     /// In-process random seed — fine for tests, **never** for production:
@@ -918,7 +918,7 @@ impl AppConfig {
             tls_key_path: None,
             database_url: None,
             object_storage: ObjectStorageConfig::local(
-                std::env::temp_dir().join("soland-test-blobs"),
+                std::env::temp_dir().join("coland-test-blobs"),
             ),
             ice: IceServersConfig::default(),
             livekit: LiveKitConfig::default(),
@@ -964,7 +964,7 @@ impl AppConfig {
             to_device_queue_capacity: 10_000,
             applet_transaction_inflight_capacity: DEFAULT_APPLET_TRANSACTION_INFLIGHT_CAPACITY,
             key_backup_daily_download_limit:
-                soland_services::runtime_guards::clamp_key_backup_daily_download_limit(None),
+                coland_services::runtime_guards::clamp_key_backup_daily_download_limit(None),
             service_identity_bundle_dir: None,
             verified_profiles_artifact: None,
             external_webvh_provider_trust_domain: None,
@@ -980,10 +980,10 @@ impl AppConfig {
             db_pool_acquire_timeout_seconds: None,
             deactivation_push_gateway_url: None,
             deactivation_push_gateway_bearer: None,
-            resumable_upload_dir: PathBuf::from("./soland-resumable-uploads"),
+            resumable_upload_dir: PathBuf::from("./coland-resumable-uploads"),
             resumable_upload_incomplete_ttl_seconds: 86_400,
             seed_demo_data: false,
-            trust_domain: TrustDomainId::new("ak:trust_domain:soland.local")
+            trust_domain: TrustDomainId::new("ak:trust_domain:coland.local")
                 .expect("static trust domain"),
             receive_policy_constraints: None,
             sovereign_enclave_enabled: false,
@@ -1028,20 +1028,20 @@ impl AppConfig {
     ) -> anyhow::Result<Self> {
         let bind = startup
             .bind
-            .or_else(|| lookup(values, "SOLAND_BIND").ok())
+            .or_else(|| lookup(values, "COLAND_BIND").ok())
             .unwrap_or_else(|| "127.0.0.1:8698".to_owned())
             .parse()?;
-        let metrics_bind = lookup(values, "SOLAND_METRICS_BIND")
+        let metrics_bind = lookup(values, "COLAND_METRICS_BIND")
             .unwrap_or_else(|_| "127.0.0.1:9090".to_owned())
             .parse()?;
         let public_base_url =
-            lookup(values, "SOLAND_PUBLIC_BASE_URL").unwrap_or_else(|_| format!("http://{bind}"));
+            lookup(values, "COLAND_PUBLIC_BASE_URL").unwrap_or_else(|_| format!("http://{bind}"));
         let first_provisioning = startup.first_provisioning
-            || env_bool(values, "SOLAND_FIRST_PROVISIONING")?.unwrap_or(false);
-        let tls_cert_path = env_non_empty(values, "SOLAND_TLS_CERT_PATH").map(PathBuf::from);
-        let tls_key_path = env_non_empty(values, "SOLAND_TLS_KEY_PATH").map(PathBuf::from);
+            || env_bool(values, "COLAND_FIRST_PROVISIONING")?.unwrap_or(false);
+        let tls_cert_path = env_non_empty(values, "COLAND_TLS_CERT_PATH").map(PathBuf::from);
+        let tls_key_path = env_non_empty(values, "COLAND_TLS_KEY_PATH").map(PathBuf::from);
         if tls_cert_path.is_some() != tls_key_path.is_some() {
-            anyhow::bail!("SOLAND_TLS_CERT_PATH and SOLAND_TLS_KEY_PATH must be set together");
+            anyhow::bail!("COLAND_TLS_CERT_PATH and COLAND_TLS_KEY_PATH must be set together");
         }
         let database_url = lookup(values, "DATABASE_URL")
             .ok()
@@ -1050,20 +1050,20 @@ impl AppConfig {
         let ice = load_ice_servers_config(values);
         let livekit = load_livekit_config(values);
         let media = load_media_issuer_config(values);
-        let account_authority_url = env_non_empty(values, "SOLAND_ACCOUNT_AUTHORITY_URL")
+        let account_authority_url = env_non_empty(values, "COLAND_ACCOUNT_AUTHORITY_URL")
             .map(|value| {
                 arkret_models_identity::service_identity::CanonicalServiceUrl::canonicalize(value)
                     .map(|url| url.as_str().to_owned())
                     .map_err(|error| {
-                        anyhow::anyhow!("SOLAND_ACCOUNT_AUTHORITY_URL is invalid: {error}")
+                        anyhow::anyhow!("COLAND_ACCOUNT_AUTHORITY_URL is invalid: {error}")
                     })
             })
             .transpose()?;
         let account_authority_public_key_multibase =
-            env_non_empty(values, "SOLAND_ACCOUNT_AUTHORITY_PUBLIC_KEY_MULTIBASE");
+            env_non_empty(values, "COLAND_ACCOUNT_AUTHORITY_PUBLIC_KEY_MULTIBASE");
         if let Some(key) = &account_authority_public_key_multibase {
             arkret_canonical::multibase::decode_ed25519_multibase(key).map_err(|error| {
-                anyhow::anyhow!("SOLAND_ACCOUNT_AUTHORITY_PUBLIC_KEY_MULTIBASE is invalid: {error}")
+                anyhow::anyhow!("COLAND_ACCOUNT_AUTHORITY_PUBLIC_KEY_MULTIBASE is invalid: {error}")
             })?;
         }
         // A separate Account Authority process still signs as this Station.
@@ -1071,14 +1071,14 @@ impl AppConfig {
         // the optional key pin controls that delegation, not another identity.
         if account_authority_url.is_none() && account_authority_public_key_multibase.is_some() {
             anyhow::bail!(
-                "SOLAND_ACCOUNT_AUTHORITY_PUBLIC_KEY_MULTIBASE requires SOLAND_ACCOUNT_AUTHORITY_URL"
+                "COLAND_ACCOUNT_AUTHORITY_PUBLIC_KEY_MULTIBASE requires COLAND_ACCOUNT_AUTHORITY_URL"
             );
         }
-        let oidc_client_id = env_non_empty(values, "SOLAND_OAUTH_CLIENT_ID");
+        let oidc_client_id = env_non_empty(values, "COLAND_OAUTH_CLIENT_ID");
         // Formal signature and DID validation never depend on this flag.
         // Local network development must opt
-        // in explicitly via `SOLAND_DEVELOPMENT_MODE=true`.
-        let development_mode = env_bool(values, "SOLAND_DEVELOPMENT_MODE")?.unwrap_or(false);
+        // in explicitly via `COLAND_DEVELOPMENT_MODE=true`.
+        let development_mode = env_bool(values, "COLAND_DEVELOPMENT_MODE")?.unwrap_or(false);
         // Production first provisioning is authorized later, after the
         // durable identity stores are open, by `first_provisioning`.
         // Development mode may provision automatically. Config never carries
@@ -1086,7 +1086,7 @@ impl AppConfig {
         // API conventions section 10 requires explicit origins for endpoints
         // carrying Authorization, device proof or session semantics. Development
         // mode has the same boundary; operators opt in to browser origins.
-        let cors_allow_origin = lookup(values, "SOLAND_CORS_ALLOW_ORIGIN")
+        let cors_allow_origin = lookup(values, "COLAND_CORS_ALLOW_ORIGIN")
             .ok()
             .map(|v| v.trim().to_owned())
             .filter(|v| !v.is_empty());
@@ -1095,23 +1095,23 @@ impl AppConfig {
             .is_some_and(|raw| raw.split(',').any(|origin| origin.trim() == "*"))
         {
             anyhow::bail!(
-                "SOLAND_CORS_ALLOW_ORIGIN requires explicit origins; wildcard is invalid"
+                "COLAND_CORS_ALLOW_ORIGIN requires explicit origins; wildcard is invalid"
             );
         }
         let session_grant_introspection_url =
-            env_non_empty(values, "SOLAND_SESSION_GRANT_INTROSPECTION_URL");
-        let auth_session_logout_url = env_non_empty(values, "SOLAND_AUTH_SESSION_LOGOUT_URL");
+            env_non_empty(values, "COLAND_SESSION_GRANT_INTROSPECTION_URL");
+        let auth_session_logout_url = env_non_empty(values, "COLAND_AUTH_SESSION_LOGOUT_URL");
         if let Some(value) = auth_session_logout_url.as_deref() {
             validate_auth_session_logout_url(value)?;
         }
         let internal_authority_shared_secret =
-            env_non_empty(values, "SOLAND_INTERNAL_AUTHORITY_SHARED_SECRET");
+            env_non_empty(values, "COLAND_INTERNAL_AUTHORITY_SHARED_SECRET");
         let account_authority_trust_domain =
-            env_non_empty(values, "SOLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN")
+            env_non_empty(values, "COLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN")
                 .map(|value| {
                     TrustDomainId::new(value).map_err(|error| {
                 anyhow::anyhow!(
-                    "SOLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN must be ak:trust_domain:<scope>: {error}"
+                    "COLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN must be ak:trust_domain:<scope>: {error}"
                 )
             })
                 })
@@ -1144,7 +1144,7 @@ impl AppConfig {
                     validate_internal_authority_endpoint_binding(
                         authority_url,
                         introspection_url,
-                        "SOLAND_SESSION_GRANT_INTROSPECTION_URL",
+                        "COLAND_SESSION_GRANT_INTROSPECTION_URL",
                         INTERNAL_SESSION_GRANT_INTROSPECTION_PATH,
                     )?;
                 }
@@ -1152,7 +1152,7 @@ impl AppConfig {
                     validate_internal_authority_endpoint_binding(
                         authority_url,
                         logout_url,
-                        "SOLAND_AUTH_SESSION_LOGOUT_URL",
+                        "COLAND_AUTH_SESSION_LOGOUT_URL",
                         INTERNAL_AUTH_SESSION_LOGOUT_PATH,
                     )?;
                 }
@@ -1167,23 +1167,23 @@ impl AppConfig {
             }
             _ => None,
         };
-        let did_resolver_allow_methods = env_csv(values, "SOLAND_DID_RESOLVER_ALLOW_METHODS")
+        let did_resolver_allow_methods = env_csv(values, "COLAND_DID_RESOLVER_ALLOW_METHODS")
             .unwrap_or_else(default_did_resolver_allow_methods);
         let embedded_webvh_provider_enabled =
-            env_bool(values, "SOLAND_EMBEDDED_WEBVH_PROVIDER_ENABLED")?.unwrap_or(true);
+            env_bool(values, "COLAND_EMBEDDED_WEBVH_PROVIDER_ENABLED")?.unwrap_or(true);
         let embedded_webvh_registration_bearer =
-            env_non_empty(values, "SOLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER");
+            env_non_empty(values, "COLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER");
         let external_webvh_provider_url =
-            env_non_empty(values, "SOLAND_EXTERNAL_WEBVH_PROVIDER_URL");
+            env_non_empty(values, "COLAND_EXTERNAL_WEBVH_PROVIDER_URL");
         let external_webvh_registration_bearer =
-            env_non_empty(values, "SOLAND_EXTERNAL_WEBVH_REGISTRATION_BEARER");
+            env_non_empty(values, "COLAND_EXTERNAL_WEBVH_REGISTRATION_BEARER");
         if external_webvh_registration_bearer.is_some() && external_webvh_provider_url.is_none() {
             anyhow::bail!(
-                "SOLAND_EXTERNAL_WEBVH_PROVIDER_URL is required when \
-                 SOLAND_EXTERNAL_WEBVH_REGISTRATION_BEARER is configured"
+                "COLAND_EXTERNAL_WEBVH_PROVIDER_URL is required when \
+                 COLAND_EXTERNAL_WEBVH_REGISTRATION_BEARER is configured"
             );
         }
-        let default_webvh_provider_id = env_non_empty(values, "SOLAND_DEFAULT_WEBVH_PROVIDER_ID");
+        let default_webvh_provider_id = env_non_empty(values, "COLAND_DEFAULT_WEBVH_PROVIDER_ID");
         let notary_signing_key_seed = load_notary_signing_key_seed(values)?;
         let key_store = KeyStoreConfig::from_values(values)?;
         validate_persistence_key_store(database_url.as_deref(), &key_store)?;
@@ -1193,14 +1193,14 @@ impl AppConfig {
         // fail-fast posture; the notary key is at least as critical.
         if !development_mode && notary_signing_key_seed.is_none() && !key_store.is_durable() {
             anyhow::bail!(
-                "SOLAND_NOTARY_SIGNING_KEY (or a durable SOLAND_KEYSTORE_BACKEND) is required when SOLAND_DEVELOPMENT_MODE is false; an ephemeral notary key breaks the Seal signature chain across restarts"
+                "COLAND_NOTARY_SIGNING_KEY (or a durable COLAND_KEYSTORE_BACKEND) is required when COLAND_DEVELOPMENT_MODE is false; an ephemeral notary key breaks the Seal signature chain across restarts"
             );
         }
-        let federation_fanout_topology = lookup(values, "SOLAND_FEDERATION_FANOUT_TOPOLOGY")
+        let federation_fanout_topology = lookup(values, "COLAND_FEDERATION_FANOUT_TOPOLOGY")
             .ok()
             .map(|value| FederationFanoutTopology::from_env_value(&value))
             .unwrap_or(FederationFanoutTopology::Mesh);
-        let federation_peers = lookup(values, "SOLAND_FEDERATION_PEERS")
+        let federation_peers = lookup(values, "COLAND_FEDERATION_PEERS")
             .ok()
             .map(|value| {
                 value
@@ -1210,26 +1210,26 @@ impl AppConfig {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let trusted_push_gateways = env_non_empty(values, "SOLAND_TRUSTED_PUSH_GATEWAYS")
+        let trusted_push_gateways = env_non_empty(values, "COLAND_TRUSTED_PUSH_GATEWAYS")
             .map(|value| {
                 crate::push_gateway_registry::TrustedPushGatewayRegistry::from_json(&value).map_err(
-                    |error| anyhow::anyhow!("SOLAND_TRUSTED_PUSH_GATEWAYS is invalid: {error}"),
+                    |error| anyhow::anyhow!("COLAND_TRUSTED_PUSH_GATEWAYS is invalid: {error}"),
                 )
             })
             .transpose()?
             .unwrap_or_default();
         // G3.S0 — outbound dispatcher toggle. Defaults to enabled so the
         // background worker drains the outbox; tests that don't want
-        // unsolicited HTTP traffic set `SOLAND_FEDERATION_OUTBOUND=0`.
+        // unsolicited HTTP traffic set `COLAND_FEDERATION_OUTBOUND=0`.
         let federation_outbound_enabled =
-            env_bool(values, "SOLAND_FEDERATION_OUTBOUND")?.unwrap_or(true);
+            env_bool(values, "COLAND_FEDERATION_OUTBOUND")?.unwrap_or(true);
         let deactivation_propagation_window_ms = match lookup(
             values,
-            "SOLAND_DEACTIVATION_PROPAGATION_WINDOW_MS",
+            "COLAND_DEACTIVATION_PROPAGATION_WINDOW_MS",
         ) {
             Ok(value) => value.trim().parse::<u64>().map_err(|error| {
                 anyhow::anyhow!(
-                    "SOLAND_DEACTIVATION_PROPAGATION_WINDOW_MS must be a positive integer: {error}"
+                    "COLAND_DEACTIVATION_PROPAGATION_WINDOW_MS must be a positive integer: {error}"
                 )
             })?,
             Err(_) => 86_400_000,
@@ -1238,18 +1238,18 @@ impl AppConfig {
             || deactivation_propagation_window_ms > i64::MAX as u64
         {
             anyhow::bail!(
-                "SOLAND_DEACTIVATION_PROPAGATION_WINDOW_MS must be in 1..={} milliseconds",
+                "COLAND_DEACTIVATION_PROPAGATION_WINDOW_MS must be in 1..={} milliseconds",
                 i64::MAX
             );
         }
         let federation_frontier_interval_seconds =
-            lookup(values, "SOLAND_FEDERATION_FRONTIER_INTERVAL_SECONDS")
+            lookup(values, "COLAND_FEDERATION_FRONTIER_INTERVAL_SECONDS")
                 .ok()
                 .and_then(|value| value.trim().parse::<u64>().ok())
                 .filter(|seconds| *seconds <= 3_600)
                 .unwrap_or(0);
         let security_rotation_worker_interval_seconds =
-            match env_non_empty(values, "SOLAND_SECURITY_ROTATION_WORKER_INTERVAL_SECONDS") {
+            match env_non_empty(values, "COLAND_SECURITY_ROTATION_WORKER_INTERVAL_SECONDS") {
                 None => 5,
                 Some(raw) => raw
                     .trim()
@@ -1258,22 +1258,22 @@ impl AppConfig {
                     .filter(|seconds| (1..=3_600).contains(seconds))
                     .ok_or_else(|| {
                         anyhow::anyhow!(
-                            "SOLAND_SECURITY_ROTATION_WORKER_INTERVAL_SECONDS must be in 1..=3600"
+                            "COLAND_SECURITY_ROTATION_WORKER_INTERVAL_SECONDS must be in 1..=3600"
                         )
                     })?,
             };
-        let admin_default_page_limit = lookup(values, "SOLAND_ADMIN_PAGE_LIMIT")
+        let admin_default_page_limit = lookup(values, "COLAND_ADMIN_PAGE_LIMIT")
             .ok()
             .and_then(|value| value.trim().parse::<usize>().ok())
             .filter(|n| *n > 0)
             .unwrap_or(100);
-        let admin_max_page_limit = lookup(values, "SOLAND_ADMIN_MAX_PAGE_LIMIT")
+        let admin_max_page_limit = lookup(values, "COLAND_ADMIN_MAX_PAGE_LIMIT")
             .ok()
             .and_then(|value| value.trim().parse::<usize>().ok())
             .filter(|n| *n > 0)
             .unwrap_or(1000)
             .max(admin_default_page_limit);
-        let admin_principal_ids = lookup(values, "SOLAND_ADMIN_PRINCIPAL_IDS")
+        let admin_principal_ids = lookup(values, "COLAND_ADMIN_PRINCIPAL_IDS")
             .ok()
             .map(|value| {
                 value
@@ -1282,119 +1282,119 @@ impl AppConfig {
                     .filter(|value| !value.is_empty())
                     .map(|value| {
                         DidCoreId::new(value.to_owned()).map_err(|error| {
-                            anyhow::anyhow!("SOLAND_ADMIN_PRINCIPAL_IDS is invalid: {error}")
+                            anyhow::anyhow!("COLAND_ADMIN_PRINCIPAL_IDS is invalid: {error}")
                         })
                     })
                     .collect::<anyhow::Result<Vec<_>>>()
             })
             .transpose()?
             .unwrap_or_default();
-        let to_device_queue_capacity = lookup(values, "SOLAND_TO_DEVICE_QUEUE_CAPACITY")
+        let to_device_queue_capacity = lookup(values, "COLAND_TO_DEVICE_QUEUE_CAPACITY")
             .ok()
             .and_then(|value| value.trim().parse::<usize>().ok())
             .filter(|value| *value > 0)
             .unwrap_or(DEFAULT_TO_DEVICE_QUEUE_CAPACITY);
         let applet_transaction_inflight_capacity =
-            lookup(values, "SOLAND_APPLET_TRANSACTION_INFLIGHT_CAPACITY")
+            lookup(values, "COLAND_APPLET_TRANSACTION_INFLIGHT_CAPACITY")
                 .ok()
                 .and_then(|value| value.trim().parse::<usize>().ok())
                 .filter(|value| *value > 0)
                 .unwrap_or(DEFAULT_APPLET_TRANSACTION_INFLIGHT_CAPACITY);
         // Parsed here, clamped by the guard that owns the range. Previously
         // `runtime_guards` read this from the environment itself, which put an
-        // env read inside `soland-services`.
+        // env read inside `coland-services`.
         let key_backup_daily_download_limit =
-            soland_services::runtime_guards::clamp_key_backup_daily_download_limit(
-                env_non_empty(values, "SOLAND_KEY_BACKUP_DAILY_DOWNLOAD_LIMIT")
+            coland_services::runtime_guards::clamp_key_backup_daily_download_limit(
+                env_non_empty(values, "COLAND_KEY_BACKUP_DAILY_DOWNLOAD_LIMIT")
                     .and_then(|value| value.parse::<u32>().ok()),
             );
         let service_identity_bundle_dir =
-            env_non_empty(values, "SOLAND_SERVICE_IDENTITY_BUNDLE_DIR");
-        let verified_profiles_artifact = env_non_empty(values, "SOLAND_VERIFIED_PROFILES_ARTIFACT");
+            env_non_empty(values, "COLAND_SERVICE_IDENTITY_BUNDLE_DIR");
+        let verified_profiles_artifact = env_non_empty(values, "COLAND_VERIFIED_PROFILES_ARTIFACT");
         let external_webvh_provider_trust_domain =
-            env_non_empty(values, "SOLAND_EXTERNAL_WEBVH_PROVIDER_TRUST_DOMAIN");
+            env_non_empty(values, "COLAND_EXTERNAL_WEBVH_PROVIDER_TRUST_DOMAIN");
         let rate_limiter = crate::ratelimit::RateLimiterConfig::resolve(
             development_mode,
             crate::ratelimit::RateLimitOverrides {
-                window_seconds: rate_limit_override(values, "SOLAND_RATE_LIMIT_WINDOW_SECONDS"),
+                window_seconds: rate_limit_override(values, "COLAND_RATE_LIMIT_WINDOW_SECONDS"),
                 default_per_minute: rate_limit_override(
                     values,
-                    "SOLAND_RATE_LIMIT_DEFAULT_PER_MINUTE",
+                    "COLAND_RATE_LIMIT_DEFAULT_PER_MINUTE",
                 ),
-                auth_per_minute: rate_limit_override(values, "SOLAND_RATE_LIMIT_AUTH_PER_MINUTE"),
-                api_per_minute: rate_limit_override(values, "SOLAND_RATE_LIMIT_API_PER_MINUTE"),
-                probe_per_minute: rate_limit_override(values, "SOLAND_RATE_LIMIT_PROBE_PER_MINUTE"),
+                auth_per_minute: rate_limit_override(values, "COLAND_RATE_LIMIT_AUTH_PER_MINUTE"),
+                api_per_minute: rate_limit_override(values, "COLAND_RATE_LIMIT_API_PER_MINUTE"),
+                probe_per_minute: rate_limit_override(values, "COLAND_RATE_LIMIT_PROBE_PER_MINUTE"),
             },
         );
         let max_request_size_bytes = Self::max_request_size_bytes(values);
         let pq_hybrid_tls_probe = env_non_empty(values, PQ_HYBRID_TLS_DEPLOYMENT_PROBE_ENV);
-        let shutdown_grace_seconds = env_non_empty(values, "SOLAND_SHUTDOWN_GRACE_SECS")
+        let shutdown_grace_seconds = env_non_empty(values, "COLAND_SHUTDOWN_GRACE_SECS")
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|secs| *secs > 0);
         let log_filter = env_non_empty(values, "RUST_LOG");
         let websocket_max_lifetime_seconds =
-            env_non_empty(values, "SOLAND_WEBSOCKET_MAX_LIFETIME_SECS")
+            env_non_empty(values, "COLAND_WEBSOCKET_MAX_LIFETIME_SECS")
                 .map(|value| value.parse::<u64>())
                 .transpose()
                 .map_err(|_| {
-                    anyhow::anyhow!("SOLAND_WEBSOCKET_MAX_LIFETIME_SECS must be an integer")
+                    anyhow::anyhow!("COLAND_WEBSOCKET_MAX_LIFETIME_SECS must be an integer")
                 })?
                 .unwrap_or(600)
                 .clamp(1, 600);
-        let log_file = env_non_empty(values, "SOLAND_LOG_FILE").map(PathBuf::from);
+        let log_file = env_non_empty(values, "COLAND_LOG_FILE").map(PathBuf::from);
         let otel = load_otel_config(values)?;
-        let db_pool_max_size = env_non_empty(values, "SOLAND_DB_POOL_MAX_SIZE")
+        let db_pool_max_size = env_non_empty(values, "COLAND_DB_POOL_MAX_SIZE")
             .and_then(|value| value.parse::<usize>().ok());
         let db_pool_acquire_timeout_seconds =
-            env_non_empty(values, "SOLAND_DB_POOL_ACQUIRE_TIMEOUT_SECS")
+            env_non_empty(values, "COLAND_DB_POOL_ACQUIRE_TIMEOUT_SECS")
                 .and_then(|value| value.parse::<u64>().ok());
         let deactivation_push_gateway_url =
-            env_non_empty(values, "SOLAND_DEACTIVATION_PUSH_GATEWAY_URL");
+            env_non_empty(values, "COLAND_DEACTIVATION_PUSH_GATEWAY_URL");
         let deactivation_push_gateway_bearer =
-            env_non_empty(values, "SOLAND_DEACTIVATION_PUSH_GATEWAY_BEARER");
+            env_non_empty(values, "COLAND_DEACTIVATION_PUSH_GATEWAY_BEARER");
         if deactivation_push_gateway_url.is_none() && deactivation_push_gateway_bearer.is_some() {
             anyhow::bail!(
-                "SOLAND_DEACTIVATION_PUSH_GATEWAY_BEARER is set without SOLAND_DEACTIVATION_PUSH_GATEWAY_URL"
+                "COLAND_DEACTIVATION_PUSH_GATEWAY_BEARER is set without COLAND_DEACTIVATION_PUSH_GATEWAY_URL"
             );
         }
-        let resumable_upload_dir = env_non_empty(values, "SOLAND_RESUMABLE_UPLOAD_DIR")
+        let resumable_upload_dir = env_non_empty(values, "COLAND_RESUMABLE_UPLOAD_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("./soland-resumable-uploads"));
+            .unwrap_or_else(|| PathBuf::from("./coland-resumable-uploads"));
         let resumable_upload_incomplete_ttl_seconds =
-            lookup(values, "SOLAND_RESUMABLE_UPLOAD_TTL_SECS")
+            lookup(values, "COLAND_RESUMABLE_UPLOAD_TTL_SECS")
                 .ok()
                 .and_then(|value| value.trim().parse::<u64>().ok())
                 .unwrap_or(86_400)
                 .max(60);
-        let seed_demo_data = env_bool(values, "SOLAND_SEED_DEMO_DATA")?.unwrap_or(false);
+        let seed_demo_data = env_bool(values, "COLAND_SEED_DEMO_DATA")?.unwrap_or(false);
         // G3.S9 — sovereign enclave toggle + outbound host allow-list.
         //
         // This is now the only parse of every egress input. `security.rs` used
         // to read the same eight variables itself with a stricter, case-
-        // sensitive matcher, so `SOLAND_SOVEREIGN_ENCLAVE=on` turned the
+        // sensitive matcher, so `COLAND_SOVEREIGN_ENCLAVE=on` turned the
         // enclave on here and left the outbound gate off there. The parsed
         // policy is installed into the gate by `install_egress_policy` at
         // startup; both sides now read one value.
         let sovereign_enclave_enabled =
-            env_bool(values, "SOLAND_SOVEREIGN_ENCLAVE")?.unwrap_or(false);
+            env_bool(values, "COLAND_SOVEREIGN_ENCLAVE")?.unwrap_or(false);
         let egress_policy = crate::security::EgressPolicy {
-            allow_private_networks: env_bool(values, "SOLAND_EGRESS_ALLOW_PRIVATE_NETWORKS")?,
+            allow_private_networks: env_bool(values, "COLAND_EGRESS_ALLOW_PRIVATE_NETWORKS")?,
             allowed_hosts: crate::security::split_host_policy_entries(
-                env_non_empty(values, "SOLAND_EGRESS_ALLOWED_HOSTS").as_deref(),
+                env_non_empty(values, "COLAND_EGRESS_ALLOWED_HOSTS").as_deref(),
             ),
             denylist: crate::security::split_host_policy_entries(
-                env_non_empty(values, "SOLAND_EGRESS_DENYLIST").as_deref(),
+                env_non_empty(values, "COLAND_EGRESS_DENYLIST").as_deref(),
             ),
             federation_denylist: crate::security::split_federation_denylist_entries(&[
-                env_non_empty(values, "SOLAND_FEDERATION_DENYLIST").as_deref(),
-                env_non_empty(values, "SOLAND_FEDERATION_PEER_DENYLIST").as_deref(),
+                env_non_empty(values, "COLAND_FEDERATION_DENYLIST").as_deref(),
+                env_non_empty(values, "COLAND_FEDERATION_PEER_DENYLIST").as_deref(),
             ]),
             federation_trust_domain_allowlist: crate::security::split_host_policy_entries(
-                env_non_empty(values, "SOLAND_FEDERATION_TRUST_DOMAIN_ALLOWLIST").as_deref(),
+                env_non_empty(values, "COLAND_FEDERATION_TRUST_DOMAIN_ALLOWLIST").as_deref(),
             ),
             sovereign_enclave_enabled,
             sovereign_enclave_allowed_outbound_hosts: crate::security::split_host_policy_entries(
-                env_non_empty(values, "SOLAND_SOVEREIGN_ENCLAVE_ALLOWED_OUTBOUND_HOSTS").as_deref(),
+                env_non_empty(values, "COLAND_SOVEREIGN_ENCLAVE_ALLOWED_OUTBOUND_HOSTS").as_deref(),
             ),
         };
         let sovereign_enclave_allowed_outbound_hosts = egress_policy
@@ -1402,15 +1402,15 @@ impl AppConfig {
             .clone();
         crate::security::install_egress_policy(egress_policy);
         crate::ratelimit::install_forwarded_for_trust(
-            env_bool(values, "SOLAND_RATE_LIMIT_TRUST_X_FORWARDED_FOR")?.unwrap_or(false),
+            env_bool(values, "COLAND_RATE_LIMIT_TRUST_X_FORWARDED_FOR")?.unwrap_or(false),
         );
-        let trust_domain = env_non_empty(values, "SOLAND_TRUST_DOMAIN").ok_or_else(|| {
+        let trust_domain = env_non_empty(values, "COLAND_TRUST_DOMAIN").ok_or_else(|| {
             anyhow::anyhow!(
-                "SOLAND_TRUST_DOMAIN is required; it cannot be derived from the service core id"
+                "COLAND_TRUST_DOMAIN is required; it cannot be derived from the service core id"
             )
         })?;
         let trust_domain = TrustDomainId::new(trust_domain).map_err(|error| {
-            anyhow::anyhow!("SOLAND_TRUST_DOMAIN must be ak:trust_domain:<scope>: {error}")
+            anyhow::anyhow!("COLAND_TRUST_DOMAIN must be ak:trust_domain:<scope>: {error}")
         })?;
         let receive_policy_constraints = load_receive_policy_constraints(values)?;
         let failpoints = crate::failpoints::FailpointRegistry::parse(
@@ -1442,7 +1442,7 @@ impl AppConfig {
             auth_session_logout_url,
             internal_authority_shared_secret,
             internal_authority_channel,
-            agent_participation_ceiling: env_non_empty(values, "SOLAND_AGENT_PARTICIPATION_CEILING").map(|value| serde_json::from_str(&value)).transpose()?.unwrap_or(arkret_models_collaboration::governance::agent_participation::ParticipationBits::ALL),
+            agent_participation_ceiling: env_non_empty(values, "COLAND_AGENT_PARTICIPATION_CEILING").map(|value| serde_json::from_str(&value)).transpose()?.unwrap_or(arkret_models_collaboration::governance::agent_participation::ParticipationBits::ALL),
             did_resolver_allow_methods,
             embedded_webvh_provider_enabled,
             embedded_webvh_registration_bearer,
@@ -1493,14 +1493,14 @@ impl AppConfig {
     }
 
     /// Maximum bytes Salvo will read from a request body before returning
-    /// `413 Payload Too Large`. Env: `SOLAND_MAX_REQUEST_SIZE`, in bytes.
+    /// `413 Payload Too Large`. Env: `COLAND_MAX_REQUEST_SIZE`, in bytes.
     ///
     /// The env override may only raise the bound. `scalability-constraints.md` §2.1.6 makes
     /// 16 MiB a fixed interoperability constant that a deployment or proxy MUST NOT declare
     /// lower, so a smaller value is clamped back up instead of silently making this service
     /// reject requests every other v1 service accepts.
     fn max_request_size_bytes(values: &BTreeMap<String, String>) -> usize {
-        lookup(values, "SOLAND_MAX_REQUEST_SIZE")
+        lookup(values, "COLAND_MAX_REQUEST_SIZE")
             .ok()
             .and_then(|value| value.trim().parse::<usize>().ok())
             .filter(|value| *value > 0)
@@ -1509,7 +1509,7 @@ impl AppConfig {
     }
 
     /// Returns true when `actor` is configured as an admin principal in
-    /// production mode via `SOLAND_ADMIN_PRINCIPAL_IDS`.
+    /// production mode via `COLAND_ADMIN_PRINCIPAL_IDS`.
     pub fn is_admin_principal(&self, actor: &str) -> bool {
         self.admin_principal_ids
             .iter()
@@ -1518,11 +1518,11 @@ impl AppConfig {
 
     /// Derive the effective admin-API authentication posture from the
     /// current config. Returned values are stable strings safe to surface
-    /// in `/health` and the soland-local `/_soland/describe`:
+    /// in `/health` and the coland-local `/_coland/describe`:
     ///
-    ///   - `"development"` — an explicit harness build with `SOLAND_DEVELOPMENT_MODE=true`; a local
+    ///   - `"development"` — an explicit harness build with `COLAND_DEVELOPMENT_MODE=true`; a local
     ///     harness session may call admin endpoints.
-    ///   - `"principal_id_allowlist"` — production mode, `SOLAND_ADMIN_PRINCIPAL_IDS` is non-empty;
+    ///   - `"principal_id_allowlist"` — production mode, `COLAND_ADMIN_PRINCIPAL_IDS` is non-empty;
     ///     admin endpoints accept calls whose session actor appears in the allowlist.
     ///   - `"closed"` — production mode with neither admin allowlist nor introspection configured;
     ///     admin endpoints are effectively locked.
@@ -1580,7 +1580,7 @@ impl AppConfig {
     /// T8.3 — derive a non-sensitive production hardening snapshot from
     /// the live config. Values are environment-detected (no operator
     /// hand-holding required); `warnings[]` enumerates the failing
-    /// checklist items so sodmin can render them inline.
+    /// checklist items so codmin can render them inline.
     ///
     /// The returned struct deliberately keeps only booleans / coarse
     /// enums — no secret material, URLs, paths, or token tails — so it
@@ -1589,9 +1589,9 @@ impl AppConfig {
         let development_mode = self.development_mode;
         let tls_enabled = self.tls_enabled();
         let pq_hybrid_tls_required_group =
-            soland_services::protocol_artifacts::pq_hybrid_tls_required_group();
+            coland_services::protocol_artifacts::pq_hybrid_tls_required_group();
         let pq_hybrid_tls_probe_artifact =
-            soland_services::protocol_artifacts::PQ_HYBRID_TLS_DEPLOYMENT_PROBE_ARTIFACT_REF;
+            coland_services::protocol_artifacts::PQ_HYBRID_TLS_DEPLOYMENT_PROBE_ARTIFACT_REF;
         let pq_hybrid_tls_probe_verified = self.pq_hybrid_tls_probe_verified();
         // CSP is enforced upstream by the reverse proxy (Caddyfile /
         // nginx); we can't probe the live header from inside the app,
@@ -1618,7 +1618,7 @@ impl AppConfig {
         // `router()` in every mode (only the per-class ceilings vary with the
         // deployment posture; see `crate::ratelimit::RateLimiterConfig::from_env`).
         let rate_limit_enabled = true;
-        // Provider credential rotation: soland's only signing identity
+        // Provider credential rotation: coland's only signing identity
         // is the notary key; rotation is manual today. The KeyStore
         // path is the closest thing to "scheduled" we ship.
         let provider_credential_rotation = if self.key_store.is_durable() {
@@ -1732,7 +1732,7 @@ fn parse_internal_authority_operation_url(
 fn validate_auth_session_logout_url(value: &str) -> anyhow::Result<()> {
     parse_internal_authority_operation_url(
         value,
-        "SOLAND_AUTH_SESSION_LOGOUT_URL",
+        "COLAND_AUTH_SESSION_LOGOUT_URL",
         INTERNAL_AUTH_SESSION_LOGOUT_PATH,
     )
     .map(|_| ())
@@ -1745,12 +1745,12 @@ fn validate_internal_authority_endpoint_binding(
     expected_path: &str,
 ) -> anyhow::Result<()> {
     let authority = url::Url::parse(authority_url).map_err(|error| {
-        anyhow::anyhow!("canonical SOLAND_ACCOUNT_AUTHORITY_URL is invalid: {error}")
+        anyhow::anyhow!("canonical COLAND_ACCOUNT_AUTHORITY_URL is invalid: {error}")
     })?;
     let operation = parse_internal_authority_operation_url(operation_url, env_name, expected_path)?;
     anyhow::ensure!(
         operation.origin() == authority.origin(),
-        "{env_name} must have the same scheme, host, and effective port as SOLAND_ACCOUNT_AUTHORITY_URL"
+        "{env_name} must have the same scheme, host, and effective port as COLAND_ACCOUNT_AUTHORITY_URL"
     );
     Ok(())
 }
@@ -1760,7 +1760,7 @@ fn internal_authority_operation_url(
     expected_path: &str,
 ) -> anyhow::Result<String> {
     let authority = url::Url::parse(authority_url).map_err(|error| {
-        anyhow::anyhow!("canonical SOLAND_ACCOUNT_AUTHORITY_URL is invalid: {error}")
+        anyhow::anyhow!("canonical COLAND_ACCOUNT_AUTHORITY_URL is invalid: {error}")
     })?;
     let target = authority.join(expected_path).map_err(|error| {
         anyhow::anyhow!("Account Authority operation URL cannot be derived: {error}")
@@ -1776,63 +1776,63 @@ fn internal_authority_operation_url(
 fn load_object_storage_config(
     values: &BTreeMap<String, String>,
 ) -> anyhow::Result<ObjectStorageConfig> {
-    let backend = env_non_empty(values, "SOLAND_OBJECT_STORAGE_BACKEND")
+    let backend = env_non_empty(values, "COLAND_OBJECT_STORAGE_BACKEND")
         .unwrap_or_else(|| "local".to_owned())
         .to_ascii_lowercase();
-    let prefix = normalized_storage_prefix(env_non_empty(values, "SOLAND_OBJECT_STORAGE_PREFIX"));
+    let prefix = normalized_storage_prefix(env_non_empty(values, "COLAND_OBJECT_STORAGE_PREFIX"));
     match backend.as_str() {
         "local" | "fs" | "filesystem" => {
-            let root = env_non_empty(values, "SOLAND_OBJECT_STORAGE_LOCAL_ROOT")
+            let root = env_non_empty(values, "COLAND_OBJECT_STORAGE_LOCAL_ROOT")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::temp_dir().join("soland-objects"));
+                .unwrap_or_else(|| std::env::temp_dir().join("coland-objects"));
             Ok(ObjectStorageConfig::Local { root, prefix })
         }
         "s3" | "s3-compatible" | "s3_compatible" => {
-            let bucket = required_env(values, "SOLAND_OBJECT_STORAGE_S3_BUCKET")?;
-            let region = env_non_empty(values, "SOLAND_OBJECT_STORAGE_S3_REGION")
+            let bucket = required_env(values, "COLAND_OBJECT_STORAGE_S3_BUCKET")?;
+            let region = env_non_empty(values, "COLAND_OBJECT_STORAGE_S3_REGION")
                 .unwrap_or_else(|| "us-east-1".to_owned());
-            let access_key_id = env_non_empty(values, "SOLAND_OBJECT_STORAGE_S3_ACCESS_KEY_ID");
+            let access_key_id = env_non_empty(values, "COLAND_OBJECT_STORAGE_S3_ACCESS_KEY_ID");
             let secret_access_key =
-                env_non_empty(values, "SOLAND_OBJECT_STORAGE_S3_SECRET_ACCESS_KEY");
+                env_non_empty(values, "COLAND_OBJECT_STORAGE_S3_SECRET_ACCESS_KEY");
             if access_key_id.is_some() != secret_access_key.is_some() {
                 anyhow::bail!(
-                    "SOLAND_OBJECT_STORAGE_S3_ACCESS_KEY_ID and SOLAND_OBJECT_STORAGE_S3_SECRET_ACCESS_KEY must be set together"
+                    "COLAND_OBJECT_STORAGE_S3_ACCESS_KEY_ID and COLAND_OBJECT_STORAGE_S3_SECRET_ACCESS_KEY must be set together"
                 );
             }
             Ok(ObjectStorageConfig::S3Compatible {
                 bucket,
                 region,
-                endpoint: env_non_empty(values, "SOLAND_OBJECT_STORAGE_S3_ENDPOINT"),
+                endpoint: env_non_empty(values, "COLAND_OBJECT_STORAGE_S3_ENDPOINT"),
                 access_key_id,
                 secret_access_key,
-                session_token: env_non_empty(values, "SOLAND_OBJECT_STORAGE_S3_SESSION_TOKEN"),
+                session_token: env_non_empty(values, "COLAND_OBJECT_STORAGE_S3_SESSION_TOKEN"),
                 prefix,
-                force_path_style: env_bool(values, "SOLAND_OBJECT_STORAGE_S3_FORCE_PATH_STYLE")?
+                force_path_style: env_bool(values, "COLAND_OBJECT_STORAGE_S3_FORCE_PATH_STYLE")?
                     .unwrap_or(true),
-                allow_http: env_bool(values, "SOLAND_OBJECT_STORAGE_S3_ALLOW_HTTP")?
+                allow_http: env_bool(values, "COLAND_OBJECT_STORAGE_S3_ALLOW_HTTP")?
                     .unwrap_or(false),
-                skip_signature: env_bool(values, "SOLAND_OBJECT_STORAGE_S3_SKIP_SIGNATURE")?
+                skip_signature: env_bool(values, "COLAND_OBJECT_STORAGE_S3_SKIP_SIGNATURE")?
                     .unwrap_or(false),
             })
         }
         other => anyhow::bail!(
-            "SOLAND_OBJECT_STORAGE_BACKEND must be local or s3-compatible, got {other}"
+            "COLAND_OBJECT_STORAGE_BACKEND must be local or s3-compatible, got {other}"
         ),
     }
 }
 
-/// Load ICE/STUN/TURN configuration from `SOLAND_ICE_*` / `SOLAND_TURN_*`
+/// Load ICE/STUN/TURN configuration from `COLAND_ICE_*` / `COLAND_TURN_*`
 /// env vars. Each field falls back to the corresponding
 /// [`IceServersConfig::default`] value when its env var is absent or empty,
 /// preserving the historical hardcoded behavior.
 fn load_ice_servers_config(values: &BTreeMap<String, String>) -> IceServersConfig {
     IceServersConfig::resolve(
-        env_non_empty(values, "SOLAND_ICE_STUN_URLS").as_deref(),
-        env_non_empty(values, "SOLAND_TURN_URLS").as_deref(),
-        env_non_empty(values, "SOLAND_ICE_TTL_SECONDS").as_deref(),
-        env_non_empty(values, "SOLAND_ICE_REFRESH_LEAD_SECONDS").as_deref(),
-        env_non_empty(values, "SOLAND_TURN_SECRET_ROTATION_WINDOW_SECS").as_deref(),
-        env_non_empty(values, "SOLAND_TURN_SHARED_SECRET"),
+        env_non_empty(values, "COLAND_ICE_STUN_URLS").as_deref(),
+        env_non_empty(values, "COLAND_TURN_URLS").as_deref(),
+        env_non_empty(values, "COLAND_ICE_TTL_SECONDS").as_deref(),
+        env_non_empty(values, "COLAND_ICE_REFRESH_LEAD_SECONDS").as_deref(),
+        env_non_empty(values, "COLAND_TURN_SECRET_ROTATION_WINDOW_SECS").as_deref(),
+        env_non_empty(values, "COLAND_TURN_SHARED_SECRET"),
     )
 }
 
@@ -1896,7 +1896,7 @@ fn normalized_storage_prefix(prefix: Option<String>) -> String {
 }
 
 /// Load the NotaryWorker signing seed from
-/// `SOLAND_NOTARY_SIGNING_KEY` (base64-standard encoded 32 bytes).
+/// `COLAND_NOTARY_SIGNING_KEY` (base64-standard encoded 32 bytes).
 /// Returns `Ok(None)` when the env var is absent or empty (the
 /// NotaryWorker then mints an ephemeral key with a sticky-warn).
 /// Returns `Err(_)` when the env var is set but malformed — fail-fast at
@@ -1904,7 +1904,7 @@ fn normalized_storage_prefix(prefix: Option<String>) -> String {
 fn load_notary_signing_key_seed(
     values: &BTreeMap<String, String>,
 ) -> anyhow::Result<Option<[u8; 32]>> {
-    let raw = match lookup(values, "SOLAND_NOTARY_SIGNING_KEY") {
+    let raw = match lookup(values, "COLAND_NOTARY_SIGNING_KEY") {
         Ok(value) => value.trim().to_owned(),
         Err(_) => return Ok(None),
     };
@@ -1917,12 +1917,12 @@ fn load_notary_signing_key_seed(
         .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(raw.as_bytes()))
         .map_err(|e| {
             anyhow::anyhow!(
-                "SOLAND_NOTARY_SIGNING_KEY must be base64 (standard or url-safe-no-pad): {e}"
+                "COLAND_NOTARY_SIGNING_KEY must be base64 (standard or url-safe-no-pad): {e}"
             )
         })?;
     if bytes.len() != 32 {
         anyhow::bail!(
-            "SOLAND_NOTARY_SIGNING_KEY must decode to exactly 32 bytes (got {})",
+            "COLAND_NOTARY_SIGNING_KEY must decode to exactly 32 bytes (got {})",
             bytes.len()
         );
     }
@@ -1943,23 +1943,23 @@ fn load_new_source_quota(
     values: &BTreeMap<String, String>,
 ) -> anyhow::Result<Option<arkret_wire::receive_policy::NewSourceQuotaConstraints>> {
     let quota = arkret_wire::receive_policy::NewSourceQuotaConstraints {
-        window_seconds: env_u64(values, "SOLAND_RECEIVE_POLICY_NEW_SOURCE_WINDOW_SECONDS")?,
+        window_seconds: env_u64(values, "COLAND_RECEIVE_POLICY_NEW_SOURCE_WINDOW_SECONDS")?,
         default_new_sources_per_window: env_u64(
             values,
-            "SOLAND_RECEIVE_POLICY_NEW_SOURCE_DEFAULT_PER_WINDOW",
+            "COLAND_RECEIVE_POLICY_NEW_SOURCE_DEFAULT_PER_WINDOW",
         )?,
         max_new_sources_per_window: env_u64(
             values,
-            "SOLAND_RECEIVE_POLICY_NEW_SOURCE_MAX_PER_WINDOW",
+            "COLAND_RECEIVE_POLICY_NEW_SOURCE_MAX_PER_WINDOW",
         )?,
-        retention_seconds: env_u64(values, "SOLAND_RECEIVE_POLICY_NEW_SOURCE_RETENTION_SECONDS")?,
+        retention_seconds: env_u64(values, "COLAND_RECEIVE_POLICY_NEW_SOURCE_RETENTION_SECONDS")?,
         default_new_sources_per_retention: env_u64(
             values,
-            "SOLAND_RECEIVE_POLICY_NEW_SOURCE_DEFAULT_PER_RETENTION",
+            "COLAND_RECEIVE_POLICY_NEW_SOURCE_DEFAULT_PER_RETENTION",
         )?,
         max_new_sources_per_retention: env_u64(
             values,
-            "SOLAND_RECEIVE_POLICY_NEW_SOURCE_MAX_PER_RETENTION",
+            "COLAND_RECEIVE_POLICY_NEW_SOURCE_MAX_PER_RETENTION",
         )?,
     };
     if quota == arkret_wire::receive_policy::NewSourceQuotaConstraints::default() {
@@ -1968,7 +1968,7 @@ fn load_new_source_quota(
     // Reject a deployment that violates the cross-field invariants at boot
     // rather than silently advertising a quota the admission path would refuse.
     quota.effective(None).map_err(|error| {
-        anyhow::anyhow!("SOLAND_RECEIVE_POLICY_NEW_SOURCE_* is invalid: {error}")
+        anyhow::anyhow!("COLAND_RECEIVE_POLICY_NEW_SOURCE_* is invalid: {error}")
     })?;
     Ok(Some(quota))
 }
@@ -1986,7 +1986,7 @@ fn env_u64(values: &BTreeMap<String, String>, name: &str) -> anyhow::Result<Opti
 fn load_receive_policy_constraints(
     values: &BTreeMap<String, String>,
 ) -> anyhow::Result<Option<arkret_wire::receive_policy::ReceivePolicyConstraints>> {
-    let applies_to = env_csv_cap(values, "SOLAND_RECEIVE_POLICY_APPLIES_TO")
+    let applies_to = env_csv_cap(values, "COLAND_RECEIVE_POLICY_APPLIES_TO")
         .map(|values| {
             values
                 .into_iter()
@@ -1998,34 +1998,34 @@ fn load_receive_policy_constraints(
                         Ok(arkret_wire::receive_policy::ReceivePolicySurface::ContactRequest)
                     }
                     other => anyhow::bail!(
-                        "SOLAND_RECEIVE_POLICY_APPLIES_TO contains unsupported surface {other}"
+                        "COLAND_RECEIVE_POLICY_APPLIES_TO contains unsupported surface {other}"
                     ),
                 })
                 .collect::<anyhow::Result<Vec<_>>>()
         })
         .transpose()?;
     let deployment_allowed_introduction_kinds =
-        env_csv_cap(values, "SOLAND_RECEIVE_POLICY_PERMITTED_INTRODUCTION_KINDS");
+        env_csv_cap(values, "COLAND_RECEIVE_POLICY_PERMITTED_INTRODUCTION_KINDS");
     let deployment_denied_introduction_kinds =
-        env_csv_cap(values, "SOLAND_RECEIVE_POLICY_FORBIDDEN_INTRODUCTION_KINDS")
+        env_csv_cap(values, "COLAND_RECEIVE_POLICY_FORBIDDEN_INTRODUCTION_KINDS")
             .unwrap_or_default();
     let handle_claim_max_behavior =
-        env_receive_action(values, "SOLAND_RECEIVE_POLICY_HANDLE_CLAIM_MAX_BEHAVIOR")?;
+        env_receive_action(values, "COLAND_RECEIVE_POLICY_HANDLE_CLAIM_MAX_BEHAVIOR")?;
     let explicit_address_max_behavior = env_receive_action(
         values,
-        "SOLAND_RECEIVE_POLICY_EXPLICIT_ADDRESS_MAX_BEHAVIOR",
+        "COLAND_RECEIVE_POLICY_EXPLICIT_ADDRESS_MAX_BEHAVIOR",
     )?;
     let unknown_invites_max_behavior =
-        env_unknown_action(values, "SOLAND_RECEIVE_POLICY_UNKNOWN_INVITES_MAX_BEHAVIOR")?;
+        env_unknown_action(values, "COLAND_RECEIVE_POLICY_UNKNOWN_INVITES_MAX_BEHAVIOR")?;
     let disclosure_max = {
         let high_trust_max =
-            env_disclosure_level(values, "SOLAND_RECEIVE_POLICY_DISCLOSURE_HIGH_TRUST_MAX")?;
+            env_disclosure_level(values, "COLAND_RECEIVE_POLICY_DISCLOSURE_HIGH_TRUST_MAX")?;
         let discovery_trust_max = env_disclosure_level(
             values,
-            "SOLAND_RECEIVE_POLICY_DISCLOSURE_DISCOVERY_TRUST_MAX",
+            "COLAND_RECEIVE_POLICY_DISCLOSURE_DISCOVERY_TRUST_MAX",
         )?;
         let low_trust_max =
-            env_disclosure_level(values, "SOLAND_RECEIVE_POLICY_DISCLOSURE_LOW_TRUST_MAX")?;
+            env_disclosure_level(values, "COLAND_RECEIVE_POLICY_DISCLOSURE_LOW_TRUST_MAX")?;
         if high_trust_max.is_some() || discovery_trust_max.is_some() || low_trust_max.is_some() {
             Some(arkret_wire::receive_policy::ReceiveDisclosureMax {
                 high_trust_max,
@@ -2037,22 +2037,22 @@ fn load_receive_policy_constraints(
         }
     };
     let allowed_handle_domains =
-        env_csv_cap(values, "SOLAND_RECEIVE_POLICY_ALLOWED_HANDLE_DOMAINS").map(|domains| {
+        env_csv_cap(values, "COLAND_RECEIVE_POLICY_ALLOWED_HANDLE_DOMAINS").map(|domains| {
             domains
                 .into_iter()
                 .map(|domain| domain.to_ascii_lowercase())
                 .collect()
         });
     let trusted_handle_issuer_ids =
-        env_did_csv_cap(values, "SOLAND_RECEIVE_POLICY_TRUSTED_HANDLE_ISSUERS")?;
+        env_did_csv_cap(values, "COLAND_RECEIVE_POLICY_TRUSTED_HANDLE_ISSUERS")?;
     let trusted_directory_ids =
-        env_did_csv_cap(values, "SOLAND_RECEIVE_POLICY_TRUSTED_DIRECTORY_SERVICES")?;
+        env_did_csv_cap(values, "COLAND_RECEIVE_POLICY_TRUSTED_DIRECTORY_SERVICES")?;
     let trusted_source_ids =
-        env_did_csv_cap(values, "SOLAND_RECEIVE_POLICY_TRUSTED_PRINCIPAL_SERVICES")?;
+        env_did_csv_cap(values, "COLAND_RECEIVE_POLICY_TRUSTED_PRINCIPAL_SERVICES")?;
     let denied_source_ids =
-        env_did_csv_cap(values, "SOLAND_RECEIVE_POLICY_BLOCKED_PRINCIPAL_SERVICES")?;
+        env_did_csv_cap(values, "COLAND_RECEIVE_POLICY_BLOCKED_PRINCIPAL_SERVICES")?;
     let accepted_subject_did_methods =
-        env_csv_cap(values, "SOLAND_RECEIVE_POLICY_ACCEPTED_SUBJECT_DID_METHODS");
+        env_csv_cap(values, "COLAND_RECEIVE_POLICY_ACCEPTED_SUBJECT_DID_METHODS");
     let new_source_quota = load_new_source_quota(values)?;
 
     let has_any_constraint = applies_to.is_some()
@@ -2153,26 +2153,26 @@ fn rate_limit_override(values: &BTreeMap<String, String>, name: &str) -> Option<
 
 fn load_otel_config(values: &BTreeMap<String, String>) -> anyhow::Result<OtelConfig> {
     let defaults = OtelConfig::default();
-    let sample_ratio = env_non_empty(values, "SOLAND_OTEL_SAMPLE_RATIO")
+    let sample_ratio = env_non_empty(values, "COLAND_OTEL_SAMPLE_RATIO")
         .map(|value| value.parse::<f64>())
         .transpose()
-        .map_err(|error| anyhow::anyhow!("SOLAND_OTEL_SAMPLE_RATIO must be a number: {error}"))?
+        .map_err(|error| anyhow::anyhow!("COLAND_OTEL_SAMPLE_RATIO must be a number: {error}"))?
         .unwrap_or(defaults.sample_ratio);
     anyhow::ensure!(
         (0.0..=1.0).contains(&sample_ratio),
-        "SOLAND_OTEL_SAMPLE_RATIO must be between 0.0 and 1.0"
+        "COLAND_OTEL_SAMPLE_RATIO must be between 0.0 and 1.0"
     );
     Ok(OtelConfig {
-        exporter_enabled: env_non_empty(values, "SOLAND_OTEL_EXPORTER").is_some_and(|value| {
+        exporter_enabled: env_non_empty(values, "COLAND_OTEL_EXPORTER").is_some_and(|value| {
             matches!(value.to_ascii_lowercase().as_str(), "otlp" | "1" | "true")
         }),
-        endpoint: env_non_empty(values, "SOLAND_OTEL_ENDPOINT").unwrap_or(defaults.endpoint),
-        timeout_seconds: env_non_empty(values, "SOLAND_OTEL_TIMEOUT_SECS")
+        endpoint: env_non_empty(values, "COLAND_OTEL_ENDPOINT").unwrap_or(defaults.endpoint),
+        timeout_seconds: env_non_empty(values, "COLAND_OTEL_TIMEOUT_SECS")
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(defaults.timeout_seconds)
             .max(1),
         sample_ratio,
-        service_name: env_non_empty(values, "SOLAND_OTEL_SERVICE_NAME"),
+        service_name: env_non_empty(values, "COLAND_OTEL_SERVICE_NAME"),
     })
 }
 
@@ -2221,7 +2221,7 @@ fn env_csv(values: &BTreeMap<String, String>, name: &str) -> Option<Vec<String>>
 fn default_did_resolver_allow_methods() -> Vec<String> {
     // did:webvh-only red line: `web` is intentionally absent from the default
     // resolver allow-list. Deployments that must interoperate with bare
-    // did:web peers can opt in explicitly via SOLAND_DID_RESOLVER_ALLOW_METHODS.
+    // did:web peers can opt in explicitly via COLAND_DID_RESOLVER_ALLOW_METHODS.
     vec!["webvh".to_owned(), "key".to_owned(), "uuid".to_owned()]
 }
 
@@ -2268,28 +2268,28 @@ mod tests {
     fn registered_internal_channel_values() -> BTreeMap<String, String> {
         BTreeMap::from([
             (
-                "SOLAND_TRUST_DOMAIN".to_owned(),
+                "COLAND_TRUST_DOMAIN".to_owned(),
                 "ak:trust_domain:station.example".to_owned(),
             ),
-            ("SOLAND_DEVELOPMENT_MODE".to_owned(), "true".to_owned()),
+            ("COLAND_DEVELOPMENT_MODE".to_owned(), "true".to_owned()),
             (
-                "SOLAND_ACCOUNT_AUTHORITY_URL".to_owned(),
+                "COLAND_ACCOUNT_AUTHORITY_URL".to_owned(),
                 "https://auth.example".to_owned(),
             ),
             (
-                "SOLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN".to_owned(),
+                "COLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN".to_owned(),
                 "ak:trust_domain:auth.example".to_owned(),
             ),
             (
-                "SOLAND_INTERNAL_AUTHORITY_SHARED_SECRET".to_owned(),
+                "COLAND_INTERNAL_AUTHORITY_SHARED_SECRET".to_owned(),
                 "test-internal-channel-secret".to_owned(),
             ),
             (
-                "SOLAND_SESSION_GRANT_INTROSPECTION_URL".to_owned(),
+                "COLAND_SESSION_GRANT_INTROSPECTION_URL".to_owned(),
                 "https://auth.example:443/_coauth/internal/session-grants/introspect".to_owned(),
             ),
             (
-                "SOLAND_AUTH_SESSION_LOGOUT_URL".to_owned(),
+                "COLAND_AUTH_SESSION_LOGOUT_URL".to_owned(),
                 "https://auth.example/_coauth/internal/auth-sessions/logout".to_owned(),
             ),
         ])
@@ -2319,14 +2319,14 @@ mod tests {
     #[test]
     fn trusted_push_gateway_registry_is_validated_and_injected_from_config() {
         let mut values = BTreeMap::from([
-            ("SOLAND_DEVELOPMENT_MODE".to_owned(), "true".to_owned()),
+            ("COLAND_DEVELOPMENT_MODE".to_owned(), "true".to_owned()),
             (
-                "SOLAND_TRUST_DOMAIN".to_owned(),
+                "COLAND_TRUST_DOMAIN".to_owned(),
                 "ak:trust_domain:station.example".to_owned(),
             ),
         ]);
         values.insert(
-            "SOLAND_TRUSTED_PUSH_GATEWAYS".to_owned(),
+            "COLAND_TRUSTED_PUSH_GATEWAYS".to_owned(),
             serde_json::json!([{
                 "canonical_origin": "https://push.example",
                 "service_did": "did:web:push.example",
@@ -2349,9 +2349,9 @@ mod tests {
     #[test]
     fn signed_pairing_transport_does_not_require_the_shared_secret_channel() {
         let mut values = registered_internal_channel_values();
-        values.remove("SOLAND_INTERNAL_AUTHORITY_SHARED_SECRET");
-        values.remove("SOLAND_SESSION_GRANT_INTROSPECTION_URL");
-        values.remove("SOLAND_AUTH_SESSION_LOGOUT_URL");
+        values.remove("COLAND_INTERNAL_AUTHORITY_SHARED_SECRET");
+        values.remove("COLAND_SESSION_GRANT_INTROSPECTION_URL");
+        values.remove("COLAND_AUTH_SESSION_LOGOUT_URL");
         let config =
             AppConfig::from_values(&values, StartupOverrides::default()).expect("valid config");
         assert!(config.internal_authority_channel.is_none());
@@ -2369,7 +2369,7 @@ mod tests {
     fn deactivation_propagation_window_is_explicit_and_positive() {
         let mut values = registered_internal_channel_values();
         values.insert(
-            "SOLAND_DEACTIVATION_PROPAGATION_WINDOW_MS".to_owned(),
+            "COLAND_DEACTIVATION_PROPAGATION_WINDOW_MS".to_owned(),
             "1234".to_owned(),
         );
         let config =
@@ -2377,7 +2377,7 @@ mod tests {
         assert_eq!(config.deactivation_propagation_window_ms, 1234);
 
         values.insert(
-            "SOLAND_DEACTIVATION_PROPAGATION_WINDOW_MS".to_owned(),
+            "COLAND_DEACTIVATION_PROPAGATION_WINDOW_MS".to_owned(),
             "0".to_owned(),
         );
         let error = AppConfig::from_values(&values, StartupOverrides::default())
@@ -2385,52 +2385,52 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("SOLAND_DEACTIVATION_PROPAGATION_WINDOW_MS")
+                .contains("COLAND_DEACTIVATION_PROPAGATION_WINDOW_MS")
         );
     }
 
     #[test]
     fn registered_internal_channel_rejects_cross_origin_or_inexact_bearer_targets() {
         for (env_name, invalid) in [
-            ("SOLAND_ACCOUNT_AUTHORITY_URL", "https://user@auth.example/"),
+            ("COLAND_ACCOUNT_AUTHORITY_URL", "https://user@auth.example/"),
             (
-                "SOLAND_ACCOUNT_AUTHORITY_URL",
+                "COLAND_ACCOUNT_AUTHORITY_URL",
                 "https://auth.example/?routing=unsafe",
             ),
             (
-                "SOLAND_ACCOUNT_AUTHORITY_URL",
+                "COLAND_ACCOUNT_AUTHORITY_URL",
                 "https://auth.example/#routing",
             ),
             (
-                "SOLAND_SESSION_GRANT_INTROSPECTION_URL",
+                "COLAND_SESSION_GRANT_INTROSPECTION_URL",
                 "https://other.example/_coauth/internal/session-grants/introspect",
             ),
             (
-                "SOLAND_SESSION_GRANT_INTROSPECTION_URL",
+                "COLAND_SESSION_GRANT_INTROSPECTION_URL",
                 "http://auth.example/_coauth/internal/session-grants/introspect",
             ),
             (
-                "SOLAND_SESSION_GRANT_INTROSPECTION_URL",
+                "COLAND_SESSION_GRANT_INTROSPECTION_URL",
                 "https://auth.example:444/_coauth/internal/session-grants/introspect",
             ),
             (
-                "SOLAND_SESSION_GRANT_INTROSPECTION_URL",
+                "COLAND_SESSION_GRANT_INTROSPECTION_URL",
                 "https://user@auth.example/_coauth/internal/session-grants/introspect",
             ),
             (
-                "SOLAND_SESSION_GRANT_INTROSPECTION_URL",
+                "COLAND_SESSION_GRANT_INTROSPECTION_URL",
                 "https://auth.example/_coauth/internal/session-grants/introspect?copy=1",
             ),
             (
-                "SOLAND_SESSION_GRANT_INTROSPECTION_URL",
+                "COLAND_SESSION_GRANT_INTROSPECTION_URL",
                 "https://auth.example/_coauth/internal/session-grants/introspect#copy",
             ),
             (
-                "SOLAND_SESSION_GRANT_INTROSPECTION_URL",
+                "COLAND_SESSION_GRANT_INTROSPECTION_URL",
                 "https://auth.example/_coauth/internal/session-grants/introspect/",
             ),
             (
-                "SOLAND_AUTH_SESSION_LOGOUT_URL",
+                "COLAND_AUTH_SESSION_LOGOUT_URL",
                 "https://other.example/_coauth/internal/auth-sessions/logout",
             ),
         ] {
@@ -2455,7 +2455,7 @@ mod tests {
         ));
 
         let platform_values =
-            BTreeMap::from([("SOLAND_KEYSTORE_BACKEND".to_owned(), "platform".to_owned())]);
+            BTreeMap::from([("COLAND_KEYSTORE_BACKEND".to_owned(), "platform".to_owned())]);
         assert!(matches!(
             KeyStoreConfig::from_values(&platform_values).unwrap(),
             KeyStoreConfig::Platform
@@ -2464,14 +2464,14 @@ mod tests {
         let encoded = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
         let encrypted_values = BTreeMap::from([
             (
-                "SOLAND_KEYSTORE_BACKEND".to_owned(),
+                "COLAND_KEYSTORE_BACKEND".to_owned(),
                 "encrypted_file".to_owned(),
             ),
             (
-                "SOLAND_KEYSTORE_PATH".to_owned(),
-                "soland-test-keystore.v1".to_owned(),
+                "COLAND_KEYSTORE_PATH".to_owned(),
+                "coland-test-keystore.v1".to_owned(),
             ),
-            ("SOLAND_KEYSTORE_MASTER_KEY".to_owned(), encoded.clone()),
+            ("COLAND_KEYSTORE_MASTER_KEY".to_owned(), encoded.clone()),
         ]);
         let encrypted = KeyStoreConfig::from_values(&encrypted_values).unwrap();
         assert_eq!(encrypted.backend_name(), Some("encrypted_file"));
@@ -2520,13 +2520,13 @@ mod tests {
     #[test]
     fn ice_servers_defaults_match_historical_hardcoded_values() {
         // These defaults must keep the pre-externalization wire behavior so
-        // deployments that do not set `SOLAND_ICE_*` / `SOLAND_TURN_*` see no
+        // deployments that do not set `COLAND_ICE_*` / `COLAND_TURN_*` see no
         // change in their issued ICE configs.
         let ice = IceServersConfig::default();
         assert_eq!(ice.stun_urls, vec!["stun:stun.l.google.com:19302"]);
         assert_eq!(
             ice.turn_urls,
-            vec!["turn:turn.soland.local:3478?transport=udp"]
+            vec!["turn:turn.coland.local:3478?transport=udp"]
         );
         assert_eq!(ice.ttl_seconds, 300);
         assert_eq!(ice.refresh_lead_seconds, 75);

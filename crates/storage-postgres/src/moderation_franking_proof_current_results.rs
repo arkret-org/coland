@@ -2,10 +2,10 @@
 
 use arkret_models_collaboration::events_payloads::moderation::FrankingProof;
 use arkret_wire::{ActorId, Event, EventId, EventKind, RealmId, ScopeRef};
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::OptionalExtension as _;
 use diesel::sql_types::{BigInt, Binary, Jsonb, Nullable, SmallInt, Text, Timestamptz};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
-use soland_storage::{PersistenceError, PersistenceResult};
 
 fn invalid(detail: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Conflict(format!("signature_invalid: franking proof: {detail}"))
@@ -143,7 +143,7 @@ struct JobRow {
 pub(crate) async fn pending_franking_in_connection(
     conn: &mut AsyncPgConnection,
     receiver: &arkret_wire::DidCoreId,
-) -> PersistenceResult<Vec<soland_storage::PendingFrankingProof>> {
+) -> PersistenceResult<Vec<coland_storage::PendingFrankingProof>> {
     diesel::sql_query(
         "SELECT realm_id,target_event_id,received_by,received_at,prepared_event,verification_key \
          FROM moderation_franking_jobs WHERE received_by=$1 ORDER BY received_at,target_event_id LIMIT 64",
@@ -153,7 +153,7 @@ pub(crate) async fn pending_franking_in_connection(
     .await
     .map_err(PersistenceError::database)?
     .into_iter()
-    .map(|row| Ok(soland_storage::PendingFrankingProof {
+    .map(|row| Ok(coland_storage::PendingFrankingProof {
         realm_id: RealmId::new(row.realm_id).map_err(invalid)?,
         target_event_id: EventId::new(row.target_event_id).map_err(invalid)?,
         received_by: arkret_wire::DidCoreId::new(row.received_by).map_err(invalid)?,
@@ -218,7 +218,7 @@ fn verify_prepared(
 /// A concurrent worker may win; the durable first Event is returned exactly.
 pub(crate) async fn fix_franking_in_connection(
     conn: &mut AsyncPgConnection,
-    prepared: &soland_storage::PreparedFrankingProof,
+    prepared: &coland_storage::PreparedFrankingProof,
 ) -> PersistenceResult<Event> {
     let proof: FrankingProof =
         serde_json::from_value(serde_json::to_value(&prepared.event.payload).map_err(invalid)?)
@@ -366,7 +366,7 @@ async fn consume_proof_nonce(
     event: &Event,
     consumed_at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
-    let expires_at = soland_storage::franking_replay_nonce_expires_at(consumed_at)?;
+    let expires_at = coland_storage::franking_replay_nonce_expires_at(consumed_at)?;
     diesel::sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
         .bind::<Text, _>(format!(
             "franking_proof_nonce.v1|{}|{}",
@@ -397,7 +397,7 @@ async fn consume_proof_nonce(
     .get_result::<Count>(&mut *conn)
     .await
     .map_err(PersistenceError::database)?;
-    if active.count >= soland_storage::LOCAL_FRANKING_REPLAY_NONCE_MAX_ACTIVE_PER_SCOPE as i64 {
+    if active.count >= coland_storage::LOCAL_FRANKING_REPLAY_NONCE_MAX_ACTIVE_PER_SCOPE as i64 {
         return Err(PersistenceError::Conflict("rate_limited".into()));
     }
     let inserted = diesel::sql_query(

@@ -39,8 +39,8 @@ https://auth.local.host:443 {
 	import dev_cors
 	import dev_error_cors
 
-	# The Account Authority gate is split across Coauth and Soland. Coauth owns
-	# onboarding/session issuance, while Soland owns the single client-visible
+	# The Account Authority gate is split across Coauth and Coland. Coauth owns
+	# onboarding/session issuance, while Coland owns the single client-visible
 	# hard-logout operation and performs the principal-side cleanup before
 	# terminating the Auth-side session.
 	@account_logout path /_arkret/gate/account/logout

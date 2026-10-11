@@ -1,6 +1,6 @@
 //! P2 — moderation control-plane projection.
 //!
-//! Migrates moderation from an `/_soland/admin` write path onto protocol
+//! Migrates moderation from an `/_coland/admin` write path onto protocol
 //! events. Projects the active moderation kinds into the canonical cells
 //! declared by `event-kind-registry.json`:
 //!

@@ -522,8 +522,8 @@ mod tests {
         .unwrap();
         let refused = crate::authority_commit::commit_transaction_in_connection(
             &mut conn,
-            &soland_storage::AuthorityCommitTransaction {
-                expected_authority: soland_storage::CurrentRealmAuthority {
+            &coland_storage::AuthorityCommitTransaction {
+                expected_authority: coland_storage::CurrentRealmAuthority {
                     realm_id: realm_id.clone(),
                     generation: 0,
                     service_id: arkret_wire::DidCoreId::new("ak:did_core:web:station.example")

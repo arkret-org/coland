@@ -1,21 +1,21 @@
 use crate::state::AppState;
 
-fn snapshot_unavailable(message: &'static str) -> soland_http::error::AppError {
+fn snapshot_unavailable(message: &'static str) -> coland_http::error::AppError {
     crate::app_error!(RealmStateSnapshotUnavailable, message,)
 }
 
 fn map_issue_error(
     realm_id: &arkret_wire::RealmId,
-    error: soland_services::ServiceError,
-) -> soland_http::error::AppError {
-    if error.conflict_code() == Some(soland_storage::ConflictCode::SnapshotCapacityExceeded) {
+    error: coland_services::ServiceError,
+) -> coland_http::error::AppError {
+    if error.conflict_code() == Some(coland_storage::ConflictCode::SnapshotCapacityExceeded) {
         return crate::app_error!(
             PayloadTooLarge,
             "complete Realm State Snapshot exceeds the 8 MiB inline response limit",
         )
         .with_wire_code("payload_too_large");
     }
-    if error.conflict_code() == Some(soland_storage::ConflictCode::TemporarilyUnavailable) {
+    if error.conflict_code() == Some(coland_storage::ConflictCode::TemporarilyUnavailable) {
         // The entire transaction rolled back. A signature may have been
         // computed, but no issuance was committed or returned. Serialization
         // alone cannot distinguish a handoff from an issuance-row race.
@@ -27,11 +27,11 @@ fn map_issue_error(
         return snapshot_unavailable("a concurrent write prevented snapshot issuance");
     }
     match error {
-        soland_services::ServiceError::SchemaViolation(_) => {
+        coland_services::ServiceError::SchemaViolation(_) => {
             tracing::warn!(%error, realm_id=%realm_id, "snapshot disclosure gate rejected material");
             snapshot_unavailable("complete Account disclosure cannot be proved at this cut")
         }
-        other => soland_http::error::AppError::internal(other.to_string()),
+        other => coland_http::error::AppError::internal(other.to_string()),
     }
 }
 
@@ -43,7 +43,7 @@ pub(crate) async fn account_is_joined_member(
     state: &AppState,
     realm_id: &str,
     account: &arkret_wire::AccountId,
-) -> Result<bool, soland_http::error::AppError> {
+) -> Result<bool, coland_http::error::AppError> {
     let Ok(realm_id) = arkret_wire::RealmId::new(realm_id.to_owned()) else {
         return Ok(false);
     };
@@ -52,9 +52,9 @@ pub(crate) async fn account_is_joined_member(
         .list_realm_streams_for_account(&realm_id, account, &state.service_core_id())
         .await
     {
-        Ok(soland_storage::AccountRealmStreamList::NotVisible) => Ok(false),
+        Ok(coland_storage::AccountRealmStreamList::NotVisible) => Ok(false),
         Ok(_) => Ok(true),
-        Err(error) => Err(soland_http::error::AppError::internal(error.to_string())),
+        Err(error) => Err(coland_http::error::AppError::internal(error.to_string())),
     }
 }
 
@@ -66,14 +66,14 @@ pub(crate) async fn realm_state_snapshot_manifest_for_realm(
     state: &AppState,
     realm_id: &str,
     account: &arkret_wire::AccountId,
-) -> Result<arkret_wire::RealmStateSnapshot, soland_http::error::AppError> {
+) -> Result<arkret_wire::RealmStateSnapshot, coland_http::error::AppError> {
     let realm_id = arkret_wire::RealmId::new(realm_id.to_owned())
-        .map_err(|_| soland_http::error::AppError::param_invalid("invalid realm_id"))?;
+        .map_err(|_| coland_http::error::AppError::param_invalid("invalid realm_id"))?;
     if state
         .authority_commits()
         .current_authority(&realm_id)
         .await
-        .map_err(|error| soland_http::error::AppError::internal(error.to_string()))?
+        .map_err(|error| coland_http::error::AppError::internal(error.to_string()))?
         .is_some_and(|authority| authority.service_id != state.service_core_id())
     {
         return crate::state::refresh_account_snapshot(state, &realm_id, account)
@@ -84,7 +84,7 @@ pub(crate) async fn realm_state_snapshot_manifest_for_realm(
     }
     let verification_method = state
         .service_verification_method("notary-key")
-        .map_err(soland_http::error::AppError::internal)?;
+        .map_err(coland_http::error::AppError::internal)?;
     let signing_key = state.notary_signing_key();
     state
         .authority_commits()
@@ -98,7 +98,7 @@ pub(crate) async fn realm_state_snapshot_manifest_for_realm(
         )
         .await
         .map_err(|error| map_issue_error(&realm_id, error))?
-        .ok_or_else(|| soland_http::error::AppError::not_found("not found"))
+        .ok_or_else(|| coland_http::error::AppError::not_found("not found"))
 }
 
 /// Return exactly the original object previously issued to this Account,
@@ -109,9 +109,9 @@ pub(crate) async fn issued_realm_state_snapshot_for_account(
     realm_id: &str,
     snapshot_id: &arkret_wire::RealmSnapshotId,
     account: &arkret_wire::AccountId,
-) -> Result<arkret_wire::RealmStateSnapshot, soland_http::error::AppError> {
+) -> Result<arkret_wire::RealmStateSnapshot, coland_http::error::AppError> {
     let realm_id = arkret_wire::RealmId::new(realm_id.to_owned())
-        .map_err(|_| soland_http::error::AppError::param_invalid("invalid realm_id"))?;
+        .map_err(|_| coland_http::error::AppError::param_invalid("invalid realm_id"))?;
     match state
         .authority_commits()
         .issued_realm_state_snapshot(&realm_id, account, snapshot_id, &state.service_core_id())
@@ -121,13 +121,13 @@ pub(crate) async fn issued_realm_state_snapshot_for_account(
         Ok(None) => Err(snapshot_unavailable(
             "the exact snapshot was not issued to this Account",
         )),
-        Err(soland_services::ServiceError::SchemaViolation(reason)) => {
+        Err(coland_services::ServiceError::SchemaViolation(reason)) => {
             tracing::warn!(%reason, realm_id=%realm_id, "issued snapshot disclosure recheck failed");
             Err(snapshot_unavailable(
                 "the exact snapshot is no longer safely disclosable",
             ))
         }
-        Err(error) => Err(soland_http::error::AppError::internal(error.to_string())),
+        Err(error) => Err(coland_http::error::AppError::internal(error.to_string())),
     }
 }
 
@@ -146,9 +146,9 @@ mod issue_error_tests {
     fn snapshot_transaction_race_is_the_registered_snapshot_unavailability() {
         let raced = map_issue_error(
             &realm(),
-            soland_services::ServiceError::Conflict(format!(
+            coland_services::ServiceError::Conflict(format!(
                 "{}: the snapshot transaction lost a concurrent write race: could not serialize access",
-                soland_storage::ConflictCode::TemporarilyUnavailable.as_str(),
+                coland_storage::ConflictCode::TemporarilyUnavailable.as_str(),
             )),
         );
         assert_eq!(raced.wire_code(), "realm_state_snapshot_unavailable");
@@ -158,7 +158,7 @@ mod issue_error_tests {
         // guessed into a caller-facing reason.
         let fault = map_issue_error(
             &realm(),
-            soland_services::ServiceError::Database("connection reset".to_owned()),
+            coland_services::ServiceError::Database("connection reset".to_owned()),
         );
         assert_eq!(fault.http_status().as_u16(), 500);
     }

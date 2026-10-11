@@ -1,10 +1,10 @@
 use arkret_wire::WebOrigin;
-use diesel::sql_types::Bool;
-use diesel_async::AsyncConnection;
-use soland_storage::{
+use coland_storage::{
     WebsocketAuthChallengeRecord, WebsocketAuthReplayRecord, WebsocketAuthStore,
     WebsocketConnectionLease,
 };
+use diesel::sql_types::Bool;
+use diesel_async::AsyncConnection;
 
 use super::{
     ExistsRow, OptionalExtension, PersistenceError, PersistenceResult, PgPool, QueryableByName,

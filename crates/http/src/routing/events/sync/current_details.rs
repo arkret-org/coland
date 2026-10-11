@@ -22,14 +22,14 @@ use arkret_models_collaboration::sync_frames::demand_sync::{
     ACCOUNT_SYNC_DEFAULT_WINDOW_LIMIT, ACCOUNT_SYNC_MAX_FRAME_BYTES, RealmDetailErrorCode,
     RealmDetailUnavailable,
 };
-use soland_storage::{AccountDetailProgress, AccountRealmWindowRequest};
+use coland_storage::{AccountDetailProgress, AccountRealmWindowRequest};
 
 use super::*;
 
 /// Consumable period of a frozen window and of its basis reservation. It is
 /// the longest a reservation may claim, which is also the Account cursor's
 /// own maximum lifetime.
-const WINDOW_TTL_MS: i64 = soland_storage::MAX_ACCOUNT_WINDOW_RESERVATION_MS;
+const WINDOW_TTL_MS: i64 = coland_storage::MAX_ACCOUNT_WINDOW_RESERVATION_MS;
 /// A delivered window is refrozen once less than this remains, so the cursor
 /// lineage that carries it is not forced to expire with the old window.
 const WINDOW_RENEW_BEFORE_MS: i64 = WINDOW_TTL_MS / 2;
@@ -74,7 +74,7 @@ pub(super) async fn continuation_heads_covered(
     account: &arkret_wire::AccountId,
     body: &SyncRequestBody,
     after: &SyncCursor,
-) -> soland_services::ServiceResult<bool> {
+) -> coland_services::ServiceResult<bool> {
     let Some(filter) = body.filter.as_ref() else {
         return Ok(true);
     };
@@ -176,7 +176,7 @@ fn unavailable(error_code: RealmDetailErrorCode) -> RealmSyncEntry {
 /// client decides what it may install.
 fn window_entry(
     realm: &RealmId,
-    window: soland_storage::AccountRealmWindow,
+    window: coland_storage::AccountRealmWindow,
     cursor: &str,
     baseline_revision: Option<u64>,
 ) -> RealmSyncEntry {
@@ -309,7 +309,7 @@ async fn freeze(
             ))
         }
         Ok(None) => Ok(Freeze::Unavailable(RealmDetailErrorCode::NotFound)),
-        Err(soland_services::ServiceError::SchemaViolation(reason)) => {
+        Err(coland_services::ServiceError::SchemaViolation(reason)) => {
             tracing::info!(%reason, realm_id = %realm, "Account window cannot be proved at this cut");
             Ok(Freeze::Unavailable(if reason.contains("byte budget") {
                 RealmDetailErrorCode::LimitExceeded
@@ -319,7 +319,7 @@ async fn freeze(
         }
         Err(error)
             if error.conflict_code()
-                == Some(soland_storage::ConflictCode::TemporarilyUnavailable) =>
+                == Some(coland_storage::ConflictCode::TemporarilyUnavailable) =>
         {
             Ok(Freeze::Unavailable(
                 RealmDetailErrorCode::TemporarilyUnavailable,

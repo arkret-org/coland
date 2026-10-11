@@ -1,7 +1,7 @@
 //! Account + contact handlers.
 //!
 //! Surfaces:
-//! - `POST /_soland/gate/account/project` — materialize an Account Authority result
+//! - `POST /_coland/gate/account/project` — materialize an Account Authority result
 //! - `GET  /_arkret/self/account/viewer` — return the authenticated principal's account
 //! - `POST /_arkret/self/contacts/request` — open a pending contact relationship
 //! - `POST /_arkret/self/contacts/respond` — accept or reject a pending request
@@ -50,22 +50,22 @@ use arkret_models_identity::{
     PrincipalResolutionAuditRequest,
 };
 use arkret_wire::ActorId;
+use coland_contracts::AccountProjectionRequestBody;
+use coland_contracts::admin::{
+    AccountLocalpartAddRequestBody, AccountLocalpartListOutcome, AccountLocalpartMutationOutcome,
+    AccountLocalpartView,
+};
+use coland_http::error::AppError;
+use coland_services::identity::{
+    AccountLifecycleState, AccountLocalpartState as AccountLocalpartRecord,
+    AccountProfileState as AccountRecord, AgentPairingState, ContactRecord, DeviceIdentity,
+    DirectConversationBindingRecord, SessionIdentityState as SessionRecord,
+};
 use salvo::http::StatusCode;
 use salvo::oapi::extract::{JsonBody, PathParam};
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use soland_contracts::AccountProjectionRequestBody;
-use soland_contracts::admin::{
-    AccountLocalpartAddRequestBody, AccountLocalpartListOutcome, AccountLocalpartMutationOutcome,
-    AccountLocalpartView,
-};
-use soland_http::error::AppError;
-use soland_services::identity::{
-    AccountLifecycleState, AccountLocalpartState as AccountLocalpartRecord,
-    AccountProfileState as AccountRecord, AgentPairingState, ContactRecord, DeviceIdentity,
-    DirectConversationBindingRecord, SessionIdentityState as SessionRecord,
-};
 
 use self::social::direct::direct_founder_for_pair;
 use super::auth::{
@@ -75,7 +75,7 @@ use super::did::require_embedded_webvh_registration_bearer;
 use super::{AuthArgs, append_audit_log, bearer_token, now, sha256_hex, validate_did};
 use crate::routing::validate_device_id;
 use crate::state::AppState;
-use crate::wire::SolandAccountRegisterOutcome;
+use crate::wire::ColandAccountRegisterOutcome;
 
 /// Deployment-local Station projection result. The Account
 /// Authority owns `AccountRegisterOutcome` and its signed binding receipt;
@@ -98,7 +98,7 @@ struct AccountProjectionRegisterOutcome {
 pub(crate) async fn record_handle_release(
     state: &AppState,
     localpart: &str,
-) -> soland_services::ServiceResult<()> {
+) -> coland_services::ServiceResult<()> {
     let released_at = chrono::Utc::now();
     state
         .identities()
@@ -201,7 +201,7 @@ pub(in crate::routing) fn local_router() -> Router {
 }
 
 pub(in crate::routing) fn local_service_router() -> Router {
-    Router::with_path(soland_contracts::ACCOUNT_LOCALPARTS_ROUTE)
+    Router::with_path(coland_contracts::ACCOUNT_LOCALPARTS_ROUTE)
         .get(list_account_localparts)
         .post(add_account_localpart)
 }
@@ -243,7 +243,7 @@ fn require_account_localparts_bearer(state: &AppState, req: &Request) -> Result<
     else {
         return Err(crate::app_error!(
             TemporarilyUnavailable,
-            "account localparts sync requires SOLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER",
+            "account localparts sync requires COLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER",
         ));
     };
     let Some(provided) = bearer_token(req)
@@ -288,7 +288,7 @@ fn account_core_id_from_path(value: String) -> Result<DidCoreId, AppError> {
     DidCoreId::new(value).map_err(|_| AppError::param_invalid("invalid account core id"))
 }
 
-fn localpart_persistence_error(error: soland_services::ServiceError) -> AppError {
+fn localpart_persistence_error(error: coland_services::ServiceError) -> AppError {
     if error.is_not_found() {
         AppError::not_found(error.detail())
     } else if error.is_conflict_kind() {
@@ -301,7 +301,7 @@ fn localpart_persistence_error(error: soland_services::ServiceError) -> AppError
 async fn local_account_pk(
     state: &AppState,
     account_principal_id: &DidCoreId,
-) -> Result<soland_storage::AccountPk, AppError> {
+) -> Result<coland_storage::AccountPk, AppError> {
     state
         .identities()
         .account(&arkret_wire::AccountId::new(
@@ -387,7 +387,7 @@ async fn reject_account_registration(
     did: &str,
     handle: Option<&str>,
     audit: AccountRegistrationAudit,
-    code: soland_http::error::ErrorCode,
+    code: coland_http::error::ErrorCode,
     message: &'static str,
 ) -> AppError {
     append_account_registration_audit(state, did, handle, &audit).await;
@@ -499,7 +499,7 @@ async fn enforce_account_registration_policy(
             principal_id,
             handle,
             audit,
-            soland_http::error::ErrorCode::FailedPrecondition,
+            coland_http::error::ErrorCode::FailedPrecondition,
             "account registration is closed",
         )
         .await);
@@ -518,7 +518,7 @@ async fn enforce_account_registration_policy(
             principal_id,
             handle,
             audit,
-            soland_http::error::ErrorCode::RateLimited,
+            coland_http::error::ErrorCode::RateLimited,
             "account registration rate limit exceeded",
         )
         .await);
@@ -541,7 +541,7 @@ async fn enforce_account_registration_policy(
             principal_id,
             handle,
             audit,
-            soland_http::error::ErrorCode::FailedPrecondition,
+            coland_http::error::ErrorCode::FailedPrecondition,
             "registration verification code is required",
         )
         .await);
@@ -561,7 +561,7 @@ async fn enforce_account_registration_policy(
             principal_id,
             handle,
             audit,
-            soland_http::error::ErrorCode::FailedPrecondition,
+            coland_http::error::ErrorCode::FailedPrecondition,
             "registration verification code is invalid",
         )
         .await);
@@ -578,7 +578,7 @@ async fn enforce_account_registration_policy(
             principal_id,
             handle,
             audit,
-            soland_http::error::ErrorCode::FailedPrecondition,
+            coland_http::error::ErrorCode::FailedPrecondition,
             "principal is not allowed by the registration organization policy",
         )
         .await);
@@ -601,7 +601,7 @@ async fn enforce_account_registration_policy(
             principal_id,
             handle,
             audit,
-            soland_http::error::ErrorCode::FailedPrecondition,
+            coland_http::error::ErrorCode::FailedPrecondition,
             "registration invitation token is required",
         )
         .await);
@@ -620,7 +620,7 @@ async fn enforce_account_registration_policy(
             principal_id,
             handle,
             audit,
-            soland_http::error::ErrorCode::FailedPrecondition,
+            coland_http::error::ErrorCode::FailedPrecondition,
             "registration invitation token is invalid",
         )
         .await);
@@ -705,12 +705,12 @@ fn agent_direct_authorization_basis_from_record(
     Some(basis)
 }
 
-#[salvo::oapi::endpoint(operation_id = "org.arkret.soland.account.register", tags("identity"))]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.account.register"))]
+#[salvo::oapi::endpoint(operation_id = "org.arkret.coland.account.register", tags("identity"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.account.register"))]
 async fn local_account_register(
     depot: &mut Depot,
     body: JsonBody<LocalAccountRegisterRequestBody>,
-) -> JsonResult<SolandAccountRegisterOutcome> {
+) -> JsonResult<ColandAccountRegisterOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body = body.into_inner();
     let did =
@@ -753,7 +753,7 @@ async fn local_account_register(
         .or_else(|| Some(body.handle.trim_start_matches('@').to_owned()));
     let identity = state
         .identities()
-        .register_account(soland_services::identity::RegisterAccountCommand {
+        .register_account(coland_services::identity::RegisterAccountCommand {
             account_id: account_id.clone(),
             localpart: localpart.clone(),
             display_name: display_name.clone(),
@@ -794,13 +794,13 @@ async fn local_account_register(
     json_ok(account_response(account, state))
 }
 
-#[salvo::oapi::endpoint(operation_id = "org.arkret.soland.account.me", tags("identity"))]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.account.me"))]
+#[salvo::oapi::endpoint(operation_id = "org.arkret.coland.account.me", tags("identity"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.account.me"))]
 async fn local_account_me(
     aa: AuthArgs,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<SolandAccountRegisterOutcome> {
+) -> JsonResult<ColandAccountRegisterOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let account = state
@@ -818,10 +818,10 @@ async fn local_account_me(
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.accounts.localparts.list",
+    operation_id = "org.arkret.coland.accounts.localparts.list",
     tags("identity")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.accounts.localparts.list"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.accounts.localparts.list"))]
 async fn list_account_localparts(
     account_principal_id: PathParam<String>,
     depot: &mut Depot,
@@ -848,10 +848,10 @@ async fn list_account_localparts(
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.accounts.localparts.add",
+    operation_id = "org.arkret.coland.accounts.localparts.add",
     tags("identity")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.accounts.localparts.add"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.accounts.localparts.add"))]
 async fn add_account_localpart(
     account_principal_id: PathParam<String>,
     depot: &mut Depot,
@@ -907,7 +907,7 @@ pub(crate) async fn account_viewer(
 }
 
 #[salvo::handler]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.account.query.viewer"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.account.query.viewer"))]
 pub(crate) async fn admin_account_viewer(
     admin: crate::routing::admin::AdminAuth,
     depot: &mut Depot,
@@ -919,7 +919,7 @@ pub(crate) async fn admin_account_viewer(
 /// `session` is the caller already authenticated by the wrapping handler
 /// (the self bearer path or the `RequireAdmin` gate).
 async fn account_viewer_impl(
-    session: soland_services::identity::SessionIdentityState,
+    session: coland_services::identity::SessionIdentityState,
     depot: &mut Depot,
 ) -> JsonResult<AccountView> {
     let state = depot.get_typed::<AppState>().expect("state injected");
@@ -951,7 +951,7 @@ async fn account_viewer_impl(
     })
 }
 
-/// `POST /_soland/gate/account/project` — deployment-local Station
+/// `POST /_coland/gate/account/project` — deployment-local Station
 /// projection invoked only after the Account Authority has completed the
 /// canonical registration operation.
 ///
@@ -961,12 +961,12 @@ async fn account_viewer_impl(
 /// It requires the configured service bearer, never accepts the client-facing
 /// `identity_creation` branch, and does not create a handle as a side effect.
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.gate.account.command.project",
+    operation_id = "org.arkret.coland.gate.account.command.project",
     tags("identity")
 )]
 #[tracing::instrument(
     skip_all,
-    fields(op = "org.arkret.soland.gate.account.command.project")
+    fields(op = "org.arkret.coland.gate.account.command.project")
 )]
 async fn project_account(
     depot: &mut Depot,
@@ -1037,7 +1037,7 @@ async fn project_account(
     let created_at = now();
     let identity = state
         .identities()
-        .register_account(soland_services::identity::RegisterAccountCommand {
+        .register_account(coland_services::identity::RegisterAccountCommand {
             account_id: account_id.clone(),
             localpart: String::new(),
             display_name: body.display_name.clone(),
@@ -1141,15 +1141,15 @@ async fn update_profile(
         .map_err(|error| profile_admission_error(error.conflict_code(), error.detail()))?;
     let outcome = state
         .persistence()
-        .admit_actor_profile(soland_storage::ActorProfileAdmissionWrite {
+        .admit_actor_profile(coland_storage::ActorProfileAdmissionWrite {
             commit: transaction,
             queued_at: committed_at,
         })
         .await
         .map_err(|error| profile_admission_error(error.conflict_code(), &error.to_string()))?;
     let record = match outcome {
-        soland_storage::ActorProfileAdmissionOutcome::Committed(record)
-        | soland_storage::ActorProfileAdmissionOutcome::Duplicate(record) => record,
+        coland_storage::ActorProfileAdmissionOutcome::Committed(record)
+        | coland_storage::ActorProfileAdmissionOutcome::Duplicate(record) => record,
     };
     json_ok(AccountUpdateProfileOutcome {
         profile: AccountMaterializedProfile::new(record.profile)
@@ -1184,10 +1184,10 @@ fn validate_profile_request(body: &AccountUpdateProfileRequestBody) -> Result<()
 /// retry-safe `revision_unavailable`, and signer-device refusals keep their
 /// device codes (device-lifecycle §8.2.2).
 pub(crate) fn profile_admission_error(
-    code: Option<soland_storage::ConflictCode>,
+    code: Option<coland_storage::ConflictCode>,
     detail: &str,
 ) -> AppError {
-    use soland_storage::ConflictCode;
+    use coland_storage::ConflictCode;
     match code {
         Some(ConflictCode::AccountabilityGrantMissing) => {
             crate::app_error!(FailedPrecondition, detail)
@@ -1484,7 +1484,7 @@ async fn read_principal_resolution_audit(
 }
 
 fn direct_current_membership_blocker(
-    facts: Option<&soland_storage::DirectConversationDurableState>,
+    facts: Option<&coland_storage::DirectConversationDurableState>,
     actor: &ActorId,
     peer: &ActorId,
 ) -> Option<DirectConversationSendBlocker> {
@@ -1997,7 +1997,7 @@ pub(crate) fn durable_binding_record(
 
 fn direct_slot_coordinates(
     pair_key: Hash,
-    slot: &soland_storage::DirectConversationFoundingSlotRecord,
+    slot: &coland_storage::DirectConversationFoundingSlotRecord,
 ) -> Result<DirectConversationCoordinates, AppError> {
     Ok(DirectConversationCoordinates {
         pair_key,
@@ -2009,9 +2009,9 @@ fn direct_slot_coordinates(
     })
 }
 
-fn account_response(account: AccountRecord, state: &AppState) -> SolandAccountRegisterOutcome {
+fn account_response(account: AccountRecord, state: &AppState) -> ColandAccountRegisterOutcome {
     let lifecycle_state = state.account_lifecycle_state(account.principal_id.as_str());
-    SolandAccountRegisterOutcome {
+    ColandAccountRegisterOutcome {
         handle: account.handle(),
         principal_id: account.principal_id,
         display_name: account.display_name,
@@ -2156,7 +2156,7 @@ async fn account_device_summary(
         .and_then(Value::as_str)
         .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
         .is_some_and(|value| value.with_timezone(&chrono::Utc) <= now());
-    // Soland does not read the `device_revocation_proposals` keyed set here
+    // Coland does not read the `device_revocation_proposals` keyed set here
     // yet, so that input is false rather than derived from gate rows.
     let status = fold_device_summary_status(DeviceStatusFoldInputs {
         revoked: device.revoked_at.is_some(),
@@ -2165,7 +2165,7 @@ async fn account_device_summary(
         expired,
     });
     let (verification_state, verification_source) =
-        soland_services::identity::fold_device_verification_checkpoint(
+        coland_services::identity::fold_device_verification_checkpoint(
             device.verification_state.as_str(),
             accepted.is_some(),
             device

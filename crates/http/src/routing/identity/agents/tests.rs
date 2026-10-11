@@ -8,15 +8,15 @@ const SERVICE_CORE: &str = "ak:did_core:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1Gfuxhp
 fn service_pairing_test_state() -> AppState {
     AppState::new(
         crate::config::AppConfig::test_default(),
-        soland_storage_postgres::Db { pool: None },
+        coland_storage_postgres::Db { pool: None },
     )
 }
 
 async fn save_service_pairing_controller(state: &AppState, account_id: arkret_wire::AccountId) {
     state
         .identities()
-        .save_account(soland_services::identity::AccountProfileState {
-            pk: soland_storage::AccountPk(0),
+        .save_account(coland_services::identity::AccountProfileState {
+            pk: coland_storage::AccountPk(0),
             principal_id: account_id.principal_id.clone(),
             localpart: format!("controller-{}", account_id.station_id),
             account_id,
@@ -208,10 +208,10 @@ fn test_session(actor: &str) -> SessionRecord {
         account_pk: None,
         token_hash: format!("test-session:{actor}"),
         actor: actor.to_owned(),
-        endpoint: soland_services::identity::SessionEndpointState::HumanDevice {
+        endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
             device_id: "test-device".to_owned(),
         },
-        audience: "did:web:soland.test".to_owned(),
+        audience: "did:web:coland.test".to_owned(),
         session_public_key: None,
         session_grant: None,
         expires_at: now() + chrono::Duration::minutes(5),
@@ -630,7 +630,7 @@ fn agent_view_projects_spec_shape_dropping_internal_columns() {
     assert_eq!(agent["agent"]["lifecycle"], "active");
     assert_eq!(agent["agent"]["readiness"]["state"], "ready");
     assert_eq!(agent["agent"]["agent_id"], "ak:did_core:web:agent.example");
-    // soland-internal columns MUST NOT leak into the protocol projection.
+    // coland-internal columns MUST NOT leak into the protocol projection.
     assert!(agent["agent"].get("controller_principal_id").is_none());
 }
 

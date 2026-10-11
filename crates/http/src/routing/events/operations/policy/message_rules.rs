@@ -1,7 +1,7 @@
 use super::*;
 
 /// strand-and-message.md §9.8.2 — a reaction MUST target an object inside its
-/// own effective scope. soland's effective scope is the Realm, so a
+/// own effective scope. coland's effective scope is the Realm, so a
 /// `ak.reaction.*` whose `target_ref` resolves to a Message in a different
 /// Realm is rejected with active `failed_precondition`. The target-kind gate
 /// already ran in `validate_operation_semantics`; an unknown /
@@ -46,7 +46,7 @@ pub(super) fn validate_reaction_scope_policy(
 /// writes derive scope from the projected target. `ak.message.create` derives
 /// scope from the projected Strand — a Message never self-declares its scope.
 pub(super) fn operation_target_scope_circle_id(
-    projection: &soland_domain::reducer::ProjectionState,
+    projection: &coland_domain::reducer::ProjectionState,
     operation: &Operation,
 ) -> Option<String> {
     let top_level_scope = || -> Option<String> {
@@ -170,7 +170,7 @@ fn reaction_target_ref(kind: &arkret_wire::EventKind, operation: &Operation) -> 
 /// Morph update / lifecycle, and `ak.reaction.add` / `ak.reaction.remove`
 /// (scope derived from the target Message's Strand).
 ///
-/// Membership is evaluated against the current Circle projection (soland's
+/// Membership is evaluated against the current Circle projection (coland's
 /// convergence frontier), matching the delivery-side check. Peer / service-
 /// originated federation operations without a typed actor stay accepted
 /// (convergence / backfill), mirroring the ban / moderation gates; direct client

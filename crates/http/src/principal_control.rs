@@ -14,7 +14,7 @@ pub(crate) async fn resolve_native_identity_control(
 ) -> Result<
     (
         NativeIdentityControlKey,
-        soland_services::identity::PinnedDidDocumentState,
+        coland_services::identity::PinnedDidDocumentState,
     ),
     String,
 > {
@@ -66,7 +66,7 @@ mod tests {
         let at = entry["versionTime"].as_str().unwrap().parse().unwrap();
         state
             .dids()
-            .append_log_event(soland_services::identity::DidLogEvent {
+            .append_log_event(coland_services::identity::DidLogEvent {
                 event_digest: arkret_canonical::canonical_sha256(&entry).unwrap(),
                 did: did.to_string(),
                 seq,
@@ -81,7 +81,7 @@ mod tests {
     async fn invite_subject_native_history_selects_exact_root_across_rotation() {
         let state = AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let inception_at: DateTime<Utc> = "2026-07-01T00:00:00Z".parse().unwrap();
         let claim_at = inception_at + chrono::TimeDelta::hours(12);
@@ -161,7 +161,7 @@ mod tests {
         );
         assert_eq!(
             historical_state.status,
-            soland_services::identity::PinnedDidVersionStatus::Rotated
+            coland_services::identity::PinnedDidVersionStatus::Rotated
         );
         assert!(
             resolve_native_identity_control(

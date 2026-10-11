@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use coland_storage::*;
 use serde_json::Value;
-use soland_storage::*;
 
 use crate::delivery::*;
 
@@ -89,7 +89,7 @@ impl crate::delivery::DeviceDeliveryPort for PersistenceDeviceDelivery {
 
     async fn register_push_device(
         &self,
-        authorization: &soland_storage::DeviceRevocationGateSelector,
+        authorization: &coland_storage::DeviceRevocationGateSelector,
         registration: Value,
     ) -> crate::ServiceResult<()> {
         self.0
@@ -191,7 +191,7 @@ impl crate::delivery::BlobPort for PersistenceBlobs {
 impl crate::delivery::DeviceMessagePort for PersistenceDeviceMessages {
     async fn append(
         &self,
-        device_revocation_gate: Option<&soland_storage::DeviceRevocationGateSelector>,
+        device_revocation_gate: Option<&coland_storage::DeviceRevocationGateSelector>,
         message: crate::delivery::DeviceMessageState,
         per_device_queue_capacity: usize,
     ) -> crate::ServiceResult<()> {

@@ -1,13 +1,13 @@
 # Security policy
 
-soland is a reference Arkret v1 server. Several scaffold endpoints (push
+coland is a reference Arkret v1 server. Several scaffold endpoints (push
 outbound bridge, MIMI provider directory, parts of directory discovery, ...)
 return placeholder shapes today; production deployments must keep `_todos.md`
 in mind when assessing security posture.
 
 ## Supported versions
 
-soland is pre-1.0. The local readiness branch is supported for this workspace;
+coland is pre-1.0. The local readiness branch is supported for this workspace;
 remote release tags are not part of this development campaign.
 
 ## Reporting a vulnerability
@@ -21,7 +21,7 @@ Please **do not** open a public GitHub issue for security reports.
 
 Please include:
 
-1. soland version (git SHA or release tag).
+1. coland version (git SHA or release tag).
 2. Affected endpoint(s) or component(s).
 3. Reproduction steps and (where possible) a minimal proof of concept.
 4. Impact assessment — what an attacker can read, modify, or escalate.
@@ -36,7 +36,7 @@ We aim to:
 
 ## In scope
 
-- All HTTP routes mounted by `soland::router`.
+- All HTTP routes mounted by `coland::router`.
 - Authentication, session, token-handling, and DID validation paths.
 - The reducer + projection pipeline (event ingestion, state computation,
   redaction handling).
@@ -48,13 +48,13 @@ We aim to:
 
 - Vulnerabilities in upstream dependencies that have not yet been advised by
   RustSec. Run `cargo deny check advisories` to see what we already track.
-- Any path explicitly behind `SOLAND_DEVELOPMENT_MODE=true` (`dev_login`, the
+- Any path explicitly behind `COLAND_DEVELOPMENT_MODE=true` (`dev_login`, the
   admin snapshot endpoints, relaxed DID validation). These are dev-only and
   must be disabled in production.
 - Denial-of-service issues that require flooding from the same authenticated
   principal (rate-limit hardening is tracked as `_todos.md` Q6 / Cfg-1).
   The built-in limiter is intentionally per-process for 1.0 local readiness:
-  every soland replica keeps its own IP bucket in memory, so horizontal
+  every coland replica keeps its own IP bucket in memory, so horizontal
   deployments must enforce a shared quota at the reverse proxy, API gateway, or
   load-balancer layer.
 

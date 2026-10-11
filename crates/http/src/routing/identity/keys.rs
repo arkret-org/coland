@@ -10,13 +10,13 @@ use std::collections::BTreeMap;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
+use coland_services::identity::{DeviceIdentity, FindDeviceQuery, SaveDeviceCommand};
 use ed25519_dalek::Signature;
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
 use serde_json::{Value, json};
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
-use soland_services::identity::{DeviceIdentity, FindDeviceQuery, SaveDeviceCommand};
 
 use super::{bearer_token, now, sha256_hex};
 use crate::routing::system::extract::AuthArgs;
@@ -39,9 +39,9 @@ pub(super) fn router() -> Router {
         .push(Router::with_path("keys/claim").post(keys_claim))
 }
 
-/// Product-surface (`/_soland/gate/account/...`) router carrying the
+/// Product-surface (`/_coland/gate/account/...`) router carrying the
 /// server-to-server device signing-key directory read used by the Account Authority process
-/// (coauth) to verify device holder proofs. Mounted under `_soland`, not the
+/// (coauth) to verify device holder proofs. Mounted under `_coland`, not the
 /// `/_arkret` protocol root: it is a deployment-local integration read, not a
 /// spec operation.
 pub(super) fn product_router() -> Router {
@@ -186,8 +186,8 @@ async fn keys_upload(
     })
 }
 
-fn directory_evidence_service_error(error: soland_services::ServiceError) -> AppError {
-    if error.conflict_code() == Some(soland_storage::ConflictCode::TemporarilyUnavailable) {
+fn directory_evidence_service_error(error: coland_services::ServiceError) -> AppError {
+    if error.conflict_code() == Some(coland_storage::ConflictCode::TemporarilyUnavailable) {
         crate::app_error!(
             TemporarilyUnavailable,
             "current account-device evidence is temporarily unavailable",
@@ -258,7 +258,7 @@ pub(crate) async fn issue_current_account_device_signer_evidence(
     account_id: &arkret_wire::AccountId,
     device_id: &arkret_wire::DeviceId,
     facet: &crate::routing::identity::device_signing::DeviceSigningDirectoryFacet,
-) -> soland_services::ServiceResult<
+) -> coland_services::ServiceResult<
     Option<(
         arkret_models_identity::AccountDeviceSignerEvidence,
         arkret_wire::SignerEvidenceRef,
@@ -267,7 +267,7 @@ pub(crate) async fn issue_current_account_device_signer_evidence(
     use arkret_models_crypto::{DeviceAuthorizationWindow, DeviceProjectionAttestationCore};
     use arkret_models_identity::AccountDeviceSignerEvidence;
     use arkret_wire::{ActorId, DidKey};
-    use soland_services::ServiceError;
+    use coland_services::ServiceError;
 
     if account_id.station_id != state.service_core_id() || facet.status != DeviceStatus::Active {
         return Ok(None);
@@ -317,7 +317,7 @@ pub(crate) async fn issue_current_account_device_signer_evidence(
             .map_err(|error| {
                 ServiceError::Conflict(format!(
                     "{}: current Service resolution is unavailable: {}",
-                    soland_storage::ConflictCode::TemporarilyUnavailable,
+                    coland_storage::ConflictCode::TemporarilyUnavailable,
                     error.message
                 ))
             })?;
@@ -1013,7 +1013,7 @@ async fn peer_keys_relationship_authorized(
 }
 
 fn keys_query_actor_visible_to_requester(
-    projection: &soland_domain::reducer::ProjectionState,
+    projection: &coland_domain::reducer::ProjectionState,
     requester: &arkret_wire::ActorId,
     actor: &arkret_wire::ActorId,
 ) -> bool {
@@ -1197,7 +1197,7 @@ async fn keys_claim(
 
 /// Server-to-server bearer gate for the device signing-key directory read.
 ///
-/// Reuses the deployment's `SOLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER`: the Auth
+/// Reuses the deployment's `COLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER`: the Auth
 /// Server (coauth) already holds this static bearer for the same Station (it registers embedded
 /// `did:webvh` records with it), so the directory read it issues while verifying a device holder
 /// proof rides the same trust edge without minting a second credential. Compared in constant-ish
@@ -1212,7 +1212,7 @@ fn require_device_directory_bearer(state: &AppState, req: &Request) -> Result<()
     else {
         return Err(crate::app_error!(
             TemporarilyUnavailable,
-            "device signing-key directory read requires SOLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER",
+            "device signing-key directory read requires COLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER",
         ));
     };
     let Some(provided) = bearer_token(req)
@@ -1232,12 +1232,12 @@ fn require_device_directory_bearer(state: &AppState, req: &Request) -> Result<()
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.gate.account.device_signing_keys.query",
+    operation_id = "org.arkret.coland.gate.account.device_signing_keys.query",
     tags("identity")
 )]
 #[tracing::instrument(
     skip_all,
-    fields(op = "org.arkret.soland.gate.account.device_signing_keys.query")
+    fields(op = "org.arkret.coland.gate.account.device_signing_keys.query")
 )]
 async fn device_signing_keys_query(
     body: JsonBody<DeviceSigningKeyDirectoryQueryRequestBody>,
@@ -1312,7 +1312,7 @@ mod tests {
     #[test]
     fn directory_evidence_cut_race_preserves_registered_retryable_error() {
         let error =
-            super::directory_evidence_service_error(soland_services::ServiceError::Conflict(
+            super::directory_evidence_service_error(coland_services::ServiceError::Conflict(
                 "temporarily_unavailable: current evidence retention lost its cut".into(),
             ));
         assert_eq!(error.code, arkret_wire::ErrorCode::TemporarilyUnavailable);
@@ -1321,7 +1321,7 @@ mod tests {
             salvo::http::StatusCode::SERVICE_UNAVAILABLE
         );
         let database = super::directory_evidence_service_error(
-            soland_services::ServiceError::Database("connection failure".into()),
+            coland_services::ServiceError::Database("connection failure".into()),
         );
         assert_eq!(database.code, arkret_wire::ErrorCode::InternalError);
     }
@@ -1346,7 +1346,7 @@ mod tests {
             "ak:did_core:web:bob.example",
             "ak:did_core:web:station.example",
         );
-        let mut projection = soland_domain::reducer::ProjectionState::default();
+        let mut projection = coland_domain::reducer::ProjectionState::default();
         assert!(keys_query_actor_visible_to_requester(
             &projection,
             &alice,
@@ -1361,7 +1361,7 @@ mod tests {
             let member = member.to_string();
             projection.members.insert(
                 ("realm".into(), member.clone()),
-                soland_domain::reducer::SolandMembershipState {
+                coland_domain::reducer::ColandMembershipState {
                     member,
                     realm_id: "realm".into(),
                     state: "join".into(),

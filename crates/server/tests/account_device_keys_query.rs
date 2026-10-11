@@ -3,8 +3,8 @@
 mod common;
 
 use arkret_models_crypto::{KeysQueryRequestBody, QueryAccountDeviceSelector};
+use coland_test_support::pcr_genesis::PcrGenesisFixture;
 use common::*;
-use soland_test_support::pcr_genesis::PcrGenesisFixture;
 
 #[test]
 fn accepted_device_has_retained_signed_projection() {
@@ -13,7 +13,7 @@ fn accepted_device_has_retained_signed_projection() {
         .build()
         .unwrap();
     runtime.block_on(async {
-        let state = soland_test_support::app_state_with_postgres_governance(test_config());
+        let state = coland_test_support::app_state_with_postgres_governance(test_config());
         let fixture = PcrGenesisFixture::new(state.service_did());
         fixture.admit(&state).await.expect("accepted PCR genesis");
         let account = fixture.history.account.clone();

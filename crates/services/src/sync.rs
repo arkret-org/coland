@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use parking_lot::Mutex;
-pub use soland_storage::{
+pub use coland_storage::{
     CursorRevocation as CursorRevocationState, RealmJoinDownload, SyncCursorRecord as CursorState,
 };
+use parking_lot::Mutex;
 
 use crate::ServiceResult;
 
@@ -34,21 +34,21 @@ pub trait CursorStorePort: Send + Sync {
         after_key: &str,
         after_revision: Option<i64>,
         limit: usize,
-    ) -> ServiceResult<Vec<soland_storage::AccountGlobalVersion>>;
+    ) -> ServiceResult<Vec<coland_storage::AccountGlobalVersion>>;
     async fn account_summary_watermark(&self) -> ServiceResult<i64>;
     async fn account_summary_page(
         &self,
         actor_key: &str,
         watermark: i64,
-        after: Option<&soland_storage::AccountSummaryKey>,
+        after: Option<&coland_storage::AccountSummaryKey>,
         limit: usize,
-    ) -> ServiceResult<Vec<soland_storage::AccountSummaryVersion>>;
+    ) -> ServiceResult<Vec<coland_storage::AccountSummaryVersion>>;
     async fn account_summary_changes(
         &self,
         actor_key: &str,
         after_revision: i64,
         limit: usize,
-    ) -> ServiceResult<Vec<soland_storage::AccountSummaryVersion>>;
+    ) -> ServiceResult<Vec<coland_storage::AccountSummaryVersion>>;
     async fn get(&self, handle: &str) -> ServiceResult<Option<CursorState>>;
     async fn upsert(&self, record: &CursorState) -> ServiceResult<()>;
     async fn delete(&self, handle: &str) -> ServiceResult<bool>;
@@ -61,7 +61,7 @@ pub trait CursorStorePort: Send + Sync {
     ) -> ServiceResult<Vec<CursorRevocationState>>;
 }
 
-pub use soland_storage::{
+pub use coland_storage::{
     WebsocketAuthChallengeRecord as WebsocketChallengeState,
     WebsocketAuthReplayRecord as WebsocketReplayState, WebsocketConnectionLease,
 };
@@ -144,7 +144,7 @@ impl SyncService {
         after_key: &str,
         after_revision: Option<i64>,
         limit: usize,
-    ) -> ServiceResult<Vec<soland_storage::AccountGlobalVersion>> {
+    ) -> ServiceResult<Vec<coland_storage::AccountGlobalVersion>> {
         self.cursors
             .account_global_page(
                 actor_key,
@@ -164,9 +164,9 @@ impl SyncService {
         &self,
         actor_key: &str,
         watermark: i64,
-        after: Option<&soland_storage::AccountSummaryKey>,
+        after: Option<&coland_storage::AccountSummaryKey>,
         limit: usize,
-    ) -> ServiceResult<Vec<soland_storage::AccountSummaryVersion>> {
+    ) -> ServiceResult<Vec<coland_storage::AccountSummaryVersion>> {
         self.cursors
             .account_summary_page(actor_key, watermark, after, limit)
             .await
@@ -177,7 +177,7 @@ impl SyncService {
         actor_key: &str,
         after_revision: i64,
         limit: usize,
-    ) -> ServiceResult<Vec<soland_storage::AccountSummaryVersion>> {
+    ) -> ServiceResult<Vec<coland_storage::AccountSummaryVersion>> {
         self.cursors
             .account_summary_changes(actor_key, after_revision, limit)
             .await
@@ -320,7 +320,7 @@ mod tests {
             _: &str,
             _: Option<i64>,
             _: usize,
-        ) -> ServiceResult<Vec<soland_storage::AccountGlobalVersion>> {
+        ) -> ServiceResult<Vec<coland_storage::AccountGlobalVersion>> {
             Ok(Vec::new())
         }
         async fn account_summary_watermark(&self) -> ServiceResult<i64> {
@@ -330,9 +330,9 @@ mod tests {
             &self,
             _: &str,
             _: i64,
-            _: Option<&soland_storage::AccountSummaryKey>,
+            _: Option<&coland_storage::AccountSummaryKey>,
             _: usize,
-        ) -> ServiceResult<Vec<soland_storage::AccountSummaryVersion>> {
+        ) -> ServiceResult<Vec<coland_storage::AccountSummaryVersion>> {
             Ok(Vec::new())
         }
         async fn account_summary_changes(
@@ -340,7 +340,7 @@ mod tests {
             _: &str,
             _: i64,
             _: usize,
-        ) -> ServiceResult<Vec<soland_storage::AccountSummaryVersion>> {
+        ) -> ServiceResult<Vec<coland_storage::AccountSummaryVersion>> {
             Ok(Vec::new())
         }
         async fn get(&self, handle: &str) -> ServiceResult<Option<CursorState>> {

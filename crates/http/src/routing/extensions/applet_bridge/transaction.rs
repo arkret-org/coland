@@ -7,8 +7,8 @@ use arkret_models_integration::{
     namespace_pattern_matches,
 };
 use arkret_wire::{CommittedEventRef, Event};
-use soland_http::error::AppError;
-use soland_services::events::{AppletTransactionReplayResult, AppletTransactionReplayState};
+use coland_http::error::AppError;
+use coland_services::events::{AppletTransactionReplayResult, AppletTransactionReplayState};
 
 use super::record::applet_record;
 use super::signature::VerifiedAppletServiceSignature;
@@ -347,7 +347,7 @@ mod backpressure_tests {
     fn transaction_state(capacity: usize) -> AppState {
         let mut config = crate::config::AppConfig::test_default();
         config.applet_transaction_inflight_capacity = capacity;
-        AppState::new(config, soland_storage_postgres::Db { pool: None })
+        AppState::new(config, coland_storage_postgres::Db { pool: None })
     }
 
     #[test]

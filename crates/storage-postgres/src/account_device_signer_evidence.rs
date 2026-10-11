@@ -8,13 +8,13 @@
 use arkret_models_collaboration::events_payloads::DeviceAuthorizePayload;
 use arkret_models_identity::AccountDeviceSignerEvidence;
 use arkret_wire::{AccountId, CommittedEventRef, DeviceId, SignerEvidenceRef};
+use coland_storage::{
+    AccountDeviceSignerEvidenceStore, ConflictCode, ForwardedProducerDeviceEvidence,
+};
 use diesel::sql_types::{Jsonb, Text, Timestamptz};
 use diesel::{OptionalExtension, QueryableByName, sql_query};
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use serde_json::Value;
-use soland_storage::{
-    AccountDeviceSignerEvidenceStore, ConflictCode, ForwardedProducerDeviceEvidence,
-};
 
 use crate::pcr_device_status_reader::confirmed_pcr_device_status_cut_in_connection;
 use crate::{
@@ -162,7 +162,7 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
             evidence
                 .validate_binding(account, device)
                 .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
-            if soland_storage::forwarded_producer_device_evidence_ref(&evidence)? != *reference
+            if coland_storage::forwarded_producer_device_evidence_ref(&evidence)? != *reference
                 || evidence
                     .device_projection_attestation
                     .attestation
@@ -201,7 +201,7 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
             )
             .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
         let fact = verified.into_fact();
-        let reference = soland_storage::forwarded_producer_device_evidence_ref(evidence)?;
+        let reference = coland_storage::forwarded_producer_device_evidence_ref(evidence)?;
         let body = serde_json::to_value(evidence).map_err(PersistenceError::database)?;
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
@@ -235,7 +235,7 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
             }
             Ok(())
         }).await.map_err(retention_transaction_error)?;
-        soland_storage::forwarded_producer_device_evidence_ref(evidence)
+        coland_storage::forwarded_producer_device_evidence_ref(evidence)
     }
 
     async fn retain_current(
@@ -525,7 +525,7 @@ pub(crate) async fn retain_forwarded_producer_evidence_in_connection(
         ));
     }
     if commit.event_ref != event.event_id
-        || soland_storage::forwarded_producer_device_evidence_ref(&retained.evidence)?
+        || coland_storage::forwarded_producer_device_evidence_ref(&retained.evidence)?
             != retained.evidence_ref
     {
         return Err(invalid(

@@ -1,5 +1,5 @@
 [package]
-name = "soland-test-support"
+name = "coland-test-support"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "Development-only fixtures and helpers for Soland integration tests."
+description = "Development-only fixtures and helpers for Coland integration tests."
 publish = false
 
 [dependencies]
@@ -37,11 +37,11 @@ rand_chacha = "0.10.0"
 rand_core = "0.10.1"
 serde_json.workspace = true
 sha2.workspace = true
-soland-domain = { version = "0.3.0", path = "../domain" }
-soland-http = { version = "0.3.0", path = "../http", features = ["test-support"] }
-soland-services = { version = "0.3.0", path = "../services", features = ["test-support"] }
-soland-storage = { version = "0.3.0", path = "../storage" }
-soland-storage-postgres = { version = "0.3.0", path = "../storage-postgres", features = [
+coland-domain = { version = "0.3.0", path = "../domain" }
+coland-http = { version = "0.3.0", path = "../http", features = ["test-support"] }
+coland-services = { version = "0.3.0", path = "../services", features = ["test-support"] }
+coland-storage = { version = "0.3.0", path = "../storage" }
+coland-storage-postgres = { version = "0.3.0", path = "../storage-postgres", features = [
     "test-support",
 ] }
 tokio = { workspace = true, features = ["rt"] }

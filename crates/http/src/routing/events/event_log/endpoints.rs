@@ -1,7 +1,7 @@
 use arkret_models_collaboration::event_query::{
     EventDeliveryStatusOutcome, EventDeliveryStatusRequestBody,
 };
-use soland_storage::MemberCommittedEventRead;
+use coland_storage::MemberCommittedEventRead;
 
 use super::*;
 
@@ -128,7 +128,7 @@ async fn event_delivery_status(
     let mut targets = BTreeMap::new();
     for delivery in deliveries {
         let Some(mut target) =
-            soland_services::federation::event_delivery_target_status(&delivery, event_id)
+            coland_services::federation::event_delivery_target_status(&delivery, event_id)
                 .map_err(|error| AppError::internal(error.to_string()))?
         else {
             continue;
@@ -167,7 +167,7 @@ async fn event_delivery_status(
 async fn caller_can_read_delivery_target_service(
     state: &AppState,
     session: &SessionRecord,
-    binding: &soland_services::federation::RealmFanoutBinding,
+    binding: &coland_services::federation::RealmFanoutBinding,
     recipient_id: &str,
 ) -> bool {
     for witness in &binding.authority_witnesses {

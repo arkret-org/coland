@@ -8,9 +8,9 @@ use super::*;
 #[tracing::instrument(skip_all, fields(op = "ak.self.account.read.describe.v1"))]
 pub(super) async fn account_describe(
     depot: &mut Depot,
-) -> soland_http::result::JsonResult<arkret_models_discovery::ServiceDescribe> {
+) -> coland_http::result::JsonResult<arkret_models_discovery::ServiceDescribe> {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    soland_http::result::json_ok(crate::routing::system::describe::build_server_description(
+    coland_http::result::json_ok(crate::routing::system::describe::build_server_description(
         state,
     ))
 }
@@ -60,7 +60,7 @@ pub(crate) async fn account_subscribe_session_or_render(
 }
 
 pub(super) fn stream_grant(req: &Request) -> Option<String> {
-    soland_http::util::dpop_token(req).map(str::to_owned)
+    coland_http::util::dpop_token(req).map(str::to_owned)
 }
 
 pub(super) async fn stream_session_current(
@@ -115,7 +115,7 @@ pub(super) async fn account_response(
     }
     let filter_value = sync_filter_value(body.filter.as_ref());
     let wait_for_event_id =
-        if let Ok(wait_for) = depot.get_typed::<soland_http::openapi_routes::WaitForSyncToken>() {
+        if let Ok(wait_for) = depot.get_typed::<coland_http::openapi_routes::WaitForSyncToken>() {
             match parse_and_validate_barrier_cursor(
                 &wait_for.0,
                 &state,
@@ -150,16 +150,16 @@ pub(super) async fn account_response(
         {
             Ok(cursor) => cursor,
             Err(SyncCursorError::Unavailable(message)) => {
-                soland_http::error::render_error_code(
-                    soland_http::error::ErrorCode::TemporarilyUnavailable,
+                coland_http::error::render_error_code(
+                    coland_http::error::ErrorCode::TemporarilyUnavailable,
                     res,
                     message,
                 );
                 return;
             }
             Err(SyncCursorError::Expired) => {
-                soland_http::error::render_error_code(
-                    soland_http::error::ErrorCode::CursorExpired,
+                coland_http::error::render_error_code(
+                    coland_http::error::ErrorCode::CursorExpired,
                     res,
                     "cursor has expired",
                 );
@@ -168,12 +168,12 @@ pub(super) async fn account_response(
             Err(SyncCursorError::Invalid(message)) => {
                 // encoding.md §8.3 closed set: syntax/schema failures pin the
                 // top-level `param_invalid` code with reason `invalid_cursor`.
-                soland_http::error::render_error_with_reason_code(
+                coland_http::error::render_error_with_reason_code(
                     res,
-                    soland_http::error::error_http_status(
-                        soland_http::error::ErrorCode::ParamInvalid,
+                    coland_http::error::error_http_status(
+                        coland_http::error::ErrorCode::ParamInvalid,
                     ),
-                    soland_http::error::ErrorCode::ParamInvalid.as_str(),
+                    coland_http::error::ErrorCode::ParamInvalid.as_str(),
                     message,
                     arkret_wire::ReasonCode::INVALID_CURSOR,
                     None,
@@ -181,16 +181,16 @@ pub(super) async fn account_response(
                 return;
             }
             Err(SyncCursorError::Mismatch(message)) | Err(SyncCursorError::Integrity(message)) => {
-                soland_http::error::render_error_code(
-                    soland_http::error::ErrorCode::CursorIntegrityInvalid,
+                coland_http::error::render_error_code(
+                    coland_http::error::ErrorCode::CursorIntegrityInvalid,
                     res,
                     message,
                 );
                 return;
             }
             Err(SyncCursorError::Revoked) => {
-                soland_http::error::render_error_code(
-                    soland_http::error::ErrorCode::CursorRevoked,
+                coland_http::error::render_error_code(
+                    coland_http::error::ErrorCode::CursorRevoked,
                     res,
                     "cursor authority has been revoked",
                 );
@@ -247,8 +247,8 @@ pub(super) async fn account_response(
                 // Reject before subscribing to broadcast or building any
                 // incremental snapshot: crossing a retained floor is a
                 // terminal resync condition, never a best-effort delta.
-                soland_http::error::render_error_code(
-                    soland_http::error::ErrorCode::StreamResyncRequired,
+                coland_http::error::render_error_code(
+                    coland_http::error::ErrorCode::StreamResyncRequired,
                     res,
                     "account-data changes are no longer retained; initial resync is required",
                 );
@@ -281,7 +281,7 @@ pub(super) async fn account_response(
     let mut rx = state.subscribe_event_notifications();
     if let Some(event_id) = wait_for_event_id.as_deref() {
         let barrier_result = wait_for_account_projection_barrier(&state, &mut rx, event_id).await;
-        if let Ok(wait) = depot.get_typed::<soland_http::openapi_routes::WaitForSyncToken>()
+        if let Ok(wait) = depot.get_typed::<coland_http::openapi_routes::WaitForSyncToken>()
             && let Err(error) = parse_and_validate_barrier_cursor(
                 &wait.0,
                 &state,
@@ -303,7 +303,7 @@ pub(super) async fn account_response(
         );
     }
     let wait_for_token = depot
-        .get_typed::<soland_http::openapi_routes::WaitForSyncToken>()
+        .get_typed::<coland_http::openapi_routes::WaitForSyncToken>()
         .ok()
         .map(|wait| wait.0.clone());
     if let Err(error) =
@@ -774,7 +774,7 @@ pub(crate) async fn wait_for_account_projection_barrier(
     state: &AppState,
     rx: &mut tokio::sync::broadcast::Receiver<crate::state::EventNotification>,
     event_id: &str,
-) -> soland_services::ServiceResult<bool> {
+) -> coland_services::ServiceResult<bool> {
     let deadline =
         tokio::time::Instant::now() + Duration::from_millis(ACCOUNT_SUBSCRIBE_DEFAULT_WAIT_MS);
     loop {
@@ -790,7 +790,7 @@ pub(crate) async fn wait_for_account_projection_barrier(
             _ = tokio::time::sleep_until(deadline) => return Ok(false),
             notification = rx.recv() => match notification {
                 Ok(_) | Err(RecvError::Lagged(_)) => {}
-                Err(RecvError::Closed) => return Err(soland_services::ServiceError::Internal(
+                Err(RecvError::Closed) => return Err(coland_services::ServiceError::Internal(
                     "account barrier notification source closed".into(),
                 )),
             }
@@ -799,7 +799,7 @@ pub(crate) async fn wait_for_account_projection_barrier(
 }
 
 fn account_barrier_refusal(
-    outcome: soland_services::ServiceResult<bool>,
+    outcome: coland_services::ServiceResult<bool>,
 ) -> Option<arkret_wire::Problem> {
     let detail = match outcome {
         Ok(true) => return None,
@@ -825,35 +825,35 @@ pub(crate) fn render_account_cursor_error(
         "after"
     };
     match error {
-        SyncCursorError::Unavailable(message) => soland_http::error::render_error_code(
-            soland_http::error::ErrorCode::TemporarilyUnavailable,
+        SyncCursorError::Unavailable(message) => coland_http::error::render_error_code(
+            coland_http::error::ErrorCode::TemporarilyUnavailable,
             res,
             message,
         ),
-        SyncCursorError::Expired => soland_http::error::render_error_code(
-            soland_http::error::ErrorCode::CursorExpired,
+        SyncCursorError::Expired => coland_http::error::render_error_code(
+            coland_http::error::ErrorCode::CursorExpired,
             res,
             &format!("{context} cursor has expired"),
         ),
         // encoding.md §8.3 closed set: syntax/schema failures pin the top-level
         // `param_invalid` code with reason `invalid_cursor`.
-        SyncCursorError::Invalid(message) => soland_http::error::render_error_with_reason_code(
+        SyncCursorError::Invalid(message) => coland_http::error::render_error_with_reason_code(
             res,
-            soland_http::error::error_http_status(soland_http::error::ErrorCode::ParamInvalid),
-            soland_http::error::ErrorCode::ParamInvalid.as_str(),
+            coland_http::error::error_http_status(coland_http::error::ErrorCode::ParamInvalid),
+            coland_http::error::ErrorCode::ParamInvalid.as_str(),
             message,
             arkret_wire::ReasonCode::INVALID_CURSOR,
             None,
         ),
         SyncCursorError::Mismatch(message) | SyncCursorError::Integrity(message) => {
-            soland_http::error::render_error_code(
-                soland_http::error::ErrorCode::CursorIntegrityInvalid,
+            coland_http::error::render_error_code(
+                coland_http::error::ErrorCode::CursorIntegrityInvalid,
                 res,
                 message,
             )
         }
-        SyncCursorError::Revoked => soland_http::error::render_error_code(
-            soland_http::error::ErrorCode::CursorRevoked,
+        SyncCursorError::Revoked => coland_http::error::render_error_code(
+            coland_http::error::ErrorCode::CursorRevoked,
             res,
             &format!("{context} cursor authority has been revoked"),
         ),
@@ -936,7 +936,7 @@ mod account_query_tests {
         assert!(account_barrier_refusal(Ok(true)).is_none());
         for outcome in [
             Ok(false),
-            Err(soland_services::ServiceError::Database(
+            Err(coland_services::ServiceError::Database(
                 "storage unavailable".into(),
             )),
         ] {

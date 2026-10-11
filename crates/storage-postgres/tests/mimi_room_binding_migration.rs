@@ -3,12 +3,12 @@
 #[allow(dead_code)]
 mod ordinary_realm;
 use arkret_wire::EventKind;
+use coland_storage::{EventCommitRequest, EventCommitUnitOfWork};
+use coland_storage_postgres::PgEventCommitUnitOfWork;
+use coland_storage_postgres::test_database::TestDatabase;
 use diesel::sql_types::{BigInt, Text};
 use diesel_async::RunQueryDsl;
 use serde_json::{Value, json};
-use soland_storage::{EventCommitRequest, EventCommitUnitOfWork};
-use soland_storage_postgres::PgEventCommitUnitOfWork;
-use soland_storage_postgres::test_database::TestDatabase;
 
 #[derive(diesel::QueryableByName, Debug, PartialEq)]
 struct Counts {
@@ -21,13 +21,13 @@ struct Counts {
     #[diesel(sql_type=BigInt)]
     outbox: i64,
 }
-async fn counts(pool: &soland_storage_postgres::PgPool, realm: &str) -> Counts {
+async fn counts(pool: &coland_storage_postgres::PgPool, realm: &str) -> Counts {
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query("SELECT (SELECT count(*) FROM canonical_events WHERE realm_id=$1) AS events,(SELECT count(*) FROM realm_commits WHERE realm_id=$1) AS commits,(SELECT count(*) FROM mimi_room_binding_current_results WHERE realm_id=$1) AS bindings,(SELECT count(*) FROM federation_outbox) AS outbox")
         .bind::<Text,_>(realm).get_result(&mut conn).await.unwrap()
 }
 async fn next(
-    pool: &soland_storage_postgres::PgPool,
+    pool: &coland_storage_postgres::PgPool,
     previous: &EventCommitRequest,
     payload: Value,
 ) -> EventCommitRequest {

@@ -1,5 +1,5 @@
 // Durable adapters enforce the same policy invariants as the domain reducer.
-pub use soland_domain::reducer::{
+pub use coland_domain::reducer::{
     join_policy_declares_an_automatic_gate, join_rule_requires_an_automatic_gate,
     validate_join_policy_payload,
 };

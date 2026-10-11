@@ -1,10 +1,10 @@
 //! Registered event-derived Strand current result at the RealmCommit cut.
 
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::OptionalExtension as _;
 use diesel::sql_types::{BigInt, Bool, Jsonb, Text, Timestamptz};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::Value;
-use soland_storage::{PersistenceError, PersistenceResult};
 
 #[derive(diesel::QueryableByName)]
 struct StrandCurrentRow {
@@ -28,7 +28,7 @@ fn reject(detail: impl Into<String>) -> PersistenceError {
     PersistenceError::Conflict(format!("failed_precondition: {}", detail.into()))
 }
 
-fn reject_lifecycle(code: soland_storage::ConflictCode, detail: &str) -> PersistenceError {
+fn reject_lifecycle(code: coland_storage::ConflictCode, detail: &str) -> PersistenceError {
     PersistenceError::Conflict(format!("{}: {detail}", code.as_str()))
 }
 
@@ -309,7 +309,7 @@ pub(crate) async fn commit_strand_transition_in_connection(
     }
     if current.state == Some(arkret_wire::ObjectState::Redacted) {
         return Err(reject_lifecycle(
-            soland_storage::ConflictCode::StrandAlreadyTerminal,
+            coland_storage::ConflictCode::StrandAlreadyTerminal,
             "Strand transition target is redacted",
         ));
     }
@@ -323,7 +323,7 @@ pub(crate) async fn commit_strand_transition_in_connection(
     if let Some(body) = stage {
         if current.state != Some(arkret_wire::ObjectState::Active) {
             return Err(reject_lifecycle(
-                soland_storage::ConflictCode::StrandNotActive,
+                coland_storage::ConflictCode::StrandNotActive,
                 "Strand stage target is not active",
             ));
         }
@@ -342,13 +342,13 @@ pub(crate) async fn commit_strand_transition_in_connection(
             (
                 arkret_wire::ObjectState::Active,
                 "archived",
-                soland_storage::ConflictCode::StrandNotActive,
+                coland_storage::ConflictCode::StrandNotActive,
             )
         } else {
             (
                 arkret_wire::ObjectState::Archived,
                 "active",
-                soland_storage::ConflictCode::StrandNotArchived,
+                coland_storage::ConflictCode::StrandNotArchived,
             )
         };
         if current.state != Some(expected) {
@@ -655,13 +655,13 @@ async fn lock_active_patch_target(
         Some(arkret_wire::ObjectState::Active) => {}
         Some(arkret_wire::ObjectState::Redacted) => {
             return Err(reject_lifecycle(
-                soland_storage::ConflictCode::StrandAlreadyTerminal,
+                coland_storage::ConflictCode::StrandAlreadyTerminal,
                 "Strand patch target is redacted",
             ));
         }
         _ => {
             return Err(reject_lifecycle(
-                soland_storage::ConflictCode::StrandNotActive,
+                coland_storage::ConflictCode::StrandNotActive,
                 "Strand patch target is not active",
             ));
         }

@@ -1,7 +1,7 @@
-//! Formal test-material rejection at Soland's production trust boundary.
+//! Formal test-material rejection at Coland's production trust boundary.
 //!
 //! The canonical registry and matching rules live in `arkret-identity`.  This
-//! module only adapts Soland's decoded DID-document representation to that
+//! module only adapts Coland's decoded DID-document representation to that
 //! guard, so every caller fingerprints algorithm-defined public-key bytes
 //! before a document, route, or accepted binding can be retained.
 
@@ -32,5 +32,5 @@ pub(crate) fn enforce_did_document_admission(
     document: &arkret_identity::DidDocument,
     trust_domain: Option<&TrustDomainId>,
 ) -> Result<(), String> {
-    soland_services::identity::enforce_formal_did_document_admission(document, trust_domain)
+    coland_services::identity::enforce_formal_did_document_admission(document, trust_domain)
 }

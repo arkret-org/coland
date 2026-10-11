@@ -2,7 +2,7 @@
 //!
 //! Two disjoint mounts (no double-mounting; SOL-NAME-02):
 //!
-//! - Operator queries ([`ops_router`], mounted inside the `RequireAdmin` gated `/_soland/admin/*`
+//! - Operator queries ([`ops_router`], mounted inside the `RequireAdmin` gated `/_coland/admin/*`
 //!   branch): `GET audit/events`, `GET audit/erasure-receipts`.
 //!
 //! `append_audit_log` — internal helper used everywhere a side-effect needs
@@ -13,13 +13,13 @@
 use arkret_models_collaboration::governance::erasure::{
     ErasureFanoutStatus, ErasureOutcome, ErasureReceipt, ErasureStorageBoundary, ErasureSubjectKind,
 };
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
+use coland_http::util::query_param;
 use salvo::oapi::extract::QueryParam;
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
-use soland_http::util::query_param;
 
 use super::{AdminAuth, now, realm_has_member};
 use crate::ids;
@@ -51,7 +51,7 @@ struct AuditEventsOutcome {
 }
 
 /// Operator audit queries, mounted inside the admin-gated
-/// `/_soland/admin/*` branch.
+/// `/_coland/admin/*` branch.
 pub(super) fn ops_router() -> Router {
     Router::new()
         // D14 — production typed audit query at the collection root.
@@ -69,10 +69,10 @@ pub(super) fn ops_router() -> Router {
 /// receipt envelopes — issuer / subject / outcome / scope — which are
 /// the auditable surface by design).
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.audit.erasure_receipts.list",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.audit.erasure_receipts.list",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.audit.erasure_receipts.list"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.audit.erasure_receipts.list"))]
 async fn audit_erasure_receipts(
     admin: AdminAuth,
     depot: &mut Depot,
@@ -95,7 +95,7 @@ async fn audit_erasure_receipts(
 }
 
 fn audit_erasure_receipt_item(
-    record: &soland_services::events::AcceptedEvent,
+    record: &coland_services::events::AcceptedEvent,
 ) -> Result<AuditErasureReceiptItem, AppError> {
     let payload = record
         .envelope
@@ -124,8 +124,8 @@ fn audit_erasure_receipt_item(
     })
 }
 
-#[salvo::oapi::endpoint(operation_id = "org.arkret.soland.audit.events", tags("soland_admin"))]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.audit.events"))]
+#[salvo::oapi::endpoint(operation_id = "org.arkret.coland.audit.events", tags("coland_admin"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.audit.events"))]
 async fn audit_events(
     admin: AdminAuth,
     actor: QueryParam<String, false>,
@@ -267,12 +267,12 @@ pub async fn append_audit_log(
     });
     if let Err(error) = state
         .governance()
-        .append_audit_entry(soland_services::governance::AppendAuditEntryCommand { entry })
+        .append_audit_entry(coland_services::governance::AppendAuditEntryCommand { entry })
         .await
     {
         // Spec: C.3.7 — every audit-append failure MUST surface to
         // operators. We escalate to ERROR (was previously implicit
-        // here) and bump the `soland_audit_append_failures_total`
+        // here) and bump the `coland_audit_append_failures_total`
         // metric so on-call can alert on durable-audit drops without
         // tailing the trace stream.
         tracing::error!(%error, action, outcome, "failed to append audit log entry");
@@ -351,7 +351,7 @@ mod tests {
             peer_receipts: Vec::new(),
         };
         let payload = serde_json::to_value(receipt).unwrap();
-        let record = soland_services::events::AcceptedEvent {
+        let record = coland_services::events::AcceptedEvent {
             event_id: "ak:event:Adpb76fsaup_4Y_cV39of-L1_k6Nv1kSoCzXa9TM4szu".to_owned(),
             actor_id: "service".to_owned(),
             realm_id: None,

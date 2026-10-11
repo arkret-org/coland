@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use coland_storage::*;
 use serde_json::Value;
-use soland_storage::*;
 
 use crate::events::*;
 
@@ -17,7 +17,7 @@ struct PersistenceRealmMetadata(Arc<dyn PersistenceStore>);
 struct PersistenceInviteLocators(Arc<dyn PersistenceStore>);
 
 fn application_projected_event(
-    event: soland_storage::ProjectionEventRecord,
+    event: coland_storage::ProjectionEventRecord,
 ) -> crate::events::ProjectedEvent {
     crate::events::ProjectedEvent {
         event_id: event.event_id,
@@ -34,8 +34,8 @@ fn application_projected_event(
 
 fn persistence_projected_event(
     event: crate::events::ProjectedEvent,
-) -> soland_storage::ProjectionEventRecord {
-    soland_storage::ProjectionEventRecord {
+) -> coland_storage::ProjectionEventRecord {
+    coland_storage::ProjectionEventRecord {
         event_id: event.event_id,
         realm_id: event.realm_id,
         event_kind: event.event_kind.as_str().to_owned(),
@@ -50,12 +50,12 @@ fn persistence_projected_event(
 
 fn persistence_outbox_row(
     delivery: crate::federation::FederationDeliveryRecord,
-) -> soland_storage::FederationOutboxRecord {
+) -> coland_storage::FederationOutboxRecord {
     let coalescing_key = delivery.coalescing_key.clone();
     let coalescing_position = delivery.coalescing_position;
     let mut persisted = match delivery.realm_fanout {
-        Some(binding) => soland_storage::FederationOutboxRecord::realm_fanout(
-            soland_storage::RealmFanoutOutboxInput {
+        Some(binding) => coland_storage::FederationOutboxRecord::realm_fanout(
+            coland_storage::RealmFanoutOutboxInput {
                 id: delivery.id,
                 peer_id: delivery.peer_id,
                 peer_url: delivery.peer_url,
@@ -66,7 +66,7 @@ fn persistence_outbox_row(
                 created_at: delivery.created_at,
             },
         ),
-        None => soland_storage::FederationOutboxRecord::pending(
+        None => coland_storage::FederationOutboxRecord::pending(
             delivery.id,
             delivery.peer_id,
             delivery
@@ -85,8 +85,8 @@ fn persistence_outbox_row(
 
 fn persistence_event_commit_request(
     command: crate::events::CommitAcceptedEventCommand,
-) -> soland_storage::EventCommitRequest {
-    soland_storage::EventCommitRequest {
+) -> coland_storage::EventCommitRequest {
+    coland_storage::EventCommitRequest {
         authority_commit: command.authority_commit,
         self_producer_guard: command.self_producer_guard,
         applet_producer_guard: command.applet_producer_guard,
@@ -106,7 +106,7 @@ fn persistence_event_commit_request(
             .collect(),
         idempotency: command
             .idempotency
-            .map(|record| soland_storage::IdempotencyRecord {
+            .map(|record| coland_storage::IdempotencyRecord {
                 authenticated_actor: record.authenticated_actor,
                 operation_id: record.operation_id,
                 idempotency_key: record.key,
@@ -132,7 +132,7 @@ impl crate::events::EventReadPort for PersistenceEventReader {
         founder_id: &str,
         trust_domain_id: &str,
         pair_key: &str,
-    ) -> crate::ServiceResult<Option<soland_storage::DirectConversationFoundingSlotRecord>> {
+    ) -> crate::ServiceResult<Option<coland_storage::DirectConversationFoundingSlotRecord>> {
         Ok(self
             .0
             .events()
@@ -143,7 +143,7 @@ impl crate::events::EventReadPort for PersistenceEventReader {
         &self,
         trust_domain_id: &str,
         pair_key: &str,
-    ) -> crate::ServiceResult<Option<soland_storage::DirectConversationDurableState>> {
+    ) -> crate::ServiceResult<Option<coland_storage::DirectConversationDurableState>> {
         Ok(self
             .0
             .events()
@@ -153,7 +153,7 @@ impl crate::events::EventReadPort for PersistenceEventReader {
     async fn direct_conversation_durable_state_for_realm(
         &self,
         realm_id: &str,
-    ) -> crate::ServiceResult<Option<soland_storage::DirectConversationDurableState>> {
+    ) -> crate::ServiceResult<Option<coland_storage::DirectConversationDurableState>> {
         Ok(self
             .0
             .events()
@@ -164,7 +164,7 @@ impl crate::events::EventReadPort for PersistenceEventReader {
         &self,
         realm: &arkret_wire::RealmId,
         caller: &arkret_wire::ActorId,
-    ) -> crate::ServiceResult<Option<soland_storage::ForeignDirectMlsInput>> {
+    ) -> crate::ServiceResult<Option<coland_storage::ForeignDirectMlsInput>> {
         Ok(self
             .0
             .events()
@@ -173,8 +173,8 @@ impl crate::events::EventReadPort for PersistenceEventReader {
     }
     async fn install_foreign_direct_mls_public_state(
         &self,
-        input: &soland_storage::ForeignDirectMlsInput,
-        result: &soland_storage::ForeignDirectMlsBase,
+        input: &coland_storage::ForeignDirectMlsInput,
+        result: &coland_storage::ForeignDirectMlsBase,
         exact: bool,
     ) -> crate::ServiceResult<bool> {
         Ok(self
@@ -216,7 +216,7 @@ impl crate::events::EventReadPort for PersistenceEventReader {
     async fn identity_anchor_account_slot(
         &self,
         account_id: &arkret_wire::AccountId,
-    ) -> crate::ServiceResult<Option<soland_storage::IdentityAnchorAccountSlot>> {
+    ) -> crate::ServiceResult<Option<coland_storage::IdentityAnchorAccountSlot>> {
         Ok(self
             .0
             .events()
@@ -226,7 +226,7 @@ impl crate::events::EventReadPort for PersistenceEventReader {
     async fn realm_event_stats(
         &self,
         realm_id: &str,
-    ) -> crate::ServiceResult<soland_storage::RealmEventStats> {
+    ) -> crate::ServiceResult<coland_storage::RealmEventStats> {
         Ok(self.0.events().realm_event_stats(realm_id).await?)
     }
     async fn realm_events_newest_first(
@@ -362,33 +362,33 @@ impl crate::events::MessagePort for PersistenceEventReader {
 impl crate::events::AppletPort for PersistenceEventReader {
     async fn issue_widget_token(
         &self,
-        record: soland_storage::AppletWidgetTokenRecord,
+        record: coland_storage::AppletWidgetTokenRecord,
     ) -> crate::ServiceResult<bool> {
         Ok(self.0.applets().issue_widget_token(record).await?)
     }
 
     async fn widget_tokens(
         &self,
-        install: &soland_storage::AppletWidgetInstallSelector,
+        install: &coland_storage::AppletWidgetInstallSelector,
         at: chrono::DateTime<chrono::Utc>,
-    ) -> crate::ServiceResult<Vec<soland_storage::AppletWidgetTokenRecord>> {
+    ) -> crate::ServiceResult<Vec<coland_storage::AppletWidgetTokenRecord>> {
         Ok(self.0.applets().widget_tokens(install, at).await?)
     }
 
     async fn check_widget_token(
         &self,
-        gate: &soland_storage::AppletWidgetTokenGateSelector,
+        gate: &coland_storage::AppletWidgetTokenGateSelector,
         at: chrono::DateTime<chrono::Utc>,
-    ) -> crate::ServiceResult<soland_storage::AppletWidgetTokenRecord> {
+    ) -> crate::ServiceResult<coland_storage::AppletWidgetTokenRecord> {
         Ok(self.0.applets().check_widget_token(gate, at).await?)
     }
 
     async fn invalidate_widget_token(
         &self,
-        install: &soland_storage::AppletWidgetInstallSelector,
+        install: &coland_storage::AppletWidgetInstallSelector,
         token_ref: &str,
         at: chrono::DateTime<chrono::Utc>,
-    ) -> crate::ServiceResult<soland_storage::AppletWidgetTokenInvalidation> {
+    ) -> crate::ServiceResult<coland_storage::AppletWidgetTokenInvalidation> {
         Ok(self
             .0
             .applets()
@@ -399,7 +399,7 @@ impl crate::events::AppletPort for PersistenceEventReader {
     async fn pending_applet_authoring_completions(
         &self,
         limit: u32,
-    ) -> crate::ServiceResult<Vec<soland_storage::AppletAuthoringCompletion>> {
+    ) -> crate::ServiceResult<Vec<coland_storage::AppletAuthoringCompletion>> {
         Ok(self
             .0
             .applets()
@@ -420,11 +420,11 @@ impl crate::events::AppletPort for PersistenceEventReader {
     }
     async fn admit_applet_authoring_unit(
         &self,
-        input: soland_storage::AppletAuthoringUnitWrite,
-        author: soland_storage::AppletCommitAuthor,
-        attester: soland_storage::AppletResolutionAttester,
-        finalize: soland_storage::AppletUnitFinalizer,
-    ) -> crate::ServiceResult<soland_storage::AppletAuthoringUnitOutcome> {
+        input: coland_storage::AppletAuthoringUnitWrite,
+        author: coland_storage::AppletCommitAuthor,
+        attester: coland_storage::AppletResolutionAttester,
+        finalize: coland_storage::AppletUnitFinalizer,
+    ) -> crate::ServiceResult<coland_storage::AppletAuthoringUnitOutcome> {
         Ok(self
             .0
             .applets()
@@ -474,7 +474,7 @@ impl crate::events::AppletPort for PersistenceEventReader {
         expected: &Value,
         replacement: Value,
         fenced_at: chrono::DateTime<chrono::Utc>,
-    ) -> crate::ServiceResult<soland_storage::AppletInstallationFenceOutcome> {
+    ) -> crate::ServiceResult<coland_storage::AppletInstallationFenceOutcome> {
         Ok(self
             .0
             .applets()
@@ -544,7 +544,7 @@ impl crate::events::ProjectionWritePort for PersistenceProjectionWriter {
         &self,
         record: &crate::events::MorphProjectionRecord,
     ) -> crate::ServiceResult<()> {
-        let record = soland_storage::MorphProjectionRecord {
+        let record = coland_storage::MorphProjectionRecord {
             morph_id: record.morph_id.clone(),
             realm_id: record.realm_id.clone(),
             scope_circle_id: record.scope_circle_id.clone(),
@@ -590,21 +590,21 @@ impl crate::events::MlsGroupReadPort for PersistenceMlsGroupReader {
     async fn current(
         &self,
         effective_scope: &arkret_wire::ScopeRef,
-    ) -> crate::ServiceResult<Option<soland_storage::MlsGroupCurrentRecord>> {
+    ) -> crate::ServiceResult<Option<coland_storage::MlsGroupCurrentRecord>> {
         Ok(self.0.mls_groups().current(effective_scope).await?)
     }
 
     async fn realm_currents(
         &self,
         realm_id: &arkret_wire::RealmId,
-    ) -> crate::ServiceResult<Vec<soland_storage::MlsGroupCurrentRecord>> {
+    ) -> crate::ServiceResult<Vec<coland_storage::MlsGroupCurrentRecord>> {
         Ok(self.0.mls_groups().realm_currents(realm_id).await?)
     }
 
     #[cfg(any(test, feature = "test-support"))]
     async fn seed_test_current(
         &self,
-        record: &soland_storage::MlsGroupCurrentRecord,
+        record: &coland_storage::MlsGroupCurrentRecord,
     ) -> crate::ServiceResult<()> {
         Ok(self.0.mls_groups().seed_test_current(record).await?)
     }
@@ -646,17 +646,17 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
         Ok(self
             .0
             .mls_key_packages()
-            .try_claim(soland_storage::MlsKeyPackageClaim {
+            .try_claim(coland_storage::MlsKeyPackageClaim {
                 id: command.id,
                 target: match command.target {
                     crate::events::ClaimMlsKeyPackageTarget::Group(group_id) => {
-                        soland_storage::MlsKeyPackageClaimTarget::Group(group_id)
+                        coland_storage::MlsKeyPackageClaimTarget::Group(group_id)
                     }
                     crate::events::ClaimMlsKeyPackageTarget::Retire => {
-                        soland_storage::MlsKeyPackageClaimTarget::Retire
+                        coland_storage::MlsKeyPackageClaimTarget::Retire
                     }
                     crate::events::ClaimMlsKeyPackageTarget::Revoke => {
-                        soland_storage::MlsKeyPackageClaimTarget::Revoke
+                        coland_storage::MlsKeyPackageClaimTarget::Revoke
                     }
                 },
                 intended_realm_id: command.intended_realm_id,
@@ -705,7 +705,7 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
     async fn claim_welcome_binding(
         &self,
         claim_id: &str,
-    ) -> crate::ServiceResult<Option<soland_storage::MlsWelcomeClaimBinding>> {
+    ) -> crate::ServiceResult<Option<coland_storage::MlsWelcomeClaimBinding>> {
         Ok(self
             .0
             .mls_key_packages()
@@ -729,7 +729,7 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
         Ok(self
             .0
             .mls_key_packages()
-            .try_claim_peer(soland_storage::PeerKeyPackageClaimAttempt {
+            .try_claim_peer(coland_storage::PeerKeyPackageClaimAttempt {
                 keypackage_id: attempt.keypackage_id,
                 mls_group_id: attempt.mls_group_id,
                 device_authorize_event_id: attempt.device_authorize_event_id,
@@ -820,7 +820,7 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
         Ok(self
             .0
             .mls_key_packages()
-            .transition_peer_claim_terminal(soland_storage::PeerClaimTerminalTransition {
+            .transition_peer_claim_terminal(coland_storage::PeerClaimTerminalTransition {
                 source_id: transition.source_id,
                 claim_request_id: transition.claim_request_id,
                 request_digest: transition.request_digest,
@@ -857,7 +857,7 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
 
     async fn retire_owner_account_keypackages(
         &self,
-        owner_account_pk: soland_storage::AccountPk,
+        owner_account_pk: coland_storage::AccountPk,
         retired_at: i64,
     ) -> crate::ServiceResult<usize> {
         let rows = self.0.mls_key_packages().snapshot_all().await?;
@@ -870,9 +870,9 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
             if self
                 .0
                 .mls_key_packages()
-                .try_claim(soland_storage::MlsKeyPackageClaim {
+                .try_claim(coland_storage::MlsKeyPackageClaim {
                     id: &row.id,
-                    target: soland_storage::MlsKeyPackageClaimTarget::Retire,
+                    target: coland_storage::MlsKeyPackageClaimTarget::Retire,
                     intended_realm_id: None,
                     device_authorize_event_id: None,
                     agent_key_authorize_event_id: None,
@@ -997,7 +997,7 @@ impl crate::events::EventCommitPort for PersistenceEventCommitter {
     ) -> crate::ServiceResult<crate::events::CommitAcceptedEventResult> {
         let outcome = self
             .0
-            .commit_event_batch(soland_storage::EventBatchCommitRequest {
+            .commit_event_batch(coland_storage::EventBatchCommitRequest {
                 events: command
                     .events
                     .into_iter()
@@ -1026,22 +1026,22 @@ pub struct PersistencePublicationEvidence(Arc<dyn PersistenceStore>);
 impl crate::events::PublicationEvidencePort for PersistencePublicationEvidence {
     async fn store_publication_evidence(
         &self,
-        record: soland_storage::PublicationEvidenceRecord,
-    ) -> crate::ServiceResult<soland_storage::PublicationEvidenceRecord> {
+        record: coland_storage::PublicationEvidenceRecord,
+    ) -> crate::ServiceResult<coland_storage::PublicationEvidenceRecord> {
         Ok(self.0.publication_evidence().put_if_absent(record).await?)
     }
 
     async fn publication_evidence(
         &self,
         event_id: &arkret_wire::EventId,
-    ) -> crate::ServiceResult<Option<soland_storage::PublicationEvidenceRecord>> {
+    ) -> crate::ServiceResult<Option<coland_storage::PublicationEvidenceRecord>> {
         Ok(self.0.publication_evidence().get(event_id).await?)
     }
 
     async fn publication_evidence_for_events(
         &self,
         event_ids: &[arkret_wire::EventId],
-    ) -> crate::ServiceResult<Vec<soland_storage::PublicationEvidenceRecord>> {
+    ) -> crate::ServiceResult<Vec<coland_storage::PublicationEvidenceRecord>> {
         Ok(self.0.publication_evidence().get_many(event_ids).await?)
     }
 }

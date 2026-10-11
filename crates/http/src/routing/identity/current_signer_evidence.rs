@@ -10,10 +10,10 @@ use arkret_models_identity::{
 use arkret_wire::{
     CommittedEventRef, CurrentSelector, EventId, RealmId, StationSigningKey, TypedCurrentRow,
 };
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
 
 use super::AuthArgs;
 use crate::state::AppState;
@@ -84,7 +84,7 @@ pub(crate) fn self_result_error(error: arkret_wire::WireError) -> AppError {
 
 pub(crate) async fn resolve_self_signer_keys(
     state: &AppState,
-    session: &soland_services::identity::SessionIdentityState,
+    session: &coland_services::identity::SessionIdentityState,
     body: &SignerKeysQueryRequestBody,
 ) -> Result<SignerKeysQueryOutcome, AppError> {
     body.validate().map_err(self_request_error)?;
@@ -277,7 +277,7 @@ async fn current_device_key(
 
 async fn exact_visible_committed_event(
     state: &AppState,
-    session: &soland_services::identity::SessionIdentityState,
+    session: &coland_services::identity::SessionIdentityState,
     realm_id: &RealmId,
     reference: &CommittedEventRef,
 ) -> bool {

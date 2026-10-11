@@ -359,21 +359,21 @@ impl ContactStore for PgContactStore {
         actor: &ActorId,
         key: &str,
         request_hash: &str,
-    ) -> PersistenceResult<Option<soland_storage::ContactCompletionState>> {
+    ) -> PersistenceResult<Option<coland_storage::ContactCompletionState>> {
         completion::lookup(&self.pool, actor, key, request_hash).await
     }
     async fn committed_completion_intents(
         &self,
         limit: u16,
         after: Option<&arkret_wire::Hash>,
-    ) -> PersistenceResult<Vec<soland_storage::CommittedContactCompletionIntent>> {
+    ) -> PersistenceResult<Vec<coland_storage::CommittedContactCompletionIntent>> {
         completion::confirmed(&self.pool, limit, after).await
     }
     async fn finalize_completion_intent(
         &self,
-        ready: &soland_storage::CommittedContactCompletionIntent,
-        result: &soland_storage::ContactCompletionResult,
-        record: Option<&soland_storage::FederationOutboxRecord>,
+        ready: &coland_storage::CommittedContactCompletionIntent,
+        result: &coland_storage::ContactCompletionResult,
+        record: Option<&coland_storage::FederationOutboxRecord>,
         counterpart_proof: Option<
             &arkret_models_collaboration::contact_operations::ContactCurrentProof,
         >,
@@ -687,7 +687,7 @@ impl InviteReceivePolicyRow {
                 ))
             })?;
         let account_id = arkret_wire::AccountId::new(self.principal_id, self.station_id);
-        soland_storage::validate_invite_policy_account(&account_id, &policy)?;
+        coland_storage::validate_invite_policy_account(&account_id, &policy)?;
         Ok((account_id, policy))
     }
 }
@@ -697,7 +697,7 @@ pub(crate) async fn put_invite_receive_policy(
     account_id: &arkret_wire::AccountId,
     policy: &arkret_models_collaboration::governance::invite_addressing::InviteReceivePolicy,
 ) -> PersistenceResult<()> {
-    soland_storage::validate_invite_policy_account(account_id, policy)?;
+    coland_storage::validate_invite_policy_account(account_id, policy)?;
     let payload = serde_json::to_value(policy).map_err(|error| {
         PersistenceError::Internal(format!("invite_receive_policy payload encode: {error}"))
     })?;

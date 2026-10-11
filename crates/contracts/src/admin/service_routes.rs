@@ -1,6 +1,6 @@
 //! Deployment-local, read-only service-route operations projection.
 //!
-//! These DTOs expose only state already verified and persisted by Soland.
+//! These DTOs expose only state already verified and persisted by Coland.
 //! They are not Arkret discovery artifacts and carry no authorization.
 
 use arkret_wire::DidCoreId;

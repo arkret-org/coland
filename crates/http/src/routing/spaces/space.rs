@@ -3,7 +3,7 @@
 //! Surfaces that remain:
 //! - `GET    /_arkret/self/realms/{realm_id}` — read a Realm lifecycle response.
 //! - `GET    /_arkret/self/realms/{realm_id}/export` — full event log + projection dump.
-//! - `GET    /_soland/self/spaces/{space_id}/cells/{cell_family}` — projected Space-container
+//! - `GET    /_coland/self/spaces/{space_id}/cells/{cell_family}` — projected Space-container
 //!   child-order cell.
 //!
 //! Everything else in this module is the visibility / membership
@@ -20,12 +20,12 @@ use arkret_models_collaboration::governance::realm_governance::{
 #[cfg(test)]
 use arkret_wire::PlaintextDataClassKind;
 use chrono::{DateTime, Utc};
+use coland_http::error::AppError;
+use coland_services::identity::SessionIdentityState as SessionRecord;
 use salvo::oapi::extract::PathParam;
 use salvo::prelude::*;
 use serde::Serialize;
 use serde_json::Value;
-use soland_http::error::AppError;
-use soland_services::identity::SessionIdentityState as SessionRecord;
 
 use super::AuthArgs;
 use crate::state::AppState;
@@ -43,9 +43,9 @@ pub(super) fn protocol_router() -> Router {
     )
 }
 
-/// Soland-local Space-container child-order cell read surface
-/// (`org.arkret.soland.spaces.cells.get`); no canonical operation, stays on the
-/// `/_soland` product surface.
+/// Coland-local Space-container child-order cell read surface
+/// (`org.arkret.coland.spaces.cells.get`); no canonical operation, stays on the
+/// `/_coland` product surface.
 pub(super) fn local_router() -> Router {
     Router::new()
         .push(Router::with_path("spaces/{space_id}/cells/{cell_family}").get(get_space_cell))
@@ -78,8 +78,8 @@ async fn get_realm(
         .map(salvo::prelude::Json)
 }
 
-#[salvo::oapi::endpoint(operation_id = "org.arkret.soland.spaces.cells.get", tags("spaces"))]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.spaces.cells.get"))]
+#[salvo::oapi::endpoint(operation_id = "org.arkret.coland.spaces.cells.get", tags("spaces"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.spaces.cells.get"))]
 async fn get_space_cell(
     aa: AuthArgs,
     depot: &mut Depot,
@@ -90,7 +90,7 @@ async fn get_space_cell(
     let state = depot.get_typed::<AppState>().expect("state injected");
     let _session = aa.authenticated_session(state, req).await?;
     Err(AppError::from_rejection(
-        soland_http::error::ErrorCode::ServiceUnavailable,
+        coland_http::error::ErrorCode::ServiceUnavailable,
         "Space child order requires a committed Event projection",
     )
     .with_rejection_code("service_unavailable"))
@@ -290,7 +290,7 @@ pub async fn realm_history_access(state: &AppState, realm_or_internal_id: &str) 
 }
 
 fn projection_member_is_joined(
-    projection: &soland_domain::reducer::ProjectionState,
+    projection: &coland_domain::reducer::ProjectionState,
     realm_id: &str,
     actor: &arkret_wire::ActorId,
     actor_key: &str,
@@ -313,8 +313,8 @@ fn projection_member_is_joined(
     projection
         .facet_value(
             realm_id,
-            &soland_domain::reducer::FacetRef::new(
-                soland_domain::reducer::facet::MEMBER_STATE,
+            &coland_domain::reducer::FacetRef::new(
+                coland_domain::reducer::facet::MEMBER_STATE,
                 actor_key,
             ),
         )
@@ -397,7 +397,7 @@ pub async fn realm_discoverability_for_id(state: &AppState, realm_id: &str) -> S
     let projected = {
         let projection = state.projections().snapshot();
         projection
-            .realm_facet_value(realm_id, soland_domain::reducer::facet::REALM_DISCOVERY)
+            .realm_facet_value(realm_id, coland_domain::reducer::facet::REALM_DISCOVERY)
             .and_then(|value| {
                 value
                     .get("value")

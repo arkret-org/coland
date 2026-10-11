@@ -8,8 +8,8 @@ use arkret_models_integration::{
     GhostActorProvisionRequestBody, namespace_pattern_matches,
 };
 use arkret_wire::{ActorId, CapabilityActionId, Event};
+use coland_http::error::AppError;
 use serde_json::{Value, json};
-use soland_http::error::AppError;
 
 use super::install::registration_epoch_evidence_from_event;
 use super::record::{applet_record, fence_applet_record};

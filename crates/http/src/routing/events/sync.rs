@@ -34,16 +34,16 @@ pub(crate) use base64::Engine;
 pub(crate) use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 pub(crate) use bytes::Bytes;
 pub(crate) use chrono::{DateTime, Utc};
+#[cfg(test)]
+pub(crate) use coland_domain::reducer::ProjectionState;
+#[cfg(test)]
+pub(crate) use coland_services::events::ProjectedEvent;
+pub(crate) use coland_services::identity::SessionIdentityState;
+pub(crate) use coland_services::sync::CursorState;
 pub(crate) use futures_util::stream::StreamExt;
 pub(crate) use salvo::http::{StatusCode, header};
 pub(crate) use salvo::prelude::*;
 pub(crate) use serde_json::{Value, json};
-#[cfg(test)]
-pub(crate) use soland_domain::reducer::ProjectionState;
-#[cfg(test)]
-pub(crate) use soland_services::events::ProjectedEvent;
-pub(crate) use soland_services::identity::SessionIdentityState;
-pub(crate) use soland_services::sync::CursorState;
 pub(crate) use tokio::sync::broadcast::error::RecvError;
 
 #[cfg(test)]
@@ -126,11 +126,11 @@ pub(super) fn protocol_router() -> Router {
 
 pub(crate) fn scope_selector_to_realm_id(
     value: &str,
-) -> Result<String, soland_http::error::AppError> {
+) -> Result<String, coland_http::error::AppError> {
     if RealmId::new(value.to_owned()).is_ok() {
         return Ok(value.to_owned());
     }
-    Err(soland_http::error::AppError::param_invalid(
+    Err(coland_http::error::AppError::param_invalid(
         "invalid realm_id",
     ))
 }

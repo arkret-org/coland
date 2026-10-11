@@ -61,7 +61,7 @@ pub(super) async fn persist_mimi_canonical_message_event(
         jws: signature.jws,
     })
     .map_err(|e| AppError::internal(e.to_string()))?;
-    let guard = soland_storage::SelfProducerCommitGuard::MimiFacade {
+    let guard = coland_storage::SelfProducerCommitGuard::MimiFacade {
         service_id: state.service_core_id(),
         verification_method: event
             .producer_proof
@@ -86,7 +86,7 @@ pub(super) async fn persist_mimi_canonical_message_event(
     Ok(event_id)
 }
 
-pub(super) fn mimi_admission_error(error: soland_services::ServiceError) -> AppError {
+pub(super) fn mimi_admission_error(error: coland_services::ServiceError) -> AppError {
     let detail = error.to_string();
     if detail.contains("mimi_observer_write_forbidden") {
         return AppError::capability_denied(detail)

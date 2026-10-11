@@ -1,21 +1,21 @@
-# soland runbook
+# coland runbook
 
-On-call recipes for common soland incidents. Pair with the
+On-call recipes for common coland incidents. Pair with the
 Prometheus alert rules in `examples/prometheus-alerts.yml`.
 
 ## Common error codes
 
-soland returns canonical SDK error codes on every refusal. The most
+coland returns canonical SDK error codes on every refusal. The most
 operator-relevant ones:
 
 | Code | Where | Operator response |
 | --- | --- | --- |
 | `migrations_pending` (top-level on `/readyz`) | `routing::system::describe::readyz` | Soft block — wait. If it persists more than 60 s on a healthy Postgres, check the diesel boot log for a partial migration. |
-| `database_unreachable` (top-level on `/readyz`) | same | Verify `DATABASE_URL`, check Postgres logs, confirm the soland process can reach the listed host. |
-| `cross_domain_replay_rejected` | Federation intake | A peer replayed an event whose `trust_domain` does not match this deployment's `SOLAND_TRUST_DOMAIN`. Confirm the peer's `Source-Trust-Domain` header is correct. |
+| `database_unreachable` (top-level on `/readyz`) | same | Verify `DATABASE_URL`, check Postgres logs, confirm the coland process can reach the listed host. |
+| `cross_domain_replay_rejected` | Federation intake | A peer replayed an event whose `trust_domain` does not match this deployment's `COLAND_TRUST_DOMAIN`. Confirm the peer's `Source-Trust-Domain` header is correct. |
 | `cursor_expired` | account / events subscribe | Client cursor older than the configured window. Client must re-subscribe with `from=null`. |
 | `handle_in_grace_period` | identity handle claim | Handle was released too recently. Wait out `HANDLE_GRACE_PERIOD_SECONDS` or pick a different handle. |
-| `retry_budget_exhausted` (DLQ row reason) | Federation outbox | Peer was unreachable for `MAX_ATTEMPTS` transport retries. Inspect with `soland-federation-outbox list --dead-letters`, then `inspect <id>`. |
+| `retry_budget_exhausted` (DLQ row reason) | Federation outbox | Peer was unreachable for `MAX_ATTEMPTS` transport retries. Inspect with `coland-federation-outbox list --dead-letters`, then `inspect <id>`. |
 | `semantic_retry_budget_exhausted` (DLQ row reason) | Federation outbox | The peer kept answering `dependency_missing` past `MAX_SEMANTIC_ATTEMPTS` resubmissions. The missing dependency is on the peer side — do not keep replaying; resolve the dependency first (`sync/federation.md` §4.1). |
 | `egress_policy_denied` (`policy_suppressed` state) | Federation outbox | The local egress policy blocked the peer. The row is **not** dead-lettered: fix the policy and the dispatcher revalidates it automatically on the next pass, because the policy version changed. |
 
@@ -27,28 +27,28 @@ adjust for your log aggregator.
 
 ```bash
 # Every audit-append failure since the last 1 h, with reason.
-journalctl -u soland --since "1 hour ago" -o cat \
+journalctl -u coland --since "1 hour ago" -o cat \
   | jq -c 'select(.target == "audit" and .level == "ERROR")'
 
 # Federation outbox dead-letters in the last 24 h.
-journalctl -u soland --since "24 hours ago" -o cat \
+journalctl -u coland --since "24 hours ago" -o cat \
   | jq -c 'select(.target == "federation_outbox" and (.fields.event | contains("dead-letter")))'
 
 # Every 5xx response by operation id.
-journalctl -u soland --since "1 hour ago" -o cat \
+journalctl -u coland --since "1 hour ago" -o cat \
   | jq -c 'select(.fields.status >= 500) | {op: .fields.op, status: .fields.status, ts: .timestamp}'
 
 # Replay-window rejections (signature too old / too new).
-journalctl -u soland --since "30 minutes ago" -o cat \
+journalctl -u coland --since "30 minutes ago" -o cat \
   | jq -c 'select(.fields.reason == "replay_window")'
 ```
 
 If the deployment uses Loki, the equivalent LogQL queries are:
 
 ```logql
-{service="soland"} |= "audit_append_failure"
-{service="soland"} |= "dead-letter"
-{service="soland"} | json | status >= 500
+{service="coland"} |= "audit_append_failure"
+{service="coland"} |= "dead-letter"
+{service="coland"} | json | status >= 500
 ```
 
 ## Metrics dashboard and alerts
@@ -62,54 +62,54 @@ Recommended PromQL alert expressions:
 
 ```promql
 # Outbound calls blocked by the configured egress policy.
-sum by (reason, target_class) (increase(soland_egress_denied_total[10m])) > 0
+sum by (reason, target_class) (increase(coland_egress_denied_total[10m])) > 0
 
 # Payload integrity mismatch on an admission path.
-sum by (scope) (increase(soland_digest_mismatch_total[10m])) > 0
+sum by (scope) (increase(coland_digest_mismatch_total[10m])) > 0
 
 # Federation retry budget exhausted or terminal 4xx dead-lettering.
 sum by (state) (
-  increase(soland_federation_retry_total{state=~"retry_budget_exhausted|terminal_http_status"}[15m])
+  increase(coland_federation_retry_total{state=~"retry_budget_exhausted|terminal_http_status"}[15m])
 ) > 0
 
 # A delivery intent nobody has managed to hand off for an hour.
-soland_federation_outbox_oldest_pending_age_seconds > 3600
+coland_federation_outbox_oldest_pending_age_seconds > 3600
 
 # One peer's backlog is growing while the rest are healthy.
-sum by (peer) (soland_federation_outbox_state_depth{state=~"pending|leased"}) > 500
+sum by (peer) (coland_federation_outbox_state_depth{state=~"pending|leased"}) > 500
 
 # A dispatcher replica keeps losing its lease mid-delivery (overrun or crash loop).
-increase(soland_federation_outbox_lease_takeover_total[15m]) > 0
+increase(coland_federation_outbox_lease_takeover_total[15m]) > 0
 
 # Durable audit append failure.
-increase(soland_audit_append_failures_total[5m]) > 0
+increase(coland_audit_append_failures_total[5m]) > 0
 
 # Eligible Control Seal work is not being drained.
-soland_control_seal_oldest_eligible_age_seconds > 60
+coland_control_seal_oldest_eligible_age_seconds > 60
 
 # A bounded Realm pass timed out.
-increase(soland_control_seal_attempt_total{outcome="pass_timed_out"}[10m]) > 0
+increase(coland_control_seal_attempt_total{outcome="pass_timed_out"}[10m]) > 0
 
 # Repair had to restore a transactionally missed schedule update.
-sum(increase(soland_control_seal_repair_total{operation=~"inserted|generation_repaired"}[10m])) > 0
+sum(increase(coland_control_seal_repair_total{operation=~"inserted|generation_repaired"}[10m])) > 0
 ```
 
 Operator actions:
 
 | Alert | First query | Owner action |
 |---|---|---|
-| `soland_egress_denied_total` | `sum by (reason,target_class) (increase(soland_egress_denied_total[30m]))` | Confirm the target is expected. If it is a real dependency, add the explicit allow-list or public endpoint; otherwise treat as SSRF or peer misconfiguration. |
-| `soland_digest_mismatch_total` | `sum by (scope) (increase(soland_digest_mismatch_total[30m]))` | Pull the rejected request logs for the same `scope`; compare client canonical bytes, `Content-Digest`, and SDK version. |
-| `soland_federation_retry_total` | `sum by (state) (increase(soland_federation_retry_total[30m]))` | For `retry_scheduled`, inspect peer health. For terminal states, inspect the dead-letter row and replay only after the peer/config issue is fixed. |
-| `soland_federation_outbox_oldest_pending_age_seconds` | `soland_federation_outbox_oldest_pending_age_seconds` | Something is owed to a peer and not moving. Check `soland_federation_retry_delay_seconds` — a long scheduled delay is the peer's `Retry-After`, a zero-progress `attempts` count is a stuck dispatcher. |
-| `soland_federation_outbox_state_depth` | `sum by (state,peer) (soland_federation_outbox_state_depth)` | Distinguishes "one peer is down" from "the dispatcher is stuck". A rising `policy_suppressed` bucket means the local egress policy, not the peer. |
-| `soland_federation_outbox_lease_takeover_total` | `increase(soland_federation_outbox_lease_takeover_total[30m])` | A replica's delivery outran its lease or the replica died. Correctness is preserved (the stale write is dropped), but sustained takeovers mean `LEASE_DURATION_SECS` is too short for this peer's latency. |
-| `soland_audit_append_failures_total` | `increase(soland_audit_append_failures_total[10m])` | Check Postgres availability and audit-table permissions first; stop admin rollout if audit durability is unavailable. |
-| `soland_federation_outbox_dead_letter_total` | `sum by (reason) (increase(soland_federation_outbox_dead_letter_total[30m]))` | Read the reasons, group by peer DID, coordinate with the peer, then replay explicitly (below). |
-| `soland_control_seal_oldest_eligible_age_seconds` | `soland_control_seal_oldest_eligible_age_seconds` | Compare pending, eligible, claimed, expired-claim and in-flight gauges. If execution slots are free, inspect coordinator/store errors and process health. |
-| `soland_control_seal_expired_claims` | `soland_control_seal_expired_claims` | Check process exits and pass/store deadline logs. Claims are safe to reclaim after expiry; a sustained non-zero value means reclaim is not keeping pace. |
-| `soland_control_seal_attempt_total{outcome="pass_timed_out"}` | `increase(soland_control_seal_attempt_total{outcome="pass_timed_out"}[30m])` | Inspect the timed-out Realm and confirm later Realms and device-revocation cleanup continued. Do not extend the claim TTL to hide a blocking stage. |
-| `soland_control_seal_repair_total` | `sum by (operation) (increase(soland_control_seal_repair_total[30m]))` | `inserted` or `generation_repaired` is a missed transactional write-path signal. Audit all three Control Event ingress paths before rollout. |
+| `coland_egress_denied_total` | `sum by (reason,target_class) (increase(coland_egress_denied_total[30m]))` | Confirm the target is expected. If it is a real dependency, add the explicit allow-list or public endpoint; otherwise treat as SSRF or peer misconfiguration. |
+| `coland_digest_mismatch_total` | `sum by (scope) (increase(coland_digest_mismatch_total[30m]))` | Pull the rejected request logs for the same `scope`; compare client canonical bytes, `Content-Digest`, and SDK version. |
+| `coland_federation_retry_total` | `sum by (state) (increase(coland_federation_retry_total[30m]))` | For `retry_scheduled`, inspect peer health. For terminal states, inspect the dead-letter row and replay only after the peer/config issue is fixed. |
+| `coland_federation_outbox_oldest_pending_age_seconds` | `coland_federation_outbox_oldest_pending_age_seconds` | Something is owed to a peer and not moving. Check `coland_federation_retry_delay_seconds` — a long scheduled delay is the peer's `Retry-After`, a zero-progress `attempts` count is a stuck dispatcher. |
+| `coland_federation_outbox_state_depth` | `sum by (state,peer) (coland_federation_outbox_state_depth)` | Distinguishes "one peer is down" from "the dispatcher is stuck". A rising `policy_suppressed` bucket means the local egress policy, not the peer. |
+| `coland_federation_outbox_lease_takeover_total` | `increase(coland_federation_outbox_lease_takeover_total[30m])` | A replica's delivery outran its lease or the replica died. Correctness is preserved (the stale write is dropped), but sustained takeovers mean `LEASE_DURATION_SECS` is too short for this peer's latency. |
+| `coland_audit_append_failures_total` | `increase(coland_audit_append_failures_total[10m])` | Check Postgres availability and audit-table permissions first; stop admin rollout if audit durability is unavailable. |
+| `coland_federation_outbox_dead_letter_total` | `sum by (reason) (increase(coland_federation_outbox_dead_letter_total[30m]))` | Read the reasons, group by peer DID, coordinate with the peer, then replay explicitly (below). |
+| `coland_control_seal_oldest_eligible_age_seconds` | `coland_control_seal_oldest_eligible_age_seconds` | Compare pending, eligible, claimed, expired-claim and in-flight gauges. If execution slots are free, inspect coordinator/store errors and process health. |
+| `coland_control_seal_expired_claims` | `coland_control_seal_expired_claims` | Check process exits and pass/store deadline logs. Claims are safe to reclaim after expiry; a sustained non-zero value means reclaim is not keeping pace. |
+| `coland_control_seal_attempt_total{outcome="pass_timed_out"}` | `increase(coland_control_seal_attempt_total{outcome="pass_timed_out"}[30m])` | Inspect the timed-out Realm and confirm later Realms and device-revocation cleanup continued. Do not extend the claim TTL to hide a blocking stage. |
+| `coland_control_seal_repair_total` | `sum by (operation) (increase(coland_control_seal_repair_total[30m]))` | `inserted` or `generation_repaired` is a missed transactional write-path signal. Audit all three Control Event ingress paths before rollout. |
 
 ## Control Seal scheduler
 
@@ -128,26 +128,26 @@ Replay is an explicit, audited act:
 
 ```bash
 # What is still owed, and what gave up.
-cargo run --bin soland-federation-outbox -- list --state pending
-cargo run --bin soland-federation-outbox -- list --dead-letters
+cargo run --bin coland-federation-outbox -- list --state pending
+cargo run --bin coland-federation-outbox -- list --dead-letters
 
 # Why one row stopped (request reported by digest, not verbatim).
-cargo run --bin soland-federation-outbox -- inspect <outbox-id|dead-letter-id>
+cargo run --bin coland-federation-outbox -- inspect <outbox-id|dead-letter-id>
 
 # Replay after the peer/config issue is fixed. Re-validates the peer, the
 # egress policy and the stored request, then mints a NEW intent with a NEW
 # Idempotency-Key and stamps the audit onto the dead letter. Single-shot.
-cargo run --bin soland-federation-outbox -- requeue <dead-letter-id> \
+cargo run --bin coland-federation-outbox -- requeue <dead-letter-id> \
   --operator did:web:you.example --reason "peer endpoint restored"
 ```
 
 There is no HTTP admin surface for this. Adding one would require a canonical
 operation and an `/_arkret/...` binding in `arkret-spec` first; a private
-`/_soland/...` route is not permitted.
+`/_coland/...` route is not permitted.
 
 ## Restart strategy
 
-soland is stateless apart from its in-process projection caches; restart
+coland is stateless apart from its in-process projection caches; restart
 is always safe once `/readyz` is green.
 
 1. Drain in-flight requests at the load balancer (LB removes the replica
@@ -185,8 +185,8 @@ sudo iptables -D OUTPUT -p tcp --dport 5432 -j DROP
 
 ```bash
 # Point a peer at a sink that returns 5xx for every request.
-# Watch soland_federation_outbox_depth climb and the
-# soland_federation_outbox_dead_letter_total counter advance after
+# Watch coland_federation_outbox_depth climb and the
+# coland_federation_outbox_dead_letter_total counter advance after
 # MAX_ATTEMPTS retries per row.
 just db-shell
 # inside psql: pull every still-owed row forward. `state` is the source of
@@ -200,12 +200,12 @@ UPDATE federation_outbox SET next_attempt_at = 0
 ```bash
 # Make the audit table read-only and exercise an event that writes
 # an audit row. Every refusal bumps
-# soland_audit_append_failures_total.
+# coland_audit_append_failures_total.
 just db-shell
 # inside psql:
-REVOKE INSERT ON projection_audit FROM soland;
+REVOKE INSERT ON projection_audit FROM coland;
 # ...exercise the event...
-GRANT INSERT ON projection_audit TO soland;
+GRANT INSERT ON projection_audit TO coland;
 ```
 
 ## Escalation pointers
@@ -221,11 +221,11 @@ GRANT INSERT ON projection_audit TO soland;
 The sections below cover the R3 sync and later v1 updates
 (`arkret-spec @ e3f6832d`). They are
 intentionally separable from the earlier runbook above so that you can
-on-call a fresh ops engineer who has not seen pre-R3 soland.
+on-call a fresh ops engineer who has not seen pre-R3 coland.
 
 ### Agent FSM transitions (pause / resume / deactivate)
 
-soland is the canonical owner of the agent FSM. The state machine has three
+coland is the canonical owner of the agent FSM. The state machine has three
 nodes:
 
 ```text
@@ -245,7 +245,7 @@ Operationally:
     writes.
   - Audit row goes to `projection_audit` with kind=`agent.pause`.
   - **Operational triage**: if you see a spike in `agent_paused` rejects on a
-    realm, check whether an admin in `sodmin` flipped the agent runtime
+    realm, check whether an admin in `codmin` flipped the agent runtime
     profile; do not assume a misbehaving client.
 - **resume** (`POST /agents/{agent_id}/resume`):
   - Reverse of pause; rejected with `agent_deactivated` if the state is
@@ -260,20 +260,20 @@ Common ops actions:
 
 | Symptom | Probable cause | Action |
 |---|---|---|
-| `agent_paused` storm on one realm | Admin policy change or pairing drift | Inspect last `ak.self.agent.pause` event for the principal; confirm with admin in sodmin |
+| `agent_paused` storm on one realm | Admin policy change or pairing drift | Inspect last `ak.self.agent.pause` event for the principal; confirm with admin in codmin |
 | `pairing_request_expired` | Pairing window elapsed; default 10 min | Re-issue `ak.gate.account.command.pair_agent_key.v1`; check NTP drift on client |
 | `proof_invalid` on pairing | Canonical-digest mismatch — usually a client serializer bug | Pull the raw payload from `agent_pairing_attempts` table and diff JCS bytes |
 | `verification_method_principal_mismatch` | DID resolved to a different principal than payload claims | Likely DID-doc misalignment in `coauth`; coordinate with that team |
 
 Recovery strand / migration story for an agent that drifts: see `coauth`
-runbook + `docs/admin-onboarding.md` in sodmin.
+runbook + `docs/admin-onboarding.md` in codmin.
 
 ### Recovery strand (policy + receipt issuance lifecycle)
 
 R3 surfaces recovery as a first-class wire strand. Lifecycle:
 
 ```text
-[client]                  [soland]                              [witnesses]
+[client]                  [coland]                              [witnesses]
    | create policy           |                                       |
    |------------------------>|  ak.recovery.policy.create             |
    |                         |---------------------+                 |
@@ -318,14 +318,14 @@ Operational behaviors:
   propagated, you get `recovery_witness_revoke_lagging`. Triage:
   1. Confirm the witness revocation actually landed at the source-of-truth
      (`coauth` for principal-bound witnesses).
-  2. Check `soland_witness_revoke_replication_lag_seconds`.
+  2. Check `coland_witness_revoke_replication_lag_seconds`.
   3. If above SLO, the right answer is to widen the window temporarily and
      escalate to whoever owns the revocation replication, NOT to weaken the
      proof check.
 
 ### Media token issuer (rotating service_signature.kid, focus binding troubleshooting)
 
-soland is the canonical issuer of media tokens. The wire surface is
+coland is the canonical issuer of media tokens. The wire surface is
 `ak.self.call.media.exchange.issue_token.v1` (`POST /rtc/token`).
 
 `service_signature.kid` rotation:
@@ -349,7 +349,7 @@ Focus-binding troubleshooting matrix:
 |---|---|
 | `focus_mismatch` | `ak.realm.media_service.foci[]` shape; the focus_id the client picked must be in the realm's current focus set. |
 | `unknown_focus_type` | A backend the realm advertises but the client doesn't profile — confirm `ak.profile.media_service_binding.<backend>.v1` is in the client's declared profile set. |
-| `token_issuer_unauthorised` | The `issuer_kid` decoded to an issuer not bound to this realm — usually a stale soland instance returning tokens for a realm it no longer hosts. |
+| `token_issuer_unauthorised` | The `issuer_kid` decoded to an issuer not bound to this realm — usually a stale coland instance returning tokens for a realm it no longer hosts. |
 | `participant_binding_invalid` | Canonical bytes / signature mismatch. Capture the raw `participant_binding` and re-verify locally; suspect a serializer bug on the issuer. |
 | `participant_id_unrecognised` | Identity string failed to parse — usually a client passing through a backend-native identity instead of the canonical `ak:participant:<realm>:<actor>:<device>:<call>`. |
 | `session_focus_already_committed` | Call is bound to a different focus already; the client must resume against that focus or end and re-initiate. |

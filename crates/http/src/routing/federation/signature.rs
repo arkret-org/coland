@@ -5,10 +5,10 @@ use arkret_signatures::http_signature::{
     SignaturePolicyError, SignatureVerificationPolicy,
 };
 use arkret_wire::{ErrorCode, ServiceOperationId};
+use coland_http::error::AppError;
+use coland_http::http_signature;
 use ed25519_dalek::VerifyingKey;
 use salvo::prelude::*;
-use soland_http::error::AppError;
-use soland_http::http_signature;
 
 use super::wire::FederationTrustHeaders;
 use crate::state::AppState;
@@ -457,7 +457,7 @@ fn current_peer_key_from_document(
 pub(in crate::routing) fn signature_target_uri(req: &Request, state: &AppState) -> String {
     // The signed target is the destination service's registered public
     // endpoint, not the reverse proxy's internal upstream URI. Salvo can
-    // expose the Caddy -> Soland hop as `http://...` even when the client used
+    // expose the Caddy -> Coland hop as `http://...` even when the client used
     // the advertised `https://...` endpoint, so the configured public origin
     // must win whenever it is available.
     let scheme = signature_target_scheme(&state.config().public_base_url, req.uri().scheme_str());
@@ -650,7 +650,7 @@ mod tests {
                 did_resolver_allow_methods: vec!["web".into()],
                 ..crate::config::AppConfig::test_default()
             },
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let did = arkret_wire::Did::new("did:web:127.0.0.1%3A9".to_owned()).unwrap();
         let service_id = arkret_wire::project_did_to_core_id(&did)

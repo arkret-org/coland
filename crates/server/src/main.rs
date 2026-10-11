@@ -1,12 +1,12 @@
 use anyhow::Context;
+use coland::process_config::arg_value;
+use coland_http::config::{AppConfig, StartupOverrides};
+use coland_http::service;
+use coland_http::state::AppState;
+use coland_storage_postgres::Db;
 use salvo::conn::Acceptor;
 use salvo::conn::rustls::{Keycert, RustlsConfig};
 use salvo::prelude::*;
-use soland::process_config::arg_value;
-use soland_http::config::{AppConfig, StartupOverrides};
-use soland_http::service;
-use soland_http::state::AppState;
-use soland_storage_postgres::Db;
 use tokio::signal;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -18,7 +18,7 @@ pub(crate) mod runtime;
 
 fn main() -> anyhow::Result<()> {
     // The dependency graph includes rustls consumers that enable different
-    // provider features. Select Soland's declared `ring` provider before any
+    // provider features. Select Coland's declared `ring` provider before any
     // listener or outbound client can ask rustls for a process default.
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -30,11 +30,11 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn run() -> anyhow::Result<()> {
-    // P5 (5.5) — `soland healthcheck` subcommand. Distroless / minimal
+    // P5 (5.5) — `coland healthcheck` subcommand. Distroless / minimal
     // runtime images cannot rely on an external `curl` binary for the
     // Docker HEALTHCHECK. Detect the subcommand BEFORE we initialize
     // tracing so the healthcheck process stays quiet (no startup chatter,
-    // no opening of SOLAND_LOG_FILE), exits with status 0 on probe
+    // no opening of COLAND_LOG_FILE), exits with status 0 on probe
     // success and 1 on failure, and never starts the Salvo listener.
     let raw_args: Vec<String> = std::env::args().collect();
     if raw_args
@@ -50,11 +50,11 @@ async fn run() -> anyhow::Result<()> {
     // Logging deliberately does not precede this. A configuration failure
     // means the process does not start, and that error returns from `main` for
     // the runtime to print — there is nothing for a subscriber to add. Before
-    // this order, `SOLAND_DEVELOPMENT_MODE` was parsed a second time here with
+    // this order, `COLAND_DEVELOPMENT_MODE` was parsed a second time here with
     // a case-sensitive matcher that did not accept `on`, so
-    // `SOLAND_DEVELOPMENT_MODE=on` produced a development-mode server writing
+    // `COLAND_DEVELOPMENT_MODE=on` produced a development-mode server writing
     // production logs.
-    let values = soland::process_config::load(&raw_args)?;
+    let values = coland::process_config::load(&raw_args)?;
     let mut config = AppConfig::from_values(
         &values,
         StartupOverrides {
@@ -75,7 +75,7 @@ async fn run() -> anyhow::Result<()> {
     // config for existing policy consumers.
     let db = Db::connect(
         config.database_url.as_deref(),
-        soland_storage_postgres::PoolTuning {
+        coland_storage_postgres::PoolTuning {
             max_size: config.db_pool_max_size,
             acquire_timeout_seconds: config.db_pool_acquire_timeout_seconds,
         },
@@ -98,14 +98,14 @@ async fn run() -> anyhow::Result<()> {
                         .as_ref()
                         .expect("tls_enabled guarantees cert path"),
                 )
-                .context("failed to read SOLAND_TLS_CERT_PATH")?
+                .context("failed to read COLAND_TLS_CERT_PATH")?
                 .key_from_path(
                     config
                         .tls_key_path
                         .as_ref()
                         .expect("tls_enabled guarantees key path"),
                 )
-                .context("failed to read SOLAND_TLS_KEY_PATH")?;
+                .context("failed to read COLAND_TLS_KEY_PATH")?;
             let acceptor = TcpListener::new(config.bind.to_string())
                 .rustls(RustlsConfig::new(keycert))
                 .bind()
@@ -137,7 +137,7 @@ async fn run() -> anyhow::Result<()> {
             .external_webvh_provider_trust_domain
             .clone()
             .unwrap_or_else(|| config.trust_domain.to_string());
-        match soland_http::state::did_resolver_chain::probe_webvh_provider_describe(
+        match coland_http::state::did_resolver_chain::probe_webvh_provider_describe(
             &url,
             std::time::Duration::from_secs(3),
             None,
@@ -183,14 +183,14 @@ async fn run() -> anyhow::Result<()> {
     spawn_federation_peer_discovery(state.clone());
 
     // Sovereign enclave security invariants. When
-    // `SOLAND_SOVEREIGN_ENCLAVE=1` the configured posture MUST satisfy:
+    // `COLAND_SOVEREIGN_ENCLAVE=1` the configured posture MUST satisfy:
     //   * federation_outbound_enabled = false
     //   * did_resolver_allow_methods non-empty
     // Fail fast at startup if either invariant is violated.
-    let enclave_assertion = soland_http::security::assert_enclave_invariants(state.config());
+    let enclave_assertion = coland_http::security::assert_enclave_invariants(state.config());
     if !enclave_assertion.is_compliant() {
         anyhow::bail!(
-            "SOLAND_SOVEREIGN_ENCLAVE=1 but enclave invariants are not satisfied: {}",
+            "COLAND_SOVEREIGN_ENCLAVE=1 but enclave invariants are not satisfied: {}",
             enclave_assertion.violations.join("; ")
         );
     }
@@ -203,11 +203,11 @@ async fn run() -> anyhow::Result<()> {
         );
     }
 
-    let _account_erasure_worker = soland_http::account_erasure_worker::spawn(state.clone());
+    let _account_erasure_worker = coland_http::account_erasure_worker::spawn(state.clone());
     // security-transactions.md §3 — the Station, not a client, advances the
     // coordinator-owned SecurityRotation `revoke` step and resumes it after a
     // restart from the durable proposal/terminal units.
-    let _security_rotation_worker = soland_http::security_rotation_worker::spawn(state.clone());
+    let _security_rotation_worker = coland_http::security_rotation_worker::spawn(state.clone());
     tracing::info!(
         worker = "account_erasure",
         enabled = true,
@@ -220,7 +220,7 @@ async fn run() -> anyhow::Result<()> {
     // `None` when no gateway is configured (single-box posture: the local
     // push-route purge completes the Push-route fanout row).
     let _deactivation_push_fanout_worker =
-        soland_http::deactivation_push_fanout::spawn(state.clone());
+        coland_http::deactivation_push_fanout::spawn(state.clone());
     tracing::info!(
         worker = "deactivation_push_fanout",
         enabled = _deactivation_push_fanout_worker.is_some(),
@@ -231,7 +231,7 @@ async fn run() -> anyhow::Result<()> {
     // request. Reconcile them after restart or an interrupted synchronous
     // unregister without sharing the federation outbox protocol.
     let _public_push_revoke_retry_worker =
-        soland_http::routing::spawn_public_push_revoke_retry_worker(state.clone());
+        coland_http::routing::spawn_public_push_revoke_retry_worker(state.clone());
     tracing::info!(
         worker = "public_push_revoke_retry",
         enabled = _public_push_revoke_retry_worker.is_some(),
@@ -242,9 +242,9 @@ async fn run() -> anyhow::Result<()> {
     // pruning on cursor presentation handles the steady state; this clears
     // rows whose client never returned).
     let _sync_cursor_ttl_sweeper =
-        soland_http::routing::spawn_sync_cursor_ttl_sweeper(state.clone());
+        coland_http::routing::spawn_sync_cursor_ttl_sweeper(state.clone());
     let _account_data_change_retention_sweeper =
-        soland_http::routing::spawn_account_data_change_retention_sweeper(state.clone());
+        coland_http::routing::spawn_account_data_change_retention_sweeper(state.clone());
     tracing::info!(
         worker = "sync_cursor_ttl_sweep",
         "background worker configured"
@@ -254,31 +254,31 @@ async fn run() -> anyhow::Result<()> {
     // media-and-blob.md §2.1: incomplete parts have a bounded lifetime and
     // never produce a referencable blob_ref.
     let _resumable_upload_ttl_sweeper =
-        soland_http::routing::spawn_resumable_upload_ttl_sweeper(state.clone());
+        coland_http::routing::spawn_resumable_upload_ttl_sweeper(state.clone());
     tracing::info!(
         worker = "resumable_upload_ttl_sweep",
         "background worker configured"
     );
 
     // G3.S0 — durable outbound federation HTTP delivery worker. No-op
-    // when `SOLAND_FEDERATION_OUTBOUND=0` (used by integration tests
+    // when `COLAND_FEDERATION_OUTBOUND=0` (used by integration tests
     // that don't want background HTTP traffic). The dispatcher drains
     // the `federation_outbox` table populated by
     // `routing::federation::broadcast_*_to_peers`.
-    let _federation_dispatcher = soland_http::routing::federation::outbox::spawn(state.clone());
+    let _federation_dispatcher = coland_http::routing::federation::outbox::spawn(state.clone());
     // Member Station replica anchors a restart or an unreachable governing
     // Station left pending (`federation.md` section 4.1.1).
-    let _replica_anchor_sweeper = soland_http::state::spawn_pending_anchor_sweeper(state.clone());
-    let _franking_sweeper = soland_http::state::spawn_pending_franking_sweeper(state.clone());
+    let _replica_anchor_sweeper = coland_http::state::spawn_pending_anchor_sweeper(state.clone());
+    let _franking_sweeper = coland_http::state::spawn_pending_franking_sweeper(state.clone());
     let _applet_completion_sweeper =
-        soland_http::state::spawn_pending_applet_completion_sweeper(state.clone());
+        coland_http::state::spawn_pending_applet_completion_sweeper(state.clone());
     tracing::info!(
         worker = "federation_outbox",
         enabled = state.config().federation_outbound_enabled,
         "background worker configured"
     );
     let _metrics_server =
-        soland_http::metrics::spawn_metrics_server(state.clone(), config.metrics_bind).await?;
+        coland_http::metrics::spawn_metrics_server(state.clone(), config.metrics_bind).await?;
     tracing::info!(
         worker = "metrics_server",
         bind = %config.metrics_bind,
@@ -299,7 +299,7 @@ async fn run() -> anyhow::Result<()> {
         object_storage_target = %config.object_storage.log_target(),
         development_mode = config.development_mode,
         storage = state.storage_mode(),
-        "starting soland"
+        "starting coland"
     );
     if config.tls_enabled() {
         let keycert = Keycert::new()
@@ -309,14 +309,14 @@ async fn run() -> anyhow::Result<()> {
                     .as_ref()
                     .expect("tls_enabled guarantees cert path"),
             )
-            .context("failed to read SOLAND_TLS_CERT_PATH")?
+            .context("failed to read COLAND_TLS_CERT_PATH")?
             .key_from_path(
                 config
                     .tls_key_path
                     .as_ref()
                     .expect("tls_enabled guarantees key path"),
             )
-            .context("failed to read SOLAND_TLS_KEY_PATH")?;
+            .context("failed to read COLAND_TLS_KEY_PATH")?;
         let acceptor = TcpListener::new(config.bind.to_string())
             .rustls(RustlsConfig::new(keycert))
             .bind()
@@ -332,14 +332,14 @@ async fn run() -> anyhow::Result<()> {
         let acceptor = TcpListener::new(config.bind.to_string()).bind().await;
         run_server(acceptor, state).await;
     }
-    tracing::info!(event = "shutdown_complete", "soland stopped");
+    tracing::info!(event = "shutdown_complete", "coland stopped");
     Ok(())
 }
 
 /// Build the tracing subscriber.
 ///
 /// Always writes to stdout (the default, interactive-friendly destination —
-/// `cargo run` users see logs as usual). When `SOLAND_LOG_FILE` is set we
+/// `cargo run` users see logs as usual). When `COLAND_LOG_FILE` is set we
 /// additionally tee output to that path through a non-blocking appender so
 /// runner harnesses (cotest's `run-joint-e2e.ps1`) get a durable trace they
 /// can `tail -f` even when Windows fully buffers stdout under
@@ -356,7 +356,7 @@ struct TracingGuards {
 fn init_tracing(config: &AppConfig) -> anyhow::Result<TracingGuards> {
     let log_format = config.log_format;
     let development_mode = config.development_mode;
-    use soland_http::config::LogFormat;
+    use coland_http::config::LogFormat;
     use tracing_subscriber::{Layer, Registry, fmt};
 
     let filter = match config.log_filter.as_deref() {
@@ -366,7 +366,7 @@ fn init_tracing(config: &AppConfig) -> anyhow::Result<TracingGuards> {
     };
     // Stdout writer: structured JSON in production, ANSI-decorated text in
     // development. JSON is required by the runbook log-search recipes; the
-    // operator can force either side via `SOLAND_LOG_FORMAT=json|plain`.
+    // operator can force either side via `COLAND_LOG_FORMAT=json|plain`.
     let stdout_layer: Box<dyn Layer<Registry> + Send + Sync> = match log_format {
         LogFormat::Json => Box::new(
             fmt::layer()
@@ -387,14 +387,14 @@ fn init_tracing(config: &AppConfig) -> anyhow::Result<TracingGuards> {
         {
             std::fs::create_dir_all(parent).with_context(|| {
                 format!(
-                    "failed to create parent directory for SOLAND_LOG_FILE: {}",
+                    "failed to create parent directory for COLAND_LOG_FILE: {}",
                     parent.display()
                 )
             })?;
         }
         let file_name = path
             .file_name()
-            .ok_or_else(|| anyhow::anyhow!("SOLAND_LOG_FILE must include a file name"))?
+            .ok_or_else(|| anyhow::anyhow!("COLAND_LOG_FILE must include a file name"))?
             .to_owned();
         let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
         // `rolling::never` is misnamed: it produces a non-rotating appender
@@ -420,7 +420,7 @@ fn init_tracing(config: &AppConfig) -> anyhow::Result<TracingGuards> {
         None
     };
 
-    let (otel_guard, otel_layer) = crate::otel::init_layer(&config.otel, "soland")?;
+    let (otel_guard, otel_layer) = crate::otel::init_layer(&config.otel, "coland")?;
     if let Some(layer) = otel_layer {
         layers.push(layer);
     }
@@ -437,7 +437,7 @@ fn init_tracing(config: &AppConfig) -> anyhow::Result<TracingGuards> {
     })
 }
 
-/// Drain window used when `SOLAND_SHUTDOWN_GRACE_SECS` is unset. The request
+/// Drain window used when `COLAND_SHUTDOWN_GRACE_SECS` is unset. The request
 /// grace stays "wait indefinitely" in that case, but a drained peer still needs
 /// a deadline it can plan its checkpoint against.
 const DEFAULT_CONNECTION_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
@@ -449,7 +449,7 @@ where
     let server = Server::new(acceptor);
     let handle = server.handle();
     // Bounded drain: after a shutdown signal, stop accepting and wait up to
-    // `SOLAND_SHUTDOWN_GRACE_SECS` for in-flight requests to finish before
+    // `COLAND_SHUTDOWN_GRACE_SECS` for in-flight requests to finish before
     // forcibly closing the listener. Unset (or 0) preserves the previous
     // "wait indefinitely" behavior. A finite bound matters under an
     // orchestrator (Kubernetes / systemd) that will SIGKILL after its own
@@ -558,7 +558,7 @@ async fn service_identity_waiting(res: &mut Response) {
 
 fn spawn_service_identity_supervisor(
     state: AppState,
-    persistence: soland_services::persistence::PersistenceHandle,
+    persistence: coland_services::persistence::PersistenceHandle,
     key_store: Option<std::sync::Arc<dyn arkret_keystore::KeyStore>>,
 ) {
     if !matches!(
@@ -638,7 +638,7 @@ fn spawn_federation_peer_discovery(state: AppState) {
             let mut resolved = std::collections::HashMap::new();
             for (configured, endpoint) in peers {
                 let (base_url, http) =
-                    match soland_http::security::validate_http_url_for_egress_with_pinned_client(
+                    match coland_http::security::validate_http_url_for_egress_with_pinned_client(
                         endpoint.as_str(),
                         "federation peer discovery",
                         state.config().development_mode,
@@ -718,7 +718,7 @@ fn spawn_federation_peer_discovery(state: AppState) {
                             }
                         };
                         let expected_verification_method =
-                            soland_http::routing::federation::federation_service_signature_key_id(
+                            coland_http::routing::federation::federation_service_signature_key_id(
                                 description.service_resolution.did.as_str(),
                             );
                         let receipt_verification_method =
@@ -806,7 +806,7 @@ fn spawn_federation_peer_discovery(state: AppState) {
                                 }
                             };
                         let now = chrono::Utc::now();
-                        let resolved_document = soland_services::identity::DidDocumentState {
+                        let resolved_document = coland_services::identity::DidDocumentState {
                             did: document.id.to_string(),
                             did_document: document_value,
                             key_log_head: None,
@@ -818,7 +818,7 @@ fn spawn_federation_peer_discovery(state: AppState) {
                             fetched_at: now,
                             expires_at: now
                                 + chrono::Duration::seconds(
-                                    soland_services::identity::DID_DOCUMENT_HIGH_RISK_TTL_SECS,
+                                    coland_services::identity::DID_DOCUMENT_HIGH_RISK_TTL_SECS,
                                 ),
                             updated_at: now,
                         };
@@ -978,14 +978,14 @@ async fn shutdown_signal() {
 }
 
 /// P5 (5.5) — container HEALTHCHECK subcommand. Hits the running
-/// soland's `/health` endpoint over loopback and exits 0 on success,
-/// 1 on any failure. The bind URL is derived from `SOLAND_BIND` (defaults
+/// coland's `/health` endpoint over loopback and exits 0 on success,
+/// 1 on any failure. The bind URL is derived from `COLAND_BIND` (defaults
 /// `127.0.0.1:8698`); operators can override per-invocation with
-/// `SOLAND_HEALTHCHECK_URL` or by passing `--url <url>` after the
+/// `COLAND_HEALTHCHECK_URL` or by passing `--url <url>` after the
 /// subcommand. This eliminates the runtime `curl` dependency the
 /// previous Dockerfile relied on (incompatible with distroless bases).
 async fn run_healthcheck(args: &[String]) -> anyhow::Result<()> {
-    // Allow `soland healthcheck --url https://...` to override the
+    // Allow `coland healthcheck --url https://...` to override the
     // default. The CLI is intentionally trivial — there is no clap
     // dependency on the binary's hot path.
     let url_override = args
@@ -993,10 +993,10 @@ async fn run_healthcheck(args: &[String]) -> anyhow::Result<()> {
         .find(|pair| pair[0] == "--url")
         .map(|pair| pair[1].clone());
     let url = url_override
-        .or_else(|| std::env::var("SOLAND_HEALTHCHECK_URL").ok())
+        .or_else(|| std::env::var("COLAND_HEALTHCHECK_URL").ok())
         .unwrap_or_else(|| {
-            let bind = std::env::var("SOLAND_BIND").unwrap_or_else(|_| "127.0.0.1:8698".to_owned());
-            // SOLAND_BIND uses a `host:port` shape — assume plain HTTP on
+            let bind = std::env::var("COLAND_BIND").unwrap_or_else(|_| "127.0.0.1:8698".to_owned());
+            // COLAND_BIND uses a `host:port` shape — assume plain HTTP on
             // loopback, which matches the in-container HEALTHCHECK call
             // pattern (TLS termination lives at the reverse proxy).
             format!("http://{bind}/health")
@@ -1008,18 +1008,18 @@ async fn run_healthcheck(args: &[String]) -> anyhow::Result<()> {
         .build()?;
     match client.get(&url).send().await {
         Ok(resp) if resp.status().is_success() => {
-            eprintln!("soland healthcheck OK: {url} → {}", resp.status());
+            eprintln!("coland healthcheck OK: {url} → {}", resp.status());
             Ok(())
         }
         Ok(resp) => {
             eprintln!(
-                "soland healthcheck FAIL: {url} → {} (non-success)",
+                "coland healthcheck FAIL: {url} → {} (non-success)",
                 resp.status()
             );
             std::process::exit(1);
         }
         Err(err) => {
-            eprintln!("soland healthcheck FAIL: {url} → {err}");
+            eprintln!("coland healthcheck FAIL: {url} → {err}");
             std::process::exit(1);
         }
     }

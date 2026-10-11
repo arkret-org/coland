@@ -1,10 +1,10 @@
-# soland — Prometheus alert rules.
+# coland — Prometheus alert rules.
 #
 # Reader notes:
 #
-# - These rules assume the soland metrics listener
-#   (`SOLAND_METRICS_BIND`, default `127.0.0.1:9090`) is scraped under
-#   the job name `soland`. Adjust the `job=` label below if you use a
+# - These rules assume the coland metrics listener
+#   (`COLAND_METRICS_BIND`, default `127.0.0.1:9090`) is scraped under
+#   the job name `coland`. Adjust the `job=` label below if you use a
 #   different convention.
 # - The `for:` durations are intentionally generous so transient blips
 #   do not page. Override per environment if you need tighter SLOs.
@@ -13,29 +13,29 @@
 # Load this file via the Prometheus `rule_files:` directive:
 #
 #   rule_files:
-#     - /etc/prometheus/rules/soland-alerts.yml
+#     - /etc/prometheus/rules/coland-alerts.yml
 #
 # See https://prometheus.io/docs/prometheus/latest/configuration/alerting_rules/
 # for full alert-rule syntax.
 
 groups:
-  - name: soland-runtime
+  - name: coland-runtime
     interval: 30s
     rules:
       # Spec C.3.7 — every durable audit-log append failure bumps this
       # counter. Any non-zero rate over 5 m means we are silently
       # dropping audit rows; on-call MUST investigate before the
       # window of unsignaled drops grows.
-      - alert: SolandAuditAppendFailures
-        expr: increase(soland_audit_append_failures_total{job="soland"}[5m]) > 0
+      - alert: ColandAuditAppendFailures
+        expr: increase(coland_audit_append_failures_total{job="coland"}[5m]) > 0
         for: 5m
         labels:
           severity: critical
           component: audit
         annotations:
-          summary: "soland is dropping audit-log appends"
+          summary: "coland is dropping audit-log appends"
           description: |
-            soland_audit_append_failures_total has advanced over the last 5
+            coland_audit_append_failures_total has advanced over the last 5
             minutes. Audit rows are being dropped silently. See
             docs/runbook.md "Common error codes" → audit_append_failure.
           runbook: "docs/runbook.md#common-error-codes"
@@ -44,37 +44,37 @@ groups:
       # up on at least one peer dispatch in the window — typically a
       # peer outage, but also fires on header / trust-domain
       # misconfiguration after onboarding a new peer.
-      - alert: SolandFederationDeadLetterRate
-        expr: increase(soland_federation_outbox_dead_letter_total{job="soland"}[5m]) > 0
+      - alert: ColandFederationDeadLetterRate
+        expr: increase(coland_federation_outbox_dead_letter_total{job="coland"}[5m]) > 0
         for: 5m
         labels:
           severity: warning
           component: federation
         annotations:
-          summary: "soland federation outbox is moving rows to the dead-letter ledger"
+          summary: "coland federation outbox is moving rows to the dead-letter ledger"
           description: |
-            soland_federation_outbox_dead_letter_total has advanced over the
+            coland_federation_outbox_dead_letter_total has advanced over the
             last 5 minutes. Group by the `reason` label, then inspect the rows
-            with `soland-federation-outbox list --dead-letters` and confirm the
+            with `coland-federation-outbox list --dead-letters` and confirm the
             peer is reachable. Replay only after the cause is fixed, via
-            `soland-federation-outbox requeue`. See docs/federation-s2s.md and
+            `coland-federation-outbox requeue`. See docs/federation-s2s.md and
             docs/runbook.md "Federation outbox operator commands".
           runbook: "docs/runbook.md#federation-outbox-operator-commands"
 
       # Federation outbox depth — gauge of undelivered rows. Sustained
       # growth (>500 for >15m) indicates the dispatcher cannot keep up
       # with intake.
-      - alert: SolandFederationOutboxDepthGrowing
-        expr: soland_federation_outbox_depth{job="soland"} > 500
+      - alert: ColandFederationOutboxDepthGrowing
+        expr: coland_federation_outbox_depth{job="coland"} > 500
         for: 15m
         labels:
           severity: warning
           component: federation
         annotations:
-          summary: "soland federation outbox depth is sustained > 500 rows"
+          summary: "coland federation outbox depth is sustained > 500 rows"
           description: |
             The outbox dispatcher cannot drain rows fast enough. Split it by
-            peer with sum by (peer) (soland_federation_outbox_state_depth) to
+            peer with sum by (peer) (coland_federation_outbox_state_depth) to
             tell "one peer is down" from "the dispatcher is stuck". Check peer
             reachability + your rate-limit budget against the peer's inbound
             quota. See docs/federation-s2s.md "Peer onboarding".
@@ -82,17 +82,17 @@ groups:
       # A delivery intent nobody has managed to hand off. Unlike depth, this
       # fires even when the backlog is a single row: an Event this service
       # already told a client was accepted is still owed to a peer.
-      - alert: SolandFederationOutboxStalled
-        expr: soland_federation_outbox_oldest_pending_age_seconds{job="soland"} > 3600
+      - alert: ColandFederationOutboxStalled
+        expr: coland_federation_outbox_oldest_pending_age_seconds{job="coland"} > 3600
         for: 15m
         labels:
           severity: warning
           component: federation
         annotations:
-          summary: "soland has owed a peer a delivery for over an hour"
+          summary: "coland has owed a peer a delivery for over an hour"
           description: |
             The oldest still-owed federation outbox row is more than an hour
-            old. A long soland_federation_retry_delay_seconds means the peer
+            old. A long coland_federation_retry_delay_seconds means the peer
             asked for the delay (Retry-After); a flat attempts count means the
             dispatcher is not making progress. See docs/runbook.md
             "Federation outbox operator commands".
@@ -102,14 +102,14 @@ groups:
       # Correctness holds (the stale write is dropped), but sustained
       # takeovers mean the lease is shorter than this peer's real latency,
       # or a replica is crash-looping.
-      - alert: SolandFederationLeaseTakeover
-        expr: increase(soland_federation_outbox_lease_takeover_total{job="soland"}[15m]) > 0
+      - alert: ColandFederationLeaseTakeover
+        expr: increase(coland_federation_outbox_lease_takeover_total{job="coland"}[15m]) > 0
         for: 15m
         labels:
           severity: info
           component: federation
         annotations:
-          summary: "soland federation outbox leases are being taken over mid-delivery"
+          summary: "coland federation outbox leases are being taken over mid-delivery"
           description: |
             A dispatcher replica's delivery result was discarded because the
             row's lease had already moved to another worker. Check replica
@@ -117,8 +117,8 @@ groups:
             response latency.
           runbook: "docs/runbook.md#federation-outbox-operator-commands"
 
-      - alert: SolandControlSealEligibleWorkStalled
-        expr: soland_control_seal_oldest_eligible_age_seconds{job="soland"} > 60
+      - alert: ColandControlSealEligibleWorkStalled
+        expr: coland_control_seal_oldest_eligible_age_seconds{job="coland"} > 60
         for: 5m
         labels:
           severity: warning
@@ -131,8 +131,8 @@ groups:
             coordinator is not draining its durable schedule.
           runbook: "docs/runbook.md#control-seal-scheduler"
 
-      - alert: SolandControlSealClaimsExpired
-        expr: soland_control_seal_expired_claims{job="soland"} > 0
+      - alert: ColandControlSealClaimsExpired
+        expr: coland_control_seal_expired_claims{job="coland"} > 0
         for: 2m
         labels:
           severity: warning
@@ -145,8 +145,8 @@ groups:
             store latency and pass timeouts.
           runbook: "docs/runbook.md#control-seal-scheduler"
 
-      - alert: SolandControlSealPassTimeout
-        expr: increase(soland_control_seal_attempt_total{job="soland",outcome="pass_timed_out"}[10m]) > 0
+      - alert: ColandControlSealPassTimeout
+        expr: increase(coland_control_seal_attempt_total{job="coland",outcome="pass_timed_out"}[10m]) > 0
         for: 1m
         labels:
           severity: warning
@@ -158,8 +158,8 @@ groups:
             was released or expired and another Realm continued to progress.
           runbook: "docs/runbook.md#control-seal-scheduler"
 
-      - alert: SolandControlSealRepairRestoredSchedule
-        expr: sum(increase(soland_control_seal_repair_total{job="soland",operation=~"inserted|generation_repaired"}[10m])) > 0
+      - alert: ColandControlSealRepairRestoredSchedule
+        expr: sum(increase(coland_control_seal_repair_total{job="coland",operation=~"inserted|generation_repaired"}[10m])) > 0
         for: 1m
         labels:
           severity: critical
@@ -175,14 +175,14 @@ groups:
       # Readiness flapping. /readyz returning 503 for > 5 minutes on a
       # replica that should be serving traffic typically means the
       # database probe is failing or the migration batch is wedged.
-      - alert: SolandReadyzDown
-        expr: probe_success{job="blackbox", instance=~".*soland.*/readyz"} == 0
+      - alert: ColandReadyzDown
+        expr: probe_success{job="blackbox", instance=~".*coland.*/readyz"} == 0
         for: 5m
         labels:
           severity: critical
           component: lifecycle
         annotations:
-          summary: "soland replica failing /readyz for 5 minutes"
+          summary: "coland replica failing /readyz for 5 minutes"
           description: |
             See docs/runbook.md "Common error codes" → migrations_pending
             / database_unreachable. If the replica was recently restarted,
@@ -191,18 +191,18 @@ groups:
 
       # 5xx surge — generic SLO guard, fold into your existing API SLO if
       # you already track one.
-      - alert: Soland5xxSurge
+      - alert: Coland5xxSurge
         expr: |
-          sum(rate(soland_request_total{job="soland",status=~"5.."}[5m]))
+          sum(rate(coland_request_total{job="coland",status=~"5.."}[5m]))
             /
-          sum(rate(soland_request_total{job="soland"}[5m]))
+          sum(rate(coland_request_total{job="coland"}[5m]))
           > 0.05
         for: 10m
         labels:
           severity: warning
           component: http
         annotations:
-          summary: "soland 5xx rate above 5% for 10 minutes"
+          summary: "coland 5xx rate above 5% for 10 minutes"
           description: |
-            More than 5% of soland responses are 5xx. Drill into per-op
-            breakdown with `sum by (op) (rate(soland_request_total{status=~"5.."}[5m]))`.
+            More than 5% of coland responses are 5xx. Drill into per-op
+            breakdown with `sum by (op) (rate(coland_request_total{status=~"5.."}[5m]))`.

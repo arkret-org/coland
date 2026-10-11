@@ -13,10 +13,10 @@ async fn build_sync_snapshot(
 
 #[tokio::test]
 async fn inconsistent_continuation_head_returns_503_without_issuing_or_resetting() {
+    use coland_test_support::pcr_genesis::PcrGenesisFixture;
     use diesel::sql_types::{Jsonb, Text};
     use diesel_async::RunQueryDsl as _;
     use salvo::test::ResponseExt as _;
-    use soland_test_support::pcr_genesis::PcrGenesisFixture;
 
     #[derive(diesel::QueryableByName)]
     struct JsonRow {
@@ -24,13 +24,13 @@ async fn inconsistent_continuation_head_returns_503_without_issuing_or_resetting
         value: Value,
     }
     const EFFECTS: &str = "SELECT jsonb_build_object('cursors',(SELECT count(*) FROM sync_cursor_handles),'snapshots',(SELECT count(*) FROM realm_state_snapshot_issuances),'windows',(SELECT count(*) FROM realm_state_snapshot_window_reservations),'device_acks',(SELECT count(*) FROM device_message_ack_tokens),'agent_acks',(SELECT count(*) FROM agent_recipient_delivery_ack_tokens)) AS value";
-    let database = soland_storage_postgres::test_database::TestDatabase::lease().await;
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     let pool = database.pool();
     let mut config = test_config();
     config.seed_demo_data = false;
     let state = AppState::new(
         config,
-        soland_storage_postgres::Db {
+        coland_storage_postgres::Db {
             pool: Some(pool.clone()),
         },
     );
@@ -40,7 +40,7 @@ async fn inconsistent_continuation_head_returns_503_without_issuing_or_resetting
     let device = genesis.admit_founding_device(store.as_ref()).await.unwrap();
     let account = &genesis.history.account;
     let mut session = roster_session(&state, account.principal_id.as_str());
-    session.endpoint = soland_services::identity::SessionEndpointState::HumanDevice {
+    session.endpoint = coland_services::identity::SessionEndpointState::HumanDevice {
         device_id: device.device_id,
     };
     let realm = CommittedRealm::bootstrap(
@@ -143,14 +143,14 @@ async fn inconsistent_continuation_head_returns_503_without_issuing_or_resetting
 
 #[tokio::test]
 async fn accepted_leave_preserves_the_ordinary_unavailable_continuation() {
-    use soland_test_support::pcr_genesis::PcrGenesisFixture;
+    use coland_test_support::pcr_genesis::PcrGenesisFixture;
 
-    let database = soland_storage_postgres::test_database::TestDatabase::lease().await;
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     let mut config = test_config();
     config.seed_demo_data = false;
     let state = AppState::new(
         config,
-        soland_storage_postgres::Db {
+        coland_storage_postgres::Db {
             pool: Some(database.pool()),
         },
     );
@@ -162,7 +162,7 @@ async fn accepted_leave_preserves_the_ordinary_unavailable_continuation() {
     let device = peer.admit_founding_device(store.as_ref()).await.unwrap();
     let account = &peer.history.account;
     let mut session = roster_session(&state, account.principal_id.as_str());
-    session.endpoint = soland_services::identity::SessionEndpointState::HumanDevice {
+    session.endpoint = coland_services::identity::SessionEndpointState::HumanDevice {
         device_id: device.device_id,
     };
     let mut realm = CommittedRealm::bootstrap(
@@ -234,10 +234,10 @@ async fn accepted_leave_preserves_the_ordinary_unavailable_continuation() {
 
 #[tokio::test]
 async fn global_storage_failure_returns_503_without_reset_or_new_delivery_material() {
+    use coland_test_support::pcr_genesis::PcrGenesisFixture;
     use diesel::sql_types::Jsonb;
     use diesel_async::RunQueryDsl as _;
     use salvo::test::ResponseExt as _;
-    use soland_test_support::pcr_genesis::PcrGenesisFixture;
 
     #[derive(diesel::QueryableByName)]
     struct JsonRow {
@@ -245,13 +245,13 @@ async fn global_storage_failure_returns_503_without_reset_or_new_delivery_materi
         value: Value,
     }
     const EFFECTS: &str = "SELECT jsonb_build_object('cursors',(SELECT count(*) FROM sync_cursor_handles),'snapshots',(SELECT count(*) FROM realm_state_snapshot_issuances),'windows',(SELECT count(*) FROM realm_state_snapshot_window_reservations),'device_acks',(SELECT count(*) FROM device_message_ack_tokens),'agent_acks',(SELECT count(*) FROM agent_recipient_delivery_ack_tokens)) AS value";
-    let database = soland_storage_postgres::test_database::TestDatabase::lease().await;
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     let pool = database.pool();
     let mut config = test_config();
     config.seed_demo_data = false;
     let state = AppState::new(
         config,
-        soland_storage_postgres::Db {
+        coland_storage_postgres::Db {
             pool: Some(pool.clone()),
         },
     );
@@ -260,7 +260,7 @@ async fn global_storage_failure_returns_503_without_reset_or_new_delivery_materi
     let genesis = PcrGenesisFixture::new(state.service_did());
     let device = genesis.admit_founding_device(store.as_ref()).await.unwrap();
     let mut session = roster_session(&state, genesis.history.account.principal_id.as_str());
-    session.endpoint = soland_services::identity::SessionEndpointState::HumanDevice {
+    session.endpoint = coland_services::identity::SessionEndpointState::HumanDevice {
         device_id: device.device_id,
     };
     let body: SyncRequestBody = serde_json::from_value(json!({"catchup": true})).unwrap();
@@ -427,10 +427,10 @@ fn cursor_token_with_handle(handle: &str, now: chrono::DateTime<chrono::Utc>) ->
     )
 }
 
-/// Migrated from the deleted `soland_http::cursor` local copy: the ≥22-char
+/// Migrated from the deleted `coland_http::cursor` local copy: the ≥22-char
 /// base64url handle floor (≥128-bit entropy, `encoding.md` §8.3.1) MUST be
 /// enforced by the real production parse chain (SDK `Cursor::decode_at`),
-/// not by a soland-local validator.
+/// not by a coland-local validator.
 #[test]
 fn sync_cursor_decode_rejects_low_entropy_or_padded_handles() {
     let now = chrono::Utc::now();
@@ -510,8 +510,8 @@ fn signal_envelope(
 fn signal_record(
     envelope: arkret_wire::SignalEnvelope,
     position: u64,
-) -> soland_storage::SignalRelayRecord {
-    soland_storage::SignalRelayRecord {
+) -> coland_storage::SignalRelayRecord {
+    coland_storage::SignalRelayRecord {
         realm_id: envelope.realm_id.as_str().to_owned(),
         scope_ref: envelope.scope_ref.clone(),
         sender_actor_id: envelope.sender_actor_id.to_string(),
@@ -659,7 +659,7 @@ async fn signal_delivery_is_once_per_subscriber_device_watermark() {
 fn test_config() -> crate::config::AppConfig {
     crate::config::AppConfig {
         object_storage: crate::config::ObjectStorageConfig::local(
-            std::env::temp_dir().join("soland-sync-cursor-test-blobs"),
+            std::env::temp_dir().join("coland-sync-cursor-test-blobs"),
         ),
         development_mode: true,
         did_resolver_allow_methods: vec!["web".to_owned(), "key".to_owned()],
@@ -670,7 +670,7 @@ fn test_config() -> crate::config::AppConfig {
 }
 
 pub(crate) fn test_state() -> AppState {
-    AppState::new(test_config(), soland_storage_postgres::Db { pool: None })
+    AppState::new(test_config(), coland_storage_postgres::Db { pool: None })
 }
 
 pub(crate) const ROSTER_REALM: &str = "ak:realm:AQKdkfI-I4MXIS2hxLXbb_FK57j-jE497FF66I5NPGPE";
@@ -687,7 +687,7 @@ pub(crate) fn roster_session(state: &AppState, actor: &str) -> SessionIdentitySt
         account_pk: None,
         token_hash: "token".to_owned(),
         actor: actor.to_owned(),
-        endpoint: soland_services::identity::SessionEndpointState::HumanDevice {
+        endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
             device_id: "device-1".to_owned(),
         },
         audience: state.service_id().clone(),
@@ -706,7 +706,7 @@ pub(crate) fn roster_realm(
     let mut entry = crate::state::RealmDirectoryEntry::new(
         RealmId::new(ROSTER_REALM.to_owned()).unwrap(),
         "Roster evidence",
-        soland_services::events::DirectoryProvenance::LocalOnly,
+        coland_services::events::DirectoryProvenance::LocalOnly,
     );
     entry.public = public;
     entry
@@ -732,7 +732,7 @@ pub(crate) fn insert_projected_membership_at(
 ) {
     state.test_projection().lock().members.insert(
         (ROSTER_REALM.to_owned(), roster_actor(actor).to_string()),
-        soland_domain::reducer::SolandMembershipState {
+        coland_domain::reducer::ColandMembershipState {
             member: roster_actor(actor).to_string(),
             realm_id: ROSTER_REALM.to_owned(),
             state: membership.to_owned(),
@@ -750,7 +750,7 @@ pub(crate) fn insert_projected_membership_at(
 async fn projection_visibility_uses_received_at_for_joined_history_cutoff() {
     let mut config = test_config();
     config.seed_demo_data = false;
-    let state = AppState::new(config, soland_storage_postgres::Db { pool: None });
+    let state = AppState::new(config, coland_storage_postgres::Db { pool: None });
     state.realm_directory().upsert(roster_realm(false, true));
     let session = roster_session(&state, ROSTER_CALLER);
     let created_at = DateTime::parse_from_rfc3339("2026-06-24T10:00:00.000Z")
@@ -764,7 +764,7 @@ async fn projection_visibility_uses_received_at_for_joined_history_cutoff() {
         .realms()
         .store_realm_metadata(
             ROSTER_REALM,
-            soland_services::events::RealmMetadata {
+            coland_services::events::RealmMetadata {
                 owner: ROSTER_ACTOR.to_owned(),
                 deleted: false,
                 discoverability: "invite_only".to_owned(),
@@ -823,18 +823,18 @@ async fn projection_visibility_uses_received_at_for_joined_history_cutoff() {
 /// whether it is public or was left.
 #[tokio::test]
 async fn sync_snapshot_excludes_public_realms_without_exact_account_membership() {
-    use soland_test_support::pcr_genesis::PcrGenesisFixture;
+    use coland_test_support::pcr_genesis::PcrGenesisFixture;
 
     let mut config = test_config();
     config.seed_demo_data = false;
-    let state = AppState::new(config, soland_storage_postgres::Db { pool: None });
+    let state = AppState::new(config, coland_storage_postgres::Db { pool: None });
     let genesis = PcrGenesisFixture::new(state.service_did());
     let device = genesis
         .admit_founding_device(state.test_persistence().as_ref())
         .await
         .unwrap();
     let mut session = roster_session(&state, genesis.history.account.principal_id.as_str());
-    session.endpoint = soland_services::identity::SessionEndpointState::HumanDevice {
+    session.endpoint = coland_services::identity::SessionEndpointState::HumanDevice {
         device_id: device.device_id,
     };
     state.realm_directory().upsert(roster_realm(true, false));
@@ -905,20 +905,20 @@ fn realm_fixture_event(
 /// An ordinary Realm on this Station, admitted through the bootstrap unit
 /// and extended through the Event unit of work, as production commits it.
 pub(super) struct CommittedRealm {
-    pub(super) head: soland_storage::AuthorityCommitTransaction,
+    pub(super) head: coland_storage::AuthorityCommitTransaction,
 }
 
 impl CommittedRealm {
     fn transaction(
-        authority: &soland_storage::CurrentRealmAuthority,
+        authority: &coland_storage::CurrentRealmAuthority,
         method: &arkret_wire::DidUrl,
         event: arkret_wire::Event,
         previous: Option<&arkret_wire::RealmCommit>,
-    ) -> soland_storage::AuthorityCommitTransaction {
+    ) -> coland_storage::AuthorityCommitTransaction {
         let at = event.created_at;
         let realm_id = authority.realm_id.clone();
         let position = previous.map_or(0, |commit| commit.stream_position + 1);
-        soland_storage::AuthorityCommitTransaction {
+        coland_storage::AuthorityCommitTransaction {
             expected_authority: authority.clone(),
             commit: arkret_wire::RealmCommit {
                 producer_signer_fact_digest: None,
@@ -952,7 +952,7 @@ impl CommittedRealm {
     }
 
     pub(super) async fn bootstrap(
-        store: &dyn soland_storage::PersistenceStore,
+        store: &dyn coland_storage::PersistenceStore,
         founder: &arkret_wire::AccountId,
         method: arkret_wire::DidUrl,
     ) -> Self {
@@ -1020,7 +1020,7 @@ impl CommittedRealm {
                 at,
             ));
         }
-        let authority = soland_storage::CurrentRealmAuthority {
+        let authority = coland_storage::CurrentRealmAuthority {
             realm_id,
             generation: 0,
             service_id: founder.station_id.clone(),
@@ -1029,7 +1029,7 @@ impl CommittedRealm {
             ),
             last_handoff_ref: None,
         };
-        let mut transactions: Vec<soland_storage::AuthorityCommitTransaction> = Vec::new();
+        let mut transactions: Vec<coland_storage::AuthorityCommitTransaction> = Vec::new();
         for event in &events {
             let previous = transactions.last().map(|transaction| &transaction.commit);
             let transaction = Self::transaction(&authority, &method, event.clone(), previous);
@@ -1043,7 +1043,7 @@ impl CommittedRealm {
                 .map(arkret_wire::EventAdmissionSubmission::new)
                 .collect(),
         };
-        let unit = soland_storage::OrdinaryRealmBootstrapCommitUnit {
+        let unit = coland_storage::OrdinaryRealmBootstrapCommitUnit {
             exact_request_body: serde_json::to_vec(
                 &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(submission.clone()),
             )
@@ -1064,7 +1064,7 @@ impl CommittedRealm {
     /// Commit `author`'s `ak.member.state` for `member` at the Realm head.
     pub(super) async fn member_state(
         &mut self,
-        store: &dyn soland_storage::PersistenceStore,
+        store: &dyn coland_storage::PersistenceStore,
         author: &arkret_wire::AccountId,
         member: &arkret_wire::AccountId,
         membership: &str,
@@ -1085,7 +1085,7 @@ impl CommittedRealm {
             event.clone(),
             Some(&self.head.commit),
         );
-        let record = soland_storage::CanonicalEventRecord {
+        let record = coland_storage::CanonicalEventRecord {
             event_id: event.event_id.to_string(),
             actor_id: event.actor_id.to_string(),
             realm_id: Some(event.realm_id.to_string()),
@@ -1103,7 +1103,7 @@ impl CommittedRealm {
             received_at: event.created_at,
         };
         store
-            .commit_event(soland_storage::EventCommitRequest {
+            .commit_event(coland_storage::EventCommitRequest {
                 authority_commit: transaction.clone(),
                 self_producer_guard: None,
                 applet_producer_guard: None,
@@ -1131,8 +1131,8 @@ impl CommittedRealm {
 /// Admit a signed PCR revoke proposal and its accepted SecurityRotation result.
 async fn admit_sync_revoke_terminal(
     state: &AppState,
-    store: &dyn soland_storage::PersistenceStore,
-    fixture: &mut soland_test_support::pcr_genesis::PcrGenesisFixture,
+    store: &dyn coland_storage::PersistenceStore,
+    fixture: &mut coland_test_support::pcr_genesis::PcrGenesisFixture,
     target_device_id: &str,
 ) {
     use arkret_models_collaboration::events_payloads::{
@@ -1149,11 +1149,11 @@ async fn admit_sync_revoke_terminal(
     use arkret_wire::{
         BackupId, BackupSeriesId, Base64UrlString, DeviceId, EventKind, Hash, TransactionId,
     };
-    use ed25519_dalek::{Signer, SigningKey};
-    use soland_storage::{
+    use coland_storage::{
         AuthorityCommitTransaction, RevokeCommandTerminalWrite, RevokeProposalCommitWrite,
         SecurityTransactionRecord, SecurityTransactionStepOutcomeRecord,
     };
+    use ed25519_dalek::{Signer, SigningKey};
 
     let account = fixture.history.account.clone();
     let authorizer = fixture.history.founding_device_id.clone();
@@ -1341,11 +1341,11 @@ async fn admit_sync_revoke_terminal(
 /// The PCR terminal updates the joined peer's device-list interest before leave.
 #[tokio::test]
 async fn sync_snapshot_emits_device_list_baseline_changes_and_left_principals() {
-    use soland_test_support::pcr_genesis::PcrGenesisFixture;
+    use coland_test_support::pcr_genesis::PcrGenesisFixture;
 
     let mut config = test_config();
     config.seed_demo_data = false;
-    let state = AppState::new(config, soland_storage_postgres::Db { pool: None });
+    let state = AppState::new(config, coland_storage_postgres::Db { pool: None });
     let store = state.test_persistence();
     let caller_genesis = PcrGenesisFixture::new(state.service_did());
     let caller_device = caller_genesis
@@ -1360,7 +1360,7 @@ async fn sync_snapshot_emits_device_list_baseline_changes_and_left_principals() 
     let caller = caller_genesis.history.account.clone();
     let actor = actor_genesis.history.account.clone();
     let mut session = roster_session(&state, caller.principal_id.as_str());
-    session.endpoint = soland_services::identity::SessionEndpointState::HumanDevice {
+    session.endpoint = coland_services::identity::SessionEndpointState::HumanDevice {
         device_id: caller_device.device_id,
     };
 
@@ -1515,7 +1515,7 @@ async fn inline_cursor_body_is_rejected_by_core_stateful_cursor_parser() {
         "purpose": "stream",
         "t": arkret_canonical::format_timestamp_canonical(chrono::Utc::now()),
         "x": now_ms + 60_000,
-        "issuer_kid": "did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:soland.local:webvh:service#notary-key",
+        "issuer_kid": "did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:coland.local:webvh:service#notary-key",
         "positions": {
             "realms": {},
             "devices": {},
@@ -1888,7 +1888,7 @@ async fn revoked_cursor_returns_revoked_error() {
 
     state
         .sync()
-        .record_cursor_revocation(&soland_services::sync::CursorRevocationState {
+        .record_cursor_revocation(&coland_services::sync::CursorRevocationState {
             cursor_digest: sha256_hex(arkret_hlc::Cursor::decode(&token).unwrap().h.as_bytes()),
             account_id: arkret_wire::AccountId::new(
                 arkret_wire::DidCoreId::new("ak:did_core:web:alice.example").unwrap(),
@@ -1967,7 +1967,7 @@ async fn cursor_issuance_and_revocation_security_boundaries() {
     .unwrap_err();
     assert!(matches!(error, SyncCursorError::Integrity(_)), "{error:?}");
     let at = arkret_canonical::normalize_timestamp_canonical(Utc::now());
-    let revocation = soland_services::sync::CursorRevocationState {
+    let revocation = coland_services::sync::CursorRevocationState {
         cursor_digest: sha256_hex(decoded.h.as_bytes()),
         account_id: arkret_wire::AccountId::new(
             first.actor.clone().parse().unwrap(),
@@ -2043,14 +2043,14 @@ async fn cursor_issuance_and_revocation_security_boundaries() {
 
 #[tokio::test]
 async fn barrier_cursor_requires_readable_exact_committed_history() {
-    use soland_test_support::pcr_genesis::PcrGenesisFixture;
+    use coland_test_support::pcr_genesis::PcrGenesisFixture;
     let state = test_state();
     let store = state.test_persistence();
     let genesis = PcrGenesisFixture::new(state.service_did());
     let device = genesis.admit_founding_device(store.as_ref()).await.unwrap();
     let account = genesis.history.account.clone();
     let mut session = roster_session(&state, account.principal_id.as_str());
-    session.endpoint = soland_services::identity::SessionEndpointState::HumanDevice {
+    session.endpoint = coland_services::identity::SessionEndpointState::HumanDevice {
         device_id: device.device_id,
     };
     let realm = CommittedRealm::bootstrap(
@@ -2118,10 +2118,10 @@ async fn barrier_cursor_requires_readable_exact_committed_history() {
 
 #[tokio::test]
 async fn barrier_revoked_during_projection_timeout_refuses_without_issuing() {
+    use coland_test_support::pcr_genesis::PcrGenesisFixture;
     use diesel::sql_types::{Jsonb, Text};
     use diesel_async::RunQueryDsl as _;
     use salvo::test::ResponseExt;
-    use soland_test_support::pcr_genesis::PcrGenesisFixture;
 
     #[derive(diesel::QueryableByName)]
     struct JsonRow {
@@ -2129,14 +2129,14 @@ async fn barrier_revoked_during_projection_timeout_refuses_without_issuing() {
         value: Value,
     }
     const EFFECTS: &str = "SELECT jsonb_build_object('cursors',(SELECT count(*) FROM sync_cursor_handles),'snapshots',(SELECT count(*) FROM realm_state_snapshot_issuances),'windows',(SELECT count(*) FROM realm_state_snapshot_window_reservations),'device_acks',(SELECT count(*) FROM device_message_ack_tokens),'agent_acks',(SELECT count(*) FROM agent_recipient_delivery_ack_tokens)) AS value";
-    let database = soland_storage_postgres::test_database::TestDatabase::lease().await;
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     let pool = database.pool();
     let mut config = test_config();
     config.seed_demo_data = false;
     let state = AppState::new_with_persistence(
         config,
-        soland_storage_postgres::Db { pool: None },
-        std::sync::Arc::new(soland_storage_postgres::PgPersistenceStore::new(
+        coland_storage_postgres::Db { pool: None },
+        std::sync::Arc::new(coland_storage_postgres::PgPersistenceStore::new(
             pool.clone(),
         )),
     );
@@ -2146,7 +2146,7 @@ async fn barrier_revoked_during_projection_timeout_refuses_without_issuing() {
     let device = genesis.admit_founding_device(store.as_ref()).await.unwrap();
     let account = genesis.history.account.clone();
     let mut session = roster_session(&state, account.principal_id.as_str());
-    session.endpoint = soland_services::identity::SessionEndpointState::HumanDevice {
+    session.endpoint = coland_services::identity::SessionEndpointState::HumanDevice {
         device_id: device.device_id,
     };
     let realm = CommittedRealm::bootstrap(
@@ -2200,7 +2200,7 @@ async fn barrier_revoked_during_projection_timeout_refuses_without_issuing() {
         .unwrap()
         .value;
     let mut depot = Depot::new();
-    depot.insert_typed(soland_http::openapi_routes::WaitForSyncToken(token));
+    depot.insert_typed(coland_http::openapi_routes::WaitForSyncToken(token));
     let mut response = Response::new();
     let request = Request::new();
     let body = serde_json::from_value(json!({"catchup": true})).unwrap();
@@ -2220,7 +2220,7 @@ async fn barrier_revoked_during_projection_timeout_refuses_without_issuing() {
             let at = arkret_canonical::normalize_timestamp_canonical(Utc::now());
             state
                 .sync()
-                .record_cursor_revocation(&soland_services::sync::CursorRevocationState {
+                .record_cursor_revocation(&coland_services::sync::CursorRevocationState {
                     cursor_digest: sha256_hex(barrier.h.as_bytes()),
                     account_id: account,
                     device_id: None,
@@ -2257,8 +2257,8 @@ async fn barrier_revoked_during_projection_timeout_refuses_without_issuing() {
 #[tokio::test]
 async fn cursor_revoke_http_rejects_unowned_unknown_and_tampered_targets_without_writes() {
     use arkret_models_identity::account::{AccountCursorRevokeRequestBody, CursorRevokeScope};
+    use coland_test_support::pcr_genesis::PcrGenesisFixture;
     use salvo::test::{ResponseExt, TestClient};
-    use soland_test_support::pcr_genesis::PcrGenesisFixture;
     let state = test_state();
     let store = state.test_persistence();
     let genesis = PcrGenesisFixture::new(state.service_did());
@@ -2266,8 +2266,8 @@ async fn cursor_revoke_http_rejects_unowned_unknown_and_tampered_targets_without
     let account = genesis.history.account.clone();
     state
         .identities()
-        .save_account(soland_services::identity::AccountProfileState {
-            pk: soland_storage::AccountPk(0),
+        .save_account(coland_services::identity::AccountProfileState {
+            pk: coland_storage::AccountPk(0),
             principal_id: account.principal_id.clone(),
             account_id: account.clone(),
             localpart: "cursor-revoker".into(),
@@ -2288,7 +2288,7 @@ async fn cursor_revoke_http_rejects_unowned_unknown_and_tampered_targets_without
             .unwrap()
             .pk,
     );
-    session.endpoint = soland_services::identity::SessionEndpointState::HumanDevice {
+    session.endpoint = coland_services::identity::SessionEndpointState::HumanDevice {
         device_id: device.device_id,
     };
     session.token_hash = crate::routing::identity::auth::session_credential_hash(
@@ -2369,8 +2369,8 @@ async fn cursor_revoke_http_rejects_unowned_unknown_and_tampered_targets_without
         let response = post(target).send(router()).await;
         assert_eq!(
             response.status_code,
-            Some(soland_http::error::error_http_status(
-                soland_http::error::ErrorCode::CursorIntegrityInvalid
+            Some(coland_http::error::error_http_status(
+                coland_http::error::ErrorCode::CursorIntegrityInvalid
             ))
         );
         assert!(
@@ -2394,8 +2394,8 @@ async fn cursor_revoke_http_rejects_unowned_unknown_and_tampered_targets_without
     let response = post(expired.encode().unwrap()).send(router()).await;
     assert_eq!(
         response.status_code,
-        Some(soland_http::error::error_http_status(
-            soland_http::error::ErrorCode::CursorExpired
+        Some(coland_http::error::error_http_status(
+            coland_http::error::ErrorCode::CursorExpired
         ))
     );
     assert!(
@@ -2449,7 +2449,7 @@ async fn expired_revocation_entry_is_pruned_and_does_not_block() {
     let now_ms = chrono::Utc::now().timestamp_millis();
     state
         .sync()
-        .record_cursor_revocation(&soland_services::sync::CursorRevocationState {
+        .record_cursor_revocation(&coland_services::sync::CursorRevocationState {
             cursor_digest: sha256_hex(arkret_hlc::Cursor::decode(&token).unwrap().h.as_bytes()),
             account_id: arkret_wire::AccountId::new(
                 arkret_wire::DidCoreId::new("ak:did_core:web:alice.example").unwrap(),
@@ -2506,13 +2506,13 @@ async fn selected_unreadable_realm_is_an_explicit_unavailable_detail() {
 async fn first_detail_continuation_starts_an_account_baseline_after_retention_advances() {
     use diesel_async::SimpleAsyncConnection;
 
-    let database = soland_storage_postgres::test_database::TestDatabase::lease().await;
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     let pool = database.pool();
     let mut config = test_config();
     config.seed_demo_data = false;
     let state = AppState::new(
         config,
-        soland_storage_postgres::Db {
+        coland_storage_postgres::Db {
             pool: Some(pool.clone()),
         },
     );

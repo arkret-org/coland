@@ -15,12 +15,12 @@ use arkret_wire::{
     ActorId, CommitStreamRef, CurrentSelector, EventKind, StreamScanDirection, StreamScanRequest,
     TypedCurrentRow,
 };
-use soland_storage::{
+use coland_storage::{
     AccountStreamScan, AuthorityCommitStore, AuthorityCommitTransaction, EventCommitUnitOfWork,
     MemberCommittedEventRead,
 };
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork};
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork};
 
 fn membership(
     previous: &AuthorityCommitTransaction,
@@ -29,7 +29,7 @@ fn membership(
     state: &str,
     expected: Option<&str>,
     parent: Option<serde_json::Value>,
-) -> soland_storage::EventCommitRequest {
+) -> coland_storage::EventCommitRequest {
     let scope = arkret_wire::ScopeRef::Circle {
         realm_id: previous.event.realm_id.clone(),
         circle_id: circle.clone(),
@@ -348,21 +348,21 @@ async fn check_circle_reads(history: &str) {
 }
 
 fn peer_interval_decision(
-    scan: soland_storage::PeerStreamScan,
-) -> soland_storage::AccountStreamScan {
+    scan: coland_storage::PeerStreamScan,
+) -> coland_storage::AccountStreamScan {
     match scan {
-        soland_storage::PeerStreamScan::Page(page) => {
-            soland_storage::AccountStreamScan::Page(arkret_wire::StreamScanOutcome {
+        coland_storage::PeerStreamScan::Page(page) => {
+            coland_storage::AccountStreamScan::Page(arkret_wire::StreamScanOutcome {
                 committed_events: page.committed_events,
                 readable_floor: page.readable_floor,
                 truncated: page.truncated,
             })
         }
-        soland_storage::PeerStreamScan::NotAuthorized => {
-            soland_storage::AccountStreamScan::NotAuthorized
+        coland_storage::PeerStreamScan::NotAuthorized => {
+            coland_storage::AccountStreamScan::NotAuthorized
         }
-        soland_storage::PeerStreamScan::Unproved(reason) => {
-            soland_storage::AccountStreamScan::Unproved(reason)
+        coland_storage::PeerStreamScan::Unproved(reason) => {
+            coland_storage::AccountStreamScan::Unproved(reason)
         }
     }
 }

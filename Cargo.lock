@@ -5787,7 +5787,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "soland"
+name = "coland"
 version = "0.3.0"
 dependencies = [
  "anyhow",
@@ -5838,12 +5838,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "soland-domain",
- "soland-http",
- "soland-services",
- "soland-storage",
- "soland-storage-postgres",
- "soland-test-support",
+ "coland-domain",
+ "coland-http",
+ "coland-services",
+ "coland-storage",
+ "coland-storage-postgres",
+ "coland-test-support",
  "thiserror",
  "tokio",
  "tokio-postgres",
@@ -5856,7 +5856,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "soland-contracts"
+name = "coland-contracts"
 version = "0.3.0"
 dependencies = [
  "arkret-canonical",
@@ -5872,7 +5872,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "soland-domain"
+name = "coland-domain"
 version = "0.3.0"
 dependencies = [
  "arkret-canonical",
@@ -5897,7 +5897,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "soland-http"
+name = "coland-http"
 version = "0.3.0"
 dependencies = [
  "anyhow",
@@ -5954,12 +5954,12 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "sha2 0.11.0",
- "soland-contracts",
- "soland-domain",
- "soland-services",
- "soland-storage",
- "soland-storage-postgres",
- "soland-test-support",
+ "coland-contracts",
+ "coland-domain",
+ "coland-services",
+ "coland-storage",
+ "coland-storage-postgres",
+ "coland-test-support",
  "subtle",
  "thiserror",
  "tokio",
@@ -5971,7 +5971,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "soland-keystore-keygen"
+name = "coland-keystore-keygen"
 version = "0.3.0"
 dependencies = [
  "anyhow",
@@ -5982,7 +5982,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "soland-services"
+name = "coland-services"
 version = "0.3.0"
 dependencies = [
  "arkret",
@@ -6010,9 +6010,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "soland-domain",
- "soland-storage",
- "soland-storage-postgres",
+ "coland-domain",
+ "coland-storage",
+ "coland-storage-postgres",
  "thiserror",
  "tokio",
  "tracing",
@@ -6020,7 +6020,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "soland-storage"
+name = "coland-storage"
 version = "0.3.0"
 dependencies = [
  "arkret",
@@ -6041,7 +6041,7 @@ dependencies = [
  "chrono-tz",
  "serde",
  "serde_json",
- "soland-domain",
+ "coland-domain",
  "subtle",
  "thiserror",
  "tokio",
@@ -6049,7 +6049,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "soland-storage-postgres"
+name = "coland-storage-postgres"
 version = "0.3.0"
 dependencies = [
  "anyhow",
@@ -6085,12 +6085,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "soland-domain",
- "soland-http",
- "soland-services",
- "soland-storage",
- "soland-storage-postgres",
- "soland-test-support",
+ "coland-domain",
+ "coland-http",
+ "coland-services",
+ "coland-storage",
+ "coland-storage-postgres",
+ "coland-test-support",
  "tokio",
  "tokio-postgres",
  "tracing",
@@ -6099,7 +6099,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "soland-test-support"
+name = "coland-test-support"
 version = "0.3.0"
 dependencies = [
  "arkret",
@@ -6128,11 +6128,11 @@ dependencies = [
  "rand_core 0.10.1",
  "serde_json",
  "sha2 0.11.0",
- "soland-domain",
- "soland-http",
- "soland-services",
- "soland-storage",
- "soland-storage-postgres",
+ "coland-domain",
+ "coland-http",
+ "coland-services",
+ "coland-storage",
+ "coland-storage-postgres",
  "tokio",
  "uuid",
 ]

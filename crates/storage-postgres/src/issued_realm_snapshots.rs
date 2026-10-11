@@ -19,7 +19,7 @@ pub(crate) fn snapshot_cut_error(error: diesel::result::Error) -> PersistenceErr
         Error::DatabaseError(DatabaseErrorKind::SerializationFailure, info) => {
             PersistenceError::Conflict(format!(
                 "{}: the snapshot transaction lost a concurrent write race: {}",
-                soland_storage::ConflictCode::TemporarilyUnavailable.as_str(),
+                coland_storage::ConflictCode::TemporarilyUnavailable.as_str(),
                 info.message(),
             ))
         }
@@ -73,7 +73,7 @@ impl SnapshotIssuanceConnection {
     ) -> PersistenceResult<Self> {
         let mut guard = Self {
             connection: Some(pg_conn(pool).await?),
-            realm_lock: format!("soland-snapshot-issuance:{}", realm.as_str()),
+            realm_lock: format!("coland-snapshot-issuance:{}", realm.as_str()),
             runtime: tokio::runtime::Handle::current(),
         };
         sql_query("SELECT pg_advisory_lock_shared($1)")
@@ -297,13 +297,13 @@ struct IssuedCandidateRow {
 /// method) is reissued instead of archiving `signed`: retries and repeated
 /// freezes at one head add no object. The Account's unreserved issuances in
 /// this Realm are then trimmed to
-/// [`soland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_REALM`],
+/// [`coland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_REALM`],
 /// never touching a reserved one or a never-issued handoff object. The
 /// caller holds the shared retention lock, so GC cannot interleave.
 pub(crate) async fn issue_head_in_connection(
     conn: &mut AsyncPgConnection,
     account: &arkret_wire::AccountId,
-    material: &soland_storage::RealmStateSnapshotMaterial,
+    material: &coland_storage::RealmStateSnapshotMaterial,
     signed: arkret_wire::RealmStateSnapshot,
 ) -> PersistenceResult<arkret_wire::RealmStateSnapshot> {
     let account_key = account_key(account)?;
@@ -325,7 +325,7 @@ pub(crate) async fn issue_head_in_connection(
     .bind::<Text, _>(material.realm_id.as_str())
     .bind::<super::BigInt, _>(generation)
     .bind::<Jsonb, _>(&heads)
-    .bind::<super::BigInt, _>(soland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_REALM)
+    .bind::<super::BigInt, _>(coland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_REALM)
     .load::<IssuedCandidateRow>(&mut *conn)
     .await
     .map_err(snapshot_cut_error)?;
@@ -333,7 +333,7 @@ pub(crate) async fn issue_head_in_connection(
     for candidate in candidates {
         let existing: arkret_wire::RealmStateSnapshot =
             serde_json::from_value(candidate.snapshot_json).map_err(PersistenceError::database)?;
-        if !soland_storage::signed_snapshot_matches_material(&existing, material)
+        if !coland_storage::signed_snapshot_matches_material(&existing, material)
             || existing.signature.verification_method != signed.signature.verification_method
             || derived_snapshot_id(&existing)? != existing.snapshot_id
         {
@@ -389,7 +389,7 @@ pub(crate) async fn issue_head_in_connection(
     .bind::<Text, _>(&account_key)
     .bind::<Text, _>(material.realm_id.as_str())
     .bind::<Text, _>(issued.snapshot_id.as_str())
-    .bind::<super::BigInt, _>(soland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_REALM - 1)
+    .bind::<super::BigInt, _>(coland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_REALM - 1)
     .execute(&mut *conn)
     .await
     .map_err(|error| snapshot_write_error("unreserved_issuance_prune", error))?;
@@ -482,7 +482,7 @@ pub(crate) async fn install_verified_account_snapshot(
             require_snapshot_serving_cut(conn, account, issuer, &tenure.service_id, &material)
                 .await?;
             if i64::try_from(snapshot.governance_generation).ok() != Some(tenure.generation)
-                || !soland_storage::signed_snapshot_matches_material(snapshot, &material)
+                || !coland_storage::signed_snapshot_matches_material(snapshot, &material)
                 || derived_snapshot_id(snapshot)? != snapshot.snapshot_id
             {
                 return Err(undisclosable(
@@ -505,7 +505,7 @@ pub(crate) async fn install_verified_account_snapshot(
                     undisclosable("the Snapshot signer is not the governing Station").into(),
                 );
             }
-            soland_storage::enforce_inline_realm_state_snapshot_capacity(snapshot)?;
+            coland_storage::enforce_inline_realm_state_snapshot_capacity(snapshot)?;
             issue_head_in_connection(conn, account, &material, snapshot.clone()).await?;
             Ok(())
         })
@@ -521,7 +521,7 @@ pub(crate) async fn require_snapshot_serving_cut(
     account: &arkret_wire::AccountId,
     issuer: &arkret_wire::DidCoreId,
     governance: &str,
-    material: &soland_storage::RealmStateSnapshotMaterial,
+    material: &coland_storage::RealmStateSnapshotMaterial,
 ) -> PersistenceResult<()> {
     if governance == issuer.as_str() {
         return Ok(());
@@ -551,7 +551,7 @@ pub(crate) async fn served_current_snapshot(
     conn: &mut AsyncPgConnection,
     account: &arkret_wire::AccountId,
     issuer: &arkret_wire::DidCoreId,
-    material: &soland_storage::RealmStateSnapshotMaterial,
+    material: &coland_storage::RealmStateSnapshotMaterial,
 ) -> PersistenceResult<Option<arkret_wire::RealmStateSnapshot>> {
     let rows = sql_query(
         "SELECT snapshot.snapshot_json FROM realm_state_snapshots snapshot \
@@ -570,7 +570,7 @@ pub(crate) async fn served_current_snapshot(
     for row in rows {
         let snapshot: arkret_wire::RealmStateSnapshot =
             serde_json::from_value(row.snapshot_json).map_err(PersistenceError::database)?;
-        if soland_storage::signed_snapshot_matches_material(&snapshot, material) {
+        if coland_storage::signed_snapshot_matches_material(&snapshot, material) {
             if derived_snapshot_id(&snapshot)? != snapshot.snapshot_id {
                 return Err(undisclosable("the stored snapshot identity changed"));
             }
@@ -985,7 +985,7 @@ async fn still_disclosable(
     }
 }
 
-/// See [`soland_storage::AuthorityCommitStore::freeze_account_realm_window`].
+/// See [`coland_storage::AuthorityCommitStore::freeze_account_realm_window`].
 ///
 /// One `REPEATABLE READ` cut holds, in order: the shared retention lock that
 /// excludes issued-snapshot GC, the share-locked governing tenure, the
@@ -1009,9 +1009,9 @@ async fn still_disclosable(
 /// capped; at the live-reservation cap a limited window is preview only.
 pub(crate) async fn freeze_account_realm_window(
     pool: &PgPool,
-    request: &soland_storage::AccountRealmWindowRequest,
-    sign: soland_storage::RealmStateSnapshotSigner<'_>,
-) -> PersistenceResult<Option<soland_storage::AccountRealmWindow>> {
+    request: &coland_storage::AccountRealmWindowRequest,
+    sign: coland_storage::RealmStateSnapshotSigner<'_>,
+) -> PersistenceResult<Option<coland_storage::AccountRealmWindow>> {
     use arkret_models_collaboration::sync_frames::account_sync::RealmStreamWindow;
 
     if !(1..=100).contains(&request.window_limit) {
@@ -1019,7 +1019,7 @@ pub(crate) async fn freeze_account_realm_window(
     }
     if request.expires_at_ms <= request.now_ms
         || request.expires_at_ms - request.now_ms
-            > soland_storage::MAX_ACCOUNT_WINDOW_RESERVATION_MS
+            > coland_storage::MAX_ACCOUNT_WINDOW_RESERVATION_MS
     {
         return Err(window_rejected(
             "the consumable deadline is outside the cursor lifetime",
@@ -1138,7 +1138,7 @@ pub(crate) async fn freeze_account_realm_window(
                 if floor > 0
                     && delivered_head.is_none_or(|delivered| delivered == head)
                     && live_reservations
-                        < soland_storage::MAX_LIVE_WINDOW_RESERVATIONS_PER_ACCOUNT_STREAM
+                        < coland_storage::MAX_LIVE_WINDOW_RESERVATIONS_PER_ACCOUNT_STREAM
                 {
                     let candidates = sql_query(
                         "SELECT snapshot.snapshot_json FROM realm_state_snapshots snapshot \
@@ -1158,7 +1158,7 @@ pub(crate) async fn freeze_account_realm_window(
                             .map_err(PersistenceError::database)?,
                     )
                     .bind::<super::BigInt, _>(
-                        soland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_REALM,
+                        coland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_REALM,
                     )
                     .load::<SnapshotJsonRow>(&mut *conn)
                     .await?;
@@ -1310,7 +1310,7 @@ pub(crate) async fn freeze_account_realm_window(
                 // names no basis and is preview only (0441).
                 if start > floor
                     && live_reservations
-                        < soland_storage::MAX_LIVE_WINDOW_RESERVATIONS_PER_ACCOUNT_STREAM
+                        < coland_storage::MAX_LIVE_WINDOW_RESERVATIONS_PER_ACCOUNT_STREAM
                 {
                     let anchor_view = &chain[0];
                     let anchor = arkret_wire::CommitStreamHead {
@@ -1336,7 +1336,7 @@ pub(crate) async fn freeze_account_realm_window(
                             .map_err(PersistenceError::database)?,
                     )
                     .bind::<super::BigInt, _>(
-                        soland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_REALM,
+                        coland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_REALM,
                     )
                     .load::<SnapshotJsonRow>(&mut *conn)
                     .await?;
@@ -1394,13 +1394,13 @@ pub(crate) async fn freeze_account_realm_window(
             // reservations have been proved in this same transaction.
             if tenure.service_id == request.issuer.as_str() {
                 let head_snapshot = sign(&material)?;
-                if !soland_storage::signed_snapshot_matches_material(&head_snapshot, &material) {
+                if !coland_storage::signed_snapshot_matches_material(&head_snapshot, &material) {
                     return Err(PersistenceError::Internal(
                         "snapshot signer changed the proved disclosure material".to_owned(),
                     )
                     .into());
                 }
-                if soland_storage::enforce_inline_realm_state_snapshot_capacity(&head_snapshot)
+                if coland_storage::enforce_inline_realm_state_snapshot_capacity(&head_snapshot)
                     .is_ok()
                 {
                     issue_head_in_connection(conn, &request.account, &material, head_snapshot)
@@ -1411,7 +1411,7 @@ pub(crate) async fn freeze_account_realm_window(
             let window = windows
                 .next()
                 .ok_or_else(|| window_rejected("no selected window"))?;
-            Ok(Some(soland_storage::AccountRealmWindow {
+            Ok(Some(coland_storage::AccountRealmWindow {
                 governance_generation: generation,
                 window,
                 additional_windows: windows.collect(),
@@ -1426,7 +1426,7 @@ pub(crate) async fn freeze_account_realm_window(
     conn.finish(result).await
 }
 
-/// See [`soland_storage::AuthorityCommitStore::account_window_basis`].
+/// See [`coland_storage::AuthorityCommitStore::account_window_basis`].
 pub(crate) async fn account_window_basis(
     pool: &PgPool,
     realm_id: &arkret_wire::RealmId,
@@ -1500,7 +1500,7 @@ pub(crate) async fn account_window_basis(
 ///
 /// Expired window reservations go first. An issuance is then reclaimable only
 /// when no live reservation names it and it is older than
-/// [`soland_storage::UNRESERVED_ISSUED_SNAPSHOT_RETENTION_MS`]; the signed
+/// [`coland_storage::UNRESERVED_ISSUED_SNAPSHOT_RETENTION_MS`]; the signed
 /// object goes with its last issuance. A snapshot that was never issued (a
 /// private handoff anchor) is never a candidate. Each class is bounded to
 /// `batch` rows; the result says whether either class filled its batch.
@@ -1546,7 +1546,7 @@ pub(crate) async fn prune_in_connection(
          SELECT count(*) AS present FROM removed",
     )
     .bind::<super::BigInt, _>(now_ms)
-    .bind::<super::BigInt, _>(soland_storage::UNRESERVED_ISSUED_SNAPSHOT_RETENTION_MS)
+    .bind::<super::BigInt, _>(coland_storage::UNRESERVED_ISSUED_SNAPSHOT_RETENTION_MS)
     .bind::<super::BigInt, _>(batch)
     .get_result::<CountRow>(&mut *conn)
     .await?
@@ -1578,7 +1578,7 @@ mod tests {
         let stream_ref = CommitStreamRef::Realm {
             realm_id: realm_id.clone(),
         };
-        let material = soland_storage::RealmStateSnapshotMaterial {
+        let material = coland_storage::RealmStateSnapshotMaterial {
             realm_id,
             governance_generation: 0,
             visible_stream_heads: vec![CommitStreamHead {
@@ -1595,7 +1595,7 @@ mod tests {
                 }],
             },
         };
-        soland_services::authority_commit::build_signed_realm_state_snapshot(
+        coland_services::authority_commit::build_signed_realm_state_snapshot(
             &material,
             DidUrl::new("did:web:station.example#notary-key").unwrap(),
             &ed25519_dalek::SigningKey::from_bytes(&[0x73; 32]),
@@ -1667,7 +1667,7 @@ mod tests {
     fn complete_signed_body_over_eight_mib_is_rejected_whole() {
         let base = signed_snapshot();
         let sized = |payload: usize| {
-            let material = soland_storage::RealmStateSnapshotMaterial {
+            let material = coland_storage::RealmStateSnapshotMaterial {
                 realm_id: base.realm_id.clone(),
                 governance_generation: 0,
                 visible_stream_heads: base.visible_stream_heads.clone(),
@@ -1682,7 +1682,7 @@ mod tests {
                 }],
                 retention_and_history_floor: base.retention_and_history_floor.clone(),
             };
-            soland_services::authority_commit::build_signed_realm_state_snapshot(
+            coland_services::authority_commit::build_signed_realm_state_snapshot(
                 &material,
                 DidUrl::new("did:web:station.example#notary-key").unwrap(),
                 &ed25519_dalek::SigningKey::from_bytes(&[0x73; 32]),
@@ -1694,20 +1694,20 @@ mod tests {
         let overhead = arkret_canonical::canonical_json_bytes(&probe)
             .unwrap()
             .len();
-        let exact = sized(soland_storage::MAX_INLINE_REALM_STATE_SNAPSHOT_BYTES - overhead);
+        let exact = sized(coland_storage::MAX_INLINE_REALM_STATE_SNAPSHOT_BYTES - overhead);
         assert_eq!(
             arkret_canonical::canonical_json_bytes(&exact)
                 .unwrap()
                 .len(),
-            soland_storage::MAX_INLINE_REALM_STATE_SNAPSHOT_BYTES,
+            coland_storage::MAX_INLINE_REALM_STATE_SNAPSHOT_BYTES,
         );
-        soland_storage::enforce_inline_realm_state_snapshot_capacity(&exact).unwrap();
-        let over = sized(soland_storage::MAX_INLINE_REALM_STATE_SNAPSHOT_BYTES - overhead + 1);
+        coland_storage::enforce_inline_realm_state_snapshot_capacity(&exact).unwrap();
+        let over = sized(coland_storage::MAX_INLINE_REALM_STATE_SNAPSHOT_BYTES - overhead + 1);
         let error =
-            soland_storage::enforce_inline_realm_state_snapshot_capacity(&over).unwrap_err();
+            coland_storage::enforce_inline_realm_state_snapshot_capacity(&over).unwrap_err();
         assert_eq!(
             error.conflict_code(),
-            Some(soland_storage::ConflictCode::SnapshotCapacityExceeded),
+            Some(coland_storage::ConflictCode::SnapshotCapacityExceeded),
         );
     }
 
@@ -1739,7 +1739,7 @@ mod tests {
         let pool = database.pool();
         let alice = account("ak:did_core:web:alice.example");
         let snapshot = signed_snapshot();
-        let material = soland_storage::RealmStateSnapshotMaterial {
+        let material = coland_storage::RealmStateSnapshotMaterial {
             realm_id: snapshot.realm_id.clone(),
             governance_generation: snapshot.governance_generation,
             visible_stream_heads: snapshot.visible_stream_heads.clone(),
@@ -1901,7 +1901,7 @@ mod tests {
         let pool = database.pool();
         let alice = account("ak:did_core:web:alice.example");
         let snapshot = signed_snapshot();
-        let material = soland_storage::RealmStateSnapshotMaterial {
+        let material = coland_storage::RealmStateSnapshotMaterial {
             realm_id: snapshot.realm_id.clone(),
             governance_generation: snapshot.governance_generation,
             visible_stream_heads: snapshot.visible_stream_heads.clone(),
@@ -1945,7 +1945,7 @@ mod tests {
         };
         assert_eq!(
             error.conflict_code(),
-            Some(soland_storage::ConflictCode::TemporarilyUnavailable),
+            Some(coland_storage::ConflictCode::TemporarilyUnavailable),
         );
         // Match our SQLSTATE 40001 mapping, not PostgreSQL's localized text.
         assert!(
@@ -2049,14 +2049,14 @@ mod tests {
         let handoff = {
             let mut other = snapshot.clone();
             other.created_at -= chrono::Duration::seconds(1);
-            let material = soland_storage::RealmStateSnapshotMaterial {
+            let material = coland_storage::RealmStateSnapshotMaterial {
                 realm_id: other.realm_id.clone(),
                 governance_generation: other.governance_generation,
                 visible_stream_heads: other.visible_stream_heads.clone(),
                 current_state_entries: other.current_state_entries.clone(),
                 retention_and_history_floor: other.retention_and_history_floor.clone(),
             };
-            soland_services::authority_commit::build_signed_realm_state_snapshot(
+            coland_services::authority_commit::build_signed_realm_state_snapshot(
                 &material,
                 DidUrl::new("did:web:station.example#notary-key").unwrap(),
                 &ed25519_dalek::SigningKey::from_bytes(&[0x73; 32]),
@@ -2088,7 +2088,7 @@ mod tests {
             pool: database.pool(),
         };
         assert_eq!(
-            soland_storage::AuthorityCommitStore::latest_snapshot(&store, &snapshot.realm_id)
+            coland_storage::AuthorityCommitStore::latest_snapshot(&store, &snapshot.realm_id)
                 .await
                 .unwrap(),
             Some(handoff),

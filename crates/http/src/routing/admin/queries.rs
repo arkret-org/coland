@@ -1,17 +1,17 @@
 //! Production admin query endpoints (D14).
 //!
 //! Typed, cursor-paginated, server-side-filtered reads for the four resources
-//! sodmin manages:
+//! codmin manages:
 //!
-//! - `GET /_soland/admin/actors`        → [`AdminActorList`]
-//! - `GET /_soland/admin/audit`         → [`AdminAuditList`]
-//! - `GET /_soland/admin/capabilities`  → [`AdminCapabilityList`]
-//! - `GET /_soland/admin/devices`       → [`AdminDeviceList`]
+//! - `GET /_coland/admin/actors`        → [`AdminActorList`]
+//! - `GET /_coland/admin/audit`         → [`AdminAuditList`]
+//! - `GET /_coland/admin/capabilities`  → [`AdminCapabilityList`]
+//! - `GET /_coland/admin/devices`       → [`AdminDeviceList`]
 //!
 //! These replace the dev-only `admin/{resource}` snapshot collection for
 //! those resources (the collection keeps serving the surfaces that have not
 //! been productionised yet). Wire contract lives in
-//! `soland_contracts::admin` — see that module for the frozen rules.
+//! `coland_contracts::admin` — see that module for the frozen rules.
 //!
 //! Pagination: rows are sorted by a stable key (actors: this Station's principal; capabilities:
 //! grant id; devices: device id; audit: newest first, audit id as tiebreak).
@@ -29,14 +29,14 @@
 use std::collections::BTreeMap;
 
 use arkret_models_collaboration::objects::account_status::AccountStatus;
-use salvo::oapi::extract::QueryParam;
-use salvo::prelude::*;
-use serde_json::{Value, json};
-use soland_contracts::admin::{
+use coland_contracts::admin::{
     AdminActor, AdminActorList, AdminAuditEntry, AdminAuditList, AdminCapabilityList, AdminDevice,
     AdminDeviceList, CapabilityGrantState, CapabilitySummary,
 };
-use soland_http::error::AppError;
+use coland_http::error::AppError;
+use salvo::oapi::extract::QueryParam;
+use salvo::prelude::*;
+use serde_json::{Value, json};
 use util::query_param;
 
 use super::{AdminAuth, append_audit_log, require_admin_principal, util};
@@ -90,7 +90,7 @@ fn contains_ci(haystack: &str, needle_lower: &str) -> bool {
 
 async fn query_audit_trail(
     state: &AppState,
-    session: &soland_services::identity::SessionIdentityState,
+    session: &coland_services::identity::SessionIdentityState,
     action: &str,
     filters: &BTreeMap<String, String>,
     count: usize,
@@ -119,10 +119,10 @@ async fn query_audit_trail(
 /// `realm_counts` uses full Actor keys from the federated Realm directory.
 pub(super) fn admin_actor_row(
     state: &AppState,
-    account: &soland_services::identity::AccountProfileState,
+    account: &coland_services::identity::AccountProfileState,
     device_counts: &BTreeMap<String, u64>,
     realm_counts: &BTreeMap<String, u64>,
-    propagation_state: Option<soland_storage::AccountStatusPropagationProjectionState>,
+    propagation_state: Option<coland_storage::AccountStatusPropagationProjectionState>,
 ) -> Option<AdminActor> {
     if account.account_id.station_id != state.service_core_id() {
         return None;
@@ -133,7 +133,7 @@ pub(super) fn admin_actor_row(
     let deactivation_federation_incomplete = (status == AccountStatus::Deactivated)
         .then(|| {
             propagation_state.map(|state| {
-                state == soland_storage::AccountStatusPropagationProjectionState::Incomplete
+                state == coland_storage::AccountStatusPropagationProjectionState::Incomplete
             })
         })
         .flatten();
@@ -172,7 +172,7 @@ pub(super) async fn account_status_propagation_state_for_admin(
     state: &AppState,
     account_id: &arkret_wire::AccountId,
     deactivated: bool,
-) -> Result<Option<soland_storage::AccountStatusPropagationProjectionState>, AppError> {
+) -> Result<Option<coland_storage::AccountStatusPropagationProjectionState>, AppError> {
     if !deactivated {
         return Ok(None);
     }
@@ -203,7 +203,7 @@ pub(super) async fn actor_count_maps(
     let mut device_counts: BTreeMap<String, u64> = BTreeMap::new();
     for actor in state
         .identities()
-        .list_active_device_actors(soland_services::identity::ListActiveDeviceActorsQuery)
+        .list_active_device_actors(coland_services::identity::ListActiveDeviceActorsQuery)
         .await
         .unwrap_or_default()
     {
@@ -214,7 +214,7 @@ pub(super) async fn actor_count_maps(
 }
 
 fn realm_membership_counts(
-    projection: &soland_domain::reducer::ProjectionState,
+    projection: &coland_domain::reducer::ProjectionState,
 ) -> BTreeMap<String, u64> {
     let realm_ids: std::collections::BTreeSet<_> = projection
         .members
@@ -231,10 +231,10 @@ fn realm_membership_counts(
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.actors.query",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.actors.query",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.actors.query"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.actors.query"))]
 pub(super) async fn admin_list_actors(
     admin: AdminAuth,
     limit: QueryParam<usize, false>,
@@ -373,10 +373,10 @@ fn parse_time_bound(raw: &str, name: &str) -> Result<chrono::DateTime<chrono::Ut
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.audit.query",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.audit.query",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.audit.query"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.audit.query"))]
 pub(super) async fn admin_query_audit(
     admin: AdminAuth,
     limit: QueryParam<usize, false>,
@@ -493,7 +493,7 @@ pub(super) async fn admin_query_audit(
 /// whose subject is a claim condition names no single principal and has no
 /// row in this principal-keyed summary.
 fn capability_summary(
-    record: &soland_storage::CapabilityGrantCurrentResultRecord,
+    record: &coland_storage::CapabilityGrantCurrentResultRecord,
 ) -> Option<CapabilitySummary> {
     use arkret_models_collaboration::governance::grant_constraint::CapabilitySubject;
     let grant = &record.value;
@@ -512,18 +512,18 @@ fn capability_summary(
         resource,
         actions: grant.actions.clone(),
         constraints: grant.constraints.clone(),
-        revoked: record.status != soland_storage::CapabilityGrantCurrentStatus::Active,
+        revoked: record.status != coland_storage::CapabilityGrantCurrentStatus::Active,
         created_at: Some(grant.issued_at),
         issuer_authority_refs: grant.issuer_authority_refs.clone(),
-        expires_at: soland_storage::capability_grant_expires_at(grant),
+        expires_at: coland_storage::capability_grant_expires_at(grant),
     })
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.capabilities.query",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.capabilities.query",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.capabilities.query"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.capabilities.query"))]
 pub(super) async fn admin_list_capabilities(
     admin: AdminAuth,
     limit: QueryParam<usize, false>,
@@ -617,7 +617,7 @@ pub(super) async fn admin_list_capabilities(
 // Devices
 // ---------------------------------------------------------------------------
 
-fn admin_device_row(device: &soland_services::identity::DeviceIdentity) -> AdminDevice {
+fn admin_device_row(device: &coland_services::identity::DeviceIdentity) -> AdminDevice {
     AdminDevice {
         id: device.device_id.clone(),
         actor_id: Some(device.actor_id.clone()),
@@ -631,10 +631,10 @@ fn admin_device_row(device: &soland_services::identity::DeviceIdentity) -> Admin
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.devices.query",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.devices.query",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.devices.query"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.devices.query"))]
 pub(super) async fn admin_list_devices(
     admin: AdminAuth,
     limit: QueryParam<usize, false>,
@@ -710,7 +710,7 @@ mod tests {
     fn admin_actor_projection_is_station_local_and_counts_exact_actor_membership() {
         let state = AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let principal_id = arkret_wire::DidCoreId::new("ak:did_core:web:alice.example").unwrap();
         let local_account =
@@ -719,8 +719,8 @@ mod tests {
             principal_id.clone(),
             arkret_wire::DidCoreId::new("ak:did_core:web:foreign-station.example").unwrap(),
         );
-        let mut account = soland_services::identity::AccountProfileState {
-            pk: soland_storage::AccountPk(1),
+        let mut account = coland_services::identity::AccountProfileState {
+            pk: coland_storage::AccountPk(1),
             account_id: local_account.clone(),
             principal_id: principal_id.clone(),
             localpart: "alice".to_owned(),
@@ -730,7 +730,7 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
         let device_counts = BTreeMap::from([(principal_id.to_string(), 1)]);
-        let mut projection = soland_domain::reducer::ProjectionState::default();
+        let mut projection = coland_domain::reducer::ProjectionState::default();
         for (realm_id, member_account, membership) in [
             ("realm-a", local_account.clone(), "join"),
             ("realm-b", local_account.clone(), "join"),
@@ -740,7 +740,7 @@ mod tests {
             let member = arkret_wire::ActorId::account(member_account).to_string();
             projection.members.insert(
                 (realm_id.to_owned(), member.clone()),
-                soland_domain::reducer::SolandMembershipState {
+                coland_domain::reducer::ColandMembershipState {
                     member,
                     realm_id: realm_id.to_owned(),
                     state: membership.to_owned(),
@@ -792,7 +792,7 @@ mod tests {
             .expect_err("unresolvable cursor must fail");
         assert_eq!(
             error.http_status(),
-            soland_http::error::error_http_status(error.code)
+            coland_http::error::error_http_status(error.code)
         );
     }
 
@@ -816,20 +816,20 @@ mod tests {
     }
 
     /// Production-mode admin-principal gate: a session whose actor is not
-    /// listed in `SOLAND_ADMIN_PRINCIPAL_IDS` is a hard 403; listing the
+    /// listed in `COLAND_ADMIN_PRINCIPAL_IDS` is a hard 403; listing the
     /// stable principal ID admits it. (The HTTP-level 401 path is covered by the
     /// `admin_production_queries` contract tests; this locks the
     /// authorization decision itself, which dev-mode fixtures cannot reach.)
     #[test]
     fn require_admin_principal_is_fail_closed_in_production() {
-        let session = |actor: &str| soland_services::identity::SessionIdentityState {
+        let session = |actor: &str| coland_services::identity::SessionIdentityState {
             account_pk: None,
             token_hash: "hash".to_owned(),
             actor: actor.to_owned(),
-            endpoint: soland_services::identity::SessionEndpointState::HumanDevice {
+            endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
                 device_id: "ak:device:test".to_owned(),
             },
-            audience: "soland".to_owned(),
+            audience: "coland".to_owned(),
             session_public_key: None,
             session_grant: None,
             expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
@@ -844,7 +844,7 @@ mod tests {
                 ],
                 ..crate::config::AppConfig::test_default()
             },
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
 
         let denied =
@@ -852,7 +852,7 @@ mod tests {
                 .expect_err("non-admin principal must be rejected in production");
         assert_eq!(
             denied.http_status(),
-            soland_http::error::error_http_status(denied.code)
+            coland_http::error::error_http_status(denied.code)
         );
 
         super::require_admin_principal(&state, session("ak:did_core:web:op.example"))

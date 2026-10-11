@@ -2,7 +2,7 @@
 #![recursion_limit = "512"]
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
-extern crate self as soland_http;
+extern crate self as coland_http;
 
 pub mod account_erasure_worker;
 mod approval_admission;
@@ -131,7 +131,7 @@ pub(crate) mod test_event {
 
     pub(crate) fn station_id() -> DidCoreId {
         super::test_actor_id_str(
-            "did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:soland.local:webvh:service",
+            "did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:coland.local:webvh:service",
         )
     }
 
@@ -203,7 +203,7 @@ pub async fn test_active_device_revocation_gate_selector(
     state: &crate::state::AppState,
     principal_id: &str,
     device_id: &str,
-) -> soland_services::ServiceResult<soland_storage::DeviceRevocationGateSelector> {
+) -> coland_services::ServiceResult<coland_storage::DeviceRevocationGateSelector> {
     crate::routing::identity::device_generation::active_device_revocation_gate_selector(
         state,
         principal_id,
@@ -220,7 +220,7 @@ pub async fn test_fresh_producer_device_evidence(
     state: &crate::state::AppState,
     event: &arkret_wire::Event,
     destination: &arkret_wire::DidCoreId,
-) -> soland_services::ServiceResult<
+) -> coland_services::ServiceResult<
     Option<arkret_models_identity::ForwardAccountDeviceSignerEvidence>,
 > {
     let request = arkret_models_collaboration::authority_commit::PeerAuthorityForwardEventRequest {
@@ -233,7 +233,7 @@ pub async fn test_fresh_producer_device_evidence(
     };
     let digest =
         arkret_models_collaboration::authority_commit::authority_forward_body_digest(&request)
-            .map_err(|e| soland_services::ServiceError::SchemaViolation(e.to_string()))?;
+            .map_err(|e| coland_services::ServiceError::SchemaViolation(e.to_string()))?;
     crate::state::fresh_producer_device_evidence(state, event, destination, &digest).await
 }
 
@@ -245,7 +245,7 @@ pub async fn test_forward_self_event(
     state: &crate::state::AppState,
     governance: &arkret_wire::DidCoreId,
     submission: arkret_wire::EventAdmissionSubmission,
-) -> soland_services::ServiceResult<arkret_wire::AuthoritySubmitOutcome> {
+) -> coland_services::ServiceResult<arkret_wire::AuthoritySubmitOutcome> {
     crate::state::forward_self_event(state, governance, submission).await
 }
 
@@ -255,10 +255,10 @@ pub async fn test_forward_self_event(
 #[doc(hidden)]
 pub async fn test_admit_authority_forward(
     state: &crate::state::AppState,
-    peer: &soland_services::authority_commit::AuthenticatedPeerContext,
+    peer: &coland_services::authority_commit::AuthenticatedPeerContext,
     request: arkret_models_collaboration::authority_commit::PeerAuthorityForwardEventRequest,
     now: chrono::DateTime<chrono::Utc>,
-) -> soland_services::ServiceResult<arkret_wire::AuthoritySubmitOutcome> {
+) -> coland_services::ServiceResult<arkret_wire::AuthoritySubmitOutcome> {
     crate::state::admit_forwarded_event(state, peer, request, now).await
 }
 

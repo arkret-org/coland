@@ -4,7 +4,7 @@ use arkret_models_collaboration::events_payloads::MlsGenesisPayload;
 use arkret_models_collaboration::mls_group_state_material::MlsMemberGroupStateMaterialReadRequestBody;
 use arkret_models_crypto::MlsCommitPayload;
 use arkret_wire::{ActorId, EventKind, MlsGroupCurrent, RealmId, ScopeRef, TypedCurrentRow};
-use soland_storage::ForeignDirectMlsInput;
+use coland_storage::ForeignDirectMlsInput;
 
 use super::AppState;
 
@@ -193,7 +193,7 @@ async fn cache_public_genesis_material(
                 .deliveries()
                 .store_blob_if_absent(
                     reference.as_str(),
-                    soland_storage::BlobRecord {
+                    coland_storage::BlobRecord {
                         sha256,
                         size_bytes,
                         storage_backend: state.deliveries().object_storage_backend_name(),
@@ -230,7 +230,7 @@ fn replay(
     input: &ForeignDirectMlsInput,
     group_info: &[u8],
     tree: &[u8],
-) -> Result<(soland_storage::ForeignDirectMlsBase, bool), String> {
+) -> Result<(coland_storage::ForeignDirectMlsBase, bool), String> {
     let fail = |error: &dyn std::fmt::Display| error.to_string();
     let scope = ScopeRef::Realm {
         realm_id: input.realm_id.clone(),
@@ -418,7 +418,7 @@ fn replay(
         &input.participants,
     );
     Ok((
-        soland_storage::ForeignDirectMlsBase {
+        coland_storage::ForeignDirectMlsBase {
             head: input.replay_head.clone(),
             current_event_ref: reference,
             epoch: tracker.epoch(),
@@ -770,12 +770,12 @@ mod tests {
     async fn seed_pg(
         input: &mut ForeignDirectMlsInput,
     ) -> (
-        soland_storage_postgres::TestDatabase,
-        soland_storage_postgres::PgEventStore,
+        coland_storage_postgres::TestDatabase,
+        coland_storage_postgres::PgEventStore,
     ) {
         use diesel::sql_types::{BigInt, Binary, Jsonb, SmallInt, Text};
         use diesel_async::RunQueryDsl;
-        let database = soland_storage_postgres::TestDatabase::lease().await;
+        let database = coland_storage_postgres::TestDatabase::lease().await;
         let pool = database.pool();
         let mut conn = pool.get().await.unwrap();
         // Post-verification storage fixture: the opening join precedes every
@@ -870,13 +870,13 @@ mod tests {
             .bind::<Text,_>(input.realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(&input.head.stream_ref).unwrap())
             .bind::<Text,_>(opening.commit_id.as_str()).execute(&mut conn).await.unwrap();
         drop(conn);
-        (database, soland_storage_postgres::PgEventStore { pool })
+        (database, coland_storage_postgres::PgEventStore { pool })
     }
     #[tokio::test]
     async fn foreign_direct_pg_public_cache_rejects_missing_stale_forked_cut_and_caller_floor() {
+        use coland_storage::EventStore;
         use diesel::sql_types::{BigInt, Text};
         use diesel_async::RunQueryDsl;
-        use soland_storage::EventStore;
         let (mut fixture, info, tree) = fixture(&[("bob", 2)]);
         let (database, store) = seed_pg(&mut fixture).await;
         let input = store

@@ -1,11 +1,11 @@
-use diesel::sql_types::{Bool, SmallInt};
-use serde::de::DeserializeOwned;
-use soland_storage::{
+use coland_storage::{
     AcceptedDeviceAuthorizationOutcome, AuthorityCommitStore, AuthorityCommitTransaction,
     AuthorityCommitWriteOutcome, CurrentRealmAuthority, ForwardAttemptRecord, ForwardAttemptStatus,
     OrdinaryRealmBootstrapCommitOutcome, OrdinaryRealmBootstrapCommitUnit, PcrGenesisCommitOutcome,
     PcrGenesisCommitUnit, QueuedEventRecord, QueuedEventStatus, SelfProducerCommitGuard,
 };
+use diesel::sql_types::{Bool, SmallInt};
+use serde::de::DeserializeOwned;
 
 use super::{
     AsyncConnection, AsyncPgConnection, BigInt, Binary, Jsonb, Nullable, OptionalExtension,
@@ -153,7 +153,7 @@ struct MimiRoomBindingCurrentRow {
 
 fn decode_mimi_room_binding_current(
     row: MimiRoomBindingCurrentRow,
-) -> PersistenceResult<soland_storage::MimiRoomBindingCurrentRecord> {
+) -> PersistenceResult<coland_storage::MimiRoomBindingCurrentRecord> {
     let selector = arkret_wire::CurrentSelector::MimiRoomBinding {
         mimi_room_uri: arkret_wire::MimiRoomUri::new(row.mimi_room_uri)
             .map_err(|error| PersistenceError::Internal(error.to_string()))?,
@@ -169,7 +169,7 @@ fn decode_mimi_room_binding_current(
     current
         .validate()
         .map_err(|error| PersistenceError::Internal(error.to_string()))?;
-    Ok(soland_storage::MimiRoomBindingCurrentRecord {
+    Ok(coland_storage::MimiRoomBindingCurrentRecord {
         current,
         source_event_id: decode_text(row.current_event_id, "MIMI current source Event id")?,
         realm_id: decode_text(row.realm_id, "MIMI current Realm id")?,
@@ -178,7 +178,7 @@ fn decode_mimi_room_binding_current(
 
 fn invalid_mimi_migration() -> PersistenceError {
     PersistenceError::Conflict(
-        soland_storage::ConflictCode::MimiRoomBindingMigrationProofInvalid.to_string(),
+        coland_storage::ConflictCode::MimiRoomBindingMigrationProofInvalid.to_string(),
     )
 }
 
@@ -940,7 +940,7 @@ pub(crate) const SNAPSHOT_CURRENT_SQL: &str = "SELECT result.*, covering.stream_
 pub(crate) async fn realm_state_snapshot_material_in_connection(
     conn: &mut AsyncPgConnection,
     realm_id: &arkret_wire::RealmId,
-) -> PersistenceResult<Option<soland_storage::RealmStateSnapshotMaterial>> {
+) -> PersistenceResult<Option<coland_storage::RealmStateSnapshotMaterial>> {
     let authority = sql_query(
         "SELECT realm_id, generation, service_id, authority_ref, last_handoff_ref \
          FROM realm_authorities WHERE realm_id = $1",
@@ -1338,7 +1338,7 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
             oldest_position: 0,
         })
         .collect();
-    Ok(Some(soland_storage::RealmStateSnapshotMaterial {
+    Ok(Some(coland_storage::RealmStateSnapshotMaterial {
         realm_id: realm_id.clone(),
         governance_generation: authority.generation,
         visible_stream_heads: heads,
@@ -1845,7 +1845,7 @@ async fn commit_transaction_with_device_guard_inner(
             {
                 return Err(PersistenceError::Conflict(format!(
                     "{}: stream head advanced to position {} before this RealmCommit",
-                    soland_storage::ConflictCode::TemporarilyUnavailable.as_str(),
+                    coland_storage::ConflictCode::TemporarilyUnavailable.as_str(),
                     previous_commit.stream_position
                 ))
                 .into());
@@ -2007,11 +2007,11 @@ pub(crate) async fn check_self_producer_guard_in_connection(
             .await
             .map_err(|error| match error {
                 PersistenceError::Conflict(detail)
-                    if soland_storage::ConflictCode::from_detail(&detail).is_none() =>
+                    if coland_storage::ConflictCode::from_detail(&detail).is_none() =>
                 {
                     PersistenceError::Conflict(format!(
                         "{}: {detail}",
-                        soland_storage::ConflictCode::CapabilityDenied
+                        coland_storage::ConflictCode::CapabilityDenied
                     ))
                 }
                 other => other,
@@ -2420,7 +2420,7 @@ struct RosterMemberRow {
 async fn accepted_realm_roster_in_connection(
     conn: &mut AsyncPgConnection,
     realm_id: &arkret_wire::RealmId,
-) -> PersistenceResult<Option<soland_storage::AcceptedRealmRoster>> {
+) -> PersistenceResult<Option<coland_storage::AcceptedRealmRoster>> {
     let Some(controller) = sql_query(
         "SELECT controller_actor_id FROM realm_authority_root_current_results WHERE realm_id = $1 \
          UNION ALL \
@@ -2471,7 +2471,7 @@ async fn accepted_realm_roster_in_connection(
             })
         })
         .collect::<PersistenceResult<Vec<_>>>()?;
-    Ok(Some(soland_storage::AcceptedRealmRoster {
+    Ok(Some(coland_storage::AcceptedRealmRoster {
         controller_actor_id,
         joined_members,
     }))
@@ -2568,7 +2568,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     async fn prepare_service_signer_fact(
         &self,
         event: &arkret_wire::Event,
-        guard: &soland_storage::AppletEventProducerGuard,
+        guard: &coland_storage::AppletEventProducerGuard,
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<arkret_models_collaboration::authority_commit::ServiceHistoricalSignerFact>
     {
@@ -2627,7 +2627,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         &self,
         request: &arkret_models_collaboration::mls_roster_authority::MlsMemberRosterAuthorityReadRequestBody,
         issuer: &arkret_wire::DidCoreId,
-    ) -> PersistenceResult<soland_storage::MlsMemberRosterSelectorRead> {
+    ) -> PersistenceResult<coland_storage::MlsMemberRosterSelectorRead> {
         crate::mls_roster_authority_read::member_selector(&self.pool, request, issuer).await
     }
 
@@ -2636,13 +2636,13 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         request: &arkret_models_collaboration::mls_roster_authority::MlsRosterAuthorityReadRequestBody,
         issuer: &arkret_wire::DidCoreId,
         source_peer: Option<&arkret_wire::DidCoreId>,
-    ) -> PersistenceResult<soland_storage::MlsRosterAuthorityRead> {
+    ) -> PersistenceResult<coland_storage::MlsRosterAuthorityRead> {
         crate::mls_roster_authority_read::read(&self.pool, request, issuer, source_peer).await
     }
 
     async fn install_mls_add_authority_attestation(
         &self,
-        verified: &soland_storage::VerifiedMlsAddAuthorityAttestation,
+        verified: &coland_storage::VerifiedMlsAddAuthorityAttestation,
         issuer: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<arkret_models_collaboration::mls_roster_authority::MlsAttestAddOutcome>
     {
@@ -2682,7 +2682,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         request: &arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialRequestBody,
         issuer: &arkret_wire::DidCoreId,
         source_peer: Option<&arkret_wire::DidCoreId>,
-    ) -> PersistenceResult<soland_storage::MlsMemberGroupStateMaterialRead> {
+    ) -> PersistenceResult<coland_storage::MlsMemberGroupStateMaterialRead> {
         crate::mls_group_state_material_read::read(&self.pool, request, issuer, source_peer).await
     }
 
@@ -2952,10 +2952,10 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
 
     async fn admit_self_direct_conversation_founding_unit(
         &self,
-        unit: &soland_storage::DirectConversationFoundingCommitUnit,
+        unit: &coland_storage::DirectConversationFoundingCommitUnit,
         producer_guards: &[SelfProducerCommitGuard; 4],
         queued_at: chrono::DateTime<chrono::Utc>,
-    ) -> PersistenceResult<soland_storage::DirectConversationFoundingCommitOutcome> {
+    ) -> PersistenceResult<coland_storage::DirectConversationFoundingCommitOutcome> {
         crate::direct_conversation_founding::admit_self_direct_conversation_founding_unit(
             &self.pool,
             unit,
@@ -2967,7 +2967,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
 
     async fn materialize_peer_direct_conversation_founding_unit(
         &self,
-        unit: &soland_storage::DirectConversationFoundingCommitUnit,
+        unit: &coland_storage::DirectConversationFoundingCommitUnit,
         evidence: &arkret_models_collaboration::objects::direct_conversation::DirectConversationFoundingAuthorityEvidence,
         local_station: &arkret_wire::DidCoreId,
         received_at: chrono::DateTime<chrono::Utc>,
@@ -2986,7 +2986,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     async fn direct_conversation_admission(
         &self,
         event: &arkret_wire::Event,
-    ) -> PersistenceResult<soland_storage::DirectConversationAdmissionCut> {
+    ) -> PersistenceResult<coland_storage::DirectConversationAdmissionCut> {
         let mut conn = pg_conn(&self.pool).await?;
         // One snapshot, not read-only: the table share-locks the rows it
         // reads, exactly as inside the accepting transaction.
@@ -3001,7 +3001,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             .await?
             .is_none()
             {
-                return Ok(soland_storage::DirectConversationAdmissionCut::NotDirectConversation);
+                return Ok(coland_storage::DirectConversationAdmissionCut::NotDirectConversation);
             }
             Ok(
                 match crate::direct_conversation_admission::admission_refusal_in_connection(
@@ -3009,8 +3009,8 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 )
                 .await?
                 {
-                    Some(code) => soland_storage::DirectConversationAdmissionCut::Refused(code),
-                    None => soland_storage::DirectConversationAdmissionCut::Passed,
+                    Some(code) => coland_storage::DirectConversationAdmissionCut::Refused(code),
+                    None => coland_storage::DirectConversationAdmissionCut::Passed,
                 },
             )
         })
@@ -3021,7 +3021,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     async fn direct_conversation_pending_peer_claim_query(
         &self,
         realm_id: &arkret_wire::RealmId,
-    ) -> PersistenceResult<Option<soland_storage::DirectConversationPendingPeerClaimQuery>> {
+    ) -> PersistenceResult<Option<coland_storage::DirectConversationPendingPeerClaimQuery>> {
         #[derive(QueryableByName)]
         struct Row {
             #[diesel(sql_type = Text)]
@@ -3059,7 +3059,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .optional()
         .map_err(PersistenceError::database)?;
         Ok(row.map(
-            |row| soland_storage::DirectConversationPendingPeerClaimQuery {
+            |row| coland_storage::DirectConversationPendingPeerClaimQuery {
                 peer_id: row.peer_id,
                 original_request_body: row.original_request_body,
                 claim_request_id: row.claim_request_id,
@@ -3138,7 +3138,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         event: &arkret_wire::Event,
         local_service_id: &arkret_wire::DidCoreId,
         peer: &arkret_wire::DidCoreId,
-        witnesses: &[soland_storage::RealmFanoutAuthorityWitness],
+        witnesses: &[coland_storage::RealmFanoutAuthorityWitness],
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<bool> {
         let mut conn = pg_conn(&self.pool).await?;
@@ -3155,8 +3155,8 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
 
     async fn install_committed_replica(
         &self,
-        replica: &soland_storage::CommittedReplica,
-    ) -> PersistenceResult<soland_storage::CommittedReplicaOutcome> {
+        replica: &coland_storage::CommittedReplica,
+    ) -> PersistenceResult<coland_storage::CommittedReplicaOutcome> {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             replica::install_committed_replica_in_connection(conn, replica).await
@@ -3170,9 +3170,9 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         event: &arkret_wire::Event,
         commit: &arkret_wire::RealmCommit,
         genesis_event_ref: Option<&arkret_wire::EventId>,
-        welcomes: &[soland_storage::VerifiedMlsWelcome],
+        welcomes: &[coland_storage::VerifiedMlsWelcome],
         at: chrono::DateTime<chrono::Utc>,
-    ) -> PersistenceResult<soland_storage::CommittedReplicaOutcome> {
+    ) -> PersistenceResult<coland_storage::CommittedReplicaOutcome> {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             replica::queue_welcomes_of_held_replica_in_connection(
@@ -3191,8 +3191,8 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
 
     async fn install_committed_chain_node(
         &self,
-        node: &soland_storage::CommittedChainNode,
-    ) -> PersistenceResult<soland_storage::CommittedReplicaOutcome> {
+        node: &coland_storage::CommittedChainNode,
+    ) -> PersistenceResult<coland_storage::CommittedReplicaOutcome> {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             replica::install_committed_chain_node_in_connection(conn, node).await
@@ -3204,7 +3204,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     async fn replica_stream_anchor(
         &self,
         realm_id: &arkret_wire::RealmId,
-    ) -> PersistenceResult<Option<soland_storage::ReplicaStreamAnchor>> {
+    ) -> PersistenceResult<Option<coland_storage::ReplicaStreamAnchor>> {
         let mut conn = pg_conn(&self.pool).await?;
         replica::replica_stream_anchor_in_connection(&mut conn, realm_id)
             .await
@@ -3214,7 +3214,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     async fn pending_franking_proofs(
         &self,
         receiver: &arkret_wire::DidCoreId,
-    ) -> PersistenceResult<Vec<soland_storage::PendingFrankingProof>> {
+    ) -> PersistenceResult<Vec<coland_storage::PendingFrankingProof>> {
         let mut conn = pg_conn(&self.pool).await?;
         crate::moderation_franking_proof_current_results::pending_franking_in_connection(
             &mut conn, receiver,
@@ -3224,7 +3224,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
 
     async fn fix_franking_proof(
         &self,
-        prepared: &soland_storage::PreparedFrankingProof,
+        prepared: &coland_storage::PreparedFrankingProof,
     ) -> PersistenceResult<arkret_wire::Event> {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
@@ -3258,7 +3258,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     async fn replica_anchor_for_stream(
         &self,
         stream: &arkret_wire::CommitStreamRef,
-    ) -> PersistenceResult<Option<soland_storage::ReplicaStreamAnchor>> {
+    ) -> PersistenceResult<Option<coland_storage::ReplicaStreamAnchor>> {
         let mut conn = pg_conn(&self.pool).await?;
         replica::replica_anchor_for_stream_in_connection(&mut conn, stream)
             .await
@@ -3549,7 +3549,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
 
     async fn install_replica_anchor(
         &self,
-        install: &soland_storage::ReplicaAnchorInstall,
+        install: &coland_storage::ReplicaAnchorInstall,
     ) -> PersistenceResult<()> {
         let mut conn = crate::issued_realm_snapshots::SnapshotIssuanceConnection::acquire(
             &self.pool,
@@ -3678,7 +3678,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     async fn accepted_realm_roster(
         &self,
         realm_id: &arkret_wire::RealmId,
-    ) -> PersistenceResult<Option<soland_storage::AcceptedRealmRoster>> {
+    ) -> PersistenceResult<Option<coland_storage::AcceptedRealmRoster>> {
         let mut conn = pg_conn(&self.pool).await?;
         accepted_realm_roster_in_connection(&mut conn, realm_id).await
     }
@@ -4264,7 +4264,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     async fn committed_event(
         &self,
         event_id: &arkret_wire::EventId,
-    ) -> PersistenceResult<Option<soland_storage::CommittedEventRecord>> {
+    ) -> PersistenceResult<Option<coland_storage::CommittedEventRecord>> {
         let token = ids::parse_event_id(event_id.as_str())
             .ok_or_else(|| invalid("committed Event lookup has malformed Event id"))?;
         let mut conn = pg_conn(&self.pool).await?;
@@ -4286,7 +4286,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                     "durable committed Event pair disagrees with its lookup key".into(),
                 ));
             }
-            Ok(soland_storage::CommittedEventRecord { commit, event })
+            Ok(coland_storage::CommittedEventRecord { commit, event })
         })
         .transpose()
     }
@@ -4294,7 +4294,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     async fn committed_event_by_commit_id(
         &self,
         commit_id: &arkret_wire::RealmCommitId,
-    ) -> PersistenceResult<Option<soland_storage::CommittedEventRecord>> {
+    ) -> PersistenceResult<Option<coland_storage::CommittedEventRecord>> {
         let mut conn = pg_conn(&self.pool).await?;
         let row = sql_query(
             "SELECT c.commit_json, e.envelope FROM realm_commits c \
@@ -4314,7 +4314,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                     "durable committed Event pair disagrees with its Commit id".into(),
                 ));
             }
-            Ok(soland_storage::CommittedEventRecord { commit, event })
+            Ok(coland_storage::CommittedEventRecord { commit, event })
         })
         .transpose()
     }
@@ -4322,7 +4322,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     async fn current_mimi_room_binding(
         &self,
         room_uri: &arkret_wire::MimiRoomUri,
-    ) -> PersistenceResult<Option<soland_storage::MimiRoomBindingCurrentRecord>> {
+    ) -> PersistenceResult<Option<coland_storage::MimiRoomBindingCurrentRecord>> {
         let mut conn = pg_conn(&self.pool).await?;
         sql_query(
             "SELECT mimi_room_uri,realm_id,current_commit_id,current_stream_position,current_event_id,value \
@@ -4368,8 +4368,8 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
 
     async fn signal_scope_authority(
         &self,
-        query: soland_storage::SignalScopeAuthorityQuery<'_>,
-    ) -> PersistenceResult<Option<soland_storage::SignalScopeAuthority>> {
+        query: coland_storage::SignalScopeAuthorityQuery<'_>,
+    ) -> PersistenceResult<Option<coland_storage::SignalScopeAuthority>> {
         crate::signal_scope_authority::read(&self.pool, query).await
     }
 
@@ -4383,7 +4383,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     async fn realm_stream_heads(
         &self,
         realm_id: &arkret_wire::RealmId,
-    ) -> PersistenceResult<Option<soland_storage::RealmStreamFrontier>> {
+    ) -> PersistenceResult<Option<coland_storage::RealmStreamFrontier>> {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -4413,7 +4413,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 })
                 .collect::<PersistenceResult<Vec<_>>>()?;
             stream_heads.sort_by(|left, right| left.stream_ref.cmp(&right.stream_ref));
-            Ok(Some(soland_storage::RealmStreamFrontier {
+            Ok(Some(coland_storage::RealmStreamFrontier {
                 governance_generation: to_u64(generation.generation, "governance generation")?,
                 stream_heads,
             }))
@@ -4425,7 +4425,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     async fn realm_state_snapshot_material(
         &self,
         realm_id: &arkret_wire::RealmId,
-    ) -> PersistenceResult<Option<soland_storage::RealmStateSnapshotMaterial>> {
+    ) -> PersistenceResult<Option<coland_storage::RealmStateSnapshotMaterial>> {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -4454,7 +4454,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         &self,
         realm_id: &arkret_wire::RealmId,
         account: &arkret_wire::AccountId,
-    ) -> PersistenceResult<Option<soland_storage::RealmStateSnapshotMaterial>> {
+    ) -> PersistenceResult<Option<coland_storage::RealmStateSnapshotMaterial>> {
         crate::snapshot_disclosure_gate::account_snapshot_material(&self.pool, realm_id, account)
             .await
     }
@@ -4480,7 +4480,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         account: &arkret_wire::AccountId,
         pair_key: &arkret_wire::Hash,
         participants: &[arkret_wire::ActorId; 2],
-    ) -> PersistenceResult<Option<soland_storage::DirectConversationReplicaCut>> {
+    ) -> PersistenceResult<Option<coland_storage::DirectConversationReplicaCut>> {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -4520,7 +4520,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             else {
                 return Ok(None);
             };
-            Ok(Some(soland_storage::DirectConversationReplicaCut {
+            Ok(Some(coland_storage::DirectConversationReplicaCut {
                 authority,
                 head,
                 current_state_entries: entries,
@@ -4538,7 +4538,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     ) -> PersistenceResult<
         Option<(
             arkret_wire::EventId,
-            Option<soland_storage::AgentSidecarContextRecord>,
+            Option<coland_storage::AgentSidecarContextRecord>,
         )>,
     > {
         crate::sidecar_current_results::prepare_context_current(
@@ -4602,7 +4602,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         realm_id: &arkret_wire::RealmId,
         account: &arkret_wire::AccountId,
         membership_commit_id: &arkret_wire::RealmCommitId,
-    ) -> PersistenceResult<Option<soland_storage::RealmStateSnapshotMaterial>> {
+    ) -> PersistenceResult<Option<coland_storage::RealmStateSnapshotMaterial>> {
         crate::snapshot_disclosure_gate::member_station_bootstrap_material(
             &self.pool,
             realm_id,
@@ -4632,7 +4632,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         realm_id: &arkret_wire::RealmId,
         account: &arkret_wire::AccountId,
         issuer: &arkret_wire::DidCoreId,
-        sign: soland_storage::RealmStateSnapshotSigner<'_>,
+        sign: coland_storage::RealmStateSnapshotSigner<'_>,
     ) -> PersistenceResult<Option<arkret_wire::RealmStateSnapshot>> {
         crate::snapshot_disclosure_gate::issue_account_snapshot(
             &self.pool, realm_id, account, issuer, sign,
@@ -4666,9 +4666,9 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
 
     async fn freeze_account_realm_window(
         &self,
-        request: &soland_storage::AccountRealmWindowRequest,
-        sign: soland_storage::RealmStateSnapshotSigner<'_>,
-    ) -> PersistenceResult<Option<soland_storage::AccountRealmWindow>> {
+        request: &coland_storage::AccountRealmWindowRequest,
+        sign: coland_storage::RealmStateSnapshotSigner<'_>,
+    ) -> PersistenceResult<Option<coland_storage::AccountRealmWindow>> {
         crate::issued_realm_snapshots::freeze_account_realm_window(&self.pool, request, sign).await
     }
 
@@ -4708,7 +4708,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         request: &arkret_wire::StreamScanRequest,
         account: &arkret_wire::AccountId,
         issuer: &arkret_wire::DidCoreId,
-    ) -> PersistenceResult<soland_storage::AccountStreamScan> {
+    ) -> PersistenceResult<coland_storage::AccountStreamScan> {
         crate::account_stream_scan::scan_stream_for_account(&self.pool, request, account, issuer)
             .await
     }
@@ -4728,7 +4728,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         event_id: &arkret_wire::EventId,
         caller: &arkret_wire::ActorId,
         issuer: &arkret_wire::DidCoreId,
-    ) -> PersistenceResult<soland_storage::MemberCommittedEventRead> {
+    ) -> PersistenceResult<coland_storage::MemberCommittedEventRead> {
         crate::account_stream_scan::committed_event_for_member(&self.pool, event_id, caller, issuer)
             .await
     }
@@ -4738,7 +4738,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         request: &arkret_wire::StreamScanRequest,
         peer: &arkret_wire::DidCoreId,
         issuer: &arkret_wire::DidCoreId,
-    ) -> PersistenceResult<soland_storage::PeerStreamScan> {
+    ) -> PersistenceResult<coland_storage::PeerStreamScan> {
         crate::account_stream_scan::scan_stream_for_peer(&self.pool, request, peer, issuer).await
     }
 
@@ -4747,7 +4747,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         realm_id: &arkret_wire::RealmId,
         account: &arkret_wire::AccountId,
         issuer: &arkret_wire::DidCoreId,
-    ) -> PersistenceResult<soland_storage::AccountRealmStreamList> {
+    ) -> PersistenceResult<coland_storage::AccountRealmStreamList> {
         crate::self_current_reads::list_realm_streams_for_account(
             &self.pool, realm_id, account, issuer,
         )
@@ -4759,7 +4759,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         realm_id: &arkret_wire::RealmId,
         account: &arkret_wire::AccountId,
         issuer: &arkret_wire::DidCoreId,
-    ) -> PersistenceResult<soland_storage::AccountRealmStreamAuthorizationCut> {
+    ) -> PersistenceResult<coland_storage::AccountRealmStreamAuthorizationCut> {
         crate::self_current_reads::realm_stream_subscription_cut(
             &self.pool, realm_id, account, issuer,
         )
@@ -4772,7 +4772,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         account: &arkret_wire::AccountId,
         issuer: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<
-        soland_storage::SelfExactCurrentRead<
+        coland_storage::SelfExactCurrentRead<
             arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadOutcome,
         >,
     > {
@@ -4788,7 +4788,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         account: &arkret_wire::AccountId,
         issuer: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<
-        soland_storage::SelfExactCurrentRead<
+        coland_storage::SelfExactCurrentRead<
             arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome,
         >,
     > {
@@ -4803,7 +4803,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         realm_id: &arkret_wire::RealmId,
         account: &arkret_wire::AccountId,
         issuer: &arkret_wire::DidCoreId,
-    ) -> PersistenceResult<soland_storage::MediaServiceAnchorRead> {
+    ) -> PersistenceResult<coland_storage::MediaServiceAnchorRead> {
         crate::self_current_reads::media_service_anchor_for_account(
             &self.pool, realm_id, account, issuer,
         )
@@ -5058,7 +5058,7 @@ mod tests {
         assert!(mimi_migration_topology_matches(&absent, &absent));
         assert_eq!(
             invalid_mimi_migration().conflict_code(),
-            Some(soland_storage::ConflictCode::MimiRoomBindingMigrationProofInvalid)
+            Some(coland_storage::ConflictCode::MimiRoomBindingMigrationProofInvalid)
         );
     }
 }

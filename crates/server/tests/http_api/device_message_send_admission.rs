@@ -9,7 +9,7 @@
 //! idempotency writes. `unknown_devices` rows carry only `device_message_id`
 //! and `status`.
 
-use soland_test_support::pcr_genesis::PcrGenesisFixture;
+use coland_test_support::pcr_genesis::PcrGenesisFixture;
 
 use super::common::*;
 
@@ -25,7 +25,7 @@ struct Sender {
 }
 
 async fn accepted_sender() -> Sender {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let fixture = PcrGenesisFixture::new(state.service_did());
     fixture.admit(&state).await.expect("accepted PCR genesis");
     let device_id = fixture.history.founding_device_id.to_string();

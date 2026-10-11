@@ -108,7 +108,7 @@ pub(crate) fn validate_operation_patch_semantics(
     let Some(patch) = operation.payload.get("patch").and_then(Value::as_object) else {
         return Ok(());
     };
-    soland_domain::reducer::validate_patch_semantic_safety(patch, patched_object_kind(kind))
+    coland_domain::reducer::validate_patch_semantic_safety(patch, patched_object_kind(kind))
 }
 
 pub fn validate_canonical_json_value(value: &serde_json::Value) -> Result<(), &'static str> {

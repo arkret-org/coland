@@ -1,11 +1,11 @@
-use diesel::sql_types::{Binary, Jsonb, Nullable, Text, Timestamptz};
-use diesel::{OptionalExtension, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
-use soland_storage::{
+use coland_storage::{
     AgentDraftPendingIntentCommit, AgentDraftPendingIntentConsumption,
     AgentDraftPendingIntentRecord, AgentDraftPendingIntentState, AgentDraftPendingIntentStore,
     PersistenceError, PersistenceResult,
 };
+use diesel::sql_types::{Binary, Jsonb, Nullable, Text, Timestamptz};
+use diesel::{OptionalExtension, sql_query};
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 
 use crate::{PgPool, pg_conn};
 
@@ -429,9 +429,9 @@ impl AgentDraftPendingIntentStore for PgAgentDraftPendingIntentStore {
 
 #[cfg(test)]
 mod tests {
+    use coland_storage::SyncCursorStore;
     use diesel::sql_types::BigInt;
     use diesel_async::RunQueryDsl;
-    use soland_storage::SyncCursorStore;
 
     use super::*;
 

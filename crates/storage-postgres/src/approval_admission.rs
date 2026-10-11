@@ -2,12 +2,12 @@
 use arkret_wire::{
     ActorId, ApprovalSignature, CapabilityActionId, Event, RealmCommit, WireResourceSelector,
 };
+use coland_storage::{
+    EventApprovalCommit, GrantEvaluation, OperationFacts, PersistenceError, PersistenceResult,
+};
 use diesel::sql_types::{Jsonb, Text, Timestamptz};
 use diesel::{QueryableByName, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
-use soland_storage::{
-    EventApprovalCommit, GrantEvaluation, OperationFacts, PersistenceError, PersistenceResult,
-};
 
 use crate::realm_authorization_cut::RealmAuthorizationCut;
 
@@ -21,7 +21,7 @@ struct Member {
 
 #[derive(Clone, Debug)]
 pub(crate) struct QualifiedApproval {
-    pub method: soland_storage::ApprovalHistoricalMethod,
+    pub method: coland_storage::ApprovalHistoricalMethod,
     pub qualification_basis: serde_json::Value,
 }
 
@@ -38,7 +38,7 @@ pub(crate) fn validate_candidate<'a>(
     event: &Event,
     commit: &RealmCommit,
     prepared: Option<&'a EventApprovalCommit>,
-) -> PersistenceResult<&'a [soland_storage::ApprovalHistoricalMethod]> {
+) -> PersistenceResult<&'a [coland_storage::ApprovalHistoricalMethod]> {
     let Some(prepared) = prepared else {
         return Ok(&[]);
     };

@@ -6,22 +6,22 @@ mod ordinary_realm;
 use std::sync::Arc;
 
 use arkret_wire::{ActorId, EventKind, ScopeRef};
-use diesel_async::RunQueryDsl as _;
-use soland_http::config::AppConfig;
-use soland_http::state::AppState;
-use soland_storage::{AuthorityCommitStore, EventCommitUnitOfWork};
-use soland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
-use soland_test_support::fault_injection::{
+use coland_http::config::AppConfig;
+use coland_http::state::AppState;
+use coland_storage::{AuthorityCommitStore, EventCommitUnitOfWork};
+use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
+use coland_test_support::fault_injection::{
     FaultInjectingStore, FaultPlan, FaultPoint, FaultTiming,
 };
-use soland_test_support::pcr_genesis::PcrGenesisFixture;
-use soland_test_support::{AppStateTestExt as _, device_authorization_history};
+use coland_test_support::pcr_genesis::PcrGenesisFixture;
+use coland_test_support::{AppStateTestExt as _, device_authorization_history};
+use diesel_async::RunQueryDsl as _;
 
 struct Fixture {
     state: AppState,
     pool: PgPool,
     config: AppConfig,
-    persistence: Arc<dyn soland_storage::PersistenceStore>,
+    persistence: Arc<dyn coland_storage::PersistenceStore>,
     target: arkret_wire::Event,
 }
 
@@ -36,9 +36,9 @@ async fn fixture() -> Fixture {
     use arkret_wire::EncryptedPayloadScheme;
     let config = AppConfig {
         notary_signing_key_seed: Some(device_authorization_history::STATION_AUTHORITY_SEED),
-        ..soland_test_support::app_config()
+        ..coland_test_support::app_config()
     };
-    let (state, pool) = soland_test_support::app_state_with_pool(config.clone());
+    let (state, pool) = coland_test_support::app_state_with_pool(config.clone());
     let persistence = state.test_persistence();
     let fixture = PcrGenesisFixture::new(state.service_did());
     let device = fixture
@@ -50,8 +50,8 @@ async fn fixture() -> Fixture {
     let label = uuid::Uuid::now_v7().to_string();
     let method = state.service_verification_method("notary-key").unwrap();
     let key = state.notary_signing_key();
-    let app = soland_services::authority_commit::AuthorityCommitApplication::new(
-        soland_services::persistence::PersistenceHandle::from_shared(persistence.clone()),
+    let app = coland_services::authority_commit::AuthorityCommitApplication::new(
+        coland_services::persistence::PersistenceHandle::from_shared(persistence.clone()),
         0,
     );
     let store = PgAuthorityCommitStore { pool: pool.clone() };
@@ -79,7 +79,7 @@ async fn fixture() -> Fixture {
         .await
         .unwrap();
     let guards = vec![
-        soland_storage::SelfProducerCommitGuard::HumanDevice(device.clone());
+        coland_storage::SelfProducerCommitGuard::HumanDevice(device.clone());
         unit.transactions.len()
     ];
     store
@@ -114,7 +114,7 @@ async fn fixture() -> Fixture {
         .await
         .unwrap();
     request.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(strand.clone()));
-    request.self_producer_guard = Some(soland_storage::SelfProducerCommitGuard::HumanDevice(
+    request.self_producer_guard = Some(coland_storage::SelfProducerCommitGuard::HumanDevice(
         device.clone(),
     ));
     uow.commit_event(request.clone()).await.unwrap();
@@ -184,7 +184,7 @@ async fn fixture() -> Fixture {
     request.authority_commit = app
         .prepare_self_mls_transaction(
             &genesis,
-            soland_storage::MlsStateInstallation {
+            coland_storage::MlsStateInstallation {
                 effective_scope: scope.clone(),
                 base: None,
                 epoch: 0,
@@ -202,7 +202,7 @@ async fn fixture() -> Fixture {
         .await
         .unwrap();
     request.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(genesis.clone()));
-    request.self_producer_guard = Some(soland_storage::SelfProducerCommitGuard::HumanDevice(
+    request.self_producer_guard = Some(coland_storage::SelfProducerCommitGuard::HumanDevice(
         device.clone(),
     ));
     uow.commit_event(request.clone()).await.unwrap();
@@ -258,11 +258,11 @@ async fn fixture() -> Fixture {
         .await
         .unwrap();
     request.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(target.clone()));
-    request.self_producer_guard = Some(soland_storage::SelfProducerCommitGuard::HumanDevice(
+    request.self_producer_guard = Some(coland_storage::SelfProducerCommitGuard::HumanDevice(
         device.clone(),
     ));
     uow.commit_event(request.clone()).await.unwrap();
-    request.self_producer_guard = Some(soland_storage::SelfProducerCommitGuard::HumanDevice(
+    request.self_producer_guard = Some(coland_storage::SelfProducerCommitGuard::HumanDevice(
         device.clone(),
     ));
     uow.commit_event(request.clone()).await.unwrap();
@@ -390,7 +390,7 @@ async fn production_franking_sweeper_publishes_real_receipt_and_clears_pending()
             .len(),
         1
     );
-    let worker = soland_http::state::spawn_pending_franking_sweeper(f.state.clone());
+    let worker = coland_http::state::spawn_pending_franking_sweeper(f.state.clone());
     let result = wait_until(&f, false).await.unwrap();
     worker.abort();
     let _ = worker.await;
@@ -404,9 +404,9 @@ async fn production_franking_sweeper_publishes_real_receipt_and_clears_pending()
             .is_empty()
     );
     let restarted =
-        soland_test_support::app_state_with_persistence(f.config.clone(), f.persistence.clone())
+        coland_test_support::app_state_with_persistence(f.config.clone(), f.persistence.clone())
             .await;
-    let worker = soland_http::state::spawn_pending_franking_sweeper(restarted);
+    let worker = coland_http::state::spawn_pending_franking_sweeper(restarted);
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     worker.abort();
     let _ = worker.await;
@@ -425,8 +425,8 @@ async fn production_franking_sweeper_keeps_fixed_proof_after_failure_and_restart
         1,
     ));
     let fault_state =
-        soland_test_support::app_state_with_persistence(f.config.clone(), fault.clone()).await;
-    let worker = soland_http::state::spawn_pending_franking_sweeper(fault_state);
+        coland_test_support::app_state_with_persistence(f.config.clone(), fault.clone()).await;
+    let worker = coland_http::state::spawn_pending_franking_sweeper(fault_state);
     assert!(wait_until(&f, true).await.is_none());
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     worker.abort();
@@ -457,9 +457,9 @@ async fn production_franking_sweeper_keeps_fixed_proof_after_failure_and_restart
             .is_some()
     );
     let restarted =
-        soland_test_support::app_state_with_persistence(f.config.clone(), f.persistence.clone())
+        coland_test_support::app_state_with_persistence(f.config.clone(), f.persistence.clone())
             .await;
-    let worker = soland_http::state::spawn_pending_franking_sweeper(restarted);
+    let worker = coland_http::state::spawn_pending_franking_sweeper(restarted);
     let result = wait_until(&f, false).await.unwrap();
     worker.abort();
     let _ = worker.await;

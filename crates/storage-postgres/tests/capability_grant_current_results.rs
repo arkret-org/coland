@@ -2,16 +2,16 @@ mod support;
 
 use std::sync::OnceLock;
 
-use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
-use diesel_async::RunQueryDsl;
-use soland_storage::{
+use coland_storage::{
     AuthorityCommitStore, AuthorityCommitTransaction, AuthorityCommitWriteOutcome,
     CapabilityGrantCurrentResultStore, CapabilityGrantCurrentStatus, CurrentRealmAuthority,
     PersistenceError,
 };
-use soland_storage_postgres::{
+use coland_storage_postgres::{
     Db, PgAuthorityCommitStore, PgCapabilityGrantCurrentResultStore, PgPool,
 };
+use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
+use diesel_async::RunQueryDsl;
 
 const REALM_ID: &str = "ak:realm:AUGIFvQctz4TjQTmvvO4Wdy-xdc5XP2ZnJ5Qpbh4s8Ru";
 const GRANT_ID: &str = "ak:grant:AcFfzgdHkT6eFkto1gjLaKniVuMXx9sD0GKQwk8BXykz";
@@ -324,7 +324,7 @@ async fn authority_transaction_admits_grants_without_subject_kind_branches() {
         now,
     );
     let create_tx = transaction(&authority, &create, 0, None, now);
-    let stale_agent_guard = soland_storage::SelfProducerCommitGuard::Agent {
+    let stale_agent_guard = coland_storage::SelfProducerCommitGuard::Agent {
         pcr_realm_id: realm_id.clone(),
         agent_id: actor_id.clone(),
         authorization_ref: arkret_wire::CommittedEventRef {

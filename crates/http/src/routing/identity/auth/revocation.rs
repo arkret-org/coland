@@ -61,7 +61,7 @@ pub fn token_for(actor: &str, device_id: &str, expires_ms: i64) -> String {
     hasher.update(expires_ms.to_string().as_bytes());
     hasher.update(b":");
     hasher.update(nonce.as_bytes());
-    hasher.update(b":soland-dev-session");
+    hasher.update(b":coland-dev-session");
     format!("sx_{}", URL_SAFE_NO_PAD.encode(hasher.finalize()))
 }
 

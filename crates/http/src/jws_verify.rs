@@ -1,8 +1,8 @@
-//! Soland thin adapter over the canonical detached-JWS verifier in the SDK.
+//! Coland thin adapter over the canonical detached-JWS verifier in the SDK.
 //!
 //! All JWS verification semantics (RFC 7515 detached shape, Ed25519
 //! signature check and authority binding) live in the SDK so inkson, floria,
-//! cotest, flagon and soland share one wire-compatible implementation. This
+//! cotest, flagon and coland share one wire-compatible implementation. This
 //! module selects a document or accepted key from [`AppState`], then hands
 //! pinned material to the resolver-free SDK verifier.
 //!
@@ -14,11 +14,11 @@ use std::collections::BTreeMap;
 
 use arkret_identifiers::{Did, Hash};
 use arkret_identity::{DidDocument, DidResolver as _};
-use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
-use serde_json::Value;
-use soland_services::identity::{
+use coland_services::identity::{
     DID_DOCUMENT_HIGH_RISK_TTL_SECS, DidDocumentFreshness, evaluate_did_document_freshness,
 };
+use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
+use serde_json::Value;
 
 use crate::routing::identity::webvh_validation::{
     WebvhLogEntry, validate_log_chain, validate_witness_policy_for_log, verify_scid_against_did,
@@ -27,7 +27,7 @@ use crate::state::AppState;
 
 /// DID document freshness threshold for high-risk verification paths. Equal
 /// to the persistence-layer baseline TTL (15min). Records older than this,
-/// or records without freshness evidence, fail closed because soland does not
+/// or records without freshness evidence, fail closed because coland does not
 /// perform on-demand network refreshes.
 pub const HIGH_RISK_DID_FRESHNESS_MAX_SECS: i64 = DID_DOCUMENT_HIGH_RISK_TTL_SECS;
 
@@ -74,7 +74,7 @@ pub fn verify_did_controlled_jws(
 
 /// Async-native production Ed25519 detached-JWS verifier.
 ///
-/// This resolves the DID document through soland's async resolver service
+/// This resolves the DID document through coland's async resolver service
 /// before delegating shape and signature verification to the SDK verifier.
 pub async fn verify_did_controlled_jws_async(
     canonical_bytes: &[u8],
@@ -234,7 +234,7 @@ async fn document_for_verification(
 /// version, log head or `accepted_at`, so it can be handed to the SDK's
 /// zero-resolver verifier [`arkret_identity::verify_jws_with_document`].
 ///
-/// This is a serde adapter, not a verifier: soland deliberately keeps **no**
+/// This is a serde adapter, not a verifier: coland deliberately keeps **no**
 /// private JWS-with-document implementation
 /// (`did-usage-and-verification.md` §6 — one shared verifier layer).
 pub fn decode_pinned_did_document(
@@ -411,7 +411,7 @@ async fn principal_authorized_device_binding_with_account_authority_async(
         .ok_or_else(|| fail("principal account authority is not durably accepted".to_owned()))?;
     let device = state
         .identities()
-        .find_device(soland_services::identity::FindDeviceQuery {
+        .find_device(coland_services::identity::FindDeviceQuery {
             actor_id: authority.principal_id.to_string(),
             device_id: expected_device_id.to_string(),
         })
@@ -753,7 +753,7 @@ pub fn verify_principal_authorized_event_proof_async<'a>(
 
         let device = state
             .identities()
-            .find_device(soland_services::identity::FindDeviceQuery {
+            .find_device(coland_services::identity::FindDeviceQuery {
                 actor_id: expected_principal_id.to_string(),
                 device_id: device_id.to_string(),
             })
@@ -946,7 +946,7 @@ fn principal_binding_acceptance(
     let expires_at = verified_at + chrono::Duration::seconds(HIGH_RISK_DID_FRESHNESS_MAX_SECS);
     // §5.2 — the evidence digest is the digest of the canonical evidence
     // receipt, and the receipt is retained so an auditor can recompute it.
-    // soland's resolver boundary surfaces no method proof set on this path, so
+    // coland's resolver boundary surfaces no method proof set on this path, so
     // `method_proofs` is empty: that is the normative degenerate form for a
     // proofless resolution, not a placeholder standing in for evidence. It is
     // still strictly stronger than the `evidence_digest = document_digest` this
@@ -1211,7 +1211,7 @@ pub async fn resolve_did_document_async(
 /// inside the SDK resolver chain; this gate only covers cached remote/submitted
 /// documents.
 ///
-/// Because soland does not perform on-demand network fetches, "stale" means
+/// Because coland does not perform on-demand network fetches, "stale" means
 /// "unavailable" for high-risk writes; degraded read-only relaxation does not
 /// apply here.
 pub async fn enforce_high_risk_did_freshness(state: &AppState, did: &Did) -> Result<(), String> {
@@ -1267,7 +1267,7 @@ pub async fn enforce_high_risk_did_freshness(state: &AppState, did: &Did) -> Res
 
 fn is_embedded_webvh_document(
     did: &Did,
-    record: &soland_services::identity::DidDocumentState,
+    record: &coland_services::identity::DidDocumentState,
 ) -> bool {
     did.as_str().starts_with("did:webvh:")
         && record
@@ -1280,7 +1280,7 @@ fn is_embedded_webvh_document(
 async fn refresh_embedded_webvh_document_for_high_risk(
     state: &AppState,
     did: &Did,
-    record: &soland_services::identity::DidDocumentState,
+    record: &coland_services::identity::DidDocumentState,
 ) -> Result<(), String> {
     if !is_embedded_webvh_document(did, record) {
         return Err("document is not a local embedded did:webvh record".to_owned());
@@ -1385,8 +1385,8 @@ fn key_log_head_for_method(
 
 #[cfg(test)]
 mod did_binding_tests {
+    use coland_storage_postgres::Db;
     use ed25519_dalek::SigningKey;
-    use soland_storage_postgres::Db;
 
     use super::*;
 
@@ -1401,7 +1401,7 @@ mod did_binding_tests {
         AppState::new(
             crate::config::AppConfig {
                 object_storage: crate::config::ObjectStorageConfig::local(
-                    std::env::temp_dir().join("soland-did-binding-test"),
+                    std::env::temp_dir().join("coland-did-binding-test"),
                 ),
                 did_resolver_allow_methods: vec!["web".to_owned()],
                 ..crate::config::AppConfig::test_default()
@@ -1609,7 +1609,7 @@ mod did_binding_tests {
             did.as_str(),
             &document,
         )
-        .expect_err("formal Soland verification must refuse the published key");
+        .expect_err("formal Coland verification must refuse the published key");
 
         assert_eq!(error, "test_signing_material_denied");
         assert!(state.did_bindings().snapshot().is_empty());

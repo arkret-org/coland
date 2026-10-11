@@ -36,7 +36,7 @@ What remains orphaned:
 
 | crate | orphan files | lines |
 |---|---|---|
-| `soland-http` | 1 | 323 |
+| `coland-http` | 1 | 323 |
 | all others | 0 | 0 |
 
 The one survivor is `http/routing/authority_commit.rs` (323 lines), and it is
@@ -56,7 +56,7 @@ Each line names the successor that already carries the capability.
 |---|---|---|
 | `current_data` (5 files) | 1,813 | `RealmStateSnapshot.current_state_entries: Vec<TypedCurrentRow>` (SDK `wire/src/authority_commit.rs:479`). The orphan imports `arkret_wire::cbs::{ProjectedCellWrite, ProjectedOp}`, which the SDK no longer defines, and resolves conflicts by "greater causal depth wins". |
 | `current_results` (2) | 345 | `sync_cursor.rs:168-256`, where `current_detail_page` is already rewired. `CurrentResultEntry` is gone from the SDK. |
-| `mls_public_state` (4) | 1,560 | `MlsStateInstallation`, which is **soland's own** type at `crates/storage/src/authority_commit.rs:53`, carried by `AuthorityCommitTransaction.mls_state` (`:48`). It has zero hits in the SDK; an earlier draft of this table cited `wire/src/authority_commit.rs:355-390` for it, which is `RealmAuthorityBundle`. `EventCommitRequest` no longer carries `mls_public_genesis` / `mls_public_producer`. |
+| `mls_public_state` (4) | 1,560 | `MlsStateInstallation`, which is **coland's own** type at `crates/storage/src/authority_commit.rs:53`, carried by `AuthorityCommitTransaction.mls_state` (`:48`). It has zero hits in the SDK; an earlier draft of this table cited `wire/src/authority_commit.rs:355-390` for it, which is `RealmAuthorityBundle`. `EventCommitRequest` no longer carries `mls_public_genesis` / `mls_public_producer`. |
 | `devices/confirmed_history` (2) | 707 | `devices.rs`, which writes `devices.verification_state` directly. The orphan's input type `ConfirmedDeviceControlProjection` was deleted from the trait crate in `c30ce6384`. |
 | `device_revocations/historical` (2) | 406 | nothing needed: it read `EventCommitRequest.historical_producer`, a field the protocol removed. |
 | `device_revocations/material_cleanup` (1) | 66 | `device_revocations.rs:256-300`, where both methods were rewritten from `covering_seal_id` to `committed_ref`. |
@@ -68,7 +68,7 @@ Each line names the successor that already carries the capability.
 ### Two capabilities with a declared surface and no implementation (2026-09-19)
 
 Both were found while unwinding the timeline and ack residue in
-`soland-storage` / `soland-services`, and neither is residue: each is a
+`coland-storage` / `coland-services`, and neither is residue: each is a
 current-protocol surface that is declared and never implemented.
 
 1. **`AuthorityProtocolPort` has no production implementation.** The trait is
@@ -107,7 +107,7 @@ because deleting them would be trading coverage for a green build:
 
 1. **The MLS public-genesis lane is residue, but only its columns are - the
    lane itself is still half-wired and will not compile.**
-   `soland_storage::MlsPublicGenesisRecord`
+   `coland_storage::MlsPublicGenesisRecord`
    (`crates/storage/src/mls_public_state.rs:14-21`) carries
    `producer_signing_key` and `producer_device_authorization` beside the full
    `source_event` envelope. Those two are a denormalised cache: the accepted
@@ -121,7 +121,7 @@ because deleting them would be trading coverage for a green build:
    not at `spec/v1/schemas`.
    Deleting the postgres half was therefore correct, and the successor is
    `MlsStateInstallation` (`crates/storage/src/authority_commit.rs:53`, a
-   soland type, not an SDK one).
+   coland type, not an SDK one).
    What is *not* done is the rest of the lane, which still names input fields
    that `EventCommitRequest` (`crates/storage/src/unit_of_work.rs:84-103`) no
    longer has:
@@ -156,7 +156,7 @@ differing by exactly 1; `commit_id` different; `event_id` different. The
 authoritative implementation is `validate_recovery_commit_pair` in
 `../arkret-rust-sdk/crates/wire/src/recovery_authority.rs`. Any local code that
 reads the two positions out of a *single* commit fails closed forever and is a
-bug, not a shortcut. As of this writing soland contains no such implementation;
+bug, not a shortcut. As of this writing coland contains no such implementation;
 `http/routing/identity/recovery/security_transaction_endpoints.rs` still builds
 the attestation from the retired `terminal_commit_digest`,
 `device_authorization_event_id` and `first_generation_seal_id` fields and has
@@ -224,7 +224,7 @@ peer-merge graph.
   addressed by `ConsentId`, account status reads come from
   `arkret_models_collaboration::account_status`, and the §6.1 counterparty
   comparison survives as exact `ConsentPeer` equality. The HTTP surface is
-  still unverified because `soland-services` (lib) does not build.
+  still unverified because `coland-services` (lib) does not build.
 - [~] DID, service identity, device inventory, pairing, and revocation. Storage
   is wired and the `DeviceRevocationStore` delegation now matches the
   single-transaction trait (`target_for_event`, `commit_revocation`). Agent
@@ -232,7 +232,7 @@ peer-merge graph.
   its `AgentLifecycleState` instead of a `SealBasis` and an
   `AwaitingAcceptedFrontier` state. `crates/http/src/routing/identity/agents/
   pairing.rs` still carries the retired activation model and is unverified,
-  because `soland-http` is never reached by `cargo check`.
+  because `coland-http` is never reached by `cargo check`.
 - [~] Realm lifecycle, organization ownership, policy, and directory reads.
   `crates/domain/src/reducer/apply_realm_*.rs` are wired and compile; their
   tests are not ported yet.
@@ -297,7 +297,7 @@ peer-merge graph.
   `arkret_models_collaboration`'s `TypedCurrentRow`, which have a **different
   shape**, so this is a port, not a deletion. The four compile errors the
   triage counted are only the ones Cargo reaches before it aborts at
-  `soland-services`; they are not the size of the job.
+  `coland-services`; they are not the size of the job.
 - [x] HLC and producer causal predecessor handling: ordering now belongs to the
   selected independent commit stream.
 - [x] Peer frontier exchange/reduction and Move/Seal federation: a Realm has one
@@ -324,7 +324,7 @@ peer-merge graph.
   `control_proposal_ack -> Nullable<Jsonb>` column is a **different thing** --
   it is on the ingress side and is entangled with the projection seam, so it
   stays until `projection.rs` is ported.
-- [~] The `soland-http` ingress ack lane (measured 2026-09-19). The two modules
+- [~] The `coland-http` ingress ack lane (measured 2026-09-19). The two modules
   it is built on, `crate::notary` and `crate::control_proposal`, **no longer
   exist as files**: `find src -path '*notary*' -o -path '*control_proposal*'`
   returns nothing. "Notary" also has **zero hits in the whole of
@@ -375,7 +375,7 @@ peer-merge graph.
      **What blocks them is that `AppState` cannot reach that service.** It has
      `notary_signing_key`, `notary_verifying_key` and `notary_signing_key_origin`
      baked into it and no authority-commit accessor at all; `current_authority`
-     has zero call sites in the whole of `soland-http`. This is the same
+     has zero call sites in the whole of `coland-http`. This is the same
      unwired seam as the orphaned `routing/authority_commit.rs`, so the ack
      unwind and the route wiring have to land together.
   2. `crate::notary::ensure_realm_seal_head(state, &realm)` is the Seal frontier,
@@ -386,7 +386,7 @@ peer-merge graph.
 
   `submit/realm_bootstrap.rs:315` (`mint_control_proposal_acks`) is neither: it
   mints the retired object and is a straight delete.
-- [~] The six SDK modules `soland-http` still imports that no longer exist
+- [~] The six SDK modules `coland-http` still imports that no longer exist
   (measured 2026-09-19 by extracting every `arkret_*::<module>` path in
   `crates/http/src` and testing each against the SDK tree). 148 references in
   total. **Four of the six are ports with a named target; only the lease family
@@ -399,7 +399,7 @@ peer-merge graph.
   | `arkret_wire::cbs_proof_bundle` | 10 / 31 | **delete.** The SDK ledger adjudicates `EventFederationSubmission` and `CbsProofBundle` as removed: "CBS is a removed unit". |
   | `arkret_models_collaboration::direct_conversation_ops` | 8 / 19 | **mixed.** `DirectConversationFoundingAuthorityEvidence` (11 refs) is a port onto `models-collaboration/src/objects/direct_conversation.rs:330` -- another stale SDK gap line, corrected in `bbca85ef`. `DirectConversationFoundingFederationSubmission` (2) goes with CBS. `DirectConversationFoundingPlan` (2) has zero hits in the SDK and zero `founding_plan` hits in `direct-conversation-operations.schema.json`; it is a local name with no protocol object. |
   | `arkret_models_collaboration::history_key` | 6 / 13 | **delete, except one.** RHRK is an adjudicated removal. `DirectorySourceRefAccess` only moved house, to `arkret_models_discovery::directory`. |
-  | `arkret_wire::offline_publication` | 5 / 9 | **blocked.** `AuthorizationLease` and `IngressReceipt` are still normative (`zh/overview/glossary.md`, `zh/identity/security-transactions.md` L213) and the SDK ledger still carries them as an open gap; `AuthoritySetRef`, `LeaseBasisRef` and `RiskTier` have zero SDK hits too. soland cannot close these without the SDK, and must not hand-roll them locally. |
+  | `arkret_wire::offline_publication` | 5 / 9 | **blocked.** `AuthorizationLease` and `IngressReceipt` are still normative (`zh/overview/glossary.md`, `zh/identity/security-transactions.md` L213) and the SDK ledger still carries them as an open gap; `AuthoritySetRef`, `LeaseBasisRef` and `RiskTier` have zero SDK hits too. coland cannot close these without the SDK, and must not hand-roll them locally. |
 
   The lesson for the next pass: two of the four ports read as "blocked on the
   SDK" only because the SDK's own gap ledger had gone stale, in both cases
@@ -415,10 +415,10 @@ peer-merge graph.
   `models-collaboration`; corrected upstream in `acdc61a5`.
   What does **not** survive is the *lookup*. `GovernanceDependencySelector` plus
   `state.persistence().governance_dependency_store().get_unscoped_signer_evidence(&selector)`
-  is a side table keyed by content digest. Its soland half was deleted
+  is a side table keyed by content digest. Its coland half was deleted
   deliberately, not by accident: `c30ce6384` removed
   `crates/storage/src/governance_history.rs`, which defined
-  `GovernanceDependencyWrite`, and `soland_storage::GovernanceDependencyWrite`
+  `GovernanceDependencyWrite`, and `coland_storage::GovernanceDependencyWrite`
   now has no definition anywhere while `services/src/{events,persistence_events,projection}.rs`
   still name it in eleven signatures.
   The successor is stated by the SDK itself, at
@@ -444,7 +444,7 @@ peer-merge graph.
 
 ### The checkboxes above are about code, not about what is mounted
 
-Measured 2026-09-17 by following `mod` declarations from `soland-http`'s crate
+Measured 2026-09-17 by following `mod` declarations from `coland-http`'s crate
 root. The Seal surface is still **served**. `router_build.rs:335`
 (`arkret_protocol_router`) pushes `events::router()` under `self` and
 `events::peer_router()` under `peer`; `events/mod.rs:6` declares `mod event_log`;
@@ -569,9 +569,9 @@ Wiring `mod authority_commit;` on its own would therefore mount the new surface
 ## Verification gates
 
 - [ ] All workspace targets format successfully with nightly rustfmt.
-- [ ] `cargo check --workspace --all-features` passes. `soland-domain`,
-  `soland-storage` and `soland-storage-postgres` are clean; `soland-services`
-  reports 256 errors, which blocks `soland-http` and `soland-server`. The
+- [ ] `cargo check --workspace --all-features` passes. `coland-domain`,
+  `coland-storage` and `coland-storage-postgres` are clean; `coland-services`
+  reports 256 errors, which blocks `coland-http` and `coland-server`. The
   dominant causes are the removed `arkret_lattice_registry` and
   `arkret_state::state` Cell surfaces and the SDK types listed under
   "Upstream SDK gaps" below.
@@ -583,10 +583,10 @@ Wiring `mod authority_commit;` on its own would therefore mount the new surface
 - [x] `migrations/00000000000000_initial/up.sql` applies to an empty database
   with `ON_ERROR_STOP=1` and exits 0.
 
-## Upstream SDK gaps that block soland
+## Upstream SDK gaps that block coland
 
-These types are referenced by soland code that must be rewired and do not exist
-in `arkret-rust-sdk` today. Soland must not define local substitutes.
+These types are referenced by coland code that must be rewired and do not exist
+in `arkret-rust-sdk` today. Coland must not define local substitutes.
 
 - `governance::realm_join_intake::{RealmJoinBootstrapAssembly, RealmJoinBootstrapOutcome,
   RealmJoinBootstrapRequestBody, RealmJoinGovernanceFacts}` — blocks
@@ -607,7 +607,7 @@ in `arkret-rust-sdk` today. Soland must not define local substitutes.
 Measured 2026-09-17 against `arkret-rust-sdk` main. Every symbol below is a
 zero-hit across the entire SDK, `generated/` included:
 
-| Missing SDK symbol | soland references |
+| Missing SDK symbol | coland references |
 |---|---|
 | `models_identity::agent_signer_evidence::AgentLifecycleStatus` | 23 |
 | `models_identity::agent_signer_evidence::AgentSignerEvidence` | 15 |
@@ -684,30 +684,30 @@ cargo check --workspace --all-targets --keep-going --message-format short
 
 `--keep-going` is not optional. Without it Cargo aborts the whole build at the
 first failing unit, which is why every earlier number in this file understated
-the workspace: the units after `soland-services` were never reached at all.
+the workspace: the units after `coland-services` were never reached at all.
 
 | unit | errors | delta vs 09-16 |
 |---|---|---|
-| `soland-domain` (lib) | 0 | |
-| `soland-domain` (lib test) | 392 | -32 |
-| `soland-storage` (lib) | 0 | |
-| `soland-storage` (lib test) | 35 | 0 |
-| `soland-storage-postgres` (lib) | **0** | was 3 undetected E0609 |
-| `soland-storage-postgres` (lib test) | 84 | not previously measured |
-| `soland-storage-postgres` (integration tests) | 170 | `store_contracts` 111, `durable_plane_restart` 48, `account_global_sync` 11 |
-| `soland-services` (lib) | **160** | -7 |
-| `soland-services` (lib test) | 199 | -67 |
-| `soland-http` | **still never checked** | blocked on `soland-services` (lib) |
-| `soland-server` | **still never checked** | same |
+| `coland-domain` (lib) | 0 | |
+| `coland-domain` (lib test) | 392 | -32 |
+| `coland-storage` (lib) | 0 | |
+| `coland-storage` (lib test) | 35 | 0 |
+| `coland-storage-postgres` (lib) | **0** | was 3 undetected E0609 |
+| `coland-storage-postgres` (lib test) | 84 | not previously measured |
+| `coland-storage-postgres` (integration tests) | 170 | `store_contracts` 111, `durable_plane_restart` 48, `account_global_sync` 11 |
+| `coland-services` (lib) | **160** | -7 |
+| `coland-services` (lib test) | 199 | -67 |
+| `coland-http` | **still never checked** | blocked on `coland-services` (lib) |
+| `coland-server` | **still never checked** | same |
 
 Workspace total with `--keep-going`: **853** errors across 8 failing units.
 
-What `fa20b0cd9` actually closed: `soland-storage-postgres` (lib) 3 -> 0,
+What `fa20b0cd9` actually closed: `coland-storage-postgres` (lib) 3 -> 0,
 `hydration.rs` 1 -> 0, `persistence_operations.rs` 12 -> 7 (the remainder is
 timeline only), and the two `E0407` in the same file. It did **not** move
 `projection.rs`, and it was not meant to.
 
-### The three remaining `soland-services` (lib) clusters are not residue
+### The three remaining `coland-services` (lib) clusters are not residue
 
 - `projection.rs` -- the Cell-write projection seam. Every `control_*` method on
   it routes through `self.control_event_store()`, and
@@ -716,7 +716,7 @@ timeline only), and the two `E0407` in the same file. It did **not** move
   `control_event_by_digest`, `control_proposal_snapshot` and
   `pending_control_records` are **all** broken -- not only the ack ones. The
   capability those methods provide survives in the protocol; the store under
-  them has to be rebuilt in soland. Together with the `cbs` port above this is
+  them has to be rebuilt in coland. Together with the `cbs` port above this is
   one design round, not a sweep.
 - `events.rs` / `persistence_events.rs` -- the same seam seen from the event
   side.
@@ -740,18 +740,18 @@ cargo check --workspace --all-targets --message-format short
 
 | unit | errors | note |
 |---|---|---|
-| `soland-domain` (lib) | 0 | |
-| `soland-domain` (lib test) | 424 | 160 in `reducer/tests/cells_realm.rs` alone |
-| `soland-storage` (lib) | 0 | |
-| `soland-storage` (lib test) | 35 | `contract_tests.rs` |
-| `soland-storage-postgres` (lib) | 0 | |
-| `soland-storage-postgres` (integration tests) | 160 | `store_contracts` 106, `durable_plane_restart` 43, `account_global_sync` 11 |
-| `soland-services` (lib) | **167** | was 216 at the start of this session |
-| `soland-services` (lib test) | 266 | |
-| `soland-http` | **never checked** | Cargo stops at the failing `soland-services` library, so this crate has not been type-checked once during the migration. |
-| `soland-server` | **never checked** | same reason |
+| `coland-domain` (lib) | 0 | |
+| `coland-domain` (lib test) | 424 | 160 in `reducer/tests/cells_realm.rs` alone |
+| `coland-storage` (lib) | 0 | |
+| `coland-storage` (lib test) | 35 | `contract_tests.rs` |
+| `coland-storage-postgres` (lib) | 0 | |
+| `coland-storage-postgres` (integration tests) | 160 | `store_contracts` 106, `durable_plane_restart` 43, `account_global_sync` 11 |
+| `coland-services` (lib) | **167** | was 216 at the start of this session |
+| `coland-services` (lib test) | 266 | |
+| `coland-http` | **never checked** | Cargo stops at the failing `coland-services` library, so this crate has not been type-checked once during the migration. |
+| `coland-server` | **never checked** | same reason |
 
-Where the 167 remaining `soland-services` library errors are:
+Where the 167 remaining `coland-services` library errors are:
 
 | file | errors | what it needs |
 |---|---|---|
@@ -762,13 +762,13 @@ Where the 167 remaining `soland-services` library errors are:
 | `persistence_events.rs` | 12 | same as `events.rs` |
 | `hydration.rs` | 1 | `validate_realm_bootstrap_unit`; the SDK now validates one genesis Event (`validate_realm_genesis_event`) rather than a multi-Event unit |
 
-The `soland-http` figure is the important one. Nothing in that crate has been
+The `coland-http` figure is the important one. Nothing in that crate has been
 compiled since the migration began, and a grep finds 328 references to the
 retired encryption-floor / content-scheme / encryption-profile vocabulary across
 40+ files there, plus a 2,177-line
 `routing/identity/recovery/security_transaction_endpoints.rs` still built on
 Seals. Treat "the workspace has N errors" as a lower bound until
-`soland-services` (lib) reaches zero.
+`coland-services` (lib) reaches zero.
 
 ### Upstream dependency
 
@@ -776,7 +776,7 @@ Seals. Treat "the workspace has N errors" as a lower bound until
 concurrently, and its working tree went red twice during this session
 (`arkret-mls::exporter_kdf` importing `arkret_wire::CallRecordingId`, then
 `arkret-models-identity::signer_key_operations` against `CommittedEventRef` /
-`StationSigningKey`). Both cleared on their own. Measure soland only when the
+`StationSigningKey`). Both cleared on their own. Measure coland only when the
 SDK workspace is green, or the numbers mean nothing.
 
 ### Schema

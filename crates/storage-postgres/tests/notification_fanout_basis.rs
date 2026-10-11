@@ -5,12 +5,12 @@
 #[allow(dead_code)]
 mod ordinary_realm;
 
+use coland_storage::{EventCommitUnitOfWork, NotificationStore};
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{PgEventCommitUnitOfWork, PgNotificationStore, PgPool};
 use diesel::sql_types::{BigInt, Jsonb, Text};
 use diesel_async::RunQueryDsl;
 use serde_json::{Value, json};
-use soland_storage::{EventCommitUnitOfWork, NotificationStore};
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{PgEventCommitUnitOfWork, PgNotificationStore, PgPool};
 
 fn member(principal: &str) -> arkret_wire::ActorId {
     arkret_wire::ActorId::account(arkret_wire::AccountId::new(
@@ -47,11 +47,11 @@ async fn seed_member(
 
 fn watch(
     discussion: &ordinary_realm::Discussion,
-    previous: &soland_storage::AuthorityCommitTransaction,
+    previous: &coland_storage::AuthorityCommitTransaction,
     level: Value,
     expected: Option<Value>,
     offset: i64,
-) -> soland_storage::EventCommitRequest {
+) -> coland_storage::EventCommitRequest {
     let mut payload = json!({
         "strand_id": discussion.strand_id,
         "watcher_actor_id": discussion.head.authority_commit.event.actor_id,

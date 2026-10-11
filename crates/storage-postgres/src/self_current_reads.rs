@@ -27,8 +27,8 @@ use arkret_wire::{
     AccountId, ActorId, CommitStreamHead, CommitStreamRef, CurrentRevision, DidCoreId, RealmId,
     RealmStreamRow, ScopeRef,
 };
+use coland_storage::{AccountRealmStreamList, MediaServiceAnchorRead, SelfExactCurrentRead};
 use diesel_async::AsyncPgConnection;
-use soland_storage::{AccountRealmStreamList, MediaServiceAnchorRead, SelfExactCurrentRead};
 
 use super::{
     AsyncConnection, BigInt, ExistsRow, Jsonb, OptionalExtension, PersistenceError,
@@ -241,7 +241,7 @@ pub(crate) async fn realm_stream_subscription_cut(
     realm_id: &RealmId,
     account: &AccountId,
     issuer: &DidCoreId,
-) -> PersistenceResult<soland_storage::AccountRealmStreamAuthorizationCut> {
+) -> PersistenceResult<coland_storage::AccountRealmStreamAuthorizationCut> {
     let caller = ActorId::account(account.clone());
     let mut conn = pg_conn(pool).await?;
     conn.transaction::<_, PgTransactionError, _>(async move |conn| {
@@ -298,7 +298,7 @@ pub(crate) async fn realm_stream_subscription_cut(
             }
             if history_digest.is_none() { listing = AccountRealmStreamList::Unproved("subscription policy provenance is not proved at this cut"); }
         }
-        Ok(soland_storage::AccountRealmStreamAuthorizationCut { listing, history_digest })
+        Ok(coland_storage::AccountRealmStreamAuthorizationCut { listing, history_digest })
     }).await.map_err(PgTransactionError::into_persistence)
 }
 async fn list_streams_in_connection(
@@ -627,7 +627,7 @@ async fn policy_exact_read(
             .evaluate(
                 &[arkret_wire::CapabilityActionId::POLICY_SET],
                 &target,
-                &soland_storage::OperationFacts::default(),
+                &coland_storage::OperationFacts::default(),
                 chrono::Utc::now(),
             )
             .unreserved()

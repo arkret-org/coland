@@ -6,7 +6,7 @@ fn retired_seal_history_authority_route_is_not_registered() {
 }
 
 async fn current_body() {
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let token = dev_token(state.clone()).await;
     let response = TestClient::post("http://server/_arkret/self/seals/history-authority")
         .add_header("authorization", format!("Bearer {token}"), true)

@@ -1,8 +1,8 @@
 //! Registered Realm lifecycle results at the accepting Commit.
 
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Bool, Jsonb, Text, Timestamptz};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
-use soland_storage::{PersistenceError, PersistenceResult};
 
 #[derive(diesel::QueryableByName)]
 struct ReplicaLifecycle {

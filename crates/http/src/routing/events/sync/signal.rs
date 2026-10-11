@@ -19,10 +19,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use arkret_models_collaboration::signal_operations::SignalSubmitOutcome;
 use arkret_wire::{SignalEnvelope, SignalRelayRequest, SignalStreamFrame};
+use coland_http::error::AppError;
+use coland_services::identity::SessionIdentityState;
 use futures_util::stream::StreamExt;
 use salvo::prelude::*;
-use soland_http::error::AppError;
-use soland_services::identity::SessionIdentityState;
 
 use super::events_query::ndjson_line;
 use super::subscribe::account_subscribe_session_or_render;
@@ -51,7 +51,7 @@ pub(super) async fn submit_signal(
     aa: crate::routing::system::extract::AuthArgs,
     depot: &mut Depot,
     req: &mut Request,
-) -> soland_http::result::JsonResult<SignalSubmitOutcome> {
+) -> coland_http::result::JsonResult<SignalSubmitOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     super::super::require_agent_session_scope(
@@ -83,7 +83,7 @@ pub(super) async fn submit_signal(
     // as accepted without a second relay append: a Signal has no durable
     // receipt to reissue, so the only observable difference must be that it is
     // not delivered twice.
-    let record = soland_storage::SignalRelayRecord {
+    let record = coland_storage::SignalRelayRecord {
         realm_id: realm_id.as_str().to_owned(),
         scope_ref: envelope.scope_ref.clone(),
         sender_actor_id: sender_actor.to_string(),
@@ -119,7 +119,7 @@ pub(super) async fn submit_signal(
         relay_signal_to_remote_services(state, &envelope, &scope_authority.recipient_actors);
     }
 
-    soland_http::result::json_ok(SignalSubmitOutcome {
+    coland_http::result::json_ok(SignalSubmitOutcome {
         accepted: true,
         realm_id,
         envelope_digest: arkret_wire::Hash::new(envelope_digest)
@@ -233,10 +233,10 @@ async fn verify_signal_scope_authority(
     state: &AppState,
     envelope: &SignalEnvelope,
     actor: &arkret_wire::ActorId,
-) -> Result<soland_storage::SignalScopeAuthority, AppError> {
+) -> Result<coland_storage::SignalScopeAuthority, AppError> {
     let authority = state
         .authority_commits()
-        .signal_scope_authority(soland_storage::SignalScopeAuthorityQuery {
+        .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
             scope: &envelope.scope_ref,
             authority_commit_id: &envelope.authority_commit_id,
             parent_realm_authority_commit_id: envelope.parent_realm_authority_commit_id.as_ref(),
@@ -699,7 +699,7 @@ pub(in crate::routing::events) async fn accept_peer_signal(
         .to_owned();
     let appended = state
         .deliveries()
-        .append_signal(soland_storage::SignalRelayRecord {
+        .append_signal(coland_storage::SignalRelayRecord {
             realm_id: envelope.realm_id.as_str().to_owned(),
             scope_ref: envelope.scope_ref.clone(),
             sender_actor_id: sender_actor.to_string(),
@@ -842,7 +842,7 @@ pub(super) async fn signal_subscribe(depot: &mut Depot, req: &mut Request, res: 
         &session,
         arkret_wire::ServiceOperationId::SELF_SIGNAL_STREAM_SUBSCRIBE_V1,
     ) {
-        soland_http::error::render_error(
+        coland_http::error::render_error(
             res,
             error.http_status(),
             error.wire_code(),
@@ -1142,7 +1142,7 @@ pub(crate) async fn pending_signals_for_subscriber(
 /// Every frame re-observes sender authority and exact current recipient eligibility.
 async fn signal_visible_to_subscriber(
     state: &AppState,
-    record: &soland_storage::SignalRelayRecord,
+    record: &coland_storage::SignalRelayRecord,
     actor: &arkret_wire::ActorId,
 ) -> bool {
     verify_signal_scope_authority(state, &record.envelope, &record.envelope.sender_actor_id)

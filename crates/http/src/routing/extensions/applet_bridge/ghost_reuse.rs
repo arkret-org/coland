@@ -4,9 +4,9 @@ use arkret_models_integration::{
     GhostActorProvisionRequestBody, GhostExternalTuple,
 };
 use arkret_wire::{ActorId, Hash};
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
 use salvo::prelude::*;
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
 
 use super::record::*;
 use super::signature::VerifiedAppletServiceSignature;
@@ -127,8 +127,8 @@ pub(super) async fn provision(
     let replacement = encode_applet_record(&record)?;
     let epoch = super::install::registration_epoch_evidence_from_event(&record.registration_event)?;
     let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-    let input = soland_storage::AppletAuthoringUnitWrite {
-        request: soland_storage::AppletAdmissionRequest::Managed(
+    let input = coland_storage::AppletAuthoringUnitWrite {
+        request: coland_storage::AppletAdmissionRequest::Managed(
             AppletManagedActorCommittedRequest::Ghost(Box::new(body.clone())),
         ),
         package: record.package.clone(),
@@ -161,7 +161,7 @@ pub(super) async fn provision(
         prior_service_signer_evidence: None,
         accepted_at: now,
     };
-    let finalizer: soland_storage::AppletUnitFinalizer = std::sync::Arc::new(move |refs| {
+    let finalizer: coland_storage::AppletUnitFinalizer = std::sync::Arc::new(move |refs| {
         // These are reopened accepted tuples, never freshly authored Events.
         for event in [
             &ghost.managed_actor_provision_event,
@@ -181,11 +181,11 @@ pub(super) async fn provision(
             display_name: ghost.display_name.clone(),
         };
         let response_body =
-            serde_json::to_value(outcome).map_err(soland_storage::PersistenceError::database)?;
-        Ok(soland_storage::AppletUnitFinalization {
-            applet_record: soland_storage::AppletRecordCommit {
+            serde_json::to_value(outcome).map_err(coland_storage::PersistenceError::database)?;
+        Ok(coland_storage::AppletUnitFinalization {
+            applet_record: coland_storage::AppletRecordCommit {
                 applet_id: record.applet_id.clone(),
-                identity: soland_storage::AppletIdentityCommit {
+                identity: coland_storage::AppletIdentityCommit {
                     target_station_id: record.target_station_id.clone(),
                     expected_record: Some(identity.clone()),
                     record: identity.clone(),
@@ -193,7 +193,7 @@ pub(super) async fn provision(
                 expected_record: Some(expected.clone()),
                 record: replacement.clone(),
             },
-            idempotency_record: soland_storage::IdempotencyRecord {
+            idempotency_record: coland_storage::IdempotencyRecord {
                 authenticated_actor: ActorId::service(basis.service_id.clone()),
                 operation_id: "ak.self.applet.ghost.command.provision".to_owned(),
                 idempotency_key: key.clone(),

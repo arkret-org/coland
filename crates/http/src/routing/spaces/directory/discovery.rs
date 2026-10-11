@@ -1,5 +1,5 @@
 use serde_json::Value;
-use soland_services::identity::SessionIdentityState as SessionRecord;
+use coland_services::identity::SessionIdentityState as SessionRecord;
 
 use crate::state::AppState;
 
@@ -61,14 +61,14 @@ mod tests {
     async fn accepted_contact_visibility_does_not_turn_a_mismatched_query_into_a_hit() {
         let state = AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let alice = "ak:did_core:web:alice.example";
         let bob = "ak:did_core:web:bob.example";
         let observed_at = now();
         state
             .contacts()
-            .save_contact(soland_services::identity::ContactRecord {
+            .save_contact(coland_services::identity::ContactRecord {
                 requester_id: arkret_wire::ActorId::account(arkret_wire::AccountId::new(
                     arkret_wire::DidCoreId::new(alice.to_owned()).unwrap(),
                     state.service_core_id().clone(),
@@ -105,7 +105,7 @@ mod tests {
             account_pk: None,
             token_hash: "directory-test-token".to_owned(),
             actor: alice.to_owned(),
-            endpoint: soland_services::identity::SessionEndpointState::HumanDevice {
+            endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
                 device_id: "ak:device:019a0000-0000-7000-8000-000000000001".to_owned(),
             },
             audience: state.service_id().clone(),

@@ -9,17 +9,17 @@ use arkret_wire::{
     NewSourceQuotaConstraints,
 };
 use chrono::Utc;
-use diesel::sql_types::BigInt;
-use diesel_async::RunQueryDsl;
-use soland_storage::{
+use coland_storage::{
     AccountDataStore, AccountPk, AccountRecord, AccountStore, ConsentRequestQuarantineInput,
     ConsentRequestQuarantineOutcome, ConsentRequestQuarantineStore, InviteReceivePolicyStore,
 };
-use soland_storage_postgres::test_database::TestDatabase;
-use soland_storage_postgres::{
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{
     PgAccountDataStore, PgAccountStore, PgConsentRequestQuarantineStore,
     PgInviteReceivePolicyStore, PgPool,
 };
+use diesel::sql_types::BigInt;
+use diesel_async::RunQueryDsl;
 
 #[derive(diesel::QueryableByName)]
 struct CountRow {
@@ -44,7 +44,7 @@ async fn count(pool: &PgPool, table: &str) -> i64 {
 fn account(name: &str) -> AccountId {
     AccountId::new(
         DidCoreId::new(format!("ak:did_core:web:{name}.example")).unwrap(),
-        DidCoreId::new("ak:did_core:web:soland.example").unwrap(),
+        DidCoreId::new("ak:did_core:web:coland.example").unwrap(),
     )
 }
 

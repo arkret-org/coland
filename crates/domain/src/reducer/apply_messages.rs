@@ -111,7 +111,7 @@ impl ProjectionState {
             };
             self.relations.insert(
                 relation_id.clone(),
-                SolandRelationState {
+                ColandRelationState {
                     relation_id,
                     realm_id: operation.realm_id.to_string(),
                     relation_kind: "replies_to".to_owned(),

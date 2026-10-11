@@ -14,7 +14,7 @@ fn seed_state(history_access: &str) -> (ProjectionState, ServerHlc, chrono::Date
         let actor = account_actor_string(actor);
         state.members.insert(
             (REALM.to_owned(), actor.clone()),
-            SolandMembershipState {
+            ColandMembershipState {
                 member: actor,
                 realm_id: REALM.to_owned(),
                 state: "join".to_owned(),

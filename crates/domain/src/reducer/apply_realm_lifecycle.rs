@@ -485,7 +485,7 @@ impl ProjectionState {
         // Update the structured cache with side-band + transition state mirror.
         self.members.insert(
             key.clone(),
-            SolandMembershipState {
+            ColandMembershipState {
                 member: member.clone(),
                 realm_id: realm_id.clone(),
                 state: new_state.to_owned(),
@@ -609,7 +609,7 @@ impl ProjectionState {
         let realm = self
             .realm_states
             .entry(realm_id.clone())
-            .or_insert_with(|| SolandRealmState {
+            .or_insert_with(|| ColandRealmState {
                 realm_id: realm_id.clone(),
                 owner: None,
                 title: None,
@@ -908,7 +908,7 @@ impl ProjectionState {
         let realm = self
             .realm_states
             .entry(realm_id.clone())
-            .or_insert_with(|| SolandRealmState {
+            .or_insert_with(|| ColandRealmState {
                 realm_id: realm_id.clone(),
                 owner: owner.clone(),
                 title: title.clone(),

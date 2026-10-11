@@ -4,11 +4,11 @@ use arkret_models_collaboration::governance::erasure::{
 };
 use arkret_wire::ProtocolSignature;
 use chrono::{Duration, Utc};
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
+use coland_services::jobs::IdempotencyState;
 use salvo::oapi::extract::{JsonBody, PathParam};
 use salvo::prelude::*;
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
-use soland_services::jobs::IdempotencyState;
 
 use super::signature::verify_inbound_peer_http_signature;
 use crate::state::AppState;
@@ -168,7 +168,7 @@ async fn submit(
         .jobs()
         .store_idempotency_record(IdempotencyState {
             authenticated_actor: arkret_wire::ActorId::service(source_id),
-            operation_id: soland_services::jobs::INTERNAL_IDEMPOTENCY_OPERATION.to_owned(),
+            operation_id: coland_services::jobs::INTERNAL_IDEMPOTENCY_OPERATION.to_owned(),
             idempotency_key: key,
             request_hash,
             response_status: StatusCode::OK.as_u16() as i32,
@@ -242,7 +242,7 @@ async fn persist_lookup(
         .jobs()
         .store_idempotency_record(IdempotencyState {
             authenticated_actor: arkret_wire::ActorId::service(state.service_core_id()),
-            operation_id: soland_services::jobs::INTERNAL_IDEMPOTENCY_OPERATION.to_owned(),
+            operation_id: coland_services::jobs::INTERNAL_IDEMPOTENCY_OPERATION.to_owned(),
             idempotency_key: lookup_key,
             request_hash: package
                 .computed_receipt_digest()

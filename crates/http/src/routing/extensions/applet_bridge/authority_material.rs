@@ -2,10 +2,10 @@
 use arkret_models_collaboration::applet_installation_authority::{
     AppletAuthorityMaterialOutcome, AppletAuthorityMaterialRequestBody,
 };
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
 
 use crate::state::AppState;
 
@@ -40,7 +40,7 @@ pub(super) async fn read(
         )
         .await
         .map_err(|error| match error {
-            soland_storage::PersistenceError::Conflict(_) => {
+            coland_storage::PersistenceError::Conflict(_) => {
                 AppError::not_found("requested authority material unavailable")
             }
             _ => {

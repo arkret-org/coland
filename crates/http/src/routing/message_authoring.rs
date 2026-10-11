@@ -5,10 +5,10 @@ use arkret_models_collaboration::message_authoring::{
 use arkret_models_collaboration::prepared_event_draft::PreparedEventDraft;
 use arkret_models_crypto::EncryptedEnvelope;
 use arkret_wire::{ActorId, Base64UrlString, EncryptedPayloadScheme, Event, Hash, ScopeRef};
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
 
 use crate::routing::system::extract::AuthArgs;
 use crate::state::AppState;
@@ -45,7 +45,7 @@ fn prepared_event_draft(
 
 async fn device_active(
     state: &AppState,
-    selector: &soland_storage::DeviceRevocationGateSelector,
+    selector: &coland_storage::DeviceRevocationGateSelector,
 ) -> Result<(), AppError> {
     state
         .persistence()
@@ -80,7 +80,7 @@ async fn visible_target_scope(
 /// shared by message prepare, self Event submit and the accepting
 /// transaction, so every surface answers the same state with the same
 /// registered identity (encryption-and-audit §2.5.2, decision 0100).
-pub(crate) use soland_storage::MlsSendGateRefusal;
+pub(crate) use coland_storage::MlsSendGateRefusal;
 
 /// Failure of the current MLS send gate.
 #[derive(Debug)]
@@ -106,7 +106,7 @@ pub(crate) async fn mls_send_gate(
         .current(scope)
         .await
         .map_err(|_| MlsSendGateError::CurrentUnavailable)?;
-    soland_storage::decide_mls_send_gate(
+    coland_storage::decide_mls_send_gate(
         current.as_ref().map(|current| &current.value),
         scope,
         envelopes,
@@ -146,15 +146,15 @@ fn send_gate_problem(error: MlsSendGateError) -> AppError {
 ///
 /// Runs before the authority transaction is prepared, so every refusal leaves
 /// no Commit, idempotency record or projection behind. The refusal travels as
-/// a typed [`soland_storage::ConflictCode`] so the HTTP layer renders its
+/// a typed [`coland_storage::ConflictCode`] so the HTTP layer renders its
 /// registered identity without reading diagnostic text.
 pub(crate) async fn message_create_send_gate(
     state: &AppState,
     event: &Event,
-) -> Result<(), soland_services::ServiceError> {
-    use soland_services::ServiceError;
-    use soland_storage::ConflictCode;
-    let envelopes = soland_storage::message_create_envelopes(&event.payload)
+) -> Result<(), coland_services::ServiceError> {
+    use coland_services::ServiceError;
+    use coland_storage::ConflictCode;
+    let envelopes = coland_storage::message_create_envelopes(&event.payload)
         .map_err(ServiceError::SchemaViolation)?;
     let envelopes = envelopes
         .as_ref()
@@ -341,7 +341,7 @@ async fn prepare(
     device_active(state, &generation).await?;
     state
         .jobs()
-        .store_idempotency_record(soland_services::jobs::IdempotencyState {
+        .store_idempotency_record(coland_services::jobs::IdempotencyState {
             authenticated_actor: actor.clone(),
             operation_id: operation_id.to_owned(),
             idempotency_key: key.clone(),
@@ -399,7 +399,7 @@ mod tests {
                 seed_demo_data: false,
                 ..crate::config::AppConfig::test_default()
             },
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         )
     }
 
@@ -461,7 +461,7 @@ mod tests {
     async fn seed_group(state: &AppState, scope: &ScopeRef, value: arkret_wire::MlsGroupCurrent) {
         state
             .mls_groups()
-            .seed_test_current(&soland_storage::MlsGroupCurrentRecord {
+            .seed_test_current(&coland_storage::MlsGroupCurrentRecord {
                 realm_id: scope.realm_id().clone(),
                 value,
                 current_commit_id: arkret_wire::RealmCommitId::from_digest([7; 32]),
@@ -826,8 +826,8 @@ mod tests {
     }
 
     fn submit_refusal(
-        result: Result<(), soland_services::ServiceError>,
-    ) -> soland_storage::ConflictCode {
+        result: Result<(), coland_services::ServiceError>,
+    ) -> coland_storage::ConflictCode {
         let error = result.expect_err("the submit gate must refuse");
         error
             .conflict_code()
@@ -850,7 +850,7 @@ mod tests {
         accept_genesis(&state, &scope, &event_ref(1)).await;
         assert_eq!(
             submit_refusal(message_create_send_gate(&state, &plaintext).await),
-            soland_storage::ConflictCode::MlsActivationRequired
+            coland_storage::ConflictCode::MlsActivationRequired
         );
     }
 
@@ -862,7 +862,7 @@ mod tests {
         for _ in 0..2 {
             assert_eq!(
                 submit_refusal(message_create_send_gate(&state, &event).await),
-                soland_storage::ConflictCode::FailedPrecondition
+                coland_storage::ConflictCode::FailedPrecondition
             );
         }
         assert!(state.mls_groups().current(&scope).await.unwrap().is_none());
@@ -883,7 +883,7 @@ mod tests {
         );
         let error = message_create_send_gate(&state, &event).await.unwrap_err();
         assert!(
-            matches!(error, soland_services::ServiceError::SchemaViolation(_)),
+            matches!(error, coland_services::ServiceError::SchemaViolation(_)),
             "{error}"
         );
     }
@@ -898,14 +898,14 @@ mod tests {
         let current = encrypted_message(&scope, standard(0, genesis.clone()), None);
         assert_eq!(
             submit_refusal(message_create_send_gate(&state, &current).await),
-            soland_storage::ConflictCode::EpochUpdateRequired
+            coland_storage::ConflictCode::EpochUpdateRequired
         );
         accept_commit(&state, &scope, &genesis, &commit).await;
         let before = accepted_mls_head(&state, &scope).await;
         for _ in 0..2 {
             assert_eq!(
                 submit_refusal(message_create_send_gate(&state, &current).await),
-                soland_storage::ConflictCode::EpochUpdateRequired
+                coland_storage::ConflictCode::EpochUpdateRequired
             );
         }
         assert_eq!(
@@ -935,7 +935,7 @@ mod tests {
             for _ in 0..2 {
                 assert_eq!(
                     submit_refusal(message_create_send_gate(&state, &event).await),
-                    soland_storage::ConflictCode::EpochMismatch
+                    coland_storage::ConflictCode::EpochMismatch
                 );
             }
         }

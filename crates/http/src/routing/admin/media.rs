@@ -4,15 +4,15 @@ use std::collections::BTreeMap;
 
 use arkret_identifiers::RealmId;
 use arkret_models_collaboration::events_payloads::RealmMediaServicePayload;
-use salvo::oapi::extract::PathParam;
-use salvo::prelude::*;
-use serde_json::{Value, json};
-use soland_contracts::admin::{
+use coland_contracts::admin::{
     AdminMediaBucket, AdminMediaByActorList, AdminMediaByActorRow, AdminMediaStatistics,
     AdminRealmMediaService,
 };
-use soland_http::error::AppError;
-use soland_services::delivery::BlobState as BlobRecord;
+use coland_http::error::AppError;
+use coland_services::delivery::BlobState as BlobRecord;
+use salvo::oapi::extract::PathParam;
+use salvo::prelude::*;
+use serde_json::{Value, json};
 
 use super::{AdminAuth, append_audit_log, require_admin_principal};
 use crate::state::AppState;
@@ -61,12 +61,12 @@ fn response_from_media_cell(
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.realms.media_service.get",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.realms.media_service.get",
+    tags("coland_admin")
 )]
 #[tracing::instrument(
     skip_all,
-    fields(op = "org.arkret.soland.admin.realms.media_service.get")
+    fields(op = "org.arkret.coland.admin.realms.media_service.get")
 )]
 async fn admin_get_realm_media_service(
     admin: AdminAuth,
@@ -86,7 +86,7 @@ async fn admin_get_realm_media_service(
         let proj = state.projections().snapshot();
         proj.realm_facet_value(
             &realm_id,
-            soland_domain::reducer::facet::REALM_MEDIA_SERVICE,
+            coland_domain::reducer::facet::REALM_MEDIA_SERVICE,
         )
         .cloned()
     };
@@ -108,10 +108,10 @@ async fn admin_get_realm_media_service(
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.media.statistics",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.media.statistics",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.media.statistics"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.media.statistics"))]
 async fn get_media_statistics(
     admin: AdminAuth,
     depot: &mut Depot,
@@ -162,10 +162,10 @@ async fn get_media_statistics(
 }
 
 #[salvo::oapi::endpoint(
-    operation_id = "org.arkret.soland.admin.media.by_actor",
-    tags("soland_admin")
+    operation_id = "org.arkret.coland.admin.media.by_actor",
+    tags("coland_admin")
 )]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.admin.media.by_actor"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.media.by_actor"))]
 async fn get_media_by_actor(
     admin: AdminAuth,
     depot: &mut Depot,

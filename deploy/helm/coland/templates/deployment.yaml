@@ -1,24 +1,24 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "soland.fullname" . }}
+  name: {{ include "coland.fullname" . }}
   labels:
-    {{- include "soland.labels" . | nindent 4 }}
+    {{- include "coland.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      {{- include "soland.selectorLabels" . | nindent 6 }}
+      {{- include "coland.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "soland.selectorLabels" . | nindent 8 }}
+        {{- include "coland.selectorLabels" . | nindent 8 }}
     spec:
-      serviceAccountName: {{ include "soland.serviceAccountName" . }}
+      serviceAccountName: {{ include "coland.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
-        - name: soland
+        - name: coland
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
@@ -36,7 +36,7 @@ spec:
             - name: {{ $name }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ default (include "soland.fullname" $) $.Values.existingSecret }}
+                  name: {{ default (include "coland.fullname" $) $.Values.existingSecret }}
                   key: {{ $name }}
             {{- end }}
           readinessProbe:
@@ -55,14 +55,14 @@ spec:
             {{- toYaml .Values.resources | nindent 12 }}
           {{- if .Values.persistence.enabled }}
           volumeMounts:
-            - name: soland-data
-              mountPath: /var/lib/soland
+            - name: coland-data
+              mountPath: /var/lib/coland
           {{- end }}
       {{- if .Values.persistence.enabled }}
       volumes:
-        - name: soland-data
+        - name: coland-data
           persistentVolumeClaim:
-            claimName: {{ default (printf "%s-data" (include "soland.fullname" .)) .Values.persistence.existingClaim }}
+            claimName: {{ default (printf "%s-data" (include "coland.fullname" .)) .Values.persistence.existingClaim }}
       {{- end }}
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}

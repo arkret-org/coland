@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use soland_http::deactivation_push_fanout::Worker;
+use coland_http::deactivation_push_fanout::Worker;
 
 use super::common::*;
 
@@ -63,7 +63,7 @@ fn gateway_config(url: &str) -> AppConfig {
 
 async fn admin_deactivate(state: AppState, admin: &str, did: &str) -> Value {
     let mut response =
-        TestClient::post(format!("http://server/_soland/admin/accounts/{did}/status"))
+        TestClient::post(format!("http://server/_coland/admin/accounts/{did}/status"))
             .add_header("authorization", format!("Bearer {admin}"), true)
             .json(&serde_json::json!({"status": "deactivated"}))
             .send(&app_from_state(state))
@@ -78,7 +78,7 @@ async fn admin_deactivate(state: AppState, admin: &str, did: &str) -> Value {
 
 async fn admin_actor_row(state: AppState, admin: &str, did: &str) -> Value {
     let actors: Value = TestClient::get(format!(
-        "http://server/_soland/admin/actors?filter[search]={}",
+        "http://server/_coland/admin/actors?filter[search]={}",
         did.trim_start_matches("ak:did_core:")
     ))
     .add_header("authorization", format!("Bearer {admin}"), true)
@@ -106,7 +106,7 @@ async fn deactivation_notifies_configured_push_gateway_and_clears_partial_body()
     let url = format!("http://{}", listener.local_addr().unwrap());
     let requests = spawn_mock_gateway(listener, 1, "completed");
 
-    let state = soland_test_support::app_state(gateway_config(&url));
+    let state = coland_test_support::app_state(gateway_config(&url));
     let admin = dev_token(state.clone()).await;
     let _token = register_account(
         state.clone(),
@@ -144,7 +144,7 @@ async fn deactivation_notifies_configured_push_gateway_and_clears_partial_body()
     assert_eq!(broadcast.actor_id, did.as_str());
     assert_eq!(
         broadcast.fanout_id,
-        soland_http::deactivation_push_fanout::base_fanout_id(state.service_id(), did.as_str())
+        coland_http::deactivation_push_fanout::base_fanout_id(state.service_id(), did.as_str())
     );
     assert!(broadcast.devices.is_empty());
 
@@ -175,7 +175,7 @@ async fn gateway_failure_marks_partial_and_worker_retries_until_ack_body() {
     drop(parked);
     let url = format!("http://{addr}");
 
-    let state = soland_test_support::app_state(gateway_config(&url));
+    let state = coland_test_support::app_state(gateway_config(&url));
     let admin = dev_token(state.clone()).await;
     let _token = register_account(
         state.clone(),
@@ -234,7 +234,7 @@ async fn partially_completed_ack_keeps_partial_until_retry_completes_body() {
     // Second answer (fresh fanout_id): completed.
     let requests = spawn_mock_gateway(listener, 2, "partially_completed");
 
-    let state = soland_test_support::app_state(gateway_config(&url));
+    let state = coland_test_support::app_state(gateway_config(&url));
     let admin = dev_token(state.clone()).await;
     let _token = register_account(
         state.clone(),
@@ -270,7 +270,7 @@ async fn partially_completed_ack_keeps_partial_until_retry_completes_body() {
     };
     assert_eq!(
         id_of(&first),
-        soland_http::deactivation_push_fanout::base_fanout_id(state.service_id(), did.as_str())
+        coland_http::deactivation_push_fanout::base_fanout_id(state.service_id(), did.as_str())
     );
     assert_eq!(id_of(&second), id_of(&first));
     assert!(state.deactivation_push_partial(did.as_str()));
@@ -290,7 +290,7 @@ async fn no_gateway_configured_completes_locally_without_partial_body() {
     // that independently holds delivery state; without one, the local
     // push-route purge completes the Push-route row and the flag never
     // rises.
-    let state = soland_test_support::app_state(test_config());
+    let state = coland_test_support::app_state(test_config());
     let admin = dev_token(state.clone()).await;
     let _token = register_account(
         state.clone(),

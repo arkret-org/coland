@@ -56,7 +56,7 @@ pub struct MessageRedactionMarker {
 
 pub fn message_redactions_from_events(
     events: &[ProjectionEventRecord],
-    projection: &soland_domain::reducer::ProjectionState,
+    projection: &coland_domain::reducer::ProjectionState,
 ) -> HashMap<String, MessageRedactionMarker> {
     let mut redactions = HashMap::new();
     for redaction_event in events
@@ -64,7 +64,7 @@ pub fn message_redactions_from_events(
         .filter(|event| arkret_wire::events::kinds::is_redaction_kind(&event.event_kind))
     {
         let Some(target_ref) =
-            soland_domain::reducer::message_redaction_target_ref(&redaction_event.payload)
+            coland_domain::reducer::message_redaction_target_ref(&redaction_event.payload)
         else {
             continue;
         };
@@ -123,7 +123,7 @@ pub fn event_is_visible(event: &ProjectionEventRecord) -> bool {
 }
 
 pub fn tombstone_projection_event_for_message_redaction(
-    projection: &soland_domain::reducer::ProjectionState,
+    projection: &coland_domain::reducer::ProjectionState,
     durable_redactions: &HashMap<String, MessageRedactionMarker>,
     event: &mut ProjectionEventRecord,
 ) {
@@ -162,7 +162,7 @@ pub fn tombstone_projection_event_for_retention(
 }
 
 pub fn stub_pin_projection_event_for_invisible_target(
-    projection: &soland_domain::reducer::ProjectionState,
+    projection: &coland_domain::reducer::ProjectionState,
     event: &mut ProjectionEventRecord,
 ) {
     if !arkret_wire::events::kinds::is_pin_kind(&event.event_kind) {
@@ -294,7 +294,7 @@ fn pin_target_locked_stub_payload(payload: &Value) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use soland_domain::reducer::{MessageState, ProjectionState, RedactionCellValue};
+    use coland_domain::reducer::{MessageState, ProjectionState, RedactionCellValue};
 
     use super::*;
 
@@ -365,7 +365,7 @@ mod tests {
         let realm_id = "ak:realm:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb";
         let now = fixed_time("2020-01-01T00:00:00.000Z");
         let mut projection = ProjectionState::new();
-        let message_id = soland_domain::reducer::message_id_from_event_id(event_id);
+        let message_id = coland_domain::reducer::message_id_from_event_id(event_id);
         projection.messages.insert(
             event_id.to_owned(),
             MessageState {
@@ -432,7 +432,7 @@ mod tests {
             event_id.to_owned(),
             MessageState {
                 event_id: event_id.to_owned(),
-                message_id: soland_domain::reducer::message_id_from_event_id(event_id),
+                message_id: coland_domain::reducer::message_id_from_event_id(event_id),
                 realm_id: realm_id.to_owned(),
                 sender: "did:web:alice.example".to_owned(),
                 thread_id: realm_id.to_owned(),

@@ -9,9 +9,9 @@ use arkret_models_collaboration::consent_operations::{
 };
 use arkret_wire::AccountDataKey;
 use chrono::{DateTime, Utc};
+use coland_storage::{ConsentRequestQuarantineInput, ConsentRequestQuarantineOutcome};
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
-use soland_storage::{ConsentRequestQuarantineInput, ConsentRequestQuarantineOutcome};
 
 use super::AuthArgs;
 use super::device_messages::{
@@ -112,8 +112,8 @@ async fn grant_consent(
         .await
         .map_err(consent_error)?;
     let record = match outcome {
-        soland_storage::ConsentAdmissionOutcome::Committed(record)
-        | soland_storage::ConsentAdmissionOutcome::Duplicate(record) => record,
+        coland_storage::ConsentAdmissionOutcome::Committed(record)
+        | coland_storage::ConsentAdmissionOutcome::Duplicate(record) => record,
     };
     json_ok(record.view())
 }
@@ -135,8 +135,8 @@ async fn revoke_consent(
         .await
         .map_err(consent_error)?;
     let record = match outcome {
-        soland_storage::ConsentAdmissionOutcome::Committed(record)
-        | soland_storage::ConsentAdmissionOutcome::Duplicate(record) => record,
+        coland_storage::ConsentAdmissionOutcome::Committed(record)
+        | coland_storage::ConsentAdmissionOutcome::Duplicate(record) => record,
     };
     json_ok(record.view())
 }
@@ -217,9 +217,9 @@ async fn request_consent(
     json_ok(ConsentRequestOutcome::accepted())
 }
 
-pub(crate) fn consent_error(error: soland_services::ServiceError) -> AppError {
+pub(crate) fn consent_error(error: coland_services::ServiceError) -> AppError {
     use arkret_wire::ErrorCode;
-    use soland_services::ServiceError;
+    use coland_services::ServiceError;
     let code = match &error {
         ServiceError::NotFound(_) => ErrorCode::NotFound,
         ServiceError::SchemaViolation(_) => ErrorCode::SchemaViolation,

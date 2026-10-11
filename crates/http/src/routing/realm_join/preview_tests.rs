@@ -4,12 +4,12 @@ use arkret_wire::{
     AccountId, ActorId, CommitStreamRef, CurrentRevision, DidCoreId, Event, EventKind, InviteId,
     RealmCommit, RealmCommitId, RealmId, ScopeRef,
 };
-use salvo::test::{ResponseExt as _, TestClient};
-use soland_storage::{
+use coland_storage::{
     AuthorityCommitTransaction, CanonicalEventRecord, CurrentRealmAuthority, EventCommitRequest,
     OrdinaryRealmBootstrapCommitUnit, ProjectionEventRecord, RealmMetaRecord,
 };
-use soland_test_support::AppStateTestExt as _;
+use coland_test_support::AppStateTestExt as _;
+use salvo::test::{ResponseExt as _, TestClient};
 
 use super::*;
 
@@ -127,7 +127,7 @@ fn realm_transaction(
 }
 
 async fn commit_projected_invite(
-    store: &dyn soland_storage::PersistenceStore,
+    store: &dyn coland_storage::PersistenceStore,
     transaction: AuthorityCommitTransaction,
 ) {
     let event = &transaction.event;
@@ -192,7 +192,7 @@ impl GovernedRealm {
     /// `method` is the governing Station's Commit signing method; the
     /// fixture signatures are structural only.
     async fn admit(
-        store: &dyn soland_storage::PersistenceStore,
+        store: &dyn coland_storage::PersistenceStore,
         station: &DidCoreId,
         method: arkret_wire::DidUrl,
     ) -> Self {
@@ -311,7 +311,7 @@ impl GovernedRealm {
     /// position and project its pending lifecycle.
     async fn invite(
         &mut self,
-        store: &dyn soland_storage::PersistenceStore,
+        store: &dyn coland_storage::PersistenceStore,
         invitee: &AccountId,
         expires_at: chrono::DateTime<chrono::Utc>,
     ) -> InviteId {
@@ -343,7 +343,7 @@ impl GovernedRealm {
 
     async fn cancel_invite(
         &mut self,
-        store: &dyn soland_storage::PersistenceStore,
+        store: &dyn coland_storage::PersistenceStore,
         invite_id: &InviteId,
         invitee: &AccountId,
     ) {
@@ -374,7 +374,7 @@ impl GovernedRealm {
 }
 
 async fn set_preview_metadata(
-    store: &dyn soland_storage::PersistenceStore,
+    store: &dyn coland_storage::PersistenceStore,
     realm_id: &RealmId,
     policy: Option<serde_json::Value>,
 ) {
@@ -407,7 +407,7 @@ async fn set_preview_metadata(
 }
 
 async fn set_preview_policy(
-    store: &dyn soland_storage::PersistenceStore,
+    store: &dyn coland_storage::PersistenceStore,
     realm: &mut GovernedRealm,
     policy: Option<serde_json::Value>,
 ) {
@@ -436,22 +436,22 @@ async fn set_preview_policy(
 
 fn station() -> (
     AppState,
-    std::sync::Arc<dyn soland_storage::PersistenceStore>,
+    std::sync::Arc<dyn coland_storage::PersistenceStore>,
 ) {
     let config = crate::config::AppConfig {
         seed_demo_data: false,
         ..crate::config::AppConfig::test_default()
     };
     let service_did =
-        AppState::new(config.clone(), soland_storage_postgres::Db { pool: None }).service_did();
-    let persisted = soland_test_support::app_state_with_service_did(
-        soland_test_support::app_config(),
+        AppState::new(config.clone(), coland_storage_postgres::Db { pool: None }).service_did();
+    let persisted = coland_test_support::app_state_with_service_did(
+        coland_test_support::app_config(),
         service_did,
     );
     let store = persisted.test_persistence();
     let state = AppState::new_with_persistence(
         config,
-        soland_storage_postgres::Db { pool: None },
+        coland_storage_postgres::Db { pool: None },
         store.clone(),
     );
     (state, store)
@@ -731,7 +731,7 @@ fn disclose_requires_the_committed_required_members() {
 async fn preview_routes_authenticate_before_reading_the_body() {
     let service = crate::service(AppState::new(
         crate::config::AppConfig::test_default(),
-        soland_storage_postgres::Db { pool: None },
+        coland_storage_postgres::Db { pool: None },
     ));
     let post = |path: &str, operation: &str| {
         TestClient::post(format!("http://server{path}")).add_header(

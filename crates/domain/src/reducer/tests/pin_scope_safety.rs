@@ -9,7 +9,7 @@ fn seed_scoped_message(state: &mut ProjectionState, hlc: &ServerHlc) {
     let now = chrono::Utc::now();
     state.realm_states.insert(
         REALM_ID.to_owned(),
-        SolandRealmState {
+        ColandRealmState {
             realm_id: REALM_ID.to_owned(),
             owner: Some("ak:did_core:web:alice.example".to_owned()),
             title: Some("Product".to_owned()),
@@ -28,7 +28,7 @@ fn seed_scoped_message(state: &mut ProjectionState, hlc: &ServerHlc) {
             REALM_ID.to_owned(),
             account_actor_string("ak:did_core:web:alice.example"),
         ),
-        SolandMembershipState {
+        ColandMembershipState {
             member: account_actor_string("ak:did_core:web:alice.example"),
             realm_id: REALM_ID.to_owned(),
             state: "join".to_owned(),

@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 const CONFIG_ARG: &str = "--config";
 const NO_ENV_OVERRIDES_ARG: &str = "--no-env-overrides";
 const FILE_BACKED_SECRETS: &[&str] = &[
-    "SOLAND_KEYSTORE_MASTER_KEY",
-    "SOLAND_LIVEKIT_API_SECRET",
-    "SOLAND_INTERNAL_AUTHORITY_SHARED_SECRET",
-    "SOLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER",
-    "SOLAND_EXTERNAL_WEBVH_REGISTRATION_BEARER",
-    "SOLAND_TURN_SHARED_SECRET",
+    "COLAND_KEYSTORE_MASTER_KEY",
+    "COLAND_LIVEKIT_API_SECRET",
+    "COLAND_INTERNAL_AUTHORITY_SHARED_SECRET",
+    "COLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER",
+    "COLAND_EXTERNAL_WEBVH_REGISTRATION_BEARER",
+    "COLAND_TURN_SHARED_SECRET",
 ];
 
 /// Read and resolve deployment configuration for a server process.
@@ -155,7 +155,7 @@ fn read_config_file(path: &Path) -> anyhow::Result<Vec<(String, String)>> {
         })?;
         anyhow::ensure!(
             is_allowed_config_key(&key),
-            "config {} contains unsupported key {key}; expected SOLAND_*, DATABASE_URL, or RUST_LOG",
+            "config {} contains unsupported key {key}; expected COLAND_*, DATABASE_URL, or RUST_LOG",
             path.display()
         );
         values.push((key, value));
@@ -164,7 +164,7 @@ fn read_config_file(path: &Path) -> anyhow::Result<Vec<(String, String)>> {
 }
 
 fn is_allowed_config_key(key: &str) -> bool {
-    key.starts_with("SOLAND_") || matches!(key, "DATABASE_URL" | "RUST_LOG")
+    key.starts_with("COLAND_") || matches!(key, "DATABASE_URL" | "RUST_LOG")
 }
 
 fn non_empty(values: &BTreeMap<String, String>, name: &str) -> Option<String> {
@@ -187,7 +187,7 @@ mod tests {
 
     fn write_file(name: &str, contents: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "soland-process-config-{}-{name}",
+            "coland-process-config-{}-{name}",
             std::process::id()
         ));
         std::fs::write(&path, contents).expect("write test file");
@@ -196,15 +196,15 @@ mod tests {
 
     #[test]
     fn ambient_wins_over_config_file() {
-        let path = write_file("ambient-wins.env", "SOLAND_TRUST_DOMAIN=from-file\n");
+        let path = write_file("ambient-wins.env", "COLAND_TRUST_DOMAIN=from-file\n");
         let args = vec![
-            "soland".into(),
+            "coland".into(),
             "--config".into(),
             path.display().to_string(),
         ];
-        let values = merge(&args, ambient(&[("SOLAND_TRUST_DOMAIN", "from-env")])).unwrap();
+        let values = merge(&args, ambient(&[("COLAND_TRUST_DOMAIN", "from-env")])).unwrap();
         assert_eq!(
-            values.get("SOLAND_TRUST_DOMAIN").map(String::as_str),
+            values.get("COLAND_TRUST_DOMAIN").map(String::as_str),
             Some("from-env")
         );
         let _ = std::fs::remove_file(path);
@@ -212,9 +212,9 @@ mod tests {
 
     #[test]
     fn no_env_overrides_makes_file_authoritative() {
-        let path = write_file("file-wins.env", "SOLAND_TRUST_DOMAIN=from-file\n");
+        let path = write_file("file-wins.env", "COLAND_TRUST_DOMAIN=from-file\n");
         let args = vec![
-            "soland".into(),
+            "coland".into(),
             "--config".into(),
             path.display().to_string(),
             "--no-env-overrides".into(),
@@ -222,24 +222,24 @@ mod tests {
         let values = merge(
             &args,
             ambient(&[
-                ("SOLAND_TRUST_DOMAIN", "from-env"),
-                ("SOLAND_BIND", "from-env"),
+                ("COLAND_TRUST_DOMAIN", "from-env"),
+                ("COLAND_BIND", "from-env"),
             ]),
         )
         .unwrap();
         assert_eq!(
-            values.get("SOLAND_TRUST_DOMAIN").map(String::as_str),
+            values.get("COLAND_TRUST_DOMAIN").map(String::as_str),
             Some("from-file")
         );
-        assert!(!values.contains_key("SOLAND_BIND"));
+        assert!(!values.contains_key("COLAND_BIND"));
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn unsupported_config_key_is_rejected() {
-        let path = write_file("bad-key.env", "NOT_SOLAND_ANYTHING=1\n");
+        let path = write_file("bad-key.env", "NOT_COLAND_ANYTHING=1\n");
         let args = vec![
-            "soland".into(),
+            "coland".into(),
             "--config".into(),
             path.display().to_string(),
         ];
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn missing_config_path_is_rejected() {
-        let error = merge(&["soland".into(), "--config".into()], Vec::new()).unwrap_err();
+        let error = merge(&["coland".into(), "--config".into()], Vec::new()).unwrap_err();
         assert!(error.to_string().contains("--config requires a file path"));
     }
 
@@ -258,12 +258,12 @@ mod tests {
     fn secret_file_is_resolved_before_values_reach_library_crates() {
         let path = write_file("secret", "from-file\n");
         let mut values = BTreeMap::from([(
-            "SOLAND_TURN_SHARED_SECRET_FILE".to_owned(),
+            "COLAND_TURN_SHARED_SECRET_FILE".to_owned(),
             path.display().to_string(),
         )]);
         resolve_secret_files(&mut values).unwrap();
         assert_eq!(
-            values.get("SOLAND_TURN_SHARED_SECRET").map(String::as_str),
+            values.get("COLAND_TURN_SHARED_SECRET").map(String::as_str),
             Some("from-file")
         );
         let _ = std::fs::remove_file(path);
@@ -273,9 +273,9 @@ mod tests {
     fn direct_and_file_secret_sources_are_mutually_exclusive() {
         let path = write_file("conflicting-secret", "from-file\n");
         let mut values = BTreeMap::from([
-            ("SOLAND_TURN_SHARED_SECRET".to_owned(), "direct".to_owned()),
+            ("COLAND_TURN_SHARED_SECRET".to_owned(), "direct".to_owned()),
             (
-                "SOLAND_TURN_SHARED_SECRET_FILE".to_owned(),
+                "COLAND_TURN_SHARED_SECRET_FILE".to_owned(),
                 path.display().to_string(),
             ),
         ]);
@@ -288,8 +288,8 @@ mod tests {
     fn empty_secret_file_is_rejected() {
         let path = write_file("empty-secret", "  \n");
         let error = resolve_value_or_file(
-            "SOLAND_INTERNAL_AUTHORITY_SHARED_SECRET",
-            "SOLAND_INTERNAL_AUTHORITY_SHARED_SECRET_FILE",
+            "COLAND_INTERNAL_AUTHORITY_SHARED_SECRET",
+            "COLAND_INTERNAL_AUTHORITY_SHARED_SECRET_FILE",
             None,
             Some(path.to_str().unwrap()),
         )

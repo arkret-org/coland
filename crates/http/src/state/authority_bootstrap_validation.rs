@@ -6,10 +6,10 @@ use arkret_models_collaboration::events_payloads::realm::{
     RealmCreatePayload, RealmPolicyBundlePayload, RealmPurpose,
 };
 use arkret_wire::{EventKind, OperationKind};
-use soland_services::identity::SessionIdentityState;
-use soland_services::projection::StagedRealmBootstrap;
-use soland_services::{ServiceError, ServiceResult};
-use soland_storage::SelfProducerCommitGuard;
+use coland_services::identity::SessionIdentityState;
+use coland_services::projection::StagedRealmBootstrap;
+use coland_services::{ServiceError, ServiceResult};
+use coland_storage::SelfProducerCommitGuard;
 
 use super::AppState;
 
@@ -120,7 +120,7 @@ pub(super) async fn verify_ordinary_realm_bootstrap(
     }) {
         return Err(ServiceError::Conflict(format!(
             "{}: a restricted bootstrap declares no automatic join gate",
-            soland_storage::ConflictCode::JoinRulePolicyMismatch
+            coland_storage::ConflictCode::JoinRulePolicyMismatch
         )));
     }
     let mut guards = Vec::with_capacity(submission.events.len());

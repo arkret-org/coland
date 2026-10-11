@@ -647,7 +647,7 @@ pub(crate) async fn validate_mls_binding_in_connection(
         .ok_or_else(|| {
             PersistenceError::Conflict(format!(
                 "{}: Sidecar controller or parent membership is not current",
-                soland_storage::ConflictCode::CapabilityDenied
+                coland_storage::ConflictCode::CapabilityDenied
             ))
         })?;
     let supplied = binding
@@ -658,7 +658,7 @@ pub(crate) async fn validate_mls_binding_in_connection(
     {
         return Err(PersistenceError::Conflict(format!(
             "{}: Sidecar signed participant cut is stale",
-            soland_storage::ConflictCode::FailedPrecondition
+            coland_storage::ConflictCode::FailedPrecondition
         )));
     }
     Ok(cut)

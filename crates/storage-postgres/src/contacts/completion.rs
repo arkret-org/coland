@@ -5,14 +5,14 @@ use arkret_models_collaboration::contact_operations::{
     ContactRoundEvidenceBundle,
 };
 use arkret_wire::{ActorId, Hash};
-use diesel::sql_types::{BigInt, Integer, Jsonb, Nullable, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
-use soland_storage::{
+use coland_storage::{
     CommittedContactCompletionIntent, ContactCompletionBinding, ContactCompletionIntent,
     ContactCompletionResult, ContactCompletionState, FederationOutboxRecord, PersistenceError,
     PersistenceResult,
 };
+use diesel::sql_types::{BigInt, Integer, Jsonb, Nullable, Text, Timestamptz};
+use diesel::{OptionalExtension, QueryableByName, sql_query};
+use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 
 use crate::{PgPool, PgTransactionError, pg_conn};
 
@@ -54,7 +54,7 @@ const COLUMNS: &str =
     "event_digest,event_json,binding,intent,intent_digest,committed_ref,result,delivery_outbox_id";
 
 /// Storage-local domain of the frozen plan digest. It never leaves this table.
-const INTENT_DIGEST_DOMAIN: &str = "soland.storage.contact-completion-intent.v1";
+const INTENT_DIGEST_DOMAIN: &str = "coland.storage.contact-completion-intent.v1";
 
 /// Canonical digest of the exact frozen business plan. The terminal row keeps
 /// it after the plan itself is replaced by the result, so a replay can still be
@@ -303,14 +303,14 @@ async fn install_evidence(
         .await?
         .ok_or_else(|| invalid("committed Contact row is absent"))?;
     let expected = record.updated_at;
-    let head_of = |record: &soland_storage::ContactRecord, issuer: &arkret_wire::ActorId| {
+    let head_of = |record: &coland_storage::ContactRecord, issuer: &arkret_wire::ActorId| {
         if &record.requester_id == issuer {
             record.request_event_ref.clone()
         } else {
             record.response_event_ref.clone()
         }
     };
-    let binds_head = |record: &soland_storage::ContactRecord, proof: &ContactCurrentProof| {
+    let binds_head = |record: &coland_storage::ContactRecord, proof: &ContactCurrentProof| {
         let issuer = if proof.peer.contact_actor_id() == record.requester_id {
             &record.target_id
         } else {
@@ -337,7 +337,7 @@ async fn install_evidence(
                 record.request_receipts.push(receipt.clone());
             }
             if let Some(target) = &intent.plan.local_mirror_target {
-                mirror = Some(soland_storage::ContactVerifiedMirrorRecord {
+                mirror = Some(coland_storage::ContactVerifiedMirrorRecord {
                     target_holder_principal_id: target.clone(),
                     request_event_id: event.event_id.to_string(),
                     request_digest: event.event_id.event_digest().to_string(),
@@ -432,7 +432,7 @@ async fn install_evidence(
     crate::unit_of_work::commit_contact_projection(
         conn,
         None,
-        soland_storage::ContactProjectionCommit {
+        coland_storage::ContactProjectionCommit {
             completion_intent: None,
             record,
             expected_updated_at: Some(expected),
@@ -553,7 +553,7 @@ fn validate_delivery_payload(
 }
 
 fn validate_destination(
-    intent: &soland_storage::ContactDeliveryTarget,
+    intent: &coland_storage::ContactDeliveryTarget,
     delivery: &FederationOutboxRecord,
 ) -> PersistenceResult<()> {
     if delivery.endpoint != "/_arkret/peer/contacts"

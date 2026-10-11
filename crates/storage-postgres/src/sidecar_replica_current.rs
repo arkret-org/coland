@@ -1,9 +1,9 @@
 //! Install source-signed Sidecar current values without replaying admission.
 use arkret_wire::{CommitStreamRef, CurrentSelector, RealmId, TypedCurrentRow};
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
 use diesel::{OptionalExtension, QueryableByName};
 use diesel_async::RunQueryDsl;
-use soland_storage::{PersistenceError, PersistenceResult};
 
 #[derive(QueryableByName)]
 struct Covered {
@@ -137,7 +137,7 @@ mod recovery_fixture;
 #[cfg(test)]
 mod tests {
     use arkret_wire::{ActorId, EventKind, ScopeRef, SemanticRef, SidecarId};
-    use soland_storage::{AuthorityCommitStore, EventCommitUnitOfWork};
+    use coland_storage::{AuthorityCommitStore, EventCommitUnitOfWork};
 
     use super::*;
     #[derive(diesel::QueryableByName)]

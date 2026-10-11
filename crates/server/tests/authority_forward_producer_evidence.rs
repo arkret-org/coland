@@ -25,16 +25,16 @@ use arkret_wire::{
     RealmId, ScopeRef, ServiceKind,
 };
 use chrono::{DateTime, Duration, Utc};
+use coland_http::state::AppState;
+use coland_services::ServiceError;
+use coland_services::authority_commit::AuthenticatedPeerContext;
+use coland_storage::CurrentRealmAuthority;
+use coland_test_support::AppStateTestExt as _;
+use coland_test_support::device_authorization_history::sign_event;
+use coland_test_support::pcr_genesis::PcrGenesisFixture;
 use ed25519_dalek::SigningKey;
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::SeedableRng;
-use soland_http::state::AppState;
-use soland_services::ServiceError;
-use soland_services::authority_commit::AuthenticatedPeerContext;
-use soland_storage::CurrentRealmAuthority;
-use soland_test_support::AppStateTestExt as _;
-use soland_test_support::device_authorization_history::sign_event;
-use soland_test_support::pcr_genesis::PcrGenesisFixture;
 
 #[path = "../../storage-postgres/tests/support/historical_human.rs"]
 mod historical_human;
@@ -311,7 +311,7 @@ fn refusal_code(result: Result<AuthoritySubmitOutcome, ServiceError>) -> String 
 /// A governance Station over its own leased database, governing one Realm.
 async fn governance_station() -> (AppState, RealmId) {
     let state =
-        soland_test_support::app_state_with_postgres_governance(soland_test_support::app_config());
+        coland_test_support::app_state_with_postgres_governance(coland_test_support::app_config());
     let realm_id = RealmId::from_event_id(&EventId::from_digest(
         arkret_canonical::DigestSuite::Sha256,
         arkret_canonical::sha256_bytes(uuid::Uuid::now_v7().as_bytes()),
@@ -519,7 +519,7 @@ fn governance_station_refuses_every_evidence_negative_with_zero_writes() {
             ),
         ];
         for (name, event, carried, peer, instant, expected) in cases {
-            let result = soland_http::test_admit_authority_forward(
+            let result = coland_http::test_admit_authority_forward(
                 &state,
                 &peer,
                 forward(event.clone(), carried, &state.service_core_id(), &[&a, &c]),
@@ -534,7 +534,7 @@ fn governance_station_refuses_every_evidence_negative_with_zero_writes() {
         // reaches ordinary admission. This fixture installed only Station
         // tenure, so the missing durable Realm authority root refuses it.
         let valid = human("valid");
-        let result = soland_http::test_admit_authority_forward(
+        let result = coland_http::test_admit_authority_forward(
             &state,
             &source,
             forward(valid.clone(), Some(evidence(&a, core(&a, at), at)), &state.service_core_id(), &[&a, &c]),
@@ -553,7 +553,7 @@ fn governance_station_refuses_every_evidence_negative_with_zero_writes() {
 fn exact_replay_returns_the_original_outcome_before_evidence_freshness() {
     runtime().block_on(async {
         let (state, pool) =
-            soland_test_support::app_state_with_pool(soland_test_support::app_config());
+            coland_test_support::app_state_with_pool(coland_test_support::app_config());
         let fixture = historical_human::HumanFixture::new(&pool, state.service_did()).await;
         fixture.admit(&pool).await;
         let accepted = fixture.unit.transactions.last().unwrap();
@@ -573,7 +573,7 @@ fn exact_replay_returns_the_original_outcome_before_evidence_freshness() {
         // attached signed negative-test claim is deliberately not a new
         // authorizing source for this already accepted Event.
         let late = at + Duration::hours(1);
-        let replay = soland_http::test_admit_authority_forward(
+        let replay = coland_http::test_admit_authority_forward(
             &state,
             &peer(&a.service_id),
             forward(
@@ -589,7 +589,7 @@ fn exact_replay_returns_the_original_outcome_before_evidence_freshness() {
         assert_eq!(replay, original);
 
         // A new attempt with freshly signed evidence gets the same outcome.
-        let fresh = soland_http::test_admit_authority_forward(
+        let fresh = coland_http::test_admit_authority_forward(
             &state,
             &peer(&a.service_id),
             forward(
@@ -616,8 +616,8 @@ fn exact_replay_returns_the_original_outcome_before_evidence_freshness() {
 #[test]
 fn forwarding_station_signs_fresh_retained_evidence_the_governance_station_verifies() {
     runtime().block_on(async {
-        let forwarder = soland_test_support::app_state_with_postgres_governance(
-            soland_test_support::app_config(),
+        let forwarder = coland_test_support::app_state_with_postgres_governance(
+            coland_test_support::app_config(),
         );
         let fixture = PcrGenesisFixture::new(forwarder.service_did());
         fixture
@@ -648,12 +648,12 @@ fn forwarding_station_signs_fresh_retained_evidence_the_governance_station_verif
 
         // Every forwarding attempt signs its own evidence and retains the
         // complete object and ref before anything could be sent.
-        let first = soland_http::test_fresh_producer_device_evidence(&forwarder, &event, &governance.service_core_id())
+        let first = coland_http::test_fresh_producer_device_evidence(&forwarder, &event, &governance.service_core_id())
             .await
             .unwrap()
             .expect("a human-device producer carries evidence");
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        let second = soland_http::test_fresh_producer_device_evidence(&forwarder, &event, &governance.service_core_id())
+        let second = coland_http::test_fresh_producer_device_evidence(&forwarder, &event, &governance.service_core_id())
             .await
             .unwrap()
             .expect("a human-device producer carries evidence");
@@ -662,7 +662,7 @@ fn forwarding_station_signs_fresh_retained_evidence_the_governance_station_verif
                 > first.device_projection_attestation.attestation.attested_at
         );
         for issued in [&first, &second] {
-            let reference = soland_storage::forwarded_producer_device_evidence_ref(issued).unwrap();
+            let reference = coland_storage::forwarded_producer_device_evidence_ref(issued).unwrap();
             let retained = forwarder
                 .test_persistence()
                 .account_device_signer_evidence()
@@ -677,7 +677,7 @@ fn forwarding_station_signs_fresh_retained_evidence_the_governance_station_verif
         // producer's Station: every §8.2.2 check passes and the Event reaches
         // ordinary admission. Its deliberately incomplete Realm cut has no
         // authority root; it must still refuse the write after verifying proof.
-        let result = soland_http::test_admit_authority_forward(
+        let result = coland_http::test_admit_authority_forward(
             &governance,
             &peer(&account.station_id),
             PeerAuthorityForwardEventRequest::new(
@@ -701,7 +701,7 @@ fn forwarding_station_signs_fresh_retained_evidence_the_governance_station_verif
             DidUrl::new(format!("{}#key-1", fixture.history.did)).unwrap(),
         );
         assert!(
-            soland_http::test_fresh_producer_device_evidence(&forwarder, &service_signed, &governance.service_core_id())
+            coland_http::test_fresh_producer_device_evidence(&forwarder, &service_signed, &governance.service_core_id())
                 .await
                 .unwrap()
                 .is_none()
@@ -713,12 +713,12 @@ fn forwarding_station_signs_fresh_retained_evidence_the_governance_station_verif
             "unknown device",
             DidUrl::new(format!("{}#{OTHER_DEVICE}", fixture.history.did)).unwrap(),
         );
-        let refused = soland_http::test_fresh_producer_device_evidence(&forwarder, &unknown, &governance.service_core_id())
+        let refused = coland_http::test_fresh_producer_device_evidence(&forwarder, &unknown, &governance.service_core_id())
             .await
             .unwrap_err();
         assert_eq!(
             refused.conflict_code(),
-            Some(soland_storage::ConflictCode::TemporarilyUnavailable),
+            Some(coland_storage::ConflictCode::TemporarilyUnavailable),
             "{refused:?}"
         );
 
@@ -728,8 +728,8 @@ fn forwarding_station_signs_fresh_retained_evidence_the_governance_station_verif
 #[test]
 fn forwarding_device_refusal_precedes_the_local_queue_write() {
     runtime().block_on(async {
-        let forwarder = soland_test_support::app_state_with_postgres_governance(
-            soland_test_support::app_config(),
+        let forwarder = coland_test_support::app_state_with_postgres_governance(
+            coland_test_support::app_config(),
         );
         let fixture = PcrGenesisFixture::new(forwarder.service_did());
         fixture
@@ -763,7 +763,7 @@ fn forwarding_device_refusal_precedes_the_local_queue_write() {
         // The route-level forwarding function must run the PCR device gate
         // before it queues the Event. This unknown generation exercises the
         // same preflight boundary used by revoked, pending and fenced devices.
-        let refused = soland_http::test_forward_self_event(
+        let refused = coland_http::test_forward_self_event(
             &forwarder,
             &DidCoreId::new("ak:did_core:web:governance.example").unwrap(),
             EventAdmissionSubmission::new(event.clone()),
@@ -772,7 +772,7 @@ fn forwarding_device_refusal_precedes_the_local_queue_write() {
         .unwrap_err();
         assert_eq!(
             refused.conflict_code(),
-            Some(soland_storage::ConflictCode::TemporarilyUnavailable),
+            Some(coland_storage::ConflictCode::TemporarilyUnavailable),
             "{refused:?}"
         );
         assert_nothing_written(&forwarder, &event).await;
@@ -901,7 +901,7 @@ fn forwarded_genesis_material_is_checked_before_any_write() {
         ];
         for (name, event, request, expected) in cases {
             let result =
-                soland_http::test_admit_authority_forward(&state, &source, request, at).await;
+                coland_http::test_admit_authority_forward(&state, &source, request, at).await;
             assert_eq!(protocol_code(result), expected, "variant {name}");
             assert_nothing_written(&state, &event).await;
         }

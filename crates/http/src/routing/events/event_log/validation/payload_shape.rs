@@ -2,7 +2,7 @@ use super::super::*;
 
 // Wire-shape validators applied on the event ingest path.
 //
-// Each maps a [`soland_http::wire_validators::WireRejection`] to a
+// Each maps a [`coland_http::wire_validators::WireRejection`] to a
 // `schema_violation`-class [`EventValidationError`] carrying the precise
 // reason code.
 
@@ -78,7 +78,7 @@ pub(super) fn validate_pre_schema_wire_shape(
     scan_sidecar_forbidden_wire_fields(payload)?;
     reject_carried_event_derived_object_id(kind, payload)?;
     if kind == arkret_wire::event_kind_str::MEMBER_IDENTITY_UPDATE {
-        soland_http::wire_validators::member_identity::validate_member_identity_update_payload(
+        coland_http::wire_validators::member_identity::validate_member_identity_update_payload(
             payload,
         )
         .map_err(wire_rejection_to_validation_error)?;
@@ -144,7 +144,7 @@ fn reject_carried_event_derived_object_id(
 }
 
 fn wire_rejection_to_validation_error(
-    rejection: soland_http::wire_validators::WireRejection,
+    rejection: coland_http::wire_validators::WireRejection,
 ) -> EventValidationError {
     event_validation_error(
         StatusCode::UNPROCESSABLE_ENTITY,

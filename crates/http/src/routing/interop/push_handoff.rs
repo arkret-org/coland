@@ -12,12 +12,12 @@ use arkret_wire::{AccountId, ServiceKind, WebOrigin};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
-use soland_http::error::{AppError, ErrorCode};
-use soland_services::push_handoff::{
+use coland_http::error::{AppError, ErrorCode};
+use coland_services::push_handoff::{
     ActivePushRegistrationPlan, active_push_registration_client_input_digest,
     plan_active_push_registration, retry_revoked_handoff_page,
 };
-use soland_storage::{
+use coland_storage::{
     DeviceRevocationGateSelector, PushRegistrationHandoffExpiryCursor,
     PushRegistrationHandoffIntentRecord, PushRegistrationHandoffIntentStatus,
     PushRegistrationHandoffIntentWrite, PushRegistrationHandoffRetryCursor,
@@ -162,8 +162,8 @@ pub(super) async fn register(
         .await
         .map_err(service_storage_error)?;
     match committed {
-        soland_storage::PushRegistrationHandoffReceiptWrite::Stored(record)
-        | soland_storage::PushRegistrationHandoffReceiptWrite::ExactReplay(record) => {
+        coland_storage::PushRegistrationHandoffReceiptWrite::Stored(record)
+        | coland_storage::PushRegistrationHandoffReceiptWrite::ExactReplay(record) => {
             outcome_from_record(&record)
         }
     }
@@ -226,7 +226,7 @@ async fn retry_awaiting_revocations_once(
     state: &AppState,
     expiry_cursor: &mut Option<PushRegistrationHandoffExpiryCursor>,
     revoke_cursor: &mut Option<PushRegistrationHandoffRetryCursor>,
-) -> Result<soland_services::push_handoff::RevokeRetryReport, AppError> {
+) -> Result<coland_services::push_handoff::RevokeRetryReport, AppError> {
     let source_station_id = state.service_core_id();
     match state
         .persistence()
@@ -467,8 +467,8 @@ async fn confirm_revoked_intent(
         .await
         .map_err(service_storage_error)?;
     match committed {
-        soland_storage::PushRegistrationHandoffReceiptWrite::Stored(record)
-        | soland_storage::PushRegistrationHandoffReceiptWrite::ExactReplay(record)
+        coland_storage::PushRegistrationHandoffReceiptWrite::Stored(record)
+        | coland_storage::PushRegistrationHandoffReceiptWrite::ExactReplay(record)
             if record.desired_state
                 == arkret_models_integration::PushRegistrationHandoffState::Revoked
                 && record.status == PushRegistrationHandoffIntentStatus::ReceiptVerified =>
@@ -588,10 +588,10 @@ async fn replay_verified_registration(
         .await
         .map_err(service_storage_error)?;
     match committed {
-        soland_storage::PushRegistrationHandoffReceiptWrite::ExactReplay(record) => {
+        coland_storage::PushRegistrationHandoffReceiptWrite::ExactReplay(record) => {
             outcome_from_record(&record)
         }
-        soland_storage::PushRegistrationHandoffReceiptWrite::Stored(_) => Err(AppError::internal(
+        coland_storage::PushRegistrationHandoffReceiptWrite::Stored(_) => Err(AppError::internal(
             "verified push registration replay unexpectedly stored a new receipt",
         )),
     }
@@ -617,7 +617,7 @@ async fn resolve_trusted_gateway(
     state: &AppState,
     origin: &WebOrigin,
     gateway: &TrustedPushGateway,
-) -> Result<soland_services::service_route::ResolvedServiceRoute, AppError> {
+) -> Result<coland_services::service_route::ResolvedServiceRoute, AppError> {
     let resolver = state
         .service_route_resolver()
         .map_err(|error| handoff_unavailable("Gateway route resolver unavailable", error))?;
@@ -632,7 +632,7 @@ async fn resolve_trusted_gateway(
         .await
     {
         Ok(route) => route,
-        Err(soland_services::ServiceError::NotFound(_)) => {
+        Err(coland_services::ServiceError::NotFound(_)) => {
             let base = arkret_models_identity::service_identity::CanonicalServiceUrl::canonicalize(
                 origin.as_str(),
             )
@@ -777,7 +777,7 @@ fn outcome_from_record(
     })
 }
 
-fn service_storage_error(error: soland_services::ServiceError) -> AppError {
+fn service_storage_error(error: coland_services::ServiceError) -> AppError {
     let detail = error.to_string();
     if error.is_conflict_kind() {
         AppError::conflict("push registration state changed concurrently")
@@ -787,8 +787,8 @@ fn service_storage_error(error: soland_services::ServiceError) -> AppError {
     }
 }
 
-fn persistence_error(error: soland_storage::PersistenceError) -> AppError {
-    let is_conflict = matches!(&error, soland_storage::PersistenceError::Conflict(_));
+fn persistence_error(error: coland_storage::PersistenceError) -> AppError {
+    let is_conflict = matches!(&error, coland_storage::PersistenceError::Conflict(_));
     let detail = error.to_string();
     if is_conflict {
         AppError::conflict("push registration state changed concurrently")

@@ -42,22 +42,22 @@ use arkret_models_crypto::{
 };
 use arkret_wire::{AccountId, ActorId, EventKind, MlsWelcomeDelivery, RealmId, ScopeRef};
 use base64::Engine as _;
-use ed25519_dalek::{Signer as _, SigningKey};
-use salvo::http::StatusCode;
-use salvo::test::{ResponseExt, TestClient};
-use serde_json::{Value, json};
-use soland_http::config::AppConfig;
-use soland_http::service;
-use soland_http::state::AppState;
-use soland_storage::{
+use coland_http::config::AppConfig;
+use coland_http::service;
+use coland_http::state::AppState;
+use coland_storage::{
     AuthorityCommitStore, AuthorityCommitTransaction, CurrentRealmAuthority, EventCommitRequest,
     EventCommitUnitOfWork, MlsInstalledBase, MlsStateInstallation, MlsWelcomeClaimLedgerKey,
     OrdinaryRealmBootstrapCommitUnit, PersistenceStore, VerifiedMlsWelcome,
 };
-use soland_storage_postgres::{
+use coland_storage_postgres::{
     PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPersistenceStore, PgPool, TestDatabase,
 };
-use soland_test_support::pcr_genesis::PcrGenesisFixture;
+use coland_test_support::pcr_genesis::PcrGenesisFixture;
+use ed25519_dalek::{Signer as _, SigningKey};
+use salvo::http::StatusCode;
+use salvo::test::{ResponseExt, TestClient};
+use serde_json::{Value, json};
 
 const ACTIVE_SUITE: &str = "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519";
 const RESERVED_SUITE: &str = "MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519";
@@ -67,7 +67,7 @@ fn test_config() -> AppConfig {
     AppConfig {
         development_mode: true,
         embedded_webvh_registration_bearer: Some(REGISTRATION_BEARER.to_owned()),
-        ..soland_test_support::app_config()
+        ..coland_test_support::app_config()
     }
 }
 
@@ -93,9 +93,9 @@ impl Member {
     ) -> Self {
         let fixture = PcrGenesisFixture::new_with(
             state.service_did(),
-            soland_test_support::device_authorization_history::DeviceHistoryFixtureOptions {
+            coland_test_support::device_authorization_history::DeviceHistoryFixtureOptions {
                 local_id: format!("mls-{index}-{}", uuid::Uuid::now_v7().simple()),
-                founding_device_id: soland_test_support::device_authorization_history::device(
+                founding_device_id: coland_test_support::device_authorization_history::device(
                     index,
                 ),
                 founding_device_signing_seed: [0x80 + index; 32],
@@ -113,7 +113,7 @@ impl Member {
             fixture.history.founding_device_signing_seed,
         );
         let app = service(state.clone());
-        let mut registration = TestClient::post("http://server/_soland/gate/account/project")
+        let mut registration = TestClient::post("http://server/_coland/gate/account/project")
             .add_header(
                 "authorization",
                 format!("Bearer {REGISTRATION_BEARER}"),
@@ -134,7 +134,7 @@ impl Member {
             "account projection: {:?}",
             registration.take_string().await
         );
-        let mut login = TestClient::post("http://server/_soland/gate/auth/dev-login")
+        let mut login = TestClient::post("http://server/_coland/gate/auth/dev-login")
             .json(&json!({
                 "actor": fixture.history.account.principal_id,
                 "device_id": fixture.history.founding_device_id,
@@ -183,7 +183,7 @@ impl Member {
             at,
         )
         .expect("fixture Event");
-        soland_test_support::device_authorization_history::sign_event(
+        coland_test_support::device_authorization_history::sign_event(
             event,
             self.method.clone(),
             self.seed,
@@ -193,7 +193,7 @@ impl Member {
     /// Replace the fixture's structural producer proof of `request` with
     /// this Account's device signature.
     fn sign_request(&self, request: &mut EventCommitRequest) {
-        let event = soland_test_support::device_authorization_history::sign_event(
+        let event = coland_test_support::device_authorization_history::sign_event(
             request.authority_commit.event.clone(),
             self.method.clone(),
             self.seed,
@@ -317,8 +317,8 @@ fn commit_signature(
 }
 
 fn seal_fixture_commit(state: &AppState, commit: &mut arkret_wire::RealmCommit) {
-    let identity = soland_test_support::fixture_service_identity(state.config());
-    let key = SigningKey::from_bytes(&soland_test_support::fixture_signing_seed(
+    let identity = coland_test_support::fixture_service_identity(state.config());
+    let key = SigningKey::from_bytes(&coland_test_support::fixture_signing_seed(
         state.config(),
         &identity,
     ));
@@ -556,7 +556,7 @@ fn claim_request(
 async fn station_state(pool: &PgPool) -> (AppState, Arc<dyn PersistenceStore>) {
     let persistence: Arc<dyn PersistenceStore> = Arc::new(PgPersistenceStore::new(pool.clone()));
     let state =
-        soland_test_support::app_state_with_persistence(test_config(), persistence.clone()).await;
+        coland_test_support::app_state_with_persistence(test_config(), persistence.clone()).await;
     (state, persistence)
 }
 
@@ -890,7 +890,7 @@ async fn mls_lifecycle_body() {
         public_state: public.export_state().unwrap(),
         member_principals: Default::default(),
         consumed_proposals: Vec::new(),
-        public_blobs: vec![soland_storage::MlsPublicBlob {
+        public_blobs: vec![coland_storage::MlsPublicBlob {
             blob_ref: blob_ref(&current_tree),
             sha256: current_tree_sha256.clone(),
             size_bytes: current_tree.len() as i64,

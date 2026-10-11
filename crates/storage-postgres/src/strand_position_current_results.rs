@@ -3,11 +3,11 @@
 
 use arkret_models_collaboration::objects::strand::StrandPositionCurrent;
 use arkret_wire::{CurrentRevision, RealmId, SpaceId, StrandId};
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::OptionalExtension as _;
 use diesel::sql_types::{BigInt, Bool, Jsonb, Text, Timestamptz};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::{Value, json};
-use soland_storage::{PersistenceError, PersistenceResult};
 
 #[derive(diesel::QueryableByName)]
 struct ObjectRow {
@@ -65,12 +65,12 @@ struct CountRow {
 
 fn refused(reason: &str) -> PersistenceError {
     let code = match reason {
-        arkret_wire::ReasonCode::SPACE_NOT_ACTIVE => soland_storage::ConflictCode::SpaceNotActive,
+        arkret_wire::ReasonCode::SPACE_NOT_ACTIVE => coland_storage::ConflictCode::SpaceNotActive,
         arkret_wire::ReasonCode::SPACE_REALM_MISMATCH => {
-            soland_storage::ConflictCode::SpaceRealmMismatch
+            coland_storage::ConflictCode::SpaceRealmMismatch
         }
-        arkret_wire::ReasonCode::STRAND_NOT_ACTIVE => soland_storage::ConflictCode::StrandNotActive,
-        _ => soland_storage::ConflictCode::FailedPrecondition,
+        arkret_wire::ReasonCode::STRAND_NOT_ACTIVE => coland_storage::ConflictCode::StrandNotActive,
+        _ => coland_storage::ConflictCode::FailedPrecondition,
     };
     PersistenceError::Conflict(format!("{}: {reason}", code.as_str()))
 }
@@ -81,7 +81,7 @@ pub(crate) async fn commit_authority_position_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
-    event_approvals: Option<&soland_storage::EventApprovalCommit>,
+    event_approvals: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     use arkret_models_collaboration::events_payloads::strand::{
         StrandMovePayload, StrandReorderPayload,

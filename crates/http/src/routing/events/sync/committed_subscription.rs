@@ -7,7 +7,7 @@ use arkret_models_collaboration::sync_frames::committed_event_subscribe::{
 use arkret_wire::{
     CommitStreamHead, CommitStreamRef, RealmStreamRow, StreamScanDirection, StreamScanRequest,
 };
-use soland_http::error::AppError;
+use coland_http::error::AppError;
 
 use super::*;
 
@@ -146,7 +146,7 @@ async fn streams(
             .await
             .map_err(|error| unavailable(error.to_string()))?;
         match cut.listing {
-            soland_storage::AccountRealmStreamList::Listed(rows) => {
+            coland_storage::AccountRealmStreamList::Listed(rows) => {
                 let history_digest = cut
                     .history_digest
                     .ok_or_else(|| unavailable("history policy binding is missing"))?;
@@ -155,8 +155,8 @@ async fn streams(
                     history_digest: history_digest.clone(),
                 }));
             }
-            soland_storage::AccountRealmStreamList::NotVisible => return Err(denied()),
-            soland_storage::AccountRealmStreamList::Unproved(reason) => {
+            coland_storage::AccountRealmStreamList::NotVisible => return Err(denied()),
+            coland_storage::AccountRealmStreamList::Unproved(reason) => {
                 return Err(unavailable(reason));
             }
         }
@@ -391,9 +391,9 @@ async fn response(
                 let request = StreamScanRequest { realm_id:progress[index].stream_ref.realm_id().clone(),
                     stream_ref:progress[index].stream_ref.clone(),direction:StreamScanDirection::After(Some(progress[index].head.stream_position)),limit:PAGE_ITEMS };
                 let page = match state.authority().scan_stream_for_account(account,request.clone()).await {
-                    Ok(soland_storage::AccountStreamScan::Page(page)) if page.validate_for_request(&request).is_ok()
+                    Ok(coland_storage::AccountStreamScan::Page(page)) if page.validate_for_request(&request).is_ok()
                         && page.readable_floor == progress[index].readable_floor => page,
-                    Ok(soland_storage::AccountStreamScan::NotAuthorized) => {
+                    Ok(coland_storage::AccountStreamScan::NotAuthorized) => {
                         yield Ok(super::events_query::ndjson_line(&control(Kind::Unauthorized,None))); failed=true; break;
                     }
                     _ => { yield Ok(super::events_query::ndjson_line(&control(Kind::ResyncRequired,None))); failed=true; break; }
@@ -511,13 +511,13 @@ mod tests {
     ) {
         let state = super::super::tests::test_state();
         let store = state.test_persistence();
-        let genesis = soland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
+        let genesis = coland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
         let device = genesis.admit_founding_device(store.as_ref()).await.unwrap();
         let account = genesis.history.account.clone();
         state
             .identities()
-            .save_account(soland_services::identity::AccountProfileState {
-                pk: soland_storage::AccountPk(0),
+            .save_account(coland_services::identity::AccountProfileState {
+                pk: coland_storage::AccountPk(0),
                 principal_id: account.principal_id.clone(),
                 account_id: account.clone(),
                 localpart: "stream-reader".to_owned(),
@@ -539,7 +539,7 @@ mod tests {
                 .unwrap()
                 .pk,
         );
-        session.endpoint = soland_services::identity::SessionEndpointState::HumanDevice {
+        session.endpoint = coland_services::identity::SessionEndpointState::HumanDevice {
             device_id: device.device_id,
         };
         state
@@ -591,7 +591,7 @@ mod tests {
         assert_eq!(checkpoint.kind, Kind::Checkpoint);
         let token = checkpoint.cursor.unwrap();
         assert_ne!(token, realm.head.commit.commit_id.to_string());
-        let peer = soland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
+        let peer = coland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
         peer.admit_into(state.test_persistence().as_ref())
             .await
             .unwrap();
@@ -625,7 +625,7 @@ mod tests {
             &selected.actors,
         );
         let mut other_device = session.clone();
-        other_device.endpoint = soland_services::identity::SessionEndpointState::HumanDevice {
+        other_device.endpoint = coland_services::identity::SessionEndpointState::HumanDevice {
             device_id: "other-device".to_owned(),
         };
         assert!(

@@ -8,7 +8,7 @@
 //! result is.
 
 use arkret_wire::{CapabilityActionId, WireResourceSelector};
-use soland_storage::{
+use coland_storage::{
     ActorRealmAuthorization, EffectiveActorGrant, GrantEvaluation, OperationFacts,
 };
 

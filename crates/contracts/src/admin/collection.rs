@@ -1,9 +1,9 @@
 //! Rows served by the deployment-local admin collection snapshot
-//! (`GET /_soland/admin/{resource}`) plus the Realm detail endpoints
-//! (`GET /_soland/admin/realms/{realm_id}` and `.../members`).
+//! (`GET /_coland/admin/{resource}`) plus the Realm detail endpoints
+//! (`GET /_coland/admin/realms/{realm_id}` and `.../members`).
 //!
-//! Every row below is the single definition shared by the soland producer
-//! (`soland/crates/http/src/routing/admin/collection.rs`) and the sodmin
+//! Every row below is the single definition shared by the coland producer
+//! (`coland/crates/http/src/routing/admin/collection.rs`) and the codmin
 //! operator console. Renaming a field here is a compile error on both
 //! sides, which is the whole point: the previous hand-mirrored DTOs let a
 //! server-side rename pass compilation and blank the column at runtime.
@@ -137,7 +137,7 @@ pub struct AdminSpaceRow {
     pub parent_space_id: Option<String>,
 }
 
-/// One federated operation row. `GET /_soland/admin/federation` streams
+/// One federated operation row. `GET /_coland/admin/federation` streams
 /// operations, not peer-health rows.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(salvo_oapi::ToSchema))]
@@ -168,7 +168,7 @@ pub struct AdminFederationOperation {
     pub created_at: DateTime<Utc>,
 }
 
-/// One stored blob row of `GET /_soland/admin/media`.
+/// One stored blob row of `GET /_coland/admin/media`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(salvo_oapi::ToSchema))]
 #[serde(deny_unknown_fields)]

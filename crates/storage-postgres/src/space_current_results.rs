@@ -8,11 +8,11 @@
 //! Event/Commit transaction, while the caller holds the Realm authority row
 //! lock.
 
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::OptionalExtension as _;
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::{Value, json};
-use soland_storage::{PersistenceError, PersistenceResult};
 
 #[derive(diesel::QueryableByName)]
 struct ParentCurrentRow {
@@ -56,9 +56,9 @@ pub(crate) struct SpaceCreateValues {
 fn reject(detail: impl Into<String>) -> PersistenceError {
     let detail = detail.into();
     let code = match detail.as_str() {
-        "space_parent_mismatch" => Some(soland_storage::ConflictCode::SpaceParentMismatch),
-        "space_parent_unreadable" => Some(soland_storage::ConflictCode::SpaceParentUnreadable),
-        "space_realm_mismatch" => Some(soland_storage::ConflictCode::SpaceRealmMismatch),
+        "space_parent_mismatch" => Some(coland_storage::ConflictCode::SpaceParentMismatch),
+        "space_parent_unreadable" => Some(coland_storage::ConflictCode::SpaceParentUnreadable),
+        "space_realm_mismatch" => Some(coland_storage::ConflictCode::SpaceRealmMismatch),
         _ => None,
     };
     match code {
@@ -67,7 +67,7 @@ fn reject(detail: impl Into<String>) -> PersistenceError {
     }
 }
 
-fn reject_lifecycle(code: soland_storage::ConflictCode, detail: &str) -> PersistenceError {
+fn reject_lifecycle(code: coland_storage::ConflictCode, detail: &str) -> PersistenceError {
     PersistenceError::Conflict(format!("{}: {detail}", code.as_str()))
 }
 
@@ -364,7 +364,7 @@ pub(crate) async fn commit_space_transition_in_connection(
     let next = match (&event.kind, current.state.unwrap_or(SpaceState::Active)) {
         (_, SpaceState::Tombstoned) => {
             return Err(reject_lifecycle(
-                soland_storage::ConflictCode::SpaceAlreadyTerminal,
+                coland_storage::ConflictCode::SpaceAlreadyTerminal,
                 "Space lifecycle target is tombstoned",
             ));
         }
@@ -372,14 +372,14 @@ pub(crate) async fn commit_space_transition_in_connection(
         (EventKind::SpaceArchive, SpaceState::Active) => "archived",
         (EventKind::SpaceArchive, SpaceState::Archived) => {
             return Err(reject_lifecycle(
-                soland_storage::ConflictCode::SpaceNotActive,
+                coland_storage::ConflictCode::SpaceNotActive,
                 "Space archive target is not active",
             ));
         }
         (_, SpaceState::Archived) => "active",
         (_, SpaceState::Active) => {
             return Err(reject_lifecycle(
-                soland_storage::ConflictCode::SpaceNotArchived,
+                coland_storage::ConflictCode::SpaceNotArchived,
                 "Space restore target is not archived",
             ));
         }
@@ -471,7 +471,7 @@ pub(crate) async fn commit_space_update_in_connection(
     }
     if current.state != Some(arkret_wire::SpaceState::Active) {
         return Err(reject_lifecycle(
-            soland_storage::ConflictCode::SpaceNotActive,
+            coland_storage::ConflictCode::SpaceNotActive,
             "Space update target is not active",
         ));
     }
@@ -797,7 +797,7 @@ pub(crate) async fn require_no_live_dependents_in_connection(
     if row.present {
         return Err(PersistenceError::Conflict(format!(
             "{}: Space has live dependents",
-            soland_storage::ConflictCode::SpaceHasLiveDependents
+            coland_storage::ConflictCode::SpaceHasLiveDependents
         )));
     }
     Ok(())

@@ -127,7 +127,7 @@ pub struct ParentMembershipAdmissionCheck {
 mod tests {
     #[test]
     fn applet_managed_authorities_require_full_accounts_at_one_station() {
-        let station = arkret_wire::DidCoreId::new("ak:did_core:web:soland.example").unwrap();
+        let station = arkret_wire::DidCoreId::new("ak:did_core:web:coland.example").unwrap();
         let bot = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
             arkret_wire::DidCoreId::new("ak:did_core:web:bot.example").unwrap(),
             station.clone(),
@@ -424,11 +424,11 @@ pub struct FrankingReplayNonceCommit {
     pub consumed_at: DateTime<Utc>,
 }
 
-/// Soland's local retention default for a consumed franking nonce. The wire
+/// Coland's local retention default for a consumed franking nonce. The wire
 /// protocol requires a finite window but does not assign its duration.
 pub const LOCAL_FRANKING_REPLAY_NONCE_TTL_SECONDS: i64 = 24 * 60 * 60;
 
-/// Soland's local active-row ceiling per `(realm_id, received_by)` scope.
+/// Coland's local active-row ceiling per `(realm_id, received_by)` scope.
 /// Capacity exhaustion fails closed instead of evicting an active nonce.
 pub const LOCAL_FRANKING_REPLAY_NONCE_MAX_ACTIVE_PER_SCOPE: usize = 4096;
 

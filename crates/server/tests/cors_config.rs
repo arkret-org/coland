@@ -5,11 +5,11 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 
+use coland_http::config::{AppConfig, StartupOverrides};
+use coland_http::service;
 use salvo::http::{HeaderMap, StatusCode};
 use salvo::test::{ResponseExt, TestClient};
 use serde_json::Value;
-use soland_http::config::{AppConfig, StartupOverrides};
-use soland_http::service;
 
 const ALLOWED: &str = "https://app.example.com";
 const SECOND_ALLOWED: &str = "https://admin.example.com";
@@ -17,9 +17,9 @@ const DENIED: &str = "https://app.example.com.attacker.example";
 const VIEWER: &str = "http://server/_arkret/self/account/viewer";
 
 fn app(origin: Option<&str>) -> salvo::Service {
-    service(soland_test_support::app_state(AppConfig {
+    service(coland_test_support::app_state(AppConfig {
         cors_allow_origin: origin.map(str::to_owned),
-        ..soland_test_support::app_config()
+        ..coland_test_support::app_config()
     }))
 }
 
@@ -189,11 +189,11 @@ fn absent_cors_configuration_does_not_admit_browser_origins() {
 #[test]
 fn browser_metadata_advertises_configured_account_authority_and_oidc() {
     run(|| async {
-        let app = service(soland_test_support::app_state(AppConfig {
+        let app = service(coland_test_support::app_state(AppConfig {
             cors_allow_origin: Some(ALLOWED.to_owned()),
             account_authority_url: Some("https://auth.example.com/".to_owned()),
             oidc_client_id: Some("browser-client".to_owned()),
-            ..soland_test_support::app_config()
+            ..coland_test_support::app_config()
         }));
         let mut response = TestClient::get("http://server/_arkret/describe")
             .add_header("Arkret-Operation", "ak.server.read.describe.v1", true)
@@ -226,21 +226,21 @@ fn browser_metadata_advertises_configured_account_authority_and_oidc() {
 #[test]
 fn wildcard_browser_configuration_is_rejected_even_in_development() {
     let mut values = BTreeMap::from([
-        ("SOLAND_DEVELOPMENT_MODE".to_owned(), "true".to_owned()),
+        ("COLAND_DEVELOPMENT_MODE".to_owned(), "true".to_owned()),
         (
-            "SOLAND_TRUST_DOMAIN".to_owned(),
+            "COLAND_TRUST_DOMAIN".to_owned(),
             "ak:trust_domain:server.test".to_owned(),
         ),
     ]);
     let config = AppConfig::from_values(&values, StartupOverrides::default()).unwrap();
     assert!(config.cors_allow_origin.is_none());
     for raw in ["*", "https://app.example.com, *"] {
-        values.insert("SOLAND_CORS_ALLOW_ORIGIN".to_owned(), raw.to_owned());
+        values.insert("COLAND_CORS_ALLOW_ORIGIN".to_owned(), raw.to_owned());
         let error = AppConfig::from_values(&values, StartupOverrides::default())
             .expect_err("authenticated service cannot accept wildcard origins");
-        assert!(error.to_string().contains("SOLAND_CORS_ALLOW_ORIGIN"));
+        assert!(error.to_string().contains("COLAND_CORS_ALLOW_ORIGIN"));
     }
-    values.insert("SOLAND_CORS_ALLOW_ORIGIN".to_owned(), ALLOWED.to_owned());
+    values.insert("COLAND_CORS_ALLOW_ORIGIN".to_owned(), ALLOWED.to_owned());
     assert_eq!(
         AppConfig::from_values(&values, StartupOverrides::default())
             .unwrap()

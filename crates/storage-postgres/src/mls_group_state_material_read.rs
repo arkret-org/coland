@@ -9,8 +9,8 @@ use arkret_wire::{
     ActorId, CommitStreamRef, CommittedEventFullView, CommittedEventView, DidCoreId, EventId,
     EventKind, MlsGroupCurrent, MlsGroupId, RealmId, ScopeRef,
 };
+use coland_storage::MlsMemberGroupStateMaterialRead as Read;
 use diesel::sql_types::{Binary, Jsonb, Nullable};
-use soland_storage::MlsMemberGroupStateMaterialRead as Read;
 
 use crate::{
     AsyncConnection, AsyncPgConnection, BigInt, OptionalExtension, PersistenceError,

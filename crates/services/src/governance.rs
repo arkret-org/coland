@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use arkret_identifiers::DidCoreId;
 use async_trait::async_trait;
-use parking_lot::Mutex;
-use serde_json::Value;
-pub use soland_storage::{
+pub use coland_storage::{
     OrganizationRecord, PolicyDocumentRecord, RetentionPolicyRecord, RetentionTombstoneRecord,
 };
+use parking_lot::Mutex;
+use serde_json::Value;
 
 use crate::ServiceResult;
 
@@ -43,7 +43,7 @@ pub trait ModerationPort: Send + Sync {
         &self,
         actor: &arkret_wire::ActorId,
         realm_id: Option<&arkret_wire::RealmId>,
-    ) -> ServiceResult<soland_storage::ModerationManagementView>;
+    ) -> ServiceResult<coland_storage::ModerationManagementView>;
     async fn report_count(&self) -> ServiceResult<u64>;
 }
 
@@ -275,7 +275,7 @@ impl GovernanceService {
         &self,
         actor: &arkret_wire::ActorId,
         realm_id: Option<&arkret_wire::RealmId>,
-    ) -> ServiceResult<soland_storage::ModerationManagementView> {
+    ) -> ServiceResult<coland_storage::ModerationManagementView> {
         self.moderation
             .management_view_for_actor(actor, realm_id)
             .await
@@ -462,8 +462,8 @@ mod tests {
             &self,
             _actor: &arkret_wire::ActorId,
             _realm_id: Option<&arkret_wire::RealmId>,
-        ) -> ServiceResult<soland_storage::ModerationManagementView> {
-            Ok(soland_storage::ModerationManagementView::default())
+        ) -> ServiceResult<coland_storage::ModerationManagementView> {
+            Ok(coland_storage::ModerationManagementView::default())
         }
         async fn report_count(&self) -> ServiceResult<u64> {
             Ok(0)

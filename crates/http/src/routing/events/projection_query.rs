@@ -43,17 +43,17 @@ use arkret_models_collaboration::objects::query_projection::{
 use arkret_models_collaboration::objects::relation::RelationEndpoint;
 use arkret_wire::ObjectState;
 use chrono::{DateTime, Utc};
+use coland_domain::reducer::{
+    ColandRelationState, MessageState, MorphProjection, ObjectLifecycleState, ProjectionState,
+    SpaceContainerLifecycleState,
+};
+use coland_http::error::AppError;
+use coland_http::result::{JsonResult, json_ok};
+use coland_services::identity::SessionIdentityState as SessionRecord;
+use coland_services::projection::morph_document_body;
 use salvo::oapi::extract::{PathParam, QueryParam};
 use salvo::prelude::*;
 use serde_json::{Value, json};
-use soland_domain::reducer::{
-    MessageState, MorphProjection, ObjectLifecycleState, ProjectionState, SolandRelationState,
-    SpaceContainerLifecycleState,
-};
-use soland_http::error::AppError;
-use soland_http::result::{JsonResult, json_ok};
-use soland_services::identity::SessionIdentityState as SessionRecord;
-use soland_services::projection::morph_document_body;
 
 use super::{realm_history_access, realm_id_accessible};
 use crate::routing::system::extract::AuthArgs;
@@ -67,7 +67,7 @@ pub(super) fn protocol_router() -> Router {
         .push(Router::with_path("realms/{realm_id}/morphs/{morph_id}").get(get_document_projection))
 }
 
-/// Product-private read surface (`/_soland/self/*`). These are
+/// Product-private read surface (`/_coland/self/*`). These are
 /// implementation-private projection reads that are NOT canonical protocol
 /// operations: per `service-http-binding.md` §2.1.3, relation / view / object
 /// direct reads that go beyond the declared `/_arkret/self/realms/...` read
@@ -190,7 +190,7 @@ fn projection_realm_history_allows(
 }
 
 fn relation_string_field<'a>(
-    relation: &'a SolandRelationState,
+    relation: &'a ColandRelationState,
     field_name: &str,
 ) -> Option<&'a str> {
     relation
@@ -203,7 +203,7 @@ fn relation_string_field<'a>(
 fn strand_position_relation<'a>(
     projection: &'a ProjectionState,
     strand_id: &str,
-) -> Option<&'a SolandRelationState> {
+) -> Option<&'a ColandRelationState> {
     projection
         .relations
         .values()
@@ -369,7 +369,7 @@ fn document_projection_versions(morph: &MorphProjection) -> Vec<BTreeMap<String,
 
 fn document_relation_visible_to_actor(
     projection: &ProjectionState,
-    relation: &SolandRelationState,
+    relation: &ColandRelationState,
     actor: &arkret_wire::ActorId,
 ) -> bool {
     relation.scope_circle_id.as_deref().is_none_or(|circle_id| {
@@ -383,7 +383,7 @@ fn document_relation_visible_to_actor(
 
 #[derive(Clone, Debug)]
 struct DocumentRelationSnapshot {
-    relation: SolandRelationState,
+    relation: ColandRelationState,
     anchor_ref: String,
     direction: &'static str,
     target_home_realm_id: Option<String>,
@@ -536,7 +536,7 @@ fn target_info_for_relation_ref(
 
 fn document_relation_snapshot(
     projection: &ProjectionState,
-    relation: &SolandRelationState,
+    relation: &ColandRelationState,
     morph_id: &str,
     actor: &arkret_wire::ActorId,
 ) -> DocumentRelationSnapshot {
@@ -633,7 +633,7 @@ async fn document_relation_target_row_visible(
 
 fn document_relation_reference_projection(
     status: ReferenceProjectionState,
-    relation: &SolandRelationState,
+    relation: &ColandRelationState,
 ) -> Value {
     let mut projection = serde_json::Map::new();
     projection.insert("status".to_owned(), json!(status));
@@ -936,9 +936,9 @@ async fn list_strand_projections(
     json_ok(lists.1)
 }
 
-/// Strongly-typed response body for `org.arkret.soland.strands.get`
-/// (`GET /_soland/self/strands/{strand_id}`). This is a soland product-private
-/// projection read (`/_soland/self/*` negative-space root); the SDK does not —
+/// Strongly-typed response body for `org.arkret.coland.strands.get`
+/// (`GET /_coland/self/strands/{strand_id}`). This is a coland product-private
+/// projection read (`/_coland/self/*` negative-space root); the SDK does not —
 /// and per `service-http-binding.md` §2.1.3 should not — define a response type
 /// for it, so the DTO lives here next to its only handler. Field set and JSON
 /// shape mirror the materialized `StrandProjection` row plus the derived
@@ -1012,9 +1012,9 @@ struct StrandRsvpProjectionView {
     entry: Value,
 }
 
-/// One relation edge in the `org.arkret.soland.relations.list` response.
-/// Mirrors the projected [`SolandRelationState`] fields surfaced by the
-/// product-private `/_soland/self/relations` read. `fields` stays a free-form
+/// One relation edge in the `org.arkret.coland.relations.list` response.
+/// Mirrors the projected [`ColandRelationState`] fields surfaced by the
+/// product-private `/_coland/self/relations` read. `fields` stays a free-form
 /// `serde_json` map (arbitrary relation payload values).
 #[derive(Debug, serde::Serialize, salvo::oapi::ToSchema)]
 struct RelationEdgeView {
@@ -1040,8 +1040,8 @@ struct RelationEdgeView {
     current_revision: Option<arkret_wire::CurrentRevision>,
 }
 
-/// Strongly-typed response body for `org.arkret.soland.relations.list`
-/// (`GET /_soland/self/relations`). soland product-private projection read;
+/// Strongly-typed response body for `org.arkret.coland.relations.list`
+/// (`GET /_coland/self/relations`). coland product-private projection read;
 /// the DTO lives here for the same reason as [`StrandProjectionView`].
 #[derive(Debug, serde::Serialize, salvo::oapi::ToSchema)]
 struct RelationEdgeList {
@@ -1049,7 +1049,7 @@ struct RelationEdgeList {
     total: u64,
 }
 
-fn relation_edge_view(relation: SolandRelationState) -> RelationEdgeView {
+fn relation_edge_view(relation: ColandRelationState) -> RelationEdgeView {
     RelationEdgeView {
         relation_id: relation.relation_id,
         realm_id: relation.realm_id,
@@ -1071,7 +1071,7 @@ fn relation_edge_view(relation: SolandRelationState) -> RelationEdgeView {
 /// read model. Unlike the reducer projection, this record carries the exact
 /// accepting RealmCommit revision needed by the next CAS operation.
 fn relation_current_edge_view(
-    record: soland_storage::RelationCurrentResultRecord,
+    record: coland_storage::RelationCurrentResultRecord,
 ) -> Result<RelationEdgeView, AppError> {
     let relation = record.relation;
     let relation_id = relation
@@ -1116,15 +1116,15 @@ fn relation_edge_matches_filters(
         && relation_kind.is_none_or(|value| relation.relation_kind == value)
 }
 
-/// `GET /_soland/self/strands/{strand_id}` — return a single Strand's
+/// `GET /_coland/self/strands/{strand_id}` — return a single Strand's
 /// projected object state including the raw `fields` map (e.g.
 /// `fields.status`). The canonical `/_arkret/self/realms/{realm_id}/strands`
 /// list intentionally does NOT surface arbitrary `fields`, so this
 /// product-private read backs invariant assertions (CAS read-back,
 /// patch-merge effects) that need the materialized field values. Visibility
 /// reuses the same Realm history / Circle scope gate as the list endpoint.
-#[salvo::oapi::endpoint(operation_id = "org.arkret.soland.strands.get", tags("events"))]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.strands.get"))]
+#[salvo::oapi::endpoint(operation_id = "org.arkret.coland.strands.get", tags("events"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.strands.get"))]
 async fn get_strand_projection(
     aa: AuthArgs,
     depot: &mut Depot,
@@ -1196,7 +1196,7 @@ async fn get_strand_projection(
         stage: strand
             .stage
             .as_ref()
-            .map(soland_domain::reducer::object_stage_wire_value),
+            .map(coland_domain::reducer::object_stage_wire_value),
         stage_changed_at: strand.stage_changed_at,
         tracks: serde_json::to_value(&strand.tracks).unwrap_or_else(|_| serde_json::json!({})),
         title: strand.title,
@@ -1274,7 +1274,7 @@ mod relation_actor_endpoint_tests {
             "created_at":"2026-09-21T00:00:00.000Z"
         }))
         .unwrap();
-        let view = relation_current_edge_view(soland_storage::RelationCurrentResultRecord {
+        let view = relation_current_edge_view(coland_storage::RelationCurrentResultRecord {
             realm_id,
             domain_key: arkret_canonical::canonical_json_string(&primary_conflict_domain).unwrap(),
             primary_conflict_domain,
@@ -1335,7 +1335,7 @@ mod relation_actor_endpoint_tests {
     fn projection_history_and_authorship_do_not_cross_stations() {
         let state = AppState::new(
             crate::config::AppConfig::test_default(),
-            soland_storage_postgres::Db { pool: None },
+            coland_storage_postgres::Db { pool: None },
         );
         let principal = DidCoreId::new("ak:did_core:web:alice.example").unwrap();
         let local = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
@@ -1351,7 +1351,7 @@ mod relation_actor_endpoint_tests {
             token_hash: "test".into(),
             account_pk: None,
             actor: principal.to_string(),
-            endpoint: soland_services::identity::SessionEndpointState::HumanDevice {
+            endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
                 device_id: "device".into(),
             },
             audience: state.service_id().clone(),
@@ -1395,7 +1395,7 @@ mod relation_actor_endpoint_tests {
         ));
         projection.members.insert(
             (realm.into(), local.to_string()),
-            soland_domain::reducer::SolandMembershipState {
+            coland_domain::reducer::ColandMembershipState {
                 member: local.to_string(),
                 realm_id: realm.into(),
                 state: "join".into(),
@@ -1431,7 +1431,7 @@ mod relation_actor_endpoint_tests {
         let mut projection = ProjectionState::new();
         projection.circles.insert(
             "circle".into(),
-            soland_domain::reducer::CircleProjection {
+            coland_domain::reducer::CircleProjection {
                 circle_id: "circle".into(),
                 realm_id: "realm".into(),
                 profile_ref: None,
@@ -1442,7 +1442,7 @@ mod relation_actor_endpoint_tests {
                 join_rule: "invite".into(),
                 history_access: "since_join".into(),
                 mls_group_ref: None,
-                state: soland_domain::reducer::CircleLifecycleState::Active,
+                state: coland_domain::reducer::CircleLifecycleState::Active,
                 state_changed_at: None,
                 created_by: local.to_string(),
                 created_at: now,
@@ -1484,7 +1484,7 @@ mod relation_actor_endpoint_tests {
             let relation_id = RelationId::from_event_id(&event).to_string();
             projection.relations.insert(
                 relation_id.clone(),
-                SolandRelationState {
+                ColandRelationState {
                     relation_id,
                     realm_id: RealmId::from_event_id(&event).to_string(),
                     relation_kind: "assigned_to".to_owned(),
@@ -1529,7 +1529,7 @@ mod relation_actor_endpoint_tests {
     }
 }
 
-/// `GET /_soland/self/relations?from_ref=&to_ref=&relation_kind=&state=` —
+/// `GET /_coland/self/relations?from_ref=&to_ref=&relation_kind=&state=` —
 /// list relation edges projected from accepted Events. Directly writable
 /// current values are restart-hydrated from their authority CAS rows, while
 /// derived edges remain reducer projections. Backs the
@@ -1537,8 +1537,8 @@ mod relation_actor_endpoint_tests {
 /// `has_default_view` edge per `from_ref`). Filters are AND-combined; `state`
 /// defaults to `active`. Only edges whose `realm_id` is accessible to the
 /// caller are returned, so non-members can't enumerate another Realm's graph.
-#[salvo::oapi::endpoint(operation_id = "org.arkret.soland.relations.list", tags("events"))]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.soland.relations.list"))]
+#[salvo::oapi::endpoint(operation_id = "org.arkret.coland.relations.list", tags("events"))]
+#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.relations.list"))]
 async fn list_relation_projections(
     aa: AuthArgs,
     depot: &mut Depot,
@@ -1548,15 +1548,15 @@ async fn list_relation_projections(
     let session = aa.authenticated_session(state, req).await?;
     let session_actor =
         crate::routing::identity::session_actor::session_actor_from_credential(state, &session)?;
-    let from_ref = soland_http::util::query_param(req, "from_ref")
+    let from_ref = coland_http::util::query_param(req, "from_ref")
         .map(|value| parse_relation_endpoint_query(&value))
         .transpose()?;
-    let to_ref = soland_http::util::query_param(req, "to_ref")
+    let to_ref = coland_http::util::query_param(req, "to_ref")
         .map(|value| parse_relation_endpoint_query(&value))
         .transpose()?;
-    let relation_kind = soland_http::util::query_param(req, "relation_kind");
+    let relation_kind = coland_http::util::query_param(req, "relation_kind");
     let state_filter =
-        soland_http::util::query_param(req, "state").unwrap_or_else(|| "active".to_owned());
+        coland_http::util::query_param(req, "state").unwrap_or_else(|| "active".to_owned());
 
     let durable_current = state
         .persistence()

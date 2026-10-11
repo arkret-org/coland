@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use coland_storage::*;
 use serde_json::Value;
-use soland_storage::*;
 
 use crate::federation::FederationService;
 use crate::governance::{GovernanceService, RuntimeSettingsPort};
@@ -219,7 +219,7 @@ impl crate::federation::FederationOutboxPort for PersistenceFederationOutbox {
     async fn resolve_policy_suppressed(
         &self,
         id: &str,
-        resolution: &soland_storage::FederationOutboxPolicyResolution,
+        resolution: &coland_storage::FederationOutboxPolicyResolution,
     ) -> crate::ServiceResult<bool> {
         Ok(self
             .0
@@ -256,7 +256,7 @@ impl crate::federation::FederationOutboxPort for PersistenceFederationOutbox {
 
     async fn deliveries_by_state(
         &self,
-        state: soland_storage::FederationOutboxState,
+        state: coland_storage::FederationOutboxState,
         limit: usize,
     ) -> crate::ServiceResult<Vec<crate::federation::PendingFederationDelivery>> {
         Ok(self
@@ -271,7 +271,7 @@ impl crate::federation::FederationOutboxPort for PersistenceFederationOutbox {
 
     async fn state_depth(
         &self,
-    ) -> crate::ServiceResult<Vec<soland_storage::FederationOutboxStateDepth>> {
+    ) -> crate::ServiceResult<Vec<coland_storage::FederationOutboxStateDepth>> {
         Ok(self.0.federation_outbox().state_depth().await?)
     }
 
@@ -390,7 +390,7 @@ impl crate::governance::ModerationPort for PersistenceModeration {
         &self,
         actor: &arkret_wire::ActorId,
         realm_id: Option<&arkret_wire::RealmId>,
-    ) -> crate::ServiceResult<soland_storage::ModerationManagementView> {
+    ) -> crate::ServiceResult<coland_storage::ModerationManagementView> {
         Ok(self
             .0
             .moderation()
@@ -565,13 +565,13 @@ impl crate::sync::CursorStorePort for PersistenceCursorStore {
     async fn realm_join_download(
         &self,
         key: &str,
-    ) -> crate::ServiceResult<Option<soland_storage::RealmJoinDownload>> {
+    ) -> crate::ServiceResult<Option<coland_storage::RealmJoinDownload>> {
         Ok(self.0.sync_cursors().realm_join_download(key).await?)
     }
     async fn save_realm_join_download(
         &self,
         key: &str,
-        assembly: &soland_storage::RealmJoinDownload,
+        assembly: &coland_storage::RealmJoinDownload,
     ) -> crate::ServiceResult<()> {
         Ok(self
             .0
@@ -605,7 +605,7 @@ impl crate::sync::CursorStorePort for PersistenceCursorStore {
         after_key: &str,
         after_revision: Option<i64>,
         limit: usize,
-    ) -> crate::ServiceResult<Vec<soland_storage::AccountGlobalVersion>> {
+    ) -> crate::ServiceResult<Vec<coland_storage::AccountGlobalVersion>> {
         Ok(self
             .0
             .sync_cursors()
@@ -626,9 +626,9 @@ impl crate::sync::CursorStorePort for PersistenceCursorStore {
         &self,
         actor_key: &str,
         watermark: i64,
-        after: Option<&soland_storage::AccountSummaryKey>,
+        after: Option<&coland_storage::AccountSummaryKey>,
         limit: usize,
-    ) -> crate::ServiceResult<Vec<soland_storage::AccountSummaryVersion>> {
+    ) -> crate::ServiceResult<Vec<coland_storage::AccountSummaryVersion>> {
         Ok(self
             .0
             .sync_cursors()
@@ -640,7 +640,7 @@ impl crate::sync::CursorStorePort for PersistenceCursorStore {
         actor_key: &str,
         after: i64,
         limit: usize,
-    ) -> crate::ServiceResult<Vec<soland_storage::AccountSummaryVersion>> {
+    ) -> crate::ServiceResult<Vec<coland_storage::AccountSummaryVersion>> {
         Ok(self
             .0
             .sync_cursors()

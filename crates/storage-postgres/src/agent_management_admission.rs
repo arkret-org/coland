@@ -234,17 +234,28 @@ fn require_authorization(
     if actions.is_empty() || resources.is_empty() {
         return Err(unavailable("Agent authorization coverage is empty"));
     }
+    // A join-only default-allow Policy does not constrain authorizing an
+    // existing Agent. Keep the coverage guard only when this operation may
+    // be restricted; the SDK evaluator below still validates every Policy.
+    let authorization_is_restricted = policies.iter().any(|policy| {
+        policy.default_effect != PolicyEffect::Allow
+            || policy.rules.iter().any(|rule| {
+                rule.agent_operations
+                    .as_ref()
+                    .is_none_or(|operations| operations.contains(&AgentPolicyOperation::Authorize))
+            })
+    });
     // A broad grant selector is a coverage promise, not an actual resource.
     // Until containment/intersection is established, never let a narrower
     // management restriction disappear by testing only the grant's Realm.
-    if policies.iter().flat_map(|p| &p.rules).any(|rule| {
-        rule.resources.as_ref().is_some_and(|selectors| {
-            selectors
-                .iter()
-                .any(|selector| selector.kind != PolicyResourceKind::Realm)
-        })
-    }) || (!policies.is_empty()
-        && resources.iter().any(|resource| {
+    if authorization_is_restricted
+        && (policies.iter().flat_map(|p| &p.rules).any(|rule| {
+            rule.resources.as_ref().is_some_and(|selectors| {
+                selectors
+                    .iter()
+                    .any(|selector| selector.kind != PolicyResourceKind::Realm)
+            })
+        }) || resources.iter().any(|resource| {
             resource.kind != arkret_wire::ResourceSelectorKind::Realm
                 || resource.realm_id.as_ref() != Some(realm)
                 || resource.match_scope.is_some()
@@ -265,7 +276,7 @@ fn require_authorization(
         let content_action = if descriptor.event_mapping_kind == "aggregate_admin"
             || ServiceOperationId::from_wire(action).is_some()
         {
-            if !policies.is_empty() {
+            if authorization_is_restricted {
                 return Err(unavailable(
                     "Agent authorization action coverage is unavailable",
                 ));

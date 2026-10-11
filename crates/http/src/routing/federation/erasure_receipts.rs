@@ -86,7 +86,7 @@ async fn submit(
                 .with_reason_code("erasure_receipt_proof_invalid")
         })?;
     // `identity/account-lifecycle.md` requires every `proofs[]` entry to verify
-    // and at least one of them to come from the issuer's currently valid
+    // and at least one of them to come from the issuer's issued-at-valid
     // verification method. An erasure receipt is issued by a peer Station, so each proof is
     // verified against the DID document its own verification method resolves to; a proof from a
     // co-signing party is still verified, but only an issuer-controlled one satisfies the

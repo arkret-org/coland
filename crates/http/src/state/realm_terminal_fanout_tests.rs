@@ -260,7 +260,7 @@ fn owner_candidate(
     source: &AppState,
     previous: &coland_storage::AuthorityCommitTransaction,
     kind: EventKind,
-    payload: serde_json::Value,
+    mut payload: serde_json::Value,
 ) -> coland_storage::EventCommitRequest {
     let at = (previous.commit.committed_at + Duration::seconds(1))
         .max(arkret_canonical::normalize_timestamp_canonical(Utc::now()));

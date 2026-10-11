@@ -227,14 +227,9 @@ pub(crate) async fn require_ordinary_member(
 ) -> PersistenceResult<()> {
     require_ordinary_realm(conn, realm_id).await?;
     if let Some(account) = member.as_account_id() {
-        let agent = sql_query(
-            "SELECT EXISTS (SELECT 1 FROM agent_status_current_results WHERE agent_id=$1) AS present",
-        )
-        .bind::<Text, _>(account.principal_id.as_str())
-        .get_result::<PresentRow>(&mut *conn)
-        .await
-        .map_err(PersistenceError::database)?;
-        if agent.present {
+        if crate::realm_authorization_cut::is_owned_agent_in_connection(conn, realm_id, account)
+            .await?
+        {
             return Err(unsupported(
                 "Agent membership needs its controller binding admission",
             ));
@@ -481,6 +476,17 @@ async fn check_agent_controller_join(
     {
         return Err(capability_denied(
             "Agent controller binding is not the exact writer/target pair",
+        ));
+    }
+    if crate::realm_authorization_cut::is_owned_agent_in_connection(
+        conn,
+        &event.realm_id,
+        controller,
+    )
+    .await?
+    {
+        return Err(capability_denied(
+            "an Agent cannot supply another Agent's controller authority",
         ));
     }
     let current = sql_query(

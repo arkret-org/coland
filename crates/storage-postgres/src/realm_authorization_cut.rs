@@ -100,6 +100,46 @@ fn capability_denied(detail: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Conflict(format!("capability_denied: {detail}"))
 }
 
+/// Classification survives missing lifecycle/current projections and binds the
+/// complete AccountId. It grants no membership or current controller authority.
+pub(crate) async fn is_owned_agent_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm_id: &RealmId,
+    account: &arkret_wire::AccountId,
+) -> PersistenceResult<bool> {
+    #[derive(QueryableByName)]
+    struct Present {
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        present: bool,
+    }
+    let actor = ActorId::account(account.clone());
+    Ok(sql_query(
+        "SELECT EXISTS(SELECT 1 FROM agent_provisioning_current_results p \
+         JOIN pcr_genesis_units g ON g.realm_id=p.realm_id \
+         WHERE p.agent_id=$1 AND g.station_id=$2) \
+         OR EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk \
+         WHERE e.state='committed' AND e.kind='ak.agent.provision' \
+           AND e.envelope->'payload'->>'agent_id'=$1 \
+           AND e.envelope->'actor_id'->'account_id'->>'station_id'=$2 \
+           AND c.realm_id=e.realm_id \
+           AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',e.realm_id)) \
+         OR EXISTS(SELECT 1 FROM member_state_current_results m \
+         JOIN realm_commits c ON c.commit_id=m.current_commit_id \
+           AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position \
+         JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
+         WHERE m.realm_id=$3 AND m.member_id=$4 \
+           AND e.envelope->'payload' ? 'agent_controller_binding') AS present",
+    )
+    .bind::<Text, _>(account.principal_id.as_str())
+    .bind::<Text, _>(account.station_id.as_str())
+    .bind::<Text, _>(realm_id.as_str())
+    .bind::<Text, _>(actor.to_string())
+    .get_result::<Present>(&mut *conn)
+    .await
+    .map_err(PersistenceError::database)?
+    .present)
+}
+
 /// Verified current ownership shared by action and member-read admission.
 /// The caller holds the Realm lock or one repeatable-read visibility cut.
 pub(crate) async fn owned_controller_in_connection(
@@ -131,19 +171,9 @@ async fn read_owned_controller_in_connection(
     let Some(agent) = actor.as_account_id() else {
         return Ok(None);
     };
-    #[derive(QueryableByName)]
-    struct Present {
-        #[diesel(sql_type = diesel::sql_types::Bool)]
-        present: bool,
-    }
     // Classification is accepted ownership material, never a profile label.
     // A broken/removed binding must not turn a known Agent into a human.
-    let known = sql_query("SELECT EXISTS(SELECT 1 FROM agent_provisioning_current_results p JOIN pcr_genesis_units g ON g.realm_id=p.realm_id JOIN realm_commits c ON c.commit_id=p.current_commit_id AND c.realm_id=p.realm_id AND c.stream_position=p.current_stream_position WHERE p.agent_id=$1 AND g.station_id=$2) OR EXISTS(SELECT 1 FROM member_state_current_results m JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE m.realm_id=$3 AND m.member_id=$4 AND e.envelope->'payload' ? 'agent_controller_binding') AS present")
-        .bind::<Text,_>(agent.principal_id.as_str())
-        .bind::<Text,_>(agent.station_id.as_str())
-        .bind::<Text,_>(realm_id.as_str())
-        .bind::<Text,_>(actor.to_string())
-        .get_result::<Present>(&mut *conn).await.map_err(PersistenceError::database)?.present;
+    let known = is_owned_agent_in_connection(conn, realm_id, agent).await?;
     if !known {
         return Ok(None);
     }
@@ -159,10 +189,7 @@ async fn read_owned_controller_in_connection(
         .await?
     }
     .ok_or_else(|| capability_denied("owned Agent current controller binding is unavailable"))?;
-    let nested = sql_query("SELECT EXISTS(SELECT 1 FROM agent_provisioning_current_results p JOIN pcr_genesis_units g ON g.realm_id=p.realm_id WHERE p.agent_id=$1 AND g.station_id=$2) AS present")
-        .bind::<Text,_>(controller.principal_id.as_str())
-        .bind::<Text,_>(controller.station_id.as_str())
-        .get_result::<Present>(&mut *conn).await.map_err(PersistenceError::database)?.present;
+    let nested = is_owned_agent_in_connection(conn, realm_id, &controller).await?;
     if nested {
         return Err(capability_denied(
             "an Agent cannot supply another Agent's controller authority",

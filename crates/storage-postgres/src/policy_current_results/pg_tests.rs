@@ -106,6 +106,73 @@ async fn seed_genesis(conn: &mut AsyncPgConnection) {
     insert_history(conn, &genesis, &commit(&genesis, 0)).await;
 }
 
+/// Imported accepted history isolates the classifier; this is not a claim
+/// that producer verification or the complete management HTTP path ran.
+#[tokio::test]
+async fn owned_agent_classification_survives_missing_projections_and_binds_exact_station() {
+    let database = TestDatabase::lease().await;
+    let mut conn = database.pool().get().await.unwrap();
+    seed_genesis(&mut conn).await;
+    let agent = arkret_wire::AccountId::new(
+        "ak:did_core:web:agent.example".parse().unwrap(),
+        "ak:did_core:web:station.example".parse().unwrap(),
+    );
+    let provision = event(
+        EventKind::AgentProvision,
+        json!({
+            "schema":"ak.schema.agent_provision.v1", "agent_id":agent.principal_id,
+            "controller_principal_id":"ak:did_core:web:controller.example",
+            "principal_control_realm_id":realm(),
+            "controller_authorization_ref":"did:web:agent.example#managed-controller",
+            "agent_slug":"classification-agent", "accountability_scope":"agent_operator",
+            "requested_scope_digest":format!("sha256:{}","b".repeat(64)),
+            "selector_visibility":"private", "created_at":"2026-10-05T12:00:01.000Z"
+        }),
+        1,
+    );
+    let payload: arkret_models_collaboration::events_payloads::agent::AgentProvisionPayload =
+        serde_json::from_value(json!(provision.payload)).unwrap();
+    payload.validate().unwrap();
+    payload.validate_envelope(&provision).unwrap();
+    let classification = crate::realm_authorization_cut::is_owned_agent_in_connection;
+    assert!(!classification(&mut conn, &realm(), &agent).await.unwrap());
+    insert_history(&mut conn, &provision, &commit(&provision, 1)).await;
+    assert!(classification(&mut conn, &realm(), &agent).await.unwrap());
+    let mut foreign = agent.clone();
+    foreign.station_id = "ak:did_core:web:foreign.example".parse().unwrap();
+    assert!(!classification(&mut conn, &realm(), &foreign).await.unwrap());
+    assert!(
+        !classification(
+            &mut conn,
+            &realm(),
+            provision.actor_id.as_account_id().unwrap()
+        )
+        .await
+        .unwrap()
+    );
+    let error = crate::realm_authorization_cut::owned_controller_in_connection(
+        &mut conn,
+        &realm(),
+        &arkret_wire::ActorId::account(agent.clone()),
+        provision.created_at,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("current controller binding is unavailable"),
+        "{error}"
+    );
+    drop(conn);
+    let mut reopened = database.pool().get().await.unwrap();
+    assert!(
+        classification(&mut reopened, &realm(), &agent)
+            .await
+            .unwrap()
+    );
+}
+
 async fn check(
     conn: &mut AsyncPgConnection,
     payload: &PolicySetStatePayload,

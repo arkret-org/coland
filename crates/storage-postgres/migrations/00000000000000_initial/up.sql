@@ -1231,6 +1231,11 @@ CREATE INDEX canonical_events_kind_idx ON public.canonical_events USING btree (k
 
 CREATE INDEX canonical_events_kind_received_idx ON public.canonical_events USING btree (kind, received_at, id);
 
+CREATE INDEX canonical_events_agent_provision_account_idx ON public.canonical_events (
+    ((envelope->'payload'->>'agent_id')),
+    ((envelope->'actor_id'->'account_id'->>'station_id'))
+) WHERE state='committed' AND kind='ak.agent.provision';
+
 CREATE INDEX canonical_events_franking_target_idx ON public.canonical_events USING btree (
     realm_pk,
     actor_id,

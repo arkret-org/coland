@@ -2199,6 +2199,105 @@ async fn provision_owned_agent_with_did(
 /// Storage admission only: accepted controller/Agent units are real; RFC
 /// verification and publication signatures are covered by HTTP/MLS suites.
 #[tokio::test]
+async fn ordinary_member_can_join_own_agent_without_permission_to_add_humans() {
+    use diesel::sql_types::{Bool, Text};
+    use diesel_async::RunQueryDsl;
+
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let station = historical_control_source::HistoricalControlStation::new(
+        "sidecar-native-control",
+        [83; 32],
+    );
+    let principal = accepted_controller(&pool, station.did.clone()).await;
+    let controller = &principal.history.account;
+    let founder = ordinary_realm::human_profile::admit_for_station_did(
+        &pool,
+        station.did.clone(),
+        "agent-self-add-founder",
+    )
+    .await;
+    let realm = ordinary_realm::bootstrap_unit_with_history_for_account(
+        "ordinary-member-agent-self-add",
+        "public",
+        "since_join",
+        &founder,
+        &station.did,
+    );
+    let realm = ordinary_realm::source_bootstrap(&pool, realm).await;
+    PgAuthorityCommitStore { pool: pool.clone() }
+        .admit_ordinary_realm_bootstrap_unit(&realm, realm.transactions[0].commit.committed_at)
+        .await
+        .unwrap();
+    let parent = realm.transactions.last().unwrap();
+    let member_join = ordinary_realm::next_request_for_actor(
+        parent,
+        EventKind::MemberState,
+        arkret_wire::ActorId::account(controller.clone()),
+        serde_json::json!({"member_id":arkret_wire::ActorId::account(controller.clone()),"membership":"join"}),
+        parent.commit.committed_at + chrono::TimeDelta::milliseconds(1),
+    );
+    let member_join = ordinary_realm::source_request(&pool, member_join).await;
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    uow.commit_event(member_join.clone()).await.unwrap();
+    let outsider = ordinary_realm::human_profile::admit_for_station_did(
+        &pool,
+        station.did.clone(),
+        "agent-self-add-human-target",
+    )
+    .await;
+    let human_add = ordinary_realm::next_request_for_actor(
+        &member_join.authority_commit,
+        EventKind::MemberState,
+        arkret_wire::ActorId::account(controller.clone()),
+        serde_json::json!({"member_id":arkret_wire::ActorId::account(outsider.clone()),"membership":"join"}),
+        member_join.authority_commit.commit.committed_at + chrono::TimeDelta::milliseconds(1),
+    );
+    let human_add = ordinary_realm::source_request(&pool, human_add).await;
+    let error = uow.commit_event(human_add).await.unwrap_err();
+    assert!(
+        error.to_string().contains("only the target itself"),
+        "{error}"
+    );
+    let (agent, genesis, _) = provision_owned_agent(&pool, &principal).await;
+    let agent_join = ordinary_realm::next_request_for_actor(
+        &member_join.authority_commit,
+        EventKind::MemberState,
+        arkret_wire::ActorId::account(controller.clone()),
+        serde_json::json!({"member_id":arkret_wire::ActorId::account(agent.clone()),"membership":"join",
+            "agent_controller_binding":{"controller_account_id":controller,
+            "controller_membership_generation_ref":member_join.authority_commit.event.event_id}}),
+        genesis
+            .commit
+            .committed_at
+            .max(member_join.authority_commit.commit.committed_at)
+            + chrono::TimeDelta::milliseconds(1),
+    );
+    let agent_join = ordinary_realm::source_request(&pool, agent_join).await;
+    uow.commit_event(agent_join).await.unwrap();
+    #[derive(diesel::QueryableByName)]
+    struct ResultRow {
+        #[diesel(sql_type = Bool)]
+        correct: bool,
+    }
+    let mut conn = pool.get().await.unwrap();
+    let result = diesel::sql_query(
+        "SELECT EXISTS(SELECT 1 FROM member_state_current_results WHERE realm_id=$1 AND member_id=$2 AND membership='join') \
+         AND NOT EXISTS(SELECT 1 FROM member_state_current_results WHERE realm_id=$1 AND member_id=$3) \
+         AND NOT EXISTS(SELECT 1 FROM capability_grant_current_results WHERE realm_id=$1) AS correct",
+    )
+    .bind::<Text, _>(parent.event.realm_id.as_str())
+    .bind::<Text, _>(arkret_wire::ActorId::account(agent).to_string())
+    .bind::<Text, _>(arkret_wire::ActorId::account(outsider).to_string())
+    .get_result::<ResultRow>(&mut *conn)
+    .await
+    .unwrap();
+    assert!(result.correct);
+}
+
+/// Storage admission only: accepted controller/Agent units are real; RFC
+/// verification and publication signatures are covered by HTTP/MLS suites.
+#[tokio::test]
 async fn administrator_can_remove_agent_without_controller_join_binding() {
     use diesel::sql_types::Text;
     use diesel_async::RunQueryDsl;

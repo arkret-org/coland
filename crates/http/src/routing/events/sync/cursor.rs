@@ -9,6 +9,8 @@ use super::*;
 
 #[derive(Debug, Default)]
 pub struct SyncCursor {
+    /// Validated immutable read inputs, never serialized into a wire cursor.
+    pub input_authorities: Vec<CursorState>,
     /// Visible timeline frontier per Realm.
     pub positions: BTreeMap<String, i64>,
     /// Account aggregate projection frontier per Realm. This is a
@@ -251,6 +253,7 @@ pub async fn sync_token_for_client_sync(
         BTreeMap::new(),
         false,
         None,
+        &[],
     )
     .await
     .expect("test account cursor must persist")
@@ -269,6 +272,7 @@ pub(crate) async fn sync_token_for_account_positions(
     detail_positions: BTreeMap<String, coland_storage::AccountDetailProgress>,
     detail_turn: bool,
     detail_next_realm: Option<String>,
+    input_authorities: &[CursorState],
 ) -> Result<String, SyncCursorError> {
     let issued_at = chrono::Utc::now();
     let (account_id, device_id) = cursor_account_device(state, session);
@@ -335,24 +339,44 @@ pub(crate) async fn sync_token_for_account_positions(
     let expires_at_ms = cursor.expires_at.timestamp_millis();
     state
         .sync()
-        .upsert_cursor(&CursorState {
-            handle: handle.clone(),
-            binding_subject: Some(binding_subject),
-            device_id: Some(device_id),
-            session_id: session.map(|session| session.token_hash.clone()),
-            service_id: DidCoreId::new(state.service_id().clone())
-                .expect("AppState service_id must be a validated DID core id"),
-            filter_digest: Some(filter_digest),
-            purpose: ACCOUNT_STREAM_CURSOR_PURPOSE.to_owned(),
-            positions: Some(positions),
-            target: None,
-            issued_at_ms,
-            expires_at_ms,
-        })
+        .upsert_cursor_with_inputs(
+            &CursorState {
+                handle: handle.clone(),
+                binding_subject: Some(binding_subject),
+                device_id: Some(device_id),
+                session_id: session.map(|session| session.token_hash.clone()),
+                service_id: DidCoreId::new(state.service_id().clone())
+                    .expect("AppState service_id must be a validated DID core id"),
+                filter_digest: Some(filter_digest),
+                purpose: ACCOUNT_STREAM_CURSOR_PURPOSE.to_owned(),
+                positions: Some(positions),
+                target: None,
+                issued_at_ms,
+                expires_at_ms,
+            },
+            input_authorities,
+        )
         .await
         .map_err(|error| {
             tracing::warn!(%error, "account cursor persistence failed");
-            SyncCursorError::Integrity("cannot persist account cursor")
+            match &error {
+                coland_services::ServiceError::Conflict(detail)
+                    if detail.starts_with("cursor_revoked:") =>
+                {
+                    SyncCursorError::Revoked
+                }
+                coland_services::ServiceError::Conflict(detail)
+                    if detail.starts_with("cursor_expired:") =>
+                {
+                    SyncCursorError::Expired
+                }
+                coland_services::ServiceError::Conflict(detail)
+                    if detail.starts_with("cursor_integrity_invalid:") =>
+                {
+                    SyncCursorError::Integrity("input authority changed during issuance")
+                }
+                _ => SyncCursorError::Unavailable("cannot persist account cursor"),
+            }
         })?;
     cursor
         .encode()
@@ -591,6 +615,7 @@ pub(crate) async fn parse_account_cursor(
         .and_then(|position| position.as_i64())
         .unwrap_or_default();
     Ok(SyncCursor {
+        input_authorities: vec![record.clone()],
         positions,
         account_positions,
         to_device_position,
@@ -1074,6 +1099,42 @@ pub(super) async fn account_cursor_revoke(
             revoke_scope_effective: Some(scope),
         },
     )
+}
+
+pub(super) async fn account_input_authorities(
+    state: &AppState,
+    body: &SyncRequestBody,
+    wait_for: Option<&str>,
+) -> Result<Vec<CursorState>, SyncCursorError> {
+    let mut tokens = Vec::new();
+    tokens.extend(body.after.as_deref());
+    tokens.extend(
+        body.realm_list
+            .as_ref()
+            .and_then(|page| page.after.as_ref())
+            .map(|token| token.as_str()),
+    );
+    tokens.extend(wait_for);
+    let mut records = Vec::new();
+    for token in tokens {
+        let cursor = decode_sync_cursor(token, Utc::now().timestamp_millis())?;
+        let record = stored_sync_cursor_record_by_handle(state, &cursor.h).await?;
+        if !records
+            .iter()
+            .any(|entry: &CursorState| entry.handle == record.handle)
+        {
+            records.push(record);
+        }
+    }
+    Ok(records)
+}
+
+pub(super) fn issuance_problem(error: SyncCursorError) -> Box<arkret_wire::Problem> {
+    let error = cursor_revoke_error(error);
+    Box::new(arkret_wire::Problem::from_code(
+        error.wire_code(),
+        "Account read input authority changed during issuance",
+    ))
 }
 
 pub(crate) fn cursor_revoke_error(error: SyncCursorError) -> coland_http::error::AppError {

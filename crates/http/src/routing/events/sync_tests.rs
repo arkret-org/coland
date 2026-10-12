@@ -1778,6 +1778,7 @@ async fn account_cursor_roundtrips_station_cas_replay_position() {
         BTreeMap::new(),
         false,
         None,
+        &[],
     )
     .await
     .expect("account cursor mints");
@@ -1817,6 +1818,7 @@ async fn account_cursor_is_bound_to_its_account_and_filter() {
         BTreeMap::new(),
         false,
         None,
+        &[],
     )
     .await
     .expect("account cursor mints");

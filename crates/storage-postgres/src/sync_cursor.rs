@@ -367,11 +367,20 @@ impl SyncCursorStore for PgSyncCursorStore {
     }
 
     async fn upsert(&self, record: &SyncCursorRecord) -> PersistenceResult<()> {
+        self.upsert_with_inputs(record, &[]).await
+    }
+
+    async fn upsert_with_inputs(
+        &self,
+        record: &SyncCursorRecord,
+        inputs: &[SyncCursorRecord],
+    ) -> PersistenceResult<()> {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
         let floors = retention::cursor_floors(record)?;
         conn.transaction::<_, crate::PgTransactionError, _>(async |conn| {
+            sql_query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED").execute(&mut *conn).await?;
             if let Some((summary, global)) = floors {
                 retention::check(conn, Some(summary), Some(global)).await?;
             }
@@ -409,6 +418,7 @@ impl SyncCursorStore for PgSyncCursorStore {
             if written != 1 {
                 return Err(PersistenceError::Conflict("cursor issuance is immutable".into()).into());
             }
+            validate_issuance_inputs(conn, inputs).await?;
             retention::save_cursor(conn, record, floors).await?;
             Ok(())
         }).await.map_err(crate::PgTransactionError::into_persistence)
@@ -434,6 +444,10 @@ impl SyncCursorStore for PgSyncCursorStore {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
+        conn.transaction::<_,crate::PgTransactionError,_>(async |conn| {
+            sql_query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED").execute(&mut *conn).await?;
+            let subject=String::from_utf8(arkret_canonical::canonical_json_bytes(&record.account_id).map_err(PersistenceError::database)?).map_err(PersistenceError::database)?;
+            sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))").bind::<Text,_>(format!("cursor-authority:{subject}")).execute(&mut *conn).await?;
         // Opportunistic TTL sweep on every write keeps the ledger bounded by
         // the stream TTL cap, independently of consumer-side reads.
         sql_query("DELETE FROM sync_cursor_revocations WHERE expires_at <= $1")
@@ -456,9 +470,9 @@ impl SyncCursorStore for PgSyncCursorStore {
         .bind::<Timestamptz, _>(record.revoked_at)
         .bind::<Timestamptz, _>(record.expires_at)
         .execute(&mut *conn)
-        .await
-        .map(|_| ())
-        .map_err(PersistenceError::database)
+        .await?;
+        Ok(())
+        }).await.map_err(crate::PgTransactionError::into_persistence)
     }
 
     async fn active_revocations(
@@ -480,6 +494,66 @@ impl SyncCursorStore for PgSyncCursorStore {
         Ok(rows.into_iter().map(CursorRevocation::from).collect())
     }
 }
+async fn validate_issuance_inputs(
+    conn: &mut super::AsyncPgConnection,
+    inputs: &[SyncCursorRecord],
+) -> Result<(), crate::PgTransactionError> {
+    let subjects = inputs
+        .iter()
+        .filter_map(|input| input.binding_subject.as_deref())
+        .collect::<std::collections::BTreeSet<_>>();
+    for subject in subjects {
+        sql_query("SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))")
+            .bind::<Text, _>(format!("cursor-authority:{subject}"))
+            .execute(&mut *conn)
+            .await?;
+    }
+    let now = Utc::now();
+    for input in inputs {
+        if now.timestamp_millis() >= input.expires_at_ms {
+            return Err(PersistenceError::Conflict(
+                "cursor_expired: input authority expired during issuance".to_owned(),
+            )
+            .into());
+        }
+        let current: SyncCursorRecord=sql_query("SELECT id AS handle,binding_subject,device_id,session_id,service_id,filter_digest,purpose,positions,target,issued_at_ms,expires_at_ms FROM sync_cursor_handles WHERE id=$1")
+            .bind::<Text,_>(&input.handle).get_result::<SyncCursorRow>(&mut *conn).await.optional()?.map(SyncCursorRecord::from)
+            .ok_or_else(||PersistenceError::Conflict("cursor_integrity_invalid: input issuance is absent".to_owned()))?;
+        if input != &current {
+            return Err(PersistenceError::Conflict(
+                "cursor_integrity_invalid: input issuance changed".to_owned(),
+            )
+            .into());
+        }
+        let Some(subject) = input.binding_subject.as_deref() else {
+            continue;
+        };
+        let Ok(account) = serde_json::from_str::<arkret_wire::AccountId>(subject) else {
+            continue;
+        };
+        let entries=sql_query("SELECT cursor_digest,account_id,device_id,session_id,scope,reason_code,revoked_at,expires_at FROM sync_cursor_revocations WHERE account_id=$1 AND expires_at>$2")
+            .bind::<Jsonb,_>(serde_json::to_value(&account).map_err(PersistenceError::database)?).bind::<Timestamptz,_>(now).load::<CursorRevocationRow>(&mut *conn).await?;
+        let digest = arkret_canonical::sha256_hex(input.handle.as_bytes());
+        let revoked = entries.iter().any(|entry| match entry.scope.as_str() {
+            "this_cursor" => entry.cursor_digest == digest,
+            "same_device" => entry.device_id == input.device_id,
+            "same_session" => {
+                entry.device_id == input.device_id
+                    && input.session_id.is_some()
+                    && entry.session_id == input.session_id
+            }
+            _ => false,
+        });
+        if revoked {
+            return Err(PersistenceError::Conflict(
+                "cursor_revoked: input authority revoked during issuance".to_owned(),
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 #[derive(QueryableByName)]
 struct CursorRevocationRow {
     #[diesel(sql_type = Text)]

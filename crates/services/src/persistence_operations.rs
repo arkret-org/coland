@@ -656,6 +656,18 @@ impl crate::sync::CursorStorePort for PersistenceCursorStore {
         Ok(())
     }
 
+    async fn upsert_with_inputs(
+        &self,
+        record: &crate::sync::CursorState,
+        inputs: &[crate::sync::CursorState],
+    ) -> crate::ServiceResult<()> {
+        self.0
+            .sync_cursors()
+            .upsert_with_inputs(record, inputs)
+            .await?;
+        Ok(())
+    }
+
     async fn delete(&self, handle: &str) -> crate::ServiceResult<bool> {
         Ok(self.0.sync_cursors().delete(handle).await?)
     }

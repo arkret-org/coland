@@ -567,13 +567,14 @@ pub(super) async fn frame(
         positions,
         false,
         last_realm,
+        &after.input_authorities,
     )
     .await
     {
         Ok(cursor) => cursor,
         Err(error) => {
             tracing::warn!(?error, "Realm detail continuation unavailable");
-            return Err(Box::new(continuation_unavailable()));
+            return Err(cursor::issuance_problem(error));
         }
     };
     let frame = AccountSubscribeFrame {

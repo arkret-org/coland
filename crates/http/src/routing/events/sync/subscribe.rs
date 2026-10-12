@@ -137,7 +137,7 @@ pub(super) async fn account_response(
     if reject_subscribe_reconnect(&state, &subscribe_scope_key, res) {
         return;
     }
-    let after_cursor = if let Some(after) = body.after.as_deref() {
+    let mut after_cursor = if let Some(after) = body.after.as_deref() {
         match cursor::parse_account_cursor(
             after,
             &state,
@@ -363,10 +363,21 @@ pub(super) async fn account_response(
         render_account_cursor_error(res, error, false);
         return;
     }
+    after_cursor.input_authorities =
+        match cursor::account_input_authorities(&state, &body, wait_for_token.as_deref()).await {
+            Ok(records) => records,
+            Err(error) => {
+                render_account_cursor_error(res, error, false);
+                return;
+            }
+        };
     let response = match build_sync_snapshot(&state, Some(&session), &body, &after_cursor).await {
         Ok(response) => response,
         Err(problem) => {
-            crate::error::render_problem_envelope(res, StatusCode::SERVICE_UNAVAILABLE, *problem);
+            let status = arkret_wire::ErrorCode::from_wire(problem.code())
+                .map(coland_http::error::error_http_status)
+                .unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
+            crate::error::render_problem_envelope(res, status, *problem);
             return;
         }
     };

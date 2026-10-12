@@ -51,6 +51,19 @@ pub trait CursorStorePort: Send + Sync {
     ) -> ServiceResult<Vec<coland_storage::AccountSummaryVersion>>;
     async fn get(&self, handle: &str) -> ServiceResult<Option<CursorState>>;
     async fn upsert(&self, record: &CursorState) -> ServiceResult<()>;
+    async fn upsert_with_inputs(
+        &self,
+        record: &CursorState,
+        inputs: &[CursorState],
+    ) -> ServiceResult<()> {
+        if inputs.is_empty() {
+            return self.upsert(record).await;
+        }
+        Err(crate::ServiceError::Internal(
+            "atomic cursor input validation is unavailable".to_owned(),
+        ))
+    }
+
     async fn delete(&self, handle: &str) -> ServiceResult<bool>;
 
     async fn prune_expired(&self, now_ms: i64) -> ServiceResult<usize>;
@@ -252,6 +265,14 @@ impl SyncService {
 
     pub async fn upsert_cursor(&self, record: &CursorState) -> ServiceResult<()> {
         self.cursors.upsert(record).await
+    }
+
+    pub async fn upsert_cursor_with_inputs(
+        &self,
+        record: &CursorState,
+        inputs: &[CursorState],
+    ) -> ServiceResult<()> {
+        self.cursors.upsert_with_inputs(record, inputs).await
     }
 
     pub async fn delete_cursor(&self, handle: &str) -> ServiceResult<bool> {

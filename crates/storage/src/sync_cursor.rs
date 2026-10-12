@@ -110,6 +110,21 @@ pub trait SyncCursorStore: Send + Sync {
     ) -> PersistenceResult<Vec<AccountSummaryVersion>>;
     async fn get(&self, handle: &str) -> PersistenceResult<Option<SyncCursorRecord>>;
     async fn upsert(&self, record: &SyncCursorRecord) -> PersistenceResult<()>;
+    /// Atomically install an issuance only while all previously validated
+    /// immutable input instances remain current and unrevoked.
+    async fn upsert_with_inputs(
+        &self,
+        record: &SyncCursorRecord,
+        inputs: &[SyncCursorRecord],
+    ) -> PersistenceResult<()> {
+        if inputs.is_empty() {
+            return self.upsert(record).await;
+        }
+        Err(super::PersistenceError::Internal(
+            "atomic cursor input validation is unavailable".to_owned(),
+        ))
+    }
+
     /// Delete one handle (cursor revoke).
     async fn delete(&self, handle: &str) -> PersistenceResult<bool>;
 

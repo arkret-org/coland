@@ -233,13 +233,14 @@ async fn build_global_sync_snapshot(
         after_cursor.detail_positions.clone(),
         true,
         after_cursor.detail_next_realm.clone(),
+        &after_cursor.input_authorities,
     )
     .await;
     let cursor = match cursor {
         Ok(cursor) => cursor,
         Err(error) => {
             tracing::error!(?error, "account continuation unavailable");
-            return Err(account_unavailable());
+            return Err(cursor::issuance_problem(error));
         }
     };
     let response = arkret_models_collaboration::sync_frames::account_subscribe::AccountSubscribeFrame {

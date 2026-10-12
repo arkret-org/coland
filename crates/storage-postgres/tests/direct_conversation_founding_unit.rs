@@ -855,6 +855,16 @@ async fn direct_founding_members_read_exact_genesis_and_unmatched_slot_keeps_joi
         panic!("actual founding must commit");
     };
     let realm = realm_of(&unit);
+    let stream = arkret_wire::CommitStreamRef::Realm {
+        realm_id: realm.clone(),
+    };
+    let readers = store
+        .replica_bootstrap_readers(&stream, &pair.station)
+        .await
+        .unwrap();
+    assert_eq!(readers.len(), 2);
+    assert!(readers.contains(&(pair.founder.clone(), commits[1].clone())));
+    assert!(readers.contains(&(pair.peer.clone(), commits[2].clone())));
     for account in [&pair.founder, &pair.peer] {
         let page = exact_genesis_scan(&store, &realm, account, &pair.station).await;
         let floor = page.readable_floor.unwrap();
@@ -933,6 +943,12 @@ async fn direct_founding_members_read_exact_genesis_and_unmatched_slot_keeps_joi
     .await
     .unwrap();
     drop(conn);
+    assert!(
+        store
+            .replica_bootstrap_readers(&stream, &pair.station)
+            .await
+            .is_err()
+    );
     for account in [&pair.founder, &pair.peer] {
         let page = exact_genesis_scan(&store, &realm, account, &pair.station).await;
         assert!(page.committed_events.is_empty());
@@ -980,6 +996,12 @@ async fn direct_founding_members_read_exact_genesis_and_unmatched_slot_keeps_joi
     .unwrap();
     drop(conn);
     let page = exact_genesis_scan(&store, &realm, &pair.founder, &pair.station).await;
+    assert!(
+        store
+            .replica_bootstrap_readers(&stream, &pair.station)
+            .await
+            .is_err()
+    );
     assert!(page.committed_events.is_empty());
     let floor = page.readable_floor.unwrap();
     assert_eq!(
@@ -1675,6 +1697,18 @@ async fn peer_founding_missing_contact_dependency_writes_nothing() {
         .unwrap()
         .unwrap();
     assert_eq!(origin_bootstrap, snapshot);
+    assert_eq!(
+        peer_store
+            .replica_bootstrap_readers(
+                &arkret_wire::CommitStreamRef::Realm {
+                    realm_id: realm_id.clone(),
+                },
+                &peer_station,
+            )
+            .await
+            .unwrap(),
+        vec![(pair.peer.clone(), unit.transactions[2].commit.clone())]
+    );
     assert_eq!(
         peer_store
             .member_station_bootstrap_floor(
@@ -3901,6 +3935,17 @@ async fn participant_authority_scenario() {
         .await;
         uow.commit_event(rejoin.clone()).await.unwrap();
         let head = rejoin.authority_commit.clone();
+        let readers = store
+            .replica_bootstrap_readers(
+                &arkret_wire::CommitStreamRef::Realm {
+                    realm_id: realm_id.clone(),
+                },
+                &pair.station,
+            )
+            .await
+            .unwrap();
+        assert!(readers.contains(&(pair.peer.clone(), head.commit.clone())));
+        assert!(!readers.contains(&(pair.peer.clone(), unit.transactions[2].commit.clone())));
         let rejoin_history = exact_genesis_scan(&store, &realm_id, &pair.peer, &pair.station).await;
         assert!(rejoin_history.committed_events.is_empty());
         let rejoin_floor = rejoin_history.readable_floor.unwrap();

@@ -509,16 +509,7 @@ pub(super) async fn bootstrap_readers_in_connection(
         let event: arkret_wire::Event = serde_json::from_value(row.envelope).map_err(invalid)?;
         let commit: arkret_wire::RealmCommit =
             serde_json::from_value(row.commit_json).map_err(invalid)?;
-        let own_join = event.actor_id == actor && match event.kind {
-            arkret_wire::EventKind::InviteAccept => matches!(stream, arkret_wire::CommitStreamRef::Realm { .. }),
-            arkret_wire::EventKind::MemberState => serde_json::from_value::<arkret_models_collaboration::governance::membership_invite::MembershipPayload>(serde_json::to_value(&event.payload).map_err(invalid)?)
-                .map_err(invalid).map(|payload| payload.member_id == actor && payload.membership == arkret_models_collaboration::governance::membership_invite::MembershipPayloadState::Join)?,
-            arkret_wire::EventKind::CircleMemberState => event.payload.get("membership").and_then(Value::as_str) == Some("join")
-                && event.payload.get("member_id").and_then(|value| serde_json::from_value::<arkret_wire::ActorId>(value.clone()).ok()).as_ref() == Some(&actor),
-            _ => false,
-        };
-        if !own_join
-            || commit.event_ref != event.event_id
+        if commit.event_ref != event.event_id
             || &commit.stream_ref != stream
             || &commit.realm_id != stream.realm_id()
             || event.realm_id != commit.realm_id
@@ -529,6 +520,51 @@ pub(super) async fn bootstrap_readers_in_connection(
             .map_err(invalid)?
                 != *stream
         {
+            return Err(invalid("bootstrap reader has no exact accepted own join").into());
+        }
+        let own_join = match event.kind {
+            arkret_wire::EventKind::InviteAccept => {
+                event.actor_id == actor
+                    && matches!(stream, arkret_wire::CommitStreamRef::Realm { .. })
+            }
+            arkret_wire::EventKind::MemberState => {
+                let payload = serde_json::from_value::<
+                    arkret_models_collaboration::governance::membership_invite::MembershipPayload,
+                >(
+                    serde_json::to_value(&event.payload).map_err(invalid)?
+                )
+                .map_err(invalid)?;
+                payload.member_id == actor
+                    && payload.membership
+                        == arkret_models_collaboration::governance::membership_invite::MembershipPayloadState::Join
+                    && (event.actor_id == actor
+                        // Direct founders accept both member joins atomically.
+                        // Only the complete registered unit can establish a
+                        // current join signed by the other founding member.
+                        || crate::account_stream_scan::registered_atomic_join_in_connection(
+                            conn,
+                            &commit.realm_id,
+                            stream,
+                            commit.commit_id.as_str(),
+                            i64::try_from(commit.stream_position).map_err(invalid)?,
+                        )
+                        .await?)
+            }
+            arkret_wire::EventKind::CircleMemberState => {
+                event.actor_id == actor
+                    && event.payload.get("membership").and_then(Value::as_str) == Some("join")
+                    && event
+                        .payload
+                        .get("member_id")
+                        .and_then(|value| {
+                            serde_json::from_value::<arkret_wire::ActorId>(value.clone()).ok()
+                        })
+                        .as_ref()
+                        == Some(&actor)
+            }
+            _ => false,
+        };
+        if !own_join {
             return Err(invalid("bootstrap reader has no exact accepted own join").into());
         }
         readers.push((account.clone(), commit));

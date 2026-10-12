@@ -130,6 +130,20 @@ async fn views(
         if circle.id.as_ref() != Some(&id) {
             return Err(corrupt("Circle current differs from its selector"));
         }
+        // The parent terminal Commit closes this live convenience surface.
+        // Keep Circle canonical lifecycle, membership and scope unchanged;
+        // authorized retained history uses the separate committed read ports.
+        let terminal = diesel::sql_query(
+            "SELECT EXISTS(SELECT 1 FROM realm_bootstrap_current_results \
+             WHERE realm_id=$1 AND result_family IN ('realm_tombstone','realm_destroy')) AS present",
+        )
+        .bind::<Text, _>(circle.realm_id.as_str())
+        .get_result::<crate::ExistsRow>(&mut *conn)
+        .await
+        .map_err(PersistenceError::database)?;
+        if terminal.present {
+            continue;
+        }
         if let Some(create) = covering_event(row.envelope, row.commit_json, row.verified_current)? {
             let mut payload: arkret_models_collaboration::events_payloads::circle::CircleCreatePayload =
             serde_json::from_value(serde_json::json!(&create.payload)).map_err(corrupt)?;

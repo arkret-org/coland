@@ -12,6 +12,8 @@ pub(crate) mod notify;
 pub(crate) mod operations;
 pub(crate) mod projection;
 pub(super) mod projection_query;
+#[cfg(test)]
+pub(crate) use projection_query::structural_navigation_available;
 pub(crate) mod strand;
 pub(crate) mod sync;
 

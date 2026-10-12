@@ -1018,7 +1018,7 @@ impl ProjectionState {
                 // Station hydrating from facets alone can distinguish
                 // migration from destroy.
                 let value = serde_json::json!({
-                    "terminal_kind": "tombstoned",
+                    "terminal_kind": "tombstone",
                     "tombstoned": true,
                     "successor_realm_id": payload_successor_realm_id,
                     "at": arkret_canonical::format_timestamp_canonical(now),
@@ -1030,7 +1030,7 @@ impl ProjectionState {
             arkret_wire::EventKind::RealmDestroy => {
                 // Terminal facet: {destroyed: true, at: ts}.
                 let value = serde_json::json!({
-                    "terminal_kind": "destroyed",
+                    "terminal_kind": "destroy",
                     "destroyed": true,
                     "at": arkret_canonical::format_timestamp_canonical(now),
                     "operation_id": operation.operation_id.as_str(),

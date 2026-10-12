@@ -488,6 +488,14 @@ async fn joined_holder_terminal_real_fanout_signed_http_and_atomic_fence() {
         .unwrap(),
     );
     // Fail after canonical/current writes, proving the fanout is in that same transaction.
+    assert!(
+        crate::routing::events::structural_navigation_available(
+            &source.state,
+            terminal.authority_commit.event.realm_id.as_str()
+        )
+        .await
+        .unwrap()
+    );
     execute(&source.pool, "CREATE OR REPLACE FUNCTION reject_terminal_intent() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'terminal fanout rollback'; END $$").await;
     execute(&source.pool, "CREATE TRIGGER reject_terminal_intent BEFORE INSERT ON federation_outbox FOR EACH ROW EXECUTE FUNCTION reject_terminal_intent()").await;
     let before = terminal_persistent_rows(&source.pool).await;
@@ -500,6 +508,14 @@ async fn joined_holder_terminal_real_fanout_signed_http_and_atomic_fence() {
     .await;
     execute(&source.pool, "DROP FUNCTION reject_terminal_intent()").await;
     Box::pin(uow.commit_event(terminal.clone())).await.unwrap();
+    assert!(
+        !crate::routing::events::structural_navigation_available(
+            &source.state,
+            terminal.authority_commit.event.realm_id.as_str()
+        )
+        .await
+        .unwrap()
+    );
     let accepted = terminal_persistent_rows(&source.pool).await;
     let intent = fanout_row(&accepted, &terminal.authority_commit.commit.commit_id);
     assert_eq!(intent["state"], "pending");
@@ -607,6 +623,14 @@ async fn joined_holder_terminal_real_fanout_signed_http_and_atomic_fence() {
     .unwrap();
     assert_eq!(installed.event, terminal.authority_commit.event);
     assert_eq!(installed.commit, terminal.authority_commit.commit);
+    assert!(
+        !crate::routing::events::structural_navigation_available(
+            &receiver.state,
+            terminal.authority_commit.event.realm_id.as_str()
+        )
+        .await
+        .unwrap()
+    );
     let before = terminal_persistent_rows(&receiver.pool).await;
     assert!(
         before["realm_bootstrap_current_results"]

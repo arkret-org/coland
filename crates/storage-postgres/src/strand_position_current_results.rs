@@ -29,19 +29,31 @@ struct ListRow {
     space_position: i64,
     #[diesel(sql_type = Jsonb)]
     space: Value,
-    #[diesel(sql_type = Text)]
-    parent_commit_id: String,
     #[diesel(sql_type = BigInt)]
     parent_position: i64,
     #[diesel(sql_type = Jsonb)]
     parent: Value,
-    #[diesel(sql_type = Text)]
-    policy_commit_id: String,
     #[diesel(sql_type = BigInt)]
     policy_position: i64,
     #[diesel(sql_type = Jsonb)]
     policy: Value,
 }
+
+const LIST_CURRENT_SQL: &str = "SELECT s.realm_id,s.current_commit_id AS space_commit_id, \
+    s.current_stream_position AS space_position,s.value AS space, \
+    p.current_stream_position AS parent_position,p.value AS parent, \
+    c.current_stream_position AS policy_position,c.value AS policy \
+    FROM space_current_results s \
+    JOIN space_parent_current_results p ON p.space_id=s.space_id AND p.realm_id=s.realm_id \
+    JOIN space_child_scope_policy_current_results c ON c.space_id=s.space_id AND c.realm_id=s.realm_id \
+    JOIN realm_commits rc ON rc.commit_id=s.current_commit_id AND rc.realm_id=s.realm_id \
+        AND rc.stream_position=s.current_stream_position \
+    JOIN realm_commits pc ON pc.commit_id=p.current_commit_id AND pc.realm_id=p.realm_id \
+        AND pc.stream_position=p.current_stream_position AND pc.stream_ref=rc.stream_ref \
+    JOIN realm_commits qc ON qc.commit_id=c.current_commit_id AND qc.realm_id=c.realm_id \
+        AND qc.stream_position=c.current_stream_position AND qc.stream_ref=rc.stream_ref \
+    WHERE s.space_id=$1 AND rc.stream_ref->>'kind'='realm' \
+        AND rc.stream_ref->>'realm_id'=s.realm_id FOR SHARE OF s,p,c";
 
 #[derive(diesel::QueryableByName)]
 struct PositionRow {
@@ -163,17 +175,22 @@ pub(crate) async fn commit_authority_position_in_connection(
     {
         return Err(refused("space_not_active"));
     }
-    let list = diesel::sql_query("SELECT s.realm_id,s.current_commit_id AS space_commit_id,s.current_stream_position AS space_position,s.value AS space, p.current_commit_id AS parent_commit_id,p.current_stream_position AS parent_position,p.value AS parent, c.current_commit_id AS policy_commit_id,c.current_stream_position AS policy_position,c.value AS policy FROM space_current_results s JOIN space_parent_current_results p ON p.space_id=s.space_id AND p.realm_id=s.realm_id JOIN space_child_scope_policy_current_results c ON c.space_id=s.space_id AND c.realm_id=s.realm_id JOIN realm_commits rc ON rc.commit_id=s.current_commit_id AND rc.realm_id=s.realm_id AND rc.stream_position=s.current_stream_position WHERE s.space_id=$1 AND rc.stream_ref->>'kind'='realm' AND rc.stream_ref->>'realm_id'=s.realm_id FOR SHARE OF s,p,c")
-        .bind::<Text,_>(destination.as_str()).get_result::<ListRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+    // Metadata, parent and child policy have independent registered writers.
+    // Read them at this locked cut and prove each family's own source Commit;
+    // a legal reparent need not rewrite metadata or policy at its new revision.
+    let list = diesel::sql_query(LIST_CURRENT_SQL)
+        .bind::<Text, _>(destination.as_str())
+        .get_result::<ListRow>(&mut *conn)
+        .await
+        .optional()
+        .map_err(PersistenceError::database)?
         .ok_or_else(|| refused("placement List is absent or incomplete"))?;
     if list.realm_id != event.realm_id.as_str() {
         return Err(refused("space_realm_mismatch"));
     }
     if list.space_position >= position
-        || list.space_commit_id != list.parent_commit_id
-        || list.space_commit_id != list.policy_commit_id
-        || list.space_position != list.parent_position
-        || list.space_position != list.policy_position
+        || list.parent_position >= position
+        || list.policy_position >= position
         || list.space.get("kind") != Some(&json!("list"))
         || list.space.get("state") != Some(&json!("active"))
         || list
@@ -231,15 +248,17 @@ pub(crate) async fn commit_authority_position_in_connection(
     if let Some(source) = current.as_ref().map(|value| &value.list_space_id) {
         // A tombstoned source can be repaired by moving out, but the source
         // must still be an actual List within this Board and Realm.
-        let source_row = diesel::sql_query("SELECT s.realm_id,s.current_commit_id AS space_commit_id,s.current_stream_position AS space_position,s.value AS space,p.current_commit_id AS parent_commit_id,p.current_stream_position AS parent_position,p.value AS parent,c.current_commit_id AS policy_commit_id,c.current_stream_position AS policy_position,c.value AS policy FROM space_current_results s JOIN space_parent_current_results p ON p.space_id=s.space_id AND p.realm_id=s.realm_id JOIN space_child_scope_policy_current_results c ON c.space_id=s.space_id AND c.realm_id=s.realm_id JOIN realm_commits rc ON rc.commit_id=s.current_commit_id AND rc.realm_id=s.realm_id AND rc.stream_position=s.current_stream_position WHERE s.space_id=$1 AND rc.stream_ref->>'kind'='realm' AND rc.stream_ref->>'realm_id'=s.realm_id FOR SHARE OF s,p,c")
-            .bind::<Text,_>(source.as_str()).get_result::<ListRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+        let source_row = diesel::sql_query(LIST_CURRENT_SQL)
+            .bind::<Text, _>(source.as_str())
+            .get_result::<ListRow>(&mut *conn)
+            .await
+            .optional()
+            .map_err(PersistenceError::database)?
             .ok_or_else(|| refused("source List is absent or incomplete"))?;
         if source_row.realm_id != event.realm_id.as_str()
             || source_row.space_position >= position
-            || source_row.space_commit_id != source_row.parent_commit_id
-            || source_row.space_commit_id != source_row.policy_commit_id
-            || source_row.space_position != source_row.parent_position
-            || source_row.space_position != source_row.policy_position
+            || source_row.parent_position >= position
+            || source_row.policy_position >= position
             || source_row.space.get("kind") != Some(&json!("list"))
             || source_row.parent != json!({"parent_space_id":board})
             || source_row

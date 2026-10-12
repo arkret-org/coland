@@ -134,6 +134,63 @@ pub(crate) async fn commit_realm_profile_current_result_in_connection(
     advance_singleton(conn, event, commit, "realm_profile", &value).await
 }
 
+/// A later declaration replaces the complete plaintext-service value under
+/// the ordinary same-cut capability/lifecycle rules, never a bootstrap bypass.
+pub(crate) async fn commit_plaintext_services_authority_current_result_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    commit: &arkret_wire::RealmCommit,
+) -> PersistenceResult<()> {
+    if event.kind != arkret_wire::EventKind::RealmPlaintextVisibleServices {
+        return Ok(());
+    }
+    crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
+        conn,
+        event,
+        commit.committed_at,
+    )
+    .await?;
+    commit_plaintext_services_current_result_in_connection(conn, event, commit).await
+}
+
+/// Replication consumes the accepted declaration without repeating admission.
+pub(crate) async fn commit_plaintext_services_current_result_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    commit: &arkret_wire::RealmCommit,
+) -> PersistenceResult<()> {
+    if event.kind != arkret_wire::EventKind::RealmPlaintextVisibleServices {
+        return Ok(());
+    }
+    arkret_schema::validate_event_for_submit(event)
+        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+    if event.scope_ref
+        != (arkret_wire::ScopeRef::Realm {
+            realm_id: event.realm_id.clone(),
+        })
+        || commit.stream_ref
+            != (arkret_wire::CommitStreamRef::Realm {
+                realm_id: event.realm_id.clone(),
+            })
+        || commit.realm_id != event.realm_id
+        || commit.event_ref != event.event_id
+    {
+        return Err(PersistenceError::Conflict(
+            "failed_precondition: plaintext services require their exact Realm Event and Commit"
+                .into(),
+        ));
+    }
+    let policy = typed_payload(event, EventPayloadExt::as_realm_plaintext_visible_services)?;
+    advance_singleton(
+        conn,
+        event,
+        commit,
+        "realm_plaintext_visible_services",
+        &result_value(&policy)?,
+    )
+    .await
+}
+
 /// Read-receipt disclosure is a separate Realm current family; it does not
 /// alter the policy bundle or the MLS key-access revision.
 pub(crate) async fn commit_read_receipt_policy_authority_current_result_in_connection(

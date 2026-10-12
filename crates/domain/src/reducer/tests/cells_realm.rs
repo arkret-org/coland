@@ -542,6 +542,13 @@ fn realm_tombstone_writes_the_tombstone_facet_and_successor() {
         Some(successor)
     );
     assert!(state.realm_is_tombstoned(realm_id));
+    assert_eq!(
+        state
+            .realm_facet_value(realm_id, facet::REALM_TOMBSTONE)
+            .and_then(|value| value.get("terminal_kind"))
+            .and_then(Value::as_str),
+        Some("tombstone")
+    );
     assert!(state.realm_is_in_terminal_state(realm_id));
     assert!(!state.realm_is_destroyed(realm_id));
 }

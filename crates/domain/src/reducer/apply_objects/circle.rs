@@ -427,7 +427,9 @@ impl ProjectionState {
     /// Strand / Space / Morph writes against it.
     pub fn circle(&self, circle_id: &str) -> Option<&CircleProjection> {
         let circle = self.circles.get(circle_id)?;
-        (circle.state != CircleLifecycleState::Tombstoned).then_some(circle)
+        (circle.state != CircleLifecycleState::Tombstoned
+            && !self.realm_is_in_terminal_state(&circle.realm_id))
+        .then_some(circle)
     }
 
     /// AKP-0007 — list all live Circles bound to `realm_id`. Excludes
@@ -437,13 +439,19 @@ impl ProjectionState {
     pub fn circles_for_realm(&self, realm_id: &str) -> Vec<&CircleProjection> {
         self.circles
             .values()
-            .filter(|c| c.realm_id == realm_id && c.state != CircleLifecycleState::Tombstoned)
+            .filter(|c| {
+                c.realm_id == realm_id
+                    && c.state != CircleLifecycleState::Tombstoned
+                    && !self.realm_is_in_terminal_state(realm_id)
+            })
             .collect()
     }
 
     pub fn circle_scope_visible_to_actor(&self, circle_id: &str, actor: &str) -> bool {
         self.circles.get(circle_id).is_some_and(|circle| {
-            circle.state != CircleLifecycleState::Tombstoned && circle.members.contains(actor)
+            circle.state != CircleLifecycleState::Tombstoned
+                && !self.realm_is_in_terminal_state(&circle.realm_id)
+                && circle.members.contains(actor)
         })
     }
 

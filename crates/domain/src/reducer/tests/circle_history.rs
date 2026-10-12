@@ -72,6 +72,37 @@ fn circle_lifecycle_reads_canonical_target_ref() {
 }
 
 #[test]
+fn parent_terminal_suppresses_live_circle_without_rewriting_canonical_lifecycle() {
+    let (mut state, hlc, _) = seed_state("since_join");
+    state
+        .circles
+        .get_mut(CIRCLE)
+        .unwrap()
+        .members
+        .insert(account_actor_string(ALICE));
+    assert!(state.circle(CIRCLE).is_some());
+    assert_eq!(state.circles_for_realm(REALM).len(), 1);
+    assert!(state.circle_scope_visible_to_actor(CIRCLE, &account_actor_string(ALICE)));
+    let canonical = state.circles.get(CIRCLE).unwrap().clone();
+    // This cache consumes an accepted terminal; durable acceptance is proved by
+    // the real PG writer and signed peer tests, not by this local projection.
+    state.set_realm_facet(REALM, facet::REALM_TOMBSTONE,
+        serde_json::json!({"terminal_kind":"tombstone","successor_realm_id":"ak:realm:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb"}));
+    assert!(state.circle(CIRCLE).is_none());
+    assert!(state.circles_for_realm(REALM).is_empty());
+    assert!(!state.circle_scope_visible_to_actor(CIRCLE, &account_actor_string(ALICE)));
+    assert_eq!(state.circles.get(CIRCLE).unwrap(), &canonical);
+    let restore = make_operation(
+        arkret_wire::EventKind::CircleRestore,
+        REALM,
+        serde_json::json!({"target_ref":CIRCLE}),
+    );
+    assert!(
+        matches!(state.apply(&restore, &hlc), ProjectionEffect::Rejected { reason } if reason == "failed_precondition")
+    );
+}
+
+#[test]
 fn circle_history_uses_current_join_boundary() {
     let (mut state, hlc, base) = seed_state("since_join");
     let knock_at = base + Duration::minutes(10);

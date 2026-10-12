@@ -121,6 +121,30 @@ fn parse_projection_actor(value: &str, field: &str) -> Result<arkret_wire::Actor
         .map_err(|_| AppError::internal(format!("invalid {field} in projection state")))
 }
 
+/// Parent lifecycle for live structural navigation, from durable current only.
+pub(crate) async fn structural_navigation_available(
+    state: &AppState,
+    realm_id: &str,
+) -> Result<bool, AppError> {
+    let realm = parse_projection_id::<arkret_wire::RealmId>(realm_id, "Realm id")?;
+    let material = state
+        .authority_commits()
+        .realm_state_snapshot_material(&realm)
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    Ok(material.is_some_and(|snapshot| {
+        !snapshot.current_state_entries.iter().any(|row| {
+            matches!(
+                row,
+                arkret_wire::TypedCurrentRow::Value {
+                    selector: arkret_wire::CurrentSelector::RealmTombstone,
+                    ..
+                }
+            )
+        })
+    }))
+}
+
 fn total_count(len: usize) -> Result<u64, AppError> {
     u64::try_from(len).map_err(|_| AppError::internal("projection row count overflow"))
 }
@@ -1629,9 +1653,26 @@ async fn list_relation_projections(
     );
 
     let mut items = Vec::new();
+    let mut structural_realms = BTreeMap::new();
     for relation in candidates {
         if !realm_id_accessible(state, &relation.realm_id, Some(&session)).await {
             continue;
+        }
+        if relation.relation_kind == "contains" {
+            // Structural navigation consumes the durable parent terminal fence,
+            // including after cold hydration. The canonical edge remains history.
+            let available = match structural_realms.get(&relation.realm_id) {
+                Some(available) => *available,
+                None => {
+                    let available =
+                        structural_navigation_available(state, &relation.realm_id).await?;
+                    structural_realms.insert(relation.realm_id.clone(), available);
+                    available
+                }
+            };
+            if !available {
+                continue;
+            }
         }
         items.push(relation);
     }

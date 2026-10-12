@@ -86,6 +86,7 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         | EventKind::DirectConversationBound
         | EventKind::RealmSetDefaultStrand
         | EventKind::RealmReadReceiptPolicy
+        | EventKind::RealmPlaintextVisibleServices
         | EventKind::RealmPreviewPolicy
         | EventKind::MemberIdentityUpdate
         | EventKind::CallCreate
@@ -140,9 +141,9 @@ pub(super) fn refuse_actor_private_event(kind: &arkret_wire::EventKind) -> Servi
 }
 
 /// A shared Event of a kind this Station admits through no unit: the
-/// Direct Conversation profile table still answers first for its Realm
-/// (contact-and-direct-conversation.md section 8.4), otherwise the refusal
-/// stays the universal `unsupported_event_kind`. `None` for a routed kind.
+/// Exact accepted replay and a verified parent terminal still have their
+/// ordinary contracts. Otherwise the Direct Conversation profile answers
+/// before the universal unsupported-kind refusal. `None` for a routed kind.
 pub(super) async fn refuse_unrouted_event(
     state: &AppState,
     event: &arkret_wire::Event,
@@ -150,6 +151,33 @@ pub(super) async fn refuse_unrouted_event(
     match self_event_route(&event.kind) {
         Ok(_) => Ok(None),
         Err(unsupported @ ServiceError::UnsupportedEventKind(_)) => {
+            if let Some(original) =
+                super::authority_self_event_unit::exact_replay(state, event).await?
+            {
+                return Ok(Some(original));
+            }
+            if !arkret_wire::events::kinds::is_audit_kind(&event.kind) {
+                let material = state
+                    .authority_commits()
+                    .realm_state_snapshot_material(&event.realm_id)
+                    .await?;
+                if material.is_some_and(|snapshot| {
+                    snapshot.current_state_entries.iter().any(|row| {
+                        matches!(
+                            row,
+                            arkret_wire::TypedCurrentRow::Value {
+                                selector: arkret_wire::CurrentSelector::RealmTombstone,
+                                ..
+                            }
+                        )
+                    })
+                }) {
+                    return Err(ServiceError::protocol(
+                        arkret_wire::ErrorCode::FailedPrecondition,
+                        "the Realm is terminal and refuses new ordinary Events",
+                    ));
+                }
+            }
             super::authority_direct_conversation::refuse_unadmitted_event(state, event, unsupported)
                 .await
                 .map(Some)
@@ -834,6 +862,7 @@ mod tests {
             EventKind::StrandCreate,
             EventKind::RealmProfile,
             EventKind::RealmReadReceiptPolicy,
+            EventKind::RealmPlaintextVisibleServices,
             EventKind::RealmPreviewPolicy,
             EventKind::RealmTombstone,
             EventKind::RealmDestroy,
@@ -902,6 +931,7 @@ mod tests {
             EventKind::StrandCreate,
             EventKind::RealmProfile,
             EventKind::RealmReadReceiptPolicy,
+            EventKind::RealmPlaintextVisibleServices,
             EventKind::RealmPreviewPolicy,
             EventKind::RealmTombstone,
             EventKind::RealmDestroy,

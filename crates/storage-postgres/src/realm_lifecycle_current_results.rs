@@ -32,9 +32,12 @@ pub(crate) async fn require_replica_live_in_connection(
     .get_result::<ReplicaLifecycle>(conn)
     .await
     .map_err(PersistenceError::database)?;
-    if event.kind == arkret_wire::EventKind::RealmDestroy
-        || (gates.terminal && !arkret_wire::events::kinds::is_audit_kind(&event.kind))
-    {
+    if event.kind == arkret_wire::EventKind::RealmDestroy {
+        return Err(PersistenceError::Conflict(
+            "failed_precondition: v1 has no registered destructive confirmation carrier".to_owned(),
+        ));
+    }
+    if gates.terminal && !arkret_wire::events::kinds::is_audit_kind(&event.kind) {
         return Err(PersistenceError::Conflict(
             "failed_precondition: replica cannot create live effects in a terminal Realm"
                 .to_owned(),

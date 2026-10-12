@@ -1414,6 +1414,9 @@ pub(crate) async fn advance_in_connection(
         arkret_wire::EventKind::RealmReadReceiptPolicy => {
             crate::realm_bootstrap_current_results::commit_read_receipt_policy_current_result_in_connection(conn, event, commit).await?;
         }
+        arkret_wire::EventKind::RealmPlaintextVisibleServices => {
+            crate::realm_bootstrap_current_results::commit_plaintext_services_current_result_in_connection(conn, event, commit).await?;
+        }
         arkret_wire::EventKind::RealmPreviewPolicy => {
             crate::realm_bootstrap_current_results::commit_preview_policy_current_result_in_connection(conn, event, commit).await?;
         }

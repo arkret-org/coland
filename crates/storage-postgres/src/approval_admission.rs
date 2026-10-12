@@ -368,8 +368,12 @@ pub(crate) async fn qualify_principal(
             continue;
         }
         let cut = RealmAuthorizationCut::read(conn, &event.realm_id, &actor).await?;
+        let authorization = cut
+            .enforcing_actor_authorization_in_connection(conn, at)
+            .await?;
         let actions = [action.as_str()];
         let owner_covers = allow_owner
+            && authorization.agent_ceiling.is_none()
             && cut.actor_is_root_controller()
             && arkret_schema::capability_action_descriptor(action)
                 .target_event_kinds
@@ -378,7 +382,7 @@ pub(crate) async fn qualify_principal(
                     arkret_schema::capability_actions_for_event_kind(kind)
                         .any(|row| row.action == CapabilityActionId::RealmOwner)
                 });
-        let qualified = match cut.evaluate(&actions, target, facts, at) {
+        let qualified = match authorization.evaluate(&actions, target, facts) {
             GrantEvaluation::Allowed(ref satisfied) => !satisfied.is_empty() || owner_covers,
             GrantEvaluation::Unnamed | GrantEvaluation::Unsatisfied => owner_covers,
             _ => false,
@@ -391,7 +395,6 @@ pub(crate) async fn qualify_principal(
             }
             let root_basis=sql_query("SELECT to_jsonb(r) AS value FROM realm_authority_root_current_results r WHERE realm_id=$1")
                 .bind::<Text,_>(event.realm_id.as_str()).get_result::<RootBasis>(&mut *conn).await.map_err(PersistenceError::database)?;
-            let authorization = cut.actor_authorization(at)?;
             let grants = authorization
                 .grants
                 .iter()

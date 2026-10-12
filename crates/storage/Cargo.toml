@@ -23,6 +23,7 @@ arkret-models-collaboration.workspace = true
 arkret-models-crypto.workspace = true
 arkret-models-identity.workspace = true
 arkret-models-integration.workspace = true
+arkret-policy.workspace = true
 arkret-schema.workspace = true
 arkret-state.workspace = true
 arkret-wire.workspace = true

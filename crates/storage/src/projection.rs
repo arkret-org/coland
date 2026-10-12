@@ -235,7 +235,9 @@ pub struct EffectiveActorGrant {
 ///
 /// `grants` holds every active grant whose subject is exactly `actor`, whose
 /// temporal window contains `evaluated_at`, and whose issuer chain descends
-/// intact from the current authority root. Membership is never an input.
+/// intact from the current authority root. Ordinary membership does not grant
+/// actions. An Agent additionally carries verified controller/member/current
+/// backing that bounds every operation of its independent grant paths.
 #[derive(Clone, Debug)]
 pub struct ActorRealmAuthorization {
     pub realm_id: arkret_wire::RealmId,
@@ -243,6 +245,14 @@ pub struct ActorRealmAuthorization {
     pub evaluated_at: chrono::DateTime<chrono::Utc>,
     pub root_controller: bool,
     pub grants: Vec<EffectiveActorGrant>,
+    /// Verifier-private same-cut backing, never an authority or wire carrier.
+    pub agent_ceiling: Option<AgentControllerCeiling>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AgentControllerCeiling {
+    pub controller: Box<ActorRealmAuthorization>,
+    pub management_policies: Vec<arkret_models_collaboration::governance::operation_wire::Policy>,
 }
 
 impl ActorRealmAuthorization {
@@ -254,15 +264,83 @@ impl ActorRealmAuthorization {
         target: &'a arkret_wire::WireResourceSelector,
         facts: &'a crate::OperationFacts,
     ) -> crate::GrantEvaluation<'a> {
-        crate::evaluate_grants(
+        let operation = crate::AuthorizationOperation {
+            actor: &self.actor,
+            actions,
+            target,
+            at: self.evaluated_at,
+            facts,
+        };
+        let Some(ceiling) = &self.agent_ceiling else {
+            return crate::evaluate_grants(
+                &operation,
+                self.grants.iter().map(|effective| &effective.grant),
+            );
+        };
+        let controller = &ceiling.controller;
+        if controller.realm_id != self.realm_id
+            || controller.actor == self.actor
+            || controller.agent_ceiling.is_some()
+        {
+            return crate::GrantEvaluation::Unsatisfied;
+        }
+        let agent_grants = self.grants.iter().map(|row| &row.grant).collect::<Vec<_>>();
+        let controller_grants = controller
+            .grants
+            .iter()
+            .map(|row| &row.grant)
+            .collect::<Vec<_>>();
+        let owner_covers = controller.root_controller
+            && actions.iter().any(|action| {
+                *action == arkret_wire::CapabilityActionId::REALM_OWNER
+                    || arkret_policy::owner_may_author_action(action).unwrap_or(false)
+            });
+        let original = crate::evaluate_controller_bounded_grants(
+            &operation,
+            &agent_grants,
+            &controller.actor,
+            &controller_grants,
+            &[],
+            owner_covers,
+        );
+        if matches!(
+            original,
+            crate::GrantEvaluation::Denied
+                | crate::GrantEvaluation::Quarantined
+                | crate::GrantEvaluation::RequiresReview
+        ) {
+            return original;
+        }
+        let (Some(controller_account), Some(agent_account)) =
+            (controller.actor.as_account_id(), self.actor.as_account_id())
+        else {
+            return crate::GrantEvaluation::Unsatisfied;
+        };
+        let Ok(managed_actions) = crate::agent_management_actions(
+            &ceiling.management_policies,
+            &self.realm_id,
+            controller_account,
+            agent_account,
+            &operation,
+            None,
+        ) else {
+            return crate::GrantEvaluation::Unsatisfied;
+        };
+        let managed_owner_covers = controller.root_controller
+            && managed_actions.iter().any(|action| {
+                *action == arkret_wire::CapabilityActionId::REALM_OWNER
+                    || arkret_policy::owner_may_author_action(action).unwrap_or(false)
+            });
+        crate::evaluate_controller_bounded_grants(
             &crate::AuthorizationOperation {
-                actor: &self.actor,
-                actions,
-                target,
-                at: self.evaluated_at,
-                facts,
+                actions: &managed_actions,
+                ..operation
             },
-            self.grants.iter().map(|effective| &effective.grant),
+            &agent_grants,
+            &controller.actor,
+            &controller_grants,
+            &[],
+            managed_owner_covers,
         )
     }
 
@@ -281,6 +359,10 @@ impl ActorRealmAuthorization {
     /// `ak.realm.owner` over the whole Realm allows it without owing a quota
     /// reservation (`authz/capabilities.md` §3.2).
     pub fn holds_realm_owner(&self) -> bool {
+        // An Agent's root/aggregate cannot replace its concrete current ceiling.
+        if self.agent_ceiling.is_some() {
+            return false;
+        }
         let realm = arkret_wire::WireResourceSelector::realm(self.realm_id.clone());
         self.root_controller
             || !self
@@ -592,6 +674,7 @@ mod capability_grant_current_result_tests {
             actor: subject(),
             evaluated_at: chrono::Utc::now(),
             root_controller: false,
+            agent_ceiling: None,
             grants: grants
                 .into_iter()
                 .map(|grant| EffectiveActorGrant {
@@ -670,6 +753,141 @@ mod capability_grant_current_result_tests {
         assert!(!root.holds_realm_owner());
         root.root_controller = true;
         assert!(root.holds_realm_owner());
+    }
+
+    fn controller_authorization() -> ActorRealmAuthorization {
+        let controller = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+            "ak:did_core:web:controller.example".parse().unwrap(),
+            "ak:did_core:web:station.example".parse().unwrap(),
+        ));
+        let mut parent_grant = grant(CapabilityGrantCurrentStatus::Active);
+        parent_grant.id = arkret_wire::GrantId::from_event_id(&arkret_wire::EventId::from_digest(
+            arkret_canonical::DigestSuite::Sha256,
+            [0x67; 32],
+        ));
+        parent_grant.subject =
+            arkret_models_collaboration::governance::grant_constraint::CapabilitySubject::Actor(
+                controller.clone(),
+            );
+        let mut result = authorization(vec![parent_grant]);
+        result.actor = controller;
+        result
+    }
+
+    #[test]
+    fn independent_agent_grant_query_intersects_controller_rights_and_global_denies() {
+        use arkret_models_collaboration::governance::grant_constraint::{
+            GrantConstraint, GrantConstraintEffect, GrantConstraintKind,
+        };
+        let mut agent = authorization(vec![grant(CapabilityGrantCurrentStatus::Active)]);
+        let target = arkret_wire::WireResourceSelector::realm(realm());
+        agent.agent_ceiling = Some(AgentControllerCeiling {
+            controller: Box::new(controller_authorization()),
+            management_policies: Vec::new(),
+        });
+        assert!(allows(&agent, "ak.message.create", &target));
+        let mut deny =
+            GrantConstraint::new(GrantConstraintKind::Temporal, GrantConstraintEffect::Deny);
+        deny.not_before = Some(chrono::Utc::now() - chrono::TimeDelta::minutes(1));
+        deny.expires_at = Some(chrono::Utc::now() + chrono::TimeDelta::minutes(1));
+        agent.agent_ceiling.as_mut().unwrap().controller.grants[0]
+            .grant
+            .constraints
+            .push(deny);
+        assert!(matches!(
+            agent.evaluate(
+                &["ak.message.create"],
+                &target,
+                &crate::OperationFacts::default()
+            ),
+            crate::GrantEvaluation::Denied
+        ));
+        agent
+            .agent_ceiling
+            .as_mut()
+            .unwrap()
+            .controller
+            .grants
+            .clear();
+        assert!(!allows(&agent, "ak.message.create", &target));
+        agent.root_controller = true;
+        assert!(!agent.holds_realm_owner());
+        assert!(!allows(&agent, "ak.message.create", &target));
+    }
+
+    #[test]
+    fn agent_query_preserves_original_controller_quota_counter_and_rejects_nested_ceiling() {
+        use arkret_models_collaboration::governance::grant_constraint::{
+            GrantConstraint, GrantConstraintEffect, GrantConstraintKind, GrantConstraintSubkind,
+        };
+        let mut controller = controller_authorization();
+        let parent_id = controller.grants[0].grant.id.clone();
+        let mut quota =
+            GrantConstraint::new(GrantConstraintKind::Quota, GrantConstraintEffect::Allow);
+        quota.constraint_subkind = Some(GrantConstraintSubkind::Rate);
+        quota.max_operations = Some(1);
+        quota.period = Some("PT1M".into());
+        quota.constraint_scope = Some(arkret_models_collaboration::governance::grant_constraint::GrantConstraintScope::PerActor);
+        controller.grants[0].grant.constraints.push(quota);
+        let controller_actor = controller.actor.to_string();
+        let mut agent = authorization(vec![grant(CapabilityGrantCurrentStatus::Active)]);
+        agent.agent_ceiling = Some(AgentControllerCeiling {
+            controller: Box::new(controller),
+            management_policies: Vec::new(),
+        });
+        let target = arkret_wire::WireResourceSelector::realm(realm());
+        let facts = crate::OperationFacts::default();
+        let evaluation = agent.evaluate(&["ak.message.create"], &target, &facts);
+        assert!(evaluation.unreserved().is_empty());
+        let crate::GrantEvaluation::Allowed(paths) = evaluation else {
+            panic!("a shared quota requires reservation, never read-only allow");
+        };
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].reservations.len(), 1);
+        assert_eq!(paths[0].reservations[0].grant_id, parent_id);
+        let counter: Vec<String> =
+            serde_json::from_str(&paths[0].reservations[0].counter_key).unwrap();
+        assert!(counter.contains(&controller_actor));
+        agent
+            .agent_ceiling
+            .as_mut()
+            .unwrap()
+            .controller
+            .agent_ceiling = Some(AgentControllerCeiling {
+            controller: Box::new(controller_authorization()),
+            management_policies: Vec::new(),
+        });
+        assert!(!allows(&agent, "ak.message.create", &target));
+    }
+
+    #[test]
+    fn filtered_write_cannot_lend_controller_owner_authority_to_a_read() {
+        let mut child = grant(CapabilityGrantCurrentStatus::Active);
+        child.actions.push("ak.object.read".parse().unwrap());
+        let mut agent = authorization(vec![child]);
+        let mut controller = controller_authorization();
+        controller.root_controller = true;
+        controller.grants.clear();
+        let policy = serde_json::from_value(serde_json::json!({
+            "id":"ak:policy:0198ff00-0000-7000-8000-000000000001",
+            "schema":"ak.schema.policy.v1", "realm_id":realm(), "policy_kind":"agent",
+            "rules":[{"rule_id":"no_execute", "kind":"agent", "effect":"deny",
+                "priority":1, "agent_target":{"kind":"all"}, "agent_operations":["execute"]}],
+            "default_effect":"allow", "created_by":controller.actor,
+            "created_at":"2026-10-01T00:00:00.000Z"
+        })).unwrap();
+        agent.agent_ceiling = Some(AgentControllerCeiling {
+            controller: Box::new(controller),
+            management_policies: vec![policy],
+        });
+        assert!(!matches!(
+            agent.evaluate(
+                &["ak.message.create", "ak.object.read"],
+                &arkret_wire::WireResourceSelector::realm(realm()),
+                &crate::OperationFacts::default()
+            ),
+            crate::GrantEvaluation::Allowed(_)
+        ));
     }
 }
 /// Wire / persistence record for a Space-container projection. Mirrors fields on

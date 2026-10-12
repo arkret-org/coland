@@ -1482,6 +1482,7 @@ dependencies = [
  "arkret-models-crypto",
  "arkret-models-identity",
  "arkret-models-integration",
+ "arkret-policy",
  "arkret-schema",
  "arkret-state",
  "arkret-wire",

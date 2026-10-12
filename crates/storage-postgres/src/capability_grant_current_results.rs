@@ -1502,7 +1502,9 @@ impl CapabilityGrantCurrentResultStore for PgCapabilityGrantCurrentResultStore {
             let cut =
                 crate::realm_authorization_cut::RealmAuthorizationCut::read(conn, realm_id, actor)
                     .await?;
-            Ok(cut.actor_authorization(at)?)
+            Ok(cut
+                .bounded_actor_authorization_in_connection(conn, at)
+                .await?)
         })
         .await
         .map_err(PgTransactionError::into_persistence)

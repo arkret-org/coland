@@ -149,6 +149,7 @@ mod tests {
             actor: actor(),
             evaluated_at: chrono::Utc::now(),
             root_controller,
+            agent_ceiling: None,
             grants: grants
                 .into_iter()
                 .map(|grant| EffectiveActorGrant {
@@ -225,6 +226,32 @@ mod tests {
                 &OperationFacts::default()
             ),
             CapabilityVerdict::Denied
+        ));
+    }
+
+    #[test]
+    fn service_verdict_does_not_restore_an_agent_owner_after_controller_rights_disappear() {
+        let mut agent = authorization(true, vec![grant(&[CapabilityActionId::MESSAGE_CREATE])]);
+        let mut controller = authorization(false, Vec::new());
+        controller.actor = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+            "ak:did_core:web:controller.example".parse().unwrap(),
+            "ak:did_core:web:station.example".parse().unwrap(),
+        ));
+        agent.agent_ceiling = Some(coland_storage::AgentControllerCeiling {
+            controller: Box::new(controller),
+            management_policies: Vec::new(),
+        });
+        let actions = [CapabilityActionId::MESSAGE_CREATE];
+        assert!(!evaluate(&agent, &actions, &realm(), &OperationFacts::default()).allowed());
+        agent
+            .agent_ceiling
+            .as_mut()
+            .unwrap()
+            .controller
+            .root_controller = true;
+        assert!(matches!(
+            evaluate(&agent, &actions, &realm(), &OperationFacts::default()),
+            CapabilityVerdict::Granted(_)
         ));
     }
 }

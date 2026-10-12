@@ -738,6 +738,26 @@ async fn desired_agents_require_owned_active_key_and_exact_realm_membership() {
         not_joined.participant_authority_digest
     );
     let member_reader = PgAuthorityCommitStore { pool: pool.clone() };
+    let grant_reader =
+        coland_storage_postgres::PgCapabilityGrantCurrentResultStore { pool: pool.clone() };
+    let authorization = coland_storage::CapabilityGrantCurrentResultStore::actor_authorization(
+        &grant_reader,
+        realm_id,
+        &arkret_wire::ActorId::account(agent.clone()),
+        chrono::Utc::now(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        authorization
+            .agent_ceiling
+            .as_ref()
+            .unwrap()
+            .controller
+            .actor
+            .as_account_id(),
+        Some(controller)
+    );
     assert!(matches!(
         member_reader
             .committed_event_for_member(
@@ -759,6 +779,16 @@ async fn desired_agents_require_owned_active_key_and_exact_realm_membership() {
     );
     let controller_leave = ordinary_realm::source_request(&pool, controller_leave).await;
     uow.commit_event(controller_leave.clone()).await.unwrap();
+    assert!(
+        coland_storage::CapabilityGrantCurrentResultStore::actor_authorization(
+            &grant_reader,
+            realm_id,
+            &arkret_wire::ActorId::account(agent.clone()),
+            chrono::Utc::now(),
+        )
+        .await
+        .is_err()
+    );
     // Snapshot and discovery cannot retain membership-derived access after
     // the exact controller incarnation terminates, including after reopening.
     let reopened_reader = PgAuthorityCommitStore { pool: pool.clone() };
@@ -809,6 +839,16 @@ async fn desired_agents_require_owned_active_key_and_exact_realm_membership() {
     );
     let controller_rejoin = ordinary_realm::source_request(&pool, controller_rejoin).await;
     uow.commit_event(controller_rejoin.clone()).await.unwrap();
+    assert!(
+        coland_storage::CapabilityGrantCurrentResultStore::actor_authorization(
+            &grant_reader,
+            realm_id,
+            &arkret_wire::ActorId::account(agent.clone()),
+            chrono::Utc::now(),
+        )
+        .await
+        .is_err()
+    );
     assert!(
         reopened_reader
             .realm_state_snapshot_material_for_account(realm_id, &agent)

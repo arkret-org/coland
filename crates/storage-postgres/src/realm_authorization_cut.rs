@@ -639,7 +639,66 @@ impl RealmAuthorizationCut {
             evaluated_at: at,
             root_controller: self.actor_is_root_controller(),
             grants,
+            agent_ceiling: None,
         })
+    }
+
+    /// Read-only consumers need the same dynamic ceiling as Event admission.
+    /// The enclosing snapshot fixes ownership, both members, grants and Policy.
+    pub(crate) async fn bounded_actor_authorization_in_connection(
+        &self,
+        conn: &mut AsyncPgConnection,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<ActorRealmAuthorization> {
+        self.bounded_actor_authorization_at_cut(conn, at, false)
+            .await
+    }
+
+    pub(crate) async fn enforcing_actor_authorization_in_connection(
+        &self,
+        conn: &mut AsyncPgConnection,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<ActorRealmAuthorization> {
+        self.bounded_actor_authorization_at_cut(conn, at, true)
+            .await
+    }
+
+    async fn bounded_actor_authorization_at_cut(
+        &self,
+        conn: &mut AsyncPgConnection,
+        at: chrono::DateTime<chrono::Utc>,
+        lock: bool,
+    ) -> PersistenceResult<ActorRealmAuthorization> {
+        let mut authorization = self.actor_authorization(at)?;
+        if !crate::committed_disclosure::ordinary_agent_read_ceiling(
+            crate::account_stream_scan::realm_purpose(conn, &self.realm_id).await?,
+        ) {
+            return Ok(authorization);
+        }
+        let Some(controller) =
+            read_owned_controller_in_connection(conn, &self.realm_id, &self.actor, at, lock)
+                .await?
+        else {
+            return Ok(authorization);
+        };
+        self.require_governed_member(&EventKind::CapabilityGrant)?;
+        let controller_cut = Self::read(conn, &self.realm_id, &controller).await?;
+        controller_cut.require_governed_member(&EventKind::CapabilityGrant)?;
+        let policies = if lock {
+            crate::policy_current_results::read_scoped_agent_management_policies_in_connection(
+                conn,
+                &self.realm_id,
+                None,
+            )
+            .await?
+        } else {
+            crate::policy_current_results::read_scoped_agent_management_policy_snapshot_in_connection(conn, &self.realm_id, None).await?
+        };
+        authorization.agent_ceiling = Some(coland_storage::AgentControllerCeiling {
+            controller: Box::new(controller_cut.actor_authorization(at)?),
+            management_policies: policies,
+        });
+        Ok(authorization)
     }
 
     /// The actions that authorize `kind` on their own: those without

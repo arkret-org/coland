@@ -25,6 +25,59 @@ pub(crate) struct QualifiedApproval {
     pub qualification_basis: serde_json::Value,
 }
 
+/// A registered operation target names the whole closed request. Identical
+/// evidence attached to multiple applicable slots consumes its nonce once;
+/// distinct evidence sharing that nonce remains a rejection.
+#[derive(Default)]
+pub(crate) struct BootstrapApprovalConsumption {
+    operation_targets: std::collections::BTreeMap<
+        (String, String, String),
+        coland_storage::ApprovalHistoricalMethod,
+    >,
+}
+
+impl BootstrapApprovalConsumption {
+    pub(crate) fn qualify(
+        &mut self,
+        methods: &[coland_storage::ApprovalHistoricalMethod],
+    ) -> PersistenceResult<Vec<QualifiedApproval>> {
+        let mut qualified = Vec::new();
+        for method in methods {
+            let vote = &method.signature;
+            if matches!(
+                vote.input.approval_target,
+                arkret_wire::ApprovalTarget::Operation
+            ) {
+                let context = arkret_canonical::canonical_json_string(&vote.input.approval_context)
+                    .map_err(|e| error("schema_violation", e))?;
+                let key = (
+                    context,
+                    vote.input.approver_did.to_string(),
+                    vote.input.nonce.clone(),
+                );
+                if let Some(previous) = self.operation_targets.get(&key) {
+                    if previous.signature != method.signature
+                        || previous.public_key != method.public_key
+                        || previous.control_history != method.control_history
+                    {
+                        return Err(error(
+                            "approval_nonce_reused",
+                            "distinct operation evidence shares one approval nonce",
+                        ));
+                    }
+                    continue;
+                }
+                self.operation_targets.insert(key, method.clone());
+            }
+            qualified.push(QualifiedApproval {
+                method: method.clone(),
+                qualification_basis: serde_json::json!({"ordinary_realm_bootstrap":true,"quorum_required":false}),
+            });
+        }
+        Ok(qualified)
+    }
+}
+
 fn error(code: &str, detail: impl std::fmt::Display) -> PersistenceError {
     if code == "schema_violation" {
         return PersistenceError::SchemaViolation(detail.to_string());
@@ -38,6 +91,63 @@ pub(crate) fn validate_candidate<'a>(
     event: &Event,
     commit: &RealmCommit,
     prepared: Option<&'a EventApprovalCommit>,
+) -> PersistenceResult<&'a [coland_storage::ApprovalHistoricalMethod]> {
+    validate_candidate_with_operation_digest(event, commit, prepared, None)
+}
+
+/// Founding has no dependency grant, List metadata or management request.
+/// An operation approval binds the entire closed unit, with every registered
+/// evidence carrier omitted, rather than a fabricated single-Event request.
+pub(crate) fn validate_bootstrap_candidate(
+    unit: &coland_storage::OrdinaryRealmBootstrapCommitUnit,
+    index: usize,
+) -> PersistenceResult<&[coland_storage::ApprovalHistoricalMethod]> {
+    let transaction = &unit.transactions[index];
+    let prepared = unit.event_approvals.get(index).and_then(Option::as_ref);
+    let Some(prepared) = prepared else {
+        return Ok(&[]);
+    };
+    let mut original = unit.submission.clone();
+    for submitted in &mut original.events {
+        submitted.approval_signatures = None;
+    }
+    let original = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(original);
+    let digest =
+        arkret_canonical::canonical_sha256(&original).map_err(|e| error("schema_violation", e))?;
+    let methods = validate_candidate_with_operation_digest(
+        &transaction.event,
+        &transaction.commit,
+        Some(prepared),
+        Some(&digest),
+    )?;
+    for method in &prepared.methods {
+        let vote = &method.signature;
+        if !matches!(
+            vote.input.approval_context,
+            arkret_wire::ApprovalContext::RealmGovernance {}
+        ) {
+            return Err(error(
+                "approval_required",
+                "bootstrap approval context has no applicable authority basis",
+            ));
+        }
+        if !arkret_schema::capability_actions_for_event_kind(transaction.event.kind.as_str())
+            .any(|action| action.action == vote.input.action)
+        {
+            return Err(error(
+                "signature_invalid",
+                "bootstrap approval action differs from its target Event",
+            ));
+        }
+    }
+    Ok(methods)
+}
+
+fn validate_candidate_with_operation_digest<'a>(
+    event: &Event,
+    commit: &RealmCommit,
+    prepared: Option<&'a EventApprovalCommit>,
+    operation_digest: Option<&str>,
 ) -> PersistenceResult<&'a [coland_storage::ApprovalHistoricalMethod]> {
     let Some(prepared) = prepared else {
         return Ok(&[]);
@@ -157,8 +267,11 @@ pub(crate) fn validate_candidate<'a>(
                     event: event.clone(),
                     approval_signatures: None,
                 };
-                let digest = arkret_canonical::canonical_sha256(&original)
-                    .map_err(|e| error("schema_violation", e))?;
+                let digest = match operation_digest {
+                    Some(digest) => digest.to_owned(),
+                    None => arkret_canonical::canonical_sha256(&original)
+                        .map_err(|e| error("schema_violation", e))?,
+                };
                 let controller = arkret_identity::verification_method_did(
                     signature.proof.verification_method.as_str(),
                 )

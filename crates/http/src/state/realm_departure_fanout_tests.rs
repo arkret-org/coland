@@ -223,7 +223,7 @@ async fn departure(membership: &str, another_member_remains: bool) {
             .unwrap()
             .contains(&previous.event.realm_id)
     );
-    let mut departed = terminal_persistent_rows(&receiver.pool).await;
+    let departed = terminal_persistent_rows(&receiver.pool).await;
     let member_row = departed["member_state_current_results"]
         .as_array()
         .unwrap()
@@ -290,36 +290,10 @@ async fn departure(membership: &str, another_member_remains: bool) {
             "{error}"
         );
         let after = terminal_persistent_rows(&receiver.pool).await;
-        // The authenticated self producer gate independently retains its
-        // registered current signer lookup. It grants no Realm admission or
-        // authority-forward rights; compare that sole row separately.
-        let old = departed["account_device_signer_evidence"]
-            .as_array()
-            .unwrap();
-        let rows = after["account_device_signer_evidence"].as_array().unwrap();
-        assert_eq!(rows.len(), old.len() + 1);
-        assert!(old.iter().all(|row| rows.contains(row)));
-        let new = rows.iter().find(|row| !old.contains(row)).unwrap();
-        let evidence: arkret_models_identity::AccountDeviceSignerEvidence =
-            serde_json::from_value(new["evidence_json"].clone()).unwrap();
-        evidence
-            .validate_binding(
-                &member.pcr.history.account,
-                &member.pcr.history.founding_device_id,
-            )
-            .unwrap();
         assert_eq!(
-            new["evidence_ref"],
-            serde_json::to_value(evidence.signer_evidence_ref().unwrap()).unwrap()
+            after, departed,
+            "closed proxy must not write an Event, signer root or forward evidence"
         );
-        let mut accepting = after.clone();
-        accepting["account_device_signer_evidence"] =
-            departed["account_device_signer_evidence"].clone();
-        assert_eq!(
-            accepting, departed,
-            "closed proxy must not queue an Event or retain new forward evidence"
-        );
-        departed = after;
     }
     let body = replication_body(&departing);
     let (status, value) = Box::pin(send_replication(

@@ -393,7 +393,7 @@ pub(super) async fn account_device_producer_key(
         ));
     }
     let (evidence, _) =
-        crate::routing::identity::keys::issue_current_account_device_signer_evidence(
+        crate::routing::identity::keys::prepare_current_account_device_signer_evidence(
             state, account, &device_id, &facet,
         )
         .await?

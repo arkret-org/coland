@@ -264,6 +264,32 @@ pub(crate) async fn issue_current_account_device_signer_evidence(
         arkret_wire::SignerEvidenceRef,
     )>,
 > {
+    let Some((evidence, authorization_ref)) =
+        prepare_current_account_device_signer_evidence(state, account_id, device_id, facet).await?
+    else {
+        return Ok(None);
+    };
+    let reference = state
+        .persistence()
+        .retain_current_account_device_signer_evidence(&evidence, &authorization_ref)
+        .await?;
+    Ok(Some((evidence, reference)))
+}
+
+/// Prepare the original root without a pre-admission durable side effect.
+/// Local Event acceptance retains it with its Commit under the same PCR cut;
+/// explicit keys/query and forwarded evidence issuance use the wrapper above.
+pub(crate) async fn prepare_current_account_device_signer_evidence(
+    state: &AppState,
+    account_id: &arkret_wire::AccountId,
+    device_id: &arkret_wire::DeviceId,
+    facet: &crate::routing::identity::device_signing::DeviceSigningDirectoryFacet,
+) -> coland_services::ServiceResult<
+    Option<(
+        arkret_models_identity::AccountDeviceSignerEvidence,
+        arkret_wire::CommittedEventRef,
+    )>,
+> {
     use arkret_models_crypto::{DeviceAuthorizationWindow, DeviceProjectionAttestationCore};
     use arkret_models_identity::AccountDeviceSignerEvidence;
     use arkret_wire::{ActorId, DidKey};
@@ -348,11 +374,7 @@ pub(crate) async fn issue_current_account_device_signer_evidence(
         device_projection_attestation: attestation,
         service_resolution,
     };
-    let signer_evidence_ref = state
-        .persistence()
-        .retain_current_account_device_signer_evidence(&evidence, &selector.authorization_ref)
-        .await?;
-    Ok(Some((evidence, signer_evidence_ref)))
+    Ok(Some((evidence, selector.authorization_ref)))
 }
 
 /// `device-lifecycle.md` §8.2 check 3 / check 4 applied to one attested row

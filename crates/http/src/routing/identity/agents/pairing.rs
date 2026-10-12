@@ -977,9 +977,10 @@ pub(super) async fn agent_key_pair(
     if verification_method_principal(&proposed_authorization.verification_method)
         .is_none_or(|principal| principal.as_str() != agent_id)
     {
-        return Err(AppError::param_invalid(
-            "verification_method DID must project to agent_id",
-        ));
+        return Err(
+            AppError::param_invalid("verification_method DID must project to agent_id")
+                .with_reason_code(arkret_wire::ReasonCode::VERIFICATION_METHOD_PRINCIPAL_MISMATCH),
+        );
     }
     let agent_record = require_agent_controller(state, &session, agent_id).await?;
     let paired_request_digest = agent_key_pair_request_digest(&body)?;
@@ -1116,6 +1117,7 @@ pub(super) async fn agent_key_pair(
             AppError::param_invalid(format!(
                 "authorize Event controller signature invalid: {error}"
             ))
+            .with_reason_code(arkret_wire::ReasonCode::PROOF_INVALID)
         })?;
     let commit_intent = coland_services::identity::RecordAgentPairingCommitIntentCommand {
         agent_id: agent_id.to_owned(),
@@ -1743,9 +1745,10 @@ pub(super) fn ensure_pairing_request_open(
     // `paired_pairing_request_id`, so a live handle exists iff the current one
     // has not yet been consumed.
     if agent_record.state == AgentLifecycleState::Deactivated {
-        return Err(pairing_failed_precondition(
-            "agent is not accepting runtime key pairing",
-        ));
+        return Err(
+            pairing_failed_precondition("agent is not accepting runtime key pairing")
+                .with_reason_code(arkret_wire::ReasonCode::AGENT_DEACTIVATED),
+        );
     }
     if !agent_pairing_handle_is_open(agent_record) {
         return Err(pairing_failed_precondition(
@@ -1754,7 +1757,8 @@ pub(super) fn ensure_pairing_request_open(
     }
     let expires_at = required_pairing_expires_at(agent_record)?;
     if expires_at <= chrono::Utc::now() {
-        return Err(pairing_failed_precondition("pairing request has expired"));
+        return Err(pairing_failed_precondition("pairing request has expired")
+            .with_reason_code(arkret_wire::ReasonCode::PAIRING_REQUEST_EXPIRED));
     }
     Ok(())
 }

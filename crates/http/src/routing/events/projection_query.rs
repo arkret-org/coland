@@ -1748,7 +1748,6 @@ async fn get_document_projection(
         versions,
         relations,
         comments,
-        cursor_presence_entries: Vec::new(),
         checkpoint: None,
     })
 }

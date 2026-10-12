@@ -650,10 +650,37 @@ async fn prepare_parent_membership_transaction(
     {
         return Ok(());
     }
-    let plan = request
-        .parent_membership_admission
-        .as_ref()
-        .ok_or_else(gate_check_failed)?;
+    // Normal Self Event admission has no separately trusted service plan.
+    // Derive its supported parent-only plan from the actual policy discovered
+    // above, then re-prove that exact policy and every dependency under locks.
+    let derived_plan;
+    let plan = match request.parent_membership_admission.as_ref() {
+        Some(plan) => plan,
+        None => {
+            let join_policy = candidate_join_policy.ok_or_else(gate_check_failed)?;
+            let gates = join_policy
+                .get("gates")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(gate_check_failed)?;
+            if gates.is_empty()
+                || gates.iter().any(|gate| {
+                    gate.get("kind").and_then(serde_json::Value::as_str)
+                        != Some("parent_membership")
+                })
+            {
+                return Err(gate_check_failed());
+            }
+            derived_plan = coland_storage::ParentMembershipAdmissionCheck {
+                expected_join_policy_digest: arkret_wire::Hash::new(
+                    arkret_canonical::canonical_sha256(join_policy)
+                        .map_err(PersistenceError::database)?,
+                )
+                .map_err(|_| gate_check_failed())?,
+                require_joined_source: true,
+            };
+            &derived_plan
+        }
+    };
     advisory_lock(
         conn,
         format!("parent-membership:policy:{}", event.realm_id.as_str()),
@@ -2516,6 +2543,13 @@ async fn commit_one_inner(
         .into());
     }
 
+    crate::agent_management_review::lock_candidate_current_realms_in_connection(
+        conn,
+        event,
+        event_approvals,
+    )
+    .await?;
+
     if matches!(
         event.scope_ref,
         arkret_wire::ScopeRef::Realm { .. }
@@ -2752,6 +2786,14 @@ async fn commit_prepared_event_inner(
 ) -> Result<(), PgTransactionError> {
     let event = &request.authority_commit.event;
 
+    let management_review = crate::agent_management_review::prepare_admission_in_connection(
+        conn,
+        event,
+        event_approvals,
+        request.authority_commit.commit.committed_at,
+    )
+    .await?;
+
     if event.kind == arkret_wire::EventKind::AgentInteractionSet {
         if !matches!(
             request.self_producer_guard,
@@ -2771,6 +2813,7 @@ async fn commit_prepared_event_inner(
             conn,
             event,
             &request.authority_commit.commit,
+            management_review.as_ref(),
         )
         .await?;
     }
@@ -2809,6 +2852,7 @@ async fn commit_prepared_event_inner(
         conn,
         event,
         &request.authority_commit.commit,
+        management_review.as_ref(),
     )
     .await?;
     crate::circle_current_results::admit_in_connection(
@@ -2847,7 +2891,8 @@ async fn commit_prepared_event_inner(
         let cut =
             crate::realm_authorization_cut::RealmAuthorizationCut::read_for_event(conn, event)
                 .await?;
-        cut.require_policy_with_approvals(
+        crate::agent_management_admission::require_policy_write_with_approvals(
+            &cut,
             conn,
             event,
             &request.authority_commit.commit,
@@ -2885,6 +2930,15 @@ async fn commit_prepared_event_inner(
     let commit = &request.authority_commit.commit;
     crate::approval_admission::validate_candidate(event, commit, event_approvals)?;
     if matches!(authority_write, AuthorityCommitWriteOutcome::Committed) {
+        if let Some(review) = management_review.as_ref() {
+            crate::agent_management_review::consume_in_connection(
+                conn,
+                event,
+                commit,
+                review.methods(),
+            )
+            .await?;
+        }
         crate::agent_confirmation_admission::require_publication(conn, event, commit).await?;
         if let Some(prepared) = self_pcr_outcome {
             crate::agent_producer_signer_keys::retain_self_outcome_in_connection(
@@ -3105,6 +3159,8 @@ async fn commit_scope_current_results_inner(
         conn, event, commit,
     ))
     .await?;
+
+    Box::pin(crate::realm_bootstrap_current_results::commit_realm_join_rule_authority_current_result_in_connection(conn, event, commit)).await?;
 
     Box::pin(crate::realm_bootstrap_current_results::commit_realm_history_access_authority_current_result_in_connection(conn, event, commit)).await?;
     Box::pin(crate::realm_bootstrap_current_results::commit_plaintext_services_authority_current_result_in_connection(conn, event, commit)).await?;

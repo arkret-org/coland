@@ -285,14 +285,7 @@ async fn peer_account_status_submit(
         return json_ok(outcome);
     }
 
-    let candidate_receipt = sign_account_status_receipt(state, record)?;
-    let append = state
-        .persistence()
-        .append_account_status_record(record, &candidate_receipt)
-        .await
-        .map_err(|error| {
-            AppError::internal(format!("account-status replica unavailable: {error}"))
-        })?;
+    let append = append_validated_account_status_record(state, record).await?;
     let (status, current, required_status_seq, receipt) = match append {
         coland_storage::AccountStatusReplicaAppend::Accepted(receipt) => (
             AccountStatusPublicationStatus::Accepted,
@@ -419,6 +412,149 @@ async fn peer_account_status_submit(
             AppError::internal(format!("stored account-status outcome invalid: {error}"))
         })
         .and_then(json_ok)
+}
+
+// Both publication ingress and authenticated issuer refresh use this original
+// replica path. Duplicate results retain the receiver's original receipt.
+async fn append_validated_account_status_record(
+    state: &AppState,
+    record: &arkret_models_collaboration::account_status::AccountStatusRecord,
+) -> Result<coland_storage::AccountStatusReplicaAppend, AppError> {
+    let candidate_receipt = sign_account_status_receipt(state, record)?;
+    state
+        .persistence()
+        .append_account_status_record(record, &candidate_receipt)
+        .await
+        .map_err(|_| AppError::internal("account-status replica unavailable"))
+}
+
+/// Refresh before any content-delivery connection or authorization cut is held.
+/// This surface conservatively observes the issuer on each request; it does not
+/// invent a protocol-wide age limit for an already verified monotonic replica.
+pub(crate) async fn refresh_current_account_status(
+    state: &AppState,
+    account: &arkret_wire::AccountId,
+) -> Result<coland_storage::AccountStatusCurrentObservation, AppError> {
+    tokio::time::timeout(
+        crate::routing::federation::outbox::REQUEST_TIMEOUT,
+        refresh_current_account_status_inner(state, account),
+    )
+    .await
+    .map_err(|_| AppError::internal("Account Authority current resolve timed out"))?
+}
+
+async fn refresh_current_account_status_inner(
+    state: &AppState,
+    account: &arkret_wire::AccountId,
+) -> Result<coland_storage::AccountStatusCurrentObservation, AppError> {
+    use arkret_models_collaboration::account_lifecycle::AccountStatusInitialPublication;
+    let (authority, endpoint) = trusted_account_authority_binding(state).await?;
+    if account.station_id != authority {
+        return Err(AppError::capability_denied(
+            "Account Authority deployment binding is unavailable",
+        ));
+    }
+    let mut expected = state
+        .persistence()
+        .current_account_status_record(authority.as_str(), account)
+        .await
+        .map_err(|_| AppError::internal("Account lifecycle replica unavailable"))?;
+    loop {
+        let from_status_seq = match expected.as_ref() {
+            Some(head) => head
+                .status_seq
+                .checked_add(1)
+                .ok_or_else(|| AppError::internal("Account lifecycle sequence overflow"))?,
+            None => 1,
+        };
+        let request = AccountStatusResolveRequestBody {
+            account_authority_id: authority.clone(),
+            account_id: account.clone(),
+            from_status_seq,
+            limit: 128,
+        };
+        request
+            .validate()
+            .map_err(|_| AppError::internal("Account lifecycle resolve bounds invalid"))?;
+        let body = arkret_canonical::canonical_json_bytes(&request)
+            .map_err(|_| AppError::internal("Account lifecycle request encoding failed"))?;
+        let response =
+            crate::routing::federation::outbox::signed_deployment_account_status_resolve(
+                state, &authority, &endpoint, &body,
+            )
+            .await
+            .map_err(|_| AppError::internal("Account Authority current resolve unavailable"))?;
+        if response.status != StatusCode::OK.as_u16() {
+            return Err(AppError::capability_denied(
+                "Account Authority current resolve refused",
+            ));
+        }
+        let outcome: AccountStatusResolveOutcome = serde_json::from_slice(&response.body)
+            .map_err(|_| AppError::internal("Account Authority current resolve answer invalid"))?;
+        if outcome
+            .records
+            .iter()
+            .any(|record| record.status_seq.checked_add(1).is_none())
+            || request
+                .from_status_seq
+                .checked_add(outcome.records.len() as u64)
+                .is_none()
+        {
+            return Err(AppError::internal(
+                "Account lifecycle resolve sequence overflow",
+            ));
+        }
+        outcome.validate_for_request(&request).map_err(|_| {
+            AppError::capability_denied("Account Authority current resolve binding invalid")
+        })?;
+        for record in &outcome.records {
+            let publication = AccountStatusPublicationRequestBody {
+                publication: AccountStatusPublication::Initial(AccountStatusInitialPublication {
+                    record: record.clone(),
+                }),
+            };
+            validate_account_status_publication(state, authority.as_str(), &publication).await?;
+            let (receipt, accepted) = match append_validated_account_status_record(state, record)
+                .await?
+            {
+                coland_storage::AccountStatusReplicaAppend::Accepted(receipt) => (receipt, true),
+                coland_storage::AccountStatusReplicaAppend::Duplicate(receipt) => (receipt, false),
+                _ => {
+                    return Err(AppError::capability_denied(
+                        "Account lifecycle refresh did not converge",
+                    ));
+                }
+            };
+            if accepted && record.status == arkret_models_collaboration::objects::account_status::AccountStatus::ErasurePending {
+                crate::account_erasure_worker::ensure_intent(state, authority.as_str(), account,
+                    &account.principal_id, &record.account_status_record_id).await?;
+            }
+            enqueue_account_status_fanout(state, record, &receipt).await?;
+            expected = Some(record.clone());
+        }
+        if outcome.has_more {
+            continue;
+        }
+        let expected = expected.ok_or_else(|| {
+            AppError::capability_denied("Account Authority has no current lifecycle head")
+        })?;
+        let current = state
+            .persistence()
+            .current_account_status_record(authority.as_str(), account)
+            .await
+            .map_err(|_| AppError::internal("Account lifecycle replica unavailable"))?
+            .ok_or_else(|| {
+                AppError::capability_denied("Account lifecycle current head is unavailable")
+            })?;
+        if current != expected {
+            return Err(AppError::capability_denied(
+                "Account lifecycle changed during current resolve",
+            ));
+        }
+        return Ok(
+            coland_storage::AccountStatusCurrentObservation::after_authenticated_resolve(current),
+        );
+    }
 }
 
 fn account_status_idempotency_is_pending(record: &coland_services::jobs::IdempotencyState) -> bool {
@@ -936,6 +1072,44 @@ fn validate_signal_signature_window(req: &Request) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Valid JSON outside the registered closed carrier is a schema failure;
+/// only malformed JSON uses the transport's `json_invalid` code.
+fn parse_peer_event_submission(body: &[u8]) -> Result<PeerAuthoritySubmitRequest, AppError> {
+    serde_json::from_slice(body).map_err(|error| match error.classify() {
+        serde_json::error::Category::Data => {
+            schema_violation("invalid ak.peer.events.command.submit.v1 closed request body")
+        }
+        _ => AppError::json_invalid("invalid ak.peer.events.command.submit.v1 JSON body"),
+    })
+}
+
+#[cfg(test)]
+mod peer_event_submission_parse_tests {
+    use super::*;
+
+    #[test]
+    fn valid_json_outside_the_closed_peer_carrier_is_schema_violation() {
+        for body in [
+            json!({"branch":"committed_replication", "replications":[{}]}),
+            json!({"branch":"committed_replication", "replications":[], "processing":{}}),
+            json!({"branch":"authority_forward", "event_submission":{}}),
+            json!({"branch":"retired_generic_batch", "events":[]}),
+        ] {
+            let error =
+                parse_peer_event_submission(&serde_json::to_vec(&body).unwrap()).unwrap_err();
+            assert_eq!(error.wire_code(), "schema_violation");
+        }
+    }
+
+    #[test]
+    fn malformed_peer_json_retains_json_invalid() {
+        for body in [b"{".as_slice(), b"not-json".as_slice()] {
+            let error = parse_peer_event_submission(body).unwrap_err();
+            assert_eq!(error.wire_code(), "json_invalid");
+        }
+    }
+}
+
 #[salvo::oapi::endpoint(operation_id = "ak.peer.events.command.submit", tags("events"))]
 #[tracing::instrument(skip_all, fields(op = "ak.peer.events.command.submit.v1"))]
 async fn peer_events_submit(depot: &mut Depot, req: &mut Request, res: &mut Response) {
@@ -947,15 +1121,20 @@ async fn peer_events_submit(depot: &mut Depot, req: &mut Request, res: &mut Resp
             return;
         }
     };
-    let submission = match req.parse_json::<PeerAuthoritySubmitRequest>().await {
+    let exact_body = match req.payload().await {
         Ok(body) => body,
         Err(_) => {
-            render_error(
+            render_app_error(
                 res,
-                StatusCode::BAD_REQUEST,
-                "json_invalid",
-                "invalid ak.peer.events.command.submit.v1 request body",
+                AppError::json_invalid("unable to read peer Event body"),
             );
+            return;
+        }
+    };
+    let submission = match parse_peer_event_submission(exact_body) {
+        Ok(body) => body,
+        Err(error) => {
+            render_app_error(res, error);
             return;
         }
     };
@@ -1761,6 +1940,135 @@ mod account_authority_identity_tests {
     }
 
     #[tokio::test]
+    async fn account_status_resolve_uses_deployment_endpoint_and_separate_trust_domain() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let endpoint = format!("http://{address}");
+        let config = crate::config::AppConfig {
+            development_mode: true,
+            account_authority_url: Some(endpoint.clone()),
+            account_authority_trust_domain: Some(
+                "ak:trust_domain:authority.example".parse().unwrap(),
+            ),
+            ..crate::config::AppConfig::test_default()
+        };
+        let state = AppState::new(config, Db { pool: None });
+        let authority = state.service_core_id();
+        let source_domain = state.config().trust_domain.to_string();
+        let destination_domain = state
+            .config()
+            .account_authority_trust_domain
+            .as_ref()
+            .unwrap()
+            .to_string();
+        let source = authority.to_string();
+        let request = AccountStatusResolveRequestBody {
+            account_authority_id: authority.clone(),
+            account_id: arkret_wire::AccountId::new(
+                "ak:did_core:web:human.example".parse().unwrap(),
+                authority.clone(),
+            ),
+            from_status_seq: 2,
+            limit: 128,
+        };
+        let body = arkret_canonical::canonical_json_bytes(&request).unwrap();
+        let expected = body.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let mut buffer = [0u8; 1024];
+            let header_end = loop {
+                let n = stream.read(&mut buffer).await.unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&buffer[..n]);
+                assert!(bytes.len() < 16384);
+                if let Some(pos) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
+                    break pos + 4;
+                }
+            };
+            let headers = std::str::from_utf8(&bytes[..header_end])
+                .unwrap()
+                .to_owned();
+            assert!(
+                headers
+                    .to_ascii_lowercase()
+                    .starts_with("post /_arkret/peer/account-status/resolve http/1.1")
+            );
+            for (name, value) in [
+                ("source-service-id", source.as_str()),
+                ("destination-service-id", source.as_str()),
+                ("source-trust-domain", source_domain.as_str()),
+                ("destination-trust-domain", destination_domain.as_str()),
+                ("arkret-operation", "ak.peer.account_status.read.resolve.v1"),
+            ] {
+                assert!(
+                    headers
+                        .lines()
+                        .any(|line| line == format!("{name}: {value}"))
+                );
+            }
+            assert!(
+                headers
+                    .lines()
+                    .any(|line| line.starts_with("signature: sig1=:"))
+            );
+            assert!(
+                headers
+                    .lines()
+                    .any(|line| line.starts_with("signature-input: sig1="))
+            );
+            assert!(
+                !headers
+                    .lines()
+                    .any(|line| line.starts_with("idempotency-key:"))
+            );
+            let length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            while bytes.len() < header_end + length {
+                let n = stream.read(&mut buffer).await.unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&buffer[..n]);
+            }
+            assert_eq!(&bytes[header_end..header_end + length], expected.as_slice());
+            let answer = b"{}";
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",answer.len()).as_bytes()).await.unwrap();
+            stream.write_all(answer).await.unwrap();
+        });
+        let response =
+            crate::routing::federation::outbox::signed_deployment_account_status_resolve(
+                &state,
+                &authority,
+                &CanonicalServiceUrl::canonicalize(&endpoint).unwrap(),
+                &body,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"{}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn account_status_resolve_rejects_substituted_endpoint_before_network() {
+        let state = state_with("https://auth.example");
+        let error = crate::routing::federation::outbox::signed_deployment_account_status_resolve(
+            &state,
+            &state.service_core_id(),
+            &CanonicalServiceUrl::canonicalize("https://substitute.example").unwrap(),
+            b"{}",
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.contains("differs from deployment configuration"));
+    }
+
+    #[tokio::test]
     async fn account_authority_endpoint_does_not_change_its_station_identity() {
         for endpoint in ["https://auth.example", "https://another-process.example"] {
             let state = state_with(endpoint);
@@ -1835,5 +2143,528 @@ mod account_status_resolution_tests {
         );
         record.response_status = StatusCode::OK.as_u16() as i32;
         assert!(!account_status_idempotency_is_pending(&record));
+    }
+}
+
+#[cfg(test)]
+mod account_status_refresh_http_pg_tests {
+    use arkret_models_collaboration::account_status::{
+        AccountStatusReceipt, AccountStatusRecord, UnsignedAccountStatusRecord,
+    };
+    use arkret_models_collaboration::objects::account_status::AccountStatus;
+    use arkret_wire::{DidUrl, RealmCommit, SchemaId};
+    use coland_storage_postgres::{Db, PgPersistenceStore};
+    use coland_test_support::pcr_genesis::PcrGenesisFixture;
+    use ed25519_dalek::SigningKey;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::*;
+
+    fn assert_wire_equal<T: serde::Serialize>(left: &T, right: &T) {
+        // Compare the entire official signed representation, including proof
+        // and immutable receipt, without leaking either representation on fail.
+        assert!(
+            arkret_canonical::canonical_json_bytes(left).unwrap()
+                == arkret_canonical::canonical_json_bytes(right).unwrap(),
+            "exact canonical signed material differs",
+        );
+    }
+
+    const SEED: [u8; 32] = [83; 32];
+    const PATH: &str = "/_arkret/peer/account-status/resolve";
+
+    struct Fixture {
+        state: AppState,
+        pcr: PcrGenesisFixture,
+        method: DidUrl,
+        listener: tokio::net::TcpListener,
+        // Keep the original PostgreSQL lease alive for the local libtest state.
+        _database_lease: Box<dyn Send + Sync>,
+    }
+
+    fn seal(commit: &mut RealmCommit, method: &DidUrl) {
+        commit.commit_id = arkret_wire::RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
+            arkret_canonical::canonical_json_bytes(
+                &arkret_canonical::canonical::unsigned_value(commit, &["commit_id", "signature"])
+                    .unwrap(),
+            )
+            .unwrap(),
+        ));
+        commit.signature = arkret_signatures::detached_object::sign_detached_object(
+            &arkret_canonical::canonical::unsigned_value(commit, &["signature"]).unwrap(),
+            arkret_wire::DetachedSignatureContext::RealmCommit,
+            method.clone(),
+            commit.committed_at,
+            &SigningKey::from_bytes(&SEED),
+        )
+        .unwrap();
+        commit.validate_content_address().unwrap();
+    }
+
+    impl Fixture {
+        async fn new() -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let mut config = coland_test_support::app_config();
+            config.notary_signing_key_seed = Some(SEED);
+            config.seed_demo_data = false;
+            let (leased_state, pool) = coland_test_support::app_state_with_pool(config.clone());
+            let identity = coland_test_support::fixture_service_identity(&config);
+            let commitment = leased_state
+                .service_resolution_commitment()
+                .as_ref()
+                .clone();
+            let local_config = crate::config::AppConfig {
+                public_base_url: config.public_base_url.clone(),
+                notary_signing_key_seed: config.notary_signing_key_seed,
+                seed_demo_data: config.seed_demo_data,
+                development_mode: true,
+                account_authority_url: Some(endpoint),
+                account_authority_trust_domain: Some(
+                    "ak:trust_domain:authority.example".parse().unwrap(),
+                ),
+                ..crate::config::AppConfig::test_default()
+            };
+            assert_eq!(local_config.trust_domain, config.trust_domain);
+            let state = AppState::new_with_service_identity(
+                local_config,
+                Db {
+                    pool: Some(pool.clone()),
+                },
+                std::sync::Arc::new(PgPersistenceStore::new(pool.clone())),
+                identity,
+                commitment,
+                SEED,
+            );
+            let method = DidUrl::new(
+                crate::routing::federation::federation_service_signature_key_id(
+                    state.service_did().as_str(),
+                ),
+            )
+            .unwrap();
+            // Require the actual persisted, signed Station history, not a key
+            // injected solely into the AccountStatus signature verifier.
+            crate::routing::system::service_resolution::current_authenticated_service_resolution(
+                &state,
+            )
+            .await
+            .unwrap();
+            let mut pcr = PcrGenesisFixture::new(state.service_did());
+            let mut previous = None;
+            for (index, tx) in pcr.unit.transactions.iter_mut().enumerate() {
+                tx.commit.previous_commit_ref = previous;
+                seal(&mut tx.commit, &method);
+                previous = Some(tx.commit.commit_id.clone());
+                pcr.history.commits[index] = tx.commit.clone();
+            }
+            pcr.admit_founding_device(&PgPersistenceStore::new(pool))
+                .await
+                .unwrap();
+            Self {
+                state,
+                pcr,
+                method,
+                listener,
+                _database_lease: Box::new(leased_state),
+            }
+        }
+
+        fn signed_record(&self, previous: Option<&AccountStatusRecord>) -> AccountStatusRecord {
+            let seq = previous.map_or(1, |record| record.status_seq + 1);
+            arkret_signatures::account_status::sign_account_status_record(
+                UnsignedAccountStatusRecord {
+                    schema: SchemaId::ACCOUNT_STATUS_RECORD_V1.to_owned(),
+                    account_authority_id: self.state.service_core_id(),
+                    account_id: self.pcr.history.account.clone(),
+                    principal_control_realm_id: self.pcr.unit.submission.pcr_realm_id.clone(),
+                    binding_version: 1,
+                    status_seq: seq,
+                    previous_account_status_record_id: previous
+                        .map(|record| record.account_status_record_id.clone()),
+                    status: if seq % 2 == 1 {
+                        AccountStatus::Active
+                    } else {
+                        AccountStatus::SoftLoggedOut
+                    },
+                    reason_code: None,
+                    reason: None,
+                    issued_at: arkret_canonical::normalize_timestamp_canonical(Utc::now()),
+                    expires_at: None,
+                },
+                self.method.clone(),
+                &SigningKey::from_bytes(&SEED),
+            )
+            .unwrap()
+        }
+
+        fn answer(
+            &self,
+            records: Vec<AccountStatusRecord>,
+            has_more: bool,
+        ) -> AccountStatusResolveOutcome {
+            AccountStatusResolveOutcome {
+                account_authority_id: self.state.service_core_id(),
+                account_id: self.pcr.history.account.clone(),
+                next_status_seq: if has_more {
+                    Some(records.last().unwrap().status_seq + 1)
+                } else {
+                    None
+                },
+                records,
+                has_more,
+            }
+        }
+
+        async fn rows(&self) -> Vec<AccountStatusRecord> {
+            self.state
+                .persistence()
+                .resolve_account_status_records(
+                    self.state.service_id(),
+                    &self.pcr.history.account,
+                    1,
+                    256,
+                )
+                .await
+                .unwrap()
+        }
+
+        async fn receipt(&self, seq: u64) -> AccountStatusReceipt {
+            let receipt = self
+                .state
+                .persistence()
+                .account_status_receipt(self.state.service_id(), &self.pcr.history.account, seq)
+                .await
+                .unwrap()
+                .unwrap();
+            arkret_signatures::account_status::verify_account_status_receipt(
+                &receipt,
+                &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+                    bytes: SigningKey::from_bytes(&SEED)
+                        .verifying_key()
+                        .to_bytes()
+                        .to_vec(),
+                },
+            )
+            .unwrap();
+            receipt
+        }
+
+        fn server(
+            &mut self,
+            pages: Vec<(
+                u64,
+                AccountStatusResolveOutcome,
+                Option<AccountStatusRecord>,
+            )>,
+        ) -> tokio::task::JoinHandle<Vec<AccountStatusReceipt>> {
+            let replacement = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            replacement.set_nonblocking(true).unwrap();
+            let listener = std::mem::replace(
+                &mut self.listener,
+                tokio::net::TcpListener::from_std(replacement).unwrap(),
+            );
+            let address = listener.local_addr().unwrap().to_string();
+            let state = self.state.clone();
+            tokio::spawn(async move {
+                let mut race_receipts = Vec::new();
+                for (from, answer, concurrent) in pages {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut bytes = Vec::new();
+                    let mut buffer = [0u8; 4096];
+                    let header_end = loop {
+                        let n = stream.read(&mut buffer).await.unwrap();
+                        assert!(n > 0);
+                        bytes.extend_from_slice(&buffer[..n]);
+                        assert!(bytes.len() < 32768);
+                        if let Some(pos) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
+                            break pos + 4;
+                        }
+                    };
+                    let header_text = std::str::from_utf8(&bytes[..header_end]).unwrap();
+                    assert_eq!(
+                        header_text.lines().next().unwrap(),
+                        format!("POST {PATH} HTTP/1.1")
+                    );
+                    let headers: Vec<(String, String)> = header_text
+                        .lines()
+                        .skip(1)
+                        .filter_map(|line| line.split_once(':'))
+                        .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_owned()))
+                        .collect();
+                    let header = |name: &str| {
+                        headers
+                            .iter()
+                            .find(|(key, _)| key == name)
+                            .unwrap()
+                            .1
+                            .as_str()
+                    };
+                    let length = header("content-length").parse::<usize>().unwrap();
+                    assert!(length < 32768);
+                    while bytes.len() < header_end + length {
+                        let n = stream.read(&mut buffer).await.unwrap();
+                        assert!(n > 0);
+                        bytes.extend_from_slice(&buffer[..n]);
+                    }
+                    let body = &bytes[header_end..header_end + length];
+                    let request: AccountStatusResolveRequestBody =
+                        serde_json::from_slice(body).unwrap();
+                    request.validate().unwrap();
+                    assert_eq!(request.account_authority_id, state.service_core_id());
+                    assert_eq!(request.account_id, answer.account_id);
+                    assert_eq!(request.from_status_seq, from);
+                    assert_eq!(request.limit, 128);
+                    assert_eq!(
+                        arkret_canonical::canonical_json_bytes(&request).unwrap(),
+                        body
+                    );
+                    assert_eq!(
+                        header("arkret-operation"),
+                        "ak.peer.account_status.read.resolve.v1"
+                    );
+                    assert_eq!(header("source-service-id"), state.service_id());
+                    assert_eq!(header("destination-service-id"), state.service_id());
+                    assert_eq!(
+                        header("source-trust-domain"),
+                        state.config().trust_domain.as_str()
+                    );
+                    assert_eq!(
+                        header("destination-trust-domain"),
+                        state
+                            .config()
+                            .account_authority_trust_domain
+                            .as_ref()
+                            .unwrap()
+                            .as_str()
+                    );
+                    assert!(!headers.iter().any(|(name, _)| name == "idempotency-key"));
+                    let policy = arkret_signatures::http_signature::SignatureVerificationPolicy::for_scenario(
+                        arkret_signatures::http_signature::HttpSignatureScenario::ServiceToServiceV1,
+                        &["content-digest", "source-trust-domain", "destination-trust-domain"],
+                    ).unwrap();
+                    arkret_signatures::http_signature::verify_signed_canonical_json_message(
+                        "POST",
+                        &format!("http://{address}{PATH}"),
+                        &address,
+                        PATH,
+                        headers
+                            .iter()
+                            .map(|(name, value)| (name.as_str(), value.as_str())),
+                        false,
+                        body,
+                        &SigningKey::from_bytes(&SEED).verifying_key(),
+                        &policy,
+                        Utc::now().timestamp(),
+                    )
+                    .unwrap();
+                    // Exercise a real verified incoming publication between the
+                    // resolve baseline read and its response; do not mock PG append.
+                    if let Some(record) = concurrent {
+                        validate_account_status_publication(&state, state.service_id(),
+                            &AccountStatusPublicationRequestBody { publication:
+                                AccountStatusPublication::Initial(
+                                    arkret_models_collaboration::account_lifecycle::AccountStatusInitialPublication { record: record.clone() },
+                                ),
+                            },
+                        ).await.unwrap();
+                        let append = append_validated_account_status_record(&state, &record)
+                            .await
+                            .unwrap();
+                        match append {
+                            coland_storage::AccountStatusReplicaAppend::Accepted(receipt) => {
+                                race_receipts.push(receipt)
+                            }
+                            _ => panic!("concurrent original publication was not newly accepted"),
+                        }
+                    }
+                    let answer = arkret_canonical::canonical_json_bytes(&answer).unwrap();
+                    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", answer.len()).as_bytes()).await.unwrap();
+                    stream.write_all(&answer).await.unwrap();
+                }
+                race_receipts
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_missing_replica_appends_verified_seq1_and_empty_preserves_receipt() {
+        let mut fixture = Fixture::new().await;
+        let first = fixture.signed_record(None);
+        assert!(fixture.rows().await.is_empty());
+        let server = fixture.server(vec![
+            (1, fixture.answer(vec![first.clone()], false), None),
+            (2, fixture.answer(vec![], false), None),
+        ]);
+        let observation =
+            refresh_current_account_status(&fixture.state, &fixture.pcr.history.account)
+                .await
+                .unwrap();
+        assert!(observation.is_completed());
+        assert_wire_equal(observation.record(), &first);
+        assert_wire_equal(&fixture.rows().await, &vec![first.clone()]);
+        let receipt = fixture.receipt(1).await;
+        let again = refresh_current_account_status(&fixture.state, &fixture.pcr.history.account)
+            .await
+            .unwrap();
+        assert_wire_equal(again.record(), &first);
+        assert_wire_equal(&fixture.receipt(1).await, &receipt);
+        assert_wire_equal(&fixture.rows().await, &vec![first]);
+        assert!(server.await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn refresh_existing_head_closes_successor_pagination_over_original_store() {
+        let mut fixture = Fixture::new().await;
+        let mut records = vec![fixture.signed_record(None)];
+        while records.len() < 131 {
+            records.push(fixture.signed_record(records.last()));
+        }
+        let server = fixture.server(vec![
+            (1, fixture.answer(records[..1].to_vec(), false), None),
+            (2, fixture.answer(records[1..129].to_vec(), true), None),
+            (130, fixture.answer(records[129..].to_vec(), false), None),
+        ]);
+        refresh_current_account_status(&fixture.state, &fixture.pcr.history.account)
+            .await
+            .unwrap();
+        let receipt = fixture.receipt(1).await;
+        let observation =
+            refresh_current_account_status(&fixture.state, &fixture.pcr.history.account)
+                .await
+                .unwrap();
+        assert_wire_equal(observation.record(), records.last().unwrap());
+        assert_wire_equal(&fixture.rows().await, &records);
+        assert_wire_equal(&fixture.receipt(1).await, &receipt);
+        fixture.receipt(131).await;
+        assert!(server.await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn refresh_duplicate_arriving_during_http_keeps_original_receipt() {
+        let mut fixture = Fixture::new().await;
+        let first = fixture.signed_record(None);
+        let server = fixture.server(vec![(
+            1,
+            fixture.answer(vec![first.clone()], false),
+            Some(first.clone()),
+        )]);
+        let observation =
+            refresh_current_account_status(&fixture.state, &fixture.pcr.history.account)
+                .await
+                .unwrap();
+        let originals = server.await.unwrap();
+        assert_eq!(originals.len(), 1);
+        assert_wire_equal(&fixture.receipt(1).await, &originals[0]);
+        assert_wire_equal(observation.record(), &first);
+        assert_wire_equal(&fixture.rows().await, &vec![first]);
+    }
+
+    #[tokio::test]
+    async fn refresh_wrong_authority_signature_refuses_without_replica_mutation() {
+        let mut fixture = Fixture::new().await;
+        let mut first = fixture.signed_record(None);
+        let (prefix, _) = first.proof.jws.rsplit_once('.').unwrap();
+        first.proof.jws = format!("{prefix}.{}", arkret_canonical::base64url_encode([0u8; 64]));
+        first.validate_shape().unwrap();
+        let server = fixture.server(vec![(1, fixture.answer(vec![first], false), None)]);
+        assert!(
+            refresh_current_account_status(&fixture.state, &fixture.pcr.history.account)
+                .await
+                .is_err()
+        );
+        server.await.unwrap();
+        assert!(fixture.rows().await.is_empty());
+        assert!(
+            fixture
+                .state
+                .persistence()
+                .account_status_receipt(fixture.state.service_id(), &fixture.pcr.history.account, 1)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_valid_signature_wrong_pcr_refuses_without_replica_mutation() {
+        let mut fixture = Fixture::new().await;
+        let first = fixture.signed_record(None);
+        let mut unsigned = first.unsigned();
+        unsigned.principal_control_realm_id = PcrGenesisFixture::new(fixture.state.service_did())
+            .unit
+            .submission
+            .pcr_realm_id;
+        let wrong = arkret_signatures::account_status::sign_account_status_record(
+            unsigned,
+            fixture.method.clone(),
+            &SigningKey::from_bytes(&SEED),
+        )
+        .unwrap();
+        let server = fixture.server(vec![(1, fixture.answer(vec![wrong], false), None)]);
+        assert!(
+            refresh_current_account_status(&fixture.state, &fixture.pcr.history.account)
+                .await
+                .is_err()
+        );
+        server.await.unwrap();
+        assert!(fixture.rows().await.is_empty());
+        assert!(
+            fixture
+                .state
+                .persistence()
+                .account_status_receipt(fixture.state.service_id(), &fixture.pcr.history.account, 1)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_empty_without_replica_never_invents_active_current() {
+        let mut fixture = Fixture::new().await;
+        let server = fixture.server(vec![(1, fixture.answer(vec![], false), None)]);
+        assert!(
+            refresh_current_account_status(&fixture.state, &fixture.pcr.history.account)
+                .await
+                .is_err()
+        );
+        server.await.unwrap();
+        assert!(fixture.rows().await.is_empty());
+        assert!(
+            fixture
+                .state
+                .persistence()
+                .current_account_status_record(
+                    fixture.state.service_id(),
+                    &fixture.pcr.history.account
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_empty_cannot_certify_head_changed_during_http_observation() {
+        let mut fixture = Fixture::new().await;
+        let first = fixture.signed_record(None);
+        let next = fixture.signed_record(Some(&first));
+        let server = fixture.server(vec![
+            (1, fixture.answer(vec![first.clone()], false), None),
+            (2, fixture.answer(vec![], false), Some(next.clone())),
+        ]);
+        refresh_current_account_status(&fixture.state, &fixture.pcr.history.account)
+            .await
+            .unwrap();
+        let receipt = fixture.receipt(1).await;
+        assert!(
+            refresh_current_account_status(&fixture.state, &fixture.pcr.history.account)
+                .await
+                .is_err()
+        );
+        let concurrent = server.await.unwrap();
+        assert_wire_equal(&fixture.rows().await, &vec![first, next]);
+        assert_wire_equal(&fixture.receipt(1).await, &receipt);
+        assert_wire_equal(&fixture.receipt(2).await, &concurrent[0]);
     }
 }

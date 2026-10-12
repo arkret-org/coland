@@ -58,6 +58,8 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         | EventKind::SidecarContextAttach
         | EventKind::AgentSidecarExchangeControl
         | EventKind::RealmOrganization
+        | EventKind::RealmLink
+        | EventKind::RealmJoinRule
         | EventKind::CircleMemberState
         | EventKind::StrandCreate
         | EventKind::RealmProfile
@@ -859,6 +861,8 @@ mod tests {
             EventKind::CircleMemberState,
             EventKind::MemberIdentityUpdate,
             EventKind::RealmOrganization,
+            EventKind::RealmLink,
+            EventKind::RealmJoinRule,
             EventKind::StrandCreate,
             EventKind::RealmProfile,
             EventKind::RealmReadReceiptPolicy,
@@ -928,6 +932,8 @@ mod tests {
             EventKind::CircleMemberState,
             EventKind::MemberIdentityUpdate,
             EventKind::RealmOrganization,
+            EventKind::RealmLink,
+            EventKind::RealmJoinRule,
             EventKind::StrandCreate,
             EventKind::RealmProfile,
             EventKind::RealmReadReceiptPolicy,

@@ -131,17 +131,6 @@ pub fn local_router() -> Router {
         // verificationMethod. Bearer-gated (see `keys::product_router`).
         .push(keys::product_router())
         .push(account::local_service_router())
-        // `root` — trust root: DID / identity documents + recovery.
-        .push(
-            Router::with_path("root").push(
-                // The embedded webvh provider only allocates hosted DIDs here;
-                // reads go through `ak.root.identity.document.resource.get.v1`
-                // and rotations through
-                // `ak.root.identity.command.submit_did_operation.v1`.
-                Router::with_path("identity")
-                    .push(Router::with_path("webvh/register").post(did::embedded_webvh_register)),
-            ),
-        )
         .push(Router::with_path("root").push(recovery::router()))
 }
 

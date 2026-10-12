@@ -99,6 +99,84 @@ pub(crate) async fn commit_ordinary_bootstrap_singleton_current_result_in_connec
     Ok(())
 }
 
+/// Join-rule changes use the same serialized Realm governance cut as the
+/// capability decision and advance only with their exact covering Commit.
+pub(crate) async fn commit_realm_join_rule_authority_current_result_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    commit: &arkret_wire::RealmCommit,
+) -> PersistenceResult<()> {
+    if event.kind != arkret_wire::EventKind::RealmJoinRule {
+        return Ok(());
+    }
+    crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
+        conn,
+        event,
+        commit.committed_at,
+    )
+    .await?;
+    commit_realm_join_rule_current_result_in_connection(conn, event, commit).await
+}
+
+/// Apply an already verified JoinRule Commit, preserving its source revision.
+/// Restricted entrance modes must retain an automatic gate in the current
+/// committed policy bundle (join-policy.md §2).
+pub(crate) async fn commit_realm_join_rule_current_result_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    commit: &arkret_wire::RealmCommit,
+) -> PersistenceResult<()> {
+    if event.kind != arkret_wire::EventKind::RealmJoinRule {
+        return Ok(());
+    }
+    arkret_schema::validate_event_for_submit(event)
+        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+    if event.scope_ref
+        != (arkret_wire::ScopeRef::Realm {
+            realm_id: event.realm_id.clone(),
+        })
+        || commit.stream_ref
+            != (arkret_wire::CommitStreamRef::Realm {
+                realm_id: event.realm_id.clone(),
+            })
+        || commit.realm_id != event.realm_id
+        || commit.event_ref != event.event_id
+    {
+        return Err(PersistenceError::Conflict(
+            "join rule requires its exact Realm Event and covering Commit".to_owned(),
+        ));
+    }
+    let rule = typed_payload(event, EventPayloadExt::as_realm_join_rule)?;
+    let value = result_value(&rule.value)?;
+    if value
+        .as_str()
+        .is_some_and(coland_storage::join_rule_requires_an_automatic_gate)
+    {
+        #[derive(diesel::QueryableByName)]
+        struct PolicyRow {
+            #[diesel(sql_type = Jsonb)]
+            value: serde_json::Value,
+        }
+        let policy = diesel::sql_query(
+            "SELECT value FROM realm_policy_bundle_current_results WHERE realm_id=$1 FOR SHARE",
+        )
+        .bind::<Text, _>(event.realm_id.as_str())
+        .get_result::<PolicyRow>(&mut *conn)
+        .await
+        .optional()
+        .map_err(PersistenceError::database)?;
+        if !coland_storage::join_policy_declares_an_automatic_gate(
+            policy.as_ref().and_then(|row| row.value.get("join_policy")),
+        ) {
+            return Err(PersistenceError::Conflict(
+                "join_rule_policy_mismatch: restricted join rule requires an automatic gate"
+                    .to_owned(),
+            ));
+        }
+    }
+    advance_singleton(conn, event, commit, "realm_join_rule", &value).await
+}
+
 /// Advance the complete profile value with its covering RealmCommit. Omitted
 /// optional fields disappear; no previous value is merged into the new value.
 pub(crate) async fn commit_realm_profile_authority_current_result_in_connection(
@@ -461,6 +539,216 @@ mod tests {
         current_commit_id: String,
         #[diesel(sql_type = Jsonb)]
         value: serde_json::Value,
+    }
+
+    #[tokio::test]
+    async fn join_rule_current_is_atomic_authorized_and_requires_automatic_gate() {
+        let database = crate::test_database::TestDatabase::lease().await;
+        let pool = database.pool();
+        let discussion =
+            ordinary_realm::open_human_discussion(&pool, &uuid::Uuid::now_v7().to_string()).await;
+        let mut previous = discussion.head.authority_commit;
+        let founder = discussion.unit.transactions[0]
+            .event
+            .actor_id
+            .signing_principal_id();
+        let uow = crate::PgEventCommitUnitOfWork::new(pool.clone());
+        for value in ["public", "invite"] {
+            let request = ordinary_realm::next_request(
+                &previous,
+                arkret_wire::EventKind::RealmJoinRule,
+                founder,
+                serde_json::json!({"value":value}),
+                chrono::Utc::now(),
+            );
+            uow.commit_event(request.clone()).await.unwrap();
+            uow.commit_event(request.clone()).await.unwrap();
+            let material = crate::PgAuthorityCommitStore { pool: pool.clone() }
+                .realm_state_snapshot_material(&request.authority_commit.event.realm_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let row = material
+                .current_state_entries
+                .iter()
+                .find(|entry| {
+                    matches!(
+                        entry,
+                        arkret_wire::TypedCurrentRow::Value {
+                            selector: arkret_wire::CurrentSelector::RealmJoinRule,
+                            ..
+                        }
+                    )
+                })
+                .expect("confirmed join rule current");
+            let arkret_wire::TypedCurrentRow::Value {
+                revision,
+                value: actual,
+                source_stream_ref,
+                ..
+            } = row;
+            assert_eq!(actual, &serde_json::json!(value));
+            assert_eq!(
+                revision.commit_id,
+                request.authority_commit.commit.commit_id
+            );
+            assert_eq!(
+                revision.stream_position,
+                request.authority_commit.commit.stream_position
+            );
+            assert_eq!(
+                source_stream_ref,
+                &request.authority_commit.commit.stream_ref
+            );
+            previous = request.authority_commit;
+        }
+        let outsider = Box::pin(ordinary_realm::human_profile::admit(
+            &pool,
+            &ordinary_realm::station(),
+            "join-rule-outsider",
+        ))
+        .await;
+        let denied = ordinary_realm::next_request(
+            &previous,
+            arkret_wire::EventKind::RealmJoinRule,
+            &outsider.principal_id,
+            serde_json::json!({"value":"public"}),
+            chrono::Utc::now(),
+        );
+        let denied = Box::pin(ordinary_realm::source_request(&pool, denied)).await;
+        let restricted = ordinary_realm::next_request(
+            &previous,
+            arkret_wire::EventKind::RealmJoinRule,
+            founder,
+            serde_json::json!({"value":"knock_restricted"}),
+            chrono::Utc::now(),
+        );
+        for (candidate, expected) in [
+            (denied, coland_storage::ConflictCode::CapabilityDenied),
+            (
+                restricted,
+                coland_storage::ConflictCode::JoinRulePolicyMismatch,
+            ),
+        ] {
+            let error = uow.commit_event(candidate.clone()).await.unwrap_err();
+            assert_eq!(error.conflict_code(), Some(expected), "{error:?}");
+            assert!(
+                crate::PgEventStore { pool: pool.clone() }
+                    .get(candidate.authority_commit.event.event_id.as_str())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                crate::PgAuthorityCommitStore { pool: pool.clone() }
+                    .committed_event_by_commit_id(&candidate.authority_commit.commit.commit_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let mut conn = pool.get().await.unwrap();
+        let current = diesel::sql_query("SELECT current_commit_id,value FROM realm_bootstrap_current_results WHERE realm_id=$1 AND result_family='realm_join_rule'")
+            .bind::<Text,_>(previous.event.realm_id.as_str()).get_result::<Row>(&mut *conn).await.unwrap();
+        assert_eq!(
+            current.current_commit_id,
+            previous.commit.commit_id.as_str()
+        );
+        assert_eq!(current.value, serde_json::json!("invite"));
+        drop(conn);
+        let policy = ordinary_realm::next_request(
+            &previous,
+            arkret_wire::EventKind::RealmPolicyBundle,
+            founder,
+            serde_json::json!({"policy_revision":2,"federation_policy":"closed", "join_policy":{
+                "gates":[{"gate_id":"claim","kind":"claim_required","auto_resolve":true,
+                    "required_claims":["employee"],"trusted_issuer_ids":[ordinary_realm::station()]}],"combinator":"all"
+            }}),
+            chrono::Utc::now(),
+        );
+        uow.commit_event(policy.clone()).await.unwrap();
+        previous = policy.authority_commit;
+        let knock = ordinary_realm::next_request(
+            &previous,
+            arkret_wire::EventKind::RealmJoinRule,
+            founder,
+            serde_json::json!({"value":"knock_restricted"}),
+            chrono::Utc::now(),
+        );
+        uow.commit_event(knock.clone()).await.unwrap();
+        previous = knock.authority_commit;
+        let erase = ordinary_realm::next_request(
+            &previous,
+            arkret_wire::EventKind::RealmPolicyBundle,
+            founder,
+            serde_json::json!({"policy_revision":3,"federation_policy":"closed"}),
+            chrono::Utc::now(),
+        );
+        let error = uow.commit_event(erase.clone()).await.unwrap_err();
+        assert_eq!(
+            error.conflict_code(),
+            Some(coland_storage::ConflictCode::JoinRulePolicyMismatch)
+        );
+        assert!(
+            crate::PgEventStore { pool: pool.clone() }
+                .get(erase.authority_commit.event.event_id.as_str())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            crate::PgAuthorityCommitStore { pool: pool.clone() }
+                .committed_event_by_commit_id(&erase.authority_commit.commit.commit_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let mut conn = pool.get().await.unwrap();
+        let current = diesel::sql_query("SELECT current_commit_id,value FROM realm_bootstrap_current_results WHERE realm_id=$1 AND result_family='realm_join_rule'")
+            .bind::<Text,_>(previous.event.realm_id.as_str()).get_result::<Row>(&mut *conn).await.unwrap();
+        assert_eq!(
+            current.current_commit_id,
+            previous.commit.commit_id.as_str()
+        );
+        assert_eq!(current.value, serde_json::json!("knock_restricted"));
+    }
+
+    #[tokio::test]
+    async fn join_rule_replica_tail_preserves_covering_source_and_rejects_mismatched_commit() {
+        let database = crate::test_database::TestDatabase::lease().await;
+        let pool = database.pool();
+        let discussion =
+            ordinary_realm::open_human_discussion(&pool, &uuid::Uuid::now_v7().to_string()).await;
+        let previous = discussion.head.authority_commit;
+        let founder = discussion.unit.transactions[0]
+            .event
+            .actor_id
+            .signing_principal_id();
+        let request = ordinary_realm::next_request(
+            &previous,
+            arkret_wire::EventKind::RealmJoinRule,
+            founder,
+            serde_json::json!({"value":"public"}),
+            chrono::Utc::now(),
+        );
+        // This projection input is downstream of source Commit verification;
+        // it exercises the replica fold, not a live signer or HTTP admission.
+        let source = &request.authority_commit;
+        let mut conn = pool.get().await.unwrap();
+        let mut wrong_commit = source.commit.clone();
+        wrong_commit.event_ref = previous.event.event_id;
+        assert!(
+            crate::replica_current::advance_in_connection(&mut conn, &source.event, &wrong_commit)
+                .await
+                .is_err()
+        );
+        crate::replica_current::advance_in_connection(&mut conn, &source.event, &source.commit)
+            .await
+            .unwrap();
+        let current = diesel::sql_query("SELECT current_commit_id,value FROM realm_bootstrap_current_results WHERE realm_id=$1 AND result_family='realm_join_rule'")
+            .bind::<Text,_>(source.event.realm_id.as_str()).get_result::<Row>(&mut *conn).await.unwrap();
+        assert_eq!(current.current_commit_id, source.commit.commit_id.as_str());
+        assert_eq!(current.value, serde_json::json!("public"));
     }
 
     #[tokio::test]

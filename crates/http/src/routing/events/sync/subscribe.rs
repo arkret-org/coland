@@ -399,7 +399,22 @@ pub(super) async fn account_response(
             return;
         }
         if initial_has_delta {
-            yield Ok::<Bytes, std::io::Error>(ndjson_line(&response));
+            let delivery = match super::account_frame_delivery_guard(&state, &session, &response).await {
+                Ok(guard) => guard,
+                Err(_) => {
+                    yield Ok::<Bytes,std::io::Error>(ndjson_line(&account_unauthorized_frame()));
+                    return;
+                }
+            };
+            let line = ndjson_line(&response);
+            if delivery.as_ref().is_some_and(|guard| !guard.permits_handoff()) {
+                yield Ok::<Bytes,std::io::Error>(ndjson_line(&account_unauthorized_frame()));
+                return;
+            }
+            yield Ok::<Bytes, std::io::Error>(line);
+            if let Some(guard) = delivery {
+                if guard.finish().await.is_err() { return; }
+            };
             if body.catchup.unwrap_or(false) && initial_cursor.is_some() {
                 yield Ok::<Bytes, std::io::Error>(ndjson_line(&account_catchup_complete_frame(
                     initial_cursor.clone(),
@@ -449,7 +464,22 @@ pub(super) async fn account_response(
                             &account_checkpoint_frame(final_cursor.clone()),
                         ));
                     } else {
-                        yield Ok::<Bytes, std::io::Error>(ndjson_line(&final_snapshot));
+                        let delivery = match super::account_frame_delivery_guard(&state, &session, &final_snapshot).await {
+                            Ok(guard) => guard,
+                            Err(_) => {
+                                yield Ok::<Bytes,std::io::Error>(ndjson_line(&account_unauthorized_frame()));
+                                return;
+                            }
+                        };
+                        let line = ndjson_line(&final_snapshot);
+                        if delivery.as_ref().is_some_and(|guard| !guard.permits_handoff()) {
+                            yield Ok::<Bytes,std::io::Error>(ndjson_line(&account_unauthorized_frame()));
+                            return;
+                        }
+                        yield Ok::<Bytes, std::io::Error>(line);
+                        if let Some(guard) = delivery {
+                            if guard.finish().await.is_err() { return; }
+                        };
                     }
                     if body.catchup.unwrap_or(false) && final_cursor.is_some() {
                         yield Ok::<Bytes, std::io::Error>(ndjson_line(
@@ -523,7 +553,22 @@ pub(super) async fn account_response(
                             yield Err(std::io::Error::other("account cursor authority changed before publication"));
                             break;
                         }
-                        yield Ok::<Bytes, std::io::Error>(ndjson_line(&delta));
+                        let delivery = match super::account_frame_delivery_guard(&state, &session, &delta).await {
+                            Ok(guard) => guard,
+                            Err(_) => {
+                                yield Ok::<Bytes,std::io::Error>(ndjson_line(&account_unauthorized_frame()));
+                                return;
+                            }
+                        };
+                        let line = ndjson_line(&delta);
+                        if delivery.as_ref().is_some_and(|guard| !guard.permits_handoff()) {
+                            yield Ok::<Bytes,std::io::Error>(ndjson_line(&account_unauthorized_frame()));
+                            return;
+                        }
+                        yield Ok::<Bytes, std::io::Error>(line);
+                        if let Some(guard) = delivery {
+                            if guard.finish().await.is_err() { return; }
+                        };
                         if body.catchup.unwrap_or(false) && delta_cursor.is_some() {
                             yield Ok::<Bytes, std::io::Error>(ndjson_line(
                                 &account_catchup_complete_frame(delta_cursor),

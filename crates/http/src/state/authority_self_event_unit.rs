@@ -115,6 +115,8 @@ fn decided_at_commit_cut(kind: &arkret_wire::EventKind) -> bool {
             | arkret_wire::EventKind::AgentSidecarExchangeControl
             | arkret_wire::EventKind::CircleMemberState
             | arkret_wire::EventKind::RealmOrganization
+            | arkret_wire::EventKind::RealmLink
+            | arkret_wire::EventKind::RealmJoinRule
             | arkret_wire::EventKind::SelfModerationReport
             | arkret_wire::EventKind::ModerationDecision
             | arkret_wire::EventKind::ModerationDecisionLift
@@ -756,6 +758,16 @@ pub(crate) async fn submit_mimi_binding_event(
 #[cfg(test)]
 mod claim_privacy_tests {
     use super::*;
+
+    #[test]
+    fn relationship_and_join_rule_admission_use_the_durable_current_cut() {
+        for kind in [
+            arkret_wire::EventKind::RealmLink,
+            arkret_wire::EventKind::RealmJoinRule,
+        ] {
+            assert!(decided_at_commit_cut(&kind));
+        }
+    }
 
     #[test]
     fn genesis_creation_timestamp_rejects_one_millisecond_drift_before_lookup() {

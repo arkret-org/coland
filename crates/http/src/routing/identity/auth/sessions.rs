@@ -455,6 +455,18 @@ fn recovery_operation_for_request(method: &str, path: &str) -> Option<&'static s
 /// KeyPackage claim, read, upload and consume handlers.
 fn agent_recipient_operation(method: &str, path: &str) -> Option<&'static str> {
     use arkret_wire::ServiceOperationId;
+    // Resolve the most specific registered binding first: the subscribe path
+    // also fits the Event resource template. This closed addition changes no
+    // holder/current authority or exact grant-scope requirement.
+    if let Some(
+        operation @ (ServiceOperationId::SelfCommittedEventResourceGetV1
+        | ServiceOperationId::SelfCommittedEventStreamSubscribeV1
+        | ServiceOperationId::SelfBlobResourceGetV1
+        | ServiceOperationId::SelfBlobResourceHeadV1),
+    ) = ServiceOperationId::from_http_request(method, path)
+    {
+        return Some(operation.as_str());
+    }
     match (method, path) {
         ("POST", "/_arkret/self/signer-keys/query") => {
             Some(ServiceOperationId::SELF_SIGNER_KEYS_READ_RESOLVE_V1)
@@ -479,6 +491,11 @@ fn agent_recipient_operation(method: &str, path: &str) -> Option<&'static str> {
         }
         ("GET", path) if path_template_matches("/_arkret/self/realms/{realm_id}/streams", path) => {
             Some(ServiceOperationId::SELF_REALM_READ_STREAMS_V1)
+        }
+        ("GET", path)
+            if ServiceOperationId::SelfRealmReadExportV1.matches_http_request("GET", path) =>
+        {
+            Some(ServiceOperationId::SELF_REALM_READ_EXPORT_V1)
         }
         ("GET", path)
             if path_template_matches("/_arkret/self/realm-state-snapshot/{snapshot_id}", path) =>
@@ -551,18 +568,31 @@ fn enforce_agent_session_operation(
     if !classify_agent_session(session)? {
         return Ok(());
     }
-    let Some(operation) = agent_recipient_operation(req.method().as_str(), req.uri().path()) else {
+    require_agent_operation_scope(
+        req.method().as_str(),
+        req.uri().path(),
+        session
+            .session_grant
+            .as_ref()
+            .map(|grant| grant.scopes.as_slice()),
+    )
+}
+
+// The endpoint operation ceiling stays independent of content action/resource
+// ceilings. Classifying the typed Agent holder remains the caller's first gate.
+fn require_agent_operation_scope(
+    method: &str,
+    path: &str,
+    scopes: Option<&[String]>,
+) -> Result<(), (StatusCode, &'static str, &'static str)> {
+    let Some(operation) = agent_recipient_operation(method, path) else {
         return Err((
             StatusCode::FORBIDDEN,
             "capability_denied",
             "Agent operation requires a migrated endpoint authorization",
         ));
     };
-    if !session
-        .session_grant
-        .as_ref()
-        .is_some_and(|grant| grant.scopes.iter().any(|scope| scope == operation))
-    {
+    if !scopes.is_some_and(|scopes| scopes.iter().any(|scope| scope == operation)) {
         return Err((
             StatusCode::FORBIDDEN,
             "capability_denied",
@@ -944,6 +974,82 @@ mod tests {
     use super::*;
 
     #[test]
+    fn owned_realm_export_operation_maps_only_registered_get() {
+        use arkret_wire::ServiceOperationId;
+        for path in [
+            "/_arkret/self/realms/ak:realm:example/export",
+            "/_arkret/self/realms/ak:realm:another/export",
+        ] {
+            assert!(ServiceOperationId::SelfRealmReadExportV1.matches_http_request("GET", path));
+            assert_eq!(
+                agent_recipient_operation("GET", path),
+                Some(ServiceOperationId::SELF_REALM_READ_EXPORT_V1)
+            );
+        }
+    }
+
+    #[test]
+    fn owned_realm_export_operation_requires_its_exact_grant_scope() {
+        use arkret_wire::{CapabilityActionId, ServiceOperationId};
+        let path = "/_arkret/self/realms/ak:realm:example/export";
+        let endpoint_and_content = [
+            ServiceOperationId::SELF_REALM_READ_EXPORT_V1.to_owned(),
+            CapabilityActionId::EventRead.to_string(),
+        ];
+        assert_eq!(
+            require_agent_operation_scope("GET", path, Some(&endpoint_and_content)),
+            Ok(())
+        );
+        // Passing this operation ceiling alone never grants EventRead. The
+        // original held content consumer must independently enforce it.
+        let endpoint_only = [ServiceOperationId::SELF_REALM_READ_EXPORT_V1.to_owned()];
+        assert_eq!(
+            require_agent_operation_scope("GET", path, Some(&endpoint_only)),
+            Ok(())
+        );
+        for scopes in [
+            vec![CapabilityActionId::EventRead.to_string()],
+            vec![ServiceOperationId::SELF_COMMITTED_EVENT_READ_SCAN_V1.to_owned()],
+            vec![],
+        ] {
+            assert_eq!(
+                require_agent_operation_scope("GET", path, Some(&scopes)),
+                Err((
+                    StatusCode::FORBIDDEN,
+                    "capability_denied",
+                    "Agent grant does not authorize this operation"
+                ))
+            );
+        }
+        assert!(require_agent_operation_scope("GET", path, None).is_err());
+    }
+
+    #[test]
+    fn owned_realm_export_operation_rejects_method_and_path_neighbors() {
+        let scope = [arkret_wire::ServiceOperationId::SELF_REALM_READ_EXPORT_V1.to_owned()];
+        for (method, path) in [
+            ("POST", "/_arkret/self/realms/ak:realm:example/export"),
+            ("QUERY", "/_arkret/self/realms/ak:realm:example/export"),
+            ("GET", "/_arkret/self/realms/ak:realm:example/export/extra"),
+            ("GET", "/_arkret/self/realms/ak:realm:example/export/"),
+            ("GET", "/_arkret/self/realms//export"),
+            ("GET", "/_arkret/self/realms/ak:realm:example/Export"),
+            ("GET", "/_coland/self/realms/ak:realm:example/export"),
+            ("GET", "/_arkret/self/realms/export"),
+        ] {
+            assert_eq!(agent_recipient_operation(method, path), None);
+            assert_eq!(
+                require_agent_operation_scope(method, path, Some(&scope)),
+                Err((
+                    StatusCode::FORBIDDEN,
+                    "capability_denied",
+                    "Agent operation requires a migrated endpoint authorization"
+                ))
+            );
+        }
+    }
+
+    #[test]
     fn agent_holder_without_marker_fails_closed() {
         assert_eq!(classify_agent_marker(true, Some(true)), Ok(true));
         assert_eq!(classify_agent_marker(false, Some(false)), Ok(false));
@@ -1071,12 +1177,107 @@ mod tests {
             ("POST", "/_arkret/self/current-results/exact/extra"),
             ("GET", "/_arkret/self/signer-keys/query"),
             ("POST", "/_arkret/self/signer-keys/query/other"),
-            (
-                "GET",
-                "/_arkret/self/committed-events/not-a-formal-selector",
-            ),
         ] {
             assert!(agent_recipient_operation(method, path).is_none());
+        }
+    }
+
+    fn owned_content_registered_operations() -> Vec<(&'static str, String, &'static str)> {
+        use arkret_wire::ServiceOperationId as Operation;
+        let event =
+            arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [71; 32]);
+        vec![
+            (
+                "GET",
+                format!("/_arkret/self/committed-events/{event}"),
+                Operation::SELF_COMMITTED_EVENT_RESOURCE_GET_V1,
+            ),
+            (
+                "GET",
+                "/_arkret/self/committed-events/subscribe".into(),
+                Operation::SELF_COMMITTED_EVENT_STREAM_SUBSCRIBE_V1,
+            ),
+            (
+                "GET",
+                "/_arkret/self/blob/get".into(),
+                Operation::SELF_BLOB_RESOURCE_GET_V1,
+            ),
+            (
+                "HEAD",
+                "/_arkret/self/blob/get".into(),
+                Operation::SELF_BLOB_RESOURCE_HEAD_V1,
+            ),
+        ]
+    }
+
+    #[test]
+    fn owned_content_operation_maps_exact_sdk_binding_with_specific_subscribe() {
+        for (method, path, operation) in owned_content_registered_operations() {
+            let typed = arkret_wire::ServiceOperationId::from_wire(operation).unwrap();
+            assert!(typed.matches_http_request(method, &path));
+            assert_eq!(agent_recipient_operation(method, &path), Some(operation));
+            assert_eq!(
+                require_agent_operation_scope(method, &path, Some(&[operation.to_owned()])),
+                Ok(())
+            );
+        }
+        // A selector is typed by the original handler, which returns its
+        // indistinguishable 404. Operation classification does not parse IDs.
+        assert_eq!(
+            agent_recipient_operation(
+                "GET",
+                "/_arkret/self/committed-events/not-a-formal-selector"
+            ),
+            Some(arkret_wire::ServiceOperationId::SELF_COMMITTED_EVENT_RESOURCE_GET_V1)
+        );
+    }
+
+    #[test]
+    fn owned_content_operation_refuses_absent_wrong_and_capability_only_scopes() {
+        for (method, path, operation) in owned_content_registered_operations() {
+            assert!(require_agent_operation_scope(method, &path, None).is_err());
+            for scopes in [
+                vec![],
+                vec![arkret_wire::CapabilityActionId::EventRead.to_string()],
+                vec![arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1.to_owned()],
+            ] {
+                assert_eq!(
+                    require_agent_operation_scope(method, &path, Some(&scopes)),
+                    Err((
+                        StatusCode::FORBIDDEN,
+                        "capability_denied",
+                        "Agent grant does not authorize this operation"
+                    ))
+                );
+            }
+            let other_operations = owned_content_registered_operations()
+                .into_iter()
+                .map(|(_, _, other)| other.to_owned())
+                .filter(|other| other != operation)
+                .collect::<Vec<_>>();
+            assert!(require_agent_operation_scope(method, &path, Some(&other_operations)).is_err());
+        }
+    }
+
+    #[test]
+    fn owned_content_operation_refuses_method_and_unregistered_path_neighbors() {
+        for (method, path) in [
+            ("POST", "/_arkret/self/committed-events/subscribe"),
+            ("HEAD", "/_arkret/self/committed-events/subscribe"),
+            ("QUERY", "/_arkret/self/blob/get"),
+            ("POST", "/_arkret/self/blob/get"),
+            ("GET", "/_arkret/self/blob/get/extra"),
+            ("GET", "/_arkret/self/blob/get/"),
+            ("GET", "/_arkret/self/committed-events/subscribe/extra"),
+            ("GET", "/_arkret/self/committed-events/"),
+            ("GET", "/_coland/self/committed-events/subscribe"),
+        ] {
+            assert_eq!(agent_recipient_operation(method, path), None);
+            let scopes = owned_content_registered_operations()
+                .into_iter()
+                .map(|(_, _, scope)| scope.to_owned())
+                .collect::<Vec<_>>();
+            assert!(require_agent_operation_scope(method, path, Some(&scopes)).is_err());
         }
     }
 

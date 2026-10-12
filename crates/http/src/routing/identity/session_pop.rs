@@ -76,6 +76,15 @@ fn auth_rejection(rejection: (StatusCode, &'static str, &'static str)) -> AppErr
     }
 }
 
+/// The fixed native consumer reuses the exact original self-resource PoP gate.
+/// It introduces no new endpoint, signature scenario, or exempt request class.
+pub(crate) async fn enforce_native_reply_session_pop(
+    state: &AppState,
+    req: &mut Request,
+) -> Result<(), AppError> {
+    enforce_session_pop(state, req).await
+}
+
 async fn enforce_session_pop(state: &AppState, req: &mut Request) -> Result<(), AppError> {
     let presented = req.headers().contains_key("signature-input");
     if !presented {

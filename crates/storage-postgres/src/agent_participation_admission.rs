@@ -194,6 +194,53 @@ pub(crate) async fn require_current(
     Ok(())
 }
 
+/// Fixed native reply preparation reads the same durable controller selection
+/// and all ancestor ceilings without constructing a signed Message Event.
+pub(crate) async fn require_native_reply_current(
+    conn: &mut AsyncPgConnection,
+    agent: &arkret_wire::AccountId,
+    scope: &arkret_wire::ScopeRef,
+    strand: &arkret_wire::StrandId,
+    target_station: &DidCoreId,
+    deployment: ParticipationBits,
+) -> PersistenceResult<()> {
+    if &agent.station_id != target_station {
+        return Err(unresolved());
+    }
+    let realm = scope.realm_id_opt().ok_or_else(unresolved)?;
+    require_owner_current(conn, agent).await?;
+    lock_selection(conn, agent.principal_id.as_str(), true).await?;
+    let mut scopes = vec![format!("realm:{realm}")];
+    match scope {
+        arkret_wire::ScopeRef::Realm { .. } => {}
+        arkret_wire::ScopeRef::Circle { circle_id, .. } => {
+            scopes.push(format!("circle:{realm}:{circle_id}"))
+        }
+        _ => return Err(unresolved()),
+    }
+    scopes.push(format!("strand:{realm}:{strand}"));
+    let rows = sql_query("SELECT jsonb_build_object('target_scope',scope,'selection',jsonb_build_object('reply_message',reply_message,'reaction_add',reaction_add,'reaction_remove',reaction_remove,'accept_third_party_mention',accept_third_party_mention,'act_on_behalf',act_on_behalf),'version',version,'next_replace_input',jsonb_build_object('expected_version',version)) AS value FROM agent_participation WHERE agent_id=$1 AND scope_key=ANY($2) FOR SHARE")
+        .bind::<Text,_>(agent.principal_id.as_str()).bind::<Array<Text>,_>(&scopes)
+        .load::<ValueRow>(&mut *conn).await.map_err(PersistenceError::database)?
+        .into_iter().map(|row| serde_json::from_value::<AgentParticipationEntry>(row.value).map_err(|_| unresolved()))
+        .collect::<PersistenceResult<Vec<_>>>()?;
+    let selected = scopes
+        .iter()
+        .rev()
+        .find_map(|key| rows.iter().find(|entry| entry.scope.scope_key() == *key))
+        .ok_or_else(unresolved)?;
+    let mut effective = deployment.intersect(selected.selection);
+    for scope in &scopes {
+        if let Some(ceiling) = governance_component(conn, realm.as_str(), scope).await? {
+            effective = effective.intersect(ceiling);
+        }
+    }
+    if !effective.reply_message || !effective.accept_third_party_mention {
+        return Err(unresolved());
+    }
+    Ok(())
+}
+
 /// Participation ownership comes from the owning Station's accepted provision
 /// and Agent PCR, including private targets without shared Realm membership.
 /// Shared membership and controller generation remain independent mode gates.

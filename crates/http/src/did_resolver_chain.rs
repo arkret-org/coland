@@ -435,6 +435,25 @@ impl coland_services::identity::DidResolverPort for ColandDidResolver {
             .map_err(|_| "current service DID resolution exceeded 5 seconds".to_owned())?
             .map_err(|e| e.to_string())
     }
+    async fn resolve_verified_external_webvh_history(
+        &self,
+        did: &Did,
+    ) -> Result<
+        arkret_identity::VerifiedDidWebvhLog,
+        coland_services::identity::PinnedDidResolutionError,
+    > {
+        use coland_services::identity::PinnedDidResolutionError;
+        if did.method() != "webvh" {
+            return Err(PinnedDidResolutionError::UnsupportedMethod);
+        }
+        if !self.method_allowed("webvh") {
+            return Err(PinnedDidResolutionError::MethodNotAllowed);
+        }
+        self.fetch_verified_webvh_history(did)
+            .await
+            .map_err(PinnedDidResolutionError::HistoryUnverifiable)
+    }
+
     async fn resolve_current_external_webvh_state(
         &self,
         did: &Did,

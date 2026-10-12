@@ -9,16 +9,13 @@
 //! directory, mimi, …) calls into to resolve "is this actor allowed to see /
 //! write in this Realm?".
 
-use std::collections::BTreeMap;
-
 use arkret_identifiers::RealmId;
-use arkret_models_collaboration::governance::realm_governance::{
-    RealmExport, RealmExportSchema, RealmLifecycleView,
-};
+use arkret_models_collaboration::governance::realm_governance::{RealmExport, RealmLifecycleView};
 #[cfg(test)]
 use arkret_wire::PlaintextDataClassKind;
 use chrono::{DateTime, Utc};
 use coland_http::error::AppError;
+use coland_http::result::{GuardedJsonResult, guarded_json_ok};
 use coland_services::identity::SessionIdentityState as SessionRecord;
 use salvo::oapi::extract::PathParam;
 use salvo::prelude::*;
@@ -63,87 +60,28 @@ async fn export_realm(
     depot: &mut Depot,
     req: &mut Request,
     realm_id: PathParam<String>,
-) -> JsonResult<RealmExport> {
+) -> GuardedJsonResult<RealmExport> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
-    let realm_id = realm_id.into_inner();
-    let typed_realm_id =
-        RealmId::new(realm_id.clone()).map_err(|_| AppError::param_invalid("invalid realm_id"))?;
-    if !realm_id_accessible(state, &realm_id, Some(&session)).await {
-        return Err(AppError::not_found("not found"));
-    }
-    let projected_events = state
-        .event_queries()
-        .projected_events_for_realm(&realm_id)
+    let actor =
+        crate::routing::identity::session_actor::validated_session_actor(state, &session).await?;
+    let realm_id = RealmId::new(realm_id.into_inner())
+        .map_err(|_| AppError::param_invalid("invalid realm_id"))?;
+    let (export, sources) = state
+        .authority_commits()
+        .realm_export_for_actor(&realm_id, &actor, &state.service_core_id())
         .await
-        .map_err(|error| AppError::internal(format!("realm export failed: {error}")))?;
-    let operations = projected_events
-        .iter()
-        .filter_map(|event| {
-            event.operation_id.as_ref().map(|operation_id| {
-                BTreeMap::from([
-                    (
-                        "operation_id".to_owned(),
-                        Value::String(operation_id.clone()),
-                    ),
-                    ("realm_id".to_owned(), Value::String(event.realm_id.clone())),
-                    (
-                        "object_kind".to_owned(),
-                        Value::String(event.event_kind.as_str().to_owned()),
-                    ),
-                    (
-                        "operation_kind".to_owned(),
-                        Value::String(event.operation_kind.clone()),
-                    ),
-                    ("payload".to_owned(), event.payload.clone()),
-                    (
-                        "created_at".to_owned(),
-                        Value::String(arkret_canonical::format_timestamp_canonical(
-                            event.created_at,
-                        )),
-                    ),
-                ])
-            })
-        })
-        .collect::<Vec<_>>();
-    let events = projected_events
-        .into_iter()
-        .map(|event| {
-            let mut exported = BTreeMap::from([
-                ("event_id".to_owned(), Value::String(event.event_id)),
-                ("realm_id".to_owned(), Value::String(event.realm_id)),
-                (
-                    "event_kind".to_owned(),
-                    Value::String(event.event_kind.as_str().to_owned()),
-                ),
-                (
-                    "operation_kind".to_owned(),
-                    Value::String(event.operation_kind),
-                ),
-                ("payload".to_owned(), event.payload),
-                (
-                    "created_at".to_owned(),
-                    Value::String(arkret_canonical::format_timestamp_canonical(
-                        event.created_at,
-                    )),
-                ),
-            ]);
-            if let Some(operation_id) = event.operation_id {
-                exported.insert("operation_id".to_owned(), Value::String(operation_id));
-            }
-            if let Some(sender) = event.sender {
-                exported.insert("sender".to_owned(), Value::String(sender));
-            }
-            exported
-        })
-        .collect();
-    json_ok(RealmExport {
-        schema: RealmExportSchema::V1,
-        realm_id: typed_realm_id,
-        generated_at: now(),
-        operations,
-        events,
-    })
+        .map_err(|error| AppError::internal(error.to_string()))?
+        .ok_or_else(|| AppError::not_found("not found"))?;
+    let input = coland_storage::AccountContentDeliveryInput {
+        realms: vec![realm_id],
+        committed_events: sources,
+        realm_exports: vec![export.clone()],
+        ..Default::default()
+    };
+    let guard =
+        crate::routing::events::sync::content_delivery_guard(state, &session, &input).await?;
+    guarded_json_ok(export, guard)
 }
 
 // ── Helpers shared with the parent module ───────────────────────────────────

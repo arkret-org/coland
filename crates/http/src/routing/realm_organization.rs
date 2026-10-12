@@ -14,13 +14,8 @@
 //! Spec: `arkret-spec/spec/v1/zh/models/realm-and-space.md` §2.3.0; response
 //! schema `realm-organization-operations.schema.json`.
 
-use std::collections::BTreeSet;
-
 use arkret_identifiers::RealmId;
-use arkret_models_collaboration::governance::realm_governance::{
-    RealmOrganizationLifecyclePhase, RealmOrganizationRelationshipList,
-};
-use arkret_wire::DidCoreId;
+use arkret_models_collaboration::governance::realm_governance::RealmOrganizationRelationshipList;
 use coland_http::error::AppError;
 use coland_http::result::{JsonResult, json_ok};
 use salvo::oapi::endpoint;
@@ -90,43 +85,14 @@ async fn list_realm_organizations_impl(
     depot: &mut Depot,
 ) -> JsonResult<RealmOrganizationRelationshipList> {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let realm_id = realm_id.into_inner();
-    if !crate::routing::realm_has_member(
-        state,
-        &realm_id,
-        &crate::routing::identity::session_actor::session_actor_from_credential(state, &session)?
-            .to_string(),
-    )
-    .await
-    {
-        return Err(AppError::not_found("realm not found"));
-    }
-    let now = chrono::Utc::now();
-
-    let typed_realm = de_str::<RealmId>("realm_id", &realm_id)?;
-    let relationships = state
+    let realm_id = de_str::<RealmId>("realm_id", &realm_id.into_inner())?;
+    let actor =
+        crate::routing::identity::session_actor::session_actor_from_credential(state, &session)?;
+    let outcome = state
         .persistence()
-        .accepted_realm_organization_relationships(&typed_realm, now)
+        .accepted_realm_organization_read(&realm_id, &actor, chrono::Utc::now())
         .await
-        .map_err(|error| AppError::internal(error.to_string()))?;
-    let verified_org_ids: BTreeSet<DidCoreId> = relationships
-        .iter()
-        .filter(|row| row.lifecycle_phase == RealmOrganizationLifecyclePhase::VerifiedActive)
-        .map(|row| row.organization_id.clone())
-        .collect();
-    // SOL-ORG-05 declared `owning_organization_ids` hints (display surface only),
-    // minus any organization that already has a currently-verified statement so
-    // a hint never duplicates a verified row.
-    let mut declared_organization_hint_ids: Vec<DidCoreId> = Vec::new();
-    for organization_id in super::organizations::realm_organization_ids(state, &realm_id) {
-        if !verified_org_ids.contains(&organization_id) {
-            declared_organization_hint_ids.push(organization_id);
-        }
-    }
-
-    json_ok(RealmOrganizationRelationshipList {
-        realm_id: de_str::<RealmId>("realm_id", &realm_id)?,
-        relationships,
-        declared_organization_hint_ids,
-    })
+        .map_err(|error| AppError::internal(error.to_string()))?
+        .ok_or_else(|| AppError::not_found("realm not found"))?;
+    json_ok(outcome)
 }

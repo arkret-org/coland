@@ -770,7 +770,98 @@ pub(crate) async fn account_snapshot_material_in_connection(
     {
         return Err(rejected("an unaudited typed-current family is installed"));
     }
-    let facts = disclosure_facts_in_connection(conn, realm_id, account, &material).await?;
+    let mut facts = disclosure_facts_in_connection(conn, realm_id, account, &material).await?;
+    let caller = ActorId::account(account.clone());
+    if crate::committed_disclosure::ordinary_agent_read_ceiling(
+        crate::account_stream_scan::realm_purpose(conn, realm_id).await?,
+    ) && let Some(controller) =
+        crate::realm_authorization_cut::owned_controller_snapshot_in_connection(
+            conn,
+            realm_id,
+            &caller,
+            chrono::Utc::now(),
+        )
+        .await?
+    {
+        let controller_account = controller
+            .as_account_id()
+            .ok_or_else(|| rejected("the Agent controller is not an Account"))?;
+        let owner_facts =
+            disclosure_facts_in_connection(conn, realm_id, controller_account, &material).await?;
+        let owner_material =
+            disclose_to_account(material.clone(), controller_account, &owner_facts)?;
+        let Some(owner_floor) = owner_facts.caller_floor.as_ref() else {
+            return Err(rejected(
+                "the Agent controller has no current readable floor",
+            ));
+        };
+        if facts
+            .caller_floor
+            .as_ref()
+            .is_none_or(|floor| floor.oldest_position < owner_floor.oldest_position)
+        {
+            facts.caller_floor = Some(owner_floor.clone());
+        }
+        for (agent_floors, owner_floors) in [(&mut facts.circle_floors, &owner_facts.circle_floors)]
+        {
+            agent_floors.retain(|id, floor| {
+                let Some(owner_floor) = owner_floors.get(id) else {
+                    return false;
+                };
+                if floor.oldest_position < owner_floor.oldest_position {
+                    *floor = owner_floor.clone();
+                }
+                true
+            });
+        }
+        for agent_floors in [&mut facts.sidecar_floors, &mut facts.sidecar_public_floors] {
+            agent_floors.retain(|id, floor| {
+                let owner_floor = owner_facts
+                    .sidecar_floors
+                    .get(id)
+                    .or_else(|| owner_facts.sidecar_public_floors.get(id));
+                let Some(owner_floor) = owner_floor else {
+                    return false;
+                };
+                if floor.oldest_position < owner_floor.oldest_position {
+                    *floor = owner_floor.clone();
+                }
+                true
+            });
+        }
+        let mut agent_material = disclose_to_account(material, account, &facts)?;
+        agent_material
+            .visible_stream_heads
+            .retain(|head| owner_material.visible_stream_heads.contains(head));
+        agent_material
+            .current_state_entries
+            .retain(|row| owner_material.current_state_entries.contains(row));
+        for row in &agent_material.current_state_entries {
+            let TypedCurrentRow::Value {
+                source_stream_ref,
+                revision,
+                ..
+            } = row;
+            let event = crate::account_content_delivery::current_source_in_connection(
+                conn,
+                realm_id,
+                source_stream_ref,
+                revision,
+            )
+            .await?;
+            crate::account_content_delivery::require_owned_current_source_in_connection(
+                conn,
+                &event,
+                controller_account,
+                account,
+                chrono::Utc::now(),
+            )
+            .await?;
+        }
+        // Validate the required current-family closure again after intersecting
+        // complete bytes. A missing pair/anchor is unavailable, never fabricated.
+        return disclose_to_account(agent_material, account, &facts).map(Some);
+    }
     disclose_to_account(material, account, &facts).map(Some)
 }
 

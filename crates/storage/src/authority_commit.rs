@@ -12,7 +12,7 @@ use arkret_wire::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use crate::PersistenceResult;
+use crate::{PersistenceError, PersistenceResult};
 
 /// A delivered cross-Station KeyPackage claim whose exact pair Welcome may
 /// have been consumed since the last source-side observation.
@@ -1404,8 +1404,214 @@ pub enum MlsMemberGroupStateMaterialRead {
     },
 }
 
+/// One request-local observation of the configured Account Authority's complete
+/// authenticated resolve answer. It is never serialized or persisted, and does
+/// not turn record signing or receipt acceptance time into a freshness TTL.
+#[derive(Clone, Debug)]
+pub struct AccountStatusCurrentObservation {
+    record: arkret_models_collaboration::account_status::AccountStatusRecord,
+    completed_at: std::time::Instant,
+}
+
+impl AccountStatusCurrentObservation {
+    /// Called only after the original signed resolve reaches its final page
+    /// and every returned original record is verified and monotonically stored.
+    pub fn after_authenticated_resolve(
+        record: arkret_models_collaboration::account_status::AccountStatusRecord,
+    ) -> Self {
+        Self {
+            record,
+            completed_at: std::time::Instant::now(),
+        }
+    }
+
+    pub fn record(&self) -> &arkret_models_collaboration::account_status::AccountStatusRecord {
+        &self.record
+    }
+
+    pub fn is_completed(&self) -> bool {
+        self.completed_at <= std::time::Instant::now()
+    }
+}
+
+/// Process-local publication inputs using the original SDK content models.
+/// This is not a wire object or a reusable authorization assertion.
+#[derive(Clone, Debug, Default)]
+pub struct AccountContentDeliveryInput {
+    pub realms: Vec<arkret_wire::RealmId>,
+    pub committed_events: Vec<arkret_wire::CommittedEventView>,
+    pub current_views:
+        Vec<arkret_models_collaboration::sync_frames::current_results::AccountCurrentView>,
+    pub projection_lists: Vec<(
+        arkret_wire::RealmId,
+        bool,
+        arkret_models_collaboration::objects::query_projection::ProjectionSpaceList,
+        arkret_models_collaboration::objects::query_projection::ProjectionStrandList,
+    )>,
+    pub morph_lists: Vec<(
+        arkret_wire::RealmId,
+        bool,
+        arkret_models_collaboration::objects::query_projection::ProjectionMorphList,
+    )>,
+    pub morph_documents: Vec<(
+        arkret_wire::RealmId,
+        arkret_wire::MorphId,
+        arkret_models_collaboration::objects::query_projection::DocumentMorphProjectionOutcome,
+    )>,
+    pub morph_absences: Vec<(arkret_wire::RealmId, arkret_wire::MorphId)>,
+    pub account_status_observations: Vec<AccountStatusCurrentObservation>,
+    pub realm_exports: Vec<arkret_models_collaboration::governance::realm_governance::RealmExport>,
+    pub snapshots: Vec<arkret_wire::RealmStateSnapshot>,
+    pub future_materials: Vec<arkret_wire::MlsWelcomeDelivery>,
+    pub notifications:
+        Vec<arkret_models_collaboration::sync_frames::account_subscribe::NotificationDelta>,
+    pub exact_reads: Vec<(
+        arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadRequestBody,
+        arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadOutcome,
+    )>,
+    pub watch_reads: Vec<(
+        arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentRequestBody,
+        arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome,
+    )>,
+    pub blobs: Vec<(
+        arkret_wire::BlobRef,
+        crate::BlobRecord,
+        arkret_wire::CapabilityActionId,
+    )>,
+    pub credential_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub agent_session_scope: Option<(Vec<String>, serde_json::Map<String, serde_json::Value>)>,
+    pub agent_endpoint: Option<crate::AgentEndpointGuard>,
+    pub qualified_agent_scope_evidence: Option<crate::VerifiedAgentScopeEvidence>,
+    pub unresolved_content_realms: Vec<arkret_wire::RealmId>,
+}
+
+impl AccountContentDeliveryInput {
+    pub fn committed(rows: &[arkret_wire::CommittedEventView]) -> Self {
+        Self {
+            realms: rows
+                .iter()
+                .map(|row| row.commit().realm_id.clone())
+                .collect(),
+            committed_events: rows.to_vec(),
+            ..Self::default()
+        }
+    }
+
+    pub fn snapshot(snapshot: &arkret_wire::RealmStateSnapshot) -> Self {
+        Self {
+            realms: vec![snapshot.realm_id.clone()],
+            snapshots: vec![snapshot.clone()],
+            ..Self::default()
+        }
+    }
+
+    pub fn account_frame(
+        frame: &arkret_models_collaboration::sync_frames::account_subscribe::AccountSubscribeFrame,
+    ) -> PersistenceResult<Self> {
+        let mut input = Self::default();
+        if let Some(realms) = &frame.realms {
+            for (id, detail) in &realms.entries {
+                if detail.unavailable.is_some() {
+                    continue;
+                }
+                let realm = arkret_wire::RealmId::new(id)
+                    .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+                input.realms.push(realm.clone());
+                input
+                    .committed_events
+                    .extend(detail.committed_events.iter().flatten().cloned());
+                input.current_views.extend(detail.current.iter().cloned());
+                if detail.state_at_window_start.is_some() || detail.member_roster.is_some() {
+                    input.unresolved_content_realms.push(realm);
+                }
+            }
+        }
+        if let Some(deliveries) = &frame.to_device {
+            for delivery in &deliveries.deliveries {
+                if let arkret_models_collaboration::device_messages::RecipientDelivery::MlsWelcome { mls_welcome } = delivery {
+                    input.realms.push(mls_welcome.realm_id.clone());
+                    input.future_materials.push(mls_welcome.clone());
+                }
+            }
+        }
+        if let Some(notifications) = &frame.notifications {
+            for delta in &notifications.items {
+                delta
+                    .validate_shape()
+                    .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+                if let Some(content) = delta.ordinary_projection() {
+                    input.realms.push(content.realm_id.clone());
+                    input.notifications.push(delta.clone());
+                }
+            }
+        }
+        Ok(input)
+    }
+}
+
+/// Process-local lock lease through the actual response handoff. It is never
+/// serialized, signed, cached or accepted as a reusable authorization token.
+#[async_trait]
+pub trait AccountContentDeliveryGuard: Send {
+    /// Recheck clock-dependent facts from the held cut immediately before the
+    /// transport accepts bytes. Locks cannot prevent an expiry or time window.
+    fn permits_handoff(&self) -> bool {
+        false
+    }
+    async fn finish(self: Box<Self>) -> PersistenceResult<()>;
+}
+
 #[async_trait]
 pub trait AuthorityCommitStore: Send + Sync {
+    /// Governing capability/management preflight for self or the exact verified
+    /// controller of an owned Agent. This does not issue a runtime/session grant.
+    async fn owned_agent_authorization_check(
+        &self,
+        _caller: &arkret_wire::ActorId,
+        _station: &arkret_wire::DidCoreId,
+        _request: &arkret_models_collaboration::governance::authorization::AuthzCheckRequestBody,
+    ) -> PersistenceResult<
+        Option<arkret_models_collaboration::governance::authorization::AuthzCheckOutcome>,
+    > {
+        Ok(None)
+    }
+
+    /// Revalidate complete bytes at this Station's current governing cut and
+    /// retain all revocable dependency locks through network handoff. A replica
+    /// without a registered authenticated governing barrier must fail closed.
+    async fn acquire_committed_content_delivery(
+        &self,
+        _account: &arkret_wire::AccountId,
+        _station: &arkret_wire::DidCoreId,
+        _input: &AccountContentDeliveryInput,
+    ) -> PersistenceResult<Option<Box<dyn AccountContentDeliveryGuard>>> {
+        Err(crate::PersistenceError::Conflict(
+            "revision_unavailable: current content delivery barrier is unavailable".into(),
+        ))
+    }
+
+    /// Hold a governing cut for fixed native MessageCreate reply preparation.
+    /// Only trusted in-process callers supply original session/custody evidence.
+    /// This creates neither a signed Event nor a quota operation identity.
+    async fn acquire_native_message_reply_preparation(
+        &self,
+        agent: &arkret_wire::AccountId,
+        controller: &arkret_wire::AccountId,
+        caller: &arkret_wire::AccountId,
+        station: &arkret_wire::DidCoreId,
+        source: &arkret_wire::CommittedEventFullView,
+        strand: &arkret_wire::StrandId,
+        input: &AccountContentDeliveryInput,
+        deployment: arkret_models_collaboration::governance::agent_participation::ParticipationBits,
+    ) -> PersistenceResult<Box<dyn AccountContentDeliveryGuard>> {
+        let _ = (
+            agent, controller, caller, station, source, strand, input, deployment,
+        );
+        Err(crate::PersistenceError::Conflict(
+            "revision_unavailable: native reply preparation barrier is unavailable".into(),
+        ))
+    }
+
     /// Assemble the complete registered Agent sibling from immutable accepted
     /// producer records and one current Origin cut. This is an internal port,
     /// not a new disclosure surface. ASRE alone is never a successful result.
@@ -2247,6 +2453,30 @@ pub trait AuthorityCommitStore: Send + Sync {
 
     /// Read the maximal-disclosure snapshot material from one consistent
     /// durable cut. Implementations must sort every repeated field.
+    async fn accepted_realm_links(
+        &self,
+        realm: &arkret_wire::RealmId,
+        direction: arkret_models_collaboration::governance::realm_governance::RealmLinkDirection,
+        allow: Option<&[String]>,
+    ) -> PersistenceResult<
+        Vec<arkret_models_collaboration::governance::realm_governance::RealmLinkEntry>,
+    > {
+        let _ = (realm, direction, allow);
+        Err(crate::PersistenceError::Internal(
+            "accepted Realm link read is unavailable".into(),
+        ))
+    }
+
+    async fn accepted_realm_organization_read(
+        &self, realm: &arkret_wire::RealmId, caller: &arkret_wire::ActorId,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<Option<arkret_models_collaboration::governance::realm_governance::RealmOrganizationRelationshipList>>{
+        let _ = (realm, caller, at);
+        Err(crate::PersistenceError::Internal(
+            "accepted Realm organization read is unavailable".into(),
+        ))
+    }
+
     async fn realm_state_snapshot_material(
         &self,
         realm_id: &arkret_wire::RealmId,
@@ -2306,6 +2536,76 @@ pub trait AuthorityCommitStore: Send + Sync {
     > {
         Err(crate::PersistenceError::Internal(
             "durable object projection read is unavailable".to_owned(),
+        ))
+    }
+
+    /// Original SDK projection lists and their exact accepted-current
+    /// structural dependencies, read together at one held database cut.
+    /// Missing provenance fails closed; this is not an independent wire DTO.
+    async fn object_projection_delivery_for_actor(
+        &self,
+        realm_id: &arkret_wire::RealmId,
+        actor: &arkret_wire::ActorId,
+        include_terminal: bool,
+    ) -> PersistenceResult<
+        Option<(
+            arkret_models_collaboration::objects::query_projection::ProjectionSpaceList,
+            arkret_models_collaboration::objects::query_projection::ProjectionStrandList,
+            arkret_models_collaboration::sync_frames::current_results::AccountCurrentView,
+        )>,
+    > {
+        let _ = (realm_id, actor, include_terminal);
+        Err(crate::PersistenceError::Internal(
+            "accepted object projection delivery read is unavailable".into(),
+        ))
+    }
+
+    /// Native current Morph values rebuilt from complete accepted source chains.
+    async fn morph_list_for_actor(
+        &self,
+        _realm: &arkret_wire::RealmId,
+        _actor: &arkret_wire::ActorId,
+        _station: &arkret_wire::DidCoreId,
+        _include_terminal: bool,
+    ) -> PersistenceResult<
+        Option<arkret_models_collaboration::objects::query_projection::ProjectionMorphList>,
+    > {
+        Err(crate::PersistenceError::Internal(
+            "native Morph list is unavailable".into(),
+        ))
+    }
+
+    async fn document_morph_for_actor(
+        &self,
+        _realm: &arkret_wire::RealmId,
+        _morph: &arkret_wire::MorphId,
+        _actor: &arkret_wire::ActorId,
+        _station: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<
+        Option<
+            arkret_models_collaboration::objects::query_projection::DocumentMorphProjectionOutcome,
+        >,
+    > {
+        Err(crate::PersistenceError::Internal(
+            "native document Morph is unavailable".into(),
+        ))
+    }
+
+    /// A complete caller-visible export and its original accepted sources at
+    /// one durable cut. Stored operation handles are metadata, not authority.
+    async fn realm_export_for_actor(
+        &self,
+        _realm_id: &arkret_wire::RealmId,
+        _actor: &arkret_wire::ActorId,
+        _station: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<
+        Option<(
+            arkret_models_collaboration::governance::realm_governance::RealmExport,
+            Vec<arkret_wire::CommittedEventView>,
+        )>,
+    > {
+        Err(crate::PersistenceError::Internal(
+            "accepted Realm export is unavailable".into(),
         ))
     }
 

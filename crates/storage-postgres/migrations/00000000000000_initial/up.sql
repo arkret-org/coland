@@ -4563,9 +4563,12 @@ CREATE TABLE agent_pairing_receipts (
     controller_principal_id TEXT NOT NULL,
     pairing_request_id TEXT NOT NULL,
     request_digest TEXT NOT NULL,
+    approval_request_id TEXT NOT NULL,
+    runtime_key_binding_digest TEXT NOT NULL,
     raw_key_digest TEXT NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
     activation_state TEXT NOT NULL CHECK (activation_state IN ('awaiting_source_commit','active','cancelled')),
+    scope_custody_ref JSONB NOT NULL CHECK (jsonb_typeof(scope_custody_ref)='object' AND scope_custody_ref ?& ARRAY['key_ref','content_digest'] AND scope_custody_ref - 'key_ref' - 'content_digest' = '{}'::jsonb AND jsonb_typeof(scope_custody_ref->'key_ref')='string' AND jsonb_typeof(scope_custody_ref->'content_digest')='string' AND scope_custody_ref->>'content_digest' ~ '^sha256:[0-9a-f]{64}$'),
     UNIQUE(agent_id, raw_key_digest)
 );
 CREATE FUNCTION preserve_agent_pairing_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -4574,10 +4577,10 @@ BEGIN
     pending := NEW.pending_pairing_commit_intent;
     IF TG_OP = 'UPDATE' THEN old_pending := OLD.pending_pairing_commit_intent; END IF;
     IF pending IS NOT NULL AND (old_pending IS NULL OR pending IS DISTINCT FROM old_pending) THEN
-        INSERT INTO agent_pairing_receipts(authorize_event_ref,agent_id,controller_principal_id,pairing_request_id,request_digest,raw_key_digest,expires_at,activation_state)
-        VALUES(pending->>'authorize_event_id',NEW.id,NEW.controller_principal_id,NEW.pairing_request_id,pending->>'request_digest',NEW.runtime_key_material->>'public_key_digest',NEW.pairing_expires_at,'awaiting_source_commit')
+        INSERT INTO agent_pairing_receipts(authorize_event_ref,agent_id,controller_principal_id,pairing_request_id,request_digest,approval_request_id,runtime_key_binding_digest,raw_key_digest,expires_at,activation_state,scope_custody_ref)
+        VALUES(pending->>'authorize_event_id',NEW.id,NEW.controller_principal_id,NEW.pairing_request_id,pending->>'request_digest',NEW.approval_request_id,NEW.runtime_key_binding_digest,NEW.runtime_key_material->>'public_key_digest',NEW.pairing_expires_at,'awaiting_source_commit',pending->'scope_custody_ref')
         ON CONFLICT (authorize_event_ref) DO NOTHING;
-        IF NOT EXISTS (SELECT 1 FROM agent_pairing_receipts WHERE authorize_event_ref=pending->>'authorize_event_id' AND agent_id=NEW.id AND request_digest=pending->>'request_digest' AND activation_state='awaiting_source_commit') THEN
+        IF NOT EXISTS (SELECT 1 FROM agent_pairing_receipts WHERE authorize_event_ref=pending->>'authorize_event_id' AND agent_id=NEW.id AND controller_principal_id=NEW.controller_principal_id AND pairing_request_id=NEW.pairing_request_id AND request_digest=pending->>'request_digest' AND approval_request_id=NEW.approval_request_id AND runtime_key_binding_digest=NEW.runtime_key_binding_digest AND scope_custody_ref=pending->'scope_custody_ref' AND activation_state='awaiting_source_commit') THEN
             RAISE EXCEPTION 'Agent authorize command is already terminal or conflicts';
         END IF;
     END IF;
@@ -4741,3 +4744,31 @@ CREATE TABLE agent_origin_control_source_candidates (
 
 CREATE INDEX agent_origin_control_candidate_gc_idx
  ON agent_origin_control_source_candidates(realm_id,staged_at);
+
+-- Station-private management requests: no membership, public serving, fanout,
+-- shared current result or MLS authority follows from Pending/Approved.
+CREATE TABLE management_review_requests (
+ request_id TEXT PRIMARY KEY,
+ realm_id TEXT NOT NULL,
+ requester_actor_key TEXT NOT NULL,
+ effective_scope JSONB NOT NULL,
+ management_operation TEXT NOT NULL CHECK(management_operation IN ('join','publish')),
+ request_digest TEXT NOT NULL,
+ target_digest TEXT NOT NULL,
+ request_body JSONB NOT NULL,
+ immutable_pins JSONB NOT NULL,
+ requirements JSONB NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL,
+ expires_at TIMESTAMPTZ NOT NULL,
+ status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected','cancelled','expired','consumed','superseded')),
+ approval_signatures JSONB NOT NULL DEFAULT '[]'::jsonb,
+ approval_basis JSONB NOT NULL DEFAULT '[]'::jsonb,
+ accepted_commit_id TEXT,
+ CHECK(expires_at>created_at AND expires_at<=created_at+INTERVAL '24 hours'),
+ CHECK(jsonb_typeof(request_body)='object' AND jsonb_typeof(immutable_pins)='object'),
+ CHECK(jsonb_typeof(requirements)='array' AND jsonb_typeof(approval_signatures)='array' AND jsonb_typeof(approval_basis)='array'),
+ CHECK((status='consumed')=(accepted_commit_id IS NOT NULL))
+);
+CREATE UNIQUE INDEX management_review_one_nonterminal_target ON management_review_requests
+ (requester_actor_key,effective_scope,management_operation,target_digest)
+ WHERE status IN ('pending','approved');

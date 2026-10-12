@@ -5995,6 +5995,275 @@ async fn third_party_invite_create_reads_from_committed_event_and_lifecycle() {
     assert_eq!(AtomicUsize::load(&signed, Ordering::SeqCst), 1);
 }
 
+/// A delegated verifier serializes actual consume/delivery with the governing
+/// writer, and cancellation cannot return a locked connection to the pool.
+#[tokio::test]
+async fn delegated_invite_provider_holds_current_cut_until_private_completion() {
+    use coland_storage::ThirdPartyInviteProviderLivenessRequest;
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let station = arkret_wire::DidCoreId::new("ak:did_core:web:bootstrap-station.example").unwrap();
+    human_profile::admit(&pool, &station, "bootstrap-actor").await;
+    let unit = unit(&pool).await;
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let at = unit.transactions[0].commit.committed_at;
+    store
+        .admit_ordinary_realm_bootstrap_unit(&unit, at)
+        .await
+        .unwrap();
+    let realm = unit.transactions[0].event.realm_id.clone();
+    let creator = creator_account(&unit);
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let policy = realm_event_request_as(
+        &bootstrap_tail(&unit),
+        &creator,
+        arkret_wire::EventKind::RealmPolicyBundle,
+        serde_json::json!({
+            "policy_revision":2,"federation_policy":"closed",
+            "allowed_third_party_invite_verification_ids":[station]
+        }),
+    );
+    uow.commit_event(policy.clone()).await.unwrap();
+    let create = realm_event_request_as(
+        &policy,
+        &creator,
+        arkret_wire::EventKind::InviteThirdParty,
+        serde_json::json!({
+            "third_party_invite":{
+                "oob_code_kind":"offline_token",
+                "token_commitment":format!("sha256:{}", "b".repeat(64)),
+                "token_salt_id":"delegated-cut-salt", "token_entropy_bits":256,
+                "max_claims":1, "verification_id":station,
+                "verification_public_key":arkret_canonical::ed25519_pubkey_to_did_key_multibase(
+                    &ed25519_dalek::SigningKey::from_bytes(&[53;32]).verifying_key().to_bytes())
+            },
+            "expires_at":arkret_canonical::format_timestamp_canonical(at+chrono::TimeDelta::hours(1))
+        }),
+    );
+    uow.commit_event(create.clone()).await.unwrap();
+    let current = PgInviteCurrentResultStore { pool: pool.clone() };
+    let original = current
+        .invites_in_realm(Some(&realm))
+        .await
+        .unwrap()
+        .remove(0);
+    let request = ThirdPartyInviteProviderLivenessRequest {
+        realm_id: realm.clone(),
+        invite_id: original.invite_id.clone(),
+        inviter_account_id: creator.clone(),
+        third_party_invite: original.third_party_invite.clone().unwrap(),
+        expires_at: original.expires_at,
+    };
+    let observed = create.authority_commit.commit.committed_at + chrono::TimeDelta::milliseconds(1);
+    let before = invite_families(&pool, &realm).await;
+    let mut wrong = request.clone();
+    wrong.third_party_invite.token_salt_id = Some("another-salt".to_owned());
+    assert!(
+        current
+            .acquire_third_party_invite_provider_liveness(&wrong, &station, &|| observed)
+            .await
+            .is_err()
+    );
+    assert!(
+        current
+            .acquire_third_party_invite_provider_liveness(&request, &station, &|| request
+                .expires_at)
+            .await
+            .is_err()
+    );
+    let remote = "ak:did_core:web:replica.example".parse().unwrap();
+    assert!(
+        current
+            .acquire_third_party_invite_provider_liveness(&request, &remote, &|| observed)
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("revision_unavailable")
+    );
+    assert_eq!(invite_families(&pool, &realm).await, before);
+    let guard = current
+        .acquire_third_party_invite_provider_liveness(&request, &station, &|| observed)
+        .await
+        .unwrap();
+    assert_eq!(guard.observed_at(), observed);
+    let mut probe = pool.get().await.unwrap();
+    let lock = diesel::sql_query(
+        "SELECT realm_id FROM realm_authorities WHERE realm_id=$1 FOR UPDATE NOWAIT",
+    )
+    .bind::<Text, _>(realm.as_str())
+    .execute(&mut *probe)
+    .await;
+    assert!(lock.is_err(), "a competing governing writer must wait");
+    guard.finish().await.unwrap();
+    diesel::sql_query("SELECT realm_id FROM realm_authorities WHERE realm_id=$1 FOR UPDATE NOWAIT")
+        .bind::<Text, _>(realm.as_str())
+        .execute(&mut *probe)
+        .await
+        .unwrap();
+    drop(probe);
+    assert_eq!(invite_families(&pool, &realm).await, before);
+    let guard = current
+        .acquire_third_party_invite_provider_liveness(&request, &station, &|| observed)
+        .await
+        .unwrap();
+    drop(guard);
+    // Cancellation discards the session; PostgreSQL may observe EOF after the
+    // task yielding, so wait only for that concrete lock release.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let mut probe = pool.get().await.unwrap();
+            if diesel::sql_query(
+                "SELECT realm_id FROM realm_authorities WHERE realm_id=$1 FOR UPDATE NOWAIT",
+            )
+            .bind::<Text, _>(realm.as_str())
+            .execute(&mut *probe)
+            .await
+            .is_ok()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let removed = realm_event_request_as(
+        &create,
+        &creator,
+        arkret_wire::EventKind::RealmPolicyBundle,
+        serde_json::json!({
+            "policy_revision":3,"federation_policy":"closed",
+            "allowed_third_party_invite_verification_ids":[]
+        }),
+    );
+    uow.commit_event(removed).await.unwrap();
+    let after_withdrawal = invite_families(&pool, &realm).await;
+    assert!(
+        current
+            .acquire_third_party_invite_provider_liveness(&request, &station, &|| observed)
+            .await
+            .is_err(),
+        "activation evidence cannot override current withdrawal"
+    );
+    assert_eq!(invite_families(&pool, &realm).await, after_withdrawal);
+}
+
+#[tokio::test]
+async fn invite_provision_proof_uses_current_accepted_device_without_root_or_document_vm() {
+    use arkret_models_collaboration::governance::third_party_invite::{
+        ThirdPartyInviteDeliveryTargetUri, ThirdPartyInviteOobKind,
+        ThirdPartyInviteProvisionRequestBody,
+    };
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let station = "ak:did_core:web:bootstrap-station.example".parse().unwrap();
+    let fixture = human_profile::fixture(&station, "provision-device");
+    let account = human_profile::admit(&pool, &station, "provision-device").await;
+    let at =
+        chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis()).unwrap();
+    let mut request = ThirdPartyInviteProvisionRequestBody {
+        request_id: "ak:request:019b6a40-0000-7000-8000-000000000001"
+            .parse()
+            .unwrap(),
+        realm_id: arkret_wire::RealmId::from_event_id(&arkret_wire::EventId::from_digest(
+            arkret_canonical::DigestSuite::Sha256,
+            [71; 32],
+        )),
+        inviter_account_id: account,
+        verification_id: station.clone(),
+        oob_code_kind: ThirdPartyInviteOobKind::OfflineToken,
+        delivery_target_uri: ThirdPartyInviteDeliveryTargetUri::new(
+            "mailto:private@example.invalid",
+        )
+        .unwrap(),
+        expires_at: at + chrono::TimeDelta::minutes(30),
+        signature: arkret_wire::PayloadProof {
+            kind: arkret_wire::proof_kind::DETACHED_JWS.into(),
+            verification_method: fixture.history.device_verification_method.clone(),
+            payload_digest: arkret_wire::Hash::new(format!("sha256:{}", "0".repeat(64))).unwrap(),
+            created_at: at,
+            domain: Some(
+                arkret_wire::ProofContextId::THIRD_PARTY_INVITE_PROVISION_REQUEST_PROOF_V1.into(),
+            ),
+            audience: Some(arkret_wire::Audience::Single(station.to_string())),
+            proof_purpose: None,
+            jws: String::new(),
+        },
+    };
+    let mut proof = request.signature.unsigned();
+    proof.payload_digest = request.payload_digest().unwrap();
+    let bytes = request.unsigned_proof_binding_bytes(&proof).unwrap();
+    request.signature = proof
+        .finalize(
+            arkret_signatures::jws::sign_jws_ed25519(
+                &bytes,
+                &ed25519_dalek::SigningKey::from_bytes(
+                    &fixture.history.founding_device_signing_seed,
+                ),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    request.validate_for_service(&station).unwrap();
+    let current = PgInviteCurrentResultStore { pool: pool.clone() };
+    let before = current.invites_in_realm(None).await.unwrap();
+    let guard = current
+        .acquire_third_party_invite_provision_device(&request, &station, &|| at)
+        .await
+        .unwrap();
+    assert_eq!(guard.observed_at(), at);
+    guard.finish().await.unwrap();
+    let mut changed = request.clone();
+    changed.request_id = "ak:request:019b6a40-0000-7000-8000-000000000002"
+        .parse()
+        .unwrap();
+    assert!(
+        current
+            .acquire_third_party_invite_provision_device(&changed, &station, &|| at)
+            .await
+            .is_err()
+    );
+    let mut wrong = request.clone();
+    wrong.signature.verification_method = arkret_wire::DidUrl::new(format!(
+        "{}#{}",
+        fixture.history.did,
+        device_authorization_history::device(9)
+    ))
+    .unwrap();
+    assert!(
+        current
+            .acquire_third_party_invite_provision_device(&wrong, &station, &|| at)
+            .await
+            .is_err()
+    );
+    let mut root = request.clone();
+    let root_method = fixture.history.events[0]
+        .producer_proof
+        .as_ref()
+        .unwrap()
+        .verification_method
+        .clone();
+    root.signature.verification_method = root_method;
+    assert!(
+        current
+            .acquire_third_party_invite_provision_device(&root, &station, &|| at)
+            .await
+            .is_err()
+    );
+    assert!(
+        current
+            .acquire_third_party_invite_provision_device(&request, &station, &|| at
+                + chrono::TimeDelta::seconds(301))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        current.invites_in_realm(None).await.unwrap().len(),
+        before.len()
+    );
+}
+
 fn circle_self_member_request(
     previous: &EventCommitRequest,
     creator: &arkret_wire::AccountId,

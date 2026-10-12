@@ -173,6 +173,83 @@ pub fn evaluate_grants<'g>(
     evaluate_grants_with_verified_approvals(operation, grants, &[])
 }
 
+/// Evaluate a mandatory ceiling without inventing a Capability Grant.
+/// Every actual action must satisfy every allow constraint. Refusals retain
+/// global deny/quarantine/review priority. Unknown or external authority cannot
+/// be discharged by this stateless evaluator, including hard quota and claims.
+/// Only `Allowed` means success; its empty candidate list grants no authority
+/// and must never be passed to quota reservation or interpreted via `is_refusal`.
+pub fn evaluate_constraint_ceiling(
+    operation: &AuthorizationOperation<'_>,
+    constraints: &[GrantConstraint],
+) -> GrantEvaluation<'static> {
+    if operation.actions.is_empty()
+        || operation.target.kind == ResourceSelectorKind::All
+        || operation.target.validate().is_err()
+        || operation.actions.iter().any(|action| {
+            arkret_schema::capability_action(action).is_none()
+                && arkret_wire::ServiceOperationId::from_wire(action).is_none()
+        })
+    {
+        return GrantEvaluation::Unsatisfied;
+    }
+    for effect in [
+        GrantConstraintEffect::Deny,
+        GrantConstraintEffect::Quarantine,
+        GrantConstraintEffect::RequireReview,
+    ] {
+        if constraints
+            .iter()
+            .filter(|constraint| constraint.effect == effect)
+            .any(|constraint| {
+                operation
+                    .actions
+                    .iter()
+                    .any(|action| constraint_matches(operation, action, constraint))
+            })
+        {
+            return match effect {
+                GrantConstraintEffect::Deny => GrantEvaluation::Denied,
+                GrantConstraintEffect::Quarantine => GrantEvaluation::Quarantined,
+                _ => GrantEvaluation::RequiresReview,
+            };
+        }
+    }
+    for constraint in constraints
+        .iter()
+        .filter(|constraint| constraint.effect == GrantConstraintEffect::Allow)
+    {
+        if !constraint_is_evaluable(constraint)
+            || operation
+                .actions
+                .iter()
+                .any(|action| admits(operation, action, constraint) != Tri::Yes)
+        {
+            return GrantEvaluation::Unsatisfied;
+        }
+    }
+    GrantEvaluation::Allowed(Vec::new())
+}
+
+/// Add an explicit resource ceiling to the same mandatory-constraint decision.
+/// Resources are alternatives within this ceiling, but every additional scope
+/// layer must be checked independently against the unchanged actual target.
+/// Empty resources are not a wildcard. A caller that has proved a scope has no
+/// additional content selectors uses `evaluate_constraint_ceiling` directly.
+pub fn evaluate_resource_constraint_ceiling(
+    operation: &AuthorizationOperation<'_>,
+    resources: &[WireResourceSelector],
+    constraints: &[GrantConstraint],
+) -> GrantEvaluation<'static> {
+    if !resources
+        .iter()
+        .any(|ceiling| crate::resource_selector_covers(ceiling, operation.target))
+    {
+        return GrantEvaluation::Unsatisfied;
+    }
+    evaluate_constraint_ceiling(operation, constraints)
+}
+
 /// Intersect an Agent's complete paths with its controller's current paths.
 /// Parent quota keys retain the controller actor and original grant identity.
 /// The returned candidates are parent-first in canonical GrantId order; callers
@@ -185,6 +262,25 @@ pub fn evaluate_controller_bounded_grants<'g>(
     approvals: &[VerifiedGrantApproval],
     controller_owner: bool,
 ) -> GrantEvaluation<'g> {
+    let actions = operation
+        .actions
+        .iter()
+        .copied()
+        .filter(|action| {
+            !arkret_schema::capability_action(action).is_some_and(|descriptor| {
+                descriptor
+                    .required_evaluator_checks
+                    .contains(&"actor_eq_target_author")
+            }) || operation.facts.target_owner.as_ref() == Some(operation.actor)
+        })
+        .collect::<Vec<_>>();
+    if actions.is_empty() {
+        return GrantEvaluation::Denied;
+    }
+    let operation = &AuthorizationOperation {
+        actions: &actions,
+        ..*operation
+    };
     let agent_verdict =
         evaluate_grants_with_verified_approvals(operation, agent_grants.iter().copied(), approvals);
     let mut controller_facts = operation.facts.clone();
@@ -209,11 +305,31 @@ pub fn evaluate_controller_bounded_grants<'g>(
             }
         }
     }
+    let controller_sources = operation
+        .actions
+        .iter()
+        .map(|action| controller_grants_for_owned_action(operation, action, controller_grants))
+        .collect::<Vec<_>>();
+    for effect in [0, 1, 2] {
+        for (action, sources) in operation.actions.iter().zip(&controller_sources) {
+            let actions = [*action];
+            let current = AuthorizationOperation {
+                actions: &actions,
+                ..controller_operation
+            };
+            match (effect, evaluate_grants(&current, sources.iter())) {
+                (0, GrantEvaluation::Denied) => return GrantEvaluation::Denied,
+                (1, GrantEvaluation::Quarantined) => return GrantEvaluation::Quarantined,
+                (2, GrantEvaluation::RequiresReview) => return GrantEvaluation::RequiresReview,
+                _ => {}
+            }
+        }
+    }
     if !matches!(agent_verdict, GrantEvaluation::Allowed(_)) {
         return agent_verdict;
     }
     let mut candidates = Vec::new();
-    for action in operation.actions {
+    for (action, sources) in operation.actions.iter().zip(&controller_sources) {
         let actions = [*action];
         let agent_operation = AuthorizationOperation {
             actions: &actions,
@@ -231,11 +347,10 @@ pub fn evaluate_controller_bounded_grants<'g>(
             facts: &controller_facts,
             ..agent_operation
         };
-        let parent_paths =
-            match evaluate_grants(&controller_operation, controller_grants.iter().copied()) {
-                GrantEvaluation::Allowed(paths) => paths,
-                _ => Vec::new(),
-            };
+        let parent_paths = match evaluate_grants(&controller_operation, sources.iter()) {
+            GrantEvaluation::Allowed(paths) => paths,
+            _ => Vec::new(),
+        };
         for agent in agent_paths {
             if controller_owner {
                 candidates.push((None, agent.clone()));
@@ -258,6 +373,36 @@ pub fn evaluate_controller_bounded_grants<'g>(
             .then_with(|| left.grant.id.cmp(&right.grant.id))
     });
     GrantEvaluation::Allowed(candidates.into_iter().map(|(_, path)| path).collect())
+}
+
+fn controller_grants_for_owned_action(
+    operation: &AuthorizationOperation<'_>,
+    action: &str,
+    grants: &[&CapabilityGrant],
+) -> Vec<CapabilityGrant> {
+    let own = arkret_schema::capability_action(action).is_some_and(|descriptor| {
+        descriptor.required_evaluator_checks == ["actor_eq_target_author"].as_slice()
+    }) && operation.facts.target_owner.as_ref() == Some(operation.actor);
+    grants
+        .iter()
+        .map(|grant| {
+            let mut grant = (**grant).clone();
+            if own {
+                for constraint in &mut grant.constraints {
+                    if let Some(condition) = &mut constraint.condition {
+                        if condition.kind == GrantConstraintConditionKind::ObjectIsOwnedByActor
+                            && condition.extra.is_empty()
+                        {
+                            // Only the registered own-author predicate is mapped.
+                            // Actual author, Device, claim and approver facts stay unchanged.
+                            condition.kind = GrantConstraintConditionKind::Always;
+                        }
+                    }
+                }
+            }
+            grant
+        })
+        .collect()
 }
 
 /// Internal admission evidence for one immutable constraint of one grant. This
@@ -1425,3 +1570,227 @@ fn covered_by_narrowed_selector(
 #[cfg(test)]
 #[path = "grant_evaluation_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod constraint_ceiling_tests {
+    use super::*;
+
+    const REALM: &str = "ak:realm:AUGIFvQctz4TjQTmvvO4Wdy-xdc5XP2ZnJ5Qpbh4s8Ru";
+    const OTHER_REALM: &str = "ak:realm:Ac1aCK8aQdnkYImvdH3DFjq4jDCP198pXYWCGzGuVyj5";
+    const STRAND: &str = "ak:strand:AZ6GqZWWvnQ2KFwbBD-MenomzWNz-31MUAuKzBXIP0zv";
+
+    fn actor() -> ActorId {
+        ActorId::account(arkret_wire::AccountId::new(
+            "ak:did_core:web:agent.example".parse().unwrap(),
+            "ak:did_core:web:station.example".parse().unwrap(),
+        ))
+    }
+
+    fn at() -> DateTime<Utc> {
+        "2026-10-12T12:00:00.000Z".parse().unwrap()
+    }
+
+    fn target(realm: &str) -> WireResourceSelector {
+        WireResourceSelector::strand(realm.parse().unwrap(), STRAND.parse().unwrap())
+    }
+
+    fn operation<'a>(
+        actor: &'a ActorId,
+        target: &'a WireResourceSelector,
+        facts: &'a OperationFacts,
+    ) -> AuthorizationOperation<'a> {
+        AuthorizationOperation {
+            actor,
+            actions: &[CapabilityActionId::MESSAGE_CREATE],
+            target,
+            at: at(),
+            facts,
+        }
+    }
+
+    fn accepts(verdict: &GrantEvaluation<'_>) -> bool {
+        matches!(verdict, GrantEvaluation::Allowed(candidates) if candidates.is_empty())
+    }
+
+    #[test]
+    fn explicit_resource_ceiling_rejects_other_realm_and_empty_set() {
+        let actor = actor();
+        let target = target(REALM);
+        let facts = OperationFacts::default();
+        let op = operation(&actor, &target, &facts);
+        let correct = WireResourceSelector::realm(REALM.parse().unwrap());
+        let wrong = WireResourceSelector::realm(OTHER_REALM.parse().unwrap());
+        assert!(accepts(&evaluate_resource_constraint_ceiling(
+            &op,
+            &[correct],
+            &[]
+        )));
+        assert!(!accepts(&evaluate_resource_constraint_ceiling(
+            &op,
+            &[wrong],
+            &[]
+        )));
+        assert!(!accepts(&evaluate_resource_constraint_ceiling(
+            &op,
+            &[],
+            &[]
+        )));
+    }
+
+    #[test]
+    fn all_allow_constraints_intersect_actual_track_and_target() {
+        let actor = actor();
+        let target = target(REALM);
+        let mut facts = OperationFacts {
+            track: Some("discussion".into()),
+            ..Default::default()
+        };
+        let mut track = GrantConstraint::new(
+            GrantConstraintKind::ScopeLimitation,
+            GrantConstraintEffect::Allow,
+        );
+        track.allowed_tracks = vec!["discussion".into()];
+        let mut strand = GrantConstraint::new(
+            GrantConstraintKind::ScopeLimitation,
+            GrantConstraintEffect::Allow,
+        );
+        strand.allowed_strand_ids = vec![STRAND.into()];
+        assert!(accepts(&evaluate_constraint_ceiling(
+            &operation(&actor, &target, &facts),
+            &[track.clone(), strand.clone()]
+        )));
+        facts.track = Some("synthesis".into());
+        assert!(!accepts(&evaluate_constraint_ceiling(
+            &operation(&actor, &target, &facts),
+            &[track, strand]
+        )));
+    }
+
+    #[test]
+    fn temporal_ceiling_uses_actual_evaluation_time() {
+        let actor = actor();
+        let target = target(REALM);
+        let facts = OperationFacts::default();
+        let op = operation(&actor, &target, &facts);
+        let mut temporal =
+            GrantConstraint::new(GrantConstraintKind::Temporal, GrantConstraintEffect::Allow);
+        temporal.expires_at = Some(at() + TimeDelta::hours(1));
+        assert!(accepts(&evaluate_constraint_ceiling(
+            &op,
+            &[temporal.clone()]
+        )));
+        let mut own_window =
+            GrantConstraint::new(GrantConstraintKind::Temporal, GrantConstraintEffect::Allow);
+        own_window.constraint_subkind = Some(GrantConstraintSubkind::EditWindow);
+        own_window.applies_to_actions = vec![CapabilityActionId::MESSAGE_REVISE_OWN.into()];
+        own_window.message_edit_window = Some("PT1M".into());
+        assert!(accepts(&evaluate_constraint_ceiling(
+            &op,
+            &[own_window.clone()]
+        )));
+        let all_actions = AuthorizationOperation {
+            actions: &[
+                CapabilityActionId::MESSAGE_CREATE,
+                CapabilityActionId::MESSAGE_REVISE_OWN,
+            ],
+            ..op
+        };
+        assert!(
+            matches!(
+                evaluate_constraint_ceiling(&all_actions, &[own_window]),
+                GrantEvaluation::Unsatisfied
+            ),
+            "an unrelated neutral action cannot replace a required unknown own-window fact"
+        );
+        temporal.expires_at = Some(at() - TimeDelta::hours(1));
+        assert!(matches!(
+            evaluate_constraint_ceiling(&op, &[temporal]),
+            GrantEvaluation::Unsatisfied
+        ));
+    }
+
+    #[test]
+    fn global_refusals_keep_deny_quarantine_review_priority() {
+        let actor = actor();
+        let target = target(REALM);
+        let facts = OperationFacts {
+            track: Some("discussion".into()),
+            ..Default::default()
+        };
+        let op = operation(&actor, &target, &facts);
+        let mut deny = GrantConstraint::new(
+            GrantConstraintKind::ScopeLimitation,
+            GrantConstraintEffect::Deny,
+        );
+        deny.denied_tracks = vec!["discussion".into()];
+        let quarantine = GrantConstraint::new(
+            GrantConstraintKind::Temporal,
+            GrantConstraintEffect::Quarantine,
+        );
+        let review = GrantConstraint::new(
+            GrantConstraintKind::Temporal,
+            GrantConstraintEffect::RequireReview,
+        );
+        assert!(matches!(
+            evaluate_constraint_ceiling(&op, &[review.clone(), quarantine.clone(), deny]),
+            GrantEvaluation::Denied
+        ));
+        assert!(matches!(
+            evaluate_constraint_ceiling(&op, &[review.clone(), quarantine]),
+            GrantEvaluation::Quarantined
+        ));
+        assert!(matches!(
+            evaluate_constraint_ceiling(&op, &[review]),
+            GrantEvaluation::RequiresReview
+        ));
+    }
+
+    #[test]
+    fn unknown_identity_or_track_facts_cannot_discharge_constraints() {
+        let actor = actor();
+        let target = target(REALM);
+        let facts = OperationFacts::default();
+        let op = operation(&actor, &target, &facts);
+        let mut track = GrantConstraint::new(
+            GrantConstraintKind::ScopeLimitation,
+            GrantConstraintEffect::Allow,
+        );
+        track.allowed_tracks = vec!["discussion".into()];
+        assert!(matches!(
+            evaluate_constraint_ceiling(&op, &[track]),
+            GrantEvaluation::Unsatisfied
+        ));
+        let mut identity = GrantConstraint::new(
+            GrantConstraintKind::AuthorityControl,
+            GrantConstraintEffect::Allow,
+        );
+        identity.constraint_subkind = Some(GrantConstraintSubkind::AppletAuthority);
+        assert!(matches!(
+            evaluate_constraint_ceiling(&op, &[identity]),
+            GrantEvaluation::Unsatisfied
+        ));
+    }
+
+    #[test]
+    fn external_quota_never_gets_a_synthetic_grant_reservation() {
+        let actor = actor();
+        let target = target(REALM);
+        let facts = OperationFacts::default();
+        let op = operation(&actor, &target, &facts);
+        let mut quota =
+            GrantConstraint::new(GrantConstraintKind::Quota, GrantConstraintEffect::Allow);
+        quota.constraint_subkind = Some(GrantConstraintSubkind::Rate);
+        quota.constraint_scope = Some(GrantConstraintScope::PerActor);
+        quota.max_operations = Some(3);
+        quota.period = Some("PT1H".into());
+        assert!(matches!(
+            evaluate_constraint_ceiling(&op, &[quota]),
+            GrantEvaluation::Unsatisfied
+        ));
+        let missing = AuthorizationOperation { actions: &[], ..op };
+        assert!(matches!(
+            evaluate_constraint_ceiling(&missing, &[]),
+            GrantEvaluation::Unsatisfied
+        ));
+    }
+}

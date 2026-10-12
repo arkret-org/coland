@@ -327,8 +327,8 @@ pub(crate) async fn commit_realm_organization_current_result_in_connection(
     )
     .await?
     {
-        return Err(denied(
-            "missing_capability: organization relationship requires Realm admin",
+        return Err(PersistenceError::Conflict(
+            "capability_denied: organization relationship requires Realm admin".to_owned(),
         ));
     }
     let position = i64::try_from(commit.stream_position).map_err(corrupt)?;

@@ -2426,6 +2426,7 @@ impl Fixture {
             .expect("canonical public holder JWK");
         assert_eq!(session_public_key.thumbprint_sha256().unwrap(), jkt);
         let grant = arkret_models_collaboration::session_grants::SessionGrantValidationMetadata {
+            scope_details: None,
             id: arkret_identifiers::SessionGrantId::from_issuance_digest(
                 Sha256::digest(token.as_bytes()).into(),
             ),

@@ -580,7 +580,7 @@ pub enum DeviceMessageBatchCommitOutcome {
     QueueAtCapacity,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BlobRecord {
     pub sha256: String,
     pub size_bytes: i64,

@@ -116,7 +116,7 @@ async fn exact_current_results(req: &mut Request, depot: &Depot, res: &mut Respo
     let Some(state) = app_state(depot, res) else {
         return;
     };
-    let Some(account) = authenticated_account(
+    let Some((session, account)) = authenticated_reader(
         state,
         req,
         res,
@@ -143,8 +143,23 @@ async fn exact_current_results(req: &mut Request, depot: &Depot, res: &mut Respo
         .await;
     match result {
         Ok(SelfExactCurrentRead::Answer(outcome)) => {
+            let input = coland_storage::AccountContentDeliveryInput {
+                realms: vec![request.realm_id.clone()],
+                exact_reads: vec![(request.clone(), outcome.clone())],
+                ..Default::default()
+            };
+            let guard =
+                match crate::routing::events::sync::content_delivery_guard(state, &session, &input)
+                    .await
+                {
+                    Ok(guard) => guard,
+                    Err(_) => return not_found(res),
+                };
             no_store(res);
-            res.render(Json(outcome));
+            let Ok(response) = coland_http::result::guarded_json_ok(outcome, guard) else {
+                return;
+            };
+            salvo::Scribe::render(response, res);
         }
         Ok(SelfExactCurrentRead::NotFound) => not_found(res),
         Ok(SelfExactCurrentRead::Unresolved(reason)) => render_unresolved(
@@ -164,7 +179,7 @@ async fn strand_watch_current(req: &mut Request, depot: &Depot, res: &mut Respon
     let Some(state) = app_state(depot, res) else {
         return;
     };
-    let Some(account) = authenticated_account(
+    let Some((session, account)) = authenticated_reader(
         state,
         req,
         res,
@@ -183,8 +198,23 @@ async fn strand_watch_current(req: &mut Request, depot: &Depot, res: &mut Respon
         .await;
     match result {
         Ok(SelfExactCurrentRead::Answer(outcome)) => {
+            let input = coland_storage::AccountContentDeliveryInput {
+                realms: vec![request.realm_id.clone()],
+                watch_reads: vec![(request.clone(), outcome.clone())],
+                ..Default::default()
+            };
+            let guard =
+                match crate::routing::events::sync::content_delivery_guard(state, &session, &input)
+                    .await
+                {
+                    Ok(guard) => guard,
+                    Err(_) => return not_found(res),
+                };
             no_store(res);
-            res.render(Json(outcome));
+            let Ok(response) = coland_http::result::guarded_json_ok(outcome, guard) else {
+                return;
+            };
+            salvo::Scribe::render(response, res);
         }
         Ok(SelfExactCurrentRead::NotFound) => not_found(res),
         Ok(SelfExactCurrentRead::Unresolved(reason)) => render_unresolved(

@@ -26,10 +26,12 @@ pub(crate) mod realms;
 pub(crate) mod spaces;
 pub(crate) mod system;
 // SOL-ORG-06: realm organization-relationship read surface
+mod management_review;
 pub(crate) mod message_authoring;
 pub(crate) mod realm_join;
 pub(crate) mod realm_organization;
 mod self_current_reads;
+mod third_party_invites;
 
 use access::policy::policy_document_to_response;
 pub(crate) use admin::audit::append_audit_log;
@@ -95,6 +97,7 @@ pub(crate) use coland_http::openapi_routes::error_catcher;
 use coland_http::openapi_routes::{api_not_found, wait_for_sync_token};
 /// Boot-time worker re-export (`events` is crate-private; `main` only needs
 /// this one entry point from it).
+pub use events::sync::acquire_native_message_reply_cut;
 pub use events::sync::{
     spawn_account_data_change_retention_sweeper, spawn_sync_cursor_ttl_sweeper,
 };

@@ -210,6 +210,7 @@ pub struct OriginFixture {
     pub directory: arkret_models_identity::AccountDeviceSignerEvidence,
     pub agent: arkret_wire::AccountId,
     pub agent_did: Did,
+    pub agent_inception: arkret_signatures::webvh::PreparedPrincipalInception,
     pub genesis: AuthorityCommitTransaction,
     pub provision: AuthorityCommitTransaction,
 }
@@ -411,11 +412,24 @@ impl OriginFixture {
             service_resolution: history.clone(),
         };
         arkret_identity::account_device_signer_evidence::verify_historical_account_device_signer_evidence(&directory,&controller.history.account,&controller.history.founding_device_id).unwrap();
-        let agent_did = Did::new(format!(
-            "did:web:agent-{}.example",
-            uuid::Uuid::now_v7().simple()
-        ))
+        let local_id = format!("agent-{}", uuid::Uuid::now_v7().simple());
+        let next_root = arkret_canonical::ed25519_pubkey_to_did_key_multibase(
+            SigningKey::from_bytes(&[102; 32])
+                .verifying_key()
+                .as_bytes(),
+        );
+        let agent_inception = arkret_signatures::webvh::prepare_agent_inception(
+            &arkret_signatures::webvh::AgentInceptionInput {
+                principal_endpoint: &"https://agent-origin.example/".parse().unwrap(),
+                local_id: &local_id,
+                controller_principal_id: &controller.history.account.principal_id,
+                version_time: at - Duration::seconds(2),
+                root_seed: &[101; 32],
+                next_root_public_key_multibase: &next_root,
+            },
+        )
         .unwrap();
+        let agent_did = Did::new(agent_inception.did.clone()).unwrap();
         let agent = arkret_wire::AccountId::new(
             arkret_wire::project_did_to_core_id(&agent_did).unwrap(),
             station.clone(),
@@ -428,8 +442,11 @@ impl OriginFixture {
                     governance_station_id: station.clone(),
                     initial_resolution: arkret_models_identity::ResolutionCommitment {
                         did: agent_did.clone(),
-                        method_history_head: format!("sha256:{}", "c".repeat(64)),
-                        version_id: "1-agent".into(),
+                        method_history_head: arkret_canonical::canonical_sha256(
+                            &agent_inception.log_entry,
+                        )
+                        .unwrap(),
+                        version_id: agent_inception.version_id.clone(),
                     },
                     genesis_salt: arkret_wire::GenesisSalt::new(
                         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
@@ -487,6 +504,7 @@ impl OriginFixture {
             directory,
             agent,
             agent_did,
+            agent_inception,
             genesis: origin_tx(genesis, gc, &station),
             provision: origin_tx(provision, pc, &station),
         }
@@ -552,6 +570,66 @@ impl OriginFixture {
             queued_at: self.genesis.commit.committed_at,
         })
         .await
+    }
+    /// Imported accepted fixture history; this is not normal HTTP binding.
+    /// Tests requiring complete bootstrap invoke it only after accepted genesis.
+    pub async fn publish_agent_binding(&self) {
+        use coland_storage::DeliveryPolicyStoreRegistry as _;
+        let provision =
+            arkret_models_collaboration::events_payloads::agent::AgentProvisionPayload::try_from(
+                &self.provision.event,
+            )
+            .unwrap();
+        let next_root = arkret_canonical::ed25519_pubkey_to_did_key_multibase(
+            SigningKey::from_bytes(&[103; 32])
+                .verifying_key()
+                .as_bytes(),
+        );
+        let update = arkret_signatures::webvh::prepare_agent_binding_update(
+            &arkret_signatures::webvh::AgentBindingUpdateInput {
+                did: self.agent_did.as_str(),
+                local_id: &self.agent_inception.local_id,
+                previous_entries: std::slice::from_ref(&self.agent_inception.log_entry),
+                version_time: self.genesis.commit.committed_at,
+                current_root_seed: &[102; 32],
+                next_root_public_key_multibase: &next_root,
+                controller_principal_id: &self.controller.history.account.principal_id,
+                principal_control_realm_id: &self.genesis.event.realm_id,
+                requested_scope_digest: &provision.requested_scope_digest,
+            },
+        )
+        .unwrap();
+        let entries = [self.agent_inception.log_entry.clone(), update.log_entry];
+        arkret_identity::verify_did_webvh_v1_chain(&self.agent_did, &entries).unwrap();
+        let store = PgPersistenceStore::new(self.pool.clone());
+        for (i, entry) in entries.iter().enumerate() {
+            store
+                .webvh()
+                .append_log_event(coland_storage::WebvhLogRecord {
+                    did: self.agent_did.to_string(),
+                    event_digest: arkret_canonical::canonical_sha256(entry).unwrap(),
+                    seq: i as u64 + 1,
+                    operation: entry.clone(),
+                    created_at: entry["versionTime"].as_str().unwrap().parse().unwrap(),
+                })
+                .await
+                .unwrap();
+        }
+        let now = Utc::now();
+        store
+            .webvh()
+            .put_document(coland_storage::WebvhDocumentRecord {
+                did: self.agent_did.to_string(),
+                did_document: entries[1]["state"].clone(),
+                key_log_head: Some(arkret_canonical::canonical_sha256(&entries[1]).unwrap()),
+                seq: 2,
+                method_evidence: serde_json::json!({}),
+                fetched_at: now,
+                expires_at: now + Duration::minutes(15),
+                updated_at: now,
+            })
+            .await
+            .unwrap();
     }
     pub async fn authorize(&self) -> AuthorityCommitTransaction {
         let at = self.genesis.commit.committed_at;

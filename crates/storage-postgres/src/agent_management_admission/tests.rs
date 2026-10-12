@@ -104,6 +104,9 @@ fn check(
         &account("controller"),
         &account("agent"),
         &operation,
+        &execution_event(arkret_wire::ScopeRef::Realm {
+            realm_id: realm.clone(),
+        }),
     )
     .map(|actions| actions.into_iter().map(str::to_owned).collect())
 }
@@ -293,7 +296,10 @@ fn wrong_account_or_realm_and_conflicting_facts_are_rejected() {
             &realm,
             &account("controller"),
             &account("agent"),
-            &operation
+            &operation,
+            &execution_event(arkret_wire::ScopeRef::Realm {
+                realm_id: realm.clone()
+            })
         )
         .is_err()
     );
@@ -303,7 +309,10 @@ fn wrong_account_or_realm_and_conflicting_facts_are_rejected() {
             &realm,
             &account("controller"),
             &account("other-agent"),
-            &operation
+            &operation,
+            &execution_event(arkret_wire::ScopeRef::Realm {
+                realm_id: realm.clone()
+            })
         )
         .is_err()
     );
@@ -681,4 +690,494 @@ fn member_event_read_preserves_full_controller_identity_and_refuses_unresolved_s
         )
         .is_err()
     );
+}
+
+fn execution_event(scope: arkret_wire::ScopeRef) -> arkret_wire::Event {
+    arkret_wire::test_support::raw_event_for_actor_at(
+        arkret_wire::EventKind::MessageCreate.as_str(),
+        scope,
+        ActorId::account(account("agent")),
+        json!({}),
+        arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()),
+    )
+    .unwrap()
+}
+
+fn check_signed_execution(
+    policies: &[Policy],
+    actions: &[&str],
+    target: &WireResourceSelector,
+    facts: &OperationFacts,
+    event: &arkret_wire::Event,
+) -> PersistenceResult<Vec<String>> {
+    executable_actions(
+        policies,
+        &realm(),
+        &account("controller"),
+        &account("agent"),
+        &AuthorizationOperation {
+            actor: &ActorId::account(account("agent")),
+            actions,
+            target,
+            at: event.created_at,
+            facts,
+        },
+        event,
+    )
+    .map(|actions| actions.into_iter().map(str::to_owned).collect())
+}
+
+#[test]
+fn serve_restricts_public_action_paths_and_preserves_private_sidecar_execution() {
+    let realm = realm();
+    let target = WireResourceSelector::realm(realm.clone());
+    let shared = execution_event(arkret_wire::ScopeRef::Realm {
+        realm_id: realm.clone(),
+    });
+    let sidecar = execution_event(arkret_wire::ScopeRef::Sidecar {
+        realm_id: realm,
+        sidecar_id: arkret_wire::SidecarId::from_event_id(&arkret_wire::EventId::from_digest(
+            arkret_canonical::DigestSuite::Sha256,
+            [75; 32],
+        )),
+    });
+    let restriction = policy(Some(vec!["ak.message.create"]), vec!["serve"], "deny");
+    let actions = ["ak.message.create", "ak.reaction.add", "ak.realm.owner"];
+    assert_eq!(
+        check_signed_execution(
+            &[restriction.clone()],
+            &actions,
+            &target,
+            &OperationFacts::default(),
+            &shared
+        )
+        .unwrap(),
+        ["ak.reaction.add"]
+    );
+    assert_eq!(
+        check_signed_execution(
+            &[restriction],
+            &actions,
+            &target,
+            &OperationFacts::default(),
+            &sidecar
+        )
+        .unwrap(),
+        actions
+    );
+    let execute = policy(None, vec!["execute"], "deny");
+    assert!(
+        check_signed_execution(
+            &[execute],
+            &actions,
+            &target,
+            &OperationFacts::default(),
+            &sidecar
+        )
+        .unwrap()
+        .is_empty()
+    );
+}
+
+#[test]
+fn public_serve_and_execute_are_independent_intersecting_gates() {
+    let target = WireResourceSelector::realm(realm());
+    let event = execution_event(arkret_wire::ScopeRef::Realm { realm_id: realm() });
+    for gates in [vec!["serve"], vec!["execute"]] {
+        let restrict = policy(None, gates, "deny");
+        assert!(
+            check_signed_execution(
+                &[restrict],
+                &["ak.message.create"],
+                &target,
+                &OperationFacts::default(),
+                &event
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+    assert_eq!(
+        check_signed_execution(
+            &[],
+            &["ak.message.create"],
+            &target,
+            &OperationFacts::default(),
+            &event
+        )
+        .unwrap(),
+        ["ak.message.create"]
+    );
+}
+
+#[test]
+fn public_serve_keeps_a_separately_legal_own_action_path() {
+    let target = WireResourceSelector::realm(realm());
+    let event = execution_event(arkret_wire::ScopeRef::Realm { realm_id: realm() });
+    let restrict = policy(Some(vec!["ak.message.revise"]), vec!["serve"], "deny");
+    assert_eq!(
+        check_signed_execution(
+            &[restrict],
+            &[
+                "ak.message.revise",
+                "ak.message.revise.own",
+                "ak.realm.owner"
+            ],
+            &target,
+            &OperationFacts::default(),
+            &event
+        )
+        .unwrap(),
+        ["ak.message.revise.own"]
+    );
+}
+
+#[test]
+fn public_circle_serve_matches_exact_strand_resource_and_requires_signed_scope_facts() {
+    let circle = arkret_wire::CircleId::from_event_id(&arkret_wire::EventId::from_digest(
+        arkret_canonical::DigestSuite::Sha256,
+        [76; 32],
+    ));
+    let target = WireResourceSelector::strand(
+        realm(),
+        arkret_wire::StrandId::from_event_id(&arkret_wire::EventId::from_digest(
+            arkret_canonical::DigestSuite::Sha256,
+            [77; 32],
+        )),
+    );
+    let event = execution_event(arkret_wire::ScopeRef::Circle {
+        realm_id: realm(),
+        circle_id: circle.clone(),
+    });
+    let facts = OperationFacts {
+        circle_id: Some(circle.to_string()),
+        strand_id: target.strand_id.as_ref().map(ToString::to_string),
+        ..OperationFacts::default()
+    };
+    let mut restrict = policy(None, vec!["serve"], "deny");
+    restrict.rules[0].resources = Some(vec![PolicyResourceSelector {
+        kind: PolicyResourceKind::Strand,
+        realm_id: Some(realm()),
+        resource_ref: target.strand_id.as_ref().map(ToString::to_string),
+    }]);
+    restrict.validate().unwrap();
+    assert!(
+        check_signed_execution(&[restrict], &["ak.message.create"], &target, &facts, &event)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        check_signed_execution(
+            &[],
+            &["ak.message.create"],
+            &target,
+            &OperationFacts::default(),
+            &event
+        )
+        .is_err()
+    );
+    let mut wrong = facts;
+    wrong.circle_id = Some(
+        arkret_wire::CircleId::from_event_id(&arkret_wire::EventId::from_digest(
+            arkret_canonical::DigestSuite::Sha256,
+            [78; 32],
+        ))
+        .to_string(),
+    );
+    assert!(check_signed_execution(&[], &["ak.message.create"], &target, &wrong, &event).is_err());
+}
+
+#[test]
+fn public_output_classification_preserves_original_private_self_exceptions() {
+    let mut event = execution_event(arkret_wire::ScopeRef::Realm { realm_id: realm() });
+    for kind in [
+        arkret_wire::EventKind::StrandWatchSet,
+        arkret_wire::EventKind::ReadCursorAdvance,
+        arkret_wire::EventKind::MlsGenesis,
+        arkret_wire::EventKind::MlsCommit,
+    ] {
+        event.kind = kind;
+        assert!(!crate::agent_interaction_current_results::requires_shared_public_mode(&event));
+    }
+    event.kind = arkret_wire::EventKind::MemberState;
+    event.payload =
+        serde_json::from_value(json!({"member_id":event.actor_id,"membership":"leave"})).unwrap();
+    assert!(!crate::agent_interaction_current_results::requires_shared_public_mode(&event));
+    event.executed_by = Some(ActorId::account(account("other")));
+    assert!(crate::agent_interaction_current_results::requires_shared_public_mode(&event));
+}
+
+#[test]
+fn unrelated_object_rule_does_not_deny_join_or_publish() {
+    let mut unrelated = policy(None, vec!["execute"], "deny");
+    unrelated.rules[0].resources = Some(vec![PolicyResourceSelector {
+        kind: PolicyResourceKind::Object,
+        realm_id: Some(realm()),
+        resource_ref: Some("ak:strand:AT47eNekH0_aKZyIMsXq_s1FAWdYXC71_CUxQ5O478t-".into()),
+    }]);
+    unrelated.validate().unwrap();
+    for operation in [AgentPolicyOperation::Join, AgentPolicyOperation::Publish] {
+        assert!(
+            require_realm_intent(
+                &[unrelated.clone()],
+                &realm(),
+                &account("controller"),
+                &account("agent"),
+                chrono::Utc::now(),
+                operation
+            )
+            .is_ok()
+        );
+    }
+    unrelated.rules[0].agent_operations = Some(vec![AgentPolicyOperation::Join]);
+    assert!(
+        require_realm_intent(
+            &[unrelated.clone()],
+            &realm(),
+            &account("controller"),
+            &account("agent"),
+            chrono::Utc::now(),
+            AgentPolicyOperation::Join
+        )
+        .is_err()
+    );
+    unrelated.rules[0].agent_target = Some(
+        arkret_models_collaboration::governance::operation_wire::AgentPolicyTarget::Agent {
+            agent_account_id: account("different-agent"),
+        },
+    );
+    assert!(
+        require_realm_intent(
+            &[unrelated.clone()],
+            &realm(),
+            &account("controller"),
+            &account("agent"),
+            chrono::Utc::now(),
+            AgentPolicyOperation::Join
+        )
+        .is_ok()
+    );
+    // Filtering never makes malformed whole Policy into valid authority.
+    assert!(
+        require_realm_intent(
+            &[unrelated.clone(), unrelated],
+            &realm(),
+            &account("controller"),
+            &account("agent"),
+            chrono::Utc::now(),
+            AgentPolicyOperation::Join
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn authorization_exact_selectors_and_every_action_preserve_priority_intersection() {
+    let exact = WireResourceSelector::strand(
+        realm(),
+        "ak:strand:AT47eNekH0_aKZyIMsXq_s1FAWdYXC71_CUxQ5O478t-"
+            .parse()
+            .unwrap(),
+    );
+    let other = WireResourceSelector::strand(
+        realm(),
+        arkret_wire::StrandId::from_event_id(&arkret_wire::EventId::from_digest(
+            arkret_canonical::DigestSuite::Sha256,
+            [74; 32],
+        )),
+    );
+    let mut restriction = policy(Some(vec!["ak.message.create"]), vec!["authorize"], "deny");
+    restriction.rules[0].resources = Some(vec![PolicyResourceSelector {
+        kind: PolicyResourceKind::Strand,
+        realm_id: Some(realm()),
+        resource_ref: exact.strand_id.as_ref().map(ToString::to_string),
+    }]);
+    let run = |policies: &[Policy], actions: &[String], resources: &[WireResourceSelector]| {
+        require_authorization(
+            policies,
+            &realm(),
+            &account("controller"),
+            &account("agent"),
+            actions,
+            resources,
+            chrono::Utc::now(),
+        )
+    };
+    assert!(
+        run(
+            &[restriction.clone()],
+            &["ak.message.create".into()],
+            &[other.clone()]
+        )
+        .is_ok()
+    );
+    assert!(
+        run(
+            &[restriction.clone()],
+            &["ak.reaction.add".into()],
+            &[exact.clone()]
+        )
+        .is_ok()
+    );
+    assert!(
+        run(
+            &[restriction.clone()],
+            &["ak.reaction.add".into(), "ak.message.create".into()],
+            &[other.clone(), exact.clone()]
+        )
+        .is_err()
+    );
+    let mut allow = restriction.rules[0].clone();
+    allow.rule_id = "whole_allow".into();
+    allow.effect = PolicyEffect::Allow;
+    allow.resources = None;
+    allow.priority = restriction.rules[0].priority + 1;
+    restriction.rules.push(allow);
+    assert!(
+        run(
+            &[restriction.clone()],
+            &["ak.message.create".into()],
+            &[WireResourceSelector::realm(realm())]
+        )
+        .is_ok()
+    );
+    restriction.rules[1].priority = restriction.rules[0].priority;
+    assert!(
+        run(
+            &[restriction.clone()],
+            &["ak.message.create".into()],
+            &[WireResourceSelector::realm(realm())]
+        )
+        .is_err()
+    );
+    restriction.rules[1].priority += 1;
+    let mut parent = policy(None, vec!["authorize"], "deny");
+    parent.id = "ak:policy:0198ff00-0000-7000-8000-000000000002"
+        .parse()
+        .unwrap();
+    assert!(
+        run(
+            &[restriction, parent],
+            &["ak.message.create".into()],
+            &[exact]
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn authorization_default_deny_needs_whole_domain_allow_and_never_current_object_enumeration() {
+    let mut p = policy(None, vec!["authorize"], "allow");
+    p.default_effect = PolicyEffect::Deny;
+    let target = WireResourceSelector::strand(
+        realm(),
+        "ak:strand:AT47eNekH0_aKZyIMsXq_s1FAWdYXC71_CUxQ5O478t-"
+            .parse()
+            .unwrap(),
+    );
+    p.rules[0].resources = Some(vec![PolicyResourceSelector {
+        kind: PolicyResourceKind::Strand,
+        realm_id: Some(realm()),
+        resource_ref: target.strand_id.as_ref().map(ToString::to_string),
+    }]);
+    let run = |p: &Policy, target: &WireResourceSelector| {
+        require_authorization(
+            std::slice::from_ref(p),
+            &realm(),
+            &account("controller"),
+            &account("agent"),
+            &["ak.message.create".into()],
+            std::slice::from_ref(target),
+            chrono::Utc::now(),
+        )
+    };
+    assert!(run(&p, &target).is_ok());
+    assert!(run(&p, &WireResourceSelector::realm(realm())).is_err());
+    p.rules[0].resources.as_mut().unwrap()[0].resource_ref = None;
+    let mut all_strands = target.clone();
+    all_strands.strand_id = None;
+    assert!(run(&p, &all_strands).is_ok());
+    assert!(run(&p, &WireResourceSelector::realm(realm())).is_err());
+    p.rules[0].resources = None;
+    assert!(run(&p, &WireResourceSelector::realm(realm())).is_ok());
+    let mut foreign = target;
+    foreign.realm_id = Some(arkret_wire::RealmId::from_event_id(
+        &arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [75; 32]),
+    ));
+    assert!(run(&p, &foreign).is_err());
+}
+
+#[test]
+fn execution_uses_exact_object_identity_and_does_not_preempt_unrelated_content_action() {
+    let raw=arkret_wire::test_support::raw_event_for_actor_at(
+        arkret_wire::EventKind::MessageCreate.as_str(), arkret_wire::ScopeRef::Realm {realm_id:realm()},
+        ActorId::account(account("agent")), json!({"strand_id":"ak:strand:AT47eNekH0_aKZyIMsXq_s1FAWdYXC71_CUxQ5O478t-","track_name":"main"}),
+        arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now())).unwrap();
+    let mut restriction = policy(Some(vec!["ak.message.create"]), vec!["execute"], "deny");
+    restriction.rules[0].resources = Some(vec![PolicyResourceSelector {
+        kind: PolicyResourceKind::Object,
+        realm_id: Some(realm()),
+        resource_ref: Some(raw.event_id.to_string()),
+    }]);
+    assert!(
+        check_signed_execution(
+            &[restriction.clone()],
+            &["ak.message.create"],
+            &WireResourceSelector::realm(realm()),
+            &OperationFacts::default(),
+            &raw
+        )
+        .unwrap()
+        .is_empty()
+    );
+    restriction.rules[0].actions = Some(vec!["ak.reaction.add".into()]);
+    assert_eq!(
+        check_signed_execution(
+            &[restriction],
+            &["ak.message.create"],
+            &WireResourceSelector::realm(realm()),
+            &OperationFacts::default(),
+            &raw
+        )
+        .unwrap(),
+        ["ak.message.create"]
+    );
+}
+
+#[test]
+fn authorization_object_effects_unknown_service_and_disabled_policy_remain_closed_or_neutral() {
+    let target = WireResourceSelector::strand(
+        realm(),
+        "ak:strand:AT47eNekH0_aKZyIMsXq_s1FAWdYXC71_CUxQ5O478t-"
+            .parse()
+            .unwrap(),
+    );
+    let mut p = policy(Some(vec!["ak.message.create"]), vec!["authorize"], "deny");
+    p.rules[0].resources = Some(vec![PolicyResourceSelector {
+        kind: PolicyResourceKind::Object,
+        realm_id: Some(realm()),
+        resource_ref: Some(
+            arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [90; 32])
+                .to_string(),
+        ),
+    }]);
+    let run = |p: &Policy| {
+        require_authorization(
+            std::slice::from_ref(p),
+            &realm(),
+            &account("controller"),
+            &account("agent"),
+            &["ak.message.create".into()],
+            std::slice::from_ref(&target),
+            chrono::Utc::now(),
+        )
+    };
+    assert!(run(&p).is_err()); // A future authored Event may be that exact Object.
+    p.expires_at = Some(chrono::Utc::now() - chrono::TimeDelta::seconds(1));
+    assert!(run(&p).is_ok());
+    p.expires_at = None;
+    p.rules[0].resources.as_mut().unwrap()[0].kind = PolicyResourceKind::Service;
+    assert!(run(&p).is_err());
+    p.rules[0].actions = Some(vec!["ak.reaction.add".into()]);
+    assert!(run(&p).is_ok()); // A verified distinct action has no Service rule.
 }

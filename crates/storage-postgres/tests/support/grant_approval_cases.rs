@@ -88,6 +88,7 @@ fn proofs_for_action(
         })
         .collect();
     coland_storage::EventApprovalCommit {
+        management_current: None,
         event_id: event.event_id.clone(),
         event_digest: digest,
         committed_at: request.authority_commit.commit.committed_at,

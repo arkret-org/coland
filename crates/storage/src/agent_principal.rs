@@ -13,6 +13,8 @@ pub struct PendingAgentPairingCommitIntent {
     pub authorize_event_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_authorization_event: Option<arkret_wire::Event>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_custody_ref: Option<crate::AgentScopeCustodyRef>,
 }
 
 /// Durable projection of a Agent principal.

@@ -198,11 +198,13 @@ pub fn router_with_rate_limiter_and_request_size_config(
     // segment stays unknown and falls through to `api_not_found` (404
     // `unrecognized_endpoint`), exactly as §2.1.2 requires.
     let conformance_harness_enabled = conformance_harness_enabled(state.config());
+    let third_party_invite_provider_enabled = state.config().third_party_invite_provider_enabled;
     let error_exposure = coland_http::error::ErrorExposure {
         development_mode: state.config().development_mode,
     };
     let router = Router::new()
         .hoop(crate::metrics::MetricsMiddleware)
+        .hoop(third_party_invites::reject_url_credentials)
         // scalability-constraints.md 2.1.8 orders the Content-Encoding rejection (step 3)
         // ahead of every body read: an encoded body must fail 415 on the coding,
         // not 413 on a size it never legally had.
@@ -223,7 +225,11 @@ pub fn router_with_rate_limiter_and_request_size_config(
         .hoop(affix_state::inject(error_exposure))
         .hoop(affix_state::inject(state))
         .hoop(rate_limit_middleware);
-    let router = mount_application_routes(router, conformance_harness_enabled);
+    let router = mount_application_routes(
+        router,
+        conformance_harness_enabled,
+        third_party_invite_provider_enabled,
+    );
     let doc = cached_arkret_openapi_doc(
         &router,
         serde_json::json!(coland_services::protocol_artifacts::registry_summary()),
@@ -247,10 +253,14 @@ pub fn router_with_rate_limiter_and_request_size_config(
 /// derived from production router declarations instead of a committed copy of
 /// the generated document.
 pub(crate) fn openapi_surface_router() -> Router {
-    mount_application_routes(Router::new(), true)
+    mount_application_routes(Router::new(), true, true)
 }
 
-fn mount_application_routes(router: Router, conformance_harness_enabled: bool) -> Router {
+fn mount_application_routes(
+    router: Router,
+    conformance_harness_enabled: bool,
+    third_party_invite_provider_enabled: bool,
+) -> Router {
     router
         .push(system::health_router())
         .push(interop::well_known_router())
@@ -278,7 +288,7 @@ fn mount_application_routes(router: Router, conformance_harness_enabled: bool) -
                 .push(admin::router())
                 .push(coland_local_router()),
         )
-        .push(arkret_protocol_router(conformance_harness_enabled))
+        .push(arkret_protocol_router(conformance_harness_enabled, third_party_invite_provider_enabled))
 }
 
 /// Whether the development conformance harness is both compiled in and
@@ -326,7 +336,10 @@ fn push_conformance_harness(router: Router, _enabled: bool) -> Router {
 /// Each module's `router()` declares its own trust segment in the paths it
 /// pushes (e.g. `events::router()` returns `self/events/...`), so the parent
 /// here only supplies the shared `_arkret` root.
-fn arkret_protocol_router(conformance_harness_enabled: bool) -> Router {
+fn arkret_protocol_router(
+    conformance_harness_enabled: bool,
+    third_party_invite_provider_enabled: bool,
+) -> Router {
     let mut router = Router::with_path("_arkret")
         .hoop(OperationSelectorMiddleware)
         .hoop(wait_for_sync_token)
@@ -353,6 +366,7 @@ fn arkret_protocol_router(conformance_harness_enabled: bool) -> Router {
                 // self/realms/{realm_id}/streams, self/current-results/exact,
                 // self/strands/watch/current, self/media-service-bindings/query.
                 .push(self_current_reads::router())
+                .push(management_review::router())
                 // self/authz/*. (Owner-scoped policy
                 // document CRUD lives on the product surface at
                 // `/_coland/self/policies*`, see `coland_local_router`.)
@@ -402,6 +416,9 @@ fn arkret_protocol_router(conformance_harness_enabled: bool) -> Router {
         .push(interop::router());
     // Applet install/package and applet-service interop operations.
     router = router.push(extensions::protocol_router());
+    if third_party_invite_provider_enabled {
+        router = router.push(Router::with_path("open").push(third_party_invites::open_router()));
+    }
     // COT-06-002 / service-http-binding.md §2.1.2: the test-only
     // `/_arkret/_conformance/*` namespace is mounted ONLY when the
     // `ak.profile.conformance_harness.v1` profile is active. In production it is
@@ -439,8 +456,7 @@ fn coland_local_router() -> Router {
             Router::with_path("self")
                 .hoop(identity::session_pop::verify_session_pop)
                 .push(identity::account::local_router())
-                // Product-private projection reads: single-Strand object
-                // (`/_coland/self/strands/{strand_id}`) + relation edge list
+                // Product-private relation edge list
                 // (`/_coland/self/relations`). See `events::local_router`.
                 .push(events::local_router())
                 // Owner-scoped policy document storage CRUD
@@ -635,7 +651,10 @@ mod tests {
     /// dead, and an advertised member without a route is a false claim.
     #[test]
     fn advertised_operations_and_mounted_routes_agree() {
-        let state = AppState::new(crate::config::AppConfig::test_default(), Db { pool: None });
+        let mut config = crate::config::AppConfig::test_default();
+        config.third_party_invite_provider_enabled = true;
+        config.account_authority_url = Some("https://auth.example/".into());
+        let state = AppState::new(config, Db { pool: None });
         let routes = mounted_protocol_routes();
         let description = crate::routing::system::describe::build_server_description(&state);
         let mut unmounted = Vec::new();

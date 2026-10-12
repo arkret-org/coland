@@ -54,6 +54,25 @@ pub type InviteAcceptanceAttestationSigner<'a> = dyn Fn(&ThirdPartyInviteAccepta
     + Sync
     + 'a;
 
+/// Frozen public invite binding for a same-Station delegated provider.
+/// This is an in-process storage contract, never an HTTP payload.
+#[derive(Clone, Debug)]
+pub struct ThirdPartyInviteProviderLivenessRequest {
+    pub realm_id: arkret_wire::RealmId,
+    pub invite_id: arkret_wire::InviteId,
+    pub inviter_account_id: arkret_wire::AccountId,
+    pub third_party_invite: ThirdPartyInvite,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Holds the governing cut through private consume or actual delivery.
+/// Dropping an unfinished guard must release and discard its database session.
+#[async_trait]
+pub trait ThirdPartyInviteProviderLivenessGuard: Send {
+    fn observed_at(&self) -> chrono::DateTime<chrono::Utc>;
+    async fn finish(self: Box<Self>) -> PersistenceResult<()>;
+}
+
 /// Reads over the Invite typed current results.
 #[async_trait]
 pub trait InviteCurrentResultStore: Send + Sync {
@@ -70,6 +89,32 @@ pub trait InviteCurrentResultStore: Send + Sync {
         observe: &(dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync),
         sign: &InviteAcceptanceAttestationSigner<'_>,
     ) -> PersistenceResult<ThirdPartyInviteAcceptanceAttestationOutcome>;
+
+    /// Verify the inviter's current accepted Device over the original SDK
+    /// provisioning transcript and hold that PCR cut through private minting.
+    async fn acquire_third_party_invite_provision_device(
+        &self,
+        _request: &arkret_models_collaboration::governance::third_party_invite::ThirdPartyInviteProvisionRequestBody,
+        _station: &arkret_wire::DidCoreId,
+        _observe: &(dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync),
+    ) -> PersistenceResult<Box<dyn ThirdPartyInviteProviderLivenessGuard>> {
+        Err(super::PersistenceError::Conflict(
+            "revision_unavailable: current inviter Device cut is unavailable".into(),
+        ))
+    }
+
+    /// Acquire current liveness; portable activation evidence is insufficient
+    /// to authorize a later token consume or out-of-band delivery.
+    async fn acquire_third_party_invite_provider_liveness(
+        &self,
+        _request: &ThirdPartyInviteProviderLivenessRequest,
+        _station: &arkret_wire::DidCoreId,
+        _observe: &(dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync),
+    ) -> PersistenceResult<Box<dyn ThirdPartyInviteProviderLivenessGuard>> {
+        Err(super::PersistenceError::Conflict(
+            "revision_unavailable: current governing invite cut is unavailable".into(),
+        ))
+    }
 
     /// Invite results, optionally filtered to one Realm, completed from
     /// committed create and claim Events under one repeatable-read snapshot.

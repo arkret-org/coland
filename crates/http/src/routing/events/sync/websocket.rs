@@ -423,7 +423,7 @@ async fn current_delivery(
     credential: &Credential,
     frame: &mut WebSocketServerFrame,
     parameters: &WebSocketOpenParameters,
-) -> Result<(), ErrorCode> {
+) -> Result<Option<Box<dyn coland_storage::AccountContentDeliveryGuard>>, ErrorCode> {
     if !super::subscribe::stream_session_current(
         state,
         &credential.session,
@@ -543,7 +543,48 @@ async fn current_delivery(
         _ => {}
     }
     current_read_inputs(state, credential, parameters).await?;
-    Ok(())
+    let input = match frame {
+        WebSocketServerFrame::Data {
+            payload: WebSocketDataPayload::Events(events),
+            ..
+        } => {
+            let row = events.committed_event().ok_or(ErrorCode::SchemaViolation)?;
+            Some(coland_storage::AccountContentDeliveryInput::committed(
+                std::slice::from_ref(row),
+            ))
+        }
+        WebSocketServerFrame::Data {
+            payload: WebSocketDataPayload::Account(frame),
+            ..
+        } => Some(
+            coland_storage::AccountContentDeliveryInput::account_frame(frame)
+                .map_err(|_| ErrorCode::SchemaViolation)?,
+        ),
+        _ => None,
+    };
+    if let Some(input) = input {
+        // The governing cut can require a large provenance future. Poll it in
+        // its own task instead of on top of the socket pump's async frames.
+        // Cancellation must still drop an in-flight acquisition, and the
+        // returned original guard remains held by the physical send below.
+        struct CancelDeliveryAcquisition(tokio::task::AbortHandle);
+        impl Drop for CancelDeliveryAcquisition {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let state = state.clone();
+        let session = credential.session.clone();
+        let task = tokio::spawn(Box::pin(async move {
+            Box::pin(super::content_delivery_guard(&state, &session, &input))
+                .await
+                .map_err(|_| ErrorCode::CapabilityDenied)
+        }));
+        let _cancel = CancelDeliveryAcquisition(task.abort_handle());
+        task.await.map_err(|_| ErrorCode::TemporarilyUnavailable)?
+    } else {
+        Ok(None)
+    }
 }
 
 struct Channel {
@@ -963,20 +1004,29 @@ async fn connection_inner(
                         if let Err(code)=send(socket,&mut outgoing,&WebSocketServerFrame::Closed {channel_id,reason:WebSocketClosedReason::Error}).await{return code;}
                         continue;
                     }
-                    if let Err(error)=current_delivery(&state,current,&mut frame,&read_inputs).await {
-                        if error==ErrorCode::Unauthenticated{return WebSocketCloseCode::PolicyViolation;}
-                        channels.remove(&channel_id);schedule.retain(|id|id!=&channel_id);
-                        if let Err(code)=send(socket,&mut outgoing,&channel_error(&channel_id,error)).await{return code;}
-                        if let Err(code)=send(socket,&mut outgoing,&WebSocketServerFrame::Closed {channel_id,reason:WebSocketClosedReason::Unauthorized}).await{return code;}
-                        ready.notify_one();continue;
-                    }
+                    let delivery=match current_delivery(&state,current,&mut frame,&read_inputs).await {
+                        Ok(guard)=>guard,
+                        Err(error)=>{
+                            if error==ErrorCode::Unauthenticated{return WebSocketCloseCode::PolicyViolation;}
+                            channels.remove(&channel_id);schedule.retain(|id|id!=&channel_id);
+                            if let Err(code)=send(socket,&mut outgoing,&channel_error(&channel_id,error)).await{return code;}
+                            if let Err(code)=send(socket,&mut outgoing,&WebSocketServerFrame::Closed {channel_id,reason:WebSocketClosedReason::Unauthorized}).await{return code;}
+                            ready.notify_one();continue;
+                        }
+                    };
                     let actual_length=match arkret_canonical::canonical_json_bytes(&frame){Ok(bytes)=>bytes.len(),Err(_)=>return WebSocketCloseCode::InternalError};
                     if actual_length>length && !outgoing.add_bytes(actual_length-length) {
                         if let Some(channel)=channels.get_mut(&channel_id){channel.pending=Some(QueuedFrame {frame,read_inputs,_permit});}
                         continue;
                     }
                     let ending=terminal(&frame);
+                    if delivery.as_ref().is_some_and(|guard| !guard.permits_handoff()) {
+                        return WebSocketCloseCode::PolicyViolation;
+                    }
                     if let Err(code)=send_unmetered(socket,&frame).await{return code;}
+                    if let Some(guard)=delivery {
+                        if guard.finish().await.is_err(){return WebSocketCloseCode::InternalError;}
+                    }
                     if ending {
                         channels.remove(&channel_id);schedule.retain(|id|id!=&channel_id);
                         if let Err(code)=send(socket,&mut outgoing,&WebSocketServerFrame::Closed {channel_id,reason:WebSocketClosedReason::Completed}).await{return code;}

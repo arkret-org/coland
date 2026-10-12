@@ -795,6 +795,7 @@ pub struct ActivateAgentRuntimeCommand {
     pub authorized_public_key_digest: String,
     /// Exact controller Event retained with its producer proof.
     pub frozen_authorize_event: arkret_wire::Event,
+    pub scope_custody_ref: Option<coland_storage::AgentScopeCustodyRef>,
     /// Authority-signed commit that admitted `frozen_authorize_event`. It is
     /// the sole activation precondition: one `RealmCommit` carries exactly one
     /// `event_ref`, so this names the Event and the commit that settled it.
@@ -816,6 +817,7 @@ pub struct RecordAgentPairingCommitIntentCommand {
     pub request_digest: String,
     pub authorize_event_id: String,
     pub key_authorization_event: arkret_wire::Event,
+    pub scope_custody_ref: Option<coland_storage::AgentScopeCustodyRef>,
 }
 
 pub use coland_storage::PendingAgentPairingCommitIntent as AgentPairingCommitIntentState;
@@ -1110,6 +1112,11 @@ pub trait AgentPairingPort: Send + Sync {
     async fn pairing_receipt(
         &self,
         event_id: &str,
+    ) -> ServiceResult<Option<coland_storage::AgentPairingReceipt>>;
+    async fn qualified_scope_receipt_for_pairing(
+        &self,
+        agent_id: &str,
+        pairing_request_id: &str,
     ) -> ServiceResult<Option<coland_storage::AgentPairingReceipt>>;
     async fn pending_pairings_after(
         &self,
@@ -1957,6 +1964,15 @@ impl AgentPairingService {
     ) -> ServiceResult<Option<coland_storage::AgentPairingReceipt>> {
         self.pairing.pairing_receipt(event_id).await
     }
+    pub async fn qualified_scope_receipt_for_pairing(
+        &self,
+        agent_id: &str,
+        pairing_request_id: &str,
+    ) -> ServiceResult<Option<coland_storage::AgentPairingReceipt>> {
+        self.pairing
+            .qualified_scope_receipt_for_pairing(agent_id, pairing_request_id)
+            .await
+    }
     pub async fn pending_pairings_after(
         &self,
         after_id: &str,
@@ -2562,6 +2578,14 @@ pub trait DidDocumentPort: Send + Sync {
 #[async_trait]
 pub trait DidResolverPort: arkret_identity::DidResolver + Send + Sync {
     async fn resolve_did_async(&self, did: &Did) -> Result<arkret_identity::DidDocument, String>;
+    async fn resolve_verified_external_webvh_history(
+        &self,
+        _did: &Did,
+    ) -> Result<arkret_identity::VerifiedDidWebvhLog, PinnedDidResolutionError> {
+        Err(PinnedDidResolutionError::HistoryUnverifiable(
+            "verified external did:webvh history resolver unavailable".to_owned(),
+        ))
+    }
     /// Remove any process-local resolution snapshot for a terminally refused
     /// DID. Durable identity state, when present, remains the responsibility of
     /// the trust-admission transaction that attempted to publish it.
@@ -2663,6 +2687,28 @@ impl DidService {
 
     pub fn resolver(&self) -> &dyn arkret_identity::DidResolver {
         self.resolver.as_ref()
+    }
+
+    /// Return one fully verified native snapshot for consumers that must
+    /// compare create-locked values throughout the method history. Local
+    /// history remains authoritative when present; external resolution keeps
+    /// the resolver's original trust, egress and witness requirements.
+    pub async fn verified_webvh_history(
+        &self,
+        did: &Did,
+    ) -> Result<arkret_identity::VerifiedDidWebvhLog, PinnedDidResolutionError> {
+        if did.method() != "webvh" {
+            return Err(PinnedDidResolutionError::UnsupportedMethod);
+        }
+        let local_events = self.verified_local_webvh_history(did).await?;
+        if local_events.is_empty() {
+            return self
+                .resolver
+                .resolve_verified_external_webvh_history(did)
+                .await;
+        }
+        verify_local_service_history(did, &local_events)
+            .map_err(|error| PinnedDidResolutionError::HistoryUnverifiable(error.to_string()))
     }
 
     pub async fn resolve_did(&self, did: &Did) -> Result<arkret_identity::DidDocument, String> {

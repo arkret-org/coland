@@ -46,6 +46,43 @@ pub(crate) fn author_private_source(event: &arkret_wire::Event) -> bool {
             && event.payload.contains_key("policy_id"))
 }
 
+/// Read an original accepted Commit/Event pair on the caller's existing cut.
+pub(crate) async fn accepted_full_event_in_connection(
+    conn: &mut AsyncPgConnection,
+    event_id: &arkret_wire::EventId,
+) -> PersistenceResult<Option<CommittedEventFullView>> {
+    use diesel::OptionalExtension;
+    #[derive(QueryableByName)]
+    struct Pair {
+        #[diesel(sql_type = diesel::sql_types::Jsonb)]
+        commit_json: serde_json::Value,
+        #[diesel(sql_type = diesel::sql_types::Jsonb)]
+        envelope: serde_json::Value,
+    }
+    let token = crate::ids::parse_event_id(event_id.as_str())
+        .ok_or_else(|| PersistenceError::SchemaViolation("Event id is not canonical".into()))?;
+    let row = sql_query("SELECT c.commit_json,e.envelope FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.id=$1 AND e.state='committed'")
+        .bind::<diesel::sql_types::Binary,_>(token.to_vec())
+        .get_result::<Pair>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let full = CommittedEventFullView {
+        commit: serde_json::from_value(row.commit_json).map_err(PersistenceError::database)?,
+        event: serde_json::from_value(row.envelope).map_err(PersistenceError::database)?,
+    };
+    if full.event.event_id != *event_id
+        || full.commit.event_ref != *event_id
+        || full.commit.realm_id != full.event.realm_id
+        || full.commit.stream_ref.realm_id() != &full.event.realm_id
+    {
+        return Err(PersistenceError::Conflict(
+            "revision_unavailable: accepted content pair differs".into(),
+        ));
+    }
+    Ok(Some(full))
+}
+
 /// Decide canonical byte visibility after the caller's stream interval is proved.
 pub(crate) async fn full_event_for_member_in_connection(
     conn: &mut AsyncPgConnection,
@@ -74,12 +111,16 @@ pub(crate) async fn full_event_for_member_in_connection(
             arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
             _ => None,
         };
-        crate::agent_management_admission::require_member_event_read_in_connection(
+        let resources = crate::agent_management_admission::event_content_resources(&row.event)?;
+        crate::agent_management_admission::require_content_snapshot_in_connection(
             conn,
             &row.event.realm_id,
             circle,
             owner,
             agent,
+            arkret_models_collaboration::governance::operation_wire::AgentPolicyOperation::Read,
+            arkret_wire::CapabilityActionId::EventRead,
+            &resources,
             at,
         )
         .await?;
@@ -99,6 +140,16 @@ pub(crate) async fn full_event_for_member_in_connection(
             if row.commit.stream_position < floor.oldest_position {
                 return Ok(false);
             }
+        }
+        for recipient in [caller, &controller] {
+            crate::realm_authorization_cut::RealmAuthorizationCut::read(
+                conn,
+                &row.event.realm_id,
+                recipient,
+            )
+            .await?
+            .require_membership_read_constraints_in_connection(conn, &row.event, at)
+            .await?;
         }
         // Membership-derived visibility is intersected on the same bytes,
         // not replaced with an explicit event.read capability requirement.

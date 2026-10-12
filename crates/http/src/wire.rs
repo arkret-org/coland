@@ -612,6 +612,7 @@ pub fn describe(
             "ak.operation_bundle.station.actor_private_events.v1".to_owned(),
             "ak.operation_bundle.station.agent_pairing_handoff.v1".to_owned(),
             "ak.operation_bundle.station.agent_runtime.v1".to_owned(),
+            "ak.operation_bundle.station.management_review.v1".to_owned(),
             "ak.operation_bundle.station.applet.v1".to_owned(),
             "ak.operation_bundle.station.applet_ghost.v1".to_owned(),
             "ak.operation_bundle.station.applet_install.v1".to_owned(),
@@ -640,6 +641,9 @@ pub fn describe(
             ];
             if websocket_binding.is_some() {
                 bundles.push("ak.operation_bundle.station.websocket.v1".to_owned());
+            }
+            if config.third_party_invite_provider_enabled {
+                bundles.push("ak.operation_bundle.station.third_party_invite_handoff.v1".to_owned());
             }
             bundles
         },

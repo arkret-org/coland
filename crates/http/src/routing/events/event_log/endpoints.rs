@@ -23,7 +23,7 @@ async fn get_committed_event(
     event_id: PathParam<String>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<CommittedEventView> {
+) -> coland_http::result::GuardedJsonResult<CommittedEventView> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let event_id = EventId::new(event_id.into_inner())
@@ -38,8 +38,17 @@ async fn get_committed_event(
         .authority_commits()
         .committed_event_for_member(&event_id, &caller, &state.service_core_id())
         .await
-        .map_err(|error| AppError::internal(format!("committed Event read failed: {error}")))?
-    {
+        .map_err(|error| {
+            if error.conflict_code() == Some(coland_storage::ConflictCode::CapabilityDenied) {
+                // The disclosure reader applies the current Owned Agent and
+                // management ceiling before returning canonical bytes. A
+                // registered refusal is not a storage failure, and its private
+                // controller basis must not escape in the public Problem.
+                AppError::capability_denied("current content read is unavailable")
+            } else {
+                AppError::internal(format!("committed Event read failed: {error}"))
+            }
+        })? {
         MemberCommittedEventRead::Read(view) => *view,
         MemberCommittedEventRead::NotVisible => {
             return Err(AppError::not_found("committed event not found"));
@@ -57,7 +66,9 @@ async fn get_committed_event(
     view.validate_shape().map_err(|error| {
         AppError::internal(format!("durable committed Event view is invalid: {error}"))
     })?;
-    json_ok(view)
+    let input = coland_storage::AccountContentDeliveryInput::committed(std::slice::from_ref(&view));
+    let guard = super::super::sync::content_delivery_guard(state, &session, &input).await?;
+    coland_http::result::guarded_json_ok(view, guard)
 }
 
 /// A committed Event outside an ordinary Realm's Realm stream -- in a

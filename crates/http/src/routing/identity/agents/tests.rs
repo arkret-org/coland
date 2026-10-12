@@ -1394,3 +1394,348 @@ fn accepted_lifecycle_rejects_stale_active_row_without_interlocking_pairing() {
         "pairing's accepted-key decision is independent of the active-action gate; paused may be ready"
     );
 }
+
+struct QualifiedAgentHistoryFixture {
+    did: Did,
+    initial: arkret_models_identity::ResolutionCommitment,
+    controller: DidCoreId,
+    realm: RealmId,
+    digest: Hash,
+    raw: Vec<Value>,
+    update_seeds: Vec<[u8; 32]>,
+}
+
+impl QualifiedAgentHistoryFixture {
+    fn new() -> Self {
+        use arkret_signatures::webvh::{
+            AgentBindingUpdateInput, AgentInceptionInput, prepare_agent_binding_update,
+            prepare_agent_inception,
+        };
+        let update_seeds: Vec<[u8; 32]> = (0..6).map(|_| rand::random()).collect();
+        let public = |index: usize| qualified_agent_update_public(&update_seeds[index]);
+        let controller = DidCoreId::new(CONTROLLER_CORE).unwrap();
+        let realm = RealmId::from_event_id(&EventId::from_digest(
+            arkret_canonical::DigestSuite::Sha256,
+            [17; 32],
+        ));
+        let digest = Hash::new(format!("sha256:{}", "a".repeat(64))).unwrap();
+        let endpoint = url::Url::parse("https://qualified-agent.example").unwrap();
+        let inception = prepare_agent_inception(&AgentInceptionInput {
+            principal_endpoint: &endpoint,
+            local_id: "qualified-agent",
+            controller_principal_id: &controller,
+            version_time: "2026-07-01T00:00:00Z".parse().unwrap(),
+            root_seed: &update_seeds[0],
+            next_root_public_key_multibase: &public(1),
+        })
+        .unwrap();
+        let did = Did::new(inception.did.clone()).unwrap();
+        let initial = arkret_models_identity::ResolutionCommitment {
+            did: did.clone(),
+            method_history_head: arkret_canonical::canonical_sha256(&inception.log_entry).unwrap(),
+            version_id: inception.version_id,
+        };
+        let mut raw = vec![inception.log_entry];
+        let binding = prepare_agent_binding_update(&AgentBindingUpdateInput {
+            did: did.as_str(),
+            local_id: "qualified-agent",
+            previous_entries: &raw,
+            version_time: "2026-07-01T00:00:01Z".parse().unwrap(),
+            current_root_seed: &update_seeds[1],
+            next_root_public_key_multibase: &public(2),
+            controller_principal_id: &controller,
+            principal_control_realm_id: &realm,
+            requested_scope_digest: &digest,
+        })
+        .unwrap();
+        raw.push(binding.log_entry);
+        Self {
+            did,
+            initial,
+            controller,
+            realm,
+            digest,
+            raw,
+            update_seeds,
+        }
+    }
+
+    fn append(&mut self, document: Value) {
+        let index = self.raw.len();
+        let next_public = qualified_agent_update_public(&self.update_seeds[index + 1]);
+        let next = arkret_signatures::webvh::prepare_service_rotation(
+            &arkret_signatures::webvh::ServiceRotationInput {
+                did: self.did.as_str(),
+                previous_entries: &self.raw,
+                state: &document,
+                current_update_seed: &self.update_seeds[index],
+                next_update_public_key_multibase: &next_public,
+                version_time: "2026-07-01T00:00:00Z"
+                    .parse::<chrono::DateTime<chrono::Utc>>()
+                    .unwrap()
+                    + chrono::Duration::seconds(index as i64),
+            },
+        )
+        .unwrap();
+        self.raw.push(next.log_entry);
+    }
+
+    fn validate_at(&self, at: &str) -> Result<(), AppError> {
+        let history = arkret_identity::verify_did_webvh_v1_chain(&self.did, &self.raw).unwrap();
+        crate::routing::identity::agent_pcr::validate_agent_binding_history_at(
+            &history,
+            &self.initial,
+            self.controller.as_str(),
+            &self.realm,
+            &crate::routing::identity::agent_pcr::controller_authorization_ref(&self.did).unwrap(),
+            &self.digest,
+            at.parse().unwrap(),
+        )
+    }
+}
+
+fn qualified_agent_update_public(seed: &[u8; 32]) -> String {
+    let key = ed25519_dalek::SigningKey::from_bytes(seed)
+        .verifying_key()
+        .to_bytes();
+    let mut bytes = vec![0xed, 0x01];
+    bytes.extend_from_slice(&key);
+    format!("z{}", bs58::encode(bytes).into_string())
+}
+
+#[test]
+fn qualified_agent_history_uses_native_accepted_at_and_accepts_sequence_three() {
+    let mut fixture = QualifiedAgentHistoryFixture::new();
+    assert!(fixture.validate_at("2026-07-01T00:00:00.999Z").is_err());
+    fixture.validate_at("2026-07-01T00:00:01Z").unwrap();
+    fixture.append(fixture.raw[1]["state"].clone());
+    fixture.validate_at("2026-07-01T00:00:02Z").unwrap();
+    fixture.validate_at("2026-07-01T00:00:01.999Z").unwrap();
+}
+
+#[test]
+fn qualified_agent_history_rejects_all_changed_create_locked_fields() {
+    for (field, replacement) in [
+        (
+            "realm_id",
+            Value::String(
+                RealmId::from_event_id(&EventId::from_digest(
+                    arkret_canonical::DigestSuite::Sha256,
+                    [18; 32],
+                ))
+                .to_string(),
+            ),
+        ),
+        (
+            "controller_did",
+            Value::String("ak:did_core:web:other-controller.example".into()),
+        ),
+        (
+            "authorization_ref",
+            Value::String("did:web:other-controller.example#managed-controller".into()),
+        ),
+        (
+            "requested_scope_digest",
+            Value::String(format!("sha256:{}", "b".repeat(64))),
+        ),
+    ] {
+        let mut fixture = QualifiedAgentHistoryFixture::new();
+        let mut document = fixture.raw[1]["state"].clone();
+        document["service"][2]["serviceEndpoint"][field] = replacement;
+        fixture.append(document);
+        assert!(
+            fixture.validate_at("2026-07-01T00:00:02Z").is_err(),
+            "changed {field}"
+        );
+        // A later invalid binding does not rewrite previously accepted time.
+        fixture.validate_at("2026-07-01T00:00:01Z").unwrap();
+    }
+}
+
+#[test]
+fn qualified_agent_history_rejects_binding_removal_and_change_then_restore() {
+    let mut removed = QualifiedAgentHistoryFixture::new();
+    let mut document = removed.raw[1]["state"].clone();
+    document["service"].as_array_mut().unwrap().pop();
+    removed.append(document);
+    assert!(removed.validate_at("2026-07-01T00:00:02Z").is_err());
+
+    let mut restored = QualifiedAgentHistoryFixture::new();
+    let original = restored.raw[1]["state"].clone();
+    let mut changed = original.clone();
+    changed["service"][2]["serviceEndpoint"]["requested_scope_digest"] =
+        Value::String(format!("sha256:{}", "b".repeat(64)));
+    restored.append(changed);
+    restored.append(original);
+    assert!(restored.validate_at("2026-07-01T00:00:03Z").is_err());
+}
+
+#[test]
+fn qualified_agent_history_rejects_substituted_genesis_pin_and_private_scope_digest() {
+    let mut fixture = QualifiedAgentHistoryFixture::new();
+    fixture.initial.method_history_head = format!("sha256:{}", "0".repeat(64));
+    assert!(fixture.validate_at("2026-07-01T00:00:01Z").is_err());
+    let mut fixture = QualifiedAgentHistoryFixture::new();
+    fixture.digest = Hash::new(format!("sha256:{}", "c".repeat(64))).unwrap();
+    assert!(fixture.validate_at("2026-07-01T00:00:01Z").is_err());
+}
+
+#[test]
+fn qualified_agent_history_rejects_unverified_native_signature() {
+    let mut fixture = QualifiedAgentHistoryFixture::new();
+    fixture.raw[1]["state"]["service"][2]["serviceEndpoint"]["requested_scope_digest"] =
+        Value::String(format!("sha256:{}", "b".repeat(64)));
+    assert!(arkret_identity::verify_did_webvh_v1_chain(&fixture.did, &fixture.raw).is_err());
+}
+
+#[tokio::test]
+async fn qualified_agent_scope_rejects_service_row_without_accepted_pcr_source() {
+    let state = service_pairing_test_state();
+    let account = arkret_wire::AccountId::new(
+        DidCoreId::new(CONTROLLER_CORE).unwrap(),
+        state.service_core_id(),
+    );
+    save_service_pairing_controller(&state, account.clone()).await;
+    let mut record = pending_pairing_record(
+        AGENT_CORE,
+        CONTROLLER_CORE,
+        requested_agent_scope(),
+        "01234567",
+        "2999-01-01T00:00:00.000Z",
+    );
+    record.provision_event_refs = Some(json!({
+        "controller_authority": account,
+        "pcr_genesis_accepted": true,
+        "did_binding_accepted": true,
+    }));
+    let digest =
+        crate::routing::identity::agent_pcr::requested_scope_digest_for_record(&record).unwrap();
+    assert!(
+        crate::routing::identity::agent_pcr::validate_agent_requested_scope_binding_at(
+            &state,
+            &record,
+            &digest,
+            chrono::Utc::now(),
+        )
+        .await
+        .is_err()
+    );
+}
+
+/// Native imported source fixture for vault I/O tests. The Agent history and
+/// disclosure signature are genuinely verified; the two source refs are
+/// structural imports, not a claim of full pairing HTTP admission.
+pub(super) fn imported_scope_custody_fixture(
+    service_id: &str,
+) -> (
+    AgentKeyPairRequestBody,
+    coland_storage::AgentScopeAcceptedBinding,
+    String,
+) {
+    use arkret_signatures::webvh::{AgentBindingUpdateInput, prepare_agent_binding_update};
+    let mut fixture = QualifiedAgentHistoryFixture::new();
+    let method = format!("{}#runtime", fixture.did);
+    let mut command = key_pair_request_body(fixture.did.as_str(), &method, service_id);
+    let controller_account = arkret_wire::AccountId::new(
+        fixture.controller.clone(),
+        DidCoreId::new(service_id).unwrap(),
+    );
+    let disclosure = &mut command.requested_scope_disclosure;
+    disclosure.challenge =
+        arkret_wire::NonEmptyString::new(command.pairing_request_id.as_str()).unwrap();
+    disclosure.request_id = arkret_wire::RequestId::new(format!(
+        "ak:request:{}",
+        command
+            .pairing_request_id
+            .as_str()
+            .strip_prefix("agent_pairing_request:")
+            .unwrap()
+    ))
+    .unwrap();
+    let digest = arkret_signatures::agent::agent_requested_scope_digest(
+        &disclosure.agent_id,
+        &disclosure.controller_principal_id,
+        &disclosure.requested_scope,
+    )
+    .unwrap();
+    fixture.digest = digest.clone();
+    fixture.raw.truncate(1);
+    let binding = prepare_agent_binding_update(&AgentBindingUpdateInput {
+        did: fixture.did.as_str(),
+        local_id: "qualified-agent",
+        previous_entries: &fixture.raw,
+        version_time: "2026-07-01T00:00:01Z".parse().unwrap(),
+        current_root_seed: &fixture.update_seeds[1],
+        next_root_public_key_multibase: &qualified_agent_update_public(&fixture.update_seeds[2]),
+        controller_principal_id: &fixture.controller,
+        principal_control_realm_id: &fixture.realm,
+        requested_scope_digest: &digest,
+    })
+    .unwrap();
+    fixture.raw.push(binding.log_entry);
+    fixture.validate_at("2026-07-06T00:00:01Z").unwrap();
+    let key = ed25519_dalek::SigningKey::from_bytes(&rand::random());
+    disclosure.proofs[0].payload_digest = disclosure.payload_digest().unwrap();
+    let transcript = disclosure
+        .canonical_proof_binding_bytes(&disclosure.proofs[0])
+        .unwrap();
+    disclosure.proofs[0].jws =
+        arkret_signatures::proof::sign_ed25519_detached_jws(&key, &transcript).unwrap();
+    arkret_signatures::proof::verify_ed25519_detached_jws_payload_proof(
+        &disclosure.proofs[0],
+        &transcript,
+        &arkret_signatures::proof::PublicKeyMaterial::Ed25519Raw {
+            bytes: key.verifying_key().to_bytes().to_vec(),
+        },
+    )
+    .unwrap();
+    let event = &mut command.authorize_event.event;
+    event.realm_id = fixture.realm.clone();
+    event.scope_ref = arkret_wire::ScopeRef::Realm {
+        realm_id: fixture.realm.clone(),
+    };
+    event.actor_id = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+        disclosure.agent_id.clone(),
+        controller_account.station_id.clone(),
+    ));
+    event.executed_by = Some(arkret_wire::ActorId::account(controller_account.clone()));
+    event.event_id = event
+        .derive_event_id_with_digest_suite(arkret_canonical::DigestSuite::Sha256)
+        .unwrap();
+    let reference = |seed: u8| arkret_wire::CommittedEventRef {
+        event_id: EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [seed; 32]),
+        commit_id: arkret_wire::RealmCommitId::from_digest([seed; 32]),
+        stream_ref: arkret_wire::CommitStreamRef::Realm {
+            realm_id: fixture.realm.clone(),
+        },
+        stream_position: 0,
+    };
+    let accepted = coland_storage::AgentScopeAcceptedBinding {
+        controller_account,
+        initial_resolution: fixture.initial,
+        binding_resolution: arkret_models_identity::ResolutionCommitment {
+            did: fixture.did,
+            version_id: binding.version_id,
+            method_history_head: arkret_canonical::canonical_sha256(&fixture.raw[1]).unwrap(),
+        },
+        provision_ref: reference(92),
+        pcr_genesis_ref: reference(93),
+        requested_scope_digest: digest,
+        verified_at: "2026-07-06T00:00:01Z".parse().unwrap(),
+    };
+    let payload =
+        arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload::try_from(
+            &command.authorize_event.event,
+        )
+        .unwrap();
+    let runtime_binding =
+        arkret_models_collaboration::agent_scope::agent_runtime_key_binding_digest(
+            &payload.agent_id,
+            &command.pairing_request_id,
+            &payload.verification_method,
+            &payload.public_key,
+            payload.runtime_attestation.as_ref(),
+        )
+        .unwrap();
+    (command, accepted, runtime_binding.to_string())
+}

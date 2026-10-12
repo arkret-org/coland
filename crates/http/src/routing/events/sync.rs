@@ -100,6 +100,257 @@ pub fn spawn_account_data_change_retention_sweeper(state: AppState) -> tokio::ta
     })
 }
 pub(crate) use cursor::*;
+pub(crate) async fn content_delivery_guard(
+    state: &AppState,
+    session: &SessionIdentityState,
+    input: &coland_storage::AccountContentDeliveryInput,
+) -> Result<Option<Box<dyn coland_storage::AccountContentDeliveryGuard>>, crate::error::AppError> {
+    let actor =
+        crate::routing::identity::session_actor::validated_session_actor(state, session).await?;
+    let account = actor.as_account_id().ok_or_else(|| {
+        crate::error::AppError::capability_denied("content recipient is not an Account")
+    })?;
+    let mut input = input.clone();
+    if let Some(agent_session) = session.agent_session() {
+        let grant = session.session_grant.as_ref().ok_or_else(|| {
+            crate::error::AppError::capability_denied("Agent delivery credential is unavailable")
+        })?;
+        input.credential_expires_at = Some(session.expires_at);
+        let details = agent_session
+            .scope_details
+            .get("scope_details")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                crate::error::AppError::capability_denied(
+                    "Agent current session resource ceiling is unavailable",
+                )
+            })?;
+        input.agent_session_scope = Some((grant.scopes.clone(), details.clone()));
+        let arkret_models_identity::session_credential::SessionGrantHolderBinding::AgentRuntime {
+            agent_id,
+            agent_key_authorization_ref,
+            verification_method,
+        } = &grant.holder_binding
+        else {
+            return Err(crate::error::AppError::capability_denied(
+                "Agent delivery credential differs",
+            ));
+        };
+        if &account.principal_id != agent_id {
+            return Err(crate::error::AppError::capability_denied(
+                "Agent delivery recipient differs",
+            ));
+        }
+        let (_, current) =
+            crate::routing::identity::current_signer_evidence::current_agent_endpoint_key(
+                state,
+                &actor,
+                verification_method,
+            )
+            .await
+            .map_err(|_| {
+                crate::error::AppError::capability_denied(
+                    "Agent current delivery key is unavailable",
+                )
+            })?;
+        if current.event_id != *agent_key_authorization_ref {
+            return Err(crate::error::AppError::capability_denied(
+                "Agent delivery authorization changed",
+            ));
+        }
+        let guard = coland_storage::AgentEndpointGuard {
+            pcr_realm_id: current.stream_ref.realm_id().clone(),
+            agent_id: agent_id.clone(),
+            authorization_ref: current,
+            verification_method: verification_method.clone(),
+        };
+        input.qualified_agent_scope_evidence =
+            Some(state.qualified_agent_scope_evidence(&guard).await?);
+        input.agent_endpoint = Some(guard);
+    }
+    state
+        .authority_commits()
+        .acquire_committed_content_delivery(account, &state.service_core_id(), &input)
+        .await
+        .map_err(|_| {
+            crate::error::AppError::capability_denied("current content delivery is unavailable")
+        })
+}
+
+/// Private process factory for the fixed reply consumer. The request is the
+/// actual original committed-Event GET signed by the live Agent session key.
+/// No caller-provided Actor/session fields are treated as authentication.
+pub async fn acquire_native_message_reply_cut(
+    state: &AppState,
+    req: &mut Request,
+    grant_jwt: &str,
+    agent: &arkret_wire::AccountId,
+    controller: &arkret_wire::AccountId,
+    caller: &arkret_wire::AccountId,
+    source: &arkret_wire::CommittedEventFullView,
+    scope: &arkret_wire::ScopeRef,
+    strand: &arkret_wire::StrandId,
+    operation: arkret_wire::ServiceOperationId,
+) -> Result<Box<dyn coland_storage::AccountContentDeliveryGuard>, crate::error::AppError> {
+    let invalid =
+        || crate::error::AppError::unauthenticated("native reply source request binding differs");
+    let expected = format!(
+        "{}/_arkret/self/committed-events/{}",
+        state.config().public_base_url.trim_end_matches('/'),
+        source.event.event_id.as_str()
+    );
+    if req.method() != salvo::http::Method::GET
+        || req.uri().to_string() != expected
+        || operation.as_str() != "ak.self.committed_event.resource.get.v1"
+        || scope != &source.event.scope_ref
+        || req.uri().query().is_some()
+        || req
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            != Some(format!("DPoP {grant_jwt}").as_str())
+    {
+        return Err(invalid());
+    }
+    // Obtain one force-fresh authoritative result before PoP verification so
+    // both original credential checks use the same exact request memo.
+    crate::routing::identity::auth_grant_dpop::take_request_authoritative_grant(
+        state, req, grant_jwt, true,
+    )
+    .await
+    .map_err(|(_, code, _)| native_reply_auth_error(code))?;
+    crate::routing::identity::session_pop::enforce_native_reply_session_pop(state, req).await?;
+    let authenticated =
+        crate::routing::identity::auth_grant_dpop::authenticate_native_reply_session(
+            state, req, grant_jwt,
+        )
+        .await
+        .map_err(|(_, code, _)| native_reply_auth_error(code))?;
+    native_message_reply_preparation_guard(
+        state,
+        &authenticated,
+        agent,
+        controller,
+        caller,
+        source,
+        strand,
+    )
+    .await
+}
+
+fn native_reply_auth_error(code: &str) -> crate::error::AppError {
+    crate::error::AppError::from_rejection(
+        crate::error::ErrorCode::from_wire(code)
+            .unwrap_or(crate::error::ErrorCode::TemporarilyUnavailable),
+        "native reply credential is unavailable",
+    )
+}
+
+/// Assemble only trusted native reply credential/current material before the
+/// PG held cut. This does not authorize generic model/tools or issue a ticket.
+pub(crate) async fn native_message_reply_preparation_guard(
+    state: &AppState,
+    authenticated: &crate::routing::identity::auth_grant_dpop::NativeReplyAuthenticatedSession,
+    expected_agent: &arkret_wire::AccountId,
+    expected_controller: &arkret_wire::AccountId,
+    caller: &arkret_wire::AccountId,
+    source: &arkret_wire::CommittedEventFullView,
+    strand: &arkret_wire::StrandId,
+) -> Result<Box<dyn coland_storage::AccountContentDeliveryGuard>, crate::error::AppError> {
+    let denied = || {
+        crate::error::AppError::capability_denied("native reply current authority is unavailable")
+    };
+    let session = authenticated.session();
+    let actor =
+        crate::routing::identity::session_actor::validated_session_actor(state, session).await?;
+    let account = actor.as_account_id().ok_or_else(denied)?;
+    let grant = session.session_grant.as_ref().ok_or_else(denied)?;
+    let agent_session = session.agent_session().ok_or_else(denied)?;
+    if account != expected_agent
+        || session.expires_at <= chrono::Utc::now()
+        || session.revoked_at.is_some()
+    {
+        return Err(denied());
+    }
+    let arkret_models_identity::session_credential::SessionGrantHolderBinding::AgentRuntime {
+        agent_id,
+        agent_key_authorization_ref,
+        verification_method,
+    } = &grant.holder_binding
+    else {
+        return Err(denied());
+    };
+    if &account.principal_id != agent_id {
+        return Err(denied());
+    }
+    let (_, current) =
+        crate::routing::identity::current_signer_evidence::current_agent_endpoint_key(
+            state,
+            &actor,
+            verification_method,
+        )
+        .await
+        .map_err(|_| denied())?;
+    if current.event_id != *agent_key_authorization_ref {
+        return Err(denied());
+    }
+    let endpoint = coland_storage::AgentEndpointGuard {
+        pcr_realm_id: current.stream_ref.realm_id().clone(),
+        agent_id: agent_id.clone(),
+        authorization_ref: current,
+        verification_method: verification_method.clone(),
+    };
+    let evidence = state.qualified_agent_scope_evidence(&endpoint).await?;
+    if &evidence.accepted_binding().controller_account != expected_controller {
+        return Err(denied());
+    }
+    let details = agent_session
+        .scope_details
+        .get("scope_details")
+        .and_then(Value::as_object)
+        .ok_or_else(denied)?;
+    let mut input = coland_storage::AccountContentDeliveryInput::committed(&[
+        arkret_wire::CommittedEventView::Full(source.clone()),
+    ]);
+    input.credential_expires_at = Some(session.expires_at);
+    input.agent_session_scope = Some((grant.scopes.clone(), details.clone()));
+    input.agent_endpoint = Some(endpoint);
+    input.qualified_agent_scope_evidence = Some(evidence);
+    // Original authenticated AA resolve/verify/append happens before acquiring
+    // any local delivery/PCR locks; a held guard never calls back to the issuer.
+    for human in [expected_controller, caller] {
+        input
+            .account_status_observations
+            .push(super::peer::refresh_current_account_status(state, human).await?);
+    }
+    state
+        .authority_commits()
+        .acquire_native_message_reply_preparation(
+            expected_agent,
+            expected_controller,
+            caller,
+            &state.service_core_id(),
+            source,
+            strand,
+            &input,
+            state.config().agent_participation_ceiling,
+        )
+        .await
+        .map_err(|_| denied())
+}
+
+async fn account_frame_delivery_guard(
+    state: &AppState,
+    session: &SessionIdentityState,
+    frame: &arkret_models_collaboration::sync_frames::account_subscribe::AccountSubscribeFrame,
+) -> Result<Option<Box<dyn coland_storage::AccountContentDeliveryGuard>>, crate::error::AppError> {
+    let input =
+        coland_storage::AccountContentDeliveryInput::account_frame(frame).map_err(|_| {
+            crate::error::AppError::capability_denied("current content delivery is unavailable")
+        })?;
+    content_delivery_guard(state, session, &input).await
+}
+
 mod subscribe;
 pub(crate) use subscribe::*;
 mod committed_subscription;
@@ -138,3 +389,24 @@ pub(crate) fn scope_selector_to_realm_id(
 #[cfg(test)]
 #[path = "sync_tests.rs"]
 mod tests;
+
+/// Unknown projection carriers cannot turn a membership check into content authority.
+pub(crate) async fn require_registered_content_mapping(
+    state: &crate::state::AppState,
+    session: &SessionIdentityState,
+    realm: &arkret_wire::RealmId,
+) -> Result<(), crate::error::AppError> {
+    let input = coland_storage::AccountContentDeliveryInput {
+        realms: vec![realm.clone()],
+        unresolved_content_realms: vec![realm.clone()],
+        ..Default::default()
+    };
+    if let Some(guard) = content_delivery_guard(state, session, &input).await? {
+        guard
+            .finish()
+            .await
+            .map_err(|_| crate::error::AppError::not_found("not found"))?;
+        return Err(crate::error::AppError::not_found("not found"));
+    }
+    Ok(())
+}

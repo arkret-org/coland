@@ -19,4 +19,7 @@ pub struct EventApprovalCommit {
     pub event_digest: String,
     pub committed_at: DateTime<Utc>,
     pub methods: Vec<ApprovalHistoricalMethod>,
+    /// Only management reviews require these process-local current AA observations.
+    /// They are not approval signatures or reusable lifecycle credentials.
+    pub management_current: Option<crate::ManagementReviewCurrent>,
 }

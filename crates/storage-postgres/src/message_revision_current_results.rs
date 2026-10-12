@@ -78,7 +78,12 @@ fn supported_plain_text(payload: &Value) -> bool {
     object.keys().all(|key| {
         matches!(
             key.as_str(),
-            "strand_id" | "track_name" | "content" | "reply_to_id" | "poll_response_heads"
+            "strand_id"
+                | "track_name"
+                | "content"
+                | "blob_refs"
+                | "reply_to_id"
+                | "poll_response_heads"
         )
     }) && object.contains_key("strand_id")
         && object.get("track_name") == Some(&Value::String("discussion".to_owned()))
@@ -101,7 +106,7 @@ fn supported_plain_text(payload: &Value) -> bool {
 
 #[cfg(test)]
 mod plain_text_format_tests {
-    use super::{supported_plain_text, supported_plain_text_revision};
+    use super::{supported_mls_carrier, supported_plain_text, supported_plain_text_revision};
 
     #[test]
     fn plain_and_markdown_text_are_accepted_without_admitting_rich_carriers() {
@@ -129,6 +134,19 @@ mod plain_text_format_tests {
                 "message_id":"fixture","content":content
             })));
         }
+        // Signed attachment refs are routing/reducer metadata in the original
+        // MessageCreate payload, not a different content or authority carrier.
+        let reference = arkret_wire::BlobRef::from_bytes(b"bounded attachment");
+        let mut plain = serde_json::json!({"strand_id":"fixture","track_name":"discussion",
+            "content":{"kind":"ak.content.text","body":"attachment"},"blob_refs":[reference]});
+        assert!(supported_plain_text(&plain));
+        plain["metadata"] = serde_json::json!({"fields":{}});
+        assert!(!supported_plain_text(&plain));
+        let mut encrypted = serde_json::json!({"strand_id":"fixture","track_name":"discussion",
+            "encrypted_content":{},"blob_refs":[reference]});
+        assert!(supported_mls_carrier(&encrypted));
+        encrypted["attachments"] = serde_json::json!([]);
+        assert!(!supported_mls_carrier(&encrypted));
     }
 }
 
@@ -144,7 +162,12 @@ fn supported_mls_carrier(payload: &Value) -> bool {
     object.keys().all(|key| {
         matches!(
             key.as_str(),
-            "strand_id" | "track_name" | "encrypted_content" | "encrypted_metadata" | "reply_to_id"
+            "strand_id"
+                | "track_name"
+                | "encrypted_content"
+                | "encrypted_metadata"
+                | "blob_refs"
+                | "reply_to_id"
         )
     }) && object.contains_key("strand_id")
         && object.contains_key("encrypted_content")
@@ -202,6 +225,18 @@ pub(crate) async fn commit_message_create_current_result_in_connection(
         ));
     }
     let payload = serde_json::to_value(&event.payload).map_err(PersistenceError::database)?;
+    let typed: arkret_models_collaboration::events_payloads::message::MessageCreatePayload =
+        serde_json::from_value(payload.clone())
+            .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+    // content-types.md §2: blob_refs is signed reducer metadata. Validate its
+    // original byte references, then use the same Message send cut below.
+    // Referencing an attachment never grants access to the referenced bytes;
+    // Blob delivery independently checks its accepted source and current cut.
+    for reference in &typed.blob_refs {
+        arkret_wire::BlobRef::new(reference.clone()).map_err(|_| {
+            PersistenceError::SchemaViolation("Message attachment ref is not a BlobRef".to_owned())
+        })?;
+    }
     let mimi = payload.get("mimi_provenance");
     let mut carrier = payload.clone();
     if mimi.is_some() {
@@ -219,9 +254,6 @@ pub(crate) async fn commit_message_create_current_result_in_connection(
     if !mls_carrier && !supported_plain_text(&carrier) && poll.is_none() {
         return Err(conflict("Message carrier needs a dedicated authority cut"));
     }
-    let typed: arkret_models_collaboration::events_payloads::message::MessageCreatePayload =
-        serde_json::from_value(payload.clone())
-            .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
     let mut attributed = event.clone();
     if let Some(provenance) = mimi {
         attributed.actor_id = serde_json::from_value(

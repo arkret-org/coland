@@ -5,7 +5,6 @@
 //! - `POST /_arkret/root/identity/resolve`      — resolve a DID via SDK + local store
 //! - `GET  /_arkret/root/identity/document`     — fetch the locally-cached DID document
 //! - `GET  /_arkret/root/identity/log`          — return the local key log for a DID
-//! - `POST /_coland/root/identity/webvh/register` — register through the embedded webvh provider
 //! - `GET  /webvh/{local_id}/did.json` — embedded webvh DID document
 //! - `GET  /webvh/{local_id}/did.jsonl` — embedded webvh log
 //! - `POST /_arkret/root/identity/submit-did-operation` — submit a DID operation
@@ -20,7 +19,6 @@ use arkret_models_identity::identity::{
     DidOperationSubmitOutcome, DidOperationSubmitRequestBody, IdentityDocumentView,
     IdentityMethodEvidence, IdentityMethodEvidenceKind, IdentityResolveOutcome,
 };
-use arkret_signatures::webvh::WEBVH_SCID_PLACEHOLDER;
 use arkret_wire::NonEmptyString;
 use coland_http::error::AppError;
 use coland_http::result::{JsonResult, json_ok};
@@ -31,13 +29,12 @@ use coland_services::identity::{
 use salvo::http::{StatusCode, header};
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::webvh_validation::{
     WebvhLogEntry, validate_log_chain, validate_rotation_authorization_for_log,
     validate_witness_policy_for_log, verify_log_subject, verify_scid_against_did,
-    verify_webvh_log_proof, webvh_entry_hash_multibase,
+    verify_webvh_log_proof,
 };
 use super::{append_audit_log, bearer_token, now, render_error, sha256_hex, validate_did};
 use crate::state::AppState;
@@ -51,8 +48,7 @@ mod webvh;
 use document::{render_json_bytes, run_webvh_resolution_checks};
 // Endpoint handlers referenced by identity/mod.rs router().
 pub(super) use endpoints::{
-    embedded_webvh_document, embedded_webvh_log, embedded_webvh_register, identity_describe,
-    identity_document, identity_log, identity_receipts, identity_resolve,
-    identity_submit_did_operation,
+    embedded_webvh_document, embedded_webvh_log, identity_describe, identity_document,
+    identity_log, identity_receipts, identity_resolve, identity_submit_did_operation,
 };
 pub(in crate::routing::identity) use webvh::*;

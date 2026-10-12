@@ -30,6 +30,7 @@ otel = [
 ]
 
 [dependencies]
+savfox-gateway-server.workspace = true
 anyhow = { workspace = true }
 arkret-canonical.workspace = true
 arkret-http-client.workspace = true

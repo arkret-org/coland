@@ -403,15 +403,22 @@ async fn check_self_entry(
         .await?
         .ok_or_else(gate_check_failed)?;
     let rule = rule.as_str().ok_or_else(gate_check_failed)?;
-    let entry_open = match to {
-        "join" => rule == "public",
-        "knock" => rule == "knock",
-        _ => false,
-    };
-    if !entry_open {
+    let gates = supported_join_gates(conn, realm_id, has_gate_proofs).await?;
+    if !self_entry_open(rule, to, gates.len()) {
         return Err(gate_check_failed());
     }
-    check_join_policy(conn, realm_id, has_gate_proofs).await
+    Ok(())
+}
+
+fn self_entry_open(rule: &str, to: &str, supported_gate_count: usize) -> bool {
+    match (rule, to) {
+        ("public", "join") | ("knock", "knock") => true,
+        // Only parent-membership gates reach here. Their authoritative
+        // dependencies were re-proved in the same accepting transaction.
+        // A missing or empty policy must never turn restricted into public.
+        ("restricted", "join") => supported_gate_count > 0,
+        _ => false,
+    }
 }
 
 /// Join Policy constrains every admission path, including the controller's
@@ -422,6 +429,16 @@ async fn check_join_policy(
     realm_id: &arkret_wire::RealmId,
     has_gate_proofs: bool,
 ) -> PersistenceResult<()> {
+    supported_join_gates(conn, realm_id, has_gate_proofs)
+        .await
+        .map(|_| ())
+}
+
+async fn supported_join_gates(
+    conn: &mut AsyncPgConnection,
+    realm_id: &arkret_wire::RealmId,
+    has_gate_proofs: bool,
+) -> PersistenceResult<Vec<Value>> {
     let policy = join_policy(conn, realm_id).await?;
     let gates = policy
         .as_ref()
@@ -440,7 +457,7 @@ async fn check_join_policy(
     if !only_parent_membership || (has_gate_proofs && gates.is_empty()) {
         return Err(gate_check_failed());
     }
-    Ok(())
+    Ok(gates)
 }
 
 /// The ordinary-Realm controller carve-out is a caller-signed Agent join.
@@ -450,6 +467,7 @@ async fn check_agent_controller_join(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     payload: &MembershipPayload,
+    review: Option<&crate::agent_management_review::ReviewAdmission>,
 ) -> PersistenceResult<()> {
     use arkret_models_collaboration::events_payloads::agent::AgentProvisioningValue;
     use arkret_models_collaboration::governance::accountability::AccountabilityProjection;
@@ -573,12 +591,28 @@ async fn check_agent_controller_join(
             "Agent accountability grant is not active",
         ));
     }
+    // Genesis installs active once; it does not complete DID binding. The same
+    // verified ownership reader is used by first join, review and later current
+    // reads, so default-allow policy cannot bypass the independent bootstrap.
+    crate::agent_interaction_current_results::owned_provenance_in_connection(
+        conn,
+        agent,
+        controller,
+        commit.committed_at,
+        true,
+    )
+    .await?
+    .ok_or_else(|| {
+        failed_precondition("Agent complete accepted ownership and DID binding are unavailable")
+    })?;
     crate::agent_management_admission::require_join_in_connection(
         conn,
         &event.realm_id,
         controller,
         agent,
         commit.committed_at,
+        event,
+        review,
     )
     .await?;
     // Joining changes the key-access revision. It does not install an MLS
@@ -610,6 +644,7 @@ async fn admit_member_state(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    review: Option<&crate::agent_management_review::ReviewAdmission>,
 ) -> PersistenceResult<()> {
     let payload: MembershipPayload = serde_json::from_value(
         serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
@@ -672,7 +707,7 @@ async fn admit_member_state(
                 "Agent controller join requires the leave state",
             ));
         }
-        return check_agent_controller_join(conn, event, commit, &payload).await;
+        return check_agent_controller_join(conn, event, commit, &payload, review).await;
     }
     // Agent entry still requires its exact controller binding. An
     // administrator's terminal transition uses the ordinary FSM instead:
@@ -723,6 +758,7 @@ pub(crate) async fn admit_member_state_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    review: Option<&crate::agent_management_review::ReviewAdmission>,
 ) -> PersistenceResult<()> {
     if event.kind != arkret_wire::EventKind::MemberState {
         return Ok(());
@@ -741,12 +777,33 @@ pub(crate) async fn admit_member_state_in_connection(
             .require_managed_self_membership_action_in_connection(conn, event, commit.committed_at)
             .await?;
     }
-    admit_member_state(conn, event, commit).await
+    admit_member_state(conn, event, commit, review).await
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{EdgeWriter, edge_writer};
+    use super::{EdgeWriter, edge_writer, self_entry_open};
+
+    #[test]
+    fn restricted_self_join_requires_a_supported_automatic_gate() {
+        assert!(!self_entry_open("restricted", "join", 0));
+        assert!(self_entry_open("restricted", "join", 1));
+        assert!(self_entry_open("restricted", "join", 2));
+        assert!(!self_entry_open("restricted", "knock", 1));
+    }
+
+    #[test]
+    fn automatic_parent_gate_does_not_open_other_entry_modes() {
+        assert!(self_entry_open("public", "join", 0));
+        assert!(self_entry_open("public", "join", 1));
+        assert!(self_entry_open("knock", "knock", 0));
+        for rule in ["invite", "knock", "knock_restricted", "closed", "unknown"] {
+            assert!(!self_entry_open(rule, "join", 1));
+        }
+        assert!(!self_entry_open("knock_restricted", "knock", 1));
+        assert!(!self_entry_open("public", "knock", 1));
+        assert!(!self_entry_open("public", "leave", 1));
+    }
 
     #[test]
     fn only_the_listed_membership_edges_have_a_writer() {

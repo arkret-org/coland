@@ -6,6 +6,15 @@ use super::{
 pub struct PgBlobStore {
     pub pool: PgPool,
 }
+
+pub(crate) async fn blob_for_delivery_in_connection(
+    conn: &mut diesel_async::AsyncPgConnection,
+    blob_ref: &arkret_wire::BlobRef,
+) -> PersistenceResult<Option<BlobRecord>> {
+    sql_query("SELECT sha256,size_bytes,storage_backend,storage_key,media_type,filename,realm_id,NULLIF(payload->'encryption','null'::jsonb) AS encryption,legal_hold,redacted,visibility,uploaded_by,created_at FROM blobs WHERE id=$1 FOR SHARE")
+        .bind::<Text,_>(blob_ref.as_str()).get_result::<BlobRow>(&mut *conn).await.optional()
+        .map_err(PersistenceError::database).and_then(|row| row.map(BlobRecord::try_from).transpose())
+}
 #[async_trait]
 impl BlobStore for PgBlobStore {
     async fn get(&self, blob_ref: &str) -> PersistenceResult<Option<BlobRecord>> {

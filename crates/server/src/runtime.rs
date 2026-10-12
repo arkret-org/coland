@@ -347,3 +347,111 @@ mod notification_tests {
         result.expect("both independent LISTEN connections must become ready and deliver");
     }
 }
+
+/// Mount the fixed native consumer using the existing normally paired runtime home.
+pub async fn start_native_arkret_public_replies(
+    state: AppState,
+    home: Option<&str>,
+) -> anyhow::Result<Option<savfox_gateway_server::NativePublicReplyHandle>> {
+    let Some(home) = home else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        !home.trim().is_empty(),
+        "native Agent runtime home is empty"
+    );
+    let path = std::path::PathBuf::from(home);
+    anyhow::ensure!(
+        path.is_absolute(),
+        "native Agent runtime home must be absolute"
+    );
+    let host = Arc::new(ColandNativePublicReplyHost { state });
+    savfox_gateway_server::start_native_arkret_public_replies(path, host)
+        .await
+        .map(Some)
+}
+
+struct ColandNativePublicReplyHost {
+    state: AppState,
+}
+
+#[async_trait::async_trait]
+impl savfox_gateway_server::NativePublicReplyHost for ColandNativePublicReplyHost {
+    async fn acquire_reply_cut(
+        &self,
+        source: &savfox_gateway_server::NativeReplySource,
+        frozen: &savfox_gateway_server::FrozenNativeProviderRequest,
+    ) -> anyhow::Result<Box<dyn savfox_gateway_server::NativePublicReplyGuard>> {
+        // Credentials remain untrusted until the original Station gates accept them.
+        let credentials = &source.credentials;
+        let mut request = salvo::Request::default();
+        *request.method_mut() = credentials
+            .method
+            .parse()
+            .map_err(|_| anyhow::anyhow!("native source request method is invalid"))?;
+        *request.uri_mut() = credentials
+            .canonical_url
+            .parse()
+            .map_err(|_| anyhow::anyhow!("native source request URI is invalid"))?;
+        *request.headers_mut() = credentials.headers.clone();
+        let grant = request
+            .headers()
+            .get(salvo::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("DPoP "))
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("native source credentials are unavailable"))?
+            .to_owned();
+        let guard = coland_http::routing::acquire_native_message_reply_cut(
+            &self.state,
+            &mut request,
+            &grant,
+            &source.agent,
+            &source.controller,
+            &source.caller,
+            &source.accepted,
+            &source.scope,
+            &source.strand,
+            credentials.operation,
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("native current reply preparation refused"))?;
+        Ok(Box::new(ColandNativePublicReplyGuard {
+            guard,
+            exact_digest: frozen.digest().clone(),
+        }))
+    }
+}
+
+struct ColandNativePublicReplyGuard {
+    guard: Box<dyn coland_storage::AccountContentDeliveryGuard>,
+    exact_digest: arkret_wire::Hash,
+}
+
+impl ColandNativePublicReplyGuard {
+    fn require_handoff(&self, digest: &arkret_wire::Hash) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            digest == &self.exact_digest && self.guard.permits_handoff(),
+            "native reply current handoff refused",
+        );
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl savfox_gateway_server::NativePublicReplyGuard for ColandNativePublicReplyGuard {
+    fn permits_model_handoff(&mut self, digest: &arkret_wire::Hash) -> anyhow::Result<()> {
+        self.require_handoff(digest)
+    }
+
+    fn permits_response_chunk(&mut self, digest: &arkret_wire::Hash) -> anyhow::Result<()> {
+        self.require_handoff(digest)
+    }
+
+    async fn finish(self: Box<Self>) -> anyhow::Result<()> {
+        self.guard
+            .finish()
+            .await
+            .map_err(|_| anyhow::anyhow!("native reply current guard release failed"))
+    }
+}

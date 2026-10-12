@@ -1,6 +1,82 @@
 use arkret_wire::OpaqueLocalId;
 
 use super::{AccountPk, AgentPrincipalRecord, PersistenceResult, Value, async_trait};
+/// Private vault coordinates; no disclosure bytes are stored in PostgreSQL.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentScopeCustodyRef {
+    pub key_ref: String,
+    pub content_digest: arkret_wire::Hash,
+}
+
+/// Original accepted sources verified when the confidential presentation arrived.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentScopeAcceptedBinding {
+    pub controller_account: arkret_wire::AccountId,
+    pub initial_resolution: arkret_models_identity::ResolutionCommitment,
+    pub binding_resolution: arkret_models_identity::ResolutionCommitment,
+    pub provision_ref: arkret_wire::CommittedEventRef,
+    pub pcr_genesis_ref: arkret_wire::CommittedEventRef,
+    pub requested_scope_digest: arkret_wire::Hash,
+    pub verified_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Trusted process-only output of the verifier-private custody port. It cannot
+/// be deserialized from a request or serialized into a public response.
+#[derive(Clone)]
+pub struct VerifiedAgentScopeEvidence {
+    custody_ref: AgentScopeCustodyRef,
+    command: arkret_models_collaboration::agent_scope::AgentKeyPairRequestBody,
+    accepted_binding: AgentScopeAcceptedBinding,
+    runtime_key_binding_digest: String,
+    request_digest: String,
+    accepted_authorization_ref: arkret_wire::CommittedEventRef,
+}
+impl std::fmt::Debug for VerifiedAgentScopeEvidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VerifiedAgentScopeEvidence([REDACTED])")
+    }
+}
+impl VerifiedAgentScopeEvidence {
+    /// Called only after vault integrity and the durable exact receipt match.
+    pub fn from_verified_custody(
+        custody_ref: AgentScopeCustodyRef,
+        command: arkret_models_collaboration::agent_scope::AgentKeyPairRequestBody,
+        accepted_binding: AgentScopeAcceptedBinding,
+        runtime_key_binding_digest: String,
+        request_digest: String,
+        accepted_authorization_ref: arkret_wire::CommittedEventRef,
+    ) -> Self {
+        Self {
+            custody_ref,
+            command,
+            accepted_binding,
+            runtime_key_binding_digest,
+            request_digest,
+            accepted_authorization_ref,
+        }
+    }
+    pub fn accepted_authorization_ref(&self) -> &arkret_wire::CommittedEventRef {
+        &self.accepted_authorization_ref
+    }
+    pub fn custody_ref(&self) -> &AgentScopeCustodyRef {
+        &self.custody_ref
+    }
+    pub fn command(&self) -> &arkret_models_collaboration::agent_scope::AgentKeyPairRequestBody {
+        &self.command
+    }
+    pub fn accepted_binding(&self) -> &AgentScopeAcceptedBinding {
+        &self.accepted_binding
+    }
+    pub fn runtime_key_binding_digest(&self) -> &str {
+        &self.runtime_key_binding_digest
+    }
+    pub fn request_digest(&self) -> &str {
+        &self.request_digest
+    }
+}
+
 /// AKP-0010 — agent participation policy persistence. Controller
 /// selections (`ak.agent.participation.v1`) and the governance ceiling
 /// projection are stored as JSON records. A selection record contains only
@@ -38,6 +114,7 @@ pub struct AgentRuntimeActivation {
     pub authorized_public_key_digest: String,
     /// Exact controller Event retained with its producer proof.
     pub frozen_authorize_event: arkret_wire::Event,
+    pub scope_custody_ref: Option<AgentScopeCustodyRef>,
     /// Authority-signed commit that admitted `frozen_authorize_event`,
     /// together with the terminal lifecycle it settled. One `RealmCommit`
     /// carries exactly one `event_ref`, so this names both the Event and the
@@ -60,6 +137,7 @@ pub struct AgentPairingCommitIntent {
     pub request_digest: String,
     pub authorize_event_id: String,
     pub key_authorization_event: arkret_wire::Event,
+    pub scope_custody_ref: Option<AgentScopeCustodyRef>,
 }
 #[derive(Clone, Debug)]
 pub struct AgentRuntimeApprovalWrite {
@@ -126,13 +204,98 @@ pub struct AgentPairingReceipt {
     pub controller_principal_id: String,
     pub request_digest: String,
     pub authorize_event_ref: String,
+    pub pairing_request_id: OpaqueLocalId,
+    pub approval_request_id: OpaqueLocalId,
+    pub runtime_key_binding_digest: String,
     pub outcome: arkret_models_collaboration::agent_operations::AgentKeyPairOutcome,
+    pub scope_custody_ref: Option<AgentScopeCustodyRef>,
 }
+/// Station-private preparation only. Reading this material grants no current
+/// qualification; every operation rechecks the observed Accounts at its cut.
+#[derive(Clone)]
+pub struct ManagementReviewMaterial {
+    pub request: arkret_models_integration::management_review::ManagementReviewRequestBody,
+    pub outcome: arkret_models_integration::management_review::ManagementReviewOutcome,
+    pub accounts: Vec<arkret_wire::AccountId>,
+}
+
+/// Process-only authenticated AA observations, never a caller wire proof or TTL.
+#[derive(Clone)]
+pub struct ManagementReviewCurrent {
+    pub station_id: arkret_wire::DidCoreId,
+    pub observations: Vec<crate::AccountStatusCurrentObservation>,
+}
+
+impl std::fmt::Debug for ManagementReviewCurrent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ManagementReviewCurrent([REDACTED])")
+    }
+}
+
 #[async_trait]
 pub trait AgentStore: Send + Sync {
+    /// Confidential in-process material for the historical signature resolver.
+    async fn management_review_material(
+        &self,
+        caller: &arkret_wire::ActorId,
+        request_id: &str,
+        new_signatures: &[arkret_wire::ApprovalSignature],
+    ) -> PersistenceResult<ManagementReviewMaterial> {
+        let _ = (caller, request_id, new_signatures);
+        Err(crate::PersistenceError::NotFound(
+            "management review not found".into(),
+        ))
+    }
+    /// Private management intent only: never commits its candidate Event.
+    async fn management_review_request(
+        &self,
+        caller: &arkret_wire::ActorId,
+        request: &arkret_models_integration::management_review::ManagementReviewRequestBody,
+        producer: &crate::SelfProducerCommitGuard,
+        current: &ManagementReviewCurrent,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>
+    {
+        let _ = (caller, request, producer, at, current);
+        Err(crate::PersistenceError::Conflict(
+            "unsupported_feature: management review persistence is unavailable".into(),
+        ))
+    }
+    async fn management_review_status(
+        &self,
+        caller: &arkret_wire::ActorId,
+        request: &arkret_models_integration::management_review::ManagementReviewLookupRequestBody,
+        current: &ManagementReviewCurrent,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>
+    {
+        let _ = (caller, request, at, current);
+        Err(crate::PersistenceError::NotFound(
+            "management review not found".into(),
+        ))
+    }
+    async fn management_review_decide(
+        &self,
+        caller: &arkret_wire::ActorId,
+        request: &arkret_models_integration::management_review::ManagementReviewDecisionRequestBody,
+        methods: &[crate::ApprovalHistoricalMethod],
+        current: &ManagementReviewCurrent,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>
+    {
+        let _ = (caller, request, methods, at, current);
+        Err(crate::PersistenceError::NotFound(
+            "management review not found".into(),
+        ))
+    }
     async fn pairing_receipt(
         &self,
         event_id: &str,
+    ) -> PersistenceResult<Option<AgentPairingReceipt>>;
+    async fn qualified_scope_receipt_for_pairing(
+        &self,
+        agent_id: &str,
+        pairing_request_id: &str,
     ) -> PersistenceResult<Option<AgentPairingReceipt>>;
     /// Bounded durable scan; cursor wraps after an empty page.
     async fn pending_pairings_after(

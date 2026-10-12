@@ -549,6 +549,31 @@ pub(crate) async fn caller_realm_floor_in_connection(
     realm_id: &arkret_wire::RealmId,
     caller: &ActorId,
 ) -> PersistenceResult<Option<ReadableFloor>> {
+    let controller = crate::agent_management_admission::read_controller_in_connection(
+        conn, realm_id, None, caller,
+    )
+    .await?;
+    let Some(mut floor) = member_realm_floor_in_connection(conn, realm_id, caller).await? else {
+        return Ok(None);
+    };
+    if let Some(controller) = controller {
+        let Some(controller_floor) =
+            member_realm_floor_in_connection(conn, realm_id, &controller).await?
+        else {
+            return Ok(None);
+        };
+        if controller_floor.oldest_position > floor.oldest_position {
+            floor = controller_floor;
+        }
+    }
+    Ok(Some(floor))
+}
+
+async fn member_realm_floor_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm_id: &arkret_wire::RealmId,
+    caller: &ActorId,
+) -> PersistenceResult<Option<ReadableFloor>> {
     let Some(genesis_floor) = genesis_floor_in_connection(conn, realm_id).await? else {
         return Ok(None);
     };
@@ -730,6 +755,37 @@ async fn circle_join_floor(
 /// A Circle's interval requires current parent-Realm and exact Circle joins.
 /// Each Circle position is independent of the parent's Realm position.
 pub(crate) async fn caller_circle_floor_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm_id: &arkret_wire::RealmId,
+    circle_id: &arkret_wire::CircleId,
+    caller: &ActorId,
+) -> PersistenceResult<Option<ReadableFloor>> {
+    let controller = crate::agent_management_admission::read_controller_in_connection(
+        conn,
+        realm_id,
+        Some(circle_id),
+        caller,
+    )
+    .await?;
+    let Some(mut floor) =
+        member_circle_floor_in_connection(conn, realm_id, circle_id, caller).await?
+    else {
+        return Ok(None);
+    };
+    if let Some(controller) = controller {
+        let Some(controller_floor) =
+            member_circle_floor_in_connection(conn, realm_id, circle_id, &controller).await?
+        else {
+            return Ok(None);
+        };
+        if controller_floor.oldest_position > floor.oldest_position {
+            floor = controller_floor;
+        }
+    }
+    Ok(Some(floor))
+}
+
+async fn member_circle_floor_in_connection(
     conn: &mut AsyncPgConnection,
     realm_id: &arkret_wire::RealmId,
     circle_id: &arkret_wire::CircleId,

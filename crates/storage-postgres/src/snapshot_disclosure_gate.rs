@@ -744,6 +744,13 @@ pub(crate) async fn account_snapshot_material_in_connection(
     realm_id: &RealmId,
     account: &AccountId,
 ) -> PersistenceResult<Option<coland_storage::RealmStateSnapshotMaterial>> {
+    crate::agent_management_admission::read_controller_in_connection(
+        conn,
+        realm_id,
+        None,
+        &ActorId::account(account.clone()),
+    )
+    .await?;
     let Some(material) =
         crate::authority_commit::realm_state_snapshot_material_in_connection(conn, realm_id)
             .await?
@@ -965,6 +972,16 @@ async fn disclosure_facts_in_connection(
                 floor_commit_id: revision.commit_id.clone(),
                 floor_reason: arkret_wire::ReadableFloorReason::MembershipJoin,
             };
+        }
+        let Some(current_floor) = crate::account_stream_scan::caller_circle_floor_in_connection(
+            conn, realm_id, circle_id, &caller,
+        )
+        .await?
+        else {
+            continue;
+        };
+        if current_floor.oldest_position > floor.oldest_position {
+            floor = current_floor;
         }
         circle_floors.insert(circle_id.clone(), floor);
     }

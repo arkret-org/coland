@@ -173,6 +173,8 @@ async fn member_cut(
     if !joined {
         return Ok(MemberCut::NotVisible);
     }
+    crate::agent_management_admission::read_controller_in_connection(conn, realm_id, None, caller)
+        .await?;
     if tenure.service_id != issuer.as_str() {
         return Ok(MemberCut::ForeignTenure);
     }

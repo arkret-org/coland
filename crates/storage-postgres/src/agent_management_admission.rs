@@ -10,6 +10,43 @@ fn unavailable(detail: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Conflict(format!("failed_precondition: {detail}"))
 }
 
+/// Resolve the continuous reading ceiling from the same authoritative snapshot.
+/// Control Realms and independently founded Directs keep their own contracts.
+pub(crate) async fn read_controller_in_connection(
+    conn: &mut diesel_async::AsyncPgConnection,
+    realm: &RealmId,
+    circle: Option<&arkret_wire::CircleId>,
+    actor: &arkret_wire::ActorId,
+) -> PersistenceResult<Option<arkret_wire::ActorId>> {
+    if !crate::committed_disclosure::ordinary_agent_read_ceiling(
+        crate::account_stream_scan::realm_purpose(conn, realm).await?,
+    ) {
+        return Ok(None);
+    }
+    let at = chrono::Utc::now();
+    let Some(controller) = crate::realm_authorization_cut::owned_controller_snapshot_in_connection(
+        conn, realm, actor, at,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    require_member_event_read_in_connection(
+        conn,
+        realm,
+        circle,
+        controller
+            .as_account_id()
+            .ok_or_else(|| unavailable("controller Account is missing"))?,
+        actor
+            .as_account_id()
+            .ok_or_else(|| unavailable("Agent Account is missing"))?,
+        at,
+    )
+    .await?;
+    Ok(Some(controller))
+}
+
 /// Canonical Event reads use the content event.read action, independently of
 /// the member/history source that admits the read. This is not a delivery gate.
 pub(crate) async fn require_member_event_read_in_connection(

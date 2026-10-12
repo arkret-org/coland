@@ -3902,25 +3902,36 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         actor: &arkret_wire::ActorId,
     ) -> PersistenceResult<bool> {
         let mut conn = pg_conn(&self.pool).await?;
-        if accepted_current_member_joined_in_connection(&mut conn, realm_id, actor).await? {
-            return Ok(true);
-        }
-        let Some(account) = actor.as_account_id() else {
-            return Ok(false);
-        };
-        // The owner Account's principal-control Realm, recorded in the same
-        // transaction as its PCR genesis.
-        Ok(sql_query(
-            "SELECT EXISTS (SELECT 1 FROM principal_resolutions \
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *conn)
+                .await?;
+            if accepted_current_member_joined_in_connection(conn, realm_id, actor).await? {
+                crate::agent_management_admission::read_controller_in_connection(
+                    conn, realm_id, None, actor,
+                )
+                .await?;
+                return Ok(true);
+            }
+            let Some(account) = actor.as_account_id() else {
+                return Ok(false);
+            };
+            // The owner Account's principal-control Realm, recorded in the same
+            // transaction as its PCR genesis.
+            Ok(sql_query(
+                "SELECT EXISTS (SELECT 1 FROM principal_resolutions \
              WHERE pcr_realm_id = $1 AND principal_id = $2 AND station_id = $3) AS present",
-        )
-        .bind::<Text, _>(realm_id.as_str())
-        .bind::<Text, _>(account.principal_id.as_str())
-        .bind::<Text, _>(account.station_id.as_str())
-        .get_result::<PresenceRow>(&mut *conn)
+            )
+            .bind::<Text, _>(realm_id.as_str())
+            .bind::<Text, _>(account.principal_id.as_str())
+            .bind::<Text, _>(account.station_id.as_str())
+            .get_result::<PresenceRow>(&mut *conn)
+            .await
+            .map_err(PersistenceError::database)?
+            .present)
+        })
         .await
-        .map_err(PersistenceError::database)?
-        .present)
+        .map_err(PgTransactionError::into_persistence)
     }
 
     async fn accepted_plaintext_visible_services(

@@ -759,6 +759,27 @@ async fn desired_agents_require_owned_active_key_and_exact_realm_membership() {
     );
     let controller_leave = ordinary_realm::source_request(&pool, controller_leave).await;
     uow.commit_event(controller_leave.clone()).await.unwrap();
+    // Snapshot and discovery cannot retain membership-derived access after
+    // the exact controller incarnation terminates, including after reopening.
+    let reopened_reader = PgAuthorityCommitStore { pool: pool.clone() };
+    assert!(
+        reopened_reader
+            .realm_state_snapshot_material_for_account(realm_id, &agent)
+            .await
+            .is_err()
+    );
+    assert!(
+        reopened_reader
+            .list_realm_streams_for_account(realm_id, &agent, &controller.station_id)
+            .await
+            .is_err()
+    );
+    assert!(
+        reopened_reader
+            .accepted_realm_reader(realm_id, &arkret_wire::ActorId::account(agent.clone()))
+            .await
+            .is_err()
+    );
     let read_error = member_reader
         .committed_event_for_member(
             &join.authority_commit.event.event_id,
@@ -788,6 +809,18 @@ async fn desired_agents_require_owned_active_key_and_exact_realm_membership() {
     );
     let controller_rejoin = ordinary_realm::source_request(&pool, controller_rejoin).await;
     uow.commit_event(controller_rejoin.clone()).await.unwrap();
+    assert!(
+        reopened_reader
+            .realm_state_snapshot_material_for_account(realm_id, &agent)
+            .await
+            .is_err()
+    );
+    assert!(
+        reopened_reader
+            .list_realm_streams_for_account(realm_id, &agent, &controller.station_id)
+            .await
+            .is_err()
+    );
     let read_error = member_reader
         .committed_event_for_member(
             &join.authority_commit.event.event_id,

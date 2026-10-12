@@ -109,7 +109,7 @@ pub(crate) async fn full_event_for_member_in_connection(
     member_event_visible_in_connection(conn, row, caller, at).await
 }
 
-fn ordinary_agent_read_ceiling(
+pub(crate) fn ordinary_agent_read_ceiling(
     purpose: Option<arkret_models_collaboration::events_payloads::realm::RealmPurpose>,
 ) -> bool {
     use arkret_models_collaboration::events_payloads::realm::RealmPurpose;

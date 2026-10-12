@@ -294,6 +294,7 @@ fn forward_with_material(
 fn peer(source: &DidCoreId) -> AuthenticatedPeerContext {
     AuthenticatedPeerContext {
         source_service_id: source.clone(),
+        replay_receipt: None,
     }
 }
 

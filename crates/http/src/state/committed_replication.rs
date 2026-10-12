@@ -217,7 +217,8 @@ async fn replicate_one(
     peer: &AuthenticatedPeerContext,
     authorities: &mut BTreeMap<RealmId, LocatedRealmAuthority>,
     item: &CommittedEventSubmission,
-) -> ServiceResult<CommittedReplicaOutcome> {
+    receipt: Option<&coland_storage::IdempotencyRecord>,
+) -> ServiceResult<(CommittedReplicaOutcome, bool)> {
     item.validate()
         .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
     let event = &item.event_submission.event;
@@ -287,32 +288,37 @@ async fn replicate_one(
                     "duplicate_conflict: original replicated Human source differs".into(),
                 ));
             }
-            if welcomes.is_empty()
+            if receipt.is_none()
+                && welcomes.is_empty()
                 && !matches!(
                     event.kind,
                     arkret_wire::EventKind::MlsGenesis | arkret_wire::EventKind::MlsCommit
                 )
             {
-                return Ok(CommittedReplicaOutcome::Duplicate);
+                return Ok((CommittedReplicaOutcome::Duplicate, false));
             }
             // A replay may retain exact Genesis provenance or queue outstanding
             // Welcomes only after re-proving this authenticated peer's origin.
-            let welcomes = prepare_replica_roster_witnesses(state, item, welcomes).await?;
-            return state
-                .authority_commits()
-                .queue_replicated_welcomes(
-                    event,
-                    commit,
-                    item.genesis_event_ref.as_ref(),
-                    &welcomes,
-                    crate::wire::now(),
-                )
-                .await;
+            if receipt.is_none() {
+                let welcomes = prepare_replica_roster_witnesses(state, item, welcomes).await?;
+                return state
+                    .authority_commits()
+                    .queue_replicated_welcomes(
+                        event,
+                        commit,
+                        item.genesis_event_ref.as_ref(),
+                        &welcomes,
+                        crate::wire::now(),
+                    )
+                    .await
+                    .map(|outcome| (outcome, false));
+            }
+        } else {
+            return Err(ServiceError::Conflict(format!(
+                "{}: the Commit id is held with different content",
+                ConflictCode::DuplicateConflict
+            )));
         }
-        return Err(ServiceError::Conflict(format!(
-            "{}: the Commit id is held with different content",
-            ConflictCode::DuplicateConflict
-        )));
     }
     if matches!(
         event.kind,
@@ -381,26 +387,33 @@ async fn replicate_one(
     )
     .await?;
     let welcomes = prepare_replica_roster_witnesses(state, item, welcomes).await?;
-    let outcome = state
-        .authority_commits()
-        .install_committed_replica(&CommittedReplica {
-            local_service_id: state.service_core_id(),
-            authority: located.current_authority(),
-            event: event.clone(),
-            commit: commit.clone(),
-            producer_signer_fact: item.producer_signer_fact.clone(),
-            genesis_event_ref: item.genesis_event_ref.clone(),
-            role,
-            received_at: crate::wire::now(),
-            welcomes,
-        })
-        .await?;
-    if matches!(outcome, CommittedReplicaOutcome::Stored) {
-        // A member Station materializes its own accounts' notification rows
-        // from the replica it just stored (private-objects.md section 3.3).
+    let replica = CommittedReplica {
+        local_service_id: state.service_core_id(),
+        authority: located.current_authority(),
+        event: event.clone(),
+        commit: commit.clone(),
+        producer_signer_fact: item.producer_signer_fact.clone(),
+        genesis_event_ref: item.genesis_event_ref.clone(),
+        role,
+        received_at: crate::wire::now(),
+        welcomes,
+    };
+    let (outcome, fresh) = if let Some(receipt) = receipt {
+        state
+            .authority_commits()
+            .install_committed_peer_replica(&replica, receipt)
+            .await?
+    } else {
+        let outcome = state
+            .authority_commits()
+            .install_committed_replica(&replica)
+            .await?;
+        (outcome, matches!(outcome, CommittedReplicaOutcome::Stored))
+    };
+    if fresh {
         crate::routing::events::notify::dispatch_committed_event_notifications(state, event).await;
     }
-    Ok(outcome)
+    Ok((outcome, fresh))
 }
 
 /// Judge every item of one `committed_replication` request in order.
@@ -412,27 +425,47 @@ pub(super) async fn receive(
     let mut authorities = BTreeMap::new();
     let mut replication_outcomes = Vec::with_capacity(request.replications.len());
     let mut converge = std::collections::BTreeSet::new();
-    for item in &request.replications {
-        let record = match replicate_one(state, peer, &mut authorities, item).await {
-            Ok(CommittedReplicaOutcome::Stored) => {
-                // A stored join that opened the stream leaves it pending
-                // anchor; anchoring it is this Station's next step.
-                converge.insert(item.source_commit.stream_ref.clone());
-                PeerCommittedReplicationOutcomeRecord::Stored {}
-            }
-            Ok(CommittedReplicaOutcome::Duplicate) => {
-                PeerCommittedReplicationOutcomeRecord::Duplicate {}
-            }
-            Err(error) => {
-                let reason_code = rejection_reason(error)?;
-                // A pending anchor or a gap in front of the item: pull the
-                // missing prefix so the sender's retry can be stored.
-                if reason_code == ConflictCode::DependencyMissing.as_str() {
-                    converge.insert(item.source_commit.stream_ref.clone());
+    for (index, item) in request.replications.iter().enumerate() {
+        let receipt = peer
+            .replay_receipt
+            .as_ref()
+            .map(|base| -> ServiceResult<_> {
+                let mut receipt = base.clone();
+                receipt.idempotency_key = arkret_canonical::sha256_digest(
+                    &arkret_canonical::canonical_json_bytes(&(
+                        base.idempotency_key.as_str(),
+                        index,
+                    ))
+                    .map_err(|error| ServiceError::Internal(error.to_string()))?,
+                )
+                .as_str()
+                .to_owned();
+                Ok(receipt)
+            })
+            .transpose()?;
+        let record =
+            match replicate_one(state, peer, &mut authorities, item, receipt.as_ref()).await {
+                Ok((CommittedReplicaOutcome::Stored, fresh)) => {
+                    // A stored join that opened the stream leaves it pending
+                    // anchor; anchoring it is this Station's next step.
+                    if fresh {
+                        converge.insert(item.source_commit.stream_ref.clone());
+                    }
+                    PeerCommittedReplicationOutcomeRecord::Stored {}
                 }
-                PeerCommittedReplicationOutcomeRecord::Rejected { reason_code }
-            }
-        };
+                Ok((CommittedReplicaOutcome::Duplicate, _)) => {
+                    PeerCommittedReplicationOutcomeRecord::Duplicate {}
+                }
+                Err(error) => {
+                    let reason_code = rejection_reason(error)?;
+                    // A pending anchor or a gap in front of the item: pull the
+                    // missing prefix so the sender's retry can be stored.
+                    if reason_code == ConflictCode::DependencyMissing.as_str() {
+                        converge.insert(item.source_commit.stream_ref.clone());
+                    }
+                    PeerCommittedReplicationOutcomeRecord::Rejected { reason_code }
+                }
+            };
         replication_outcomes.push(record);
     }
     for stream in converge {

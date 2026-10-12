@@ -64,6 +64,9 @@ pub(super) fn validate_federation_headers(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(in crate::routing) struct VerifiedPeerKeyDigest(pub [u8; 32]);
+
 /// Verify the inbound RFC 9421 HTTP Message Signature for a spec-canonical
 /// `/_arkret/peer/*` request and enforce the local peer deny policy.
 ///
@@ -96,14 +99,16 @@ pub(in crate::routing) async fn verify_inbound_peer_http_signature(
     if outcome.is_err() {
         apply_federation_auth_failure_delay(started_at).await;
     }
-    outcome
+    let digest = outcome?;
+    req.extensions_mut().insert(VerifiedPeerKeyDigest(digest));
+    Ok(())
 }
 
 async fn verify_inbound_peer_http_signature_inner(
     state: &AppState,
     req: &Request,
     body_bytes: Option<&[u8]>,
-) -> Result<(), AppError> {
+) -> Result<[u8; 32], AppError> {
     let closed_peer_submit = is_closed_peer_submit(req.method().as_str(), req.uri().path());
     if body_bytes.is_some() {
         validate_federation_request_binding(state.config().trust_domain.as_str(), req)?;
@@ -139,7 +144,7 @@ async fn verify_inbound_peer_http_signature_inner(
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let source_verifying_key = verifying_key_for_service_id(
+    let (source_verifying_key, key_state_digest) = verifying_key_and_current_state_for_service_id(
         state,
         &source_id,
         &signature_input.key_id,
@@ -217,7 +222,7 @@ async fn verify_inbound_peer_http_signature_inner(
         return Err(signature_error("peer is denied by local federation policy"));
     }
 
-    Ok(())
+    Ok(key_state_digest)
 }
 
 /// federation.md §3.2 line 105-106: verify the signed `@authority` host matches
@@ -362,13 +367,23 @@ pub(in crate::routing) async fn verifying_key_for_service_id(
     verification_method: &str,
     closed_peer_submit: bool,
 ) -> Result<VerifyingKey, AppError> {
+    verifying_key_and_current_state_for_service_id(
+        state,
+        service_id,
+        verification_method,
+        closed_peer_submit,
+    )
+    .await
+    .map(|(key, _)| key)
+}
+
+async fn verifying_key_and_current_state_for_service_id(
+    state: &AppState,
+    service_id: &str,
+    verification_method: &str,
+    closed_peer_submit: bool,
+) -> Result<(VerifyingKey, [u8; 32]), AppError> {
     if service_id == state.service_id() {
-        let expected_method = crate::routing::federation::federation_service_signature_key_id(
-            state.service_did().as_str(),
-        );
-        if verification_method == expected_method {
-            return Ok(state.notary_signing_key().verifying_key());
-        }
         // A split Account Authority signs as this Station using a method
         // delegated by its verified, durable DID history. A request-supplied
         // key or the equality of Source-Service-ID alone is never authority.
@@ -401,12 +416,13 @@ pub(in crate::routing) async fn verifying_key_for_service_id(
                         closed_peer_submit,
                     )
                 })?;
-        return VerifyingKey::from_bytes(&bytes).map_err(|error| {
+        let key = VerifyingKey::from_bytes(&bytes).map_err(|error| {
             current_peer_key_error(
                 format!("local assertion key is invalid: {error}"),
                 closed_peer_submit,
             )
-        });
+        })?;
+        return Ok((key, verified_document_digest(document)?));
     }
     // Cached peer keys are historical verification material, not current
     // transport authority. Resolve the service's current method state on every
@@ -428,12 +444,20 @@ pub(in crate::routing) async fn verifying_key_for_service_id(
         }
     };
     match current_peer_key_from_document(&current.document, &did, verification_method) {
-        Ok(key) => Ok(key),
+        Ok(key) => Ok((key, verified_document_digest(&current.document)?)),
         Err(error) => {
             state.discard_federation_peer_verification_keys(service_id, verification_method);
             Err(current_peer_key_error(error, closed_peer_submit))
         }
     }
+}
+
+fn verified_document_digest(document: &impl serde::Serialize) -> Result<[u8; 32], AppError> {
+    // Bind the verified current document, including assertion relationships
+    // and every control key; the selected method alone is not a state cut.
+    let bytes = arkret_canonical::canonical_json_bytes(document)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    Ok(arkret_canonical::sha256_bytes(&bytes))
 }
 
 fn current_peer_key_from_document(

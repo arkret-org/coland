@@ -106,6 +106,7 @@ async fn peer_forwarded_destroy_reaches_the_shared_cut_and_leaves_zero_writes() 
     request.validate().unwrap();
     let peer = coland_services::authority_commit::AuthenticatedPeerContext {
         source_service_id: origin.service_core_id(),
+        replay_receipt: None,
     };
 
     let before = terminal_persistent_rows(&governor_pool).await;

@@ -1708,6 +1708,14 @@ pub trait AuthorityCommitStore: Send + Sync {
         replica: &CommittedReplica,
     ) -> PersistenceResult<CommittedReplicaOutcome>;
 
+    /// Retain the first peer item outcome in the replica's accepting transaction.
+    /// Current recipient authorization is checked again before any receipt read.
+    async fn install_committed_peer_replica(
+        &self,
+        replica: &CommittedReplica,
+        receipt: &crate::IdempotencyRecord,
+    ) -> PersistenceResult<(CommittedReplicaOutcome, bool)>;
+
     /// Queue, in one transaction, the re-verified Welcomes of a Commit this
     /// Station already holds as the exact replica (a replay after scan
     /// stored it). The held Commit and Event must equal the item.

@@ -1495,6 +1495,17 @@ impl AuthorityCommitApplication {
         Ok(self.store().install_committed_replica(replica).await?)
     }
 
+    pub async fn install_committed_peer_replica(
+        &self,
+        replica: &coland_storage::CommittedReplica,
+        receipt: &coland_storage::IdempotencyRecord,
+    ) -> ServiceResult<(coland_storage::CommittedReplicaOutcome, bool)> {
+        Ok(self
+            .store()
+            .install_committed_peer_replica(replica, receipt)
+            .await?)
+    }
+
     /// Queue the re-verified Welcomes of an exactly held replica Commit.
     pub async fn queue_replicated_welcomes(
         &self,
@@ -2495,11 +2506,13 @@ fn authority_forward_outcome(
 /// Self submissions carry the authenticated session through the service
 /// boundary so authorization cannot be inferred from the Event body alone.
 /// HTTP validates/deserializes current SDK DTOs before delegating.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AuthenticatedPeerContext {
     /// Identity obtained from the verified peer HTTP Message Signature and
     /// its bound source-service-id header, never from the submission body.
     pub source_service_id: DidCoreId,
+    /// Authenticated HTTP request metadata, never supplied by the peer body.
+    pub replay_receipt: Option<coland_storage::IdempotencyRecord>,
 }
 
 #[async_trait]

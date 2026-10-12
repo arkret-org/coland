@@ -1404,7 +1404,52 @@ pub(in crate::routing) async fn authenticated_peer_context(
     let source_service_id =
         arkret_wire::DidCoreId::new(required_header(req, HEADER_SOURCE_SERVICE_ID)?)
             .map_err(|_| schema_violation("source-service-id must be a service core_id"))?;
-    Ok(coland_services::authority_commit::AuthenticatedPeerContext { source_service_id })
+    let replay_receipt = if req.uri().path() == "/_arkret/peer/events" {
+        let body = req
+            .payload()
+            .await
+            .map_err(|error| AppError::json_invalid(error.to_string()))?
+            .to_vec();
+        let request_hash = arkret_canonical::sha256_digest(&body).as_str().to_owned();
+        let signature = req
+            .headers()
+            .get("signature")
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| schema_violation("authenticated request lost its signature"))?;
+        let signature_input = req
+            .headers()
+            .get("signature-input")
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| schema_violation("authenticated request lost its signature input"))?;
+        let signature_digest = arkret_canonical::sha256_digest(
+            &arkret_canonical::canonical_json_bytes(&(signature_input, signature))
+                .map_err(|error| AppError::internal(error.to_string()))?,
+        );
+        let now = chrono::Utc::now();
+        Some(coland_storage::IdempotencyRecord {
+            authenticated_actor: arkret_wire::ActorId::service(source_service_id.clone()),
+            operation_id: "ak.peer.events.command.submit.v1".to_owned(),
+            // The registered request identity is canonical_hash of
+            // the full body, also when no optional HTTP key is sent.
+            idempotency_key: request_hash.clone(),
+            request_hash,
+            response_status: 200,
+            response_body: serde_json::json!({"signature_digest":signature_digest,
+                        "key_state_digest": arkret_canonical::sha256_digest(&req.extensions()
+                            .get::<crate::routing::federation::VerifiedPeerKeyDigest>()
+                            .ok_or_else(|| AppError::internal("verified peer key state is absent"))?.0)}),
+            created_at: now,
+            expires_at: now + chrono::Duration::hours(24),
+        })
+    } else {
+        None
+    };
+    Ok(
+        coland_services::authority_commit::AuthenticatedPeerContext {
+            source_service_id,
+            replay_receipt,
+        },
+    )
 }
 
 pub(in crate::routing) fn source_id_from_request(req: &Request) -> Result<String, AppError> {

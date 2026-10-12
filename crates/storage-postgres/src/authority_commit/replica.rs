@@ -992,6 +992,198 @@ pub(super) async fn install_committed_replica_in_connection(
     Ok(outcome)
 }
 
+#[derive(QueryableByName)]
+struct PeerReceiptRow {
+    #[diesel(sql_type = Text)]
+    request_hash: String,
+    #[diesel(sql_type = Jsonb)]
+    response_body: Value,
+}
+
+async fn peer_recipient_basis_digest(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+) -> Result<String, PgTransactionError> {
+    let mut basis = serde_json::Map::new();
+    for table in [
+        "realm_authorities",
+        "realm_bootstrap_current_results",
+        "realm_policy_bundle_current_results",
+        "member_state_current_results",
+        "strand_current_results",
+        "circle_current_results",
+        "circle_member_state_current_results",
+        "sidecar_current_results",
+        "space_parent_current_results",
+        "space_child_scope_policy_current_results",
+        "space_current_results",
+        "sidecar_exchange_controls_current_results",
+        "agent_interaction_current_results",
+        "replica_authorization_rows",
+    ] {
+        let query = format!(
+            "SELECT coalesce(jsonb_agg(to_jsonb(t)-'updated_at' ORDER BY (to_jsonb(t)-'updated_at')::text),'[]'::jsonb) AS value FROM {table} t WHERE realm_id=$1"
+        );
+        let row = sql_query(query)
+            .bind::<Text, _>(realm.as_str())
+            .get_result::<ValueRow>(&mut *conn)
+            .await?;
+        basis.insert(table.to_owned(), row.value);
+    }
+    // Private Sidecar authority additionally depends on the controller's
+    // provision declarations and the declared Agents' own PCR lifecycle/keys.
+    // Bind their actual accepted rows without including mutable stream heads.
+    let controller_pcrs = "SELECT DISTINCT g.realm_id FROM pcr_genesis_units g JOIN sidecar_current_results s ON s.controller_account_id->>'principal_id'=g.principal_id AND s.controller_account_id->>'station_id'=g.station_id WHERE s.realm_id=$1";
+    let agent_pcrs = format!(
+        "SELECT p.value->>'principal_control_realm_id' FROM agent_provisioning_current_results p WHERE p.realm_id IN ({controller_pcrs})"
+    );
+    for (name, table, realms) in [
+        (
+            "sidecar_controller_provisions",
+            "agent_provisioning_current_results",
+            controller_pcrs.to_owned(),
+        ),
+        (
+            "sidecar_agent_lifecycle",
+            "agent_status_current_results",
+            agent_pcrs.clone(),
+        ),
+        (
+            "sidecar_agent_keys",
+            "agent_key_current_results",
+            agent_pcrs.clone(),
+        ),
+        ("sidecar_agent_authorities", "realm_authorities", agent_pcrs),
+    ] {
+        let row = sql_query(format!("SELECT coalesce(jsonb_agg(to_jsonb(t)-'updated_at' ORDER BY (to_jsonb(t)-'updated_at')::text),'[]'::jsonb) AS value FROM {table} t WHERE realm_id IN ({realms})"))
+            .bind::<Text,_>(realm.as_str()).get_result::<ValueRow>(&mut *conn).await?;
+        basis.insert(name.to_owned(), row.value);
+    }
+    let bytes = arkret_canonical::canonical_json_bytes(&basis)
+        .map_err(|error| invalid(error.to_string()))?;
+    Ok(arkret_canonical::sha256_digest(&bytes).as_str().to_owned())
+}
+
+/// Full current recipient authorization precedes every durable receipt read.
+/// The receipt and a newly accepted replica share one transaction.
+pub(super) async fn install_committed_peer_replica_in_connection(
+    conn: &mut AsyncPgConnection,
+    replica: &CommittedReplica,
+    receipt: &coland_storage::IdempotencyRecord,
+) -> Result<(CommittedReplicaOutcome, bool), PgTransactionError> {
+    let actor_key = receipt
+        .authenticated_actor
+        .canonical_key()
+        .map_err(invalid)?;
+    for field in ["signature_digest", "key_state_digest"] {
+        let value = receipt
+            .response_body
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("authenticated peer receipt binding is absent"))?;
+        arkret_wire::Hash::new(value.to_owned()).map_err(invalid)?;
+    }
+    if receipt.authenticated_actor
+        != arkret_wire::ActorId::service(replica.authority.service_id.clone())
+    {
+        return Err(conflict(
+            ConflictCode::CapabilityDenied,
+            "peer receipt belongs to another current origin",
+        ));
+    }
+    record_remote_authority_in_connection(conn, &replica.authority, &replica.local_service_id)
+        .await?;
+    require_current_replica_authority(conn, &replica.authority, &replica.commit).await?;
+    let opening = matches!(&replica.role, CommittedReplicaRole::OpeningJoin { member_account_id }
+        if member_account_id.station_id == replica.local_service_id);
+    if !opening
+        && !hosts_joined_member(conn, &replica.commit.stream_ref, &replica.local_service_id).await?
+        && !crate::account_stream_scan::peer_replication_right_at_in_connection(
+            conn,
+            &replica.commit.stream_ref,
+            &replica.local_service_id,
+            replica.commit.stream_position,
+        )
+        .await?
+    {
+        return Err(conflict(
+            ConflictCode::CapabilityDenied,
+            "current peer recipient has no replication interval",
+        ));
+    }
+    require_visible(conn, &replica.event, &replica.local_service_id).await?;
+    // Serialize one request item without consulting or changing its receipt.
+    // The authority/member/visibility checks above cannot be bypassed by a hit.
+    let lock = format!(
+        "peer-receipt:{actor_key}:{}:{}",
+        receipt.operation_id, receipt.idempotency_key
+    );
+    sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind::<Text, _>(&lock)
+        .execute(&mut *conn)
+        .await?;
+    let current_basis = peer_recipient_basis_digest(conn, &replica.event.realm_id).await?;
+    sql_query("DELETE FROM idempotency_keys WHERE actor_key=$1 AND operation_id=$2 AND idempotency_key=$3 AND expires_at<=$4")
+        .bind::<Text,_>(&actor_key).bind::<Text,_>(&receipt.operation_id).bind::<Text,_>(&receipt.idempotency_key)
+        .bind::<Timestamptz,_>(receipt.created_at).execute(&mut *conn).await?;
+    let cached = sql_query("SELECT request_hash,response_body FROM idempotency_keys WHERE actor_key=$1 AND operation_id=$2 AND idempotency_key=$3 AND expires_at>$4 FOR UPDATE")
+        .bind::<Text,_>(&actor_key).bind::<Text,_>(&receipt.operation_id).bind::<Text,_>(&receipt.idempotency_key)
+        .bind::<Timestamptz,_>(receipt.created_at).get_result::<PeerReceiptRow>(&mut *conn).await.optional()?;
+    if let Some(cached) = &cached {
+        if cached.request_hash != receipt.request_hash {
+            return Err(conflict(
+                ConflictCode::DuplicateConflict,
+                "peer idempotency key reused with another exact body",
+            ));
+        }
+        if cached.response_body.get("signature_digest")
+            == receipt.response_body.get("signature_digest")
+            && cached.response_body.get("key_state_digest")
+                == receipt.response_body.get("key_state_digest")
+            && cached
+                .response_body
+                .get("authorization_basis_digest")
+                .and_then(Value::as_str)
+                == Some(current_basis.as_str())
+        {
+            let original: arkret_models_collaboration::authority_commit::PeerCommittedReplicationOutcomeRecord =
+                serde_json::from_value(cached.response_body.get("outcome").cloned().ok_or_else(||invalid("peer receipt has no outcome"))?)
+                    .map_err(|error| invalid(error.to_string()))?;
+            let outcome = match original {
+                arkret_models_collaboration::authority_commit::PeerCommittedReplicationOutcomeRecord::Stored {} => CommittedReplicaOutcome::Stored,
+                arkret_models_collaboration::authority_commit::PeerCommittedReplicationOutcomeRecord::Duplicate {} => CommittedReplicaOutcome::Duplicate,
+                _ => return Err(invalid("peer accepted receipt contains a rejection").into()),
+            };
+            return Ok((outcome, false));
+        }
+    }
+    let outcome = install_committed_replica_in_connection(conn, replica).await?;
+    if cached.is_none() {
+        let mut original = receipt.clone();
+        let wire = match outcome {
+            CommittedReplicaOutcome::Stored => arkret_models_collaboration::authority_commit::PeerCommittedReplicationOutcomeRecord::Stored {},
+            CommittedReplicaOutcome::Duplicate => arkret_models_collaboration::authority_commit::PeerCommittedReplicationOutcomeRecord::Duplicate {},
+        };
+        original.response_body["authorization_basis_digest"] =
+            serde_json::json!(peer_recipient_basis_digest(conn, &replica.event.realm_id).await?);
+        original.response_body["outcome"] =
+            serde_json::to_value(wire).map_err(PersistenceError::database)?;
+        original.response_body["realm_id"] = serde_json::json!(replica.event.realm_id);
+        crate::idempotency::record_idempotency_in_connection(conn, &original).await?;
+        // A later item in this exact ordered request may change its Realm's
+        // basis. Advance all earlier item receipts to that same post-item cut
+        // atomically with the later item's effects, including across crashes.
+        sql_query("UPDATE idempotency_keys SET response_body=jsonb_set(response_body,'{authorization_basis_digest}',$1) WHERE actor_key=$2 AND operation_id=$3 AND request_hash=$4 AND response_body->>'realm_id'=$5 AND response_body->'signature_digest'=$6 AND response_body->'key_state_digest'=$7 AND expires_at>$8")
+            .bind::<Jsonb,_>(serde_json::json!(peer_recipient_basis_digest(conn, &replica.event.realm_id).await?))
+            .bind::<Text,_>(&actor_key).bind::<Text,_>(&receipt.operation_id)
+            .bind::<Text,_>(&receipt.request_hash).bind::<Text,_>(replica.event.realm_id.as_str())
+            .bind::<Jsonb,_>(&receipt.response_body["signature_digest"])
+            .bind::<Jsonb,_>(&receipt.response_body["key_state_digest"])
+            .bind::<Timestamptz,_>(receipt.created_at).execute(&mut *conn).await?;
+    }
+    Ok((outcome, outcome == CommittedReplicaOutcome::Stored))
+}
+
 /// Queue the re-verified Welcomes of a Commit this Station already holds as
 /// the exact replica, and answer `duplicate`.
 pub(super) async fn queue_welcomes_of_held_replica_in_connection(

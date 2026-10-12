@@ -3245,6 +3245,19 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .map_err(PgTransactionError::into_persistence)
     }
 
+    async fn install_committed_peer_replica(
+        &self,
+        replica: &coland_storage::CommittedReplica,
+        receipt: &coland_storage::IdempotencyRecord,
+    ) -> PersistenceResult<(coland_storage::CommittedReplicaOutcome, bool)> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            replica::install_committed_peer_replica_in_connection(conn, replica, receipt).await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
     async fn queue_replicated_welcomes(
         &self,
         event: &arkret_wire::Event,

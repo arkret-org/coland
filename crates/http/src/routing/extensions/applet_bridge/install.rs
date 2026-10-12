@@ -1398,6 +1398,45 @@ mod tests {
     }
 
     #[test]
+    fn registration_payload_preserves_canonical_whole_second_package_timestamp() {
+        let seed = [1u8; 32];
+        let (controller_did, controller_vm) = did_key_for_seed(seed);
+        let mut package = signed_did_key_package(seed, seed, &controller_vm);
+        let evidence = AppletRegistrationEpochEvidence::new(
+            test_applet_service_did(),
+            Hash::new(format!("sha256:{}", "22".repeat(32))).unwrap(),
+            pinned_service_method_version(),
+            vec![
+                arkret_models_integration::applet::AppletAcceptedSigningKeyEvidence {
+                    key_ref: package.webhook_auth.key_ref.to_string(),
+                    public_key_digest: Hash::new(format!("sha256:{}", "33".repeat(32))).unwrap(),
+                },
+            ],
+        );
+        package.created_at =
+            arkret_canonical::parse_timestamp_canonical("2026-01-01T00:00:00.000Z").unwrap();
+        package.stamp_registration_epoch(&evidence).unwrap();
+        package.stamp_package_digest().unwrap();
+        let verification_method = arkret_wire::DidUrl::new(controller_vm).unwrap();
+        let signer = Ed25519PayloadSigner::from_did_key_seed(
+            seed,
+            controller_did,
+            verification_method.clone(),
+        );
+        package.sign(&signer, &verification_method).unwrap();
+
+        let payload = registration_payload_from_package(&package, &evidence).unwrap();
+        assert_eq!(payload["created_at"], "2026-01-01T00:00:00.000Z");
+        let registration: arkret_models_integration::AppletRegistrationPayload =
+            serde_json::from_value(payload).unwrap();
+        assert_eq!(registration.created_at, package.created_at);
+        assert_eq!(
+            serde_json::to_value(&registration.proof).unwrap(),
+            serde_json::to_value(package.proof.as_ref().unwrap()).unwrap()
+        );
+    }
+
+    #[test]
     fn validate_controller_proof_rejects_wrong_key_signature() {
         let state = production_test_state();
         // controller_principal_id is keyed by `controller_seed`, but the proof is signed

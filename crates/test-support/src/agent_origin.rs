@@ -19,10 +19,8 @@ use super::{
     device_authorization_history as device_history_fixture, pcr_genesis as pcr_genesis_fixture,
 };
 pub fn agent_provision_event(
-    controller: &arkret_wire::AccountId,
+    controller: &device_history_fixture::DeviceHistoryFixture,
     realm_id: &RealmId,
-    method: &DidUrl,
-    seed: [u8; 32],
     agent_id: &DidCoreId,
     agent_pcr_id: &RealmId,
     slug: &str,
@@ -34,12 +32,12 @@ pub fn agent_provision_event(
         arkret_wire::ScopeRef::Realm {
             realm_id: realm_id.clone(),
         },
-        controller.principal_id.clone(),
-        controller.station_id.clone(),
+        controller.account.principal_id.clone(),
+        controller.account.station_id.clone(),
         serde_json::json!({
             "schema": "ak.schema.agent_provision.v1",
             "agent_id": agent_id,
-            "controller_principal_id": controller.principal_id,
+            "controller_principal_id": controller.account.principal_id,
             "principal_control_realm_id": agent_pcr_id,
             "controller_authorization_ref": "did:webvh:z6mkfixture:agent.example#managed-controller",
             "agent_slug": slug,
@@ -52,13 +50,15 @@ pub fn agent_provision_event(
     )
     .unwrap();
     event.created_at = created_at;
-    device_history_fixture::sign_event(event, method.clone(), seed)
+    device_history_fixture::sign_event(
+        event,
+        controller.device_verification_method.clone(),
+        controller.founding_device_signing_seed,
+    )
 }
 
 pub fn agent_control_event(
-    controller_method: &DidUrl,
-    signing_seed: [u8; 32],
-    executed_by: &arkret_wire::AccountId,
+    controller: &device_history_fixture::DeviceHistoryFixture,
     agent: &arkret_wire::AccountId,
     agent_pcr: &RealmId,
     authorization_ref: &str,
@@ -76,10 +76,14 @@ pub fn agent_control_event(
         at,
     )
     .unwrap();
-    event.executed_by = Some(arkret_wire::ActorId::account(executed_by.clone()));
+    event.executed_by = Some(arkret_wire::ActorId::account(controller.account.clone()));
     event.authorization_ref =
         Some(arkret_wire::AuthorizationRef::new(authorization_ref.to_owned()).unwrap());
-    device_history_fixture::sign_event(event, controller_method.clone(), signing_seed)
+    device_history_fixture::sign_event(
+        event,
+        controller.device_verification_method.clone(),
+        controller.founding_device_signing_seed,
+    )
 }
 
 pub fn agent_key_authorization(
@@ -151,7 +155,7 @@ pub fn station_genesis_commit(
     let identity =
         arkret_canonical::canonical::unsigned_value(&commit, &["commit_id", "signature"]).unwrap();
     commit.commit_id = RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
-        &arkret_canonical::canonical_json_bytes(&identity).unwrap(),
+        arkret_canonical::canonical_json_bytes(&identity).unwrap(),
     ));
     let unsigned = arkret_canonical::canonical::unsigned_value(&commit, &["signature"]).unwrap();
     commit.signature = arkret_signatures::detached_object::sign_detached_object(
@@ -179,7 +183,7 @@ pub fn station_successor(
     let identity =
         arkret_canonical::canonical::unsigned_value(&commit, &["commit_id", "signature"]).unwrap();
     commit.commit_id = RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
-        &arkret_canonical::canonical_json_bytes(&identity).unwrap(),
+        arkret_canonical::canonical_json_bytes(&identity).unwrap(),
     ));
     let unsigned = arkret_canonical::canonical::unsigned_value(&commit, &["signature"]).unwrap();
     commit.signature = arkret_signatures::detached_object::sign_detached_object(
@@ -232,7 +236,7 @@ pub fn origin_tx(
 }
 pub fn origin_seal(commit: &mut arkret_wire::RealmCommit, method: &DidUrl, key: &SigningKey) {
     commit.commit_id = RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
-        &arkret_canonical::canonical_json_bytes(
+        arkret_canonical::canonical_json_bytes(
             &arkret_canonical::canonical::unsigned_value(commit, &["commit_id", "signature"])
                 .unwrap(),
         )
@@ -268,10 +272,8 @@ impl OriginFixture {
         ));
         let at = parent.committed_at + Duration::seconds(1);
         let event = agent_provision_event(
-            &self.controller.history.account,
+            &self.controller.history,
             &parent.realm_id,
-            &self.controller.history.device_verification_method,
-            self.controller.history.founding_device_signing_seed,
             &agent,
             &pcr,
             slug,
@@ -292,9 +294,7 @@ impl OriginFixture {
     ) -> AuthorityCommitTransaction {
         let at = parent.committed_at + Duration::seconds(1);
         let event = agent_control_event(
-            &self.controller.history.device_verification_method,
-            self.controller.history.founding_device_signing_seed,
-            &self.controller.history.account,
+            &self.controller.history,
             &self.agent,
             &self.genesis.event.realm_id,
             &format!("{}#managed-controller", self.agent_did),
@@ -452,10 +452,8 @@ impl OriginFixture {
         );
         let realm = RealmId::from_event_id(&genesis.event_id);
         let mut provision = agent_provision_event(
-            &controller.history.account,
+            &controller.history,
             &controller.history.events[0].realm_id,
-            &controller.history.device_verification_method,
-            controller.history.founding_device_signing_seed,
             &agent.principal_id,
             &realm,
             "origin",
@@ -567,9 +565,7 @@ impl OriginFixture {
         );
         payload["audience"] = serde_json::json!([self.station]);
         let event = agent_control_event(
-            &self.controller.history.device_verification_method,
-            self.controller.history.founding_device_signing_seed,
-            &self.controller.history.account,
+            &self.controller.history,
             &self.agent,
             &self.genesis.event.realm_id,
             &format!("{}#managed-controller", self.agent_did),

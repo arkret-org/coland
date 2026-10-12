@@ -20,11 +20,11 @@ use pcr_genesis_fixture as pcr_genesis;
     reason = "This integration binary uses a subset of the shared Origin fixture."
 )]
 mod origin_fixture;
-use arkret_wire::{Did, DidCoreId, DidUrl, EventKind, RealmId};
+use arkret_wire::{Did, DidUrl, EventKind, RealmId};
 use chrono::{Duration, Utc};
 use coland_storage::{
     ActorProfileStore, AgentControlAdmissionWrite, AgentProvisionAdmissionWrite,
-    AuthorityCommitStore, AuthorityCommitTransaction,
+    AuthorityCommitStore,
 };
 use coland_storage_postgres::{PgActorProfileStore, PgAuthorityCommitStore, PgPersistenceStore};
 use diesel::sql_types::{BigInt, Text};
@@ -111,9 +111,7 @@ async fn agent_slug_is_reserved_until_accepted_terminal_lifecycle() {
     );
     late_payload["audience"] = serde_json::json!([f.station]);
     let event = agent_control_event(
-        &f.controller.history.device_verification_method,
-        f.controller.history.founding_device_signing_seed,
-        &f.controller.history.account,
+        &f.controller.history,
         &f.agent,
         &f.genesis.event.realm_id,
         &format!("{}#managed-controller", f.agent_did),
@@ -219,10 +217,8 @@ async fn different_controllers_can_reserve_the_same_agent_slug() {
     let parent = &other.unit.transactions.last().unwrap().commit;
     let at = parent.committed_at + Duration::seconds(1);
     let event = agent_provision_event(
-        &other.history.account,
+        &other.history,
         &parent.realm_id,
-        &other.history.device_verification_method,
-        other.history.founding_device_signing_seed,
         &agent,
         &pcr,
         "origin",
@@ -330,9 +326,7 @@ async fn agent_origin_current_pause_rejects_prepared_gate_intent_without_retaini
         original
     );
     let paused = agent_control_event(
-        &f.controller.history.device_verification_method,
-        f.controller.history.founding_device_signing_seed,
-        &f.controller.history.account,
+        &f.controller.history,
         &f.agent,
         &f.genesis.event.realm_id,
         &format!("{}#managed-controller", f.agent_did),

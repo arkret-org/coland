@@ -183,6 +183,11 @@ async fn contract_store() -> (PgPool, DidCoreId) {
         .unwrap()
         .pool
         .unwrap();
+    let station = contract_station(&pool).await;
+    (pool, station)
+}
+
+async fn contract_station(pool: &PgPool) -> DidCoreId {
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
         "INSERT INTO device_inventory_station(singleton,station_id) \
@@ -197,7 +202,7 @@ async fn contract_store() -> (PgPool, DidCoreId) {
             .await
             .unwrap();
     drop(conn);
-    (pool, DidCoreId::new(station.station_id).unwrap())
+    DidCoreId::new(station.station_id).unwrap()
 }
 
 fn page_fixture(
@@ -601,7 +606,9 @@ fn is_duplicate_conflict<T>(outcome: &Result<T, PersistenceError>) -> bool {
 
 #[tokio::test]
 async fn every_pcr_genesis_write_rolls_back_and_restart_preserves_the_first_outcome() {
-    let (pool, station) = contract_store().await;
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    let pool = database.pool();
+    let station = contract_station(&pool).await;
     let unit = unit(station);
     let store = PgAuthorityCommitStore { pool: pool.clone() };
     let at = unit.transactions[0].commit.committed_at;
@@ -615,7 +622,7 @@ async fn every_pcr_genesis_write_rolls_back_and_restart_preserves_the_first_outc
     result.validate_against(&unit.submission).unwrap();
     assert_eq!(unit_footprint(&pool, &unit).await, ACCEPTED_FOOTPRINT);
     let before = sql_fault_matrix::snapshot(&pool).await;
-    let restarted = Db::connect(Some(&support::contract_database_url()), Default::default())
+    let restarted = Db::connect(Some(database.url()), Default::default())
         .await
         .unwrap();
     let reopened = PgAuthorityCommitStore {
@@ -890,7 +897,9 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
     use arkret_models_collaboration::events_payloads::DeviceRevokePayload;
     use arkret_wire::RealmCommit;
 
-    let (pool, station) = contract_store().await;
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    let pool = database.pool();
+    let station = contract_station(&pool).await;
     let fixture = fixture(&station);
     let account = fixture.account.clone();
     let authorizer = fixture.founding_device_id.clone();
@@ -1241,7 +1250,7 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
         .await,
         covering
     );
-    let restarted_pool = Db::connect(Some(&support::contract_database_url()), Default::default())
+    let restarted_pool = Db::connect(Some(database.url()), Default::default())
         .await
         .unwrap()
         .pool
@@ -1357,7 +1366,7 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
             .resource,
         decided.resource,
     );
-    let reopened = Db::connect(Some(&support::contract_database_url()), Default::default())
+    let reopened = Db::connect(Some(database.url()), Default::default())
         .await
         .unwrap()
         .pool
@@ -1559,7 +1568,7 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
         before_rejected_list,
         "rejected terminal replay does not publish a device-list change"
     );
-    let reopened = Db::connect(Some(&support::contract_database_url()), Default::default())
+    let reopened = Db::connect(Some(database.url()), Default::default())
         .await
         .unwrap()
         .pool

@@ -58,7 +58,7 @@ sudo install -d -m 0700 -o 10001 -g 10001 /secure/coland
 docker run --rm \
   --entrypoint /usr/local/bin/coland-keystore-keygen \
   --mount type=bind,source=/secure/coland,target=/secrets \
-  ghcr.io/arkret/coland:<tag> \
+  ghcr.io/arkret-org/coland:<tag> \
   --output /secrets/coland-keystore-master-key
 sudo chmod 0400 /secure/coland/coland-keystore-master-key
 ```
@@ -74,7 +74,7 @@ $keyDir = (Resolve-Path -LiteralPath $keyDir).Path
 docker run --rm `
   --entrypoint /usr/local/bin/coland-keystore-keygen `
   --mount "type=bind,source=$keyDir,target=/secrets" `
-  ghcr.io/arkret/coland:<tag> `
+  ghcr.io/arkret-org/coland:<tag> `
   --output /secrets/coland-keystore-master-key
 
 $keyFile = Join-Path $keyDir 'coland-keystore-master-key'
@@ -304,7 +304,7 @@ docker run --name coland --restart=always -d \
   -e RUST_LOG=coland=info \
   --mount type=volume,source=coland-data,target=/var/lib/coland \
   --mount type=bind,source=/secure/coland/coland-keystore-master-key,target=/run/secrets/coland-keystore-master-key,readonly \
-  ghcr.io/arkret/coland:<tag>
+  ghcr.io/arkret-org/coland:<tag>
 ```
 
 The image runs as UID `10001`. Mounted volumes for

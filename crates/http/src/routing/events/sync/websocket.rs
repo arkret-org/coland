@@ -24,6 +24,9 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, watch};
 
 use super::*;
 
+#[cfg(feature = "conformance-harness")]
+mod cursor_emission_probe;
+
 pub(crate) const MAX_FRAME: u32 = 262_144;
 pub(crate) const MAX_CHANNELS: u32 = 16;
 const QUEUE_FRAMES: u32 = 8;
@@ -354,12 +357,72 @@ fn terminal(frame: &WebSocketServerFrame) -> bool {
         || matches!(frame,WebSocketServerFrame::ChannelControl {payload,..} if payload.is_terminal())
 }
 
+/// Revalidate the exact read inputs without building a snapshot or issuing
+/// another handle. Queue progress is not authority to replace these inputs.
+async fn current_read_inputs(
+    state: &AppState,
+    credential: &Credential,
+    parameters: &WebSocketOpenParameters,
+) -> Result<(), ErrorCode> {
+    let result = match parameters {
+        WebSocketOpenParameters::Account(p) => {
+            let body = SyncRequestBody {
+                after: p.after.clone(),
+                catchup: p.catchup,
+                filter: p.filter.clone(),
+                realm_list: p.realm_list.clone(),
+                replace_filter: p.replace_filter,
+            };
+            super::subscribe::account_read_inputs_current(
+                state,
+                &credential.session,
+                &body,
+                p.wait_for.as_deref(),
+            )
+            .await
+        }
+        WebSocketOpenParameters::Events(p) => {
+            if let Some(after) = p.after.as_deref() {
+                let realms = p
+                    .realm_ids
+                    .iter()
+                    .flatten()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                let actors = p
+                    .actor_ids
+                    .iter()
+                    .flatten()
+                    .map(ToString::to_string)
+                    .collect::<BTreeSet<_>>();
+                let digest = super::events_query::events_subscribe_filter_digest(&realms, &actors);
+                super::cursor::parse_committed_stream_cursor(
+                    state,
+                    &credential.session,
+                    &digest,
+                    after,
+                )
+                .await
+                .map(|_| ())
+            } else {
+                Ok(())
+            }
+        }
+        WebSocketOpenParameters::Signal(_) => Ok(()),
+    };
+    result.map_err(|error| {
+        ErrorCode::from_wire(super::cursor::cursor_revoke_error(error).wire_code())
+            .unwrap_or(ErrorCode::TemporarilyUnavailable)
+    })
+}
+
 /// Queuing is not delivery authorization. A revoke after enqueue must still
 /// suppress the payload at the physical send boundary.
 async fn current_delivery(
     state: &AppState,
     credential: &Credential,
     frame: &mut WebSocketServerFrame,
+    parameters: &WebSocketOpenParameters,
 ) -> Result<(), ErrorCode> {
     if !super::subscribe::stream_session_current(
         state,
@@ -479,6 +542,7 @@ async fn current_delivery(
         }
         _ => {}
     }
+    current_read_inputs(state, credential, parameters).await?;
     Ok(())
 }
 
@@ -490,6 +554,7 @@ struct Channel {
 }
 struct QueuedFrame {
     frame: WebSocketServerFrame,
+    read_inputs: WebSocketOpenParameters,
     _permit: OwnedSemaphorePermit,
 }
 impl Drop for Channel {
@@ -615,6 +680,7 @@ fn start_channel(
                 ready.notify_one();
                 return;
             }
+            let read_inputs = parameters.clone();
             let mut response = match prepared.take() {
                 Some(response) => response,
                 None => response_for(&state, &credential, &parameters).await,
@@ -647,9 +713,11 @@ fn start_channel(
                     break;
                 };
                 let Ok(chunk) = chunk else {
-                    let _ = failure
-                        .send((id.clone(), ErrorCode::TemporarilyUnavailable))
-                        .await;
+                    let code = current_read_inputs(&state, &credential, &read_inputs)
+                        .await
+                        .err()
+                        .unwrap_or(ErrorCode::TemporarilyUnavailable);
+                    let _ = failure.send((id.clone(), code)).await;
                     ready.notify_one();
                     return;
                 };
@@ -690,6 +758,7 @@ fn start_channel(
                         .is_ok_and(|bytes| bytes.len() <= MAX_FRAME as usize);
                 let queued = QueuedFrame {
                     frame,
+                    read_inputs: read_inputs.clone(),
                     _permit: permit,
                 };
                 let delivered = if !bounded {
@@ -885,9 +954,16 @@ async fn connection_inner(
                         channel.pending=Some(queued);continue;
                     }
                     if let Err(code)=outgoing.wait(length).await{return code;}
-                    let QueuedFrame {mut frame,_permit}=queued;
+                    let QueuedFrame {mut frame,read_inputs,_permit}=queued;
                     let current=credential.as_ref().unwrap();
-                    if let Err(error)=current_delivery(&state,current,&mut frame).await {
+                    #[cfg(feature = "conformance-harness")]
+                    if let Err(error)=cursor_emission_probe::pause(&state,&read_inputs,&frame).await {
+                        channels.remove(&channel_id);schedule.retain(|id|id!=&channel_id);
+                        if let Err(code)=send(socket,&mut outgoing,&channel_error(&channel_id,error)).await{return code;}
+                        if let Err(code)=send(socket,&mut outgoing,&WebSocketServerFrame::Closed {channel_id,reason:WebSocketClosedReason::Error}).await{return code;}
+                        continue;
+                    }
+                    if let Err(error)=current_delivery(&state,current,&mut frame,&read_inputs).await {
                         if error==ErrorCode::Unauthenticated{return WebSocketCloseCode::PolicyViolation;}
                         channels.remove(&channel_id);schedule.retain(|id|id!=&channel_id);
                         if let Err(code)=send(socket,&mut outgoing,&channel_error(&channel_id,error)).await{return code;}
@@ -896,7 +972,7 @@ async fn connection_inner(
                     }
                     let actual_length=match arkret_canonical::canonical_json_bytes(&frame){Ok(bytes)=>bytes.len(),Err(_)=>return WebSocketCloseCode::InternalError};
                     if actual_length>length && !outgoing.add_bytes(actual_length-length) {
-                        if let Some(channel)=channels.get_mut(&channel_id){channel.pending=Some(QueuedFrame {frame,_permit});}
+                        if let Some(channel)=channels.get_mut(&channel_id){channel.pending=Some(QueuedFrame {frame,read_inputs,_permit});}
                         continue;
                     }
                     let ending=terminal(&frame);

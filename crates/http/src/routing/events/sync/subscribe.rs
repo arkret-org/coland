@@ -551,7 +551,7 @@ pub(super) fn account_unauthorized_frame()
     frame
 }
 
-async fn account_read_inputs_current(
+pub(super) async fn account_read_inputs_current(
     state: &AppState,
     session: &SessionIdentityState,
     body: &SyncRequestBody,

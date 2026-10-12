@@ -859,7 +859,7 @@ pub(super) async fn renew_agent_pairing(
     if record.state == AgentLifecycleState::Deactivated {
         return Err(
             pairing_failed_precondition("agent is deactivated; deactivation is terminal")
-                .with_reason_detail("agent_deactivated"),
+                .with_reason_code(arkret_wire::ReasonCode::AGENT_DEACTIVATED),
         );
     }
     let now_utc = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(

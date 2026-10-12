@@ -801,8 +801,9 @@ mod tests {
             "service": [
                 {
                     "id": format!("{AGENT_DID}#coland"),
-                    "type": "ArkretStation",
-                    "serviceEndpoint": "https://agent.example"
+                    "type": "ArkretService",
+                    "serviceKind": "station",
+                    "serviceEndpoint": "https://agent.example/"
                 },
                 {
                     "id": format!("{AGENT_DID}#managed-controller"),

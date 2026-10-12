@@ -1435,7 +1435,7 @@ pub(in crate::routing) async fn authenticated_peer_context(
             request_hash,
             response_status: 200,
             response_body: serde_json::json!({"signature_digest":signature_digest,
-                        "key_state_digest": arkret_canonical::sha256_digest(&req.extensions()
+                        "key_state_digest": arkret_canonical::sha256_digest(req.extensions()
                             .get::<crate::routing::federation::VerifiedPeerKeyDigest>()
                             .ok_or_else(|| AppError::internal("verified peer key state is absent"))?.0)}),
             created_at: now,

@@ -875,7 +875,8 @@ mod capability_grant_current_result_tests {
                 "priority":1, "agent_target":{"kind":"all"}, "agent_operations":["execute"]}],
             "default_effect":"allow", "created_by":controller.actor,
             "created_at":"2026-10-01T00:00:00.000Z"
-        })).unwrap();
+        }))
+        .unwrap();
         agent.agent_ceiling = Some(AgentControllerCeiling {
             controller: Box::new(controller),
             management_policies: vec![policy],

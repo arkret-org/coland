@@ -153,6 +153,7 @@ impl Fixture {
                     model_generation_ref: 1,
                 },
             ),
+            scope_details: None,
         };
         grant
             .validate()

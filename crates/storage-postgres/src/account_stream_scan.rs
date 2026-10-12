@@ -940,6 +940,52 @@ async fn prior_join(
     }))
 }
 
+/// Prove a peer interval from a full governing prefix or a verified held
+/// since-join suffix. A replica need not possess position zero; its durable
+/// bootstrap anchor and exact held join bound its retained interval instead.
+async fn peer_realm_join_floor(
+    conn: &mut AsyncPgConnection,
+    realm_id: &arkret_wire::RealmId,
+    genesis_floor: Option<&ReadableFloor>,
+    join_commit_id: &str,
+    join_position: i64,
+) -> PersistenceResult<Option<ReadableFloor>> {
+    if let Some(genesis_floor) = genesis_floor {
+        return join_floor_in_connection(
+            conn,
+            realm_id,
+            genesis_floor,
+            join_commit_id,
+            join_position,
+        )
+        .await;
+    }
+    if realm_history_access(conn, realm_id).await?.as_deref() != Some("since_join") {
+        return Ok(None);
+    }
+    let anchor = sql_query(
+        "SELECT a.anchor_commit_id,c.stream_position AS join_position \
+         FROM replica_stream_anchors a JOIN realm_commits c ON c.commit_id=a.join_commit_id \
+         WHERE a.realm_id=$1 AND a.stream_key=$2 AND c.stream_key=a.stream_key",
+    )
+    .bind::<Text, _>(realm_id.as_str())
+    .bind::<Text, _>(crate::authority_commit::stream_key(
+        &CommitStreamRef::Realm {
+            realm_id: realm_id.clone(),
+        },
+    )?)
+    .get_result::<ReplicaAnchorRow>(&mut *conn)
+    .await
+    .optional()
+    .map_err(PersistenceError::database)?;
+    if anchor.is_none_or(|anchor| {
+        anchor.anchor_commit_id.is_none() || join_position < anchor.join_position
+    }) {
+        return Ok(None);
+    }
+    held_join_floor(conn, realm_id, join_commit_id, join_position).await
+}
+
 /// Every interval of `peer`'s replication right on the Realm stream at this
 /// governing cut, with the members routed to it.
 async fn peer_intervals(
@@ -969,16 +1015,14 @@ async fn peer_intervals(
     if hosted.is_empty() {
         return Ok((intervals, joined));
     }
-    let Some(genesis_floor) = genesis_floor_in_connection(conn, realm_id).await? else {
-        return Ok((intervals, joined));
-    };
+    let genesis_floor = held_genesis_floor_in_connection(conn, realm_id).await?;
     for (member, row) in hosted {
         match row.membership.as_str() {
             "join" => {
-                if let Some(floor) = join_floor_in_connection(
+                if let Some(floor) = peer_realm_join_floor(
                     conn,
                     realm_id,
-                    &genesis_floor,
+                    genesis_floor.as_ref(),
                     &row.current_commit_id,
                     row.current_stream_position,
                 )
@@ -996,10 +1040,10 @@ async fn peer_intervals(
                 else {
                     continue;
                 };
-                if let Some(floor) = join_floor_in_connection(
+                if let Some(floor) = peer_realm_join_floor(
                     conn,
                     realm_id,
-                    &genesis_floor,
+                    genesis_floor.as_ref(),
                     &join.commit_id,
                     join.stream_position,
                 )

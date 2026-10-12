@@ -861,6 +861,58 @@ async fn admin_domain_request(
     fixture: &Fixture,
     event: Event,
 ) -> coland_storage::EventCommitRequest {
+    let producer = event
+        .human_device_producer()
+        .unwrap()
+        .expect("admin Event has a Human Device producer");
+    // Explicit directory issuance is a fixture prerequisite. Local
+    // producer validation prepares its root without retaining it.
+    let query = arkret_models_crypto::KeysQueryRequestBody {
+        device_keys: vec![arkret_models_crypto::QueryAccountDeviceSelector {
+            account_id: producer.account_id.clone(),
+            device_ids: vec![producer.device_id.clone()],
+        }],
+        timeout_ms: None,
+    };
+    let (status, result) = fixture
+        .admin_post(
+            "/_arkret/self/keys/query",
+            arkret_wire::ServiceOperationId::SELF_KEYS_READ_LOOKUP_V1,
+            &serde_json::to_value(query).unwrap(),
+            None,
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "explicit Device directory issuance: {result}"
+    );
+    let result: arkret_models_crypto::KeysQueryOutcome = serde_json::from_value(result).unwrap();
+    let row = result
+        .device_keys
+        .iter()
+        .find(|entry| entry.account_id == producer.account_id)
+        .and_then(|entry| entry.device_keys.get(&producer.device_id))
+        .expect("complete current Device directory row");
+    let original = fixture
+        .state
+        .test_persistence()
+        .account_device_signer_evidence()
+        .get(
+            &producer.account_id,
+            &producer.device_id,
+            &row.signer_evidence_ref,
+        )
+        .await
+        .unwrap()
+        .expect("explicitly issued original Device evidence retained");
+    original
+        .validate_binding(&producer.account_id, &producer.device_id)
+        .unwrap();
+    assert_eq!(
+        original.signer_evidence_ref().unwrap(),
+        row.signer_evidence_ref
+    );
     let store = PgAuthorityCommitStore {
         pool: fixture.pool.clone(),
     };
@@ -898,35 +950,25 @@ async fn admin_domain_request(
         .as_ref()
         .and_then(|fact| fact.as_human())
     {
-        let producer = event.human_device_producer().unwrap().unwrap();
         let selector = coland_storage::DeviceRevocationGateSelector {
             principal_id: producer.account_id.principal_id,
             station_id: producer.account_id.station_id,
             device_id: producer.device_id.to_string(),
             authorization_ref: fact.key.authorization_ref.clone(),
         };
-        #[derive(diesel::QueryableByName)]
-        struct Root {
-            #[diesel(sql_type=diesel::sql_types::Jsonb)]
-            value: Value,
-        }
-        let mut conn = fixture.pool.get().await.unwrap();
-        use diesel::OptionalExtension as _;
-        let original = diesel::sql_query("SELECT evidence_json AS value FROM account_device_signer_evidence WHERE principal_id=$1 AND station_id=$2 AND device_id=$3 AND authorization_commit_id=$4 AND attested_at <= $5 AND (evidence_json#>>'{device_projection_attestation,attestation,expires_at}')::timestamptz > $5 ORDER BY attested_at DESC LIMIT 1")
-            .bind::<diesel::sql_types::Text,_>(selector.principal_id.as_str())
-            .bind::<diesel::sql_types::Text,_>(selector.station_id.as_str())
-            .bind::<diesel::sql_types::Text,_>(&selector.device_id)
-            .bind::<diesel::sql_types::Text,_>(selector.authorization_ref.commit_id.as_str())
-            .bind::<diesel::sql_types::Timestamptz,_>(request.authority_commit.commit.committed_at)
-            .get_result::<Root>(&mut conn).await.optional().unwrap();
-        if let Some(original) = original {
-            request.self_producer_guard = Some(
-                coland_storage::SelfProducerCommitGuard::HumanDeviceEvidence {
-                    selector,
-                    evidence: Box::new(serde_json::from_value(original.value).unwrap()),
-                },
-            );
-        }
+        assert_eq!(
+            original
+                .device_projection_attestation
+                .attestation
+                .device_authorize_event_id,
+            selector.authorization_ref.event_id
+        );
+        request.self_producer_guard = Some(
+            coland_storage::SelfProducerCommitGuard::HumanDeviceEvidence {
+                selector,
+                evidence: Box::new(original),
+            },
+        );
     }
     request
 }

@@ -77,7 +77,12 @@ pub(super) async fn submit_self_agent_pcr_genesis(
         .agent(agent_id.as_str())
         .await
         .map_err(|error| ServiceError::Internal(format!("Agent lookup failed: {error}")))?
-        .ok_or_else(|| precondition("the Agent has no accepted provision on this Station"))?;
+        .ok_or_else(|| {
+            ServiceError::Conflict(format!(
+                "{}: the Agent has no accepted provision on this Station",
+                coland_storage::ConflictCode::AgentPcrGenesisDeclarationMissing,
+            ))
+        })?;
     let pinned = crate::routing::identity::agent_pcr::agent_initial_resolution_for_record(&record)
         .map_err(|error| precondition(&error.message))?;
     if genesis.initial_resolution.as_ref() != Some(&pinned)

@@ -1049,24 +1049,12 @@ pub(super) fn registration_payload_from_package(
     package: &AppletPackage,
     registration_epoch_evidence: &AppletRegistrationEpochEvidence,
 ) -> Result<Value, AppError> {
-    Ok(json!({
-        "applet_id": package.applet_id,
-        "service_id": package.service_id,
-        "controller_principal_id": package.controller_principal_id,
-        "base_url": package.base_url,
-        "claimed_profiles": package.claimed_profiles,
-        "protocols": package.protocols,
-        "namespaces": package.namespaces,
-        "receive_events": package.receive_events,
-        "receive_signals": package.receive_signals,
-        "rate_limited": package.rate_limited,
-        "requested_scopes": package.requested_scopes,
-        "registration_epoch": package.registration_epoch,
-        "webhook_auth": package.webhook_auth,
-        "manifest": package.manifest_snapshot(registration_epoch_evidence),
-        "proof": package.proof,
-        "created_at": package.created_at,
-    }))
+    let registration = package
+        .to_registration(registration_epoch_evidence)
+        .map_err(|error| AppError::schema_violation(error.to_string()))?;
+    serde_json::to_value(registration).map_err(|error| {
+        AppError::internal(format!("Applet registration cannot be serialized: {error}"))
+    })
 }
 
 pub(super) fn registration_epoch_evidence_from_event(

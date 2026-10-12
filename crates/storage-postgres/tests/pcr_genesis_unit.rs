@@ -1517,11 +1517,21 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
         step_outcome: None,
     };
     let before_rejected_list = device_list_position(&pool, &account, &account).await;
+    let before_rejected_rows = sql_fault_matrix::snapshot(&pool).await;
     let rejected_result =
         sql_fault_matrix::exhaust_writes(&pool, "revoke_terminal_rejected", || {
             transactions.commit_revoke_command_terminal(rejected_write.clone())
         })
         .await;
+    let after_rejected_rows = sql_fault_matrix::snapshot(&pool).await;
+    for (table, rows) in &before_rejected_rows {
+        if table != "security_transactions" {
+            assert_eq!(
+                &after_rejected_rows[table], rows,
+                "rejected terminal wrote to {table}"
+            );
+        }
+    }
     assert_eq!(
         device_list_position(&pool, &account, &account).await,
         before_rejected_list,

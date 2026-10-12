@@ -60,7 +60,8 @@ async fn fixture() -> Fixture {
     let mut policy: RecoveryPolicy = serde_json::from_value(json!({
         "schema": "ak.schema.recovery_policy.v1", "policy_id": policy_id,
         "account_id": account, "version": 1, "supersedes_id": null,
-        "trust_domain": "ak:trust_domain:fixture.example", "issued_at": now,
+        "trust_domain": "ak:trust_domain:fixture.example",
+        "issued_at": arkret_canonical::format_timestamp_canonical(now),
         "auth_data": {"verification_method": pcr.history.device_verification_method,
                       "signature_algorithm": "Ed25519", "signature": "AA"},
         "methods": [{"kind": "did_root"}]

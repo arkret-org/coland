@@ -1332,8 +1332,8 @@ mod tests {
     #[test]
     fn agent_holder_binding_materializes_closed_authorization_context() {
         let mut grant = test_introspection_grant();
-        // Wire-valid agent grants carry no top-level human device metadata;
-        // the typed holder binding is self-contained.
+        // Wire-valid Agent grants omit human device metadata and retain the
+        // immutable issuer scope alongside their typed holder binding.
         grant.device_id = None;
         grant.device_binding = None;
         grant.account_id = arkret_wire::AccountId::new(
@@ -1352,6 +1352,24 @@ mod tests {
             )
             .unwrap(),
         };
+        grant.scope_details = Some(
+            serde_json::json!({
+                "controller_principal_id": "ak:did_core:web:alice.example",
+                "agent_key_authorization_ref": "ak:event:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "realm_ids": [],
+                "strand_ids": [],
+                "resources": {"realm_ids": [], "strand_ids": []},
+                "constraints": {
+                    "allowed_tracks": [], "allowed_data_labels": [], "allowed_endpoints": []
+                },
+                "capability_grant_refs": [],
+                "policy_refs": []
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        grant.validate().unwrap();
 
         let SessionEndpointState::AgentRuntime {
             state: agent_session,

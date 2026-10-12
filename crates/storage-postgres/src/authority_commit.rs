@@ -2250,11 +2250,9 @@ impl PgAuthorityCommitStore {
             if authority_inserted != 1 {
                 return Err(PersistenceError::Conflict("realm_already_exists".to_owned()).into());
             }
+            let mut approval_consumption = crate::approval_admission::BootstrapApprovalConsumption::default();
             for (index, transaction) in unit.transactions.iter().enumerate() {
-                let approvals = crate::approval_admission::validate_candidate(
-                    &transaction.event, &transaction.commit,
-                    unit.event_approvals.get(index).and_then(Option::as_ref),
-                )?;
+                let approvals = crate::approval_admission::validate_bootstrap_candidate(unit, index)?;
                 if let Some(guards) = producer_guards {
                     check_self_producer_guard_in_connection(
                         conn,
@@ -2320,12 +2318,10 @@ impl PgAuthorityCommitStore {
                 // This closed founding unit has no pre-existing Realm grants
                 // or governance Policy. Evidence is still verified and its
                 // nonce consumed at the successful target's accepting cut.
-                let approved = approvals.iter().map(|method| crate::approval_admission::QualifiedApproval {
-                    method: method.clone(),
-                    qualification_basis: serde_json::json!({"ordinary_realm_bootstrap":true,"quorum_required":false}),
-                }).collect::<Vec<_>>();
+                let approved = approval_consumption.qualify(approvals)?;
                 crate::approval_admission::consume_and_audit(conn, &transaction.event, &transaction.commit,
-                    &approved, &serde_json::json!({"unit_kind":"ordinary_realm_bootstrap","idempotency_key":key})).await?;
+                    &approved, &serde_json::json!({"unit_kind":"ordinary_realm_bootstrap","idempotency_key":key,
+                        "commits":unit.transactions.iter().map(|transaction| &transaction.commit).collect::<Vec<_>>()})).await?;
             }
             crate::account_summary::publish_realm_account_summary_in_connection(
                 conn,

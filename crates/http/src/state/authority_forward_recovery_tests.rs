@@ -9,6 +9,9 @@ mod historical_human;
 mod realm_terminal_fanout_tests;
 #[path = "realm_terminal_peer_tests.rs"]
 mod realm_terminal_peer_tests;
+#[path = "../../../storage-postgres/tests/support/sql_fault_matrix.rs"]
+#[allow(dead_code)]
+mod sql_fault_matrix;
 
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -231,6 +234,12 @@ async fn authenticated_context(
 /// the already-authenticated state-port context, not a dev-login credential.
 #[test]
 fn ordinary_realm_bootstrap_and_event_admission_fit_default_worker_stack() {
+    for operation_target in [false, true] {
+        bootstrap_admission_on_default_worker_stack(operation_target);
+    }
+}
+
+fn bootstrap_admission_on_default_worker_stack(operation_target: bool) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
@@ -252,15 +261,30 @@ fn ordinary_realm_bootstrap_and_event_admission_fit_default_worker_stack() {
         let mut approval = arkret_wire::ApprovalSignature {
             input: arkret_wire::ApprovalSignatureInput {
                 approval_context: arkret_wire::ApprovalContext::RealmGovernance {},
-                approval_target: arkret_wire::ApprovalTarget::Event {
-                    event_id: event.event_id.clone(),
+                approval_target: if operation_target {
+                    arkret_wire::ApprovalTarget::Operation
+                } else {
+                    arkret_wire::ApprovalTarget::Event {
+                        event_id: event.event_id.clone(),
+                    }
                 },
-                request_canonical_digest: arkret_wire::Hash::new(
-                    arkret_canonical::canonical_sha256(event).unwrap(),
-                )
+                request_canonical_digest: arkret_wire::Hash::new(if operation_target {
+                    arkret_canonical::canonical_sha256(
+                        &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(
+                            human.unit.submission.clone(),
+                        ),
+                    )
+                    .unwrap()
+                } else {
+                    arkret_canonical::canonical_sha256(event).unwrap()
+                })
                 .unwrap(),
                 operation: "ak.self.events.command.submit.v1".into(),
-                action: arkret_wire::CapabilityActionId::RealmProfile,
+                action: if operation_target {
+                    arkret_wire::CapabilityActionId::RealmOwner
+                } else {
+                    arkret_wire::CapabilityActionId::RealmProfile
+                },
                 realm_id: event.realm_id.clone(),
                 initiating_actor_id: event.actor_id.clone(),
                 approver_did: did,
@@ -277,6 +301,9 @@ fn ordinary_realm_bootstrap_and_event_admission_fit_default_worker_stack() {
             &arkret_signatures::approval_signature::approval_signature_signing_bytes(&approval)
                 .unwrap(),
         );
+        if operation_target {
+            human.unit.submission.events[2].approval_signatures = Some(vec![approval.clone()]);
+        }
         human.unit.submission.events[1].approval_signatures = Some(vec![approval]);
         human.unit.exact_request_body = serde_json::to_vec(
             &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(human.unit.submission.clone()),
@@ -311,17 +338,73 @@ fn ordinary_realm_bootstrap_and_event_admission_fit_default_worker_stack() {
             for item in &human.unit.submission.events {
                 assert!(state.authority_commits().committed_event(&item.event.event_id).await.unwrap().is_none());
             }
-            let outcome = state
-                .authority()
-                .submit_self(&session, request.clone(), &human.unit.exact_request_body)
-                .await
-                .unwrap();
+            let before = sql_fault_matrix::snapshot(&pool).await;
+            let mut null_carrier = serde_json::to_value(&request).unwrap();
+            null_carrier["events"][0]["approval_signatures"] = serde_json::Value::Null;
+            let null_body = serde_json::to_vec(&null_carrier).unwrap();
+            let error = state.authority().submit_self(&session, request.clone(), &null_body).await.unwrap_err();
+            assert!(matches!(error, ServiceError::SchemaViolation(_)), "null approval carrier: {error}");
+            assert_eq!(sql_fault_matrix::snapshot(&pool).await, before);
+            for case in 0..3 {
+                let mut wrong = human.unit.submission.clone();
+                let vote = &mut wrong.events[1].approval_signatures.as_mut().unwrap()[0];
+                match case {
+                    0 => vote.input.action = arkret_wire::CapabilityActionId::RealmTombstone,
+                    1 => vote.input.approval_context = arkret_wire::ApprovalContext::Grant {
+                        grant_id: arkret_wire::GrantId::from_event_id(&human.unit.submission.events[0].event.event_id),
+                    },
+                    _ => {
+                        vote.input.approval_target = arkret_wire::ApprovalTarget::Operation;
+                        vote.input.request_canonical_digest = arkret_wire::Hash::new(arkret_canonical::canonical_sha256(&EventAdmissionSubmission::new(human.unit.submission.events[1].event.clone())).unwrap()).unwrap();
+                    }
+                }
+                let signer = arkret_signatures::Ed25519DetachedJwsSigner::from_seed([95; 32], vote.proof.verification_method.as_str());
+                let bytes = arkret_signatures::approval_signature::approval_signature_signing_bytes(vote).unwrap();
+                vote.proof.jws = signer.sign_detached_jws(&bytes);
+                vote.validate().unwrap();
+                arkret_signatures::Ed25519DetachedJwsVerifier::new().verify_detached_jws(&vote.proof.jws, &bytes,
+                    &arkret_signatures::PublicKeyMaterial::Ed25519Raw { bytes: signer.verifying_key().to_bytes().to_vec() }).unwrap();
+                let wrong_request = SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(wrong);
+                wrong_request.validate().unwrap();
+                let body = serde_json::to_vec(&wrong_request).unwrap();
+                let error = state.authority().submit_self(&session, wrong_request, &body).await.unwrap_err();
+                let code = if case == 1 { "approval_required" } else { "signature_invalid" };
+                assert!(error.to_string().contains(code), "case {case}: {error}");
+                assert_eq!(sql_fault_matrix::snapshot(&pool).await, before, "case {case}");
+            }
+            if operation_target {
+                let mut wrong = human.unit.submission.clone();
+                let vote = &mut wrong.events[2].approval_signatures.as_mut().unwrap()[0];
+                vote.input.action = arkret_wire::CapabilityActionId::RealmAdmin;
+                let signer = arkret_signatures::Ed25519DetachedJwsSigner::from_seed([95; 32], vote.proof.verification_method.as_str());
+                let bytes = arkret_signatures::approval_signature::approval_signature_signing_bytes(vote).unwrap();
+                vote.proof.jws = signer.sign_detached_jws(&bytes);
+                arkret_signatures::Ed25519DetachedJwsVerifier::new().verify_detached_jws(&vote.proof.jws, &bytes,
+                    &arkret_signatures::PublicKeyMaterial::Ed25519Raw { bytes: signer.verifying_key().to_bytes().to_vec() }).unwrap();
+                let wrong = SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(wrong);
+                wrong.validate().unwrap();
+                let body = serde_json::to_vec(&wrong).unwrap();
+                assert!(state.authority().submit_self(&session, wrong, &body).await.unwrap_err().to_string().contains("approval_nonce_reused"));
+                assert_eq!(sql_fault_matrix::snapshot(&pool).await, before);
+            }
+            let name = if operation_target { "ordinary_bootstrap_http_operation_approval" } else { "ordinary_bootstrap_http_event_approval" };
+            let outcome = sql_fault_matrix::exhaust_writes(&pool, name, || async {
+                state.authority().submit_self(&session, request.clone(), &human.unit.exact_request_body).await.map_err(|error| {
+                    let detail = error.to_string();
+                    if detail.contains("authority_unit_fault:") { coland_storage::PersistenceError::Database(detail) }
+                    else { coland_storage::PersistenceError::Internal(detail) }
+                })
+            }).await;
             outcome.validate_for_request(&request).unwrap();
             let replay = state.authority().submit_self(&session, request.clone(), &human.unit.exact_request_body).await.unwrap();
             let arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::OrdinaryRealmBootstrap(first) = outcome else {panic!("bootstrap outcome");};
             let arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::OrdinaryRealmBootstrap(replay) = replay else {panic!("bootstrap replay");};
             assert_eq!(first.commits, replay.commits);
             assert_eq!(replay.status, arkret_models_collaboration::authority_commit::AggregateAcceptanceStatus::Duplicate);
+            let accepted = sql_fault_matrix::snapshot(&pool).await;
+            let audit = accepted["event_approval_private_audit"].as_array().unwrap();
+            assert_eq!(audit.len(), 1);
+            assert_eq!(audit[0]["accepted_basis"]["authority_cut"]["commits"], serde_json::to_value(&first.commits).unwrap());
             let committed = state
                 .authority_commits()
                 .committed_event(&human.unit.transactions.last().unwrap().event.event_id)

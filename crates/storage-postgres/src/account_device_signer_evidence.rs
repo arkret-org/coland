@@ -332,7 +332,13 @@ impl PgAccountDeviceSignerEvidenceArchive {
             PersistenceError::SchemaViolation("authorization position exceeds storage range".into())
         })?;
         let mut conn = pg_conn(&self.pool).await?;
-        conn.transaction::<(), PgTransactionError, _>(async move |conn| {
+        // Identical concurrent issuance can conflict at the immutable insert.
+        // Restart only an aborted serialization cut, with the complete source
+        // and current-device checks repeated from a fresh snapshot. Authority
+        // denials and immutable collisions are never retried or upgraded.
+        let mut retries = 0;
+        loop {
+            let result = conn.transaction::<(), PgTransactionError, _>(async |conn| {
             sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
                 .execute(&mut *conn)
                 .await?;
@@ -448,9 +454,24 @@ impl PgAccountDeviceSignerEvidenceArchive {
                 ).into());
             }
             Ok(())
-        })
-        .await
-        .map_err(retention_transaction_error)?;
+        }).await;
+            match result {
+                Ok(()) => break,
+                Err(error)
+                    if retries < 2
+                        && matches!(
+                            &error,
+                            PgTransactionError::Diesel(diesel::result::Error::DatabaseError(
+                                diesel::result::DatabaseErrorKind::SerializationFailure,
+                                _,
+                            ))
+                        ) =>
+                {
+                    retries += 1;
+                }
+                Err(error) => return Err(retention_transaction_error(error)),
+            }
+        }
         Ok(reference)
     }
 

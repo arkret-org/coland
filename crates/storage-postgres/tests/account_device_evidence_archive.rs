@@ -34,8 +34,8 @@ use coland_storage::{
 use coland_storage_postgres::test_database::TestDatabase;
 use coland_storage_postgres::{PgAccountDeviceSignerEvidenceArchive, PgAuthorityCommitStore};
 use device_history_fixture::{DeviceHistoryFixture, DeviceHistoryFixtureOptions};
-use diesel::sql_types::Text;
-use diesel_async::RunQueryDsl;
+use diesel::sql_types::{BigInt, Text};
+use diesel_async::{RunQueryDsl, SimpleAsyncConnection};
 use ed25519_dalek::SigningKey;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
@@ -228,7 +228,81 @@ async fn exact_signed_root_is_immutable_and_scoped_after_real_pcr_genesis() {
         device_projection_attestation: attestation,
         service_resolution,
     };
-    let archive = PgAccountDeviceSignerEvidenceArchive::new(pool);
+    let archive = PgAccountDeviceSignerEvidenceArchive::new(pool.clone());
+    // Hold both inserts after their repeatable-read cuts have been observed.
+    // Releasing them forces the second identical root to cross a concurrent
+    // commit. Its retry must revalidate the entire accepted/current closure.
+    let mut barrier = pool.get().await.unwrap();
+    barrier
+        .batch_execute(
+            "CREATE FUNCTION hold_evidence_insert() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN PERFORM pg_advisory_xact_lock(19390001); RETURN NEW; END $$; \
+         CREATE TRIGGER hold_evidence_insert BEFORE INSERT ON account_device_signer_evidence \
+         FOR EACH ROW EXECUTE FUNCTION hold_evidence_insert(); \
+         SELECT pg_advisory_lock(19390001)",
+        )
+        .await
+        .unwrap();
+    let mut jobs = Vec::new();
+    for _ in 0..2 {
+        let archive = archive.clone();
+        let evidence = evidence.clone();
+        let source = source.clone();
+        jobs.push(tokio::spawn(async move {
+            archive.retain_current(&evidence, &source).await
+        }));
+    }
+    #[derive(diesel::QueryableByName)]
+    struct Waiting {
+        #[diesel(sql_type = BigInt)]
+        count: i64,
+    }
+    let both_waiting = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let waiting = diesel::sql_query(
+                "SELECT count(*)::bigint AS count FROM pg_stat_activity \
+                 WHERE datname=current_database() AND wait_event='advisory' \
+                 AND pid<>pg_backend_pid()",
+            )
+            .get_result::<Waiting>(&mut barrier)
+            .await
+            .unwrap();
+            if waiting.count == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    barrier
+        .batch_execute("SELECT pg_advisory_unlock(19390001)")
+        .await
+        .unwrap();
+    let mut outcomes = Vec::new();
+    for job in jobs {
+        outcomes.push(job.await.unwrap());
+    }
+    barrier
+        .batch_execute(
+            "DROP TRIGGER hold_evidence_insert ON account_device_signer_evidence; \
+         DROP FUNCTION hold_evidence_insert()",
+        )
+        .await
+        .unwrap();
+    both_waiting.expect("both identical roots observed their cuts before the first commit");
+    for outcome in outcomes {
+        assert_eq!(outcome.unwrap(), evidence.signer_evidence_ref().unwrap());
+    }
+    let reference_value = serde_json::to_value(evidence.signer_evidence_ref().unwrap()).unwrap();
+    let rows = diesel::sql_query(
+        "SELECT count(*)::bigint AS count FROM account_device_signer_evidence WHERE evidence_ref=$1",
+    ).bind::<Text, _>(reference_value.as_str().unwrap())
+        .get_result::<Waiting>(&mut barrier).await.unwrap();
+    assert_eq!(
+        rows.count, 1,
+        "concurrent identical roots have one immutable row"
+    );
+    drop(barrier);
     let reference = archive.retain(&evidence, &source).await.unwrap();
     assert_eq!(
         archive.retain_current(&evidence, &source).await.unwrap(),
@@ -270,6 +344,72 @@ async fn exact_signed_root_is_immutable_and_scoped_after_real_pcr_genesis() {
     let mut wrong_source = source.clone();
     wrong_source.stream_position += 1;
     assert!(archive.retain(&evidence, &wrong_source).await.is_err());
+    let mut check = pool.get().await.unwrap();
+    check
+        .batch_execute(
+            "CREATE SEQUENCE evidence_retention_attempts; \
+         CREATE FUNCTION fail_evidence_insert() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN PERFORM nextval('evidence_retention_attempts'); \
+         RAISE EXCEPTION 'fixture serialization cut' USING ERRCODE='40001'; END $$; \
+         CREATE TRIGGER fail_evidence_insert BEFORE INSERT ON account_device_signer_evidence \
+         FOR EACH ROW EXECUTE FUNCTION fail_evidence_insert()",
+        )
+        .await
+        .unwrap();
+    let error = archive
+        .retain_current(&evidence, &wrong_source)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("no exact accepted PCR authorization Commit")
+    );
+    let attempts = diesel::sql_query(
+        "SELECT (CASE WHEN is_called THEN last_value ELSE 0 END)::bigint AS count \
+         FROM evidence_retention_attempts",
+    )
+    .get_result::<Waiting>(&mut check)
+    .await
+    .unwrap();
+    assert_eq!(
+        attempts.count, 0,
+        "invalid authority never reaches insertion or retries"
+    );
+    let error = archive
+        .retain_current(&evidence, &source)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.conflict_code(),
+        Some(coland_storage::ConflictCode::TemporarilyUnavailable)
+    );
+    let attempts =
+        diesel::sql_query("SELECT last_value::bigint AS count FROM evidence_retention_attempts")
+            .get_result::<Waiting>(&mut check)
+            .await
+            .unwrap();
+    assert_eq!(
+        attempts.count, 3,
+        "serialization retries have a closed budget"
+    );
+    check
+        .batch_execute(
+            "DROP TRIGGER fail_evidence_insert ON account_device_signer_evidence; \
+         DROP FUNCTION fail_evidence_insert(); DROP SEQUENCE evidence_retention_attempts",
+        )
+        .await
+        .unwrap();
+    drop(check);
+    let unchanged = archive
+        .get(&fixture.account, &fixture.founding_device_id, &reference)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(unchanged).unwrap(),
+        serde_json::to_value(&evidence).unwrap()
+    );
     let mut forged = evidence.clone();
     forged
         .device_projection_attestation

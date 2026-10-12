@@ -439,11 +439,29 @@ pub(crate) async fn bootstrap_floor_in_connection(
 ) -> PersistenceResult<u64> {
     let position = u64::try_from(join_position)
         .map_err(|_| PersistenceError::Internal("stored join position is negative".into()))?;
+    if registered_atomic_join_in_connection(conn, realm_id, stream, join_commit_id, join_position)
+        .await?
+    {
+        return Ok(0);
+    }
+    Ok(position)
+}
+
+/// Prove that this exact current join belongs to a complete accepted founding
+/// unit, including its held genesis and continuous physical Commit prefix.
+/// A retained slot, Realm purpose, low position or former join is insufficient.
+pub(crate) async fn registered_atomic_join_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm_id: &arkret_wire::RealmId,
+    stream: &CommitStreamRef,
+    join_commit_id: &str,
+    join_position: i64,
+) -> PersistenceResult<bool> {
     if !matches!(stream, CommitStreamRef::Realm { realm_id: held } if held == realm_id) {
-        return Ok(position);
+        return Ok(false);
     }
     let Some(genesis) = held_genesis_floor_in_connection(conn, realm_id).await? else {
-        return Ok(position);
+        return Ok(false);
     };
     let ordinary = sql_query(
         "SELECT EXISTS (SELECT 1 FROM ordinary_realm_bootstrap_units u \
@@ -473,7 +491,7 @@ pub(crate) async fn bootstrap_floor_in_connection(
     .get_result::<PresentRow>(&mut *conn)
     .await
     .map_err(PersistenceError::database)?;
-    if ordinary.present
+    Ok(ordinary.present
         || direct_founding_join_in_connection(
             conn,
             realm_id,
@@ -481,11 +499,7 @@ pub(crate) async fn bootstrap_floor_in_connection(
             join_commit_id,
             join_position,
         )
-        .await?
-    {
-        return Ok(0);
-    }
-    Ok(position)
+        .await?)
 }
 
 /// The `membership_join` floor at a join Commit this Station holds on the

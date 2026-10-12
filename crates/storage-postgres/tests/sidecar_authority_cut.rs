@@ -3313,8 +3313,8 @@ async fn agent_publish_policy_scenario<F>(
     let selector = arkret_wire::CurrentSelector::AgentInteraction {
         agent_account_id: agent.clone(),
     };
-    // Management writes remain guarded. Import complete accepted policy history
-    // to exercise the real mode UOW consumer without claiming HTTP enablement.
+    // Allow/deny Policies enter through the production UOW. Review remains
+    // guarded; its imported history isolates the fail-closed mode consumer.
     async fn import_publish_policy(
         pool: &coland_storage_postgres::PgPool,
         previous: &coland_storage::AuthorityCommitTransaction,
@@ -3361,6 +3361,25 @@ async fn agent_publish_policy_scenario<F>(
             previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
         );
         let request = ordinary_realm::source_request(pool, request).await;
+        if effect != "require_review" {
+            let transaction = request.authority_commit.clone();
+            PgEventCommitUnitOfWork::new(pool.clone())
+                .commit_event(request)
+                .await
+                .unwrap();
+            return transaction;
+        }
+        let before = agent_mode_footprint(pool, &previous.event.realm_id).await;
+        assert!(
+            PgEventCommitUnitOfWork::new(pool.clone())
+                .commit_event(request.clone())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            agent_mode_footprint(pool, &previous.event.realm_id).await,
+            before
+        );
         let tx = request.authority_commit;
         let event = &tx.event;
         let commit = &tx.commit;

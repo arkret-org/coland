@@ -435,7 +435,7 @@ fn require_supported_policy(
         return Ok(());
     }
     document.validate().map_err(schema)?;
-    // This production boundary changes only new Realm Agent entry. A default
+    // These gates change new Realm entry and controller public intent only. A default
     // deny/review also governs every unmatched operation, so it cannot be
     // enabled until continuous read/delivery and review consumers are closed.
     if document.default_effect != PolicyEffect::Allow
@@ -443,7 +443,14 @@ fn require_supported_policy(
             if document.realm_id.as_ref() == Some(realm_id))
         || document.rules.iter().any(|rule| {
             rule.kind != PolicyRuleKind::Agent
-                || rule.agent_operations.as_deref() != Some(&[AgentPolicyOperation::Join])
+                || rule.agent_operations.as_ref().is_none_or(|operations| {
+                    operations.iter().any(|operation| {
+                        !matches!(
+                            operation,
+                            AgentPolicyOperation::Join | AgentPolicyOperation::Publish
+                        )
+                    })
+                })
                 || !matches!(rule.effect, PolicyEffect::Allow | PolicyEffect::Deny)
                 || rule.actions.is_some()
                 || rule.resources.as_ref().is_some_and(|resources| {
@@ -526,7 +533,7 @@ mod admission_tests {
     }
 
     #[test]
-    fn realm_join_only_policy_is_enabled_without_enabling_continuous_gates() {
+    fn realm_intent_policy_is_enabled_without_enabling_continuous_gates() {
         use arkret_models_collaboration::governance::operation_wire::AgentPolicyOperation;
         let policy = join_policy();
         let scope = arkret_wire::ScopeRef::Realm {
@@ -538,13 +545,20 @@ mod admission_tests {
             AgentPolicyOperation::Execute,
             AgentPolicyOperation::Read,
             AgentPolicyOperation::Deliver,
-            AgentPolicyOperation::Publish,
             AgentPolicyOperation::Serve,
         ] {
             let mut other = policy.clone();
             other.rules[0].agent_operations = Some(vec![operation]);
             assert!(require_supported_policy(&other, &scope).is_err());
         }
+        let mut publish = policy.clone();
+        publish.rules[0].agent_operations = Some(vec![AgentPolicyOperation::Publish]);
+        assert!(require_supported_policy(&publish, &scope).is_ok());
+        publish.rules[0].agent_operations = Some(vec![
+            AgentPolicyOperation::Join,
+            AgentPolicyOperation::Publish,
+        ]);
+        assert!(require_supported_policy(&publish, &scope).is_ok());
         for effect in [
             arkret_wire::PolicyEffect::Deny,
             arkret_wire::PolicyEffect::Quarantine,

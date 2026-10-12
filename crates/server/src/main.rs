@@ -17,6 +17,12 @@ pub(crate) mod otel;
 pub(crate) mod runtime;
 
 fn main() -> anyhow::Result<()> {
+    let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args.len() == 2 && matches!(raw_args[1].as_str(), "--version" | "-V") {
+        println!("coland {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     // The dependency graph includes rustls consumers that enable different
     // provider features. Select Coland's declared `ring` provider before any
     // listener or outbound client can ask rustls for a process default.
@@ -26,17 +32,16 @@ fn main() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(run())
+        .block_on(run(raw_args))
 }
 
-async fn run() -> anyhow::Result<()> {
+async fn run(raw_args: Vec<String>) -> anyhow::Result<()> {
     // P5 (5.5) — `coland healthcheck` subcommand. Distroless / minimal
     // runtime images cannot rely on an external `curl` binary for the
     // Docker HEALTHCHECK. Detect the subcommand BEFORE we initialize
     // tracing so the healthcheck process stays quiet (no startup chatter,
     // no opening of COLAND_LOG_FILE), exits with status 0 on probe
     // success and 1 on failure, and never starts the Salvo listener.
-    let raw_args: Vec<String> = std::env::args().collect();
     if raw_args
         .iter()
         .skip(1)

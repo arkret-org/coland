@@ -3,21 +3,33 @@ name: Docker
 on:
   pull_request:
   push:
-    branches:
-      - main
-      - master
+    branches: [main, master]
+    tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-env:
-  IMAGE_NAME: coland:ci
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   image:
-    name: Build and scan Docker image
-    runs-on: ubuntu-latest
-
+    name: Build and scan (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout coland
         uses: actions/checkout@v6
@@ -45,26 +57,17 @@ jobs:
           path: arkret-spec
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=sha-
+      - name: Resolve image name
+        id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: echo "name=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
-      - name: Build image
-        uses: docker/build-push-action@v7
+      - name: Build image for validation
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: coland
           file: coland/Dockerfile
@@ -72,20 +75,130 @@ jobs:
             arkret-rust-sdk=arkret-rust-sdk
             arkret-spec=arkret-spec
             floria=floria
+          platforms: linux/${{ matrix.arch }}
+          pull: true
           load: true
-          tags: ${{ env.IMAGE_NAME }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: coland:ci
+          cache-from: type=gha,scope=docker-${{ matrix.arch }}
+          cache-to: type=gha,scope=docker-${{ matrix.arch }},mode=max,ignore-error=true
+
+      - name: Smoke test image
+        run: docker run --rm coland:ci --version
 
       - name: Trivy image scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          image-ref: coland:ci
+          scan-type: image
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish validated image by digest
+        if: github.event_name != 'pull_request'
+        id: publish
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: coland
+          file: coland/Dockerfile
+          build-contexts: |
+            arkret-rust-sdk=arkret-rust-sdk
+            arkret-spec=arkret-spec
+            floria=floria
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=docker-${{ matrix.arch }}
+
+      - name: Export digest
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.publish.outputs.digest }}
         run: |
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "${{ github.workspace }}/.trivy-cache:/root/.cache/" \
-            aquasec/trivy:0.70.0 image \
-              --exit-code 1 \
-              --severity HIGH,CRITICAL \
-              --ignore-unfixed \
-              --no-progress \
-              "${IMAGE_NAME}"
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    name: Publish multi-platform tags
+    if: github.event_name != 'pull_request'
+    needs: image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Resolve image name
+        id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: echo "name=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish and inspect manifest
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+          METADATA: ${{ steps.meta.outputs.json }}
+        run: |
+          set -euo pipefail
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 2
+          args=()
+          while IFS= read -r tag; do
+            [ -z "$tag" ] || args+=(--tag "$tag")
+          done <<< "$TAGS"
+          sources=()
+          for digest in *; do
+            sources+=("${IMAGE}@sha256:${digest}")
+          done
+          docker buildx imagetools create "${args[@]}" "${sources[@]}"
+          docker buildx imagetools inspect "$(jq -r '.tags[0]' <<< "$METADATA")"

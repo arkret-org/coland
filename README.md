@@ -166,6 +166,11 @@ DATABASE_URL=postgres://coland:coland@localhost:5432/coland \
 
 ### Run with Docker
 
+Images are published to `ghcr.io/arkret-org/coland` for Linux amd64 and arm64.
+Main branch builds publish `latest`, `main`, and `sha-<commit>`; `v*` tags publish
+version tags (stable versions also update `latest`). Pull requests build and scan
+both architectures without publishing.
+
 Provision the master key explicitly before the first container start. The
 release image includes the same cross-platform helper used by `just init-dev`;
 this Linux example creates the host directory for the image's UID `10001` and
@@ -176,7 +181,7 @@ sudo install -d -m 0700 -o 10001 -g 10001 /secure/coland
 docker run --rm \
   --entrypoint /usr/local/bin/coland-keystore-keygen \
   --mount type=bind,source=/secure/coland,target=/secrets \
-  ghcr.io/arkret/coland:<tag> \
+  ghcr.io/arkret-org/coland:<tag> \
   --output /secrets/coland-keystore-master-key
 sudo chmod 0400 /secure/coland/coland-keystore-master-key
 ```
@@ -202,7 +207,7 @@ docker run --rm -p 8698:8698 \
   -e COLAND_OBJECT_STORAGE_LOCAL_ROOT=/var/lib/coland/objects \
   --mount type=volume,source=coland-data,target=/var/lib/coland \
   --mount type=bind,source=/secure/coland/coland-keystore-master-key,target=/run/secrets/coland-keystore-master-key,readonly \
-  ghcr.io/arkret/coland:<tag>
+  ghcr.io/arkret-org/coland:<tag>
 ```
 
 Back up the mounted master key separately from the ciphertext volume. Remove

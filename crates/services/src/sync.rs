@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 pub use coland_storage::{
-    CursorRevocation as CursorRevocationState, RealmJoinDownload, SyncCursorRecord as CursorState,
+    CursorRevocation as CursorRevocationState, SyncCursorRecord as CursorState,
 };
 use parking_lot::Mutex;
 
@@ -12,12 +12,6 @@ use crate::ServiceResult;
 
 #[async_trait]
 pub trait CursorStorePort: Send + Sync {
-    async fn realm_join_download(&self, key: &str) -> ServiceResult<Option<RealmJoinDownload>>;
-    async fn save_realm_join_download(
-        &self,
-        key: &str,
-        assembly: &RealmJoinDownload,
-    ) -> ServiceResult<()>;
     async fn account_sync_watermarks(&self) -> ServiceResult<(i64, i64)>;
     async fn account_global_watermark(&self) -> ServiceResult<i64>;
     async fn account_global_channel_position(
@@ -251,18 +245,6 @@ impl SyncService {
         self.cursors.get(handle).await
     }
 
-    pub async fn realm_join_download(&self, key: &str) -> ServiceResult<Option<RealmJoinDownload>> {
-        self.cursors.realm_join_download(key).await
-    }
-
-    pub async fn save_realm_join_download(
-        &self,
-        key: &str,
-        assembly: &RealmJoinDownload,
-    ) -> ServiceResult<()> {
-        self.cursors.save_realm_join_download(key, assembly).await
-    }
-
     pub async fn upsert_cursor(&self, record: &CursorState) -> ServiceResult<()> {
         self.cursors.upsert(record).await
     }
@@ -309,16 +291,6 @@ mod tests {
 
     #[async_trait]
     impl CursorStorePort for RecordingCursors {
-        async fn realm_join_download(&self, _: &str) -> ServiceResult<Option<RealmJoinDownload>> {
-            unreachable!("cursor-only fixture cannot serve bootstrap downloads")
-        }
-        async fn save_realm_join_download(
-            &self,
-            _: &str,
-            _: &RealmJoinDownload,
-        ) -> ServiceResult<()> {
-            unreachable!("cursor-only fixture cannot store bootstrap downloads")
-        }
         async fn account_sync_watermarks(&self) -> ServiceResult<(i64, i64)> {
             Ok((0, 0))
         }

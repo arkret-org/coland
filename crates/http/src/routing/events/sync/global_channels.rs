@@ -39,6 +39,7 @@ pub(crate) struct GlobalDelta {
 #[derive(Debug)]
 pub(crate) enum GlobalReadError {
     ResyncRequired,
+    Cursor(SyncCursorError),
     Unavailable(String),
 }
 
@@ -56,10 +57,7 @@ impl From<&str> for GlobalReadError {
 
 impl From<SyncCursorError> for GlobalReadError {
     fn from(error: SyncCursorError) -> Self {
-        match error {
-            SyncCursorError::Expired => Self::ResyncRequired,
-            other => Self::Unavailable(format!("{other:?}")),
-        }
+        Self::Cursor(error)
     }
 }
 

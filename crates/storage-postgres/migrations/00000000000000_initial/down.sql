@@ -45,7 +45,6 @@ DROP TABLE IF EXISTS pcr_device_generation_current_results;
 DROP TABLE IF EXISTS replica_stream_anchors CASCADE;
 DROP TABLE IF EXISTS realm_commits CASCADE;
 DROP TABLE IF EXISTS realm_authorities CASCADE;
-DROP TABLE IF EXISTS realm_join_downloads;
 DROP TABLE IF EXISTS key_backup_unlock_attempt_windows;
 DROP TRIGGER IF EXISTS preserve_agent_pairing_receipt ON agent_principals;
 DROP FUNCTION IF EXISTS preserve_agent_pairing_receipt();

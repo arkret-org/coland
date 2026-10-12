@@ -755,6 +755,7 @@ async fn run(departure: Option<&str>) {
         package: feedback.clone(),
     })
     .unwrap();
+    let source_before_feedback = terminal_persistent_rows(&source.pool).await;
     outbox::enqueue_outbound(
         &receiver.state,
         &source.state.config().public_base_url,
@@ -785,7 +786,37 @@ async fn run(departure: Option<&str>) {
         peers[0].receipt_id.as_ref(),
         Some(&feedback.receipt.receipt_id)
     );
-    assert_eq!(terminal_persistent_rows(&receiver.pool).await, before);
+    let reply = receipt_delivery(&receiver, &feedback.receipt.receipt_id).await;
+    assert_eq!(
+        reply.state,
+        coland_storage::FederationOutboxState::Delivered
+    );
+    assert_eq!(reply.peer_id, source.state.service_core_id());
+    assert_eq!(reply.endpoint, outbox::ERASURE_RECEIPT_ENDPOINT);
+    assert_eq!(reply.payload_json, body);
+    assert_eq!(reply.attempts, 1);
+    assert_eq!(reply.semantic_attempts, 0);
+    assert!(reply.realm_fanout.is_none());
+    erasure_receipts::verify_acceptance(
+        &receiver.state,
+        &feedback,
+        &source.state.service_core_id(),
+        reply.last_response_excerpt.as_ref().unwrap(),
+    )
+    .await
+    .unwrap();
+    let mut after_feedback = terminal_persistent_rows(&receiver.pool).await;
+    let rows = after_feedback["federation_outbox"].as_array_mut().unwrap();
+    assert_eq!(rows.iter().filter(|row| row["id"] == reply.id).count(), 1);
+    rows.retain(|row| row["id"] != reply.id);
+    assert_eq!(
+        after_feedback, before,
+        "only the explicit feedback intent may change"
+    );
+    assert_eq!(
+        terminal_persistent_rows(&source.pool).await,
+        source_before_feedback
+    );
 
     let mut outstanding = package.clone();
     outstanding.receipt.receipt_id = format!("ak:receipt:{}", uuid::Uuid::now_v7());

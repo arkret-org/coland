@@ -802,7 +802,7 @@ mod tests {
                 {
                     "id": format!("{AGENT_DID}#coland"),
                     "type": "ArkretStation",
-                    "serviceEndpoint": "https://agent.example"
+                    "serviceEndpoint": "https://agent.example/"
                 },
                 {
                     "id": format!("{AGENT_DID}#managed-controller"),

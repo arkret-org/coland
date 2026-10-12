@@ -464,6 +464,14 @@ async fn run(departure: Option<&str>) {
         ))
         .await;
     }
+    // Peer replication schedules a background scan of the governing stream.
+    // Settle it before publishing the Audit: delaying its outbox alone cannot
+    // stop that scan from pulling a new tail into the receipt-only snapshot.
+    crate::state::replica_anchor::wait_for_converge_stream(
+        &receiver.state,
+        &terminal.authority_commit.commit.stream_ref,
+    )
+    .await;
     let package = package(
         &source.state,
         &message.authority_commit,

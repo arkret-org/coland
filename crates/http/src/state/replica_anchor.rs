@@ -74,6 +74,25 @@ pub(crate) fn spawn_converge_stream(state: &AppState, stream: CommitStreamRef) {
     });
 }
 
+/// Let live tests settle replication before measuring another delivery rail.
+#[cfg(test)]
+pub(super) async fn wait_for_converge_stream(state: &AppState, stream: &CommitStreamRef) {
+    let key = (
+        state.service_id().to_owned(),
+        arkret_canonical::canonical_json_string(stream).unwrap(),
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if !IN_FLIGHT.lock().unwrap().contains(&key) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("replica convergence must settle before the receipt-only snapshot");
+}
+
 /// Retry every pending anchor periodically. Needs outbound federation.
 pub fn spawn_pending_anchor_sweeper(state: AppState) -> Option<tokio::task::JoinHandle<()>> {
     if !state.config().federation_outbound_enabled {

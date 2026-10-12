@@ -540,7 +540,7 @@ async fn blob_get(depot: &mut Depot, req: &mut Request, res: &mut Response) {
                 "blob.get",
                 json!({
                     "blob_ref": blob_ref.clone(),
-                    "device_id": session.as_ref().map(|session| session.require_human_device_id().clone()),
+                    "device_id": session.as_ref().and_then(|session| session.human_device_id().cloned()),
                     "purpose": purpose,
                     "realm_id": blob.realm_id.clone(),
                     "presigned": session.is_none(),
@@ -1347,7 +1347,12 @@ async fn blob_visible_to_session(
     else {
         return false;
     };
-    if blob.uploaded_by == session.actor {
+    // Upload ownership does not exempt an Agent's Realm content from its
+    // current controller and management ceiling. Unscoped private uploads
+    // retain the uploader's ordinary access contract.
+    if blob.uploaded_by == session.actor
+        && (session.agent_session().is_none() || blob.realm_id.is_none())
+    {
         return blob.realm_id.as_deref().is_none_or(|realm_id| {
             requested_realm_id.is_none_or(|requested| requested == realm_id)
         });
@@ -1563,6 +1568,38 @@ mod presign_block_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn agent_uploaded_realm_blob_cannot_bypass_unavailable_current_reader() {
+        let state = AppState::new(
+            crate::config::AppConfig::test_default(),
+            coland_storage_postgres::Db { pool: None },
+        );
+        let session = SessionRecord {
+            token_hash: "blob-agent-current-fixture".into(),
+            account_pk: None,
+            actor: "ak:did_core:web:blob-agent.example".into(),
+            endpoint: coland_services::identity::SessionEndpointState::AgentRuntime {
+                state: coland_services::identity::AgentSessionState {
+                    granted_scope: Vec::new(),
+                    scope_details: json!({}),
+                    freshness_state: arkret_wire::FreshnessState::Fresh,
+                },
+            },
+            audience: state.service_id().clone(),
+            session_public_key: None,
+            session_grant: None,
+            expires_at: now() + chrono::Duration::minutes(5),
+            created_at: now(),
+            revoked_at: None,
+        };
+        let mut blob = blob_record("application/octet-stream", None);
+        blob.uploaded_by = session.actor.clone();
+        assert!(!blob_visible_to_session(&state, &blob, &session, blob.realm_id.as_deref()).await);
+        // A private upload is not a substitute for Realm or group content.
+        blob.realm_id = None;
+        assert!(blob_visible_to_session(&state, &blob, &session, None).await);
+    }
 
     /// Realm membership itself is the durable accepted reader of the Realm
     /// (PostgreSQL `accepted_realm_reader`); a session bound to another

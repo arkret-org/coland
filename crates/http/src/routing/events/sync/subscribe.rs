@@ -234,10 +234,9 @@ pub(super) async fn account_response(
                             Ok(true) => {
                                 if !stream_session_current(&state, &session, grant.as_deref()).await
                                 {
-                                    render_error(
+                                    coland_http::error::render_error_code(
+                                        coland_http::error::ErrorCode::Unauthenticated,
                                         res,
-                                        StatusCode::UNAUTHORIZED,
-                                        "unauthorized",
                                         "session authority is no longer current",
                                     );
                                     return;

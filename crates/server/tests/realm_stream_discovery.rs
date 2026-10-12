@@ -48,7 +48,7 @@ async fn session(
         .put(&coland_storage::SessionRecord {
             token_hash: format!(
                 "sha256:{}",
-                arkret_wire::base64url::base64url_encode(&arkret_canonical::sha256_bytes(
+                arkret_wire::base64url::base64url_encode(arkret_canonical::sha256_bytes(
                     format!("{}:{token}", state.service_id()).as_bytes()
                 ))
             ),

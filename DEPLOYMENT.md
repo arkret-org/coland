@@ -211,7 +211,6 @@ and rollout-only switches that should be managed deliberately.
 | `COLAND_EXTERNAL_WEBVH_PROVIDER_TRUST_DOMAIN` | derived trust domain | Expected trust domain for the external webvh provider probe. |
 | `COLAND_FEDERATION_DENYLIST` | empty | Comma-separated federation host/service denylist. |
 | `COLAND_FEDERATION_FANOUT_TOPOLOGY` | `mesh` | Federation fanout topology (`mesh` or `hub`). |
-| `COLAND_FEDERATION_FRONTIER_INTERVAL_SECONDS` | `0` | Optional frontier synchronization interval, at most `3600` seconds; `0` disables periodic polling. |
 | `COLAND_FEDERATION_PEER_DENYLIST` | empty | Additional comma-separated peer denylist. |
 | `COLAND_HEALTHCHECK_URL` | derived from `COLAND_BIND` | URL used by the built-in healthcheck command. |
 | `COLAND_ICE_STUN_URLS` | `stun:stun.l.google.com:19302` | Comma-separated STUN URLs advertised in signed ICE configs. |

@@ -357,27 +357,7 @@ pub(crate) async fn sync_token_for_account_positions(
             input_authorities,
         )
         .await
-        .map_err(|error| {
-            tracing::warn!(%error, "account cursor persistence failed");
-            match &error {
-                coland_services::ServiceError::Conflict(detail)
-                    if detail.starts_with("cursor_revoked:") =>
-                {
-                    SyncCursorError::Revoked
-                }
-                coland_services::ServiceError::Conflict(detail)
-                    if detail.starts_with("cursor_expired:") =>
-                {
-                    SyncCursorError::Expired
-                }
-                coland_services::ServiceError::Conflict(detail)
-                    if detail.starts_with("cursor_integrity_invalid:") =>
-                {
-                    SyncCursorError::Integrity("input authority changed during issuance")
-                }
-                _ => SyncCursorError::Unavailable("cannot persist account cursor"),
-            }
-        })?;
+        .map_err(cursor_issuance_error)?;
     cursor
         .encode()
         .map_err(|_| SyncCursorError::Integrity("cannot encode account cursor"))
@@ -1129,6 +1109,28 @@ pub(super) async fn account_input_authorities(
     Ok(records)
 }
 
+fn cursor_issuance_error(error: coland_services::ServiceError) -> SyncCursorError {
+    tracing::warn!(%error, "cursor persistence failed");
+    match &error {
+        coland_services::ServiceError::Conflict(detail)
+            if detail.starts_with("cursor_revoked:") =>
+        {
+            SyncCursorError::Revoked
+        }
+        coland_services::ServiceError::Conflict(detail)
+            if detail.starts_with("cursor_expired:") =>
+        {
+            SyncCursorError::Expired
+        }
+        coland_services::ServiceError::Conflict(detail)
+            if detail.starts_with("cursor_integrity_invalid:") =>
+        {
+            SyncCursorError::Integrity("input authority changed during issuance")
+        }
+        _ => SyncCursorError::Unavailable("cannot persist cursor"),
+    }
+}
+
 pub(super) fn issuance_problem(error: SyncCursorError) -> Box<arkret_wire::Problem> {
     let error = cursor_revoke_error(error);
     Box::new(arkret_wire::Problem::from_code(
@@ -1197,6 +1199,7 @@ pub(crate) async fn realm_list_token(
     state: &AppState,
     session: &SessionIdentityState,
     position: &RealmListPosition,
+    input_authorities: &[CursorState],
 ) -> Result<arkret_wire::Cursor, SyncCursorError> {
     let (account, device) = cursor_account_device(state, Some(session));
     let subject = cursor_binding_subject(account.as_ref());
@@ -1220,6 +1223,14 @@ pub(crate) async fn realm_list_token(
             return Ok(snapshot_token.clone());
         }
     }
+    let mut inputs = input_authorities.to_vec();
+    if let Some(token) = position.snapshot_cursor.as_ref() {
+        let cursor = decode_sync_cursor(token.as_str(), now.timestamp_millis())?;
+        let record = stored_sync_cursor_record_by_handle(state, &cursor.h).await?;
+        if !inputs.iter().any(|input| input.handle == record.handle) {
+            inputs.push(record);
+        }
+    }
     let issued_at = chrono::DateTime::from_timestamp_millis(position.expires_at_ms - 3_600_000)
         .ok_or(SyncCursorError::Integrity("invalid list snapshot time"))?;
     let cursor = arkret_hlc::Cursor::new_at(issued_at, 3_600_000)
@@ -1227,21 +1238,24 @@ pub(crate) async fn realm_list_token(
     let handle = cursor.h.clone();
     state
         .sync()
-        .upsert_cursor(&CursorState {
-            handle,
-            binding_subject: Some(subject),
-            device_id: Some(device),
-            session_id: Some(session.token_hash.clone()),
-            service_id: state.service_core_id(),
-            filter_digest: None,
-            purpose: "realm_list".to_owned(),
-            positions: None,
-            target: Some(target),
-            issued_at_ms: cursor.issued_at.timestamp_millis(),
-            expires_at_ms: cursor.expires_at.timestamp_millis(),
-        })
+        .upsert_cursor_with_inputs(
+            &CursorState {
+                handle,
+                binding_subject: Some(subject),
+                device_id: Some(device),
+                session_id: Some(session.token_hash.clone()),
+                service_id: state.service_core_id(),
+                filter_digest: None,
+                purpose: "realm_list".to_owned(),
+                positions: None,
+                target: Some(target),
+                issued_at_ms: cursor.issued_at.timestamp_millis(),
+                expires_at_ms: cursor.expires_at.timestamp_millis(),
+            },
+            &inputs,
+        )
         .await
-        .map_err(|_| SyncCursorError::Integrity("cannot persist list cursor"))?;
+        .map_err(cursor_issuance_error)?;
     arkret_wire::Cursor::new(
         cursor
             .encode()

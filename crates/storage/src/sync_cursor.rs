@@ -1,15 +1,5 @@
 use super::{CursorRevocation, PersistenceResult, Utc, Value, async_trait};
 
-/// Resumable join bootstrap assembled from the current authority snapshot and
-/// the independent Realm/Circle/Sidecar stream tails after that snapshot.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct RealmJoinDownload {
-    pub snapshot: arkret_wire::RealmStateSnapshot,
-    pub stream_heads: Vec<arkret_wire::CommitStreamHead>,
-    pub items: Vec<arkret_wire::CommittedEventFullView>,
-    pub next_cursor: Option<String>,
-    pub expires_at: chrono::DateTime<Utc>,
-}
 /// Private durable account summary read position; never a wire cursor.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AccountSummaryKey {
@@ -70,13 +60,6 @@ pub struct SyncCursorRecord {
 /// Presenting another cursor never revokes older immutable retry authorities.
 #[async_trait]
 pub trait SyncCursorStore: Send + Sync {
-    /// Mutable private download progress, separate from immutable wire cursors.
-    async fn realm_join_download(&self, key: &str) -> PersistenceResult<Option<RealmJoinDownload>>;
-    async fn save_realm_join_download(
-        &self,
-        key: &str,
-        assembly: &RealmJoinDownload,
-    ) -> PersistenceResult<()>;
     async fn account_sync_watermarks(&self) -> PersistenceResult<(i64, i64)>;
     async fn account_global_watermark(&self) -> PersistenceResult<i64>;
     async fn account_global_channel_position(

@@ -64,6 +64,9 @@ async fn build_global_sync_snapshot(
     let summary_delta = if let Some(session) = session {
         match demand_list::read(state, session, body, after_cursor).await {
             Ok(delta) => Some(delta),
+            Err(global_channels::GlobalReadError::Cursor(error)) => {
+                return Err(cursor::issuance_problem(error));
+            }
             Err(global_channels::GlobalReadError::ResyncRequired) => {
                 return Ok(serde_json::from_value(json!({"kind":"resync_required"}))
                     .expect("resync frame"));
@@ -91,6 +94,9 @@ async fn build_global_sync_snapshot(
         .await
         {
             Ok(delta) => delta,
+            Err(global_channels::GlobalReadError::Cursor(error)) => {
+                return Err(cursor::issuance_problem(error));
+            }
             Err(global_channels::GlobalReadError::ResyncRequired) => {
                 return Ok(serde_json::from_value(json!({"kind":"resync_required"}))
                     .expect("resync frame"));

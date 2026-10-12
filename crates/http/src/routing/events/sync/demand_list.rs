@@ -87,6 +87,7 @@ pub(crate) async fn read(
                 after: None,
                 snapshot_cursor: frozen.snapshot_cursor.clone(),
             },
+            &after.input_authorities,
         )
         .await
         .map_err(global_channels::GlobalReadError::from)?;
@@ -136,6 +137,7 @@ pub(crate) async fn read(
                         after: scanned,
                         snapshot_cursor: Some(snapshot_cursor.clone()),
                     },
+                    &after.input_authorities,
                 )
                 .await
                 .map_err(global_channels::GlobalReadError::from)?,

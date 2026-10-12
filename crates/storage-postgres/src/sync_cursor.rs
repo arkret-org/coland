@@ -4,17 +4,11 @@ use super::{
     Text, Timestamptz, Utc, Value, async_trait, pg_conn, sql_query, sql_types,
 };
 pub(crate) mod retention;
-use coland_storage::RealmJoinDownload;
 use diesel_async::AsyncConnection;
 pub struct PgSyncCursorStore {
     pub pool: PgPool,
 }
 
-#[derive(QueryableByName)]
-struct RealmJoinDownloadRow {
-    #[diesel(sql_type = Jsonb)]
-    assembly: Value,
-}
 #[derive(QueryableByName)]
 struct AccountWatermarksRow {
     #[diesel(sql_type = BigInt)]
@@ -126,50 +120,6 @@ impl From<SyncCursorRow> for SyncCursorRecord {
 }
 #[async_trait]
 impl SyncCursorStore for PgSyncCursorStore {
-    async fn realm_join_download(&self, key: &str) -> PersistenceResult<Option<RealmJoinDownload>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
-        sql_query("SELECT assembly FROM realm_join_downloads WHERE context_key = $1 AND expires_at > CURRENT_TIMESTAMP")
-            .bind::<Text, _>(key)
-            .get_result::<RealmJoinDownloadRow>(&mut *conn).await.optional()
-            .map_err(PersistenceError::database)?
-            .map(|row| serde_json::from_value(row.assembly).map_err(PersistenceError::database)).transpose()
-    }
-
-    async fn save_realm_join_download(
-        &self,
-        key: &str,
-        assembly: &RealmJoinDownload,
-    ) -> PersistenceResult<()> {
-        if assembly.expires_at <= Utc::now() {
-            return Err(PersistenceError::Conflict(
-                "bootstrap download expired".into(),
-            ));
-        }
-        let value = serde_json::to_value(assembly).map_err(PersistenceError::database)?;
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
-        conn.transaction::<_, crate::PgTransactionError, _>(async |conn| {
-            sql_query("DELETE FROM realm_join_downloads WHERE expires_at <= CURRENT_TIMESTAMP")
-                .execute(conn).await.map_err(PersistenceError::database)?;
-            let written = sql_query(
-                "INSERT INTO realm_join_downloads (context_key, assembly, expires_at) VALUES ($1, $2, $3) \
-                 ON CONFLICT (context_key) DO UPDATE SET assembly = EXCLUDED.assembly \
-                 WHERE (realm_join_downloads.assembly->'snapshot') = (EXCLUDED.assembly->'snapshot') \
-                   AND ((realm_join_downloads.assembly->'items') <@ (EXCLUDED.assembly->'items') \
-                        OR realm_join_downloads.assembly = EXCLUDED.assembly)"
-            ).bind::<Text, _>(key).bind::<Jsonb, _>(&value)
-                .bind::<Timestamptz, _>(assembly.expires_at)
-                .execute(conn).await.map_err(PersistenceError::database)?;
-            if written != 1 {
-                return Err(PersistenceError::Conflict("bootstrap download context or progress changed".into()).into());
-            }
-            Ok(())
-        }).await.map_err(crate::PgTransactionError::into_persistence)
-    }
-
     async fn account_sync_watermarks(&self) -> PersistenceResult<(i64, i64)> {
         retention::freeze(&self.pool).await
     }
@@ -595,158 +545,18 @@ mod account_summary_query_tests {
 
     use super::*;
 
-    /// The bootstrap answer is one authority snapshot plus the independent
-    /// stream tails after it: nothing is paged by the authority
-    /// (`realm_join_bootstrap`). What the Station still owes a restarting
-    /// joiner is that the download it persisted is the one it recovers, that
-    /// the snapshot the progress was measured against cannot be swapped under
-    /// it, and that progress never regresses. Immutable wire cursors are a
-    /// separate table and stay frozen throughout.
+    /// An immutable cursor cannot be rewritten through another store instance.
     #[tokio::test]
-    async fn bootstrap_download_resumes_durably_without_mutating_wire_cursors() {
+    async fn cursor_issuance_remains_immutable_across_store_restart() {
         let database = crate::test_database::TestDatabase::lease().await;
-        let pool = database.pool();
-        let store = PgSyncCursorStore { pool: pool.clone() };
-        let realm_id: arkret_wire::RealmId =
-            "ak:realm:AdkQ-RmB1a8zyc52yl9GWAsodQ_EUle1WAVZqbO7pc19"
-                .parse()
-                .unwrap();
-        let station_id: arkret_identifiers::DidCoreId =
-            "ak:did_core:web:origin.example".parse().unwrap();
-        let applicant: arkret_identifiers::DidCoreId =
-            "ak:did_core:web:applicant.example".parse().unwrap();
-        let observed_at =
-            chrono::DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).unwrap();
-
-        let stream_ref = arkret_wire::CommitStreamRef::Realm {
-            realm_id: realm_id.clone(),
+        let store = PgSyncCursorStore {
+            pool: database.pool(),
         };
-        let commit_id = |seed: u8| arkret_wire::RealmCommitId::from_digest([seed; 32]);
-        let signature = |context| arkret_wire::DetachedObjectSignature {
-            context,
-            signature_algorithm: arkret_wire::DetachedSignatureAlgorithm::Ed25519,
-            verification_method: arkret_wire::DidUrl::new("did:web:origin.example#authority")
-                .unwrap(),
-            signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "aa".repeat(32))).unwrap(),
-            created_at: observed_at,
-            sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl").unwrap(),
+        let station_id = "ak:did_core:web:origin.example".parse().unwrap();
+        let observed_at = Utc::now();
+        let restarted = PgSyncCursorStore {
+            pool: database.pool(),
         };
-        let snapshot = arkret_wire::RealmStateSnapshot {
-            snapshot_id: arkret_wire::RealmSnapshotId::from_digest([7; 32]),
-            realm_id: realm_id.clone(),
-            governance_generation: 1,
-            visible_stream_heads: vec![arkret_wire::CommitStreamHead {
-                stream_ref: stream_ref.clone(),
-                stream_position: 0,
-                commit_id: commit_id(1),
-            }],
-            current_state_entries: vec![],
-            retention_and_history_floor: arkret_wire::RetentionAndHistoryFloor {
-                history_access: arkret_wire::HistoryAccess::SinceJoin,
-                stream_floors: vec![arkret_wire::StreamHistoryFloor {
-                    stream_ref: stream_ref.clone(),
-                    oldest_position: 0,
-                }],
-            },
-            created_at: observed_at,
-            signature: signature(arkret_wire::DetachedSignatureContext::RealmSnapshot),
-        };
-        let stream_row = |position: u64, previous: Option<arkret_wire::RealmCommitId>| {
-            let event = arkret_wire::test_support::raw_event(
-                arkret_wire::EventKind::MemberState.as_str(),
-                arkret_wire::ScopeRef::Realm {
-                    realm_id: realm_id.clone(),
-                },
-                applicant.clone(),
-                station_id.clone(),
-                serde_json::json!({
-                    "member_id": arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-                        applicant.clone(),
-                        station_id.clone(),
-                    )),
-                    "membership": "join",
-                    "stream_position": position
-                }),
-            )
-            .unwrap();
-            arkret_wire::CommittedEventFullView {
-                commit: arkret_wire::RealmCommit {
-                    producer_signer_fact_digest: None,
-                    commit_id: commit_id(u8::try_from(position).unwrap() + 2),
-                    realm_id: realm_id.clone(),
-                    stream_ref: stream_ref.clone(),
-                    stream_position: position,
-                    previous_commit_ref: previous,
-                    event_ref: event.event_id.clone(),
-                    governance_generation: 1,
-                    authority_ref: arkret_wire::RealmCommitAuthorityRef::GenesisOrChangeEvent(
-                        event.event_id.clone(),
-                    ),
-                    committed_at: observed_at,
-                    signature: signature(arkret_wire::DetachedSignatureContext::RealmCommit),
-                },
-                event,
-            }
-        };
-        let first_row = stream_row(1, Some(commit_id(1)));
-        let second_row = stream_row(2, Some(first_row.commit.commit_id.clone()));
-
-        let partial = RealmJoinDownload {
-            snapshot: snapshot.clone(),
-            stream_heads: vec![arkret_wire::CommitStreamHead {
-                stream_ref: stream_ref.clone(),
-                stream_position: 2,
-                commit_id: second_row.commit.commit_id.clone(),
-            }],
-            items: vec![first_row.clone()],
-            next_cursor: Some("scan".into()),
-            expires_at: observed_at + chrono::Duration::seconds(300),
-        };
-        store
-            .save_realm_join_download("download-test", &partial)
-            .await
-            .unwrap();
-
-        let mut complete = partial.clone();
-        complete.items.push(second_row);
-        complete.next_cursor = None;
-        store
-            .save_realm_join_download("download-test", &complete)
-            .await
-            .unwrap();
-        // Re-saving the identical terminal state is an idempotent no-op.
-        store
-            .save_realm_join_download("download-test", &complete)
-            .await
-            .unwrap();
-
-        // A fresh adapter must recover the terminal scan, not the initial one.
-        let restarted = PgSyncCursorStore { pool };
-        let restored = restarted
-            .realm_join_download("download-test")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(restored.items.len(), 2);
-        assert!(restored.next_cursor.is_none());
-
-        // Progress may not regress back to the shorter scan.
-        assert!(
-            restarted
-                .save_realm_join_download("download-test", &partial)
-                .await
-                .is_err()
-        );
-        // Nor may the snapshot the scan was measured against be swapped.
-        let mut changed_context = complete.clone();
-        changed_context.snapshot.governance_generation = 2;
-        assert!(
-            restarted
-                .save_realm_join_download("download-test", &changed_context)
-                .await
-                .is_err()
-        );
-
         let mut cursor = SyncCursorRecord {
             handle: "immutable-cursor-test".into(),
             binding_subject: None,
@@ -758,9 +568,9 @@ mod account_summary_query_tests {
             positions: Some(serde_json::json!({"page": 0})),
             target: None,
             issued_at_ms: observed_at.timestamp_millis(),
-            expires_at_ms: complete.expires_at.timestamp_millis(),
+            expires_at_ms: (observed_at + chrono::Duration::seconds(300)).timestamp_millis(),
         };
-        restarted.upsert(&cursor).await.unwrap();
+        store.upsert(&cursor).await.unwrap();
         cursor.positions = Some(serde_json::json!({"page": 1}));
         assert!(restarted.upsert(&cursor).await.is_err());
         assert_eq!(

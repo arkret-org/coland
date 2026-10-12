@@ -562,23 +562,6 @@ impl crate::jobs::MaintenancePort for PersistenceMaintenance {
 
 #[async_trait::async_trait]
 impl crate::sync::CursorStorePort for PersistenceCursorStore {
-    async fn realm_join_download(
-        &self,
-        key: &str,
-    ) -> crate::ServiceResult<Option<coland_storage::RealmJoinDownload>> {
-        Ok(self.0.sync_cursors().realm_join_download(key).await?)
-    }
-    async fn save_realm_join_download(
-        &self,
-        key: &str,
-        assembly: &coland_storage::RealmJoinDownload,
-    ) -> crate::ServiceResult<()> {
-        Ok(self
-            .0
-            .sync_cursors()
-            .save_realm_join_download(key, assembly)
-            .await?)
-    }
     async fn account_sync_watermarks(&self) -> crate::ServiceResult<(i64, i64)> {
         Ok(self.0.sync_cursors().account_sync_watermarks().await?)
     }

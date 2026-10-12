@@ -2647,14 +2647,6 @@ ALTER TABLE ONLY public.sessions
     ADD CONSTRAINT sessions_account_pk_fkey
     FOREIGN KEY (account_pk) REFERENCES public.accounts(pk);
 
--- Private resumable download state; never a wire cursor or accepted Realm state.
-CREATE TABLE public.realm_join_downloads (
-    context_key text PRIMARY KEY,
-    assembly jsonb NOT NULL,
-    expires_at timestamptz NOT NULL
-);
-CREATE INDEX realm_join_downloads_expiry_idx ON public.realm_join_downloads (expires_at);
-
 CREATE TABLE public.sync_cursor_handles (
     id text PRIMARY KEY,
     binding_subject text,

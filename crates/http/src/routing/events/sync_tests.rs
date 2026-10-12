@@ -2632,12 +2632,18 @@ async fn realm_list_snapshot_identity_is_stable_and_never_renews_its_deadline() 
         after: None,
         snapshot_cursor: None,
     };
-    let first = realm_list_token(&state, &session, &position).await.unwrap();
+    // This first list read has no incoming resume handle. Subsequent calls
+    // revalidate the snapshot handle retained by the parsed position.
+    let first = realm_list_token(&state, &session, &position, &[])
+        .await
+        .unwrap();
     position = parse_realm_list_cursor(&state, &session, first.as_str())
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(5)).await;
-    let repeated = realm_list_token(&state, &session, &position).await.unwrap();
+    let repeated = realm_list_token(&state, &session, &position, &[])
+        .await
+        .unwrap();
     assert_eq!(
         first, repeated,
         "later pages must retain the same snapshot identity"
@@ -2648,7 +2654,7 @@ async fn realm_list_snapshot_identity_is_stable_and_never_renews_its_deadline() 
     assert_eq!(parsed.expires_at_ms, position.expires_at_ms);
     position.expires_at_ms = chrono::Utc::now().timestamp_millis() - 1;
     assert!(matches!(
-        realm_list_token(&state, &session, &position).await,
+        realm_list_token(&state, &session, &position, &[]).await,
         Err(SyncCursorError::Expired)
     ));
 }

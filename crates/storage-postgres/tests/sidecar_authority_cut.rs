@@ -8472,6 +8472,17 @@ async fn owned_consumer_footprint(
         "delivery_digest":owned_welcome_footprint(pool, realm, realm).await})
 }
 
+fn owned_consumer_grant_scope_step(
+    state: coland_http::state::AppState,
+    endpoint: coland_storage::AgentEndpointGuard,
+) -> Pin<Box<dyn Future<Output = coland_storage::VerifiedAgentScopeEvidence> + Send>> {
+    fixture_step(async move {
+        Box::pin(state.qualified_agent_scope_evidence(&endpoint))
+            .await
+            .unwrap()
+    })
+}
+
 async fn owned_consumer_root_grant(
     fixture: &OwnedConsumerFixture,
     previous: &coland_storage::AuthorityCommitTransaction,
@@ -8494,9 +8505,26 @@ async fn owned_consumer_root_grant(
         EventKind::CapabilityGrant,
         arkret_wire::ActorId::account(fixture.founder.clone()),
         serde_json::json!({"grant":grant}),
-        previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
+        previous
+            .commit
+            .committed_at
+            .max(arkret_canonical::normalize_timestamp_canonical(
+                chrono::Utc::now(),
+            ))
+            + chrono::TimeDelta::milliseconds(1),
     );
-    Box::pin(ordinary_realm::source_request(&fixture.pool, request)).await
+    let mut request = Box::pin(ordinary_realm::source_request(&fixture.pool, request)).await;
+    if let Some(agent) = fixture
+        .agents
+        .iter()
+        .find(|agent| subject.as_account_id() == Some(&agent.account))
+    {
+        request.agent_grant_scope_evidence = Some(
+            owned_consumer_grant_scope_step(agent._vault.state.clone(), agent.endpoint.clone())
+                .await,
+        );
+    }
+    request
 }
 
 async fn owned_consumer_refused_without_effects(
@@ -12339,7 +12367,7 @@ async fn build_native_reply_preparation_fixture(
     grant_body: bool,
 ) -> NativeReplyPreparationFixture {
     use coland_storage::AgentParticipationStore;
-    let original = boxed_owned_consumer_fixture(1).await;
+    let original = fixture_step(boxed_owned_consumer_fixture(1)).await;
     let realm = original.head.event.realm_id.clone();
     let mut head = original.head.clone();
     if grant_message {

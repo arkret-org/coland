@@ -74,6 +74,17 @@ pub(crate) fn is_agent_control_kind(kind: &EventKind) -> bool {
     )
 }
 
+pub(crate) fn is_agent_control_event(event: &arkret_wire::Event) -> bool {
+    is_agent_control_kind(&event.kind)
+        || (matches!(
+            event.kind,
+            EventKind::ProfileCreate | EventKind::ProfileUpdate
+        ) && event
+            .executed_by
+            .as_ref()
+            .is_some_and(|actor| actor.as_account_id().is_some()))
+}
+
 async fn pcr_of(
     conn: &mut AsyncPgConnection,
     account: &arkret_wire::AccountId,
@@ -139,11 +150,12 @@ async fn accepted_lifecycle(
 pub(crate) async fn admit_agent_control_event_in_connection(
     conn: &mut AsyncPgConnection,
     write: &AgentControlAdmissionWrite,
+    origin: Option<&coland_storage::AgentControlOriginSource>,
 ) -> Result<AgentControlAdmissionOutcome, PgTransactionError> {
     let transaction = &write.commit;
     let event = &transaction.event;
     let commit = &transaction.commit;
-    if !is_agent_control_kind(&event.kind)
+    if !is_agent_control_event(event)
         || event.applet_id.is_some()
         || commit.event_ref != event.event_id
         || commit.realm_id != event.realm_id
@@ -348,6 +360,65 @@ pub(crate) async fn admit_agent_control_event_in_connection(
         _ => {}
     }
 
+    let profile = if matches!(
+        event.kind,
+        EventKind::ProfileCreate | EventKind::ProfileUpdate
+    ) {
+        if !non_terminal {
+            return Err(precondition(
+                "a deactivated Agent cannot author a new profile Event",
+            ));
+        }
+        let profile =
+            crate::actor_profiles::materialize_profile_in_connection(conn, event, commit, &agent)
+                .await?;
+        if profile.actor_kind != arkret_wire::ActorKind::Agent
+            || !profile
+                .accountable_principal_ids
+                .contains(&controller.principal_id)
+        {
+            return Err(precondition(
+                "the Agent profile retains its kind and accountable controller",
+            ));
+        }
+        if let Some(slug) = &profile.agent_slug {
+            let selected = sql_query(
+                "SELECT value FROM agent_selector_claim_current_results \
+                 WHERE realm_id=$1 AND controller_principal_id=$2 AND agent_slug=$3 FOR SHARE",
+            )
+            .bind::<Text, _>(controller_realm.as_str())
+            .bind::<Text, _>(controller.principal_id.as_str())
+            .bind::<Text, _>(slug)
+            .get_result::<ValueRow>(&mut *conn)
+            .await
+            .optional()?
+            .ok_or_else(|| {
+                precondition("Agent profile slug has no accepted controller selector claim")
+            })?;
+            let selected: arkret_models_identity::AgentSelectorClaimValue =
+                serde_json::from_value(selected.value).map_err(corrupt)?;
+            if selected.subject_account_id != agent {
+                return Err(precondition(
+                    "Agent profile slug is claimed for another Account",
+                ));
+            }
+        }
+        Some(profile)
+    } else {
+        None
+    };
+    if let Some((dependency, history)) = origin {
+        crate::agent_origin::stage_control_source_in_connection(
+            conn,
+            &arkret_wire::CommittedEventFullView {
+                event: event.clone(),
+                commit: commit.clone(),
+            },
+            dependency,
+            history,
+        )
+        .await?;
+    }
     let historical =
         crate::agent_producer_signer_keys::prepare_agent_controller_outcome_in_connection(
             conn,
@@ -380,6 +451,18 @@ pub(crate) async fn admit_agent_control_event_in_connection(
     // active set, a revoke with nothing active or a status edge outside the
     // lifecycle FSM refuses the whole Event.
     let projected = match event.kind {
+        EventKind::ProfileCreate | EventKind::ProfileUpdate => {
+            crate::actor_profiles::write_profile_current_in_connection(
+                conn,
+                event,
+                commit,
+                profile
+                    .as_ref()
+                    .expect("profile materialized at the Agent cut"),
+            )
+            .await
+            .map_err(PgTransactionError::into_persistence)
+        }
         EventKind::AgentKeyAuthorize | EventKind::AgentKeyRevoke => {
             crate::agent_current_results::project_agent_key_in_connection(conn, event, commit).await
         }

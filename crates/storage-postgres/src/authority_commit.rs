@@ -1684,7 +1684,9 @@ async fn commit_transaction_with_device_guard_inner(
     ) && !matches!(
         verified_unit,
         VerifiedPcrUnit::ProfileOrAccountability | VerifiedPcrUnit::Applet
-    ) {
+    ) && !(verified_unit == VerifiedPcrUnit::AgentControl
+        && crate::agent_control::is_agent_control_event(&transaction.event))
+    {
         return Err(PersistenceError::Conflict(
             "actor_profile_or_accountability_unit_required".to_owned(),
         )
@@ -1719,7 +1721,7 @@ async fn commit_transaction_with_device_guard_inner(
     // Agent key and lifecycle Events decide the controller delegation and
     // the Agent's current key set and lifecycle at one Agent PCR cut; only
     // their unit may commit them.
-    if crate::agent_control::is_agent_control_kind(&transaction.event.kind)
+    if crate::agent_control::is_agent_control_event(&transaction.event)
         && verified_unit != VerifiedPcrUnit::AgentControl
     {
         return Err(PersistenceError::Conflict("agent_control_unit_required".to_owned()).into());

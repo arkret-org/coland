@@ -288,7 +288,10 @@ fn mount_application_routes(
                 .push(admin::router())
                 .push(coland_local_router()),
         )
-        .push(arkret_protocol_router(conformance_harness_enabled, third_party_invite_provider_enabled))
+        .push(arkret_protocol_router(
+            conformance_harness_enabled,
+            third_party_invite_provider_enabled,
+        ))
 }
 
 /// Whether the development conformance harness is both compiled in and

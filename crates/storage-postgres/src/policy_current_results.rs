@@ -561,7 +561,7 @@ pub(crate) enum ManagementPolicyCurrentRead {
         source: CommitStreamRef,
         revision: CurrentRevision,
         payload: PolicySetStatePayload,
-        head: arkret_wire::CommitStreamHead,
+        head: Box<arkret_wire::CommitStreamHead>,
     },
 }
 
@@ -711,11 +711,11 @@ pub(crate) async fn read_management_policy_exact_in_connection(
     };
     payload.validate().map_err(schema)?;
     Ok(ManagementPolicyCurrentRead::Present {
-        head: arkret_wire::CommitStreamHead {
+        head: Box::new(arkret_wire::CommitStreamHead {
             stream_ref: source.clone(),
             commit_id: head.commit_id.parse().map_err(schema)?,
             stream_position: u64::try_from(head.stream_position).map_err(schema)?,
-        },
+        }),
         source,
         revision: policy_revision(leaf)?,
         payload,

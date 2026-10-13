@@ -412,9 +412,7 @@ pub(super) async fn account_response(
                 return;
             }
             yield Ok::<Bytes, std::io::Error>(line);
-            if let Some(guard) = delivery {
-                if guard.finish().await.is_err() { return; }
-            };
+            if let Some(guard) = delivery && guard.finish().await.is_err() { return; };
             if body.catchup.unwrap_or(false) && initial_cursor.is_some() {
                 yield Ok::<Bytes, std::io::Error>(ndjson_line(&account_catchup_complete_frame(
                     initial_cursor.clone(),
@@ -477,9 +475,7 @@ pub(super) async fn account_response(
                             return;
                         }
                         yield Ok::<Bytes, std::io::Error>(line);
-                        if let Some(guard) = delivery {
-                            if guard.finish().await.is_err() { return; }
-                        };
+                        if let Some(guard) = delivery && guard.finish().await.is_err() { return; };
                     }
                     if body.catchup.unwrap_or(false) && final_cursor.is_some() {
                         yield Ok::<Bytes, std::io::Error>(ndjson_line(
@@ -566,9 +562,7 @@ pub(super) async fn account_response(
                             return;
                         }
                         yield Ok::<Bytes, std::io::Error>(line);
-                        if let Some(guard) = delivery {
-                            if guard.finish().await.is_err() { return; }
-                        };
+                        if let Some(guard) = delivery && guard.finish().await.is_err() { return; };
                         if body.catchup.unwrap_or(false) && delta_cursor.is_some() {
                             yield Ok::<Bytes, std::io::Error>(ndjson_line(
                                 &account_catchup_complete_frame(delta_cursor),

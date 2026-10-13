@@ -145,25 +145,22 @@ where
         .extensions
         .get("reason_code")
         .and_then(serde_json::Value::as_str)
+        && arkret_wire::ReasonCode::is_registered(reason)
     {
-        if arkret_wire::ReasonCode::is_registered(reason) {
-            error = error.with_reason_code(reason);
-        }
+        error = error.with_reason_code(reason);
     }
     if matches!(
         code,
         ErrorCode::RateLimited | ErrorCode::TemporarilyUnavailable
-    ) {
-        if let Some(delay) = problem
-            .extensions
-            .get("retry_after_ms")
-            .and_then(serde_json::Value::as_u64)
-        {
-            error.wire_details = Some(Box::new(std::collections::BTreeMap::from([(
-                "retry_after_ms".into(),
-                serde_json::json!(delay),
-            )])));
-        }
+    ) && let Some(delay) = problem
+        .extensions
+        .get("retry_after_ms")
+        .and_then(serde_json::Value::as_u64)
+    {
+        error.wire_details = Some(Box::new(std::collections::BTreeMap::from([(
+            "retry_after_ms".into(),
+            serde_json::json!(delay),
+        )])));
     }
     Err(error)
 }

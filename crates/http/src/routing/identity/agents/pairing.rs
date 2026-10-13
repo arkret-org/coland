@@ -2576,7 +2576,7 @@ pub(crate) async fn qualified_agent_scope_evidence(
     let source_id = record
         .paired_request_digest
         .as_ref()
-        .and_then(|_| record.paired_pairing_request_id.as_ref())
+        .and(record.paired_pairing_request_id.as_ref())
         .ok_or_else(|| AppError::capability_denied("Agent qualified pairing is unavailable"))?;
     let receipts = state
         .agent_pairings()

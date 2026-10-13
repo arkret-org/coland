@@ -266,88 +266,6 @@ impl PgEventNotificationWorker {
     }
 }
 
-#[cfg(test)]
-mod notification_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn independent_listeners_forward_large_events_without_origin_echo() {
-        let database = coland_storage_postgres::TestDatabase::lease().await;
-        let make_worker = |origin: &str| {
-            Arc::new(PgEventNotificationWorker {
-                pool: database.pool(),
-                database_url: database.url().to_owned(),
-                origin: origin.to_owned(),
-            })
-        };
-        let first = make_worker("first");
-        let second = make_worker("second");
-        let first_local = EventBroadcast::new(32);
-        let second_local = EventBroadcast::new(32);
-        let mut first_rx = first_local.subscribe();
-        let mut second_rx = second_local.subscribe();
-        let first_listener = first.clone();
-        let second_listener = second.clone();
-        let first_task =
-            tokio::spawn(async move { first_listener.listen_once(&first_local).await });
-        let second_task =
-            tokio::spawn(async move { second_listener.listen_once(&second_local).await });
-        let large_body = serde_json::json!({"ciphertext": "x".repeat(32_768)});
-        let exchange = async {
-            let mut received_first = false;
-            let mut received_second = false;
-            while !received_first || !received_second {
-                first
-                    .publish(EventNotification::event(
-                        "from-first".into(),
-                        "cursor".into(),
-                        large_body.clone(),
-                    ))
-                    .await
-                    .unwrap();
-                second
-                    .publish(EventNotification::event(
-                        "from-second".into(),
-                        "cursor".into(),
-                        large_body.clone(),
-                    ))
-                    .await
-                    .unwrap();
-                if !received_first
-                    && let Ok(Ok(notification)) =
-                        tokio::time::timeout(Duration::from_millis(100), first_rx.recv()).await
-                {
-                    assert_eq!(notification.realm_id, "from-second");
-                    let coland_http::state::EventNotificationKind::Event { event_payload, .. } =
-                        notification.kind
-                    else {
-                        panic!("expected event");
-                    };
-                    assert_eq!(event_payload, large_body);
-                    received_first = true;
-                }
-                if !received_second
-                    && let Ok(Ok(notification)) =
-                        tokio::time::timeout(Duration::from_millis(100), second_rx.recv()).await
-                {
-                    assert_eq!(notification.realm_id, "from-first");
-                    let coland_http::state::EventNotificationKind::Event { event_payload, .. } =
-                        notification.kind
-                    else {
-                        panic!("expected event");
-                    };
-                    assert_eq!(event_payload, large_body);
-                    received_second = true;
-                }
-            }
-        };
-        let result = tokio::time::timeout(Duration::from_secs(5), exchange).await;
-        first_task.abort();
-        second_task.abort();
-        result.expect("both independent LISTEN connections must become ready and deliver");
-    }
-}
-
 /// Mount the fixed native consumer using the existing normally paired runtime home.
 pub async fn start_native_arkret_public_replies(
     state: AppState,
@@ -453,5 +371,87 @@ impl savfox_gateway_server::NativePublicReplyGuard for ColandNativePublicReplyGu
             .finish()
             .await
             .map_err(|_| anyhow::anyhow!("native reply current guard release failed"))
+    }
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn independent_listeners_forward_large_events_without_origin_echo() {
+        let database = coland_storage_postgres::TestDatabase::lease().await;
+        let make_worker = |origin: &str| {
+            Arc::new(PgEventNotificationWorker {
+                pool: database.pool(),
+                database_url: database.url().to_owned(),
+                origin: origin.to_owned(),
+            })
+        };
+        let first = make_worker("first");
+        let second = make_worker("second");
+        let first_local = EventBroadcast::new(32);
+        let second_local = EventBroadcast::new(32);
+        let mut first_rx = first_local.subscribe();
+        let mut second_rx = second_local.subscribe();
+        let first_listener = first.clone();
+        let second_listener = second.clone();
+        let first_task =
+            tokio::spawn(async move { first_listener.listen_once(&first_local).await });
+        let second_task =
+            tokio::spawn(async move { second_listener.listen_once(&second_local).await });
+        let large_body = serde_json::json!({"ciphertext": "x".repeat(32_768)});
+        let exchange = async {
+            let mut received_first = false;
+            let mut received_second = false;
+            while !received_first || !received_second {
+                first
+                    .publish(EventNotification::event(
+                        "from-first".into(),
+                        "cursor".into(),
+                        large_body.clone(),
+                    ))
+                    .await
+                    .unwrap();
+                second
+                    .publish(EventNotification::event(
+                        "from-second".into(),
+                        "cursor".into(),
+                        large_body.clone(),
+                    ))
+                    .await
+                    .unwrap();
+                if !received_first
+                    && let Ok(Ok(notification)) =
+                        tokio::time::timeout(Duration::from_millis(100), first_rx.recv()).await
+                {
+                    assert_eq!(notification.realm_id, "from-second");
+                    let coland_http::state::EventNotificationKind::Event { event_payload, .. } =
+                        notification.kind
+                    else {
+                        panic!("expected event");
+                    };
+                    assert_eq!(event_payload, large_body);
+                    received_first = true;
+                }
+                if !received_second
+                    && let Ok(Ok(notification)) =
+                        tokio::time::timeout(Duration::from_millis(100), second_rx.recv()).await
+                {
+                    assert_eq!(notification.realm_id, "from-first");
+                    let coland_http::state::EventNotificationKind::Event { event_payload, .. } =
+                        notification.kind
+                    else {
+                        panic!("expected event");
+                    };
+                    assert_eq!(event_payload, large_body);
+                    received_second = true;
+                }
+            }
+        };
+        let result = tokio::time::timeout(Duration::from_secs(5), exchange).await;
+        first_task.abort();
+        second_task.abort();
+        result.expect("both independent LISTEN connections must become ready and deliver");
     }
 }

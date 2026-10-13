@@ -466,20 +466,11 @@ impl AuthorityCommitApplication {
     /// Native fixed reply preparation, separate from the final Event UOW.
     pub async fn acquire_native_message_reply_preparation(
         &self,
-        agent: &arkret_wire::AccountId,
-        controller: &arkret_wire::AccountId,
-        caller: &arkret_wire::AccountId,
-        station: &arkret_wire::DidCoreId,
-        source: &arkret_wire::CommittedEventFullView,
-        strand: &arkret_wire::StrandId,
-        input: &coland_storage::AccountContentDeliveryInput,
-        deployment: arkret_models_collaboration::governance::agent_participation::ParticipationBits,
+        request: coland_storage::NativeMessageReplyPreparation<'_>,
     ) -> ServiceResult<Box<dyn coland_storage::AccountContentDeliveryGuard>> {
         Ok(self
             .store()
-            .acquire_native_message_reply_preparation(
-                agent, controller, caller, station, source, strand, input, deployment,
-            )
+            .acquire_native_message_reply_preparation(request)
             .await?)
     }
 

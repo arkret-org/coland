@@ -461,9 +461,7 @@ async fn response(
                     }
                     bytes += line.len(); progress=next; token=next_token;
                     yield Ok(line);
-                    if let Some(guard) = delivery {
-                        if guard.finish().await.is_err() { failed=true; break; }
-                    }
+                    if let Some(guard) = delivery && guard.finish().await.is_err() { failed=true; break; }
                 }
                 if failed { break; }
                 more |= progress[index].head.stream_position + 1 < current_rows[index].next_position;

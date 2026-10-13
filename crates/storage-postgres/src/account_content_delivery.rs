@@ -443,13 +443,15 @@ struct DeliveryClockProof {
     )>,
     native_projection_reads: Vec<crate::morph_projection_reads::NativeTimeProof>,
     native_reply: Option<NativeReplyTimeProof>,
-    reads: Vec<(
-        crate::realm_authorization_cut::RealmAuthorizationCut,
-        Option<arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef>,
-        Vec<arkret_wire::Event>,
-        Vec<(arkret_wire::Event, CapabilityActionId)>,
-    )>,
+    reads: Vec<ContentReadTimeProof>,
 }
+
+type ContentReadTimeProof = (
+    crate::realm_authorization_cut::RealmAuthorizationCut,
+    Option<arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef>,
+    Vec<arkret_wire::Event>,
+    Vec<(arkret_wire::Event, CapabilityActionId)>,
+);
 
 struct NativeReplyTimeProof {
     checked_at: chrono::DateTime<chrono::Utc>,
@@ -998,15 +1000,18 @@ pub(crate) async fn acquire(
 
 pub(crate) async fn acquire_native_message_reply_preparation(
     pool: &crate::PgPool,
-    agent: &AccountId,
-    controller: &AccountId,
-    caller: &AccountId,
-    station: &DidCoreId,
-    source: &arkret_wire::CommittedEventFullView,
-    strand: &arkret_wire::StrandId,
-    input: &coland_storage::AccountContentDeliveryInput,
-    deployment: arkret_models_collaboration::governance::agent_participation::ParticipationBits,
+    request: coland_storage::NativeMessageReplyPreparation<'_>,
 ) -> PersistenceResult<Box<dyn AccountContentDeliveryGuard>> {
+    let coland_storage::NativeMessageReplyPreparation {
+        agent,
+        controller,
+        caller,
+        station,
+        source,
+        strand,
+        input,
+        deployment,
+    } = request;
     source
         .validate_shape()
         .map_err(PersistenceError::database)?;
@@ -2311,7 +2316,7 @@ Ok(())
     })
     .await?;
     crate::boxed_future(|| async {
-        if reply.is_some() {
+        if let Some(reply) = &reply {
             for row in &input.committed_events {
                 let CommittedEventView::Full(full) = row else {
                     return Err(unavailable("native reply body source is withheld"));
@@ -2333,7 +2338,7 @@ Ok(())
                     || current.author != full.event.actor_id
                     || current.created_at != full.event.created_at
                     || current.scope_ref != full.event.scope_ref
-                    || current.strand_id != reply.as_ref().expect("native context").strand.clone()
+                    || current.strand_id != reply.strand.clone()
                     || crate::message_revision_current_results::message_is_redacted(
                         guard.connection(),
                         &full.event.realm_id,
@@ -2348,7 +2353,7 @@ Ok(())
                 require_owned_content_source_in_connection(
                     guard.connection(),
                     &full.event,
-                    reply.as_ref().expect("native context").controller,
+                    reply.controller,
                     account,
                     at,
                     CapabilityActionId::ObjectReadContent,
@@ -2432,16 +2437,15 @@ for realm in &realms {
                 "current owned controller differs from private scope custody",
             ));
         }
-        if let Some((_, details)) = &clock.session_scope {
-            if details.get("controller_principal_id")
+        if let Some((_, details)) = &clock.session_scope
+            && ( details.get("controller_principal_id")
                 != Some(&serde_json::json!(controller_account_id.principal_id))
                 || details.get("agent_key_authorization_ref")
                     != Some(&serde_json::json!(endpoint.authorization_ref.event_id))
-            {
+            ) {
                 return Err(unavailable(
                     "session scope differs from the current controller or key",
                 ));
-            }
         }
         let accountability = sql_query("SELECT value FROM identity_accountability_current_results WHERE subject_id=$1 AND issuer_id=$2 ORDER BY realm_id,scope_set_digest FOR SHARE")
             .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(controller_account_id.principal_id.as_str())
@@ -2636,7 +2640,7 @@ Ok(())
                     target
                         .circle_id
                         .as_ref()
-                        .or_else(|| match &reply.source.event.scope_ref {
+                        .or(match &reply.source.event.scope_ref {
                             arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
                             _ => None,
                         }),

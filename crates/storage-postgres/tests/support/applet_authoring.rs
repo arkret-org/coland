@@ -30,7 +30,6 @@ use coland_storage::{AppletStore as _, AuthorityCommitStore, PersistenceError, P
 use coland_storage_postgres::{PgAppletStore, PgAuthorityCommitStore, PgPool};
 use coland_test_support::AppStateTestExt as _;
 use coland_test_support::pcr_genesis::PcrGenesisFixture;
-use diesel_async::RunQueryDsl as _;
 use ed25519_dalek::SigningKey;
 use salvo::http::StatusCode;
 use salvo::test::{ResponseExt, TestClient};
@@ -117,7 +116,6 @@ impl Fixture {
             .expect("canonical public holder JWK");
         assert_eq!(session_public_key.thumbprint_sha256().unwrap(), jkt);
         let grant = arkret_models_collaboration::session_grants::SessionGrantValidationMetadata {
-            scope_details: None,
             id: arkret_identifiers::SessionGrantId::from_issuance_digest(
                 Sha256::digest(token.as_bytes()).into(),
             ),

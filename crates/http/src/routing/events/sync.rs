@@ -341,16 +341,16 @@ pub(crate) async fn native_message_reply_preparation_guard(
     }
     state
         .authority_commits()
-        .acquire_native_message_reply_preparation(
-            expected_agent,
-            expected_controller,
+        .acquire_native_message_reply_preparation(coland_storage::NativeMessageReplyPreparation {
+            agent: expected_agent,
+            controller: expected_controller,
             caller,
-            &state.service_core_id(),
+            station: &state.service_core_id(),
             source,
             strand,
-            &input,
-            state.config().agent_participation_ceiling,
-        )
+            input: &input,
+            deployment: state.config().agent_participation_ceiling,
+        })
         .await
         .map_err(|_| denied())
 }

@@ -1387,6 +1387,28 @@ pub(crate) async fn freeze_account_realm_window(
                 window.validate().map_err(PersistenceError::database)?;
                 windows.push(window);
             }
+            // Budget the entire atomic detail payload before publishing any
+            // issuance. Coverage repeats the current heads in an initial
+            // baseline; reserve them even on subsequent detail turns.
+            let current =
+                arkret_models_collaboration::sync_frames::current_results::AccountCurrentView {
+                    realm_id: request.realm_id.clone(),
+                    governance_generation: generation,
+                    stream_heads: material.visible_stream_heads.clone(),
+                    entries: material.current_state_entries.clone(),
+                };
+            let payload_bytes = arkret_canonical::canonical_json_bytes(&(
+                &windows,
+                &committed_events,
+                &current,
+                &material.visible_stream_heads,
+            ))
+            .map_err(PersistenceError::database)?;
+            if payload_bytes.len() > request.byte_budget {
+                return Err(
+                    window_rejected("the atomic detail payload exceeds its byte budget").into(),
+                );
+            }
             // Issue the complete signed cut once, after all per-stream basis
             // reservations have been proved in this same transaction.
             if tenure.service_id == request.issuer.as_str() {

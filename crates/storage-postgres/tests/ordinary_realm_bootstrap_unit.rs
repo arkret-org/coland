@@ -2981,6 +2981,45 @@ async fn account_window_carries_same_cut_current_and_reservation_deadline() {
     .unwrap();
     assert_eq!(reserved.expires_at_ms, request.expires_at_ms);
 
+    #[derive(diesel::QueryableByName)]
+    struct Issuances {
+        #[diesel(sql_type = diesel::sql_types::Jsonb)]
+        value: serde_json::Value,
+    }
+    const ISSUANCES: &str = "SELECT jsonb_build_object('snapshots', (SELECT jsonb_agg(to_jsonb(s) ORDER BY snapshot_id) FROM realm_state_snapshots s), 'issuances', (SELECT jsonb_agg(to_jsonb(i) ORDER BY account_id, snapshot_id) FROM realm_state_snapshot_issuances i), 'reservations', (SELECT jsonb_agg(to_jsonb(r) ORDER BY window_cursor, stream_key) FROM realm_state_snapshot_window_reservations r)) AS value";
+    let before = diesel::sql_query(ISSUANCES)
+        .get_result::<Issuances>(&mut conn)
+        .await
+        .unwrap()
+        .value;
+    // History alone fits. The complete current and coverage do not; the
+    // attempted basis reservation must roll back along with the refusal.
+    let rows_budget = arkret_canonical::canonical_json_bytes(&backed.committed_events)
+        .unwrap()
+        .len()
+        + 16;
+    let refused = store
+        .freeze_account_realm_window(
+            &AccountRealmWindowRequest {
+                byte_budget: rows_budget,
+                window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
+                ..request.clone()
+            },
+            &sign,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, coland_storage::PersistenceError::SchemaViolation(ref reason)
+        if reason.contains("atomic detail payload exceeds its byte budget"))
+    );
+    let after = diesel::sql_query(ISSUANCES)
+        .get_result::<Issuances>(&mut conn)
+        .await
+        .unwrap()
+        .value;
+    assert_eq!(before, after);
+
     // A preview-only window still carries the same-cut current: current
     // never depends on the window start.
     let preview = store
@@ -6994,7 +7033,7 @@ async fn circle_create_and_self_join_write_same_cut_current() {
                     circle_id: circle_id.clone(),
                 }]),
                 window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
-                ..request
+                ..request.clone()
             },
             &sign,
         )
@@ -7072,6 +7111,38 @@ async fn circle_create_and_self_join_write_same_cut_current() {
         None,
     );
     uow.commit_event(leave).await.unwrap();
+    let after_revocation = store
+        .freeze_account_realm_window(
+            &coland_storage::AccountRealmWindowRequest {
+                delivered_heads: frozen.current_stream_heads.clone(),
+                window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
+                ..request
+            },
+            &sign,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(after_revocation.additional_windows.is_empty());
+    assert!(
+        after_revocation
+            .current_stream_heads
+            .iter()
+            .all(|head| matches!(head.stream_ref, arkret_wire::CommitStreamRef::Realm { .. }))
+    );
+    assert!(
+        !after_revocation
+            .current_state_entries
+            .iter()
+            .any(|row| matches!(
+                row,
+                arkret_wire::TypedCurrentRow::Value {
+                    selector: arkret_wire::CurrentSelector::Circle { .. }
+                        | arkret_wire::CurrentSelector::CircleMemberState { .. },
+                    ..
+                }
+            ))
+    );
     let after_leave = store
         .committed_event_for_member(
             &create.authority_commit.event.event_id,

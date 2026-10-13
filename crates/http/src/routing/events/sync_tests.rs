@@ -1,5 +1,123 @@
 use super::*;
 
+#[tokio::test]
+async fn account_detail_unavailable_realm_does_not_block_an_independent_window() {
+    use coland_test_support::pcr_genesis::PcrGenesisFixture;
+    use diesel::sql_types::{Jsonb, Text};
+    use diesel_async::RunQueryDsl as _;
+
+    #[derive(diesel::QueryableByName)]
+    struct JsonRow {
+        #[diesel(sql_type = Jsonb)]
+        value: Value,
+    }
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    let pool = database.pool();
+    let mut config = test_config();
+    config.seed_demo_data = false;
+    let state = AppState::new(
+        config,
+        coland_storage_postgres::Db {
+            pool: Some(pool.clone()),
+        },
+    );
+    database.bind_device_inventory_station(state.service_id());
+    let store = state.test_persistence();
+    let genesis = PcrGenesisFixture::new(state.service_did());
+    let device = genesis.admit_founding_device(store.as_ref()).await.unwrap();
+    let account = &genesis.history.account;
+    let mut session = roster_session(&state, account.principal_id.as_str());
+    session.endpoint = coland_services::identity::SessionEndpointState::HumanDevice {
+        device_id: device.device_id,
+    };
+    let mut realms = Vec::new();
+    for _ in 0..2 {
+        realms.push(
+            CommittedRealm::bootstrap(
+                store.as_ref(),
+                account,
+                state.service_verification_method("notary-key").unwrap(),
+            )
+            .await,
+        );
+    }
+    realms.sort_by_key(|realm| realm.head.event.realm_id.clone());
+    let broken = &realms[0].head;
+    let healthy = &realms[1].head;
+    let body: SyncRequestBody = serde_json::from_value(json!({
+        "filter": {"realm_ids": [broken.event.realm_id, healthy.event.realm_id]},
+        "catchup": true,
+    }))
+    .unwrap();
+    let mut conn = pool.get().await.unwrap();
+    let original =
+        diesel::sql_query("SELECT commit_json AS value FROM realm_commits WHERE commit_id=$1")
+            .bind::<Text, _>(broken.commit.commit_id.as_str())
+            .get_result::<JsonRow>(&mut conn)
+            .await
+            .unwrap()
+            .value;
+    diesel::sql_query("UPDATE realm_commits SET commit_json=jsonb_set(commit_json,'{event_ref}','null'::jsonb) WHERE commit_id=$1")
+        .bind::<Text, _>(broken.commit.commit_id.as_str())
+        .execute(&mut conn).await.unwrap();
+    let result =
+        super::build_sync_snapshot(&state, Some(&session), &body, &SyncCursor::default()).await;
+    diesel::sql_query("UPDATE realm_commits SET commit_json=$2 WHERE commit_id=$1")
+        .bind::<Text, _>(broken.commit.commit_id.as_str())
+        .bind::<Jsonb, _>(original)
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    let frame = result.expect("one unavailable Realm must not starve another");
+    frame.validate().unwrap();
+    let entries = &frame.realms.as_ref().unwrap().entries;
+    let unavailable = &entries[broken.event.realm_id.as_str()];
+    assert_eq!(unavailable.unavailable.as_ref().unwrap().error_code,
+        arkret_models_collaboration::sync_frames::demand_sync::RealmDetailErrorCode::TemporarilyUnavailable);
+    assert!(unavailable.current.is_none());
+    assert!(unavailable.baseline.is_none());
+    assert!(unavailable.streams.is_none());
+    let current = entries[healthy.event.realm_id.as_str()]
+        .current
+        .as_ref()
+        .unwrap();
+    assert_eq!(current.realm_id, healthy.event.realm_id);
+    assert!(!current.entries.is_empty());
+    let token = frame.cursor.unwrap();
+    let filter = sync_filter_value(body.filter.as_ref());
+    let after = super::cursor::parse_account_cursor(
+        &token,
+        &state,
+        Some(&session),
+        filter.as_ref(),
+        Utc::now().timestamp_millis(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !after
+            .detail_positions
+            .contains_key(broken.event.realm_id.as_str())
+    );
+    assert!(
+        after
+            .detail_positions
+            .contains_key(healthy.event.realm_id.as_str())
+    );
+    let mut resumed = body;
+    resumed.after = Some(token);
+    let restored = super::build_sync_snapshot(&state, Some(&session), &resumed, &after)
+        .await
+        .unwrap();
+    restored.validate().unwrap();
+    assert!(
+        restored.realms.unwrap().entries[broken.event.realm_id.as_str()]
+            .current
+            .is_some()
+    );
+}
+
 async fn build_sync_snapshot(
     state: &AppState,
     session: Option<&SessionIdentityState>,

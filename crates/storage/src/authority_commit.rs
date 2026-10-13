@@ -246,8 +246,9 @@ pub struct AccountRealmWindowRequest {
     pub window_cursor: String,
     pub expires_at_ms: i64,
     pub now_ms: i64,
-    /// Canonical bytes the delivered rows may occupy. The window is atomic:
-    /// rows that do not fit fail the freeze instead of being truncated.
+    /// Canonical bytes available for all windows, committed rows, typed current
+    /// and coverage heads. The caller reserves the remaining frame envelope.
+    /// A payload that does not fit fails the entire freeze without truncation.
     pub byte_budget: usize,
     /// The Realm-stream head the Account cursor last delivered. When it is
     /// still an accepted ancestor of the head within `window_limit`, the

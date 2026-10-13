@@ -65,9 +65,9 @@ async fn request_review(
                 != arkret_canonical::canonical_sha256(&body)
                     .map_err(|_| AppError::schema_violation("invalid review request"))?
             {
-                return Err(AppError::new(
-                    arkret_wire::ErrorCode::DuplicateConflict,
-                    "review id is bound to different immutable intent",
+                return Err(crate::app_error!(
+                    DuplicateConflict,
+                    "review id is bound to different immutable intent"
                 ));
             }
             return Ok(ManagementReviewResponse::Outcome(outcome));

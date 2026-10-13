@@ -6802,7 +6802,6 @@ async fn management_review_atomic_join_scenario(
         }
     }
     if withdraw_approver {
-        use coland_storage::ResolutionStoreRegistry as _;
         let arkret_models_identity::principal_registration_anchor::PrincipalRegistrationAnchor::WebvhRegistration { log_entries, .. } = &approver.history.registration_anchor;
         let mut entries = log_entries
             .iter()
@@ -10344,7 +10343,7 @@ impl Drop for OwnedTlsServer {
 struct OwnedWebSocketFixture {
     socket: Option<OwnedTlsWebSocket>,
     server: OwnedTlsServer,
-    directory: OwnedCertificateDirectory,
+    _directory: OwnedCertificateDirectory,
     client_pid: u32,
     // A shared control shape is decoded only through this actual Open/Opened
     // channel binding, never through serde's untagged variant order.
@@ -10487,7 +10486,7 @@ async fn owned_consumer_ws_connect(http: &OwnedConsumerHttpFixture) -> OwnedWebS
     OwnedWebSocketFixture {
         socket: Some(socket),
         server,
-        directory,
+        _directory: directory,
         client_pid: pid,
         channels: std::collections::BTreeMap::new(),
     }
@@ -12440,14 +12439,16 @@ fn native_reply_preparation_step(
         fixture_step(async move {
             PgAuthorityCommitStore { pool }
                 .acquire_native_message_reply_preparation(
-                    &agent,
-                    &controller,
-                    &caller,
-                    &station,
-                    &source,
-                    &strand,
-                    &input,
-                    deployment,
+                    coland_storage::NativeMessageReplyPreparation {
+                        agent: &agent,
+                        controller: &controller,
+                        caller: &caller,
+                        station: &station,
+                        source: &source,
+                        strand: &strand,
+                        input: &input,
+                        deployment,
+                    },
                 )
                 .await
         })

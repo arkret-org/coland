@@ -644,13 +644,14 @@ async fn joined_holder_terminal_real_fanout_signed_http_and_atomic_fence() {
         before["federation_outbox"].as_array().unwrap().is_empty(),
         "replication never fans out again"
     );
+    // Use a new transport key to test the held Commit's semantic duplicate,
+    // independently of the dispatch receipt's original outcome.
+    let duplicate_key = format!("{key}:duplicate-check");
     let (status, replay) = Box::pin(send_replication(
         &source.state,
         &receiver.state,
         &body,
-        // A fresh request tests exact replica duplicate detection; the
-        // original key may replay its first Stored result (federation section 4).
-        "terminal-exact-original-new-request",
+        &duplicate_key,
         false,
     ))
     .await;

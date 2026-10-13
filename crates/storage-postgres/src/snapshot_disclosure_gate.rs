@@ -802,8 +802,9 @@ pub(crate) async fn account_snapshot_material_in_connection(
         {
             facts.caller_floor = Some(owner_floor.clone());
         }
-        for (agent_floors, owner_floors) in [(&mut facts.circle_floors, &owner_facts.circle_floors)]
         {
+            let (agent_floors, owner_floors) =
+                (&mut facts.circle_floors, &owner_facts.circle_floors);
             agent_floors.retain(|id, floor| {
                 let Some(owner_floor) = owner_floors.get(id) else {
                     return false;

@@ -26,6 +26,9 @@ docker buildx build `
     --build-context arkret-rust-sdk=../arkret-rust-sdk `
     --build-context arkret-spec=../arkret-spec `
     --build-context floria=../floria `
+    --build-context garth=../garth `
+    --build-context bridges=../bridges `
+    --build-context savfox=../../savfox-ai/savfox `
     .
 
 syft $ImageTag -o "spdx-json=$sbomPath"

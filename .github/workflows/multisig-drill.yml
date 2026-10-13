@@ -68,26 +68,11 @@ jobs:
       - name: Checkout coland
         uses: actions/checkout@v6
         with:
-          path: coland
+          path: arkret-org/coland
 
-      - name: Checkout Arkret Rust SDK
-        uses: actions/checkout@v6
+      - name: Checkout workspace dependencies
+        uses: ./arkret-org/coland/.github/actions/checkout-workspace
         with:
-          repository: ${{ github.repository_owner }}/arkret-rust-sdk
-          path: arkret-rust-sdk
-
-      - name: Checkout Floria contracts workspace
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/floria
-          path: floria
-          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
-
-      - name: Checkout Arkret Spec
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/arkret-spec
-          path: arkret-spec
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Install Rust
@@ -96,7 +81,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: coland -> target
+          workspaces: arkret-org/coland -> target
 
       - name: Install drill prerequisites
         run: |
@@ -118,7 +103,7 @@ jobs:
           exit 1
 
       - name: Build coland + coland-keystore-snapshot
-        working-directory: coland
+        working-directory: arkret-org/coland
         run: |
           set -euxo pipefail
           cargo build --locked --bin coland --bin coland-keystore-snapshot
@@ -143,7 +128,7 @@ jobs:
           : > "$GITHUB_WORKSPACE/_drill/config.env"
 
       - name: Boot coland once to apply migrations
-        working-directory: coland
+        working-directory: arkret-org/coland
         run: |
           set -euxo pipefail
           "$COLAND_DRILL_BIN" --config "$GITHUB_WORKSPACE/_drill/config.env" \
@@ -178,7 +163,7 @@ jobs:
           echo "COLAND_SERVICE_IDENTITY_BUNDLE=${BUNDLES[0]}" >> "$GITHUB_ENV"
 
       - name: Admit actual two-of-three approval fixture
-        working-directory: coland
+        working-directory: arkret-org/coland
         run: |
           set -euxo pipefail
           # This existing real-PG case checks signed historical approval
@@ -227,7 +212,7 @@ jobs:
           echo "DATABASE_URL=$FIXTURE_URL" >> "$GITHUB_ENV"
 
       - name: Run backup-drill.sh
-        working-directory: coland
+        working-directory: arkret-org/coland
         run: |
           set -euxo pipefail
           bash scripts/backup-drill.sh
@@ -262,7 +247,7 @@ jobs:
           done
 
       - name: Run restore-drill.sh
-        working-directory: coland
+        working-directory: arkret-org/coland
         run: |
           set -euxo pipefail
           bash scripts/restore-drill.sh "$DRILL_TARBALL" | tee "$GITHUB_WORKSPACE/_drill/logs/restore-drill.log"
@@ -282,7 +267,7 @@ jobs:
           echo "[approval-drill] complete accepted rows restored byte-for-byte"
 
       - name: KeyStore snapshot export/import roundtrip
-        working-directory: coland
+        working-directory: arkret-org/coland
         run: |
           set -euxo pipefail
           mkdir -p "$GITHUB_WORKSPACE/_drill"

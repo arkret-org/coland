@@ -8,7 +8,7 @@ use arkret_wire::{
 };
 use chrono::{DateTime, Utc};
 use coland_storage::{ApprovalHistoricalMethod, PersistenceError, PersistenceResult};
-use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
+use diesel::sql_types::{Jsonb, Text, Timestamptz};
 use diesel::{OptionalExtension, QueryableByName, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::{Value, json};

@@ -1024,9 +1024,7 @@ async fn connection_inner(
                         return WebSocketCloseCode::PolicyViolation;
                     }
                     if let Err(code)=send_unmetered(socket,&frame).await{return code;}
-                    if let Some(guard)=delivery {
-                        if guard.finish().await.is_err(){return WebSocketCloseCode::InternalError;}
-                    }
+                    if let Some(guard) = delivery && guard.finish().await.is_err() {return WebSocketCloseCode::InternalError;}
                     if ending {
                         channels.remove(&channel_id);schedule.retain(|id|id!=&channel_id);
                         if let Err(code)=send(socket,&mut outgoing,&WebSocketServerFrame::Closed {channel_id,reason:WebSocketClosedReason::Completed}).await{return code;}

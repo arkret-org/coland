@@ -34,27 +34,11 @@ jobs:
       - name: Checkout coland
         uses: actions/checkout@v6
         with:
-          path: coland
+          path: arkret-org/coland
 
-      - name: Checkout Arkret Rust SDK
-        uses: actions/checkout@v6
+      - name: Checkout workspace dependencies
+        uses: ./arkret-org/coland/.github/actions/checkout-workspace
         with:
-          repository: ${{ github.repository_owner }}/arkret-rust-sdk
-          path: arkret-rust-sdk
-          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
-
-      - name: Checkout Floria contracts workspace
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/floria
-          path: floria
-          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
-
-      - name: Checkout Arkret Spec
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/arkret-spec
-          path: arkret-spec
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Set up Docker Buildx
@@ -69,12 +53,15 @@ jobs:
       - name: Build image for validation
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
-          context: coland
-          file: coland/Dockerfile
+          context: arkret-org/coland
+          file: arkret-org/coland/Dockerfile
           build-contexts: |
-            arkret-rust-sdk=arkret-rust-sdk
-            arkret-spec=arkret-spec
-            floria=floria
+            arkret-rust-sdk=arkret-org/arkret-rust-sdk
+            arkret-spec=arkret-org/arkret-spec
+            floria=arkret-org/floria
+            garth=arkret-org/garth
+            bridges=arkret-org/bridges
+            savfox=savfox-ai/savfox
           platforms: linux/${{ matrix.arch }}
           pull: true
           load: true
@@ -109,12 +96,15 @@ jobs:
         id: publish
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
-          context: coland
-          file: coland/Dockerfile
+          context: arkret-org/coland
+          file: arkret-org/coland/Dockerfile
           build-contexts: |
-            arkret-rust-sdk=arkret-rust-sdk
-            arkret-spec=arkret-spec
-            floria=floria
+            arkret-rust-sdk=arkret-org/arkret-rust-sdk
+            arkret-spec=arkret-org/arkret-spec
+            floria=arkret-org/floria
+            garth=arkret-org/garth
+            bridges=arkret-org/bridges
+            savfox=savfox-ai/savfox
           platforms: linux/${{ matrix.arch }}
           outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
           labels: |

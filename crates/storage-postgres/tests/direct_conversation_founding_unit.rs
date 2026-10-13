@@ -437,7 +437,7 @@ async fn accept_contact(
     );
     let contact_round_id = evidence.contact_round_id.clone();
     PgContactStore { pool: pool.clone() }
-        .put(&coland_domain::identity::ContactRecord {
+        .put(&coland_storage::ContactRecord {
             requester_id: ActorId::account(requester.clone()),
             target_id: ActorId::account(responder.clone()),
             contact_round_id: Some(contact_round_id.clone()),
@@ -4081,14 +4081,12 @@ async fn participant_authority_scenario() {
             let id = strand.id.as_ref().unwrap();
             let cached = &state.strands[id.as_str()];
             let lifecycle = match strand.state.as_ref().unwrap() {
-                arkret_wire::ObjectState::Active => {
-                    coland_domain::reducer::ObjectLifecycleState::Active
-                }
+                arkret_wire::ObjectState::Active => coland_storage::ObjectLifecycleState::Active,
                 arkret_wire::ObjectState::Archived => {
-                    coland_domain::reducer::ObjectLifecycleState::Archived
+                    coland_storage::ObjectLifecycleState::Archived
                 }
                 arkret_wire::ObjectState::Redacted => {
-                    coland_domain::reducer::ObjectLifecycleState::Redacted
+                    coland_storage::ObjectLifecycleState::Redacted
                 }
             };
             assert_eq!(cached.state, lifecycle);

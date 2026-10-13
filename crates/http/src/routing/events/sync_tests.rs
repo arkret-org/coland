@@ -369,12 +369,13 @@ async fn global_storage_failure_returns_503_without_reset_or_new_delivery_materi
     let refused = super::build_sync_snapshot(&state, Some(&session), &body, &after)
         .await
         .expect_err("a changed stored deadline cannot authorize a baseline reset");
-    // client-sync section 12.2: a stored issuance-time mismatch is an
-    // integrity refusal, distinct from the real storage failure above.
-    assert_eq!(refused.status, 400);
     assert_eq!(
         refused.error_code(),
         Some(arkret_wire::ErrorCode::CursorIntegrityInvalid)
+    );
+    assert_eq!(
+        refused.status,
+        arkret_wire::ErrorCode::CursorIntegrityInvalid.http_status()
     );
     let mut response = Response::new();
     super::subscribe::account_response(
@@ -387,6 +388,7 @@ async fn global_storage_failure_returns_503_without_reset_or_new_delivery_materi
         None,
     )
     .await;
+    assert_eq!(response.status_code, Some(StatusCode::BAD_REQUEST));
     let problem: arkret_wire::Problem = response.take_json().await.unwrap();
     assert_eq!(
         problem.error_code(),

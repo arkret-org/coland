@@ -841,6 +841,10 @@ pub(crate) async fn owned_bootstrap_in_connection(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bootstrap verification binds independent controller, inception, authorization, scope and time evidence."
+)]
 fn validate_owned_bootstrap_history(
     history: &arkret_identity::VerifiedDidWebvhLog,
     initial: &arkret_models_identity::ResolutionCommitment,

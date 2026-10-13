@@ -200,7 +200,10 @@ and rollout-only switches that should be managed deliberately.
 | `COLAND_ADMIN_MAX_PAGE_LIMIT` | `1000` | Maximum admin API page size; clamped above the default. |
 | `COLAND_AGENT_PARTICIPATION_CEILING` | all five bits `true` | Closed JSON object with required boolean fields `reply_message`, `reaction_add`, `reaction_remove`, `accept_third_party_mention`, and `act_on_behalf`. This deployment ceiling only narrows participation; it does not grant permissions or override management restrictions. Invalid JSON or unknown fields fail startup. |
 | `COLAND_APPLET_TRANSACTION_INFLIGHT_CAPACITY` | `64` | Maximum concurrent applet transactions retained in memory. |
+| `COLAND_ARKRET_RUNTIME_HOME` | unset | Absolute path to an existing normally paired native Agent runtime home. Enables the embedded Savfox public reply consumer; unset leaves the consumer inactive. Empty or relative paths fail startup. |
+| `COLAND_CONFORMANCE_CURSOR_EMISSION_PAUSE_FILE` | unset | Development-only Account WebSocket cursor delivery probe path for builds with `conformance-harness`. The file selects input cursor digests; a sibling `.pause` file pauses delivery for at most 15 seconds and `.reached.json` records the pending frame. Unset disables the probe; production mode ignores it. |
 | `COLAND_CONFORMANCE_SIGNAL_EMISSION_PAUSE_FILE` | unset | Development-only Signal frame scheduling probe path for builds with `conformance-harness`. Unset disables the probe; production mode ignores it. |
+| `COLAND_THIRD_PARTY_INVITE_PROVIDER_ENABLED` | `false` | Enable the third-party invite provider backed by `COLAND_ACCOUNT_AUTHORITY_URL`. Enabling without that authority URL fails startup. |
 | `COLAND_DB_POOL_ACQUIRE_TIMEOUT_SECS` | deadpool default | Positive database-pool acquisition timeout; unset means no explicit wait timeout. |
 | `COLAND_DB_POOL_MAX_SIZE` | CPU count × 4 | Positive database-pool size override. |
 | `COLAND_DID_RESOLVER_ALLOW_METHODS` | `web,key,uuid` | Comma-separated DID methods accepted by outbound DID resolution. |
@@ -545,6 +548,27 @@ load balancer. coland's in-process limiter remains useful as a last-resort
 guard, but it is not a distributed budget.
 
 ## 8. Local supply-chain artifacts
+
+The CI, release and local image builds use the same dependency layout:
+`arkret-org/{coland,arkret-rust-sdk,arkret-spec,floria,garth,bridges}` alongside
+`savfox-ai/savfox`. Cargo paths are checked out in that layout; image builds
+provide all six dependency repositories as named BuildKit contexts.
+
+The supply-chain gate rejects reported vulnerabilities. `deny.toml` records
+four reviewed INFO Unmaintained notices retained by upstream dependencies:
+
+| Advisory | Dependency | Review scope |
+| --- | --- | --- |
+| [RUSTSEC-2024-0388](https://rustsec.org/advisories/RUSTSEC-2024-0388.html) | `derivative` via Starlark | Compile-time derive macro; no patched upstream release. |
+| [RUSTSEC-2024-0436](https://rustsec.org/advisories/RUSTSEC-2024-0436.html) | `paste` via Starlark | Compile-time token macro; no patched upstream release. |
+| [RUSTSEC-2025-0057](https://rustsec.org/advisories/RUSTSEC-2025-0057.html) | `fxhash` via Starlark | Internal evaluator maps; the notice reports maintenance status. |
+| [RUSTSEC-2026-0173](https://rustsec.org/advisories/RUSTSEC-2026-0173.html) | `proc-macro-error2` via Teloxide/Aquamarine | Documentation macro diagnostics; no patched upstream release. |
+
+These dependencies remain in the reviewed graph. Other advisories, including
+future vulnerability reports for these crates, remain subject to the gate.
+Revisit the exceptions when the owning upstream dependencies change. Starlark
+0.14.2 pins BLAKE3 1.8.2 and cannot resolve alongside the SDK's BLAKE3 1.8.7
+requirement; the compatible Starlark/allocative family stays pinned.
 
 Generate local image metadata and an SPDX JSON SBOM without pushing an image or
 creating a release tag:

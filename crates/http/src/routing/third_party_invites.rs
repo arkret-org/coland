@@ -50,9 +50,9 @@ pub(crate) async fn reject_url_credentials(
         return;
     }
     let error = if suffix == "present" || suffix.starts_with("present/") {
-        AppError::new(
-            ErrorCode::FailedPrecondition,
-            "invitation credentials belong only in the request body",
+        crate::app_error!(
+            FailedPrecondition,
+            "invitation credentials belong only in the request body"
         )
         .with_reason_code(arkret_wire::ReasonCode::THIRD_PARTY_INVITE_TOKEN_IN_QUERY)
     } else {
@@ -73,9 +73,9 @@ where
     ResponseBody: serde::de::DeserializeOwned,
 {
     if !state.config().third_party_invite_provider_enabled {
-        return Err(AppError::new(
-            ErrorCode::UnsupportedFeature,
-            "invitation provider is unavailable",
+        return Err(crate::app_error!(
+            UnsupportedFeature,
+            "invitation provider is unavailable"
         ));
     }
     let base = state
@@ -139,38 +139,36 @@ where
     }
     // No arbitrary upstream detail, instance, URL or private extension crosses
     // this public boundary. Only registry-checked classification survives.
-    let mut error = AppError::new(code, "third-party invite request could not be completed");
+    let mut error =
+        AppError::from_rejection(code, "third-party invite request could not be completed");
     if let Some(reason) = problem
         .extensions
         .get("reason_code")
         .and_then(serde_json::Value::as_str)
+        && arkret_wire::ReasonCode::is_registered(reason)
     {
-        if arkret_wire::ReasonCode::is_registered(reason) {
-            error = error.with_reason_code(reason);
-        }
+        error = error.with_reason_code(reason);
     }
     if matches!(
         code,
         ErrorCode::RateLimited | ErrorCode::TemporarilyUnavailable
-    ) {
-        if let Some(delay) = problem
-            .extensions
-            .get("retry_after_ms")
-            .and_then(serde_json::Value::as_u64)
-        {
-            error.wire_details = Some(Box::new(std::collections::BTreeMap::from([(
-                "retry_after_ms".into(),
-                serde_json::json!(delay),
-            )])));
-        }
+    ) && let Some(delay) = problem
+        .extensions
+        .get("retry_after_ms")
+        .and_then(serde_json::Value::as_u64)
+    {
+        error.wire_details = Some(Box::new(std::collections::BTreeMap::from([(
+            "retry_after_ms".into(),
+            serde_json::json!(delay),
+        )])));
     }
     Err(error)
 }
 
 fn unavailable() -> AppError {
-    AppError::new(
-        ErrorCode::TemporarilyUnavailable,
-        "invitation provider is temporarily unavailable",
+    crate::app_error!(
+        TemporarilyUnavailable,
+        "invitation provider is temporarily unavailable"
     )
 }
 
@@ -378,9 +376,11 @@ mod tests {
         assert_eq!(started.elapsed(), Duration::ZERO);
         for code in [ErrorCode::RateLimited, ErrorCode::TemporarilyUnavailable] {
             let started = tokio::time::Instant::now();
-            let result =
-                finish_present_at_deadline::<()>(started, Err(AppError::new(code, "controlled")))
-                    .await;
+            let result = finish_present_at_deadline::<()>(
+                started,
+                Err(AppError::from_rejection(code, "controlled")),
+            )
+            .await;
             assert_eq!(result.unwrap_err().code, code);
             assert_eq!(started.elapsed(), Duration::ZERO);
         }
@@ -469,27 +469,14 @@ mod tests {
                 &doc["paths"][format!("/_arkret/open/third-party-invites/{suffix}")]["post"];
             let request = &operation["requestBody"]["content"]["application/json"]["schema"];
             let response = &operation["responses"]["200"]["content"]["application/json"]["schema"];
-            assert!(
-                request["$ref"]
-                    .as_str()
-                    .is_some_and(|reference| reference.ends_with(request_model)),
-                "{suffix}: {request}"
-            );
-            assert!(
-                response["$ref"]
-                    .as_str()
-                    .is_some_and(|reference| reference.ends_with(response_model)),
-                "{suffix}: {response}"
-            );
-            for schema in [request, response] {
-                let key = schema["$ref"]
-                    .as_str()
-                    .unwrap()
-                    .strip_prefix("#/components/schemas/")
-                    .unwrap();
+            for (schema, model) in [(request, request_model), (response, response_model)] {
+                let reference = schema["$ref"].as_str().expect("SDK model reference");
+                assert!(reference.ends_with(model), "{suffix}: {schema}");
+                let pointer = reference.strip_prefix('#').expect("local schema reference");
                 assert!(
-                    doc["components"]["schemas"][key].is_object(),
-                    "unresolved {key}"
+                    doc.pointer(pointer)
+                        .is_some_and(serde_json::Value::is_object),
+                    "unresolved {reference}"
                 );
             }
         }
@@ -504,7 +491,8 @@ mod tests {
                     .as_object()
                     .unwrap()
                     .iter()
-                    .any(|(name, schema)| name.ends_with(nested) && schema.is_object()),
+                    .any(|(name, schema)| name.rsplit('.').next() == Some(nested)
+                        && schema.is_object()),
                 "missing {nested}"
             );
         }

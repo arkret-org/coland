@@ -748,7 +748,7 @@ async fn policy_exact_read(
         } => ExactCurrentResultsReadOutcome::Present {
             realm_id: request.realm_id.clone(),
             governance_generation: generation,
-            effective_stream_head: head,
+            effective_stream_head: *head,
             entry: ExactCurrentResultEntry::Policy(PolicyExactCurrentRow {
                 selector: selector.clone(),
                 source_stream_ref: source,

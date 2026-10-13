@@ -2596,17 +2596,10 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
 
     async fn acquire_native_message_reply_preparation(
         &self,
-        agent: &arkret_wire::AccountId,
-        controller: &arkret_wire::AccountId,
-        caller: &arkret_wire::AccountId,
-        station: &arkret_wire::DidCoreId,
-        source: &arkret_wire::CommittedEventFullView,
-        strand: &arkret_wire::StrandId,
-        input: &coland_storage::AccountContentDeliveryInput,
-        deployment: arkret_models_collaboration::governance::agent_participation::ParticipationBits,
+        request: coland_storage::NativeMessageReplyPreparation<'_>,
     ) -> PersistenceResult<Box<dyn coland_storage::AccountContentDeliveryGuard>> {
         crate::account_content_delivery::acquire_native_message_reply_preparation(
-            &self.pool, agent, controller, caller, station, source, strand, input, deployment,
+            &self.pool, request,
         )
         .await
     }

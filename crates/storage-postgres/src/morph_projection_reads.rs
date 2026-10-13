@@ -10,8 +10,9 @@ use arkret_wire::{
     ActorId, CommitStreamHead, CommitStreamRef, CommittedEventFullView, DidCoreId, EventKind,
     RealmId,
 };
-use coland_domain::reducer::{CommitStreamProjection, ProjectionState, ServerHlc};
-use coland_storage::{PersistenceError, PersistenceResult};
+use coland_storage::{
+    CommitStreamProjection, PersistenceError, PersistenceResult, ProjectionState, ServerHlc,
+};
 use diesel::sql_types::{BigInt, Bool, Jsonb, Nullable, Text, Timestamptz};
 use diesel::{OptionalExtension as _, QueryableByName, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
@@ -447,12 +448,7 @@ fn reduce_streams(
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|target| target.starts_with("ak:morph:"));
         let effect = state.apply(&operation, &clock);
-        if relevant
-            && matches!(
-                effect,
-                coland_domain::reducer::ProjectionEffect::Rejected { .. }
-            )
-        {
+        if relevant && matches!(effect, coland_storage::ProjectionEffect::Rejected { .. }) {
             return Err(unavailable(
                 "accepted Morph scaffold could not be reduced from complete originals",
             ));
@@ -512,7 +508,7 @@ fn field_paths(value: &serde_json::Value) -> Vec<String> {
 }
 
 fn fact_for_morph(
-    morph: &coland_domain::reducer::MorphProjection,
+    morph: &coland_storage::MorphProjection,
     value: &serde_json::Value,
 ) -> PersistenceResult<NativeReadFact> {
     let realm: RealmId = morph.realm_id.parse().map_err(unavailable)?;
@@ -596,9 +592,9 @@ async fn visible(
 }
 
 fn morph_row(
-    morph: &coland_domain::reducer::MorphProjection,
+    morph: &coland_storage::MorphProjection,
 ) -> PersistenceResult<arkret_models_collaboration::objects::query_projection::ProjectionMorphRow> {
-    use coland_domain::reducer::ObjectLifecycleState;
+    use coland_storage::ObjectLifecycleState;
     let row = arkret_models_collaboration::objects::query_projection::ProjectionMorphRow {
         morph_id: morph.morph_id.parse().map_err(unavailable)?,
         realm_id: morph.realm_id.parse().map_err(unavailable)?,
@@ -774,8 +770,8 @@ pub(crate) async fn document_in_connection(
             "encrypted document plaintext is not an observable native current fact",
         ));
     }
-    let body = coland_domain::reducer::morph_document_body(&morph.fields)
-        .unwrap_or(serde_json::Value::Null);
+    let body =
+        coland_storage::morph_document_body(&morph.fields).unwrap_or(serde_json::Value::Null);
     let document =
         arkret_models_collaboration::objects::query_projection::DocumentMorphProjection {
             morph_id: morph_id.clone(),
@@ -917,7 +913,7 @@ fn reference_fact(
 async fn relations_for_document(
     conn: &mut AsyncPgConnection,
     material: &NativeMaterial,
-    morph: &coland_domain::reducer::MorphProjection,
+    morph: &coland_storage::MorphProjection,
     actor: &ActorId,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<(
@@ -1064,7 +1060,7 @@ fn body_text_len(body: &serde_json::Value) -> usize {
 async fn comments_for_document(
     conn: &mut AsyncPgConnection,
     material: &NativeMaterial,
-    morph: &coland_domain::reducer::MorphProjection,
+    morph: &coland_storage::MorphProjection,
     body: &serde_json::Value,
     actor: &ActorId,
     at: chrono::DateTime<chrono::Utc>,

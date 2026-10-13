@@ -27,8 +27,8 @@ use super::realm_allows_plaintext_service_for_data_class;
 use super::validate_space_id;
 use super::{
     authenticated_session, is_realm_deleted, now, query_param, realm_discoverability,
-    realm_event_visible_to_session, realm_history_access, realm_id_accessible,
-    realm_state_snapshot_manifest_for_realm, render_error, sha256_hex, validate_did,
+    realm_event_visible_to_session, realm_id_accessible, realm_state_snapshot_manifest_for_realm,
+    render_error, sha256_hex, validate_did,
 };
 
 pub fn router() -> Router {

@@ -924,23 +924,33 @@ impl RealmAuthorizationCut {
         let producer = event.actual_signer();
         if !self.is_direct_conversation()
             && producer != &self.actor
-            && let Some(producer_controller) =
-                owned_controller_in_connection(conn, &self.realm_id, producer, operation.at).await?
+            && let Some(producer_controller) = Box::pin(owned_controller_in_connection(
+                conn,
+                &self.realm_id,
+                producer,
+                operation.at,
+            ))
+            .await?
         {
             if producer_controller != self.actor {
                 return Err(capability_denied(
                     "Agent producer is not attributed to its current controller",
                 ));
             }
-            let producer_cut = Self::read(conn, &self.realm_id, producer).await?;
+            let producer_cut = Box::pin(Self::read(conn, &self.realm_id, producer)).await?;
             producer_cut.require_governed_member(&event.kind)?;
             let producer_operation = AuthorizationOperation {
                 actor: producer,
                 ..*operation
             };
-            let source =
-                owned_source_in_connection(conn, &self.realm_id, producer, operation.at, true)
-                    .await?;
+            let source = Box::pin(owned_source_in_connection(
+                conn,
+                &self.realm_id,
+                producer,
+                operation.at,
+                true,
+            ))
+            .await?;
             if evaluate_grants(
                 &producer_operation,
                 producer_cut
@@ -953,17 +963,19 @@ impl RealmAuthorizationCut {
                     "current Agent producer sources refuse attributed execution",
                 ));
             }
-            let permitted = crate::agent_management_admission::executable_actions_in_connection(
-                conn,
-                &self.realm_id,
-                producer_controller.as_account_id().ok_or_else(|| {
-                    capability_denied("Agent producer controller is not an account")
-                })?,
-                producer
-                    .as_account_id()
-                    .ok_or_else(|| capability_denied("Agent producer is not an account"))?,
-                &producer_operation,
-                event,
+            let permitted = Box::pin(
+                crate::agent_management_admission::executable_actions_in_connection(
+                    conn,
+                    &self.realm_id,
+                    producer_controller.as_account_id().ok_or_else(|| {
+                        capability_denied("Agent producer controller is not an account")
+                    })?,
+                    producer
+                        .as_account_id()
+                        .ok_or_else(|| capability_denied("Agent producer is not an account"))?,
+                    &producer_operation,
+                    event,
+                ),
             )
             .await?;
             managed_actions = Some(

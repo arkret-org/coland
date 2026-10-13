@@ -261,6 +261,14 @@ pub(super) async fn fresh_directory_device_evidence(
     state: &AppState,
     event: &Event,
 ) -> ServiceResult<Option<AccountDeviceSignerEvidence>> {
+    prepare_directory_device_evidence(state, event, true).await
+}
+
+async fn prepare_directory_device_evidence(
+    state: &AppState,
+    event: &Event,
+    retain: bool,
+) -> ServiceResult<Option<AccountDeviceSignerEvidence>> {
     let Some(producer) = event.human_device_producer().map_err(wire_refusal)? else {
         return Ok(None);
     };
@@ -292,18 +300,30 @@ pub(super) async fn fresh_directory_device_evidence(
         )
         .await
         .map_err(|error| temporarily_unavailable(format!("device directory: {error}")))?;
-    let issued = crate::routing::identity::keys::issue_current_account_device_signer_evidence(
-        state,
-        &producer.account_id,
-        &producer.device_id,
-        &facet,
-    )
-    .await
+    let issued = if retain {
+        crate::routing::identity::keys::issue_current_account_device_signer_evidence(
+            state,
+            &producer.account_id,
+            &producer.device_id,
+            &facet,
+        )
+        .await
+        .map(|value| value.map(|(evidence, _)| evidence))
+    } else {
+        crate::routing::identity::keys::prepare_current_account_device_signer_evidence(
+            state,
+            &producer.account_id,
+            &producer.device_id,
+            &facet,
+        )
+        .await
+        .map(|value| value.map(|(evidence, _)| evidence))
+    }
     .map_err(|error| match error.conflict_code() {
         Some(_) => error,
         None => temporarily_unavailable(format!("producer device evidence: {error}")),
     })?;
-    let (evidence, _) = issued.ok_or_else(|| {
+    let evidence = issued.ok_or_else(|| {
         temporarily_unavailable("current producer device material is unavailable")
     })?;
     Ok(Some(evidence))
@@ -1247,17 +1267,30 @@ pub(super) async fn prepare_control_source(
             | arkret_wire::EventKind::SelfAgentPause
             | arkret_wire::EventKind::SelfAgentResume
             | arkret_wire::EventKind::SelfAgentDeactivate
-    ) || (event.kind == arkret_wire::EventKind::RealmCreate
-        && event
-            .payload
-            .get("object")
-            .and_then(|v| v.get("purpose"))
-            .and_then(serde_json::Value::as_str)
-            == Some("agent_control"));
+    ) || (matches!(
+        event.kind,
+        arkret_wire::EventKind::ProfileCreate | arkret_wire::EventKind::ProfileUpdate
+    ) && event
+        .executed_by
+        .as_ref()
+        .is_some_and(|actor| actor.as_account_id().is_some()))
+        || (event.kind == arkret_wire::EventKind::RealmCreate
+            && event
+                .payload
+                .get("object")
+                .and_then(|v| v.get("purpose"))
+                .and_then(serde_json::Value::as_str)
+                == Some("agent_control"));
     if !relevant {
         return Ok(None);
     }
-    let dependency = if let Some(root) = fresh_directory_device_evidence(state, event).await? {
+    let transactional_profile = matches!(
+        event.kind,
+        arkret_wire::EventKind::ProfileCreate | arkret_wire::EventKind::ProfileUpdate
+    );
+    let dependency = if let Some(root) =
+        prepare_directory_device_evidence(state, event, !transactional_profile).await?
+    {
         arkret_models_identity::AgentSignerDependency::AccountDevice {
             signer_resolution_evidence_ref: root.signer_evidence_ref().map_err(wire_refusal)?,
             account_device_signer_evidence: root,

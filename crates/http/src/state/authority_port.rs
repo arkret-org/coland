@@ -490,11 +490,20 @@ impl AuthorityProtocolPort for AppState {
             })
             .await;
         }
-        // A key revocation is likewise controller-executed for the Agent and
-        // decided by the Agent control unit.
-        if event.kind == arkret_wire::EventKind::AgentKeyRevoke {
+        // Controller-executed key revocations and Agent Profiles are decided
+        // by the Agent control unit.
+        if event.kind == arkret_wire::EventKind::AgentKeyRevoke
+            || (matches!(
+                event.kind,
+                arkret_wire::EventKind::ProfileCreate | arkret_wire::EventKind::ProfileUpdate
+            ) && event
+                .executed_by
+                .as_ref()
+                .is_some_and(|actor| actor.as_account_id().is_some())
+                && event.actor_id.as_account_id().is_some())
+        {
             return crate::boxed_future(|| {
-                super::authority_agent_control::submit_self_agent_key_revoke(
+                super::authority_agent_control::submit_self_agent_controller_event(
                     self, session, &request,
                 )
             })

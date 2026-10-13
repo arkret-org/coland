@@ -3682,6 +3682,23 @@ mod tests {
             .unwrap();
         assert!(error.to_string().contains("Account status is not active"));
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_morph_non_morph_delivery_uses_default_worker_stack() {
+        let database = morph_database().await;
+        let (_, identity, mut input) = human_list_fixture(&database).await;
+        input.realms = vec![input.morph_lists[0].0.clone()];
+        input.morph_lists.clear();
+        let pool = database.pool();
+        let account = identity.history.account;
+        let guard = tokio::spawn(async move {
+            crate::account_content_delivery::acquire(&pool, &account, &station(), &input).await
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(guard.is_none());
+    }
+
     #[tokio::test]
     async fn native_morph_verified_history_without_current_observation_is_unavailable() {
         let database = morph_database().await;

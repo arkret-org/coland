@@ -368,6 +368,7 @@ pub(crate) fn validate_ancestor_graph(
     let parent = rows
         .get(current_id)
         .ok_or_else(|| conflict("grant_exceeds_issuer_authority"))?;
+    require_delegable_parent(parent)?;
     if parent.realm_id.as_ref() != Some(realm_id) || !grant_is_active_at(parent, accepted_at) {
         return Err(conflict("grant_revoked_upstream"));
     }
@@ -929,6 +930,102 @@ fn materialize_capability_grant<'a>(
     ))
 }
 
+/// The registry's owned source is an exclusive terminal execution/read root.
+/// Derivation never proves its liveness; the caller must validate accepted
+/// ownership and both exact current join Events at its held admission cut.
+fn owned_authority_root(
+    body: &arkret_models_collaboration::events_payloads::CapabilityGrantCreateBody,
+) -> PersistenceResult<Option<AuthorityRootRef>> {
+    use arkret_wire::CapabilityActionId as Action;
+    body.validate_owned_agent_shape()
+        .map_err(|error| schema_violation(error.to_string()))?;
+    let [
+        IssuerAuthorityRef::OwnedAgent {
+            realm_id,
+            controller_account_id,
+            controller_join_event_id,
+            agent_join_event_id,
+        },
+    ] = body.issuer_authority_refs.as_slice()
+    else {
+        return Ok(None);
+    };
+    if body.actions.is_empty()
+        || body.resources.is_empty()
+        || body.actions.iter().any(|action| {
+            !matches!(
+                Action::from_wire(action),
+                Some(
+                    Action::EventRead
+                        | Action::MessageCreate
+                        | Action::MessageRedactOwn
+                        | Action::MessageReviseOwn
+                        | Action::ObjectRead
+                        | Action::ObjectReadContent
+                        | Action::ObjectReadHistory
+                        | Action::ObjectReadMetadata
+                        | Action::ReactionAdd
+                        | Action::ReactionRemove
+                        | Action::StrandRead
+                )
+            )
+        })
+    {
+        return Err(schema_violation(
+            "owned Agent action is outside its registered terminal surface",
+        ));
+    }
+    Ok(Some(AuthorityRootRef::OwnedAgent {
+        realm_id: realm_id.clone(),
+        controller_account_id: controller_account_id.clone(),
+        controller_join_event_id: controller_join_event_id.clone(),
+        agent_join_event_id: agent_join_event_id.clone(),
+    }))
+}
+
+fn require_delegable_parent(parent: &CapabilityGrant) -> PersistenceResult<()> {
+    if parent
+        .issuer_authority_refs
+        .iter()
+        .any(|source| matches!(source, IssuerAuthorityRef::OwnedAgent { .. }))
+        || parent
+            .authority_root_refs
+            .iter()
+            .any(|root| matches!(root, AuthorityRootRef::OwnedAgent { .. }))
+    {
+        return Err(conflict("authority_regrant_denied"));
+    }
+    Ok(())
+}
+
+fn materialized_grant(
+    realm_id: &RealmId,
+    grant_id: GrantId,
+    body: arkret_models_collaboration::events_payloads::CapabilityGrantCreateBody,
+    authority_depth: u64,
+    authority_root_refs: Vec<AuthorityRootRef>,
+) -> CapabilityGrant {
+    CapabilityGrant {
+        id: grant_id,
+        schema: body.schema,
+        realm_id: Some(realm_id.clone()),
+        issuer_id: body.issuer_id,
+        subject: body.subject,
+        actions: body.actions,
+        resources: body.resources,
+        constraints: body.constraints,
+        issuer_authority_refs: body.issuer_authority_refs,
+        authority_depth,
+        authority_root_refs,
+        issued_at: body.issued_at,
+        status: CapabilityGrantStatus::Active,
+        updated_by: None,
+        updated_at: None,
+        revoked_by: None,
+        revoked_at: None,
+    }
+}
+
 async fn materialize_capability_grant_inner(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
@@ -1008,6 +1105,22 @@ async fn materialize_capability_grant_inner(
         }
     }
 
+    if let Some(owned_root) = owned_authority_root(&body)? {
+        // This is the original signed Event, not a reference synthesized from
+        // a principal row. Recheck the complete accepted source and current
+        // controller coverage under the same transaction as the current write.
+        crate::realm_authorization_cut::RealmAuthorizationCut::require_owned_grant_coverage_in_connection(
+            conn, event, &body, commit.committed_at,
+        ).await?;
+        return Ok(materialized_grant(
+            &event.realm_id,
+            grant_id,
+            body,
+            1,
+            vec![owned_root],
+        ));
+    }
+
     // The Realm authority row already serializes commits, while this ordered
     // lock snapshot gives every grant dependency one deterministic database
     // basis. No process-local projection participates in admission.
@@ -1046,9 +1159,7 @@ async fn materialize_capability_grant_inner(
         }
         match authority_ref {
             IssuerAuthorityRef::OwnedAgent { .. } => {
-                return Err(conflict(
-                    "owned Agent current execution and delivery gates are not established",
-                ));
+                return Err(schema_violation("owned Agent source must be exclusive"));
             }
             IssuerAuthorityRef::RealmRoot {
                 realm_id,
@@ -1083,6 +1194,7 @@ async fn materialize_capability_grant_inner(
                 {
                     return Err(conflict("grant_exceeds_issuer_authority"));
                 }
+                require_delegable_parent(parent)?;
                 if let Some(role) = managed_role {
                     validate_managed_parent(parent, &body, role, commit.committed_at)?;
                 } else {
@@ -1175,26 +1287,13 @@ async fn materialize_capability_grant_inner(
         ));
     }
 
-    let grant = CapabilityGrant {
-        id: grant_id,
-        schema: body.schema,
-        realm_id: Some(event.realm_id.clone()),
-        issuer_id: body.issuer_id,
-        subject: body.subject,
-        actions: body.actions,
-        resources: body.resources,
-        constraints: body.constraints,
-        issuer_authority_refs: body.issuer_authority_refs,
+    Ok(materialized_grant(
+        &event.realm_id,
+        grant_id,
+        body,
         authority_depth,
         authority_root_refs,
-        issued_at: body.issued_at,
-        status: CapabilityGrantStatus::Active,
-        updated_by: None,
-        updated_at: None,
-        revoked_by: None,
-        revoked_at: None,
-    };
-    Ok(grant)
+    ))
 }
 
 /// Materialize one of the four registered `capability_grant` writers inside
@@ -1649,6 +1748,147 @@ mod tests {
 
     fn selector(value: serde_json::Value) -> WireResourceSelector {
         serde_json::from_value(value).expect("valid selector")
+    }
+
+    fn owned_body() -> arkret_models_collaboration::events_payloads::CapabilityGrantCreateBody {
+        let controller = arkret_wire::AccountId::new(
+            "ak:did_core:web:controller.example".parse().unwrap(),
+            "ak:did_core:web:station.example".parse().unwrap(),
+        );
+        let agent = arkret_wire::AccountId::new(
+            "ak:did_core:web:agent.example".parse().unwrap(),
+            controller.station_id.clone(),
+        );
+        serde_json::from_value(serde_json::json!({
+            "schema":"ak.schema.capability.v1", "realm_id":REALM_ID,
+            "issuer_id":ActorId::account(controller.clone()), "subject":ActorId::account(agent),
+            "actions":["ak.message.create"], "resources":[{"kind":"realm","realm_id":REALM_ID}],
+            "constraints":[{"constraint_kind":"authority_control","effect":"allow","max_authority_depth":0,"authority_regrant_allowed":false}],
+            "issuer_authority_refs":[{"kind":"owned_agent","realm_id":REALM_ID,
+                "controller_account_id":controller,
+                "controller_join_event_id":EventId::from_digest(arkret_canonical::DigestSuite::Sha256,[61;32]),
+                "agent_join_event_id":EventId::from_digest(arkret_canonical::DigestSuite::Sha256,[62;32])}],
+            "issued_at":"2026-10-12T00:00:00.000Z"
+        })).unwrap()
+    }
+
+    #[test]
+    fn owned_materializer_derives_exact_terminal_root_and_preserves_constraints() {
+        let body = owned_body();
+        let root = owned_authority_root(&body).unwrap().unwrap();
+        let IssuerAuthorityRef::OwnedAgent {
+            realm_id,
+            controller_account_id,
+            controller_join_event_id,
+            agent_join_event_id,
+        } = &body.issuer_authority_refs[0]
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            root,
+            AuthorityRootRef::OwnedAgent {
+                realm_id: realm_id.clone(),
+                controller_account_id: controller_account_id.clone(),
+                controller_join_event_id: controller_join_event_id.clone(),
+                agent_join_event_id: agent_join_event_id.clone(),
+            }
+        );
+        let grant = materialized_grant(
+            realm_id,
+            GRANT_ID.parse().unwrap(),
+            body.clone(),
+            1,
+            vec![root],
+        );
+        assert_eq!(grant.authority_depth, 1);
+        assert_eq!(grant.issuer_authority_refs, body.issuer_authority_refs);
+        assert_eq!(grant.constraints, body.constraints);
+        assert_eq!(
+            serde_json::to_value(&grant.subject).unwrap(),
+            serde_json::to_value(&body.subject).unwrap()
+        );
+        assert_eq!(grant.status, CapabilityGrantStatus::Active);
+    }
+
+    #[test]
+    fn owned_materializer_rejects_admin_service_unknown_and_mixed_sources() {
+        let mut body = owned_body();
+        for action in [
+            "ak.event.read",
+            "ak.message.create",
+            "ak.message.redact.own",
+            "ak.message.revise.own",
+            "ak.object.read",
+            "ak.object.read_content",
+            "ak.object.read_history",
+            "ak.object.read_metadata",
+            "ak.reaction.add",
+            "ak.reaction.remove",
+            "ak.strand.read",
+        ] {
+            body.actions = vec![action.to_owned()];
+            assert!(owned_authority_root(&body).unwrap().is_some(), "{action}");
+        }
+        for action in [
+            "ak.capability.grant",
+            "ak.agent.key.authorize",
+            "ak.message.redact.any",
+            "ak.admin",
+            "ak.self.events.command.submit.v1",
+            "ak.unknown",
+        ] {
+            body.actions = vec![action.to_owned()];
+            assert!(owned_authority_root(&body).is_err(), "{action}");
+        }
+        body = owned_body();
+        body.issuer_authority_refs.push(IssuerAuthorityRef::Grant {
+            grant_id: GRANT_ID.parse().unwrap(),
+        });
+        assert!(owned_authority_root(&body).is_err());
+        body = owned_body();
+        body.constraints.clear();
+        assert!(owned_authority_root(&body).is_err());
+        body = owned_body();
+        body.issuer_id = ActorId::account(arkret_wire::AccountId::new(
+            "ak:did_core:web:controller.example".parse().unwrap(),
+            "ak:did_core:web:other-station.example".parse().unwrap(),
+        ));
+        assert!(owned_authority_root(&body).is_err());
+    }
+
+    #[test]
+    fn owned_parent_cannot_regrant_even_with_forged_control_or_only_owned_root() {
+        let body = owned_body();
+        let root = owned_authority_root(&body).unwrap().unwrap();
+        let realm = body.realm_id.as_ref().unwrap();
+        let mut parent = materialized_grant(
+            realm,
+            GRANT_ID.parse().unwrap(),
+            body.clone(),
+            1,
+            vec![root],
+        );
+        parent.constraints[0].max_authority_depth = Some(4);
+        parent.constraints[0].authority_regrant_allowed = Some(true);
+        let refusal = require_delegable_parent(&parent).unwrap_err();
+        assert_eq!(
+            refusal.conflict_code(),
+            Some(coland_storage::ConflictCode::FailedPrecondition)
+        );
+        assert!(refusal.to_string().contains("authority_regrant_denied"));
+        parent.issuer_authority_refs = vec![IssuerAuthorityRef::Grant {
+            grant_id: GrantId::from_event_id(&EventId::from_digest(
+                arkret_canonical::DigestSuite::Sha256,
+                [63; 32],
+            )),
+        }];
+        let refusal = require_delegable_parent(&parent).unwrap_err();
+        assert_eq!(
+            refusal.conflict_code(),
+            Some(coland_storage::ConflictCode::FailedPrecondition)
+        );
+        assert!(refusal.to_string().contains("authority_regrant_denied"));
     }
 
     #[test]

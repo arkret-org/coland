@@ -1,3 +1,4 @@
+DROP TABLE IF EXISTS management_review_requests;
 DROP TABLE IF EXISTS agent_approval_publications;
 DROP TABLE IF EXISTS key_backup_list_revisions;
 DROP TABLE IF EXISTS mimi_room_binding_current_results;

@@ -532,7 +532,7 @@ mod tests {
 pub(super) async fn realm_state_snapshot_head(
     depot: &mut Depot,
     req: &mut Request,
-) -> coland_http::result::JsonResult<arkret_wire::RealmStateSnapshot> {
+) -> coland_http::result::GuardedJsonResult<arkret_wire::RealmStateSnapshot> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let realm_id = query_param(req, "realm_id")
         .ok_or_else(|| coland_http::error::AppError::param_missing("realm_id is required"))?;
@@ -571,7 +571,9 @@ pub(super) async fn realm_state_snapshot_head(
                 crate::app_error!(RealmStateSnapshotUnavailable, error.message,)
             }
         })?;
-    coland_http::result::json_ok(manifest)
+    let input = coland_storage::AccountContentDeliveryInput::snapshot(&manifest);
+    let guard = super::content_delivery_guard(state, &session, &input).await?;
+    coland_http::result::guarded_json_ok(manifest, guard)
 }
 
 #[endpoint(operation_id = "ak.self.realm_state_snapshot.read.by_ref")]
@@ -579,7 +581,7 @@ pub(super) async fn realm_state_snapshot_head(
 pub(super) async fn realm_state_snapshot_by_ref(
     depot: &mut Depot,
     req: &mut Request,
-) -> coland_http::result::JsonResult<arkret_wire::RealmStateSnapshot> {
+) -> coland_http::result::GuardedJsonResult<arkret_wire::RealmStateSnapshot> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let snapshot_id = req
         .param::<String>("snapshot_id")
@@ -621,5 +623,7 @@ pub(super) async fn realm_state_snapshot_by_ref(
         account,
     )
     .await?;
-    coland_http::result::json_ok(snapshot)
+    let input = coland_storage::AccountContentDeliveryInput::snapshot(&snapshot);
+    let guard = super::content_delivery_guard(state, &session, &input).await?;
+    coland_http::result::guarded_json_ok(snapshot, guard)
 }

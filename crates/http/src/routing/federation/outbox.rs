@@ -449,8 +449,69 @@ pub(crate) async fn signed_peer_request(
 ) -> Result<PeerSubmitResponse, String> {
     let peer_target = super::resolved_peer_target(state, peer_id, "station", false).await?;
     let target = format!("{}{path}", peer_target.base_url);
-    let (parsed_url, client) = crate::security::validate_http_url_for_egress_with_pinned_client(
+    signed_peer_request_to_target(
+        state,
+        peer_id,
+        &peer_target.trust_domain,
         &target,
+        body,
+        max_response_bytes,
+    )
+    .await
+}
+
+/// The deployment-pinned Account Authority is a separate endpoint of this
+/// Station identity. Generic Station discovery would read the Station replica.
+pub(crate) async fn signed_deployment_account_status_resolve(
+    state: &AppState,
+    authority_id: &arkret_wire::DidCoreId,
+    authority_url: &arkret_models_identity::service_identity::CanonicalServiceUrl,
+    body: &[u8],
+) -> Result<PeerSubmitResponse, String> {
+    if authority_id != &state.service_core_id() {
+        return Err("Account Authority is not the deployment Station identity".to_owned());
+    }
+    let configured = state
+        .config()
+        .account_authority_url
+        .as_deref()
+        .ok_or_else(|| "Account Authority endpoint is not configured".to_owned())?;
+    let configured =
+        arkret_models_identity::service_identity::CanonicalServiceUrl::canonicalize(configured)
+            .map_err(|_| "Account Authority endpoint is invalid".to_owned())?;
+    if &configured != authority_url {
+        return Err("Account Authority endpoint differs from deployment configuration".to_owned());
+    }
+    let authority_trust_domain = state
+        .config()
+        .account_authority_trust_domain
+        .as_ref()
+        .ok_or_else(|| "Account Authority trust domain is not configured".to_owned())?;
+    let target = format!(
+        "{}/_arkret/peer/account-status/resolve",
+        authority_url.as_str().trim_end_matches('/')
+    );
+    signed_peer_request_to_target(
+        state,
+        authority_id.as_str(),
+        authority_trust_domain.as_str(),
+        &target,
+        body,
+        2 * 1024 * 1024,
+    )
+    .await
+}
+
+async fn signed_peer_request_to_target(
+    state: &AppState,
+    peer_id: &str,
+    trust_domain: &str,
+    target: &str,
+    body: &[u8],
+    max_response_bytes: usize,
+) -> Result<PeerSubmitResponse, String> {
+    let (parsed_url, client) = crate::security::validate_http_url_for_egress_with_pinned_client(
+        target,
         "peer read",
         state.config().development_mode,
         REQUEST_TIMEOUT,
@@ -472,12 +533,8 @@ pub(crate) async fn signed_peer_request(
         "source-trust-domain",
         state.config().trust_domain.as_str(),
     );
-    insert_header_if_valid(
-        &mut headers,
-        "destination-trust-domain",
-        &peer_target.trust_domain,
-    );
-    let headers = rfc9421_sign(state, headers, "POST", &target);
+    insert_header_if_valid(&mut headers, "destination-trust-domain", trust_domain);
+    let headers = rfc9421_sign(state, headers, "POST", target);
     let mut response = client
         .post(parsed_url)
         .headers(headers)

@@ -899,7 +899,7 @@ async fn get_device_messages(
     limit: QueryParam<u32, false>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<DeviceMessagesGetOutcome> {
+) -> coland_http::result::GuardedJsonResult<DeviceMessagesGetOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let cursor = after.into_inner();
@@ -971,6 +971,28 @@ async fn get_device_messages(
     if lost && let Some(lost_watermark) = lost_watermark {
         to_device_position = to_device_position.max(lost_watermark);
     }
+    // Current permission and future-material authority precede every private
+    // ACK/cursor allocation, including continuation reads. Keep this same cut
+    // through the original guarded response handoff.
+    let future_materials = page
+        .iter()
+        .filter_map(|record| match &record.delivery {
+            arkret_models_collaboration::device_messages::RecipientDelivery::MlsWelcome {
+                mls_welcome,
+            } => Some(mls_welcome.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let input = coland_storage::AccountContentDeliveryInput {
+        realms: future_materials
+            .iter()
+            .map(|welcome| welcome.realm_id.clone())
+            .collect(),
+        future_materials,
+        ..Default::default()
+    };
+    let guard =
+        crate::routing::events::sync::content_delivery_guard(state, &session, &input).await?;
     let ack_token = if page.is_empty() {
         None
     } else {
@@ -997,14 +1019,17 @@ async fn get_device_messages(
                 .map_err(|_| AppError::internal("cannot persist device queue cursor".to_owned()))?,
         )
     };
-    json_ok(DeviceMessagesGetOutcome {
-        deliveries,
-        ack_token,
-        next_cursor,
-        has_more,
-        limited: Some(has_more),
-        lost: Some(lost),
-    })
+    coland_http::result::guarded_json_ok(
+        DeviceMessagesGetOutcome {
+            deliveries,
+            ack_token,
+            next_cursor,
+            has_more,
+            limited: Some(has_more),
+            lost: Some(lost),
+        },
+        guard,
+    )
 }
 
 #[handler]

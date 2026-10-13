@@ -2551,6 +2551,64 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         Ok(Some(commits))
     }
 
+    async fn owned_agent_authorization_check(
+        &self,
+        caller: &arkret_wire::ActorId,
+        station: &arkret_wire::DidCoreId,
+        request: &arkret_models_collaboration::governance::authorization::AuthzCheckRequestBody,
+    ) -> PersistenceResult<
+        Option<arkret_models_collaboration::governance::authorization::AuthzCheckOutcome>,
+    > {
+        let Some(realm) = request
+            .resource
+            .as_ref()
+            .and_then(|resource| resource.realm_id.as_ref())
+        else {
+            return Ok(None);
+        };
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            let Some(account) = request.actor_id.as_account_id() else { return Ok(None) };
+            if !crate::committed_disclosure::ordinary_agent_read_ceiling(crate::account_stream_scan::realm_purpose(conn, realm).await?)
+                || !crate::realm_authorization_cut::is_owned_agent_in_connection(conn, realm, account).await? {
+                return Ok(None);
+            }
+            crate::realm_authorization_cut::lock_realm_authorization_cut(conn, realm).await?;
+            let authority = sql_query("SELECT realm_id,generation,service_id,authority_ref,last_handoff_ref FROM realm_authorities WHERE realm_id=$1")
+                .bind::<Text,_>(realm.as_str()).get_result::<AuthorityRow>(&mut *conn).await?;
+            if authority.service_id != station.as_str() {
+                return Err(PersistenceError::Conflict("revision_unavailable: current governing authorization is unavailable".into()).into());
+            }
+            crate::realm_authorization_cut::owned_agent_authorization_check_in_connection(conn, caller, request).await.map_err(Into::into)
+        }).await.map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn acquire_committed_content_delivery(
+        &self,
+        account: &arkret_wire::AccountId,
+        station: &arkret_wire::DidCoreId,
+        input: &coland_storage::AccountContentDeliveryInput,
+    ) -> PersistenceResult<Option<Box<dyn coland_storage::AccountContentDeliveryGuard>>> {
+        crate::account_content_delivery::acquire(&self.pool, account, station, input).await
+    }
+
+    async fn acquire_native_message_reply_preparation(
+        &self,
+        agent: &arkret_wire::AccountId,
+        controller: &arkret_wire::AccountId,
+        caller: &arkret_wire::AccountId,
+        station: &arkret_wire::DidCoreId,
+        source: &arkret_wire::CommittedEventFullView,
+        strand: &arkret_wire::StrandId,
+        input: &coland_storage::AccountContentDeliveryInput,
+        deployment: arkret_models_collaboration::governance::agent_participation::ParticipationBits,
+    ) -> PersistenceResult<Box<dyn coland_storage::AccountContentDeliveryGuard>> {
+        crate::account_content_delivery::acquire_native_message_reply_preparation(
+            &self.pool, agent, controller, caller, station, source, strand, input, deployment,
+        )
+        .await
+    }
+
     async fn stage_agent_control_source(
         &self,
         full: &arkret_wire::CommittedEventFullView,
@@ -3907,10 +3965,19 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 .execute(&mut *conn)
                 .await?;
             if accepted_current_member_joined_in_connection(conn, realm_id, actor).await? {
-                crate::agent_management_admission::read_controller_in_connection(
-                    conn, realm_id, None, actor,
-                )
-                .await?;
+                if let Some(controller) =
+                    crate::agent_management_admission::read_controller_in_connection(
+                        conn, realm_id, None, actor,
+                    )
+                    .await?
+                {
+                    return Ok(accepted_current_member_joined_in_connection(
+                        conn,
+                        realm_id,
+                        &controller,
+                    )
+                    .await?);
+                }
                 return Ok(true);
             }
             let Some(account) = actor.as_account_id() else {
@@ -4600,6 +4667,24 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .map_err(PgTransactionError::into_persistence)
     }
 
+    async fn accepted_realm_links(
+        &self,
+        realm: &arkret_wire::RealmId,
+        direction: arkret_models_collaboration::governance::realm_governance::RealmLinkDirection,
+        allow: Option<&[String]>,
+    ) -> PersistenceResult<
+        Vec<arkret_models_collaboration::governance::realm_governance::RealmLinkEntry>,
+    > {
+        crate::object_projection_reads::realm_link_list(&self.pool, realm, direction, allow).await
+    }
+
+    async fn accepted_realm_organization_read(
+        &self, realm: &arkret_wire::RealmId, caller: &arkret_wire::ActorId,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<Option<arkret_models_collaboration::governance::realm_governance::RealmOrganizationRelationshipList>>{
+        crate::object_projection_reads::realm_organization_read(&self.pool, realm, caller, at).await
+    }
+
     async fn realm_state_snapshot_material(
         &self,
         realm_id: &arkret_wire::RealmId,
@@ -4759,6 +4844,78 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             realm_id,
             actor,
             include_terminal,
+        )
+        .await
+    }
+
+    async fn object_projection_delivery_for_actor(
+        &self,
+        realm_id: &arkret_wire::RealmId,
+        actor: &arkret_wire::ActorId,
+        include_terminal: bool,
+    ) -> PersistenceResult<
+        Option<(
+            arkret_models_collaboration::objects::query_projection::ProjectionSpaceList,
+            arkret_models_collaboration::objects::query_projection::ProjectionStrandList,
+            arkret_models_collaboration::sync_frames::current_results::AccountCurrentView,
+        )>,
+    > {
+        crate::object_projection_reads::delivery_for_actor(
+            &self.pool,
+            realm_id,
+            actor,
+            include_terminal,
+        )
+        .await
+    }
+
+    async fn morph_list_for_actor(
+        &self,
+        realm: &arkret_wire::RealmId,
+        actor: &arkret_wire::ActorId,
+        station: &arkret_wire::DidCoreId,
+        include_terminal: bool,
+    ) -> PersistenceResult<
+        Option<arkret_models_collaboration::objects::query_projection::ProjectionMorphList>,
+    > {
+        crate::morph_projection_reads::list_for_actor(
+            &self.pool,
+            realm,
+            actor,
+            station,
+            include_terminal,
+        )
+        .await
+    }
+
+    async fn document_morph_for_actor(
+        &self,
+        realm: &arkret_wire::RealmId,
+        morph: &arkret_wire::MorphId,
+        actor: &arkret_wire::ActorId,
+        station: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<
+        Option<
+            arkret_models_collaboration::objects::query_projection::DocumentMorphProjectionOutcome,
+        >,
+    > {
+        crate::morph_projection_reads::document_for_actor(&self.pool, realm, morph, actor, station)
+            .await
+    }
+
+    async fn realm_export_for_actor(
+        &self,
+        realm_id: &arkret_wire::RealmId,
+        actor: &arkret_wire::ActorId,
+        station: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<
+        Option<(
+            arkret_models_collaboration::governance::realm_governance::RealmExport,
+            Vec<arkret_wire::CommittedEventView>,
+        )>,
+    > {
+        crate::account_content_delivery::realm_export_for_actor(
+            &self.pool, realm_id, actor, station,
         )
         .await
     }

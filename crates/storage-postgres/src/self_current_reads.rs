@@ -389,179 +389,267 @@ pub(crate) async fn exact_current_result_for_account(
     account: &AccountId,
     issuer: &DidCoreId,
 ) -> PersistenceResult<SelfExactCurrentRead<ExactCurrentResultsReadOutcome>> {
+    let mut conn = pg_conn(pool).await?;
+    conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+        begin_read_cut(conn).await?;
+        exact_current_result_in_connection(conn, request, account, issuer).await
+    })
+    .await
+    .map_err(PgTransactionError::into_persistence)
+}
+
+pub(crate) async fn exact_current_result_in_connection(
+    conn: &mut AsyncPgConnection,
+    request: &ExactCurrentResultsReadRequestBody,
+    account: &AccountId,
+    issuer: &DidCoreId,
+) -> Result<SelfExactCurrentRead<ExactCurrentResultsReadOutcome>, PgTransactionError> {
     request
         .validate()
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
     let caller = ActorId::account(account.clone());
-    let mut conn = pg_conn(pool).await?;
-    conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-        begin_read_cut(conn).await?;
-        if let ExactCurrentResultSelector::CapabilityGrant(selector) = &request.selector {
-            return owned_agent_grant_read(conn, request, selector, account, issuer).await;
+    if let ExactCurrentResultSelector::CapabilityGrant(selector) = &request.selector {
+        return owned_agent_grant_read(conn, request, selector, account, issuer).await;
+    }
+    let (generation, head) = match member_cut(conn, &request.realm_id, &caller, issuer).await? {
+        MemberCut::NotVisible => return Ok(SelfExactCurrentRead::NotFound),
+        MemberCut::ForeignTenure => {
+            return Ok(SelfExactCurrentRead::Unresolved(
+                "this Station does not hold the Realm's governing tenure",
+            ));
         }
-        let (generation, head) = match member_cut(conn, &request.realm_id, &caller, issuer).await? {
-            MemberCut::NotVisible => return Ok(SelfExactCurrentRead::NotFound),
-            MemberCut::ForeignTenure => {
+        MemberCut::Member {
+            scoped_streams: true,
+            ..
+        } if matches!(request.selector, ExactCurrentResultSelector::Relation(_)) => {
+            return Ok(SelfExactCurrentRead::Unresolved(
+                "Circle and Sidecar scope visibility is not proved at this cut",
+            ));
+        }
+        MemberCut::Member {
+            realm_head: None, ..
+        } => {
+            return Ok(SelfExactCurrentRead::Unresolved(
+                "the Realm stream has no established head",
+            ));
+        }
+        MemberCut::Member {
+            generation,
+            realm_head: Some(head),
+            ..
+        } => (generation, head),
+    };
+    let selector = match &request.selector {
+        ExactCurrentResultSelector::Policy(selector) => {
+            return policy_exact_read(conn, request, selector, &caller, generation, head).await;
+        }
+        ExactCurrentResultSelector::CalendarScheduleSource(selector) => {
+            use arkret_models_collaboration::exact_current_results::CalendarScheduleSourceExactRow;
+            #[derive(QueryableByName)]
+            struct CalendarRow {
+                #[diesel(sql_type = Text)]
+                current_commit_id: String,
+                #[diesel(sql_type = BigInt)]
+                current_stream_position: i64,
+                #[diesel(sql_type = Jsonb)]
+                value: serde_json::Value,
+                #[diesel(sql_type = Jsonb)]
+                stream_ref: serde_json::Value,
+            }
+            let row = sql_query("SELECT s.current_commit_id,s.current_stream_position,s.calendar_schedule_source_value AS value,c.commit_json->'stream_ref' AS stream_ref FROM strand_current_results s JOIN realm_commits c ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.strand_id=$2 AND s.calendar_schedule_source_value IS NOT NULL")
+                .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(selector.strand_id.as_str())
+                .get_result::<CalendarRow>(&mut *conn).await.optional()?;
+            let Some(row) = row else {
                 return Ok(SelfExactCurrentRead::Unresolved(
-                    "this Station does not hold the Realm's governing tenure",
+                    "Calendar current source is not available at this cut",
                 ));
+            };
+            let value: arkret_wire::CalendarScheduleSourceValue =
+                serde_json::from_value(row.value).map_err(PersistenceError::database)?;
+            match crate::moderation_report_current_results::ensure_scope_member(
+                conn,
+                &request.realm_id,
+                &value.effective_scope,
+                &caller,
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(PersistenceError::NotFound(_)) => return Ok(SelfExactCurrentRead::NotFound),
+                Err(error) => return Err(error.into()),
             }
-            MemberCut::Member {
-                scoped_streams: true,
-                ..
-            } if matches!(request.selector, ExactCurrentResultSelector::Relation(_)) => {
-                return Ok(SelfExactCurrentRead::Unresolved(
-                    "Circle and Sidecar scope visibility is not proved at this cut",
-                ));
-            }
-            MemberCut::Member {
-                realm_head: None, ..
-            } => {
-                return Ok(SelfExactCurrentRead::Unresolved(
-                    "the Realm stream has no established head",
-                ));
-            }
-            MemberCut::Member {
-                generation,
-                realm_head: Some(head),
-                ..
-            } => (generation, head),
-        };
-        let selector = match &request.selector {
-            ExactCurrentResultSelector::Policy(selector) => {
-                return policy_exact_read(conn, request, selector, &caller, generation, head).await;
-            }
-            ExactCurrentResultSelector::CalendarScheduleSource(selector) => {
-                use arkret_models_collaboration::exact_current_results::CalendarScheduleSourceExactRow;
-                #[derive(QueryableByName)]
-                struct CalendarRow {
-                    #[diesel(sql_type = Text)]
-                    current_commit_id: String,
-                    #[diesel(sql_type = BigInt)]
-                    current_stream_position: i64,
-                    #[diesel(sql_type = Jsonb)]
-                    value: serde_json::Value,
-                    #[diesel(sql_type = Jsonb)]
-                    stream_ref: serde_json::Value,
-                }
-                let row = sql_query("SELECT s.current_commit_id,s.current_stream_position,s.calendar_schedule_source_value AS value,c.commit_json->'stream_ref' AS stream_ref FROM strand_current_results s JOIN realm_commits c ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.strand_id=$2 AND s.calendar_schedule_source_value IS NOT NULL")
-                    .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(selector.strand_id.as_str())
-                    .get_result::<CalendarRow>(&mut *conn).await.optional()?;
-                let Some(row) = row else { return Ok(SelfExactCurrentRead::Unresolved("Calendar current source is not available at this cut")); };
-                let value: arkret_wire::CalendarScheduleSourceValue = serde_json::from_value(row.value).map_err(PersistenceError::database)?;
-                match crate::moderation_report_current_results::ensure_scope_member(conn, &request.realm_id, &value.effective_scope, &caller).await {
-                    Ok(()) => {},
-                    Err(PersistenceError::NotFound(_)) => return Ok(SelfExactCurrentRead::NotFound),
-                    Err(error) => return Err(error.into()),
-                }
-                let stream: CommitStreamRef = serde_json::from_value(row.stream_ref).map_err(PersistenceError::database)?;
-                let stream_key = crate::authority_commit::stream_key(&stream)?;
-                let Some(stream_head) = sql_query("SELECT commit_id,stream_position FROM realm_commits WHERE realm_id=$1 AND stream_key=$2 ORDER BY stream_position DESC LIMIT 1")
-                    .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(stream_key).get_result::<HeadRow>(&mut *conn).await.optional()? else {
-                    return Ok(SelfExactCurrentRead::Unresolved("Calendar scope head is unavailable"));
-                };
-                let revision = CurrentRevision { commit_id: row.current_commit_id.parse().map_err(PersistenceError::database)?,
-                    stream_position: to_u64(row.current_stream_position, "Calendar current position")? };
-                value.validate_for_current(&request.realm_id, &stream, &revision).map_err(PersistenceError::database)?;
-                return Ok(SelfExactCurrentRead::Answer(ExactCurrentResultsReadOutcome::Present {
-                    realm_id: request.realm_id.clone(), governance_generation: generation,
-                    effective_stream_head: CommitStreamHead { stream_ref: stream.clone(), commit_id: stream_head.commit_id.parse().map_err(PersistenceError::database)?, stream_position: to_u64(stream_head.stream_position,"Calendar scope head")? },
-                    entry: ExactCurrentResultEntry::CalendarScheduleSource(CalendarScheduleSourceExactRow { selector: selector.clone(), source_stream_ref: stream, revision, value }),
-                }));
-            }
-            ExactCurrentResultSelector::CapabilityGrant(_) => unreachable!("handled before membership gate"),
-            ExactCurrentResultSelector::AgentInteraction(selector) => {
-                use arkret_models_collaboration::agent_interaction::AgentInteractionExactCurrentRow;
-                use arkret_models_collaboration::exact_current_results::NeverWrittenExactCurrentSelector;
-                if !sql_query("SELECT EXISTS(SELECT 1 FROM member_state_current_results m JOIN realm_commits c ON c.realm_id=m.realm_id AND c.commit_id=m.current_commit_id AND c.stream_position=m.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE m.realm_id=$1 AND m.member_id=$2 AND m.membership='join' AND e.envelope->'payload' ? 'agent_controller_binding') AS present")
-                    .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(ActorId::account(selector.agent_account_id.clone()).to_string()).get_result::<ExistsRow>(&mut *conn).await?.present { return Ok(SelfExactCurrentRead::NotFound); }
-                let result = crate::agent_interaction_current_results::read_in_connection(conn, &request.realm_id, &selector.agent_account_id).await?;
-                let outcome = match result {
-                    Some(row) => ExactCurrentResultsReadOutcome::Present {
-                        realm_id: request.realm_id.clone(), governance_generation: generation, effective_stream_head: head.clone(),
-                        entry: ExactCurrentResultEntry::AgentInteraction(AgentInteractionExactCurrentRow {
-                            selector: selector.clone(), source_stream_ref: head.stream_ref.clone(),
-                            revision: CurrentRevision { commit_id: arkret_wire::RealmCommitId::new(row.current_commit_id).map_err(|error| corrupt(error.to_string()))?, stream_position: to_u64(row.current_stream_position, "Agent interaction position")? },
-                            value: serde_json::from_value(row.value).map_err(|error| corrupt(error.to_string()))?,
-                        }),
+            let stream: CommitStreamRef =
+                serde_json::from_value(row.stream_ref).map_err(PersistenceError::database)?;
+            let stream_key = crate::authority_commit::stream_key(&stream)?;
+            let Some(stream_head) = sql_query("SELECT commit_id,stream_position FROM realm_commits WHERE realm_id=$1 AND stream_key=$2 ORDER BY stream_position DESC LIMIT 1")
+                .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(stream_key).get_result::<HeadRow>(&mut *conn).await.optional()? else {
+                return Ok(SelfExactCurrentRead::Unresolved("Calendar scope head is unavailable"));
+            };
+            let revision = CurrentRevision {
+                commit_id: row
+                    .current_commit_id
+                    .parse()
+                    .map_err(PersistenceError::database)?,
+                stream_position: to_u64(row.current_stream_position, "Calendar current position")?,
+            };
+            value
+                .validate_for_current(&request.realm_id, &stream, &revision)
+                .map_err(PersistenceError::database)?;
+            return Ok(SelfExactCurrentRead::Answer(
+                ExactCurrentResultsReadOutcome::Present {
+                    realm_id: request.realm_id.clone(),
+                    governance_generation: generation,
+                    effective_stream_head: CommitStreamHead {
+                        stream_ref: stream.clone(),
+                        commit_id: stream_head
+                            .commit_id
+                            .parse()
+                            .map_err(PersistenceError::database)?,
+                        stream_position: to_u64(
+                            stream_head.stream_position,
+                            "Calendar scope head",
+                        )?,
                     },
-                    None if crate::agent_interaction_current_results::known_never_written(conn, &request.realm_id, &selector.agent_account_id, head.stream_position).await? => ExactCurrentResultsReadOutcome::NeverWritten {
-                        realm_id: request.realm_id.clone(), governance_generation: generation, effective_stream_head: head,
-                        selector: NeverWrittenExactCurrentSelector::AgentInteraction(selector.clone()),
-                    },
-                    None => return Ok(SelfExactCurrentRead::Unresolved("Agent interaction absence is not confirmed")),
-                };
-                outcome.validate_for_request(request, generation).map_err(|error| corrupt(error.to_string()))?;
-                return Ok(SelfExactCurrentRead::Answer(outcome));
-            }
-            ExactCurrentResultSelector::Relation(selector) => selector,
-            ExactCurrentResultSelector::ModerationState(selector) => {
-                return moderation_state_read(
+                    entry: ExactCurrentResultEntry::CalendarScheduleSource(
+                        CalendarScheduleSourceExactRow {
+                            selector: selector.clone(),
+                            source_stream_ref: stream,
+                            revision,
+                            value,
+                        },
+                    ),
+                },
+            ));
+        }
+        ExactCurrentResultSelector::CapabilityGrant(_) => {
+            unreachable!("handled before membership gate")
+        }
+        ExactCurrentResultSelector::AgentInteraction(selector) => {
+            use arkret_models_collaboration::agent_interaction::AgentInteractionExactCurrentRow;
+            use arkret_models_collaboration::exact_current_results::NeverWrittenExactCurrentSelector;
+            if !sql_query("SELECT EXISTS(SELECT 1 FROM member_state_current_results m JOIN realm_commits c ON c.realm_id=m.realm_id AND c.commit_id=m.current_commit_id AND c.stream_position=m.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE m.realm_id=$1 AND m.member_id=$2 AND m.membership='join' AND e.envelope->'payload' ? 'agent_controller_binding') AS present")
+                .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(ActorId::account(selector.agent_account_id.clone()).to_string()).get_result::<ExistsRow>(&mut *conn).await?.present { return Ok(SelfExactCurrentRead::NotFound); }
+            let result = crate::agent_interaction_current_results::read_in_connection(
+                conn,
+                &request.realm_id,
+                &selector.agent_account_id,
+            )
+            .await?;
+            let outcome = match result {
+                Some(row) => ExactCurrentResultsReadOutcome::Present {
+                    realm_id: request.realm_id.clone(),
+                    governance_generation: generation,
+                    effective_stream_head: head.clone(),
+                    entry: ExactCurrentResultEntry::AgentInteraction(
+                        AgentInteractionExactCurrentRow {
+                            selector: selector.clone(),
+                            source_stream_ref: head.stream_ref.clone(),
+                            revision: CurrentRevision {
+                                commit_id: arkret_wire::RealmCommitId::new(row.current_commit_id)
+                                    .map_err(|error| corrupt(error.to_string()))?,
+                                stream_position: to_u64(
+                                    row.current_stream_position,
+                                    "Agent interaction position",
+                                )?,
+                            },
+                            value: serde_json::from_value(row.value)
+                                .map_err(|error| corrupt(error.to_string()))?,
+                        },
+                    ),
+                },
+                None if crate::agent_interaction_current_results::known_never_written(
                     conn,
                     &request.realm_id,
-                    generation,
-                    head,
-                    &caller,
-                    selector,
+                    &selector.agent_account_id,
+                    head.stream_position,
                 )
-                .await;
-            }
-        };
-        let domain_key = arkret_canonical::canonical_json_string(&selector.primary_conflict_domain)
-            .map_err(|error| {
-                PersistenceError::Internal(format!(
-                    "Relation primary conflict domain canonicalization failed: {error}"
-                ))
-            })?;
-        let Some(row) = sql_query(RELATION_CURRENT_SQL)
-            .bind::<Text, _>(request.realm_id.as_str())
-            .bind::<Text, _>(&domain_key)
-            .get_result::<CurrentRow>(&mut *conn)
-            .await
-            .optional()?
-        else {
-            // Absence of a row cannot prove never_written until the domain's
-            // endpoint visibility is decided at this cut.
-            return Ok(SelfExactCurrentRead::Unresolved(
-                "the Relation domain's endpoint visibility is not proved at this cut",
-            ));
-        };
-        let value = serde_json::from_value::<Relation>(row.value).map_err(|error| {
-            corrupt(format!("stored Relation current value is invalid: {error}"))
-        })?;
-        let source_stream_ref = serde_json::from_value::<CommitStreamRef>(row.stream_ref)
-            .map_err(|error| corrupt(format!("stored RealmCommit stream is invalid: {error}")))?;
-        let realm_scoped = matches!(
-            &value.effective_scope,
-            Some(ScopeRef::Realm { realm_id }) if realm_id == &request.realm_id
-        );
-        if !realm_scoped || source_stream_ref != head.stream_ref {
-            return Ok(SelfExactCurrentRead::Unresolved(
-                "the Relation's scope visibility is not proved at this cut",
-            ));
+                .await? =>
+                {
+                    ExactCurrentResultsReadOutcome::NeverWritten {
+                        realm_id: request.realm_id.clone(),
+                        governance_generation: generation,
+                        effective_stream_head: head,
+                        selector: NeverWrittenExactCurrentSelector::AgentInteraction(
+                            selector.clone(),
+                        ),
+                    }
+                }
+                None => {
+                    return Ok(SelfExactCurrentRead::Unresolved(
+                        "Agent interaction absence is not confirmed",
+                    ));
+                }
+            };
+            outcome
+                .validate_for_request(request, generation)
+                .map_err(|error| corrupt(error.to_string()))?;
+            return Ok(SelfExactCurrentRead::Answer(outcome));
         }
-        let revision = CurrentRevision {
-            commit_id: row.current_commit_id.parse().map_err(|error| {
-                corrupt(format!("stored Relation Commit id is invalid: {error}"))
-            })?,
-            stream_position: to_u64(row.current_stream_position, "Relation stream position")?,
-        };
-        Ok(SelfExactCurrentRead::Answer(
-            ExactCurrentResultsReadOutcome::Present {
-                realm_id: request.realm_id.clone(),
-                governance_generation: generation,
-                effective_stream_head: head,
-                entry: ExactCurrentResultEntry::Relation(RelationExactCurrentRow {
-                    selector: selector.clone(),
-                    source_stream_ref,
-                    revision,
-                    value,
-                }),
-            },
-        ))
-    })
-    .await
-    .map_err(PgTransactionError::into_persistence)
+        ExactCurrentResultSelector::Relation(selector) => selector,
+        ExactCurrentResultSelector::ModerationState(selector) => {
+            return moderation_state_read(
+                conn,
+                &request.realm_id,
+                generation,
+                head,
+                &caller,
+                selector,
+            )
+            .await;
+        }
+    };
+    let domain_key = arkret_canonical::canonical_json_string(&selector.primary_conflict_domain)
+        .map_err(|error| {
+            PersistenceError::Internal(format!(
+                "Relation primary conflict domain canonicalization failed: {error}"
+            ))
+        })?;
+    let Some(row) = sql_query(RELATION_CURRENT_SQL)
+        .bind::<Text, _>(request.realm_id.as_str())
+        .bind::<Text, _>(&domain_key)
+        .get_result::<CurrentRow>(&mut *conn)
+        .await
+        .optional()?
+    else {
+        // Absence of a row cannot prove never_written until the domain's
+        // endpoint visibility is decided at this cut.
+        return Ok(SelfExactCurrentRead::Unresolved(
+            "the Relation domain's endpoint visibility is not proved at this cut",
+        ));
+    };
+    let value = serde_json::from_value::<Relation>(row.value)
+        .map_err(|error| corrupt(format!("stored Relation current value is invalid: {error}")))?;
+    let source_stream_ref = serde_json::from_value::<CommitStreamRef>(row.stream_ref)
+        .map_err(|error| corrupt(format!("stored RealmCommit stream is invalid: {error}")))?;
+    let realm_scoped = matches!(
+        &value.effective_scope,
+        Some(ScopeRef::Realm { realm_id }) if realm_id == &request.realm_id
+    );
+    if !realm_scoped || source_stream_ref != head.stream_ref {
+        return Ok(SelfExactCurrentRead::Unresolved(
+            "the Relation's scope visibility is not proved at this cut",
+        ));
+    }
+    let revision = CurrentRevision {
+        commit_id: row
+            .current_commit_id
+            .parse()
+            .map_err(|error| corrupt(format!("stored Relation Commit id is invalid: {error}")))?,
+        stream_position: to_u64(row.current_stream_position, "Relation stream position")?,
+    };
+    Ok(SelfExactCurrentRead::Answer(
+        ExactCurrentResultsReadOutcome::Present {
+            realm_id: request.realm_id.clone(),
+            governance_generation: generation,
+            effective_stream_head: head,
+            entry: ExactCurrentResultEntry::Relation(RelationExactCurrentRow {
+                selector: selector.clone(),
+                source_stream_ref,
+                revision,
+                value,
+            }),
+        },
+    ))
 }
 
 async fn policy_exact_read(
@@ -575,147 +663,101 @@ async fn policy_exact_read(
     use arkret_models_collaboration::exact_current_results::{
         NeverWrittenExactCurrentSelector, PolicyExactCurrentRow,
     };
-    use arkret_models_collaboration::governance::operation_wire::{
-        PolicySetStatePayload, PolicySetValue,
-    };
-    #[derive(QueryableByName)]
-    struct PolicyRow {
-        #[diesel(sql_type = Text)]
-        realm_id: String,
-        #[diesel(sql_type = Text)]
-        current_commit_id: String,
-        #[diesel(sql_type = BigInt)]
-        current_stream_position: i64,
-        #[diesel(sql_type = Jsonb)]
-        value: serde_json::Value,
-        #[diesel(sql_type = Jsonb)]
-        payload: serde_json::Value,
-        #[diesel(sql_type = Jsonb)]
-        stream_ref: serde_json::Value,
-    }
-    let row = sql_query("SELECT p.realm_id,p.current_commit_id,p.current_stream_position,p.value,e.envelope->'payload' AS payload,c.stream_ref FROM policy_current_results p JOIN realm_commits c ON c.realm_id=p.realm_id AND c.commit_id=p.current_commit_id AND c.stream_position=p.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' AND e.kind='ak.policy.set' AND e.envelope->>'event_id'=p.current_event_id WHERE p.policy_id=$1")
-        .bind::<Text,_>(selector.policy_id.as_str()).get_result::<PolicyRow>(&mut *conn).await.optional()?;
-    let stream = match &row {
-        Some(row) if row.realm_id == request.realm_id.as_str() => {
-            serde_json::from_value::<CommitStreamRef>(row.stream_ref.clone())
-                .map_err(PersistenceError::database)?
+
+    use crate::policy_current_results::ManagementPolicyCurrentRead;
+    let current = match crate::policy_current_results::read_management_policy_exact_in_connection(
+        conn,
+        &request.realm_id,
+        &selector.policy_id,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error)
+            if error.conflict_code() == Some(coland_storage::ConflictCode::FailedPrecondition) =>
+        {
+            return Ok(SelfExactCurrentRead::Unresolved(
+                "Policy accepted current proof is unavailable",
+            ));
         }
-        Some(_) => return Ok(SelfExactCurrentRead::NotFound),
-        None => realm_head.stream_ref.clone(),
+        Err(error) => return Err(error.into()),
     };
-    let target = match &stream {
-        CommitStreamRef::Realm { realm_id } if realm_id == &request.realm_id => {
-            arkret_wire::WireResourceSelector::realm(realm_id.clone())
-        }
-        CommitStreamRef::Circle {
-            realm_id,
-            circle_id,
-        } if realm_id == &request.realm_id => {
-            let mut target =
-                arkret_wire::WireResourceSelector::circle(realm_id.clone(), circle_id.clone());
-            target.match_scope = Some(arkret_wire::ResourceMatchScope::Exact);
-            target
-        }
-        _ => return Ok(SelfExactCurrentRead::NotFound),
+    let source = match &current {
+        ManagementPolicyCurrentRead::NotFound => return Ok(SelfExactCurrentRead::NotFound),
+        ManagementPolicyCurrentRead::NeverWritten => &realm_head.stream_ref,
+        ManagementPolicyCurrentRead::Present { source, .. } => source,
     };
+    let target =
+        crate::policy_current_results::management_policy_scope_target(&request.realm_id, source)?;
     let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
         conn,
         &request.realm_id,
         caller,
     )
     .await?;
-    if !cut.actor_is_root_controller()
-        && cut
-            .evaluate(
-                &[arkret_wire::CapabilityActionId::POLICY_SET],
-                &target,
-                &coland_storage::OperationFacts::default(),
-                chrono::Utc::now(),
-            )
-            .unreserved()
-            .is_empty()
+    let actions = arkret_schema::capability_actions_for_event_kind(
+        arkret_wire::EventKind::PolicySet.as_str(),
+    )
+    .filter(|action| action.required_evaluator_checks.is_empty())
+    .map(|action| action.action.as_str())
+    .collect::<Vec<_>>();
+    let facts = coland_storage::OperationFacts::default();
+    let evaluation = cut.evaluate(&actions, &target, &facts, chrono::Utc::now());
+    if evaluation.is_refusal()
+        || (!cut.actor_is_root_controller() && evaluation.unreserved().is_empty())
     {
         return Ok(SelfExactCurrentRead::NotFound);
     }
-    let complete = sql_query("WITH nodes AS (SELECT c.*,e.state,e.kind,e.envelope,ROW_NUMBER() OVER(PARTITION BY c.stream_key ORDER BY c.stream_position)-1 AS expected,LAG(c.commit_id) OVER(PARTITION BY c.stream_key ORDER BY c.stream_position) AS predecessor FROM realm_commits c LEFT JOIN canonical_events e ON e.pk=c.event_pk WHERE c.realm_id=$1) SELECT COALESCE(COUNT(*)>0 AND BOOL_AND(COALESCE(stream_position=expected AND previous_commit_ref IS NOT DISTINCT FROM predecessor AND state='committed' AND commit_json->>'event_ref'=envelope->>'event_id' AND envelope->>'kind'=kind,false)),false) AS present FROM nodes")
-        .bind::<Text,_>(request.realm_id.as_str()).get_result::<ExistsRow>(&mut *conn).await?.present;
-    if !complete {
-        return Ok(SelfExactCurrentRead::Unresolved(
-            "Policy governance prefix is incomplete",
-        ));
+    if let Some(account) = caller.as_account_id()
+        && crate::realm_authorization_cut::is_owned_agent_in_connection(
+            conn,
+            &request.realm_id,
+            account,
+        )
+        .await?
+    {
+        // An ordinary grant to the Agent cannot bypass its owner's current
+        // upper bound merely because this read does not author an Event.
+        let check = arkret_models_collaboration::governance::authorization::AuthzCheckRequestBody {
+            actor_id: caller.clone(),
+            action: arkret_wire::CapabilityActionId::POLICY_SET.to_owned(),
+            resource: Some(target.clone()),
+            context: None,
+        };
+        if !crate::realm_authorization_cut::owned_agent_authorization_check_in_connection(
+            conn, caller, &check,
+        )
+        .await?
+        .is_some_and(|result| result.decision == arkret_wire::AuthzDecision::Allow)
+        {
+            return Ok(SelfExactCurrentRead::NotFound);
+        }
     }
-    let stream_key = crate::authority_commit::stream_key(&stream)?;
-    if sql_query("SELECT EXISTS(SELECT 1 FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE e.state='committed' AND e.kind='ak.policy.set' AND e.envelope->'payload'->>'policy_id'=$1 AND (c.realm_id<>$2 OR c.stream_key<>$3)) AS present")
-        .bind::<Text,_>(selector.policy_id.as_str()).bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(&stream_key)
-        .get_result::<ExistsRow>(&mut *conn).await?.present {
-        return Ok(SelfExactCurrentRead::NotFound);
-    }
-    let latest = sql_query("SELECT c.commit_id,c.stream_position FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE e.state='committed' AND e.kind='ak.policy.set' AND e.envelope->'payload'->>'policy_id'=$1 AND c.realm_id=$2 AND c.stream_key=$3 ORDER BY c.stream_position DESC LIMIT 1")
-        .bind::<Text,_>(selector.policy_id.as_str()).bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(&stream_key)
-        .get_result::<HeadRow>(&mut *conn).await.optional()?;
-    let outcome = match row {
-        None if latest.is_none() => ExactCurrentResultsReadOutcome::NeverWritten {
+    let outcome = match current {
+        ManagementPolicyCurrentRead::NeverWritten => ExactCurrentResultsReadOutcome::NeverWritten {
             realm_id: request.realm_id.clone(),
             governance_generation: generation,
             effective_stream_head: realm_head,
             selector: NeverWrittenExactCurrentSelector::Policy(selector.clone()),
         },
-        None => {
-            return Ok(SelfExactCurrentRead::Unresolved(
-                "Policy current is absent despite accepted history",
-            ));
-        }
-        Some(row) => {
-            if !latest.is_some_and(|latest| {
-                latest.commit_id == row.current_commit_id
-                    && latest.stream_position == row.current_stream_position
-            }) {
-                return Ok(SelfExactCurrentRead::Unresolved(
-                    "Policy current differs from accepted history",
-                ));
-            }
-            let payload: PolicySetStatePayload =
-                serde_json::from_value(row.payload).map_err(PersistenceError::database)?;
-            payload.validate().map_err(PersistenceError::database)?;
-            if payload.policy_id != selector.policy_id
-                || serde_json::to_value(&payload.value).map_err(PersistenceError::database)?
-                    != row.value
-            {
-                return Err(
-                    corrupt("Policy current differs from its original accepted payload").into(),
-                );
-            }
-            if !matches!(&payload.value, PolicySetValue::Governance(policy) if matches!(policy.policy_kind,arkret_wire::PolicyKind::Agent|arkret_wire::PolicyKind::Applet))
-            {
-                return Ok(SelfExactCurrentRead::NotFound);
-            }
-            let stream_key = crate::authority_commit::stream_key(&stream)?;
-            let head = sql_query("SELECT commit_id,stream_position FROM realm_commits WHERE realm_id=$1 AND stream_key=$2 ORDER BY stream_position DESC LIMIT 1")
-                .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(stream_key).get_result::<HeadRow>(&mut *conn).await?;
-            ExactCurrentResultsReadOutcome::Present {
-                realm_id: request.realm_id.clone(),
-                governance_generation: generation,
-                effective_stream_head: CommitStreamHead {
-                    stream_ref: stream.clone(),
-                    commit_id: head.commit_id.parse().map_err(PersistenceError::database)?,
-                    stream_position: to_u64(head.stream_position, "Policy scope head")?,
-                },
-                entry: ExactCurrentResultEntry::Policy(PolicyExactCurrentRow {
-                    selector: selector.clone(),
-                    source_stream_ref: stream,
-                    revision: CurrentRevision {
-                        commit_id: row
-                            .current_commit_id
-                            .parse()
-                            .map_err(PersistenceError::database)?,
-                        stream_position: to_u64(
-                            row.current_stream_position,
-                            "Policy current position",
-                        )?,
-                    },
-                    value: payload,
-                }),
-            }
+        ManagementPolicyCurrentRead::Present {
+            source,
+            revision,
+            payload,
+            head,
+        } => ExactCurrentResultsReadOutcome::Present {
+            realm_id: request.realm_id.clone(),
+            governance_generation: generation,
+            effective_stream_head: head,
+            entry: ExactCurrentResultEntry::Policy(PolicyExactCurrentRow {
+                selector: selector.clone(),
+                source_stream_ref: source,
+                revision,
+                value: payload,
+            }),
+        },
+        ManagementPolicyCurrentRead::NotFound => {
+            unreachable!("non-visible policies return before authorization")
         }
     };
     outcome
@@ -723,7 +765,6 @@ async fn policy_exact_read(
         .map_err(PersistenceError::database)?;
     Ok(SelfExactCurrentRead::Answer(outcome))
 }
-
 async fn owned_agent_grant_read(
     conn: &mut AsyncPgConnection,
     request: &ExactCurrentResultsReadRequestBody,
@@ -899,69 +940,130 @@ pub(crate) async fn strand_watch_current_for_account(
     account: &AccountId,
     issuer: &DidCoreId,
 ) -> PersistenceResult<SelfExactCurrentRead<StrandWatchCurrentOutcome>> {
+    let mut conn = pg_conn(pool).await?;
+    conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+        begin_read_cut(conn).await?;
+        strand_watch_current_in_connection(conn, request, account, issuer).await
+    })
+    .await
+    .map_err(PgTransactionError::into_persistence)
+}
+
+pub(crate) async fn strand_watch_current_in_connection(
+    conn: &mut AsyncPgConnection,
+    request: &StrandWatchCurrentRequestBody,
+    account: &AccountId,
+    issuer: &DidCoreId,
+) -> Result<SelfExactCurrentRead<StrandWatchCurrentOutcome>, PgTransactionError> {
     let caller = ActorId::account(account.clone());
     if request.watcher_actor_id != caller {
         return Ok(SelfExactCurrentRead::NotFound);
     }
-    let mut conn = pg_conn(pool).await?;
-    conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-        begin_read_cut(conn).await?;
-        let (generation,head) = match member_cut(conn, &request.realm_id, &caller, issuer).await? {
-            MemberCut::NotVisible => return Ok(SelfExactCurrentRead::NotFound),
-            MemberCut::ForeignTenure => {
-                return Ok(SelfExactCurrentRead::Unresolved(
-                    "this Station does not hold the Realm's governing tenure",
-                ));
-            }
-            MemberCut::Member { generation, realm_head: Some(head), .. } => (generation,head),
-            MemberCut::Member { .. } => return Ok(SelfExactCurrentRead::Unresolved("watch current stream head is unavailable")),
-        };
-        let known_strand = sql_query(
-            "SELECT EXISTS(SELECT 1 FROM strand_current_results \
-             WHERE realm_id=$1 AND strand_id=$2 AND value->>'state'='active' \
-               AND (NOT value?'scope_circle_id' OR value->'scope_circle_id'='null'::jsonb)) AS present",
-        )
+    let (generation, head) = match member_cut(conn, &request.realm_id, &caller, issuer).await? {
+        MemberCut::NotVisible => return Ok(SelfExactCurrentRead::NotFound),
+        MemberCut::ForeignTenure => {
+            return Ok(SelfExactCurrentRead::Unresolved(
+                "this Station does not hold the Realm's governing tenure",
+            ));
+        }
+        MemberCut::Member {
+            generation,
+            realm_head: Some(head),
+            ..
+        } => (generation, head),
+        MemberCut::Member { .. } => {
+            return Ok(SelfExactCurrentRead::Unresolved(
+                "watch current stream head is unavailable",
+            ));
+        }
+    };
+    let known_strand = sql_query(
+        "SELECT EXISTS(SELECT 1 FROM strand_current_results \
+         WHERE realm_id=$1 AND strand_id=$2 AND value->>'state'='active' \
+           AND (NOT value?'scope_circle_id' OR value->'scope_circle_id'='null'::jsonb)) AS present",
+    )
+    .bind::<Text, _>(request.realm_id.as_str())
+    .bind::<Text, _>(request.strand_id.as_str())
+    .get_result::<ExistsRow>(&mut *conn)
+    .await?
+    .present;
+    if !known_strand {
+        return Ok(SelfExactCurrentRead::NotFound);
+    }
+    let confirmed_strand = sql_query("SELECT EXISTS(SELECT 1 FROM strand_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE s.realm_id=$1 AND s.strand_id=$2 AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=s.realm_id AND e.state='committed' AND c.stream_position<=$3 AND (c.stream_position<$3 OR c.commit_id=$4)) AS present")
+        .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.strand_id.as_str()).bind::<BigInt,_>(i64::try_from(head.stream_position).map_err(PersistenceError::database)?).bind::<Text,_>(head.commit_id.as_str())
+        .get_result::<ExistsRow>(&mut *conn).await?.present;
+    if !confirmed_strand {
+        return Ok(SelfExactCurrentRead::Unresolved(
+            "Strand current has no confirmed covering Commit in this stream prefix",
+        ));
+    }
+    let selector = StrandWatchCurrentSelector {
+        kind: StrandWatchSelectorKind::StrandWatch,
+        strand_id: request.strand_id.clone(),
+        watcher_actor_id: caller.clone(),
+    };
+    let row = sql_query(WATCH_CURRENT_SQL)
         .bind::<Text, _>(request.realm_id.as_str())
         .bind::<Text, _>(request.strand_id.as_str())
-        .get_result::<ExistsRow>(&mut *conn)
-        .await?
-        .present;
-        if !known_strand {
-            return Ok(SelfExactCurrentRead::NotFound);
-        }
-        let confirmed_strand = sql_query("SELECT EXISTS(SELECT 1 FROM strand_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE s.realm_id=$1 AND s.strand_id=$2 AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=s.realm_id AND e.state='committed' AND c.stream_position<=$3 AND (c.stream_position<$3 OR c.commit_id=$4)) AS present")
-            .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.strand_id.as_str()).bind::<BigInt,_>(i64::try_from(head.stream_position).map_err(PersistenceError::database)?).bind::<Text,_>(head.commit_id.as_str())
-            .get_result::<ExistsRow>(&mut *conn).await?.present;
-        if !confirmed_strand { return Ok(SelfExactCurrentRead::Unresolved("Strand current has no confirmed covering Commit in this stream prefix")); }
-        let selector = StrandWatchCurrentSelector { kind: StrandWatchSelectorKind::StrandWatch,
-            strand_id: request.strand_id.clone(), watcher_actor_id: caller.clone() };
-        let row = sql_query(WATCH_CURRENT_SQL)
-            .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.strand_id.as_str()).bind::<Text,_>(caller.to_string())
-            .get_result::<CurrentRow>(&mut *conn).await.optional()?;
-        let outcome = if let Some(row) = row {
-            let source_stream_ref: CommitStreamRef = serde_json::from_value(row.stream_ref).map_err(PersistenceError::database)?;
-            let revision = CurrentRevision { commit_id: row.current_commit_id.parse().map_err(PersistenceError::database)?,
-                stream_position: to_u64(row.current_stream_position,"watch current position")? };
-            if source_stream_ref != head.stream_ref || revision.stream_position > head.stream_position
-                || (revision.stream_position==head.stream_position && revision.commit_id!=head.commit_id) {
-                return Ok(SelfExactCurrentRead::Unresolved("watch current does not belong to the confirmed stream prefix"));
-            }
-            StrandWatchCurrentOutcome::Current { realm_id: request.realm_id.clone(), governance_generation: generation, stream_head: head,
-                result: StrandWatchCurrentRow { selector,source_stream_ref,revision,
-                    value: serde_json::from_value(row.value).map_err(PersistenceError::database)? } }
-        } else {
-            let previously_written = sql_query(crate::strand_watch_current_results::WATCH_HISTORY_SQL)
-                .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.strand_id.as_str()).bind::<Text,_>(caller.to_string()).bind::<Text,_>("")
-                .get_result::<ExistsRow>(&mut *conn).await?.present;
-            let orphan_current = sql_query("SELECT EXISTS(SELECT 1 FROM strand_watch_current_results WHERE realm_id=$1 AND strand_id=$2 AND watcher_actor_id=$3) AS present")
-                .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.strand_id.as_str()).bind::<Text,_>(caller.to_string()).get_result::<ExistsRow>(&mut *conn).await?.present;
-            if previously_written || orphan_current || generation!=0 { return Ok(SelfExactCurrentRead::Unresolved("written watch current or tenure import is unavailable")); }
-            StrandWatchCurrentOutcome::NeverWritten { realm_id: request.realm_id.clone(),governance_generation:generation,stream_head:head,selector }
+        .bind::<Text, _>(caller.to_string())
+        .get_result::<CurrentRow>(&mut *conn)
+        .await
+        .optional()?;
+    let outcome = if let Some(row) = row {
+        let source_stream_ref: CommitStreamRef =
+            serde_json::from_value(row.stream_ref).map_err(PersistenceError::database)?;
+        let revision = CurrentRevision {
+            commit_id: row
+                .current_commit_id
+                .parse()
+                .map_err(PersistenceError::database)?,
+            stream_position: to_u64(row.current_stream_position, "watch current position")?,
         };
-        Ok(SelfExactCurrentRead::Answer(outcome))
-    })
-    .await
-    .map_err(PgTransactionError::into_persistence)
+        if source_stream_ref != head.stream_ref
+            || revision.stream_position > head.stream_position
+            || (revision.stream_position == head.stream_position
+                && revision.commit_id != head.commit_id)
+        {
+            return Ok(SelfExactCurrentRead::Unresolved(
+                "watch current does not belong to the confirmed stream prefix",
+            ));
+        }
+        StrandWatchCurrentOutcome::Current {
+            realm_id: request.realm_id.clone(),
+            governance_generation: generation,
+            stream_head: head,
+            result: StrandWatchCurrentRow {
+                selector,
+                source_stream_ref,
+                revision,
+                value: serde_json::from_value(row.value).map_err(PersistenceError::database)?,
+            },
+        }
+    } else {
+        let previously_written = sql_query(crate::strand_watch_current_results::WATCH_HISTORY_SQL)
+            .bind::<Text, _>(request.realm_id.as_str())
+            .bind::<Text, _>(request.strand_id.as_str())
+            .bind::<Text, _>(caller.to_string())
+            .bind::<Text, _>("")
+            .get_result::<ExistsRow>(&mut *conn)
+            .await?
+            .present;
+        let orphan_current = sql_query("SELECT EXISTS(SELECT 1 FROM strand_watch_current_results WHERE realm_id=$1 AND strand_id=$2 AND watcher_actor_id=$3) AS present")
+            .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.strand_id.as_str()).bind::<Text,_>(caller.to_string()).get_result::<ExistsRow>(&mut *conn).await?.present;
+        if previously_written || orphan_current || generation != 0 {
+            return Ok(SelfExactCurrentRead::Unresolved(
+                "written watch current or tenure import is unavailable",
+            ));
+        }
+        StrandWatchCurrentOutcome::NeverWritten {
+            realm_id: request.realm_id.clone(),
+            governance_generation: generation,
+            stream_head: head,
+            selector,
+        }
+    };
+    Ok(SelfExactCurrentRead::Answer(outcome))
 }
 
 pub(crate) async fn media_service_anchor_for_account(

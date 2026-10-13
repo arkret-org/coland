@@ -654,6 +654,17 @@ impl crate::identity::AgentPairingPort for PersistenceAgentPairing {
     ) -> crate::ServiceResult<Option<coland_storage::AgentPairingReceipt>> {
         Ok(self.0.agents().pairing_receipt(event_id).await?)
     }
+    async fn qualified_scope_receipt_for_pairing(
+        &self,
+        agent_id: &str,
+        pairing_request_id: &str,
+    ) -> crate::ServiceResult<Option<coland_storage::AgentPairingReceipt>> {
+        Ok(self
+            .0
+            .agents()
+            .qualified_scope_receipt_for_pairing(agent_id, pairing_request_id)
+            .await?)
+    }
     async fn pending_pairings_after(
         &self,
         after_id: &str,
@@ -760,6 +771,7 @@ impl crate::identity::AgentPairingPort for PersistenceAgentPairing {
             signer_resolution_evidence_ref: command.signer_resolution_evidence_ref.clone(),
             current_signer_evidence: command.current_signer_evidence.clone(),
             frozen_authorize_event: command.frozen_authorize_event.clone(),
+            scope_custody_ref: command.scope_custody_ref.clone(),
             authorize_ref: command.authorize_ref.clone(),
             status: command.status,
             authorized_key_event: command.authorized_key_event.clone(),
@@ -784,6 +796,7 @@ impl crate::identity::AgentPairingPort for PersistenceAgentPairing {
             request_digest: command.request_digest.clone(),
             authorize_event_id: command.authorize_event_id.clone(),
             key_authorization_event: command.key_authorization_event.clone(),
+            scope_custody_ref: command.scope_custody_ref.clone(),
         };
         Ok(self
             .0

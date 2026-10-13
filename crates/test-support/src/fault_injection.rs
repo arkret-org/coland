@@ -258,6 +258,16 @@ impl AgentStore for FaultAgentStore {
     ) -> PersistenceResult<Option<coland_storage::AgentPairingReceipt>> {
         self.inner.agents().pairing_receipt(event_id).await
     }
+    async fn qualified_scope_receipt_for_pairing(
+        &self,
+        agent_id: &str,
+        pairing_request_id: &str,
+    ) -> PersistenceResult<Option<coland_storage::AgentPairingReceipt>> {
+        self.inner
+            .agents()
+            .qualified_scope_receipt_for_pairing(agent_id, pairing_request_id)
+            .await
+    }
     async fn pending_pairings_after(
         &self,
         after_id: &str,

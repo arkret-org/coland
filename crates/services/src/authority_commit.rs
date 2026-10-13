@@ -406,6 +406,83 @@ pub struct AuthorityCommitApplication {
 }
 
 impl AuthorityCommitApplication {
+    pub async fn morph_list_for_actor(
+        &self,
+        realm: &arkret_wire::RealmId,
+        actor: &arkret_wire::ActorId,
+        station: &arkret_wire::DidCoreId,
+        include_terminal: bool,
+    ) -> ServiceResult<
+        Option<arkret_models_collaboration::objects::query_projection::ProjectionMorphList>,
+    > {
+        Ok(self
+            .store()
+            .morph_list_for_actor(realm, actor, station, include_terminal)
+            .await?)
+    }
+
+    pub async fn document_morph_for_actor(
+        &self,
+        realm: &arkret_wire::RealmId,
+        morph: &arkret_wire::MorphId,
+        actor: &arkret_wire::ActorId,
+        station: &arkret_wire::DidCoreId,
+    ) -> ServiceResult<
+        Option<
+            arkret_models_collaboration::objects::query_projection::DocumentMorphProjectionOutcome,
+        >,
+    > {
+        Ok(self
+            .store()
+            .document_morph_for_actor(realm, morph, actor, station)
+            .await?)
+    }
+
+    pub async fn owned_agent_authorization_check(
+        &self,
+        caller: &arkret_wire::ActorId,
+        station: &arkret_wire::DidCoreId,
+        request: &arkret_models_collaboration::governance::authorization::AuthzCheckRequestBody,
+    ) -> ServiceResult<
+        Option<arkret_models_collaboration::governance::authorization::AuthzCheckOutcome>,
+    > {
+        Ok(self
+            .store()
+            .owned_agent_authorization_check(caller, station, request)
+            .await?)
+    }
+
+    pub async fn acquire_committed_content_delivery(
+        &self,
+        account: &arkret_wire::AccountId,
+        station: &arkret_wire::DidCoreId,
+        input: &coland_storage::AccountContentDeliveryInput,
+    ) -> ServiceResult<Option<Box<dyn coland_storage::AccountContentDeliveryGuard>>> {
+        Ok(self
+            .store()
+            .acquire_committed_content_delivery(account, station, input)
+            .await?)
+    }
+    /// Native fixed reply preparation, separate from the final Event UOW.
+    pub async fn acquire_native_message_reply_preparation(
+        &self,
+        agent: &arkret_wire::AccountId,
+        controller: &arkret_wire::AccountId,
+        caller: &arkret_wire::AccountId,
+        station: &arkret_wire::DidCoreId,
+        source: &arkret_wire::CommittedEventFullView,
+        strand: &arkret_wire::StrandId,
+        input: &coland_storage::AccountContentDeliveryInput,
+        deployment: arkret_models_collaboration::governance::agent_participation::ParticipationBits,
+    ) -> ServiceResult<Box<dyn coland_storage::AccountContentDeliveryGuard>> {
+        Ok(self
+            .store()
+            .acquire_native_message_reply_preparation(
+                agent, controller, caller, station, source, strand, input, deployment,
+            )
+            .await?)
+    }
+
     /// Sign the exact Event at a cut locked by a specialized admission unit.
     /// The unit must install this Commit with its domain facts atomically.
     #[expect(
@@ -1856,6 +1933,41 @@ impl AuthorityCommitApplication {
         Ok(self
             .store()
             .object_projection_lists_for_actor(realm_id, actor, include_terminal)
+            .await?)
+    }
+
+    pub async fn object_projection_delivery_for_actor(
+        &self,
+        realm_id: &arkret_wire::RealmId,
+        actor: &arkret_wire::ActorId,
+        include_terminal: bool,
+    ) -> ServiceResult<
+        Option<(
+            arkret_models_collaboration::objects::query_projection::ProjectionSpaceList,
+            arkret_models_collaboration::objects::query_projection::ProjectionStrandList,
+            arkret_models_collaboration::sync_frames::current_results::AccountCurrentView,
+        )>,
+    > {
+        Ok(self
+            .store()
+            .object_projection_delivery_for_actor(realm_id, actor, include_terminal)
+            .await?)
+    }
+
+    pub async fn realm_export_for_actor(
+        &self,
+        realm_id: &arkret_wire::RealmId,
+        actor: &arkret_wire::ActorId,
+        station: &arkret_wire::DidCoreId,
+    ) -> ServiceResult<
+        Option<(
+            arkret_models_collaboration::governance::realm_governance::RealmExport,
+            Vec<arkret_wire::CommittedEventView>,
+        )>,
+    > {
+        Ok(self
+            .store()
+            .realm_export_for_actor(realm_id, actor, station)
             .await?)
     }
 

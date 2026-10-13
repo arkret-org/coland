@@ -522,6 +522,14 @@ fn canonical_event_read_operation(req: &Request) -> Option<&'static str> {
 }
 
 fn normalize_path_for_metrics(path: &str) -> String {
+    if let Some(suffix) = path.strip_prefix("/_arkret/open/third-party-invites/") {
+        // A lookup code may be only six characters. Length-based ID masking
+        // must never decide whether an unregistered URL credential is private.
+        return match suffix {
+            "provision" | "activate" | "status" | "present" => path.to_owned(),
+            _ => "/_arkret/open/third-party-invites/{invalid}".to_owned(),
+        };
+    }
     if path == "/" {
         return "/".to_owned();
     }
@@ -570,6 +578,21 @@ fn normalize_label(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn invite_url_credentials_never_enter_metric_labels() {
+        use salvo::test::TestClient;
+        for url in [
+            "http://localhost/_arkret/open/third-party-invites/present/ABC123",
+            "http://localhost/_arkret/open/third-party-invites/present/123456?token=SECRET",
+            "http://localhost/_arkret/open/third-party-invites/status/PRIVATE",
+        ] {
+            let request = TestClient::post(url).build();
+            assert_eq!(
+                super::request_op_label(&request),
+                "POST /_arkret/open/third-party-invites/{invalid}"
+            );
+        }
+    }
     use super::*;
 
     /// Render against the live global recorder. Tests share one process-wide

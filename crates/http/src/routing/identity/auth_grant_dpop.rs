@@ -593,6 +593,9 @@ pub(crate) fn is_grant_dpop_presentation(req: &Request) -> bool {
 fn session_binding_from_introspection(
     grant: &SessionGrantValidationMetadata,
 ) -> Result<SessionEndpointState, AuthError> {
+    grant.validate().map_err(|_| {
+        unauthenticated("session grant introspection authorization metadata is incomplete")
+    })?;
     let authority = grant.account_id();
     if authority.station_id != grant.audience_id {
         return Err(unauthenticated(
@@ -622,6 +625,7 @@ fn session_binding_from_introspection(
                     "session_grant_revocation_ref": grant.revocation_ref,
                     "agent_key_authorization_ref": agent_key_authorization_ref,
                     "verification_method": verification_method,
+                    "scope_details": grant.scope_details,
                 }),
                 freshness_state: FreshnessState::Fresh,
             },
@@ -820,6 +824,42 @@ pub(crate) async fn grant_dpop_session(
     Ok(session_from_verified_grant(
         state, grant_jwt, grant, endpoint,
     ))
+}
+
+/// Native, non-transferable authentication material constructed only by the
+/// original exact-token/DPoP request boundary. Not a serializable allow ticket.
+/// Issuer observation precedes acquisition of every local held reply cut.
+pub(crate) struct NativeReplyAuthenticatedSession {
+    session: SessionRecord,
+}
+impl NativeReplyAuthenticatedSession {
+    pub(crate) fn session(&self) -> &SessionRecord {
+        &self.session
+    }
+}
+
+pub(crate) async fn authenticate_native_reply_session(
+    state: &AppState,
+    req: &mut Request,
+    grant_jwt: &str,
+) -> Result<NativeReplyAuthenticatedSession, AuthError> {
+    // The standard RFC 9421 request hoop must already have verified the request.
+    // This takes (or reuses) the same strict request memo for DPoP and downstream
+    // actor/ceiling checks, rather than independently parsing a JWT locally.
+    take_request_authoritative_grant(state, req, grant_jwt, true).await?;
+    let session = grant_dpop_session(state, req, grant_jwt, true).await?;
+    if session.agent_session().is_none()
+        || session.revoked_at.is_some()
+        || !matches!(
+            session.session_grant.as_ref().map(|g| &g.holder_binding),
+            Some(SessionGrantHolderBinding::AgentRuntime { .. })
+        )
+    {
+        return Err(unauthenticated(
+            "native reply requires an authenticated Agent runtime",
+        ));
+    }
+    Ok(NativeReplyAuthenticatedSession { session })
 }
 
 /// Synthesize the request- or connection-scoped `SessionRecord` from an
@@ -1229,6 +1269,7 @@ mod tests {
 
     fn test_introspection_grant() -> SessionGrantValidationMetadata {
         SessionGrantValidationMetadata {
+            scope_details: None,
             id: SessionGrantId::new(
                 "ak:session_grant:Aepgr15HbtERKfqPAh9SrfWBdihSvX_c94JvujvBS2f-",
             )
@@ -1273,7 +1314,6 @@ mod tests {
             holder_binding: SessionGrantHolderBinding::HumanDevice {
                 device_binding: "ak:device:0196419b-0000-7000-8000-000000000001".to_owned(),
             },
-            scope_details: None,
         }
     }
 
@@ -1360,7 +1400,7 @@ mod tests {
                 "strand_ids": [],
                 "resources": {"realm_ids": [], "strand_ids": []},
                 "constraints": {
-                    "allowed_tracks": [], "allowed_data_labels": [], "allowed_endpoints": []
+                    "allowed_tracks": ["discussion"], "allowed_data_labels": [], "allowed_endpoints": []
                 },
                 "capability_grant_refs": [],
                 "policy_refs": []
@@ -1383,8 +1423,17 @@ mod tests {
         );
         assert_eq!(agent_session.freshness_state, FreshnessState::Fresh);
         assert_eq!(
+            agent_session.scope_details["scope_details"],
+            serde_json::to_value(grant.scope_details.as_ref().unwrap()).unwrap()
+        );
+        assert_eq!(
             agent_session.scope_details["session_grant_revocation_ref"],
             "ak:session:grant-1"
+        );
+        grant.scope_details.as_mut().unwrap().remove("resources");
+        assert!(
+            session_binding_from_introspection(&grant).is_err(),
+            "missing resource metadata cannot become an unrestricted Agent session"
         );
     }
 }

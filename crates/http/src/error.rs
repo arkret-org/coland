@@ -164,6 +164,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn non_enumerable_not_found_has_exact_public_bytes_without_request_instance() {
+        use salvo::test::ResponseExt as _;
+        let mut bodies = Vec::new();
+        for development_mode in [false, true, false] {
+            let error = AppError::indistinguishable_not_found("third-party invite unavailable");
+            assert_eq!(error.code, ErrorCode::NotFound);
+            let mut response = Response::new();
+            let mut depot = Depot::new();
+            depot.inject(ErrorExposure { development_mode });
+            error
+                .write(&mut Request::new(), &mut depot, &mut response)
+                .await;
+            assert_eq!(response.status_code, Some(StatusCode::NOT_FOUND));
+            let body = response.take_string().await.unwrap();
+            let problem: arkret_wire::problem_details::Problem =
+                serde_json::from_str(&body).unwrap();
+            assert_eq!(problem.error_code(), Some(ErrorCode::NotFound));
+            assert!(problem.instance.is_none());
+            assert!(problem.extensions.is_empty());
+            bodies.push(body);
+        }
+        assert!(
+            bodies
+                .windows(2)
+                .all(|bodies| bodies[0].as_bytes() == bodies[1].as_bytes())
+        );
+    }
+
+    #[tokio::test]
     async fn typed_constructors_preserve_registered_wire_and_context() {
         for code in ErrorCode::ALL {
             for context in [
@@ -549,6 +578,19 @@ impl AppError {
     }
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::NotFound, message)
+    }
+    /// Freeze the public rejection for a non-enumerable lookup. Per-request
+    /// correlation stays in transport/audit metadata rather than this body.
+    pub fn indistinguishable_not_found(message: impl Into<String>) -> Self {
+        let mut error = Self::not_found(message);
+        error.frozen_problem = Some(Box::new(
+            arkret_wire::problem_details::Problem::from_code(
+                ErrorCode::NotFound.as_str(),
+                error.message.as_ref(),
+            )
+            .with_status(ErrorCode::NotFound.http_status()),
+        ));
+        error
     }
     pub fn conflict(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::Conflict, message)

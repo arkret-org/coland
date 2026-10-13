@@ -359,6 +359,30 @@ pub(crate) async fn admit_in_connection(
                     "Circle self-membership edge is invalid",
                 ));
             }
+            if next == "join" {
+                let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
+                    conn, realm_id, &member,
+                )
+                .await?;
+                if let Some(controller) = cut
+                    .owned_controller_in_connection(conn, commit.committed_at)
+                    .await?
+                {
+                    crate::agent_management_admission::require_circle_join_in_connection(
+                        conn,
+                        realm_id,
+                        circle_id,
+                        controller
+                            .as_account_id()
+                            .ok_or_else(|| schema("Agent controller is not an Account"))?,
+                        member
+                            .as_account_id()
+                            .ok_or_else(|| schema("Agent member is not an Account"))?,
+                        commit.committed_at,
+                    )
+                    .await?;
+                }
+            }
             Ok(())
         }
         _ => Ok(()),

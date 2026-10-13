@@ -48,12 +48,17 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2.workspace = true
 coland-storage = { workspace = true }
+coland-domain = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
 tokio-postgres = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+bytes.workspace = true
+futures-util.workspace = true
+rustls.workspace = true
+tokio-tungstenite.workspace = true
 rand.workspace = true
 arkret-test-kit.workspace = true
 salvo = { workspace = true, features = ["test"] }
@@ -68,7 +73,6 @@ arkret-signatures = { workspace = true, features = ["signer"] }
 ed25519-dalek.workspace = true
 arkret-mls = { workspace = true, features = ["test-utils"] }
 arkret-wire = { workspace = true, features = ["diesel", "test-support"] }
-coland-domain = { workspace = true }
 coland-services = { workspace = true }
 coland-storage = { workspace = true, features = ["test-support"] }
 coland-storage-postgres = { version = "0.3.0", path = ".", features = ["test-support"] }

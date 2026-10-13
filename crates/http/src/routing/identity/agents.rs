@@ -218,3 +218,5 @@ pub(crate) fn open_router() -> Router {
 #[cfg(test)]
 #[path = "agents/tests.rs"]
 mod tests;
+
+pub(crate) use pairing::{qualified_agent_scope_evidence, verify_and_retain_agent_scope_custody};

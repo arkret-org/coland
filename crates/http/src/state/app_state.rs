@@ -80,6 +80,7 @@ pub struct ConnectionDrain {
 /// DID resolver service, `ProjectionState`).
 #[derive(Clone)]
 pub struct AppState {
+    verifier_private_keystore: Option<Arc<dyn arkret_keystore::KeyStore>>,
     config: AppConfig,
     /// Runtime-authoritative service DID. It is resolved from durable identity
     /// state before construction and is never loaded from configuration.
@@ -1014,6 +1015,37 @@ impl AppState {
         *self.notary_signing_key_origin.lock()
     }
 
+    /// The original durable vault is shared with service bootstrap, never reopened
+    /// with a different namespace or derived from a rotating signing seed.
+    pub fn with_verifier_private_keystore(
+        mut self,
+        store: Arc<dyn arkret_keystore::KeyStore>,
+    ) -> Self {
+        self.verifier_private_keystore = Some(store);
+        self
+    }
+    pub(crate) fn verifier_private_keystore(
+        &self,
+    ) -> Result<&dyn arkret_keystore::KeyStore, crate::error::AppError> {
+        self.verifier_private_keystore.as_deref().ok_or_else(|| {
+            crate::error::AppError::capability_denied(
+                "verifier-private scope custody is unavailable",
+            )
+        })
+    }
+    pub async fn verify_and_retain_agent_scope_custody(
+        &self,
+        body: &arkret_models_collaboration::agent_scope::AgentKeyPairRequestBody,
+    ) -> Result<coland_storage::AgentScopeCustodyRef, crate::error::AppError> {
+        crate::routing::identity::agents::verify_and_retain_agent_scope_custody(self, body).await
+    }
+    pub async fn qualified_agent_scope_evidence(
+        &self,
+        guard: &coland_storage::AgentEndpointGuard,
+    ) -> Result<coland_storage::VerifiedAgentScopeEvidence, crate::error::AppError> {
+        crate::routing::identity::agents::qualified_agent_scope_evidence(self, guard).await
+    }
+
     pub fn from_runtime(
         config: AppConfig,
         runtime: AppStateRuntime,
@@ -1137,6 +1169,7 @@ impl AppState {
         let trusted_push_gateways = Arc::new(config.trusted_push_gateways.clone());
 
         Self {
+            verifier_private_keystore: None,
             config,
             service_id: service_id.clone(),
             service_identity,

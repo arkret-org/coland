@@ -158,20 +158,36 @@ pub(crate) async fn agent_binding_is_accepted(
         controller_core_id.as_str(),
         true,
     )?;
-    let services = current
-        .document
+    validate_agent_binding_document(
+        &current.document,
+        &initial_resolution.did,
+        &controller_core_id,
+        principal_control_realm_id,
+        authorization_ref,
+        requested_scope_digest,
+    )?;
+    Ok(true)
+}
+
+fn validate_agent_binding_document(
+    document: &Value,
+    agent_did: &Did,
+    controller_core_id: &DidCoreId,
+    principal_control_realm_id: &RealmId,
+    authorization_ref: &DidUrl,
+    requested_scope_digest: &Hash,
+) -> Result<(), AppError> {
+    validate_agent_inception_document(document, agent_did, controller_core_id.as_str(), true)?;
+    let services = document
         .get("service")
         .and_then(Value::as_array)
         .ok_or_else(|| schema_error("Agent DID service set is missing"))?;
-    let expected_id = format!(
-        "{}#arkret-principal-control-realm",
-        initial_resolution.did.as_str()
-    );
+    let expected_id = format!("{}#arkret-principal-control-realm", agent_did.as_str());
     let mut bindings = services.iter().filter(|service| {
         service.get("type").and_then(Value::as_str) == Some("ArkretPrincipalControlRealm")
     });
     let Some(binding) = bindings.next() else {
-        return Ok(false);
+        return Err(schema_error("Agent DID PCR binding is missing"));
     };
     if bindings.next().is_some()
         || binding.get("id").and_then(Value::as_str) != Some(expected_id.as_str())
@@ -199,7 +215,81 @@ pub(crate) async fn agent_binding_is_accepted(
             "Agent DID PCR service binding does not match the accepted create-locked tuple",
         ));
     }
-    Ok(true)
+    Ok(())
+}
+
+/// All state comparisons use one already verified native snapshot. Inception
+/// is the exact commitment in accepted PCR genesis, and every effective
+/// successor must retain entry one's create-locked binding, even if a later
+/// successor restores a previously changed value.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_agent_binding_history_at(
+    history: &arkret_identity::VerifiedDidWebvhLog,
+    initial_resolution: &arkret_models_identity::ResolutionCommitment,
+    controller_principal_id: &str,
+    principal_control_realm_id: &RealmId,
+    authorization_ref: &DidUrl,
+    requested_scope_digest: &Hash,
+    accepted_at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    use coland_services::identity::{select_did_webvh_state_at, select_pinned_did_webvh_state};
+    let controller = managed_controller_core_id(controller_principal_id)?;
+    let initial_head = Hash::new(initial_resolution.method_history_head.clone())
+        .map_err(|error| schema_error(error.to_string()))?;
+    let inception = select_pinned_did_webvh_state(
+        &initial_resolution.did,
+        history,
+        &initial_resolution.version_id,
+        &initial_head,
+    )
+    .map_err(|error| schema_error(format!("Agent accepted inception pin is invalid: {error}")))?;
+    if !inception.version_id.starts_with("1-") {
+        return Err(schema_error("Agent accepted inception must be entry zero"));
+    }
+    validate_agent_inception_document(
+        &inception.document,
+        &initial_resolution.did,
+        controller.as_str(),
+        false,
+    )?;
+    let selected = select_did_webvh_state_at(&initial_resolution.did, history, accepted_at)
+        .map_err(|error| {
+            schema_error(format!("Agent accepted-at DID history is invalid: {error}"))
+        })?;
+    if selected.version_id == initial_resolution.version_id {
+        return Err(schema_error(
+            "Agent PCR binding was not published at the evaluation time",
+        ));
+    }
+    let binding = history
+        .entries
+        .get(1)
+        .filter(|entry| entry.version_id.starts_with("2-") && entry.version_time <= accepted_at)
+        .ok_or_else(|| schema_error("Agent PCR binding must be the first continuous update"))?;
+    validate_agent_binding_document(
+        &binding.state,
+        &initial_resolution.did,
+        &controller,
+        principal_control_realm_id,
+        authorization_ref,
+        requested_scope_digest,
+    )?;
+    for entry in history
+        .entries
+        .iter()
+        .skip(2)
+        .filter(|entry| entry.version_time <= accepted_at)
+    {
+        validate_agent_binding_document(
+            &entry.state,
+            &initial_resolution.did,
+            &controller,
+            principal_control_realm_id,
+            authorization_ref,
+            requested_scope_digest,
+        )?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn agent_controller_account(
@@ -368,12 +458,204 @@ pub(crate) async fn validate_agent_controller_binding(
     agent_record: &AgentPrincipalRecord,
     accepted_at: DateTime<Utc>,
 ) -> Result<(), AppError> {
-    requested_scope_digest_for_record(agent_record)?;
-    let agent_did = agent_did(agent_record)?;
-    let document = agent_did_document_at(state, &agent_did, accepted_at).await?;
-    validate_agent_did_identity_anchor(&document, &agent_did)?;
+    validate_agent_requested_scope_binding_at(
+        state,
+        agent_record,
+        &requested_scope_digest_for_record(agent_record)?,
+        accepted_at,
+    )
+    .await?;
     validate_agent_runtime_authority(agent_record)?;
     validate_active_agent_accountability(state, agent_record, accepted_at).await
+}
+
+/// Bind privately disclosed scope to accepted provisioning and PCR genesis,
+/// then to the create-locked public commitment in verified native history.
+/// Service-local rows only locate the accepted sources; they grant no authority.
+pub(crate) async fn validate_agent_requested_scope_binding_at(
+    state: &AppState,
+    record: &AgentPrincipalRecord,
+    requested_scope_digest: &Hash,
+    accepted_at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    qualified_agent_scope_binding_at(state, record, requested_scope_digest, accepted_at)
+        .await
+        .map(|_| ())
+}
+
+pub(crate) async fn qualified_agent_scope_binding_at(
+    state: &AppState,
+    record: &AgentPrincipalRecord,
+    requested_scope_digest: &Hash,
+    accepted_at: DateTime<Utc>,
+) -> Result<coland_storage::AgentScopeAcceptedBinding, AppError> {
+    let controller = agent_controller_account(state, record).await?;
+    let actor = agent_actor_for_account(record, &controller)?;
+    let account = actor
+        .as_account_id()
+        .ok_or_else(|| schema_error("Agent Account is missing"))?;
+    let resolution = state
+        .persistence()
+        .principal_resolution_by_account_id(account)
+        .await
+        .map_err(|error| AppError::internal(format!("Agent PCR source lookup failed: {error}")))?
+        .ok_or_else(|| schema_error("Agent accepted PCR genesis is missing"))?;
+    coland_storage::validate_principal_resolution_record(&resolution)
+        .map_err(|error| schema_error(error.to_string()))?;
+    let genesis = state
+        .authority_commits()
+        .committed_event(&resolution.genesis_event.event_id)
+        .await
+        .map_err(|error| {
+            AppError::internal(format!("Agent accepted genesis lookup failed: {error}"))
+        })?
+        .ok_or_else(|| schema_error("Agent PCR genesis covering Commit is missing"))?;
+    let realm = RealmId::new(record.principal_control_realm_id.clone())
+        .map_err(|error| schema_error(error.to_string()))?;
+    if genesis.event != resolution.genesis_event
+        || genesis.commit.event_ref != genesis.event.event_id
+        || genesis.commit.realm_id != realm
+        || genesis.event.realm_id != realm
+        || genesis.commit.stream_position != 0
+        || genesis.commit.committed_at > accepted_at
+        || genesis.event.actor_id != actor
+        || genesis.event.executed_by.as_ref() != Some(&ActorId::account(controller.clone()))
+        || genesis
+            .event
+            .authorization_ref
+            .as_ref()
+            .map(|reference| reference.as_str())
+            != Some(record.controller_authorization_ref.as_str())
+        || genesis.event.scope_ref != arkret_wire::ScopeRef::RealmGenesis
+        || RealmId::from_event_id(&genesis.event.event_id) != realm
+    {
+        return Err(schema_error(
+            "Agent PCR genesis does not bind its exact accepted Account, controller and Realm",
+        ));
+    }
+    genesis
+        .event
+        .verify_event_id_matches_content_with_digest_suite(arkret_canonical::DigestSuite::Sha256)
+        .map_err(|error| schema_error(error.to_string()))?;
+    let genesis_payload: arkret_models_collaboration::events_payloads::RealmCreatePayload =
+        serde_json::from_value(
+            serde_json::to_value(&genesis.event.payload)
+                .map_err(|error| schema_error(error.to_string()))?,
+        )
+        .map_err(|error| schema_error(error.to_string()))?;
+    let initial = agent_initial_resolution_for_record(record)?;
+    let trust_domain = state
+        .did_binding_trust_domain()
+        .map_err(AppError::internal)?;
+    validate_agent_pcr_genesis_object(
+        &serde_json::to_value(&genesis_payload.object)
+            .map_err(|error| schema_error(error.to_string()))?,
+        &record.id,
+        &record.controller_principal_id,
+        realm.as_str(),
+        trust_domain.as_str(),
+        &initial,
+    )?;
+    if genesis_payload.object.governance_station_id != account.station_id
+        || initial.did != agent_did(record)?
+    {
+        return Err(schema_error(
+            "Agent accepted genesis inception or hosting Station differs from its binding",
+        ));
+    }
+    let provision_id = record
+        .provision_event_refs
+        .as_ref()
+        .and_then(|refs| refs.get("provision_event_id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| schema_error("Agent accepted provisioning reference is missing"))?;
+    let provision_id = arkret_wire::EventId::new(provision_id.to_owned())
+        .map_err(|error| schema_error(error.to_string()))?;
+    let provision = state
+        .authority_commits()
+        .committed_event(&provision_id)
+        .await
+        .map_err(|error| {
+            AppError::internal(format!("Agent provisioning source lookup failed: {error}"))
+        })?
+        .ok_or_else(|| schema_error("Agent provisioning covering Commit is missing"))?;
+    let payload =
+        arkret_models_collaboration::events_payloads::agent::AgentProvisionPayload::try_from(
+            &provision.event,
+        )
+        .map_err(|error| schema_error(error.to_string()))?;
+    provision
+        .event
+        .verify_event_id_matches_content_with_digest_suite(arkret_canonical::DigestSuite::Sha256)
+        .map_err(|error| schema_error(error.to_string()))?;
+    if provision.event.event_id != provision_id
+        || provision.commit.event_ref != provision_id
+        || provision.commit.realm_id != provision.event.realm_id
+        || provision.commit.committed_at > genesis.commit.committed_at
+        || provision.event.actor_id != ActorId::account(controller.clone())
+        || payload.agent_id != account.principal_id
+        || payload.controller_principal_id != controller.principal_id
+        || payload.principal_control_realm_id != realm
+        || payload.controller_authorization_ref != record.controller_authorization_ref
+        || &payload.requested_scope_digest != requested_scope_digest
+    {
+        return Err(schema_error(
+            "Agent disclosed scope differs from its exact accepted provisioning source",
+        ));
+    }
+    let history = state
+        .dids()
+        .verified_webvh_history(&initial.did)
+        .await
+        .map_err(|error| {
+            schema_error(format!(
+                "Agent verified DID history is unavailable: {error}"
+            ))
+        })?;
+    validate_agent_binding_history_at(
+        &history,
+        &initial,
+        &record.controller_principal_id,
+        &realm,
+        &record.controller_authorization_ref,
+        requested_scope_digest,
+        accepted_at,
+    )?;
+    let entry_one = history
+        .entries
+        .get(1)
+        .ok_or_else(|| schema_error("Agent entry one is missing"))?;
+    let raw = history
+        .raw_entries
+        .get(1)
+        .ok_or_else(|| schema_error("Agent entry one bytes are missing"))?;
+    let binding_digest = arkret_canonical::sha256_digest(
+        &arkret_canonical::canonical_json_bytes(raw)
+            .map_err(|error| schema_error(error.to_string()))?,
+    );
+    Ok(coland_storage::AgentScopeAcceptedBinding {
+        controller_account: controller,
+        binding_resolution: arkret_models_identity::ResolutionCommitment {
+            did: initial.did.clone(),
+            method_history_head: binding_digest,
+            version_id: entry_one.version_id.clone(),
+        },
+        initial_resolution: initial,
+        provision_ref: arkret_wire::CommittedEventRef {
+            event_id: provision.event.event_id.clone(),
+            commit_id: provision.commit.commit_id.clone(),
+            stream_ref: provision.commit.stream_ref.clone(),
+            stream_position: provision.commit.stream_position,
+        },
+        pcr_genesis_ref: arkret_wire::CommittedEventRef {
+            event_id: genesis.event.event_id.clone(),
+            commit_id: genesis.commit.commit_id.clone(),
+            stream_ref: genesis.commit.stream_ref.clone(),
+            stream_position: genesis.commit.stream_position,
+        },
+        requested_scope_digest: requested_scope_digest.clone(),
+        verified_at: accepted_at,
+    })
 }
 
 pub(crate) async fn validate_effective_agent_realm_membership(
@@ -581,29 +863,6 @@ async fn agent_record(state: &AppState, agent_id: &str) -> Result<AgentPrincipal
         .ok_or_else(|| schema_error("managed_principal_id does not identify a local Agent"))
 }
 
-async fn agent_did_document_at(
-    state: &AppState,
-    agent_did: &Did,
-    accepted_at: DateTime<Utc>,
-) -> Result<Value, AppError> {
-    let mut history = state
-        .dids()
-        .log_events(agent_did.as_str())
-        .await
-        .map_err(|error| AppError::internal(format!("Agent DID history lookup failed: {error}")))?;
-    history.sort_by_key(|entry| (entry.created_at, entry.seq));
-    if let Some(document) = history.into_iter().rev().find_map(|entry| {
-        (entry.created_at <= accepted_at)
-            .then(|| entry.operation.get("state").cloned())
-            .flatten()
-    }) {
-        return Ok(document);
-    }
-    Err(schema_error(
-        "Agent DID accepted history is unavailable at the evaluation time",
-    ))
-}
-
 fn agent_did(record: &AgentPrincipalRecord) -> Result<Did, AppError> {
     let (controller, _) = record
         .controller_authorization_ref
@@ -628,6 +887,7 @@ fn agent_did(record: &AgentPrincipalRecord) -> Result<Did, AppError> {
     Ok(did)
 }
 
+#[cfg(test)]
 fn validate_agent_did_identity_anchor(document: &Value, agent_did: &Did) -> Result<(), AppError> {
     arkret_signatures::webvh::validate_agent_did_document_profile(agent_did.as_str(), document, &[])
         .map_err(|error| schema_error(format!("Agent DID identity profile is invalid: {error}")))

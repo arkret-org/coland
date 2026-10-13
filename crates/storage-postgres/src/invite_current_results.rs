@@ -22,6 +22,7 @@
 
 mod acceptance_attestation;
 mod claim_admission;
+mod provider_liveness;
 
 use arkret_event_draft::EventPayloadExt;
 use arkret_models_collaboration::events_payloads::realm::RealmPolicyBundlePayload;
@@ -859,6 +860,24 @@ impl coland_storage::InviteCurrentResultStore for PgInviteCurrentResultStore {
         })
         .await
         .map_err(crate::PgTransactionError::into_persistence)
+    }
+
+    async fn acquire_third_party_invite_provision_device(
+        &self,
+        request: &arkret_models_collaboration::governance::third_party_invite::ThirdPartyInviteProvisionRequestBody,
+        station: &arkret_wire::DidCoreId,
+        observe: &(dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync),
+    ) -> PersistenceResult<Box<dyn coland_storage::ThirdPartyInviteProviderLivenessGuard>> {
+        provider_liveness::acquire_provision_device(&self.pool, request, station, observe).await
+    }
+
+    async fn acquire_third_party_invite_provider_liveness(
+        &self,
+        request: &coland_storage::ThirdPartyInviteProviderLivenessRequest,
+        station: &arkret_wire::DidCoreId,
+        observe: &(dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync),
+    ) -> PersistenceResult<Box<dyn coland_storage::ThirdPartyInviteProviderLivenessGuard>> {
+        provider_liveness::acquire(&self.pool, request, station, observe).await
     }
 
     async fn invites_in_realm(

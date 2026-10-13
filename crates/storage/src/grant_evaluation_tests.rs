@@ -766,6 +766,87 @@ fn controller_bound_execution_loses_authority_without_revoking_agent_grant() {
 }
 
 #[test]
+fn controller_own_mapping_keeps_actual_author_and_global_refusals() {
+    use arkret_models_collaboration::governance::grant_constraint::{
+        GrantConstraintCondition, GrantConstraintConditionKind,
+    };
+    let mut own = constraint(
+        GrantConstraintKind::FieldAccess,
+        GrantConstraintEffect::Allow,
+    );
+    own.allowed_write_fields = vec!["body".to_owned()];
+    own.condition = Some(GrantConstraintCondition {
+        kind: GrantConstraintConditionKind::ObjectIsOwnedByActor,
+        extra: Default::default(),
+    });
+    let mut agents = [grant(
+        1,
+        &["ak.message.revise.own"],
+        realm_wide(),
+        vec![own.clone()],
+    )];
+    let mut parents = vec![grant(
+        2,
+        &["ak.message.revise.own"],
+        realm_wide(),
+        vec![own.clone()],
+    )];
+    let mut facts = OperationFacts {
+        target_owner: Some(actor()),
+        target_created_at: Some(now()),
+        write_fields: Some(vec!["body".to_owned()]),
+        ..Default::default()
+    };
+    assert!(allowed(&bounded(
+        &agents,
+        &parents,
+        &["ak.message.revise.own"],
+        &facts
+    )));
+    let author = facts.target_owner.clone();
+    own.effect = GrantConstraintEffect::Deny;
+    own.allowed_write_fields.clear();
+    own.denied_write_fields = vec!["body".to_owned()];
+    parents.push(grant(
+        3,
+        &["ak.message.revise.own"],
+        realm_wide(),
+        vec![own],
+    ));
+    assert!(matches!(
+        bounded(&agents, &parents, &["ak.message.revise.own"], &facts),
+        GrantEvaluation::Denied
+    ));
+    assert_eq!(facts.target_owner, author);
+    parents.pop();
+    facts.target_owner = Some(ActorId::account(arkret_wire::AccountId::new(
+        "ak:did_core:web:controller.example".parse().unwrap(),
+        "ak:did_core:web:station.example".parse().unwrap(),
+    )));
+    assert!(!allowed(&bounded(
+        &agents,
+        &parents,
+        &["ak.message.revise.own"],
+        &facts
+    )));
+    agents[0].actions.push("ak.message.revise".to_owned());
+    parents[0].actions.push("ak.message.revise".to_owned());
+    assert!(allowed(&bounded(
+        &agents,
+        &parents,
+        &["ak.message.revise.own", "ak.message.revise"],
+        &facts
+    )));
+    facts.target_owner = None;
+    assert!(!allowed(&bounded(
+        &agents,
+        &parents,
+        &["ak.message.revise.own"],
+        &facts
+    )));
+}
+
+#[test]
 fn controller_bound_execution_never_splices_action_and_resource_paths() {
     let agents = [grant(1, &["ak.message.create"], realm_wide(), vec![])];
     let parents = [

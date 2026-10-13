@@ -348,6 +348,65 @@ pub(crate) async fn qualify_principal(
     at: chrono::DateTime<chrono::Utc>,
     allow_owner: bool,
 ) -> PersistenceResult<Option<serde_json::Value>> {
+    qualify_principal_or_actor(
+        conn,
+        event,
+        principal,
+        action,
+        target,
+        facts,
+        at,
+        allow_owner,
+        None,
+    )
+    .await
+}
+
+/// Management reviews select the designated complete Actor, not the first
+/// SQL membership row sharing one signing principal across Stations.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Exact Actor qualification retains the original complete authority inputs."
+)]
+pub(crate) async fn qualify_actor(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    actor: &ActorId,
+    action: CapabilityActionId,
+    target: &WireResourceSelector,
+    facts: &OperationFacts,
+    at: chrono::DateTime<chrono::Utc>,
+    allow_owner: bool,
+) -> PersistenceResult<Option<serde_json::Value>> {
+    qualify_principal_or_actor(
+        conn,
+        event,
+        actor.signing_principal_id(),
+        action,
+        target,
+        facts,
+        at,
+        allow_owner,
+        Some(actor),
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The internal exact Actor selector does not change ordinary principal qualification."
+)]
+async fn qualify_principal_or_actor(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    principal: &arkret_wire::DidCoreId,
+    action: CapabilityActionId,
+    target: &WireResourceSelector,
+    facts: &OperationFacts,
+    at: chrono::DateTime<chrono::Utc>,
+    allow_owner: bool,
+    exact_actor: Option<&ActorId>,
+) -> PersistenceResult<Option<serde_json::Value>> {
     if principal == event.actor_id.signing_principal_id() {
         return Ok(None);
     }
@@ -357,7 +416,9 @@ pub(crate) async fn qualify_principal(
         let actor: ActorId = serde_json::from_str(&member.member_id).map_err(|e| {
             PersistenceError::Database(format!("stored membership ActorId is invalid: {e}"))
         })?;
-        if actor.signing_principal_id() != principal {
+        if actor.signing_principal_id() != principal
+            || exact_actor.is_some_and(|expected| expected != &actor)
+        {
             continue;
         }
         let checks = arkret_schema::capability_action_descriptor(action).required_evaluator_checks;

@@ -1408,6 +1408,9 @@ pub(crate) async fn advance_in_connection(
             )
             .await?;
         }
+        arkret_wire::EventKind::RealmJoinRule => {
+            crate::realm_bootstrap_current_results::commit_realm_join_rule_current_result_in_connection(conn, event, commit).await?;
+        }
         arkret_wire::EventKind::RealmHistoryAccess => {
             crate::realm_bootstrap_current_results::commit_realm_history_access_current_result_in_connection(conn, event, commit).await?;
         }

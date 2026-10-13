@@ -37,6 +37,58 @@ pub struct PersistenceHandle {
 }
 
 impl PersistenceHandle {
+    pub async fn management_review_request(
+        &self,
+        caller: &arkret_wire::ActorId,
+        request: &arkret_models_integration::management_review::ManagementReviewRequestBody,
+        producer: &coland_storage::SelfProducerCommitGuard,
+        current: &coland_storage::ManagementReviewCurrent,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>
+    {
+        self.persistence
+            .agents()
+            .management_review_request(caller, request, producer, current, at)
+            .await
+    }
+    pub async fn management_review_status(
+        &self,
+        caller: &arkret_wire::ActorId,
+        request: &arkret_models_integration::management_review::ManagementReviewLookupRequestBody,
+        current: &coland_storage::ManagementReviewCurrent,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>
+    {
+        self.persistence
+            .agents()
+            .management_review_status(caller, request, current, at)
+            .await
+    }
+    pub async fn management_review_material(
+        &self,
+        caller: &arkret_wire::ActorId,
+        id: &str,
+        new_signatures: &[arkret_wire::ApprovalSignature],
+    ) -> PersistenceResult<coland_storage::ManagementReviewMaterial> {
+        self.persistence
+            .agents()
+            .management_review_material(caller, id, new_signatures)
+            .await
+    }
+    pub async fn management_review_decide(
+        &self,
+        caller: &arkret_wire::ActorId,
+        request: &arkret_models_integration::management_review::ManagementReviewDecisionRequestBody,
+        methods: &[coland_storage::ApprovalHistoricalMethod],
+        current: &coland_storage::ManagementReviewCurrent,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>
+    {
+        self.persistence
+            .agents()
+            .management_review_decide(caller, request, methods, current, at)
+            .await
+    }
     pub async fn historical_content_holders(
         &self,
         realm_ids: &[arkret_wire::RealmId],
@@ -105,6 +157,31 @@ impl PersistenceHandle {
         self.persistence
             .applets()
             .authority_material(applet, service, station, request)
+            .await
+    }
+
+    /// Registered Realm links retain their durable accepted Event/Commit source.
+    pub async fn accepted_realm_links(
+        &self,
+        realm: &arkret_wire::RealmId,
+        direction: arkret_models_collaboration::governance::realm_governance::RealmLinkDirection,
+        allow: Option<&[String]>,
+    ) -> PersistenceResult<
+        Vec<arkret_models_collaboration::governance::realm_governance::RealmLinkEntry>,
+    > {
+        self.persistence
+            .authority_commits()
+            .accepted_realm_links(realm, direction, allow)
+            .await
+    }
+
+    /// Full-Actor current membership and the disclosed organization rows share a cut.
+    pub async fn accepted_realm_organization_read(
+        &self, realm: &arkret_wire::RealmId, caller: &arkret_wire::ActorId, at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<Option<arkret_models_collaboration::governance::realm_governance::RealmOrganizationRelationshipList>>{
+        self.persistence
+            .authority_commits()
+            .accepted_realm_organization_read(realm, caller, at)
             .await
     }
 

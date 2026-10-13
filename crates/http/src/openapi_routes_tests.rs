@@ -67,11 +67,7 @@ async fn wait_carriers_are_closed_and_duplicates_are_rejected() {
     }
     // A caller cannot grant a different binding HTTP wait support merely by
     // declaring a registered Account operation on its request.
-    for path in [
-        "/_arkret/ws",
-        "/_coland/self/strands/unknown",
-        "/unregistered",
-    ] {
+    for path in ["/_arkret/ws", "/_coland/self/relations", "/unregistered"] {
         let response = TestClient::get(format!("http://localhost{path}"))
             .add_header(
                 "Arkret-Operation",

@@ -247,6 +247,31 @@ pub(crate) async fn project_agent_key_in_connection(
             let mut entries = load_key(conn, &event.realm_id, &key).await?;
             entries.push(json!({"tag_id":format!("{}:1",event.event_id),"value":event.payload}));
             write_key(conn, event, commit, &payload.agent_id, &key_id, entries).await?;
+            if !payload.supersedes.is_empty() {
+                let audit = json!({
+                    "action": "ak.agent.key.authorize",
+                    "outcome": "accepted",
+                    "reason_code": arkret_wire::ReasonCode::SUPERSEDED_BY_REPAIRING,
+                    "event_id": event.event_id,
+                    "commit_id": commit.commit_id,
+                    "realm_id": event.realm_id,
+                    "agent_id": payload.agent_id,
+                    "executed_by": event.executed_by,
+                    "supersedes": payload.supersedes,
+                });
+                sql_query(
+                    "INSERT INTO audit_logs(id,actor_id,action,outcome,realm_id,payload,created_at) \
+                     VALUES($1,$2,'ak.agent.key.authorize','accepted',$3,$4,$5)",
+                )
+                .bind::<diesel::sql_types::Uuid, _>(uuid::Uuid::now_v7())
+                .bind::<Text, _>(event.actor_id.to_string())
+                .bind::<Text, _>(event.realm_id.as_str())
+                .bind::<Jsonb, _>(&audit)
+                .bind::<Timestamptz, _>(commit.committed_at)
+                .execute(&mut *conn)
+                .await
+                .map_err(PersistenceError::database)?;
+            }
         }
         arkret_wire::EventKind::AgentKeyRevoke => {
             let payload: AgentKeyRevokePayload = serde_json::from_value(json!(event.payload))

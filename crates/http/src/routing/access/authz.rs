@@ -54,6 +54,14 @@ async fn authz_check(
     let body = body.into_inner();
     let session_actor_id =
         crate::routing::identity::session_actor::session_actor_from_credential(state, &session)?;
+    if let Some(outcome) = state
+        .authority_commits()
+        .owned_agent_authorization_check(&session_actor_id, &state.service_core_id(), &body)
+        .await
+        .map_err(|_| AppError::capability_denied("current authorization cannot be confirmed"))?
+    {
+        return json_ok(outcome);
+    }
     if body.actor_id != session_actor_id {
         return Err(AppError::capability_denied(
             "authorization checks may only target the authenticated actor",

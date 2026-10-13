@@ -1,3 +1,4 @@
+use arkret_wire::OpaqueLocalId;
 use coland_storage::PendingAgentPairingCommitIntent;
 use diesel::dsl::case_when;
 use diesel::{
@@ -255,12 +256,114 @@ impl AgentParticipationStore for PgAgentParticipationStore {
         }).await.map_err(PgTransactionError::into_persistence)
     }
 }
+/// Exact immutable receipt retained under the caller's held authority transaction.
+pub(crate) async fn pairing_scope_receipt_in_connection(
+    conn: &mut diesel_async::AsyncPgConnection,
+    event_id: &str,
+) -> PersistenceResult<Option<coland_storage::AgentPairingReceipt>> {
+    #[derive(QueryableByName)]
+    struct Receipt {
+        #[diesel(sql_type = Jsonb)]
+        receipt: Value,
+    }
+    let row = sql_query("SELECT jsonb_build_object('agent_id',agent_id,'controller_principal_id',controller_principal_id,'request_digest',request_digest,'authorize_event_ref',authorize_event_ref,'pairing_request_id',pairing_request_id,'approval_request_id',approval_request_id,'runtime_key_binding_digest',runtime_key_binding_digest,'scope_custody_ref',scope_custody_ref,'outcome',jsonb_build_object('activation_state',activation_state,'authorize_event_ref',authorize_event_ref)) AS receipt FROM agent_pairing_receipts WHERE authorize_event_ref=$1 FOR SHARE")
+        .bind::<Text,_>(event_id).get_result::<Receipt>(conn).await.optional().map_err(PersistenceError::database)?;
+    row.map(|row| serde_json::from_value(row.receipt).map_err(PersistenceError::database))
+        .transpose()
+}
+
 pub struct PgAgentStore {
     pub pool: PgPool,
 }
 
 #[async_trait]
 impl AgentStore for PgAgentStore {
+    async fn management_review_request(
+        &self,
+        caller: &arkret_wire::ActorId,
+        request: &arkret_models_integration::management_review::ManagementReviewRequestBody,
+        producer: &coland_storage::SelfProducerCommitGuard,
+        current: &coland_storage::ManagementReviewCurrent,
+        _at: chrono::DateTime<Utc>,
+    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>
+    {
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            Ok(crate::agent_management_review::request_in_connection(
+                conn, caller, request, producer, current,
+            )
+            .await?)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+    async fn management_review_status(
+        &self,
+        caller: &arkret_wire::ActorId,
+        request: &arkret_models_integration::management_review::ManagementReviewLookupRequestBody,
+        current: &coland_storage::ManagementReviewCurrent,
+        _at: chrono::DateTime<Utc>,
+    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>
+    {
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            Ok(crate::agent_management_review::status_in_connection(
+                conn,
+                caller,
+                &request.request_id,
+                current,
+            )
+            .await?)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+    async fn management_review_material(
+        &self,
+        caller: &arkret_wire::ActorId,
+        id: &str,
+        new_signatures: &[arkret_wire::ApprovalSignature],
+    ) -> PersistenceResult<coland_storage::ManagementReviewMaterial> {
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            Ok(crate::agent_management_review::material_in_connection(
+                conn,
+                caller,
+                id,
+                new_signatures,
+            )
+            .await?)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+    async fn management_review_decide(
+        &self,
+        caller: &arkret_wire::ActorId,
+        request: &arkret_models_integration::management_review::ManagementReviewDecisionRequestBody,
+        methods: &[coland_storage::ApprovalHistoricalMethod],
+        current: &coland_storage::ManagementReviewCurrent,
+        _at: chrono::DateTime<Utc>,
+    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>
+    {
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            Ok(crate::agent_management_review::decide_in_connection(
+                conn, caller, request, methods, current,
+            )
+            .await?)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
     async fn pairing_receipt(
         &self,
         event_id: &str,
@@ -277,13 +380,21 @@ impl AgentStore for PgAgentStore {
             authorize_event_ref: String,
             #[diesel(sql_type = Text)]
             activation_state: String,
+            #[diesel(sql_type = Text)]
+            pairing_request_id: String,
+            #[diesel(sql_type = Text)]
+            approval_request_id: String,
+            #[diesel(sql_type = Text)]
+            runtime_key_binding_digest: String,
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Jsonb>)]
+            scope_custody_ref: Option<Value>,
         }
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
         sql_query("UPDATE agent_pairing_receipts SET activation_state = 'cancelled' WHERE authorize_event_ref = $1 AND activation_state = 'awaiting_source_commit' AND expires_at <= NOW()")
             .bind::<Text,_>(event_id).execute(&mut *conn).await.map_err(PersistenceError::database)?;
-        let row = sql_query("SELECT agent_id, controller_principal_id, request_digest, authorize_event_ref, activation_state FROM agent_pairing_receipts WHERE authorize_event_ref = $1")
+        let row = sql_query("SELECT agent_id, controller_principal_id, request_digest, authorize_event_ref, activation_state, scope_custody_ref, pairing_request_id, approval_request_id, runtime_key_binding_digest FROM agent_pairing_receipts WHERE authorize_event_ref = $1")
             .bind::<Text,_>(event_id).get_result::<Receipt>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
         row.map(|row| {
             let activation_state = match row.activation_state.as_str() {
@@ -297,8 +408,12 @@ impl AgentStore for PgAgentStore {
             Ok(coland_storage::AgentPairingReceipt {
                 agent_id: row.agent_id,
                 controller_principal_id: row.controller_principal_id,
+                scope_custody_ref: row.scope_custody_ref.map(serde_json::from_value).transpose().map_err(PersistenceError::database)?,
                 request_digest: row.request_digest,
                 authorize_event_ref: authorize_event_ref.to_string(),
+                pairing_request_id: OpaqueLocalId::new(row.pairing_request_id).map_err(PersistenceError::database)?,
+                approval_request_id: OpaqueLocalId::new(row.approval_request_id).map_err(PersistenceError::database)?,
+                runtime_key_binding_digest: row.runtime_key_binding_digest,
                 outcome: arkret_models_collaboration::agent_operations::AgentKeyPairOutcome {
                     activation_state,
                     authorize_event_ref,
@@ -306,6 +421,34 @@ impl AgentStore for PgAgentStore {
             })
         })
         .transpose()
+    }
+
+    async fn qualified_scope_receipt_for_pairing(
+        &self,
+        agent_id: &str,
+        pairing_request_id: &str,
+    ) -> PersistenceResult<Option<coland_storage::AgentPairingReceipt>> {
+        #[derive(QueryableByName)]
+        struct Source {
+            #[diesel(sql_type = Text)]
+            authorize_event_ref: String,
+        }
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        let rows = sql_query("SELECT authorize_event_ref FROM agent_pairing_receipts WHERE agent_id=$1 AND pairing_request_id=$2 AND activation_state='active' LIMIT 2")
+            .bind::<Text,_>(agent_id).bind::<Text,_>(pairing_request_id).load::<Source>(&mut *conn).await.map_err(PersistenceError::database)?;
+        if rows.len() > 1 {
+            return Err(PersistenceError::SchemaViolation(
+                "ambiguous qualified Agent pairing receipt".into(),
+            ));
+        }
+        drop(conn);
+        if let Some(row) = rows.as_slice().first() {
+            self.pairing_receipt(&row.authorize_event_ref).await
+        } else {
+            Ok(None)
+        }
     }
 
     async fn pending_pairings_after(
@@ -446,6 +589,11 @@ impl AgentStore for PgAgentStore {
         &self,
         activation: &AgentRuntimeActivation,
     ) -> PersistenceResult<bool> {
+        if activation.scope_custody_ref.is_none() {
+            return Err(PersistenceError::SchemaViolation(
+                "Agent activation lacks verifier-private scope custody".into(),
+            ));
+        }
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
@@ -464,6 +612,7 @@ impl AgentStore for PgAgentStore {
             request_digest: activation.paired_request_digest.clone(),
             authorize_event_id: activation.authorized_event_ref.clone(),
             key_authorization_event: Some(activation.frozen_authorize_event.clone()),
+            scope_custody_ref: activation.scope_custody_ref.clone(),
         })
         .map_err(|error| {
             PersistenceError::Internal(format!(
@@ -559,10 +708,16 @@ impl AgentStore for PgAgentStore {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
+        if intent.scope_custody_ref.is_none() {
+            return Err(PersistenceError::SchemaViolation(
+                "Agent pairing lacks verifier-private scope custody".into(),
+            ));
+        }
         let intent_value = serde_json::to_value(PendingAgentPairingCommitIntent {
             request_digest: intent.request_digest.clone(),
             authorize_event_id: intent.authorize_event_id.clone(),
             key_authorization_event: Some(intent.key_authorization_event.clone()),
+            scope_custody_ref: intent.scope_custody_ref.clone(),
         })
         .map_err(|error| {
             PersistenceError::Internal(format!(

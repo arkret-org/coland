@@ -28,6 +28,7 @@ use coland_http::result::{JsonResult, json_ok};
 use coland_services::delivery::BlobState as BlobRecord;
 use coland_services::identity::SessionIdentityState as SessionRecord;
 use ed25519_dalek::Signer;
+use futures_util::StreamExt as _;
 use salvo::http::{Method, ParseError, StatusCode};
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
@@ -333,13 +334,25 @@ async fn blob_get(depot: &mut Depot, req: &mut Request, res: &mut Response) {
     } else {
         match authenticated_session(state, req).await {
             Ok(session) => Some(session),
-            Err(_) => {
-                render_error(
-                    res,
-                    StatusCode::UNAUTHORIZED,
-                    "unauthenticated",
-                    "missing bearer token",
-                );
+            Err((_, code, message)) => {
+                // api-conventions §3.3: expired or invalid presented grants
+                // are unauthenticated, but authority outages and the Account
+                // lifecycle's specific refusal remain their original class.
+                let code = match crate::error::ErrorCode::from_wire(code) {
+                    Some(crate::error::ErrorCode::AuthExpired) => {
+                        crate::error::ErrorCode::Unauthenticated
+                    }
+                    Some(code) => code,
+                    None => crate::error::ErrorCode::InternalError,
+                };
+                if code == crate::error::ErrorCode::TemporarilyUnavailable {
+                    res.headers_mut()
+                        .insert(salvo::http::header::RETRY_AFTER, "1".parse().unwrap());
+                }
+                AppError::new(code, message)
+                    .with_status_context(arkret_wire::ErrorStatusContext::ProtectedResource)
+                    .write(req, depot, res)
+                    .await;
                 return;
             }
         }
@@ -426,6 +439,43 @@ async fn blob_get(depot: &mut Depot, req: &mut Request, res: &mut Response) {
                 render_error(res, StatusCode::NOT_FOUND, "not_found", "not found");
                 return;
             }
+            let delivery_guard = if let Some(session) = session.as_ref() {
+                let Some(realm) = blob.realm_id.as_deref().map(RealmId::new).transpose().ok()
+                else {
+                    render_error(res, StatusCode::NOT_FOUND, "not_found", "not found");
+                    return;
+                };
+                let input = coland_storage::AccountContentDeliveryInput {
+                    realms: realm.into_iter().collect(),
+                    blobs: vec![(
+                        match BlobRef::new(blob_ref.clone()) {
+                            Ok(reference) => reference,
+                            Err(_) => {
+                                render_error(res, StatusCode::NOT_FOUND, "not_found", "not found");
+                                return;
+                            }
+                        },
+                        blob.clone(),
+                        if req.method() == Method::HEAD {
+                            arkret_wire::CapabilityActionId::ObjectReadMetadata
+                        } else {
+                            arkret_wire::CapabilityActionId::ObjectReadContent
+                        },
+                    )],
+                    ..Default::default()
+                };
+                match crate::routing::events::sync::content_delivery_guard(state, session, &input)
+                    .await
+                {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        render_error(res, StatusCode::NOT_FOUND, "not_found", "not found");
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
             // Round R2/R3 (T11) — fail-closed gates for E2EE / legal_hold /
             // redacted / actor_private. `/blob/presign` issues a short-lived
             // local direct-serve URL that re-enters this handler without a
@@ -549,6 +599,14 @@ async fn blob_get(depot: &mut Depot, req: &mut Request, res: &mut Response) {
                 "accepted",
             )
             .await;
+            if delivery_guard
+                .as_ref()
+                .is_some_and(|guard| !guard.permits_handoff())
+            {
+                clear_blob_content_headers(res);
+                render_error(res, StatusCode::NOT_FOUND, "not_found", "not found");
+                return;
+            }
             if req.method() != Method::HEAD {
                 let object_range = match range {
                     Some((start, end)) => start as u64..(end as u64 + 1),
@@ -571,10 +629,56 @@ async fn blob_get(depot: &mut Depot, req: &mut Request, res: &mut Response) {
                         return;
                     }
                 };
-                res.stream(stream);
+                if let Some(guard) = delivery_guard {
+                    if !guard.permits_handoff() {
+                        clear_blob_content_headers(res);
+                        render_error(res, StatusCode::NOT_FOUND, "not_found", "not found");
+                        return;
+                    }
+                    res.stream(async_stream::stream! {
+                        let mut stream = stream;
+                        while let Some(chunk) = stream.next().await {
+                            if !guard.permits_handoff() {
+                                yield Err(std::io::Error::other("attachment delivery time authority changed"));
+                                return;
+                            }
+                            yield chunk.map_err(std::io::Error::other);
+                        }
+                        if guard.finish().await.is_err() {
+                            yield Err(std::io::Error::other("attachment delivery cut could not be released"));
+                        }
+                    });
+                } else {
+                    res.stream(stream);
+                }
+            } else if let Some(guard) = delivery_guard {
+                // A HEAD response publishes the same protected metadata.
+                res.stream(async_stream::stream! {
+                    if !guard.permits_handoff() {
+                        yield Err(std::io::Error::other("attachment metadata time authority changed"));
+                        return;
+                    }
+                    yield Ok::<bytes::Bytes,std::io::Error>(bytes::Bytes::new());
+                    if guard.finish().await.is_err() {
+                        yield Err(std::io::Error::other("attachment metadata cut could not be released"));
+                    }
+                });
             }
         }
         None => render_error(res, StatusCode::NOT_FOUND, "not_found", "not found"),
+    }
+}
+
+fn clear_blob_content_headers(res: &mut Response) {
+    for name in [
+        "content-type",
+        "content-length",
+        "content-range",
+        "content-disposition",
+        "digest",
+        "accept-ranges",
+    ] {
+        res.headers_mut().remove(name);
     }
 }
 
@@ -663,6 +767,31 @@ async fn blob_presign(
     .await
     {
         return Err(AppError::not_found("blob not found"));
+    }
+    if session.agent_session().is_some() {
+        let realm = blob
+            .realm_id
+            .as_deref()
+            .map(RealmId::new)
+            .transpose()
+            .map_err(|_| AppError::not_found("blob not found"))?;
+        let input = coland_storage::AccountContentDeliveryInput {
+            realms: realm.into_iter().collect(),
+            blobs: vec![(
+                body.blob_ref.clone(),
+                blob.clone(),
+                arkret_wire::CapabilityActionId::ObjectReadContent,
+            )],
+            ..Default::default()
+        };
+        let guard = crate::routing::events::sync::content_delivery_guard(state, &session, &input)
+            .await
+            .map_err(|_| AppError::not_found("blob not found"))?;
+        if guard.is_some() {
+            return Err(AppError::capability_denied(
+                "Owned Agent attachments require current authenticated delivery",
+            ));
+        }
     }
     let blob_value = presign_blob_policy_value(&blob);
     if let Some(block) = classify_presign_blob_block(&blob_value, "presigned") {
@@ -1635,6 +1764,98 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// Original local development bearer path: lifecycle refusal is checked
+    /// before device/current lookup. This is not normal Agent OAuth evidence.
+    #[tokio::test]
+    async fn blob_existing_session_lifecycle_refusal_preserves_registered_code() {
+        use salvo::test::{ResponseExt as _, TestClient};
+        let mut config = crate::config::AppConfig::test_default();
+        config.development_mode = true;
+        let state = AppState::new(config, coland_storage_postgres::Db { pool: None });
+        let actor = DidCoreId::new("ak:did_core:web:blob-lifecycle.example").unwrap();
+        let identity = state
+            .identities()
+            .register_account(coland_services::identity::RegisterAccountCommand {
+                account_id: arkret_wire::AccountId::new(actor.clone(), state.service_core_id()),
+                localpart: "blob_lifecycle".to_owned(),
+                display_name: None,
+                created_at: now(),
+            })
+            .await
+            .unwrap();
+        let token = "original-local-blob-session";
+        let token_hash =
+            crate::routing::identity::auth::session_credential_hash(token, state.service_id());
+        let session = SessionRecord {
+            token_hash: token_hash.clone(),
+            account_pk: Some(identity.account_pk),
+            actor: actor.to_string(),
+            endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
+                device_id: "ak:device:01904100-0000-7000-8000-000000000071".to_owned(),
+            },
+            audience: state.service_id().to_string(),
+            session_public_key: None,
+            session_grant: None,
+            expires_at: now() + chrono::Duration::minutes(5),
+            created_at: now(),
+            revoked_at: None,
+        };
+        state.sessions().create_session(session).await.unwrap();
+        let service = crate::service(state.clone());
+        for (status, code) in [
+            ("soft_logged_out", crate::error::ErrorCode::SoftLoggedOut),
+            ("locked", crate::error::ErrorCode::AccountLocked),
+            ("deactivated", crate::error::ErrorCode::AccountDeactivated),
+            ("erasure_pending", crate::error::ErrorCode::AccountErased),
+        ] {
+            let lifecycle = coland_services::identity::AccountLifecycleState {
+                state: status.to_owned(),
+                reason: None,
+                changed_by: None,
+                changed_at: now(),
+            };
+            state
+                .identities()
+                .save_account_lifecycle(identity.account_pk, actor.as_str(), lifecycle)
+                .await
+                .unwrap();
+            let before = state.identities().account_lifecycles_snapshot();
+            let mut response = TestClient::get("http://server/_arkret/self/blob/get?blob_ref=sha256:0000000000000000000000000000000000000000000000000000000000000000")
+                .add_header("Authorization", format!("Bearer {token}"), true)
+                .add_header("Arkret-Operation", arkret_wire::ServiceOperationId::SELF_BLOB_RESOURCE_GET_V1, true)
+                .send(&service).await;
+            assert_eq!(response.status_code, Some(StatusCode::UNAUTHORIZED));
+            for protected in [
+                "digest",
+                "content-range",
+                "content-disposition",
+                "accept-ranges",
+            ] {
+                assert!(!response.headers().contains_key(protected));
+            }
+            let problem: arkret_wire::Problem = response.take_json().await.unwrap();
+            assert_eq!(problem.error_code(), Some(code));
+            assert!(problem.extensions.is_empty());
+            let after = state.identities().account_lifecycles_snapshot();
+            assert_eq!(before.len(), after.len());
+            for ((before_actor, before), (after_actor, after)) in before.iter().zip(&after) {
+                assert_eq!(before_actor, after_actor);
+                assert_eq!(before.state, after.state);
+                assert_eq!(before.reason, after.reason);
+                assert_eq!(before.changed_by, after.changed_by);
+                assert_eq!(before.changed_at, after.changed_at);
+            }
+            assert!(
+                state
+                    .sessions()
+                    .session(&token_hash)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
     }
 
     fn blob_record(media_type: &str, filename: Option<&str>) -> BlobRecord {

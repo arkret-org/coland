@@ -13,9 +13,18 @@ pub struct HistoricalControlStation {
     pub core: DidCoreId,
     pub history: arkret_models_identity::AuthenticatedServiceResolution,
     seed: [u8; 32],
+    inception: arkret_signatures::webvh::PreparedInception,
+    registration: arkret_models_identity::service_identity::ServiceRegistrationKey,
 }
 impl HistoricalControlStation {
     pub fn new(label: &str, seed: [u8; 32]) -> Self {
+        Self::new_with_assertion_keys(label, seed, &[])
+    }
+    pub fn new_with_assertion_keys(
+        label: &str,
+        seed: [u8; 32],
+        assertion_keys: &[(&str, &str)],
+    ) -> Self {
         use arkret_models_identity::service_identity::{
             CanonicalServiceUrl, ServiceRegistrationKey,
         };
@@ -27,7 +36,7 @@ impl HistoricalControlStation {
         )
         .unwrap();
         let inception =
-            arkret_signatures::webvh::prepare_service_registration_inception_with_did_key_seed(
+            arkret_signatures::webvh::prepare_service_registration_inception_with_assertion_keys(
                 &mut rng,
                 &arkret_signatures::webvh::ServiceRegistrationInceptionInput {
                     provider_endpoint: &"https://historical-fixture.example/".parse().unwrap(),
@@ -37,6 +46,7 @@ impl HistoricalControlStation {
                     did_key_fragment: Some("authority"),
                 },
                 &seed,
+                assertion_keys,
             )
             .unwrap();
         let did = Did::new(inception.did.clone()).unwrap();
@@ -55,12 +65,104 @@ impl HistoricalControlStation {
             core,
             history,
             seed,
+            inception,
+            registration,
         };
         stations()
             .lock()
             .unwrap()
             .insert(station.core.to_string(), station.clone());
         station
+    }
+    /// Install the real signed Station history before issuing fresh Device
+    /// evidence. The registration receipt is an explicit historical import,
+    /// not a claim that this fixture exercised Provider registration HTTP.
+    pub async fn install_runtime_identity(
+        &self,
+        persistence: &dyn coland_storage::PersistenceStore,
+    ) -> arkret_identity::service_identity::DidCoreIdentityState {
+        use arkret_identity::service_identity::{
+            DidCoreIdentityKeyRef, DidCoreIdentityState, LocalDidCoreIdentity,
+            StoredDidCoreIdentity,
+        };
+        use arkret_models_identity::service_identity::ServiceRegistrationReceipt;
+
+        let key_ref = DidCoreIdentityKeyRef::new("fixture:coland:service-signing-key").unwrap();
+        let identity = LocalDidCoreIdentity {
+            did: self.did.clone(),
+            service_id: self.core.clone(),
+            registration_key: self.registration.clone(),
+            provider: None,
+            signing_key_refs: vec![key_ref.clone()],
+            active_signing_key_ref: key_ref,
+            control_key_ref: DidCoreIdentityKeyRef::new("fixture:coland:webvh-control-key")
+                .unwrap(),
+            version_id: self.inception.version_id.clone(),
+            last_verified_at: Utc::now(),
+        };
+        let now = arkret_canonical::normalize_timestamp_canonical(Utc::now());
+        let provider_did =
+            Did::new("did:webvh:z6mkfixture:provider.example:webvh:service").unwrap();
+        let log_head_digest =
+            arkret_canonical::canonical_sha256(&self.inception.log_entry).unwrap();
+        let mut receipt = ServiceRegistrationReceipt {
+            registration_receipt_id: arkret_wire::ServiceRegistrationReceiptId::new(format!(
+                "ak:service_registration_receipt:{}",
+                "0".repeat(64)
+            ))
+            .unwrap(),
+            registration_key: self.registration.clone(),
+            service_id: self.core.clone(),
+            did: self.did.clone(),
+            version_id: self.inception.version_id.clone(),
+            log_head_digest: log_head_digest.clone(),
+            control_key_digest: arkret_canonical::sha256_digest(
+                self.inception.update_public_key_multibase.as_bytes(),
+            ),
+            issued_at: now,
+            provider_id: arkret_wire::project_did_to_core_id(&provider_did).unwrap(),
+            proof: arkret_wire::PayloadProof {
+                kind: "detached_jws".to_owned(),
+                verification_method: DidUrl::new(format!("{provider_did}#service-key")).unwrap(),
+                payload_digest: arkret_wire::Hash::new(format!("sha256:{}", "0".repeat(64)))
+                    .unwrap(),
+                created_at: now,
+                domain: None,
+                audience: None,
+                proof_purpose: None,
+                jws: "eyJhbGciOiJFZDI1NTE5In0..c2ln".to_owned(),
+            },
+        };
+        receipt.registration_receipt_id = receipt.expected_registration_receipt_id().unwrap();
+        receipt.proof.payload_digest = receipt.expected_payload_digest().unwrap();
+        receipt.proof = arkret_signatures::service_identity::sign_registration_receipt_proof(
+            &receipt,
+            &SigningKey::from_bytes(&[86; 32]),
+        )
+        .unwrap();
+        let stored = StoredDidCoreIdentity {
+            identity: identity.clone(),
+            did_document: serde_json::from_value(self.inception.log_entry["state"].clone())
+                .unwrap(),
+            registration_receipt: receipt,
+            stored_at: now,
+        };
+        stored.validate().unwrap();
+        arkret_identity::verify_did_webvh_v1_chain(&self.did, &[self.inception.log_entry.clone()])
+            .unwrap();
+        persistence.service_identity().put(stored).await.unwrap();
+        persistence
+            .webvh()
+            .append_log_event(coland_storage::WebvhLogRecord {
+                event_digest: log_head_digest,
+                did: self.did.to_string(),
+                seq: 1,
+                created_at: self.inception.version_time.parse().unwrap(),
+                operation: self.inception.log_entry.clone(),
+            })
+            .await
+            .unwrap();
+        DidCoreIdentityState::Ready { identity }
     }
     /// The authorization must already be accepted in this database. Its exact
     /// original is used rather than today’s cached key or a synthetic device row.

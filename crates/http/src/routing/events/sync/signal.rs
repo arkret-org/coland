@@ -188,6 +188,7 @@ async fn admit_signal(
     // constants, the AAD binding, the signed outer `sent_at`, the envelope
     // digest and the per-class TTL ceilings.
     envelope.validate_structural().map_err(structural_error)?;
+    require_signal_content_mapping(state, session, &envelope.realm_id).await?;
     if envelope.expires_at <= chrono::Utc::now() {
         return Err(signal_invalid("signal envelope is already expired"));
     }
@@ -1049,7 +1050,32 @@ pub(crate) async fn admitted_signal_frame(
     #[cfg(feature = "conformance-harness")]
     emission_probe::record(probe.as_deref(), &envelope, &decision)?;
     decision?;
+    require_signal_content_mapping(state, session, &envelope.realm_id).await?;
     Ok(SignalStreamFrame::signal(envelope, authority))
+}
+
+async fn require_signal_content_mapping(
+    state: &AppState,
+    session: &SessionIdentityState,
+    realm: &arkret_wire::RealmId,
+) -> Result<(), AppError> {
+    // The encrypted Signal rail has no registered durable content-action
+    // mapping. Independent Direct/control authority keeps its own contract.
+    let input = coland_storage::AccountContentDeliveryInput {
+        realms: vec![realm.clone()],
+        unresolved_content_realms: vec![realm.clone()],
+        ..Default::default()
+    };
+    if let Some(guard) = super::content_delivery_guard(state, session, &input).await? {
+        guard
+            .finish()
+            .await
+            .map_err(|_| signal_rail_unavailable("release its current delivery cut"))?;
+        return Err(AppError::capability_denied(
+            "Signal content-action mapping is unavailable",
+        ));
+    }
+    Ok(())
 }
 
 async fn signal_subscription_start(

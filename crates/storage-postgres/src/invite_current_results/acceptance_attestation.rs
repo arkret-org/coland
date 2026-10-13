@@ -42,29 +42,37 @@ fn unavailable() -> PersistenceError {
     )
 }
 
-pub(super) async fn issue(
+pub(super) struct PendingInviteEvidence {
+    event: arkret_wire::Event,
+    commit: arkret_wire::RealmCommit,
+    source: CommitStreamRef,
+    pub(super) material: InviteThirdPartyCreatePayload,
+    pub(super) observed_at: chrono::DateTime<chrono::Utc>,
+}
+
+pub(super) async fn pending_invite_evidence(
     conn: &mut AsyncPgConnection,
-    request: &ThirdPartyInviteAcceptanceAttestationRequestBody,
+    realm_id: &arkret_wire::RealmId,
+    invite_id: &InviteId,
     caller: &AccountId,
     station: &DidCoreId,
-    verification_method: &DidUrl,
+    verification_id: &DidCoreId,
     observe: &(dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync),
-    sign: &coland_storage::InviteAcceptanceAttestationSigner<'_>,
-) -> PersistenceResult<ThirdPartyInviteAcceptanceAttestationOutcome> {
+) -> PersistenceResult<PendingInviteEvidence> {
     let accepted = diesel::sql_query(
         "SELECT e.envelope,c.commit_json FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk \
          WHERE e.envelope->>'event_id'=$1 AND e.realm_id=$2 AND e.kind='ak.invite.third_party' \
          AND e.state='committed' AND e.envelope->'actor_id'=$3",
     )
-    .bind::<Text, _>(request.invite_id.event_id().as_str())
-    .bind::<Text, _>(request.realm_id.as_str())
+    .bind::<Text, _>(invite_id.event_id().as_str())
+    .bind::<Text, _>(realm_id.as_str())
     .bind::<Jsonb, _>(serde_json::to_value(ActorId::account(caller.clone())).map_err(corrupt)?)
     .get_result::<Accepted>(&mut *conn)
     .await
     .optional()
     .map_err(PersistenceError::database)?
     .ok_or_else(hidden)?;
-    lock_realm_authorization_cut(conn, &request.realm_id).await?;
+    lock_realm_authorization_cut(conn, realm_id).await?;
     // Observe time at the serialized cut, after any competing writer or lock
     // wait. Request-arrival time can outlive the creator's current permission.
     let at = observe();
@@ -73,7 +81,7 @@ pub(super) async fn issue(
     if !diesel::sql_query(
         "SELECT EXISTS(SELECT 1 FROM realm_authorities WHERE realm_id=$1 AND service_id=$2) AS present",
     )
-    .bind::<Text, _>(request.realm_id.as_str())
+    .bind::<Text, _>(realm_id.as_str())
     .bind::<Text, _>(station.as_str())
     .get_result::<Present>(&mut *conn)
     .await
@@ -102,7 +110,7 @@ pub(super) async fn issue(
                   AND envelope->'scope_ref'=stream_ref)),false)) \
          AND BOOL_OR(stream_position=0),false) AS present FROM nodes",
     )
-    .bind::<Text, _>(request.realm_id.as_str())
+    .bind::<Text, _>(realm_id.as_str())
     .get_result::<Present>(&mut *conn)
     .await
     .map_err(PersistenceError::database)?
@@ -114,12 +122,12 @@ pub(super) async fn issue(
     let commit: arkret_wire::RealmCommit =
         serde_json::from_value(accepted.commit_json).map_err(corrupt)?;
     let source = CommitStreamRef::Realm {
-        realm_id: request.realm_id.clone(),
+        realm_id: realm_id.clone(),
     };
     if event.actor_id.as_account_id() != Some(caller)
-        || event.realm_id != request.realm_id
-        || InviteId::from_event_id(&event.event_id) != request.invite_id
-        || commit.realm_id != request.realm_id
+        || event.realm_id != *realm_id
+        || InviteId::from_event_id(&event.event_id) != *invite_id
+        || commit.realm_id != *realm_id
         || commit.event_ref != event.event_id
         || commit.stream_ref != source
     {
@@ -127,8 +135,7 @@ pub(super) async fn issue(
     }
     let material: InviteThirdPartyCreatePayload = typed_payload(&event)?;
     material.validate().map_err(corrupt)?;
-    if material.third_party_invite.verification_id != request.verification_id
-        || material.expires_at <= at
+    if material.third_party_invite.verification_id != *verification_id || material.expires_at <= at
     {
         return Err(hidden());
     }
@@ -136,8 +143,8 @@ pub(super) async fn issue(
         "SELECT current_commit_id,current_stream_position,value FROM invite_lifecycle_current_results \
          WHERE realm_id=$1 AND invite_id=$2 FOR SHARE",
     )
-    .bind::<Text, _>(request.realm_id.as_str())
-    .bind::<Text, _>(request.invite_id.as_str())
+    .bind::<Text, _>(realm_id.as_str())
+    .bind::<Text, _>(invite_id.as_str())
     .get_result::<Current>(&mut *conn)
     .await
     .optional()
@@ -154,8 +161,8 @@ pub(super) async fn issue(
              AND e.state='committed' AND e.kind IN ('ak.invite.claim','ak.invite.accept','ak.invite.cancel','ak.invite.revoke') \
              AND e.envelope->'payload'->>'invite_id'=$2) AS present",
         )
-        .bind::<Text, _>(request.realm_id.as_str())
-        .bind::<Text, _>(request.invite_id.as_str())
+        .bind::<Text, _>(realm_id.as_str())
+        .bind::<Text, _>(invite_id.as_str())
         .get_result::<Present>(&mut *conn)
         .await
         .map_err(PersistenceError::database)?
@@ -168,7 +175,7 @@ pub(super) async fn issue(
          WHERE c.realm_id=$1 AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',$1) \
          AND e.state='committed' AND e.kind='ak.realm.policy_bundle' ORDER BY c.stream_position DESC LIMIT 1",
     )
-    .bind::<Text, _>(request.realm_id.as_str())
+    .bind::<Text, _>(realm_id.as_str())
     .get_result::<Accepted>(&mut *conn)
     .await
     .optional()
@@ -182,7 +189,7 @@ pub(super) async fn issue(
         "SELECT current_commit_id,current_stream_position,value FROM realm_policy_bundle_current_results \
          WHERE realm_id=$1 FOR SHARE",
     )
-    .bind::<Text, _>(request.realm_id.as_str())
+    .bind::<Text, _>(realm_id.as_str())
     .get_result::<Current>(&mut *conn)
     .await
     .optional()
@@ -200,14 +207,48 @@ pub(super) async fn issue(
     if !policy
         .allowed_third_party_invite_verification_ids
         .as_ref()
-        .is_some_and(|allowed| allowed.contains(&request.verification_id))
+        .is_some_and(|allowed| allowed.contains(verification_id))
     {
         return Err(hidden());
     }
-    RealmAuthorizationCut::read(conn, &request.realm_id, &event.actor_id)
+    RealmAuthorizationCut::read(conn, realm_id, &event.actor_id)
         .await?
         .require_live_invite_creator(&event, at)
         .map_err(|_| hidden())?;
+    Ok(PendingInviteEvidence {
+        event,
+        commit,
+        source,
+        material,
+        observed_at: at,
+    })
+}
+
+pub(super) async fn issue(
+    conn: &mut AsyncPgConnection,
+    request: &ThirdPartyInviteAcceptanceAttestationRequestBody,
+    caller: &AccountId,
+    station: &DidCoreId,
+    verification_method: &DidUrl,
+    observe: &(dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync),
+    sign: &coland_storage::InviteAcceptanceAttestationSigner<'_>,
+) -> PersistenceResult<ThirdPartyInviteAcceptanceAttestationOutcome> {
+    let PendingInviteEvidence {
+        event,
+        commit,
+        source,
+        material,
+        observed_at: at,
+    } = pending_invite_evidence(
+        conn,
+        &request.realm_id,
+        &request.invite_id,
+        caller,
+        station,
+        &request.verification_id,
+        observe,
+    )
+    .await?;
     let mut attestation = ThirdPartyInviteAcceptanceAttestation {
         station_id: station.clone(),
         verification_id: request.verification_id.clone(),

@@ -4,8 +4,10 @@ use coland_http::config::{AppConfig, StartupOverrides};
 use coland_http::service;
 use coland_http::state::AppState;
 use coland_storage_postgres::Db;
-use salvo::conn::Acceptor;
 use salvo::conn::rustls::{Keycert, RustlsConfig};
+use salvo::conn::tcp::{TcpAcceptor, TcpCoupler};
+use salvo::conn::{Accepted, Acceptor, ConnCtrl, Holding, Listener, StraightStream};
+use salvo::fuse::{ArcFusePolicy, FuseAction, FuseInfo, TransProto};
 use salvo::prelude::*;
 use tokio::signal;
 use tracing_subscriber::layer::SubscriberExt;
@@ -15,6 +17,103 @@ pub(crate) mod bootstrap;
 pub(crate) mod object_storage;
 pub(crate) mod otel;
 pub(crate) mod runtime;
+
+/// Apply the native TCP latency policy before Salvo wraps the socket or starts TLS.
+/// All normal and identity-bootstrap listeners use this same typed factory.
+fn low_latency_tcp_listener(bind: String) -> NoDelayTcpListener {
+    NoDelayTcpListener(TcpListener::new(bind))
+}
+
+struct NoDelayTcpListener(TcpListener<String>);
+
+impl NoDelayTcpListener {
+    fn rustls(
+        self,
+        config: RustlsConfig,
+    ) -> salvo::conn::rustls::RustlsListener<RustlsConfig, RustlsConfig, Self, std::io::Error> {
+        salvo::conn::rustls::RustlsListener::new(config, self)
+    }
+}
+
+impl Listener for NoDelayTcpListener {
+    type Acceptor = NoDelayTcpAcceptor;
+
+    async fn try_bind(self) -> salvo::Result<Self::Acceptor> {
+        Ok(NoDelayTcpAcceptor {
+            inner: self.0.try_bind().await?,
+            pending: None,
+        })
+    }
+}
+
+struct NoDelayTcpAcceptor {
+    inner: TcpAcceptor,
+    pending: Option<(tokio::net::TcpStream, std::net::SocketAddr)>,
+}
+
+impl NoDelayTcpAcceptor {
+    async fn accept_pending_tcp(&mut self) -> std::io::Result<()> {
+        if self.pending.is_none() {
+            let (stream, remote_addr) = self.inner.inner().accept().await?;
+            // Failure rejects this connection; never serve an unconfigured fallback.
+            stream.set_nodelay(true)?;
+            self.pending = Some((stream, remote_addr));
+        }
+        Ok(())
+    }
+}
+
+impl Acceptor for NoDelayTcpAcceptor {
+    type Coupler = TcpCoupler<Self::Stream>;
+    type Stream = StraightStream<tokio::net::TcpStream>;
+
+    fn holdings(&self) -> &[Holding] {
+        self.inner.holdings()
+    }
+
+    async fn accept(
+        &mut self,
+        fuse_policy: Option<ArcFusePolicy>,
+    ) -> std::io::Result<Accepted<Self::Coupler, Self::Stream>> {
+        loop {
+            self.accept_pending_tcp().await?;
+            // As in Salvo's native acceptor, keep the socket across cancellation
+            // while async admission runs, and preserve the original fuse observer.
+            let remote_addr = self.pending.as_ref().expect("accepted TCP socket").1;
+            let local_addr = self.holdings()[0].local_addr.clone();
+            let conn_ctrl = ConnCtrl::new();
+            let (fuse_config, observer) = match &fuse_policy {
+                Some(policy) => {
+                    let info = FuseInfo {
+                        trans_proto: TransProto::Tcp,
+                        remote_addr: remote_addr.into(),
+                        local_addr: local_addr.clone(),
+                    };
+                    match policy.decide(&info).await {
+                        FuseAction::Accept(config) => {
+                            (Some(config), policy.observe(&info, &conn_ctrl))
+                        }
+                        FuseAction::Reject => {
+                            self.pending = None;
+                            continue;
+                        }
+                    }
+                }
+                None => (None, None),
+            };
+            let (stream, remote_addr) = self.pending.take().expect("accepted TCP socket");
+            return Ok(Accepted {
+                coupler: TcpCoupler::new(),
+                stream: StraightStream::new(stream, fuse_config, conn_ctrl.clone(), observer),
+                fuse_config,
+                conn_ctrl,
+                remote_addr: remote_addr.into(),
+                local_addr,
+                http_scheme: salvo::http::uri::Scheme::HTTP,
+            });
+        }
+    }
+}
 
 fn main() -> anyhow::Result<()> {
     let raw_args: Vec<String> = std::env::args().collect();
@@ -111,13 +210,15 @@ async fn run(raw_args: Vec<String>) -> anyhow::Result<()> {
                         .expect("tls_enabled guarantees key path"),
                 )
                 .context("failed to read COLAND_TLS_KEY_PATH")?;
-            let acceptor = TcpListener::new(config.bind.to_string())
+            let acceptor = low_latency_tcp_listener(config.bind.to_string())
                 .rustls(RustlsConfig::new(keycert))
                 .bind()
                 .await;
             wait_for_service_identity(acceptor, config.clone(), bootstrap).await?
         } else {
-            let acceptor = TcpListener::new(config.bind.to_string()).bind().await;
+            let acceptor = low_latency_tcp_listener(config.bind.to_string())
+                .bind()
+                .await;
             wait_for_service_identity(acceptor, config.clone(), bootstrap).await?
         }
     } else {
@@ -173,7 +274,7 @@ async fn run(raw_args: Vec<String>) -> anyhow::Result<()> {
         .resolution_commitment
         .clone()
         .ok_or_else(|| anyhow::anyhow!("serving service identity has no resolution commitment"))?;
-    let state = crate::runtime::build_app_state(
+    let mut state = crate::runtime::build_app_state(
         config.clone(),
         db,
         bootstrap.persistence,
@@ -181,10 +282,18 @@ async fn run(raw_args: Vec<String>) -> anyhow::Result<()> {
         resolution_commitment,
         bootstrap.signing_seed,
     )?;
+    if let Some(store) = supervisor_key_store.clone() {
+        state = state.with_verifier_private_keystore(store);
+    }
     spawn_service_identity_supervisor(state.clone(), supervisor_persistence, supervisor_key_store);
     // Finish boot: seed demo data + hydrate the Realm directory and
     // projections from the (now async) persistence store.
     state.hydrate().await?;
+    let _native_public_replies = crate::runtime::start_native_arkret_public_replies(
+        state.clone(),
+        values.get("COLAND_ARKRET_RUNTIME_HOME").map(String::as_str),
+    )
+    .await?;
     spawn_federation_peer_discovery(state.clone());
 
     // Sovereign enclave security invariants. When
@@ -322,7 +431,7 @@ async fn run(raw_args: Vec<String>) -> anyhow::Result<()> {
                     .expect("tls_enabled guarantees key path"),
             )
             .context("failed to read COLAND_TLS_KEY_PATH")?;
-        let acceptor = TcpListener::new(config.bind.to_string())
+        let acceptor = low_latency_tcp_listener(config.bind.to_string())
             .rustls(RustlsConfig::new(keycert))
             .bind()
             .await;
@@ -334,7 +443,9 @@ async fn run(raw_args: Vec<String>) -> anyhow::Result<()> {
         );
         run_server(acceptor, state).await;
     } else {
-        let acceptor = TcpListener::new(config.bind.to_string()).bind().await;
+        let acceptor = low_latency_tcp_listener(config.bind.to_string())
+            .bind()
+            .await;
         run_server(acceptor, state).await;
     }
     tracing::info!(event = "shutdown_complete", "coland stopped");
@@ -1027,5 +1138,86 @@ async fn run_healthcheck(args: &[String]) -> anyhow::Result<()> {
             eprintln!("coland healthcheck FAIL: {url} → {err}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tcp_latency_policy_tests {
+    use std::sync::Arc;
+
+    use salvo::fuse::{FuseConfig, FusePolicy};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::Notify;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn shared_listener_factory_sets_nodelay_on_real_accepted_socket() {
+        let mut acceptor = low_latency_tcp_listener("127.0.0.1:0".to_owned())
+            .try_bind()
+            .await
+            .unwrap();
+        let address = acceptor.inner.local_addr().unwrap();
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        acceptor.accept_pending_tcp().await.unwrap();
+        let (stream, remote) = acceptor.pending.as_ref().unwrap();
+        assert!(stream.nodelay().unwrap());
+        assert_eq!(*remote, client.local_addr().unwrap());
+        client.write_all(b"native tcp").await.unwrap();
+        let mut accepted = acceptor.accept(None).await.unwrap();
+        let mut bytes = [0; 10];
+        accepted.stream.read_exact(&mut bytes).await.unwrap();
+        assert_eq!(&bytes, b"native tcp");
+    }
+
+    #[tokio::test]
+    async fn configured_socket_survives_cancelled_fuse_admission() {
+        struct PendingAdmission(Arc<Notify>);
+        #[async_trait::async_trait]
+        impl FusePolicy for PendingAdmission {
+            async fn decide(&self, _info: &FuseInfo) -> FuseAction {
+                self.0.notify_one();
+                std::future::pending::<()>().await;
+                FuseAction::Accept(FuseConfig::disabled())
+            }
+        }
+        let mut acceptor = low_latency_tcp_listener("127.0.0.1:0".to_owned())
+            .try_bind()
+            .await
+            .unwrap();
+        let mut client = tokio::net::TcpStream::connect(acceptor.inner.local_addr().unwrap())
+            .await
+            .unwrap();
+        let entered = Arc::new(Notify::new());
+        let policy: ArcFusePolicy = Arc::new(PendingAdmission(entered.clone()));
+        tokio::select! {
+            result = acceptor.accept(Some(policy)) => panic!("admission unexpectedly completed: {}", result.is_ok()),
+            () = entered.notified() => {}
+        }
+        let (stream, remote) = acceptor.pending.as_ref().unwrap();
+        assert!(stream.nodelay().unwrap());
+        assert_eq!(*remote, client.local_addr().unwrap());
+        client.write_all(b"resumed").await.unwrap();
+        let mut accepted = acceptor.accept(None).await.unwrap();
+        assert_eq!(
+            accepted.remote_addr.into_std().unwrap(),
+            client.local_addr().unwrap()
+        );
+        let mut bytes = [0; 7];
+        accepted.stream.read_exact(&mut bytes).await.unwrap();
+        assert_eq!(&bytes, b"resumed");
+    }
+
+    #[test]
+    fn tls_listener_uses_the_same_native_nodelay_acceptor_before_handshake() {
+        fn require_common_acceptor<L>(_: L)
+        where
+            L: Listener<Acceptor = salvo::conn::rustls::RustlsAcceptor<NoDelayTcpAcceptor>>,
+        {
+        }
+        require_common_acceptor(
+            low_latency_tcp_listener("127.0.0.1:0".to_owned())
+                .rustls(RustlsConfig::new(Keycert::new())),
+        );
     }
 }

@@ -575,6 +575,34 @@ pub(super) async fn reconcile_accepted_agent_authorization(
     let Some(pending_commit_intent) = agent_record.pending_pairing_commit_intent.clone() else {
         return Ok(agent_record);
     };
+    let reference = pending_commit_intent
+        .scope_custody_ref
+        .as_ref()
+        .ok_or_else(|| {
+            pairing_failed_precondition("pending pairing lacks private scope custody")
+        })?;
+    let private = load_scope_custody(state, reference)?;
+    if private.command.authorize_event.event.event_id.as_str()
+        != pending_commit_intent.authorize_event_id
+        || private.request_digest != pending_commit_intent.request_digest
+        || private.command.pairing_request_id != pairing_request_id
+        || private.command.approval_request_id != approval_request_id
+        || private.runtime_key_binding_digest
+            != agent_record
+                .runtime_key_binding_digest
+                .clone()
+                .unwrap_or_default()
+        || private.command.requested_scope_disclosure.agent_id.as_str() != agent_id
+        || private.command.authorize_event.event
+            != pending_commit_intent
+                .key_authorization_event
+                .clone()
+                .ok_or_else(|| pairing_failed_precondition("pending authorize Event is missing"))?
+    {
+        return Err(pairing_failed_precondition(
+            "pending pairing private custody differs",
+        ));
+    }
     let paired_request_digest = pending_commit_intent.request_digest;
     let pending_authorize_event_id = pending_commit_intent.authorize_event_id;
     let key_authorization_event =
@@ -770,6 +798,7 @@ pub(super) async fn reconcile_accepted_agent_authorization(
         authorized_public_key_digest: authorized_public_key_digest.as_str().to_owned(),
         signer_resolution_evidence_ref,
         current_signer_evidence,
+        scope_custody_ref: pending_commit_intent.scope_custody_ref.clone(),
         frozen_authorize_event: key_authorization_event,
         authorize_ref: arkret_wire::CommittedEventRef {
             event_id: committed.event.event_id.clone(),
@@ -1004,21 +1033,35 @@ pub(super) async fn agent_key_pair(
         }
     }
     let agent_record = reconcile_accepted_agent_authorization(state, agent_record).await?;
-    validate_requested_scope_disclosure(&body, &agent_record, state).await?;
-    let provision_scope = serde_json::from_value::<AgentKeyScope>(
-        agent_record.requested_scope.clone().ok_or_else(|| {
-            agent_runtime_scope_error(
-                arkret_wire::ReasonCode::AgentProvisionScopeMigrationRequired,
-                "Agent record is missing its immutable requested_scope",
-            )
-        })?,
-    )
-    .map_err(|error| {
-        agent_runtime_scope_error(
-            arkret_wire::ReasonCode::AgentProvisionScopeMigrationRequired,
-            format!("stored Agent requested_scope is invalid: {error}"),
-        )
-    })?;
+    if let Some(receipt) = state
+        .agent_pairings()
+        .pairing_receipt(event_id)
+        .await
+        .map_err(|_| AppError::internal("pairing receipt reload failed"))?
+        && receipt.request_digest == paired_request_digest
+        && receipt.outcome.activation_state != AgentKeyPairActivationState::AwaitingSourceCommit
+    {
+        return json_ok(receipt.outcome);
+    }
+    let existing_scope_custody = agent_record
+        .pending_pairing_commit_intent
+        .as_ref()
+        .map(|intent| {
+            let reference = intent.scope_custody_ref.as_ref().ok_or_else(|| {
+                pairing_failed_precondition("pending command lacks private scope custody")
+            })?;
+            let original = load_scope_custody(state, reference)?;
+            if !same_scope_command(&original.command, &body)?
+                || original.request_digest != paired_request_digest
+            {
+                return Err(AppError::conflict(
+                    "pairing command differs from private scope custody",
+                ));
+            }
+            Ok(reference.clone())
+        })
+        .transpose()?;
+    let provision_scope = body.requested_scope_disclosure.requested_scope.clone();
     validate_agent_runtime_key_scopes(&provision_scope, &proposed_authorization.agent_key_scope)?;
     validate_agent_key_authorize_effects(&body.authorize_event.event)?;
     if agent_record.authorized_event_ref.as_deref() == Some(event_id) {
@@ -1080,12 +1123,17 @@ pub(super) async fn agent_key_pair(
         &proposed_authorization.public_key,
         &proposed_authorization.verification_method,
     )?;
-    verify_runtime_key_pair_proof_of_possession(
-        &body,
-        &agent_record,
-        agent_id,
-        state.service_id(),
-    )?;
+    // An exact, authenticated pending custody command already passed this
+    // frozen runtime proof. Current candidate/key/lifecycle gates below still
+    // run; recovering the accepted intent is not a new presentation.
+    if existing_scope_custody.is_none() {
+        verify_runtime_key_pair_proof_of_possession(
+            &body,
+            &agent_record,
+            agent_id,
+            state.service_id(),
+        )?;
+    }
     if agent_record.authorized_public_key_digest.as_deref()
         == Some(runtime_public_key_digest.as_str())
     {
@@ -1111,14 +1159,17 @@ pub(super) async fn agent_key_pair(
         .ok_or_else(|| {
             AppError::capability_denied("authorize Event is not executed by the Agent's controller")
         })?;
-    crate::state::verify_account_device_producer(state, controller_account, event)
-        .await
-        .map_err(|error| {
-            AppError::param_invalid(format!(
-                "authorize Event controller signature invalid: {error}"
-            ))
-            .with_reason_code(arkret_wire::ReasonCode::PROOF_INVALID)
-        })?;
+    let scope_custody_ref = if let Some(reference) = existing_scope_custody {
+        reference
+    } else {
+        crate::state::verify_account_device_producer(state, controller_account, event)
+            .await
+            .map_err(|_| {
+                AppError::param_invalid("authorize Event controller signature invalid")
+                    .with_reason_code(arkret_wire::ReasonCode::PROOF_INVALID)
+            })?;
+        retain_verified_scope_custody(state, &agent_record, &body).await?
+    };
     let commit_intent = coland_services::identity::RecordAgentPairingCommitIntentCommand {
         agent_id: agent_id.to_owned(),
         approval_request_id: agent_record.approval_request_id.clone().ok_or_else(|| {
@@ -1131,6 +1182,7 @@ pub(super) async fn agent_key_pair(
         request_digest: paired_request_digest.clone(),
         authorize_event_id: event_id.to_owned(),
         key_authorization_event: body.authorize_event.event.clone(),
+        scope_custody_ref: Some(scope_custody_ref),
     };
     let committed = state
         .agent_pairings()
@@ -1271,7 +1323,7 @@ async fn validate_requested_scope_disclosure(
     body: &AgentKeyPairRequestBody,
     agent_record: &AgentPrincipalRecord,
     state: &AppState,
-) -> Result<(), AppError> {
+) -> Result<coland_storage::AgentScopeAcceptedBinding, AppError> {
     let disclosure = &body.requested_scope_disclosure;
     disclosure.validate().map_err(|error| {
         AppError::param_invalid(format!("requested_scope_disclosure invalid: {error}"))
@@ -1345,12 +1397,17 @@ async fn validate_requested_scope_disclosure(
             "requested_scope_disclosure does not match the provisioned Agent ceiling",
         ));
     }
+    let accepted_binding = crate::routing::identity::agent_pcr::qualified_agent_scope_binding_at(
+        state,
+        agent_record,
+        &disclosed_digest,
+        now,
+    )
+    .await?;
     // The controller's current proof is by one of its active devices at its
     // PCR cut; a DID Document lists no device keys.
-    let controller_account = arkret_wire::AccountId::new(
-        disclosure.controller_principal_id.clone(),
-        state.service_core_id(),
-    );
+    let controller_account =
+        crate::routing::identity::agent_pcr::agent_controller_account(state, agent_record).await?;
     let mut proof_errors = Vec::new();
     for proof in &disclosure.proofs {
         if proof.created_at < disclosure.issued_at || proof.created_at > disclosure.expires_at {
@@ -1372,7 +1429,7 @@ async fn validate_requested_scope_disclosure(
         )
         .await
         {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(accepted_binding),
             Err(error) => proof_errors.push(error.to_string()),
         }
     }
@@ -2272,5 +2329,460 @@ mod requested_scope_tests {
         record.paired_pairing_request_id = None;
         record.pairing_expires_at = Some(now - chrono::Duration::seconds(1));
         assert!(ensure_pairing_request_open(&record).is_err());
+    }
+}
+
+// The only serialized copy lives in the original encrypted vault. This is an
+// internal custody record, never a request/response or public Event carrier.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentScopeCustodyMaterial {
+    command: AgentKeyPairRequestBody,
+    accepted_binding: coland_storage::AgentScopeAcceptedBinding,
+    runtime_key_binding_digest: String,
+    request_digest: String,
+}
+
+fn same_scope_command(
+    left: &AgentKeyPairRequestBody,
+    right: &AgentKeyPairRequestBody,
+) -> Result<bool, AppError> {
+    let left = serde_json::to_value(left)
+        .map_err(|_| AppError::internal("private command encoding failed"))?;
+    let right = serde_json::to_value(right)
+        .map_err(|_| AppError::internal("private command encoding failed"))?;
+    Ok(left == right)
+}
+
+fn custody_bytes(material: &AgentScopeCustodyMaterial) -> Result<Vec<u8>, AppError> {
+    let value = serde_json::to_value(material)
+        .map_err(|_| AppError::internal("private scope custody encoding failed"))?;
+    arkret_canonical::canonical_json_bytes(&value)
+        .map_err(|_| AppError::internal("private scope custody canonicalization failed"))
+}
+
+fn scope_custody_key(material: &AgentScopeCustodyMaterial) -> Result<String, AppError> {
+    let disclosure = &material.command.requested_scope_disclosure;
+    let tuple = serde_json::json!([
+        disclosure.agent_id,
+        material.accepted_binding.requested_scope_digest,
+        disclosure.verifier_id,
+        disclosure.audience,
+        material.command.authorize_event.event.event_id,
+        material.request_digest
+    ]);
+    let bytes = arkret_canonical::canonical_json_bytes(&tuple)
+        .map_err(|_| AppError::internal("private scope custody address failed"))?;
+    Ok(format!(
+        "{}:{}",
+        material.command.authorize_event.event.event_id,
+        arkret_canonical::sha256_digest(&bytes)
+    ))
+}
+
+fn validate_custody_material(
+    material: &AgentScopeCustodyMaterial,
+    state: &AppState,
+) -> Result<(), AppError> {
+    let command = &material.command;
+    let disclosure = &command.requested_scope_disclosure;
+    let binding = &material.accepted_binding;
+    disclosure
+        .validate()
+        .map_err(|_| AppError::capability_denied("private scope evidence is malformed"))?;
+    let digest = arkret_signatures::agent::agent_requested_scope_digest(
+        &disclosure.agent_id,
+        &disclosure.controller_principal_id,
+        &disclosure.requested_scope,
+    )
+    .map_err(|_| AppError::capability_denied("private scope evidence digest is invalid"))?;
+    let event = &command.authorize_event.event;
+    let payload =
+        arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload::try_from(
+            event,
+        )
+        .map_err(|_| AppError::capability_denied("private scope authorize material is invalid"))?;
+    event
+        .verify_event_id_matches_content_with_digest_suite(arkret_canonical::DigestSuite::Sha256)
+        .map_err(|_| AppError::capability_denied("private scope authorize content differs"))?;
+    validate_agent_runtime_key_scopes(&disclosure.requested_scope, &payload.agent_key_scope)?;
+    if payload.agent_id != disclosure.agent_id
+        || payload.accountable_principal_id != disclosure.controller_principal_id
+        || event.realm_id != *binding.pcr_genesis_ref.stream_ref.realm_id()
+        || event
+            .executed_by
+            .as_ref()
+            .and_then(arkret_wire::ActorId::as_account_id)
+            != Some(&binding.controller_account)
+    {
+        return Err(AppError::capability_denied(
+            "private scope authorizing principal differs",
+        ));
+    }
+    let request_uuid = command
+        .pairing_request_id
+        .as_str()
+        .strip_prefix("agent_pairing_request:")
+        .ok_or_else(|| AppError::capability_denied("private scope pairing binding is invalid"))?;
+    if digest != binding.requested_scope_digest
+        || disclosure.controller_principal_id != binding.controller_account.principal_id
+        || binding.controller_account.station_id != state.service_core_id()
+        || disclosure.verifier_id.as_str() != state.service_id()
+        || disclosure.audience.as_str()
+            != arkret_wire::ServiceOperationId::GATE_ACCOUNT_COMMAND_PAIR_AGENT_KEY_V1
+        || disclosure.challenge.as_str() != command.pairing_request_id.as_str()
+        || disclosure.request_id.as_str() != format!("ak:request:{request_uuid}")
+        || binding.verified_at < disclosure.issued_at
+        || binding.verified_at > disclosure.expires_at
+        || agent_key_pair_request_digest(command)? != material.request_digest
+        || arkret_wire::project_did_to_core_id(&binding.initial_resolution.did)
+            .ok()
+            .as_ref()
+            != Some(&disclosure.agent_id)
+        || binding.initial_resolution.did != binding.binding_resolution.did
+        || !binding.initial_resolution.version_id.starts_with("1-")
+        || !binding.binding_resolution.version_id.starts_with("2-")
+    {
+        return Err(AppError::capability_denied(
+            "private scope evidence binding differs",
+        ));
+    }
+    // This only verifies the original transcript consistency, not the current
+    // Device signature or today's presentation window. Those were verified on
+    // first receipt; current key/lifecycle checks are independent.
+    if !disclosure.proofs.iter().any(|proof| {
+        proof.created_at >= disclosure.issued_at
+            && proof.created_at <= disclosure.expires_at
+            && disclosure.canonical_proof_binding_bytes(proof).is_ok()
+    }) {
+        return Err(AppError::capability_denied(
+            "private scope evidence lacks its frozen proof",
+        ));
+    }
+    Ok(())
+}
+
+fn load_scope_custody(
+    state: &AppState,
+    reference: &coland_storage::AgentScopeCustodyRef,
+) -> Result<AgentScopeCustodyMaterial, AppError> {
+    let bytes = state
+        .verifier_private_keystore()?
+        .load(&reference.key_ref)
+        .map_err(|_| AppError::capability_denied("private scope custody is unavailable"))?;
+    if arkret_canonical::sha256_digest(bytes.as_ref()) != reference.content_digest.as_str() {
+        return Err(AppError::capability_denied(
+            "private scope custody integrity differs",
+        ));
+    }
+    let material: AgentScopeCustodyMaterial = serde_json::from_slice(bytes.as_ref())
+        .map_err(|_| AppError::capability_denied("private scope custody is invalid"))?;
+    if custody_bytes(&material)? != bytes.as_ref()
+        || scope_custody_key(&material)? != reference.key_ref
+    {
+        return Err(AppError::capability_denied(
+            "private scope custody canonical binding differs",
+        ));
+    }
+    validate_custody_material(&material, state)?;
+    Ok(material)
+}
+
+async fn retain_verified_scope_custody(
+    state: &AppState,
+    record: &AgentPrincipalRecord,
+    body: &AgentKeyPairRequestBody,
+) -> Result<coland_storage::AgentScopeCustodyRef, AppError> {
+    let accepted_binding = validate_requested_scope_disclosure(body, record, state).await?;
+    let runtime_key_binding_digest = record
+        .runtime_key_binding_digest
+        .clone()
+        .ok_or_else(|| pairing_failed_precondition("frozen runtime binding is missing"))?;
+    let material = AgentScopeCustodyMaterial {
+        command: body.clone(),
+        accepted_binding,
+        runtime_key_binding_digest,
+        request_digest: agent_key_pair_request_digest(body)?,
+    };
+    validate_custody_material(&material, state)?;
+    let key_ref = scope_custody_key(&material)?;
+    let bytes = custody_bytes(&material)?;
+    let winner = state
+        .verifier_private_keystore()?
+        .create_if_absent(&key_ref, &bytes)
+        .map_err(|_| AppError::capability_denied("private scope durable custody failed"))?;
+    let stored: AgentScopeCustodyMaterial = serde_json::from_slice(winner.as_ref())
+        .map_err(|_| AppError::capability_denied("private scope custody winner is invalid"))?;
+    let normalized =
+        |binding: &coland_storage::AgentScopeAcceptedBinding| -> Result<Value, AppError> {
+            let mut value = serde_json::to_value(binding)
+                .map_err(|_| AppError::internal("private source encoding failed"))?;
+            value
+                .as_object_mut()
+                .ok_or_else(|| AppError::internal("private source shape failed"))?
+                .remove("verified_at");
+            Ok(value)
+        };
+    if !same_scope_command(&stored.command, &material.command)?
+        || stored.runtime_key_binding_digest != material.runtime_key_binding_digest
+        || stored.request_digest != material.request_digest
+        || normalized(&stored.accepted_binding)? != normalized(&material.accepted_binding)?
+    {
+        return Err(AppError::conflict(
+            "private scope custody is bound to different exact material",
+        ));
+    }
+    let reference = coland_storage::AgentScopeCustodyRef {
+        key_ref,
+        content_digest: Hash::new(arkret_canonical::sha256_digest(winner.as_ref()))
+            .map_err(|_| AppError::internal("private scope custody digest failed"))?,
+    };
+    load_scope_custody(state, &reference)?;
+    Ok(reference)
+}
+
+pub(crate) async fn verify_and_retain_agent_scope_custody(
+    state: &AppState,
+    body: &AgentKeyPairRequestBody,
+) -> Result<coland_storage::AgentScopeCustodyRef, AppError> {
+    let record = state
+        .agent_pairings()
+        .agent(body.requested_scope_disclosure.agent_id.as_str())
+        .await
+        .map_err(|_| AppError::internal("Agent pairing lookup failed"))?
+        .ok_or_else(|| pairing_failed_precondition("Agent pairing is unavailable"))?;
+    ensure_pairing_request_open(&record)?;
+    ensure_current_runtime_key_request_matches(&record, body)?;
+    let controller =
+        crate::routing::identity::agent_pcr::agent_controller_account(state, &record).await?;
+    crate::state::verify_account_device_producer(state, &controller, &body.authorize_event.event)
+        .await
+        .map_err(|_| AppError::capability_denied("private scope authorize producer is invalid"))?;
+    retain_verified_scope_custody(state, &record, body).await
+}
+
+pub(crate) async fn qualified_agent_scope_evidence(
+    state: &AppState,
+    guard: &coland_storage::AgentEndpointGuard,
+) -> Result<coland_storage::VerifiedAgentScopeEvidence, AppError> {
+    let record = state
+        .agent_pairings()
+        .agent(guard.agent_id.as_str())
+        .await
+        .map_err(|_| AppError::internal("Agent custody lookup failed"))?
+        .ok_or_else(|| AppError::capability_denied("Agent custody is unavailable"))?;
+    // A same-key current authorization can retain the original immutable
+    // qualified presentation. It cannot create a receipt or replace its bytes.
+    let source_id = record
+        .paired_request_digest
+        .as_ref()
+        .and_then(|_| record.paired_pairing_request_id.as_ref())
+        .ok_or_else(|| AppError::capability_denied("Agent qualified pairing is unavailable"))?;
+    let receipts = state
+        .agent_pairings()
+        .qualified_scope_receipt_for_pairing(guard.agent_id.as_str(), source_id.as_str())
+        .await
+        .map_err(|_| AppError::internal("Agent qualified receipt lookup failed"))?
+        .ok_or_else(|| AppError::capability_denied("Agent qualified receipt is unavailable"))?;
+    if receipts.outcome.activation_state != AgentKeyPairActivationState::Active {
+        return Err(AppError::capability_denied(
+            "Agent qualified receipt is not active",
+        ));
+    }
+    let reference = receipts
+        .scope_custody_ref
+        .as_ref()
+        .ok_or_else(|| AppError::capability_denied("Agent qualified receipt lacks custody"))?;
+    let material = load_scope_custody(state, reference)?;
+    let controller =
+        crate::routing::identity::agent_pcr::agent_controller_account(state, &record).await?;
+    if material.command.requested_scope_disclosure.agent_id != guard.agent_id
+        || material.accepted_binding.controller_account != controller
+    {
+        return Err(AppError::capability_denied(
+            "Agent qualified custody binding differs",
+        ));
+    }
+    let authorization = state
+        .authority_commits()
+        .committed_event(&material.command.authorize_event.event.event_id)
+        .await
+        .map_err(|_| AppError::internal("Agent original authorization source lookup failed"))?
+        .ok_or_else(|| {
+            AppError::capability_denied("Agent original authorization source is unavailable")
+        })?;
+    if authorization.event != material.command.authorize_event.event
+        || authorization.commit.event_ref != authorization.event.event_id
+        || authorization.commit.realm_id != guard.pcr_realm_id
+        || material
+            .accepted_binding
+            .pcr_genesis_ref
+            .stream_ref
+            .realm_id()
+            != &guard.pcr_realm_id
+        || receipts.agent_id != guard.agent_id.as_str()
+        || receipts.controller_principal_id != controller.principal_id.as_str()
+        || receipts.authorize_event_ref != authorization.event.event_id.as_str()
+        || receipts.request_digest != material.request_digest
+        || receipts.runtime_key_binding_digest != material.runtime_key_binding_digest
+        || receipts.pairing_request_id != material.command.pairing_request_id
+        || receipts.approval_request_id != material.command.approval_request_id
+    {
+        return Err(AppError::capability_denied(
+            "Agent original qualified receipt differs",
+        ));
+    }
+    let accepted_authorization_ref = arkret_wire::CommittedEventRef {
+        event_id: authorization.event.event_id.clone(),
+        commit_id: authorization.commit.commit_id.clone(),
+        stream_ref: authorization.commit.stream_ref.clone(),
+        stream_position: authorization.commit.stream_position,
+    };
+    Ok(
+        coland_storage::VerifiedAgentScopeEvidence::from_verified_custody(
+            reference.clone(),
+            material.command,
+            material.accepted_binding,
+            material.runtime_key_binding_digest,
+            material.request_digest,
+            accepted_authorization_ref,
+        ),
+    )
+}
+
+#[cfg(test)]
+mod private_scope_custody_tests {
+    use arkret_keystore::{EncryptedFileKeyStore, KeyStore};
+
+    use super::*;
+
+    struct VaultDirectory(std::path::PathBuf);
+    impl VaultDirectory {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("coland-private-scope-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&path).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            Self(path)
+        }
+    }
+    impl Drop for VaultDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn imported_material(state: &AppState) -> AgentScopeCustodyMaterial {
+        let (command, accepted_binding, runtime_key_binding_digest) =
+            super::super::tests::imported_scope_custody_fixture(state.service_id());
+        let request_digest = agent_key_pair_request_digest(&command).unwrap();
+        let material = AgentScopeCustodyMaterial {
+            command,
+            accepted_binding,
+            runtime_key_binding_digest,
+            request_digest,
+        };
+        validate_custody_material(&material, state).unwrap();
+        material
+    }
+
+    #[tokio::test]
+    async fn qualified_agent_private_custody_encrypted_reopen_preserves_expired_presentation() {
+        let directory = VaultDirectory::new();
+        let master = rand::random();
+        let path = directory.0.join("vault");
+        let first = std::sync::Arc::new(
+            EncryptedFileKeyStore::new(&path, crate::config::SERVICE_IDENTITY_KEYSTORE_APP, master)
+                .unwrap(),
+        );
+        let state = AppState::new(
+            crate::config::AppConfig::test_default(),
+            coland_storage_postgres::Db { pool: None },
+        )
+        .with_verifier_private_keystore(first.clone());
+        let material = imported_material(&state);
+        assert!(material.command.requested_scope_disclosure.expires_at < chrono::Utc::now());
+        let bytes = custody_bytes(&material).unwrap();
+        let key_ref = scope_custody_key(&material).unwrap();
+        let winner = first.create_if_absent(&key_ref, &bytes).unwrap();
+        assert!(winner.as_ref() == bytes);
+        let reference = coland_storage::AgentScopeCustodyRef {
+            key_ref,
+            content_digest: Hash::new(arkret_canonical::sha256_digest(&bytes)).unwrap(),
+        };
+        let disk = std::fs::read(&path).unwrap();
+        assert!(
+            !disk
+                .windows(b"requested_scope".len())
+                .any(|window| window == b"requested_scope")
+        );
+        drop(state);
+        drop(first);
+        let second = std::sync::Arc::new(
+            EncryptedFileKeyStore::new(&path, crate::config::SERVICE_IDENTITY_KEYSTORE_APP, master)
+                .unwrap(),
+        );
+        let reopened = AppState::new(
+            crate::config::AppConfig::test_default(),
+            coland_storage_postgres::Db { pool: None },
+        )
+        .with_verifier_private_keystore(second);
+        let restored = load_scope_custody(&reopened, &reference).unwrap();
+        assert!(same_scope_command(&restored.command, &material.command).unwrap());
+        assert!(restored.runtime_key_binding_digest == material.runtime_key_binding_digest);
+    }
+
+    #[tokio::test]
+    async fn qualified_agent_private_custody_rejects_digest_substitution_and_wrong_master_key() {
+        let directory = VaultDirectory::new();
+        let path = directory.0.join("vault");
+        let first = std::sync::Arc::new(
+            EncryptedFileKeyStore::new(
+                &path,
+                crate::config::SERVICE_IDENTITY_KEYSTORE_APP,
+                rand::random(),
+            )
+            .unwrap(),
+        );
+        let state = AppState::new(
+            crate::config::AppConfig::test_default(),
+            coland_storage_postgres::Db { pool: None },
+        )
+        .with_verifier_private_keystore(first.clone());
+        let material = imported_material(&state);
+        let bytes = custody_bytes(&material).unwrap();
+        let key_ref = scope_custody_key(&material).unwrap();
+        first.create_if_absent(&key_ref, &bytes).unwrap();
+        let mut reference = coland_storage::AgentScopeCustodyRef {
+            key_ref,
+            content_digest: Hash::new(arkret_canonical::sha256_digest(&bytes)).unwrap(),
+        };
+        let correct = reference.clone();
+        reference.content_digest = Hash::new(format!("sha256:{}", "0".repeat(64))).unwrap();
+        assert!(load_scope_custody(&state, &reference).is_err());
+        let mut changed = material;
+        changed.command.requested_scope_disclosure.challenge =
+            arkret_wire::NonEmptyString::new("a-different-challenge").unwrap();
+        first
+            .store(&correct.key_ref, &custody_bytes(&changed).unwrap())
+            .unwrap();
+        assert!(load_scope_custody(&state, &correct).is_err());
+        let wrong = AppState::new(
+            crate::config::AppConfig::test_default(),
+            coland_storage_postgres::Db { pool: None },
+        )
+        .with_verifier_private_keystore(std::sync::Arc::new(
+            EncryptedFileKeyStore::new(
+                &path,
+                crate::config::SERVICE_IDENTITY_KEYSTORE_APP,
+                rand::random(),
+            )
+            .unwrap(),
+        ));
+        assert!(load_scope_custody(&wrong, &correct).is_err());
     }
 }

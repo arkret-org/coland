@@ -1,6 +1,6 @@
-//! Space and Strand lists derive from durable typed current at one caller
-//! read cut. Morph and product-private reads retain their derived projection
-//! view until their registered current writers and disclosure cuts are wired.
+//! Space/Strand current and Morph accepted-source reads retain one caller
+//! disclosure cut through the physical response-body handoff. Product-private
+//! Relation reads remain separate from these registered native read surfaces.
 //!
 //! These endpoints let inkson (and other clients) re-hydrate the
 //! optimistic Archive / Restore state after a page refresh, so a
@@ -33,7 +33,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use arkret_identifiers::{MorphId, RealmId, RelationId, SpaceId, StrandId};
+use arkret_identifiers::{MorphId, RealmId, RelationId};
 #[cfg(test)]
 use arkret_models_collaboration::objects::query_projection::ProjectionAssignedToRelation;
 use arkret_models_collaboration::objects::query_projection::{
@@ -48,7 +48,7 @@ use coland_domain::reducer::{
     SpaceContainerLifecycleState,
 };
 use coland_http::error::AppError;
-use coland_http::result::{JsonResult, json_ok};
+use coland_http::result::{GuardedJsonResult, JsonResult, guarded_json_ok, json_ok};
 use coland_services::identity::SessionIdentityState as SessionRecord;
 use coland_services::projection::morph_document_body;
 use salvo::oapi::extract::{PathParam, QueryParam};
@@ -67,18 +67,12 @@ pub(super) fn protocol_router() -> Router {
         .push(Router::with_path("realms/{realm_id}/morphs/{morph_id}").get(get_document_projection))
 }
 
-/// Product-private read surface (`/_coland/self/*`). These are
-/// implementation-private projection reads that are NOT canonical protocol
-/// operations: per `service-http-binding.md` §2.1.3, relation / view / object
-/// direct reads that go beyond the declared `/_arkret/self/realms/...` read
-/// binding live on the implementation's own negative-space root. They expose
-/// already-projected reducer state (single Strand object fields, the relation
-/// edge list) so cotest can assert invariants the canonical list endpoints do
-/// not surface (raw `fields`, per-(from_ref, relation_kind) active edge sets).
+/// Product-private relation read surface (`/_coland/self/relations`).
+/// This implementation-only read exposes the active edge sets needed by
+/// product invariant assertions. Strand state uses the registered signed
+/// Snapshot/current readers instead of an independent mutable projection GET.
 pub(super) fn local_router() -> Router {
-    Router::new()
-        .push(Router::with_path("strands/{strand_id}").get(get_strand_projection))
-        .push(Router::with_path("relations").get(list_relation_projections))
+    Router::new().push(Router::with_path("relations").get(list_relation_projections))
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -211,60 +205,6 @@ fn projection_realm_history_allows(
         "since_join" => created_at >= member.joined_at,
         _ => false,
     }
-}
-
-fn relation_string_field<'a>(
-    relation: &'a ColandRelationState,
-    field_name: &str,
-) -> Option<&'a str> {
-    relation
-        .fields
-        .get(field_name)
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-}
-
-fn strand_position_relation<'a>(
-    projection: &'a ProjectionState,
-    strand_id: &str,
-) -> Option<&'a ColandRelationState> {
-    projection
-        .relations
-        .values()
-        .filter(|relation| relation.is_active())
-        .filter(|relation| relation.relation_kind == "contains")
-        .filter(|relation| relation.to_object_ref() == Some(strand_id))
-        .filter(|relation| relation_string_field(relation, "board_space_id").is_some())
-        .filter(|relation| {
-            relation_string_field(relation, "list_space_id")
-                .or(relation.from_object_ref())
-                .is_some()
-        })
-        .max_by(|left, right| {
-            left.updated_at
-                .cmp(&right.updated_at)
-                .then(left.relation_id.cmp(&right.relation_id))
-        })
-}
-
-type StrandPositionFields = (Option<SpaceId>, Option<SpaceId>, Option<String>);
-
-fn strand_position_fields(
-    projection: &ProjectionState,
-    strand_id: &str,
-) -> Result<StrandPositionFields, AppError> {
-    let Some(relation) = strand_position_relation(projection, strand_id) else {
-        return Ok((None, None, None));
-    };
-    let board_space_id = relation_string_field(relation, "board_space_id")
-        .map(|value| parse_projection_id::<SpaceId>(value, "board_space_id"))
-        .transpose()?;
-    let list_space_id = relation_string_field(relation, "list_space_id")
-        .or(relation.from_object_ref())
-        .map(|value| parse_projection_id::<SpaceId>(value, "list_space_id"))
-        .transpose()?;
-    let rank = relation_string_field(relation, "rank").map(ToOwned::to_owned);
-    Ok((board_space_id, list_space_id, rank))
 }
 
 #[cfg(test)]
@@ -916,7 +856,7 @@ async fn list_space_container_projections(
     req: &mut Request,
     realm_id: PathParam<String>,
     include_terminal: QueryParam<bool, false>,
-) -> JsonResult<ProjectionSpaceList> {
+) -> GuardedJsonResult<ProjectionSpaceList> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let session_actor =
@@ -927,11 +867,19 @@ async fn list_space_container_projections(
     let include_terminal = include_terminal.into_inner().unwrap_or(false);
     let lists = state
         .authority_commits()
-        .object_projection_lists_for_actor(&realm_id, &session_actor, include_terminal)
+        .object_projection_delivery_for_actor(&realm_id, &session_actor, include_terminal)
         .await
         .map_err(|error| AppError::internal(error.to_string()))?
         .ok_or_else(|| crate::app_error!(NotFound, "Realm not found"))?;
-    json_ok(lists.0)
+    let input = coland_storage::AccountContentDeliveryInput {
+        realms: vec![realm_id.clone()],
+        current_views: vec![lists.2],
+        projection_lists: vec![(realm_id, include_terminal, lists.0.clone(), lists.1)],
+        ..Default::default()
+    };
+    let guard =
+        crate::routing::events::sync::content_delivery_guard(state, &session, &input).await?;
+    guarded_json_ok(lists.0, guard)
 }
 
 #[salvo::oapi::endpoint(operation_id = "ak.self.strand.read.list", tags("events"))]
@@ -942,7 +890,7 @@ async fn list_strand_projections(
     req: &mut Request,
     realm_id: PathParam<String>,
     include_terminal: QueryParam<bool, false>,
-) -> JsonResult<ProjectionStrandList> {
+) -> GuardedJsonResult<ProjectionStrandList> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let session_actor =
@@ -953,87 +901,19 @@ async fn list_strand_projections(
     let include_terminal = include_terminal.into_inner().unwrap_or(false);
     let lists = state
         .authority_commits()
-        .object_projection_lists_for_actor(&realm_id, &session_actor, include_terminal)
+        .object_projection_delivery_for_actor(&realm_id, &session_actor, include_terminal)
         .await
         .map_err(|error| AppError::internal(error.to_string()))?
         .ok_or_else(|| crate::app_error!(NotFound, "Realm not found"))?;
-    json_ok(lists.1)
-}
-
-/// Strongly-typed response body for `org.arkret.coland.strands.get`
-/// (`GET /_coland/self/strands/{strand_id}`). This is a coland product-private
-/// projection read (`/_coland/self/*` negative-space root); the SDK does not —
-/// and per `service-http-binding.md` §2.1.3 should not — define a response type
-/// for it, so the DTO lives here next to its only handler. Field set and JSON
-/// shape mirror the materialized `StrandProjection` row plus the derived
-/// board/list position fields. `state` / `fields` keep `serde_json` free-form
-/// types: `state` is a small projected enum already rendered as a string and
-/// `fields` is an arbitrary materialized key/value map.
-#[derive(Debug, serde::Serialize, salvo::oapi::ToSchema)]
-struct StrandProjectionView {
-    strand_id: String,
-    realm_id: String,
-    state: ObjectState,
-    #[serde(
-        serialize_with = "arkret_canonical::serde_helpers::serialize_optional_canonical_timestamp"
-    )]
-    state_changed_at: Option<DateTime<Utc>>,
-    /// Business-progression stage (`common-fields.md` §5.3), written only by
-    /// `ak.strand.stage.set`. `common-fields.md` §3.2 keeps it in the
-    /// lifecycle cluster with `stage_changed_at` immediately after it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stage: Option<String>,
-    /// Reducer-derived timestamp of the last real stage transition; absent
-    /// while the Strand carries no stage, and unchanged by a same-value
-    /// self-transition.
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "arkret_canonical::serde_helpers::serialize_optional_canonical_timestamp"
-    )]
-    stage_changed_at: Option<DateTime<Utc>>,
-    /// Track map. Synthesis narrative lives only at
-    /// `tracks.synthesis.content` / `encrypted_content`.
-    tracks: Value,
-    title: String,
-    summary: Option<String>,
-    /// Strand Description, distinct from Synthesis.
-    content: Option<Value>,
-    /// Encrypted Strand Description, mutually exclusive with `content`.
-    encrypted_content: Option<Value>,
-    fields: BTreeMap<String, Value>,
-    /// Profile activation axis. Its calendar entry and the
-    /// `metadata.fields.calendar` subtree co-occur in both directions.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    schema_refs: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    schedule_revision_source: Option<String>,
-    /// One deterministic current RSVP value for every occurrence/responder Cell.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    rsvps: Vec<StrandRsvpProjectionView>,
-    board_space_id: Option<String>,
-    list_space_id: Option<String>,
-    rank: Option<String>,
-    created_by: String,
-    #[serde(serialize_with = "arkret_canonical::serde_helpers::serialize_canonical_timestamp")]
-    created_at: DateTime<Utc>,
-    updated_by: Option<String>,
-    #[serde(
-        serialize_with = "arkret_canonical::serde_helpers::serialize_optional_canonical_timestamp"
-    )]
-    updated_at: Option<DateTime<Utc>>,
-}
-
-/// One RSVP cell of a Calendar Strand, keyed by occurrence and responder.
-#[derive(Debug, serde::Serialize, salvo::oapi::ToSchema)]
-struct StrandRsvpProjectionView {
-    /// `null` is the whole series; a string is a canonical instance key.
-    occurrence: Option<String>,
-    actor_id: String,
-    /// Exact source Event identity of the settled current RSVP.
-    source_event_id: String,
-    source_event_digest: String,
-    /// Complete signed state-model value, including schedule basis and response.
-    entry: Value,
+    let input = coland_storage::AccountContentDeliveryInput {
+        realms: vec![realm_id.clone()],
+        current_views: vec![lists.2],
+        projection_lists: vec![(realm_id, include_terminal, lists.0, lists.1.clone())],
+        ..Default::default()
+    };
+    let guard =
+        crate::routing::events::sync::content_delivery_guard(state, &session, &input).await?;
+    guarded_json_ok(lists.1, guard)
 }
 
 /// One relation edge in the `org.arkret.coland.relations.list` response.
@@ -1066,7 +946,7 @@ struct RelationEdgeView {
 
 /// Strongly-typed response body for `org.arkret.coland.relations.list`
 /// (`GET /_coland/self/relations`). coland product-private projection read;
-/// the DTO lives here for the same reason as [`StrandProjectionView`].
+/// the DTO stays next to its implementation-private relation handler.
 #[derive(Debug, serde::Serialize, salvo::oapi::ToSchema)]
 struct RelationEdgeList {
     items: Vec<RelationEdgeView>,
@@ -1138,107 +1018,6 @@ fn relation_edge_matches_filters(
         && from_ref.is_none_or(|value| relation.from_ref.as_ref() == Some(value))
         && to_ref.is_none_or(|value| relation.to_ref.as_ref() == Some(value))
         && relation_kind.is_none_or(|value| relation.relation_kind == value)
-}
-
-/// `GET /_coland/self/strands/{strand_id}` — return a single Strand's
-/// projected object state including the raw `fields` map (e.g.
-/// `fields.status`). The canonical `/_arkret/self/realms/{realm_id}/strands`
-/// list intentionally does NOT surface arbitrary `fields`, so this
-/// product-private read backs invariant assertions (CAS read-back,
-/// patch-merge effects) that need the materialized field values. Visibility
-/// reuses the same Realm history / Circle scope gate as the list endpoint.
-#[salvo::oapi::endpoint(operation_id = "org.arkret.coland.strands.get", tags("events"))]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.strands.get"))]
-async fn get_strand_projection(
-    aa: AuthArgs,
-    depot: &mut Depot,
-    req: &mut Request,
-    strand_id: PathParam<String>,
-) -> JsonResult<StrandProjectionView> {
-    let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
-    let strand_id = strand_id.into_inner();
-    StrandId::new(strand_id.clone())
-        .map_err(|_| AppError::param_invalid("invalid strand_id format"))?;
-    let realm_id = {
-        let proj = state.projections().snapshot();
-        let Some(strand) = proj.strands.get(&strand_id) else {
-            return Err(AppError::not_found("strand not found"));
-        };
-        strand.realm_id.clone()
-    };
-    if !realm_id_accessible(state, &realm_id, Some(&session)).await {
-        return Err(crate::app_error!(
-            CapabilityDenied,
-            "Strand not visible to this actor",
-        ));
-    }
-    let history_access = realm_history_access(state, &realm_id).await;
-    let proj = state.projections().snapshot();
-    let Some(strand) = proj.strands.get(&strand_id).cloned() else {
-        return Err(AppError::not_found("strand not found"));
-    };
-    if !projection_row_visible_to_session(
-        state,
-        &proj,
-        &realm_id,
-        &session,
-        &strand.created_by,
-        strand.created_at,
-        strand.scope_circle_id.as_deref(),
-        &history_access,
-    ) {
-        return Err(crate::app_error!(
-            CapabilityDenied,
-            "Strand not visible to this actor",
-        ));
-    }
-    let (board_space_id, list_space_id, rank) = strand_position_fields(&proj, &strand_id)?;
-    let rsvps = if strand.state == ObjectLifecycleState::Redacted {
-        // A redacted Calendar target must not keep leaking responder identity
-        // or response content through its historical RSVP cells.
-        Vec::new()
-    } else {
-        proj.rsvps
-            .values()
-            .filter(|cell| cell.event_ref == strand_id)
-            .map(|cell| StrandRsvpProjectionView {
-                occurrence: cell.occurrence.clone(),
-                actor_id: cell.actor_id.clone(),
-                source_event_id: cell.source_event_id.to_string(),
-                source_event_digest: cell.source_event_digest.to_string(),
-                entry: cell.entry.clone(),
-            })
-            .collect::<Vec<_>>()
-    };
-    drop(proj);
-    json_ok(StrandProjectionView {
-        strand_id: strand.strand_id,
-        realm_id: strand.realm_id,
-        state: projection_object_state(strand.state),
-        state_changed_at: strand.state_changed_at,
-        stage: strand
-            .stage
-            .as_ref()
-            .map(coland_domain::reducer::object_stage_wire_value),
-        stage_changed_at: strand.stage_changed_at,
-        tracks: serde_json::to_value(&strand.tracks).unwrap_or_else(|_| serde_json::json!({})),
-        title: strand.title,
-        summary: strand.summary,
-        content: strand.content,
-        encrypted_content: strand.encrypted_content,
-        fields: strand.fields,
-        schema_refs: strand.schema_refs,
-        schedule_revision_source: strand.schedule_revision_source,
-        rsvps,
-        board_space_id: board_space_id.map(|id| id.to_string()),
-        list_space_id: list_space_id.map(|id| id.to_string()),
-        rank,
-        created_by: strand.created_by,
-        created_at: strand.created_at,
-        updated_by: strand.updated_by,
-        updated_at: strand.updated_at,
-    })
 }
 
 /// Parse an endpoint transported in a URL query: object ids are plain text,
@@ -1689,67 +1468,50 @@ async fn get_document_projection(
     req: &mut Request,
     realm_id: PathParam<String>,
     morph_id: PathParam<String>,
-) -> JsonResult<DocumentMorphProjectionOutcome> {
+) -> GuardedJsonResult<DocumentMorphProjectionOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
-    let realm_id = validate_realm_id(realm_id.into_inner())?;
-    let morph_id = morph_id.into_inner();
-    MorphId::new(morph_id.clone())
-        .map_err(|_| AppError::param_invalid("invalid morph_id format"))?;
-    {
-        let proj = state.projections().snapshot();
-        let Some(morph) = proj.morphs.get(&morph_id) else {
-            return Err(AppError::not_found("document Morph not found"));
-        };
-        if morph.realm_id != realm_id {
-            return Err(AppError::not_found("document Morph not found"));
-        }
+    let actor =
+        crate::routing::identity::session_actor::session_actor_from_credential(state, &session)?;
+    let realm = RealmId::new(validate_realm_id(realm_id.into_inner())?)
+        .map_err(|_| AppError::param_invalid("invalid realm_id"))?;
+    let morph = MorphId::new(morph_id.into_inner())
+        .map_err(|_| AppError::param_invalid("invalid morph_id"))?;
+    let observation = if session.agent_session().is_none() {
+        let account = actor
+            .as_account_id()
+            .ok_or_else(|| AppError::capability_denied("Morph caller is not an Account"))?;
+        Some(super::peer::refresh_current_account_status(state, account).await?)
+    } else {
+        None
     };
-    if !realm_id_accessible(state, &realm_id, Some(&session)).await {
-        return Err(crate::app_error!(
-            CapabilityDenied,
-            "Document not visible to this actor",
-        ));
-    }
-    let history_access = realm_history_access(state, &realm_id).await;
-    let (document, versions, comments) = {
-        let proj = state.projections().snapshot();
-        let Some(morph) = proj.morphs.get(&morph_id).cloned() else {
-            return Err(AppError::not_found("document Morph not found"));
+    let output = state
+        .authority_commits()
+        .document_morph_for_actor(&realm, &morph, &actor, &state.service_core_id())
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let Some(output) = output else {
+        let input = coland_storage::AccountContentDeliveryInput {
+            realms: vec![realm.clone()],
+            morph_absences: vec![(realm, morph)],
+            account_status_observations: observation.into_iter().collect(),
+            credential_expires_at: Some(session.expires_at),
+            ..Default::default()
         };
-        if morph.morph_kind != "document" {
-            return Err(AppError::not_found("document Morph not found"));
-        }
-        if !projection_row_visible_to_session(
-            state,
-            &proj,
-            &realm_id,
-            &session,
-            &morph.created_by,
-            morph.created_at,
-            morph.scope_circle_id.as_deref(),
-            &history_access,
-        ) {
-            return Err(crate::app_error!(
-                CapabilityDenied,
-                "Document not visible to this actor",
-            ));
-        }
-        let body = morph_document_body(&morph.fields).unwrap_or(Value::Null);
-        let document = document_projection_document(&morph, body.clone())?;
-        let versions = document_projection_versions(&morph);
-        let comments =
-            document_projection_comments(state, &proj, &morph, &body, &session, &history_access);
-        (document, versions, comments)
+        let guard =
+            crate::routing::events::sync::content_delivery_guard(state, &session, &input).await?;
+        return crate::result::guarded_json_not_found(guard);
     };
-    let relations = document_projection_relations(state, &morph_id, &realm_id, &session).await?;
-    json_ok(DocumentMorphProjectionOutcome {
-        document,
-        versions,
-        relations,
-        comments,
-        checkpoint: None,
-    })
+    let input = coland_storage::AccountContentDeliveryInput {
+        realms: vec![realm.clone()],
+        morph_documents: vec![(realm, morph, output.clone())],
+        account_status_observations: observation.into_iter().collect(),
+        credential_expires_at: Some(session.expires_at),
+        ..Default::default()
+    };
+    let guard =
+        crate::routing::events::sync::content_delivery_guard(state, &session, &input).await?;
+    guarded_json_ok(output, guard)
 }
 
 #[salvo::oapi::endpoint(operation_id = "ak.self.morph.read.list", tags("events"))]
@@ -1760,84 +1522,36 @@ async fn list_morph_projections(
     req: &mut Request,
     realm_id: PathParam<String>,
     include_terminal: QueryParam<bool, false>,
-) -> JsonResult<ProjectionMorphList> {
+) -> GuardedJsonResult<ProjectionMorphList> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
-    let realm_id = validate_realm_id(realm_id.into_inner())?;
-    let response_realm_id = RealmId::new(realm_id.clone())
-        .map_err(|_| AppError::param_invalid("invalid realm_id format"))?;
+    let actor =
+        crate::routing::identity::session_actor::session_actor_from_credential(state, &session)?;
+    let realm = RealmId::new(validate_realm_id(realm_id.into_inner())?)
+        .map_err(|_| AppError::param_invalid("invalid realm_id"))?;
     let include_terminal = include_terminal.into_inner().unwrap_or(false);
-    if !realm_id_accessible(state, &realm_id, Some(&session)).await {
-        return Err(crate::app_error!(
-            CapabilityDenied,
-            "Space not visible to this actor",
-        ));
-    }
-    let history_access = realm_history_access(state, &realm_id).await;
-    let proj = state.projections().snapshot();
-    let morphs: Vec<ProjectionMorphRow> = proj
-        .morphs
-        .values()
-        .filter(|m| m.realm_id == realm_id)
-        .filter(|m| {
-            projection_row_visible_to_session(
-                state,
-                &proj,
-                &realm_id,
-                &session,
-                &m.created_by,
-                m.created_at,
-                m.scope_circle_id.as_deref(),
-                &history_access,
-            )
-        })
-        .filter(|m| include_terminal || !is_object_terminal(m.state))
-        .map(|m| {
-            Ok(ProjectionMorphRow {
-                morph_id: parse_projection_id::<MorphId>(&m.morph_id, "morph_id")?,
-                realm_id: parse_projection_id::<RealmId>(&m.realm_id, "realm_id")?,
-                morph_kind: m.morph_kind.clone(),
-                state: projection_object_state(m.state),
-                title: m.title.clone(),
-                state_changed_at: m.state_changed_at,
-                stage: m.stage.clone(),
-                stage_changed_at: m.stage_changed_at,
-                created_by: Some(parse_projection_actor(&m.created_by, "created_by")?),
-                created_at: Some(m.created_at),
-                updated_at: m.updated_at,
-            })
-        })
-        .collect::<Result<_, AppError>>()?;
-    drop(proj);
-    let total = total_count(morphs.len())?;
-    json_ok(ProjectionMorphList {
-        realm_id: response_realm_id,
-        morphs,
-        total,
-        next_cursor: None,
-        has_more: false,
-    })
-}
-
-#[cfg(test)]
-mod rsvp_view_tests {
-    use serde_json::json;
-
-    use super::StrandRsvpProjectionView;
-
-    #[test]
-    fn settled_rsvp_view_has_no_retired_causal_winner_depth() {
-        let view = StrandRsvpProjectionView {
-            occurrence: None,
-            actor_id: "actor-1".to_owned(),
-            source_event_id: "event-2".to_owned(),
-            source_event_digest: "digest-2".to_owned(),
-            entry: json!({"response": "yes"}),
-        };
-        let value = serde_json::to_value(view).expect("RSVP view serializes");
-        assert_eq!(value["source_event_id"], "event-2");
-        assert_eq!(value["source_event_digest"], "digest-2");
-        assert_eq!(value["entry"]["response"], "yes");
-        assert!(value.get("winner_depth").is_none());
-    }
+    let observation = if session.agent_session().is_none() {
+        let account = actor
+            .as_account_id()
+            .ok_or_else(|| AppError::capability_denied("Morph caller is not an Account"))?;
+        Some(super::peer::refresh_current_account_status(state, account).await?)
+    } else {
+        None
+    };
+    let output = state
+        .authority_commits()
+        .morph_list_for_actor(&realm, &actor, &state.service_core_id(), include_terminal)
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))?
+        .ok_or_else(|| AppError::not_found("Realm not found"))?;
+    let input = coland_storage::AccountContentDeliveryInput {
+        realms: vec![realm.clone()],
+        morph_lists: vec![(realm, include_terminal, output.clone())],
+        account_status_observations: observation.into_iter().collect(),
+        credential_expires_at: Some(session.expires_at),
+        ..Default::default()
+    };
+    let guard =
+        crate::routing::events::sync::content_delivery_guard(state, &session, &input).await?;
+    guarded_json_ok(output, guard)
 }

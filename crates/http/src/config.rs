@@ -329,6 +329,9 @@ pub struct AppConfig {
     /// coland consumes the resulting session grants and may expose DID provider
     /// primitives for trusted server-to-server calls.
     pub account_authority_url: Option<String>,
+    /// Explicit delegation of the complete IVS lifecycle to this Station's
+    /// Account Authority. Disabled deployments do not advertise or mount it.
+    pub third_party_invite_provider_enabled: bool,
     /// Explicit destination trust domain for signed Station -> Account
     /// Authority requests. It is independent of the older shared-secret
     /// channel: RFC 9421 transport requires this value even when that channel
@@ -920,6 +923,7 @@ impl AppConfig {
             media: MediaIssuerConfig::test_default(),
             cors_allow_origin: None,
             account_authority_url: None,
+            third_party_invite_provider_enabled: false,
             account_authority_trust_domain: None,
             account_authority_public_key_multibase: None,
             oidc_client_id: None,
@@ -1055,6 +1059,13 @@ impl AppConfig {
             .transpose()?;
         let account_authority_public_key_multibase =
             env_non_empty(values, "COLAND_ACCOUNT_AUTHORITY_PUBLIC_KEY_MULTIBASE");
+        let third_party_invite_provider_enabled =
+            env_bool(values, "COLAND_THIRD_PARTY_INVITE_PROVIDER_ENABLED")?.unwrap_or(false);
+        if third_party_invite_provider_enabled && account_authority_url.is_none() {
+            anyhow::bail!(
+                "COLAND_THIRD_PARTY_INVITE_PROVIDER_ENABLED requires COLAND_ACCOUNT_AUTHORITY_URL"
+            );
+        }
         if let Some(key) = &account_authority_public_key_multibase {
             arkret_canonical::multibase::decode_ed25519_multibase(key).map_err(|error| {
                 anyhow::anyhow!("COLAND_ACCOUNT_AUTHORITY_PUBLIC_KEY_MULTIBASE is invalid: {error}")
@@ -1421,6 +1432,7 @@ impl AppConfig {
             media,
             cors_allow_origin,
             account_authority_url,
+            third_party_invite_provider_enabled,
             account_authority_trust_domain,
             account_authority_public_key_multibase,
             oidc_client_id,

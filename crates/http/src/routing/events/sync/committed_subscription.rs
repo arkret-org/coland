@@ -445,8 +445,25 @@ async fn response(
                             reconnect_after_ms:Some(1) }));
                         failed=true; break;
                     }
+                    let delivery = if let Some(Payload::CommittedEvent(row)) = &frame.payload {
+                        let input = coland_storage::AccountContentDeliveryInput::committed(std::slice::from_ref(row.as_ref()));
+                        match super::content_delivery_guard(&state, &session, &input).await {
+                            Ok(guard) => guard,
+                            Err(_) => {
+                                yield Ok(super::events_query::ndjson_line(&control(Kind::Unauthorized,None)));
+                                failed=true; break;
+                            }
+                        }
+                    } else { None };
+                    if delivery.as_ref().is_some_and(|guard| !guard.permits_handoff()) {
+                        yield Ok(super::events_query::ndjson_line(&control(Kind::Unauthorized,None)));
+                        failed=true; break;
+                    }
                     bytes += line.len(); progress=next; token=next_token;
                     yield Ok(line);
+                    if let Some(guard) = delivery {
+                        if guard.finish().await.is_err() { failed=true; break; }
+                    }
                 }
                 if failed { break; }
                 more |= progress[index].head.stream_position + 1 < current_rows[index].next_position;

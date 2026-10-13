@@ -74,7 +74,7 @@ pub(crate) async fn require_current(
     if &agent.station_id != target_station {
         return Err(unresolved());
     }
-    require_owner_current(conn, agent).await?;
+    Box::pin(require_owner_current(conn, agent)).await?;
     lock_selection(conn, agent.principal_id.as_str(), true).await?;
 
     let mut scopes = vec![format!("realm:{}", event.realm_id)];

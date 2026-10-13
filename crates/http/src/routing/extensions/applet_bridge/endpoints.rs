@@ -527,7 +527,7 @@ async fn revoke_install_inner(
     req: &mut Request,
 ) -> JsonResult<AppletRevokeOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
+    let session = crate::boxed_future(|| aa.authenticated_session(state, req)).await?;
     let applet_id = applet_id_param(req)?;
     let idempotency_key = idempotency_key(req)
         .ok_or_else(|| AppError::param_missing("Idempotency-Key header is required"))?;
@@ -541,11 +541,12 @@ async fn revoke_install_inner(
         .map_err(|error| AppError::param_invalid(format!("revoke request invalid: {error}")))?;
     let request_digest = arkret_canonical::canonical_sha256(&request_value)
         .map_err(|error| AppError::param_invalid(format!("revoke request invalid: {error}")))?;
-    let mut record = applet_record(state, &applet_id, &revoke.effective_scope)
-        .await?
-        .ok_or_else(|| AppError::not_found("applet is not registered"))?;
+    let mut record =
+        crate::boxed_future(|| applet_record(state, &applet_id, &revoke.effective_scope))
+            .await?
+            .ok_or_else(|| AppError::not_found("applet is not registered"))?;
     validate_revoke_scope(&record, &revoke.effective_scope)?;
-    require_realm_admin(state, &session, &revoke.effective_scope).await?;
+    crate::boxed_future(|| require_realm_admin(state, &session, &revoke.effective_scope)).await?;
     let admin_actor =
         crate::routing::identity::session_actor::session_actor_from_credential(state, &session)?;
     let admin_actor_key = admin_actor.to_string();
@@ -568,7 +569,8 @@ async fn revoke_install_inner(
             reason_code: revoke.reason_code.clone(),
             revoke_mode: revoke.revoke_mode,
         };
-        let recomputed = build_revoke_plan(state, &record, &preview).await?;
+        let recomputed =
+            crate::boxed_future(|| build_revoke_plan(state, &record, &preview)).await?;
         let recomputed_digest = arkret_canonical::canonical_sha256(&recomputed.revoke_plan)
             .map_err(|error| AppError::internal(format!("revoke plan digest failed: {error}")))?;
         if recomputed_digest != revoke.revoke_plan_digest.as_str() {
@@ -650,16 +652,18 @@ async fn revoke_install_inner(
             revoked_refs: Vec::new(),
             rejections: Vec::new(),
         };
-        persist_revoke_execution(
-            state,
-            &mut record,
-            &admin_actor_key,
-            &idempotency_key,
-            &request_digest,
-            &request_value,
-            revoke_plan.as_ref(),
-            &mut outcome,
-        )
+        crate::boxed_future(|| {
+            persist_revoke_execution(
+                state,
+                &mut record,
+                &admin_actor_key,
+                &idempotency_key,
+                &request_digest,
+                &request_value,
+                revoke_plan.as_ref(),
+                &mut outcome,
+            )
+        })
         .await?;
         outcome
     };
@@ -687,16 +691,18 @@ async fn revoke_install_inner(
         // A retry of a rejected step is made durable as pending before the
         // exact signed bytes are submitted again. The first attempt already
         // persisted the same pending identity with the initial ledger.
-        persist_revoke_execution(
-            state,
-            &mut record,
-            &admin_actor_key,
-            &idempotency_key,
-            &request_digest,
-            &request_value,
-            revoke_plan.as_ref(),
-            &mut outcome,
-        )
+        crate::boxed_future(|| {
+            persist_revoke_execution(
+                state,
+                &mut record,
+                &admin_actor_key,
+                &idempotency_key,
+                &request_digest,
+                &request_value,
+                revoke_plan.as_ref(),
+                &mut outcome,
+            )
+        })
         .await?;
         if outcome.status == AppletRevokeSagaStatus::Complete {
             return json_ok(outcome);
@@ -705,7 +711,7 @@ async fn revoke_install_inner(
             continue;
         }
         if let Some(committed_event_ref) =
-            durable_revoke_event_ref(state, &submitted_event_id).await?
+            crate::boxed_future(|| durable_revoke_event_ref(state, &submitted_event_id)).await?
         {
             outcome.steps[index] =
                 AppletRevokeStep::CommittedEvent(AppletRevokeCommittedEventStep {
@@ -717,30 +723,36 @@ async fn revoke_install_inner(
             outcome
                 .revoked_refs
                 .push(AppletRevokeEffectRef::CommittedEvent(committed_event_ref));
-            persist_revoke_execution(
-                state,
-                &mut record,
-                &admin_actor_key,
-                &idempotency_key,
-                &request_digest,
-                &request_value,
-                revoke_plan.as_ref(),
-                &mut outcome,
-            )
+            crate::boxed_future(|| {
+                persist_revoke_execution(
+                    state,
+                    &mut record,
+                    &admin_actor_key,
+                    &idempotency_key,
+                    &request_digest,
+                    &request_value,
+                    revoke_plan.as_ref(),
+                    &mut outcome,
+                )
+            })
             .await?;
             continue;
         }
-        match crate::routing::events::event_log::submit_applet_revoke_event_submission(
-            state, &session, submission,
-        )
+        match crate::boxed_future(|| {
+            crate::routing::events::event_log::submit_applet_revoke_event_submission(
+                state, &session, submission,
+            )
+        })
         .await
         {
             Ok(accepted) => {
-                let committed_event_ref = committed_revoke_event_ref(
-                    state,
-                    &submitted_event_id,
-                    accepted.event_id.as_str(),
-                )
+                let committed_event_ref = crate::boxed_future(|| {
+                    committed_revoke_event_ref(
+                        state,
+                        &submitted_event_id,
+                        accepted.event_id.as_str(),
+                    )
+                })
                 .await?;
                 let status = if accepted.duplicate {
                     AppletRevokeCommittedEventStatus::Duplicate
@@ -774,30 +786,34 @@ async fn revoke_install_inner(
                         reason_code,
                     });
                 outcome.status = AppletRevokeSagaStatus::PartiallyCompleted;
-                persist_revoke_execution(
-                    state,
-                    &mut record,
-                    &admin_actor_key,
-                    &idempotency_key,
-                    &request_digest,
-                    &request_value,
-                    revoke_plan.as_ref(),
-                    &mut outcome,
-                )
+                crate::boxed_future(|| {
+                    persist_revoke_execution(
+                        state,
+                        &mut record,
+                        &admin_actor_key,
+                        &idempotency_key,
+                        &request_digest,
+                        &request_value,
+                        revoke_plan.as_ref(),
+                        &mut outcome,
+                    )
+                })
                 .await?;
                 return json_ok(outcome);
             }
         }
-        persist_revoke_execution(
-            state,
-            &mut record,
-            &admin_actor_key,
-            &idempotency_key,
-            &request_digest,
-            &request_value,
-            revoke_plan.as_ref(),
-            &mut outcome,
-        )
+        crate::boxed_future(|| {
+            persist_revoke_execution(
+                state,
+                &mut record,
+                &admin_actor_key,
+                &idempotency_key,
+                &request_digest,
+                &request_value,
+                revoke_plan.as_ref(),
+                &mut outcome,
+            )
+        })
         .await?;
         if outcome.status == AppletRevokeSagaStatus::Complete {
             return json_ok(outcome);
@@ -841,16 +857,18 @@ async fn revoke_install_inner(
         outcome
             .revoked_refs
             .push(AppletRevokeEffectRef::TypedResource(token_ref));
-        persist_revoke_execution(
-            state,
-            &mut record,
-            &admin_actor_key,
-            &idempotency_key,
-            &request_digest,
-            &request_value,
-            revoke_plan.as_ref(),
-            &mut outcome,
-        )
+        crate::boxed_future(|| {
+            persist_revoke_execution(
+                state,
+                &mut record,
+                &admin_actor_key,
+                &idempotency_key,
+                &request_digest,
+                &request_value,
+                revoke_plan.as_ref(),
+                &mut outcome,
+            )
+        })
         .await?;
     }
 
@@ -860,12 +878,14 @@ async fn revoke_install_inner(
                 "Applet revoke cannot apply its local fence before every Event step is committed",
             ));
         }
-        let local_outcome = revoke_applet_record_after_admin_gate(
-            state,
-            &session.actor,
-            &applet_id,
-            &revoke.effective_scope,
-        )
+        let local_outcome = crate::boxed_future(|| {
+            revoke_applet_record_after_admin_gate(
+                state,
+                &session.actor,
+                &applet_id,
+                &revoke.effective_scope,
+            )
+        })
         .await?;
         for bot_actor_id in local_outcome.bot_actor_ids {
             outcome
@@ -904,33 +924,37 @@ async fn revoke_install_inner(
     }
     deduplicate_revoke_effect_refs(&mut outcome.revoked_refs)?;
     outcome.status = AppletRevokeSagaStatus::Complete;
-    record = applet_record(state, &applet_id, &revoke.effective_scope)
+    record = crate::boxed_future(|| applet_record(state, &applet_id, &revoke.effective_scope))
         .await?
         .ok_or_else(|| AppError::not_found("applet disappeared during revoke"))?;
-    persist_revoke_execution(
-        state,
-        &mut record,
-        &admin_actor_key,
-        &idempotency_key,
-        &request_digest,
-        &request_value,
-        revoke_plan.as_ref(),
-        &mut outcome,
-    )
+    crate::boxed_future(|| {
+        persist_revoke_execution(
+            state,
+            &mut record,
+            &admin_actor_key,
+            &idempotency_key,
+            &request_digest,
+            &request_value,
+            revoke_plan.as_ref(),
+            &mut outcome,
+        )
+    })
     .await?;
-    crate::routing::append_audit_log(
-        state,
-        Some(&session.actor),
-        "applet.revoke",
-        json!({
-            "applet_id": applet_id,
-            "operation_id": outcome.operation_id,
-            "revoke_plan_digest": outcome.revoke_plan_digest,
-            "status": outcome.status,
-            "revoked_refs": outcome.revoked_refs,
-        }),
-        "accepted",
-    )
+    crate::boxed_future(|| {
+        crate::routing::append_audit_log(
+            state,
+            Some(&session.actor),
+            "applet.revoke",
+            json!({
+                "applet_id": applet_id,
+                "operation_id": outcome.operation_id,
+                "revoke_plan_digest": outcome.revoke_plan_digest,
+                "status": outcome.status,
+                "revoked_refs": outcome.revoked_refs,
+            }),
+            "accepted",
+        )
+    })
     .await;
     json_ok(outcome)
 }

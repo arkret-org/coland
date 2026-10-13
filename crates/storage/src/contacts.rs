@@ -3,6 +3,7 @@ mod completion_plan;
 use arkret_models_collaboration::contact_operations::RequestAcceptanceReceipt;
 use arkret_wire::ActorId;
 use coland_domain::identity::ContactRecord;
+pub use coland_domain::identity::contact_event_prefix;
 
 use super::{PersistenceResult, Utc, Value, async_trait};
 

@@ -148,7 +148,10 @@ pub(crate) async fn owned_controller_in_connection(
     actor: &ActorId,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<Option<ActorId>> {
-    read_owned_controller_in_connection(conn, realm_id, actor, at, true).await
+    Box::pin(read_owned_controller_in_connection(
+        conn, realm_id, actor, at, true,
+    ))
+    .await
 }
 
 /// Read ownership without admission locks from one repeatable-read snapshot.
@@ -919,72 +922,60 @@ impl RealmAuthorizationCut {
         // on the same concrete paths; controller attribution is not a bypass.
         let mut attributed_agent = false;
         let producer = event.actual_signer();
-        if !self.is_direct_conversation() && producer != &self.actor {
-            if let Some(producer_controller) = Box::pin(owned_controller_in_connection(
+        if !self.is_direct_conversation()
+            && producer != &self.actor
+            && let Some(producer_controller) =
+                owned_controller_in_connection(conn, &self.realm_id, producer, operation.at).await?
+        {
+            if producer_controller != self.actor {
+                return Err(capability_denied(
+                    "Agent producer is not attributed to its current controller",
+                ));
+            }
+            let producer_cut = Self::read(conn, &self.realm_id, producer).await?;
+            producer_cut.require_governed_member(&event.kind)?;
+            let producer_operation = AuthorizationOperation {
+                actor: producer,
+                ..*operation
+            };
+            let source =
+                owned_source_in_connection(conn, &self.realm_id, producer, operation.at, true)
+                    .await?;
+            if evaluate_grants(
+                &producer_operation,
+                producer_cut
+                    .effective_grants_with_owned_source(operation.at, source)
+                    .map(|(_, grant)| grant),
+            )
+            .is_refusal()
+            {
+                return Err(capability_denied(
+                    "current Agent producer sources refuse attributed execution",
+                ));
+            }
+            let permitted = crate::agent_management_admission::executable_actions_in_connection(
                 conn,
                 &self.realm_id,
-                producer,
-                operation.at,
-            ))
-            .await?
-            {
-                if producer_controller != self.actor {
-                    return Err(capability_denied(
-                        "Agent producer is not attributed to its current controller",
-                    ));
-                }
-                let producer_cut = Box::pin(Self::read(conn, &self.realm_id, producer)).await?;
-                producer_cut.require_governed_member(&event.kind)?;
-                let producer_operation = AuthorizationOperation {
-                    actor: producer,
-                    ..*operation
-                };
-                let source = Box::pin(owned_source_in_connection(
-                    conn,
-                    &self.realm_id,
-                    producer,
-                    operation.at,
-                    true,
-                ))
-                .await?;
-                if evaluate_grants(
-                    &producer_operation,
-                    producer_cut
-                        .effective_grants_with_owned_source(operation.at, source)
-                        .map(|(_, grant)| grant),
-                )
-                .is_refusal()
-                {
-                    return Err(capability_denied(
-                        "current Agent producer sources refuse attributed execution",
-                    ));
-                }
-                let permitted = Box::pin(
-                    crate::agent_management_admission::executable_actions_in_connection(
-                        conn,
-                        &self.realm_id,
-                        producer_controller.as_account_id().ok_or_else(|| {
-                            capability_denied("Agent producer controller is not an account")
-                        })?,
-                        producer
-                            .as_account_id()
-                            .ok_or_else(|| capability_denied("Agent producer is not an account"))?,
-                        &producer_operation,
-                        event,
-                    ),
-                )
-                .await?;
-                managed_actions = Some(
-                    managed_actions
-                        .as_deref()
-                        .unwrap_or(operation.actions)
-                        .iter()
-                        .copied()
-                        .filter(|action| permitted.contains(action))
-                        .collect(),
-                );
-                attributed_agent = true;
-            }
+                producer_controller.as_account_id().ok_or_else(|| {
+                    capability_denied("Agent producer controller is not an account")
+                })?,
+                producer
+                    .as_account_id()
+                    .ok_or_else(|| capability_denied("Agent producer is not an account"))?,
+                &producer_operation,
+                event,
+            )
+            .await?;
+            managed_actions = Some(
+                managed_actions
+                    .as_deref()
+                    .unwrap_or(operation.actions)
+                    .iter()
+                    .copied()
+                    .filter(|action| permitted.contains(action))
+                    .collect(),
+            );
+            attributed_agent = true;
         }
         let managed_operation = AuthorizationOperation {
             actions: managed_actions.as_deref().unwrap_or(operation.actions),
@@ -2719,10 +2710,10 @@ impl RealmLifecycleGates {
         let mut gates = Self::default();
         for event in events {
             match event.kind.as_str() {
-                "ak.realm.archive" => gates.archived = true,
-                "ak.realm.restore" => gates.archived = false,
-                "ak.realm.freeze" => gates.frozen = true,
-                "ak.realm.unfreeze" => gates.frozen = false,
+                arkret_wire::CapabilityActionId::REALM_ARCHIVE => gates.archived = true,
+                arkret_wire::event_kind_str::REALM_RESTORE => gates.archived = false,
+                arkret_wire::CapabilityActionId::REALM_FREEZE => gates.frozen = true,
+                arkret_wire::event_kind_str::REALM_UNFREEZE => gates.frozen = false,
                 _ => gates.terminal = true,
             }
         }

@@ -1142,6 +1142,12 @@ pub(super) async fn agent_key_pair(
         ));
     }
     ensure_current_runtime_key_request_matches(&agent_record, &body)?;
+    ensure_controller_pairing_authorization(
+        &body.authorize_event.event,
+        &proposed_authorization,
+        &agent_record,
+        state.service_id(),
+    )?;
     crate::routing::identity::agent_pcr::validate_agent_controller_binding(
         state,
         &agent_record,
@@ -1474,6 +1480,73 @@ fn ensure_current_runtime_key_request_matches(
     if agent_record.runtime_key_binding_digest.as_deref() != Some(digest.as_str()) {
         return Err(pairing_failed_precondition(
             "runtime candidate changed after controller discovery",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_controller_pairing_authorization(
+    event: &arkret_wire::Event,
+    payload: &arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload,
+    record: &AgentPrincipalRecord,
+    service_id: &str,
+) -> Result<(), AppError> {
+    let controller = &record.controller_principal_id;
+    if event.actor_id != pairing_account_actor(&record.id, service_id)?
+        || event.executed_by.as_ref() != Some(&pairing_account_actor(controller, service_id)?)
+        || event.authorization_ref.as_ref().map(|value| value.as_str())
+            != Some(record.controller_authorization_ref.as_str())
+        || event.realm_id.as_str() != record.principal_control_realm_id
+        || payload.accountable_principal_id.as_str() != controller
+    {
+        return Err(AppError::capability_denied(
+            "authorize Event must bind the exact Agent Account, controller, delegation and PCR",
+        ));
+    }
+    if !payload
+        .audience
+        .iter()
+        .any(|audience| audience == service_id)
+    {
+        return Err(AppError::param_invalid(
+            "authorize_event.payload.audience must include this Station",
+        ));
+    }
+    if payload
+        .expires_at
+        .is_some_and(|expiry| expiry <= chrono::Utc::now())
+    {
+        return Err(pairing_failed_precondition(
+            "authorize_event payload has expired",
+        ));
+    }
+    let evidence = &payload.approval_evidence;
+    if evidence.kind
+        != arkret_models_collaboration::events_payloads::agent::AgentKeyApprovalEvidenceKind::PairingRequest
+        || evidence.evidence_ref.is_some()
+        || evidence.approved_by.as_ref().map(|value| value.as_str()) != Some(controller.as_str())
+        || evidence.pairing_request_id.as_ref().map(|value| value.as_str())
+            != Some(required_pairing_request_id(record)?)
+    {
+        return Err(AppError::param_invalid(
+            "authorize_event.payload.approval_evidence must bind the current controller pairing request",
+        ));
+    }
+    let expected = pairing_request_binding_digest(
+        record,
+        controller,
+        &record.id,
+        &payload.verification_method,
+        service_id,
+    )?;
+    if evidence
+        .request_canonical_digest
+        .as_ref()
+        .map(|value| value.as_str())
+        != Some(expected.as_str())
+    {
+        return Err(AppError::param_invalid(
+            "authorize_event.payload.approval_evidence.request_canonical_digest must bind the pairing request",
         ));
     }
     Ok(())
@@ -2493,7 +2566,8 @@ async fn retain_verified_scope_custody(
     record: &AgentPrincipalRecord,
     body: &AgentKeyPairRequestBody,
 ) -> Result<coland_storage::AgentScopeCustodyRef, AppError> {
-    let accepted_binding = validate_requested_scope_disclosure(body, record, state).await?;
+    let accepted_binding =
+        Box::pin(validate_requested_scope_disclosure(body, record, state)).await?;
     let runtime_key_binding_digest = record
         .runtime_key_binding_digest
         .clone()
@@ -2553,12 +2627,27 @@ pub(crate) async fn verify_and_retain_agent_scope_custody(
         .ok_or_else(|| pairing_failed_precondition("Agent pairing is unavailable"))?;
     ensure_pairing_request_open(&record)?;
     ensure_current_runtime_key_request_matches(&record, body)?;
+    let payload =
+        arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload::try_from(
+            &body.authorize_event.event,
+        )
+        .map_err(|error| AppError::param_invalid(error.to_string()))?;
+    ensure_controller_pairing_authorization(
+        &body.authorize_event.event,
+        &payload,
+        &record,
+        state.service_id(),
+    )?;
     let controller =
         crate::routing::identity::agent_pcr::agent_controller_account(state, &record).await?;
-    crate::state::verify_account_device_producer(state, &controller, &body.authorize_event.event)
-        .await
-        .map_err(|_| AppError::capability_denied("private scope authorize producer is invalid"))?;
-    retain_verified_scope_custody(state, &record, body).await
+    Box::pin(crate::state::verify_account_device_producer(
+        state,
+        &controller,
+        &body.authorize_event.event,
+    ))
+    .await
+    .map_err(|_| AppError::capability_denied("private scope authorize producer is invalid"))?;
+    Box::pin(retain_verified_scope_custody(state, &record, body)).await
 }
 
 pub(crate) async fn qualified_agent_scope_evidence(
@@ -2576,7 +2665,7 @@ pub(crate) async fn qualified_agent_scope_evidence(
     let source_id = record
         .paired_request_digest
         .as_ref()
-        .and_then(|_| record.paired_pairing_request_id.as_ref())
+        .and(record.paired_pairing_request_id.as_ref())
         .ok_or_else(|| AppError::capability_denied("Agent qualified pairing is unavailable"))?;
     let receipts = state
         .agent_pairings()

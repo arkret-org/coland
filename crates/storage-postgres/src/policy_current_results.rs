@@ -94,7 +94,10 @@ pub(crate) async fn read_scoped_agent_management_policies_in_connection(
     realm: &arkret_wire::RealmId,
     circle: Option<&arkret_wire::CircleId>,
 ) -> PersistenceResult<Vec<arkret_models_collaboration::governance::operation_wire::Policy>> {
-    read_scoped_agent_management_policies_at_cut(conn, realm, circle, true).await
+    Box::pin(read_scoped_agent_management_policies_at_cut(
+        conn, realm, circle, true,
+    ))
+    .await
 }
 
 /// Governing visibility from an enclosing repeatable-read transaction. This is
@@ -561,7 +564,7 @@ pub(crate) enum ManagementPolicyCurrentRead {
         source: CommitStreamRef,
         revision: CurrentRevision,
         payload: PolicySetStatePayload,
-        head: arkret_wire::CommitStreamHead,
+        head: Box<arkret_wire::CommitStreamHead>,
     },
 }
 
@@ -654,8 +657,10 @@ pub(crate) async fn read_management_policy_exact_in_connection(
                 value.get("schema").and_then(Value::as_str),
                 value.get("policy_kind").and_then(Value::as_str),
             ) {
-                (Some("ak.schema.policy.v1"), Some("agent")) => Some(PolicyKind::Agent),
-                (Some("ak.schema.policy.v1"), Some("applet")) => Some(PolicyKind::Applet),
+                (Some(arkret_wire::SchemaId::POLICY_V1), Some("agent")) => Some(PolicyKind::Agent),
+                (Some(arkret_wire::SchemaId::POLICY_V1), Some("applet")) => {
+                    Some(PolicyKind::Applet)
+                }
                 _ => None,
             }
         });
@@ -711,11 +716,11 @@ pub(crate) async fn read_management_policy_exact_in_connection(
     };
     payload.validate().map_err(schema)?;
     Ok(ManagementPolicyCurrentRead::Present {
-        head: arkret_wire::CommitStreamHead {
+        head: Box::new(arkret_wire::CommitStreamHead {
             stream_ref: source.clone(),
             commit_id: head.commit_id.parse().map_err(schema)?,
             stream_position: u64::try_from(head.stream_position).map_err(schema)?,
-        },
+        }),
         source,
         revision: policy_revision(leaf)?,
         payload,
@@ -766,7 +771,8 @@ async fn check_policy_cas_in_connection(
         .bind::<Text,_>(payload.policy_id.as_str()).get_result::<Present>(&mut *conn)
         .await.map_err(PersistenceError::database)?.present;
     let current_kind = current.as_ref().and_then(|row| {
-        if row.value.get("schema").and_then(Value::as_str) != Some("ak.schema.policy.v1") {
+        if row.value.get("schema").and_then(Value::as_str) != Some(arkret_wire::SchemaId::POLICY_V1)
+        {
             return None;
         }
         match row.value.get("policy_kind").and_then(Value::as_str) {
@@ -1377,17 +1383,44 @@ pub(crate) async fn admit_in_connection(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PolicyWriteContext {
+    Admission,
+    AcceptedReplica,
+}
+
 pub(crate) async fn commit_in_connection(
     conn: &mut AsyncPgConnection,
     event: &Event,
     commit: &RealmCommit,
+) -> PersistenceResult<()> {
+    commit_in_connection_inner(conn, event, commit, PolicyWriteContext::Admission).await
+}
+
+// The caller has verified the accepted originals, native revision and prefix.
+// A disclosed snapshot does not fabricate the producer's local CAS predecessor.
+pub(crate) async fn commit_replica_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    commit: &RealmCommit,
+) -> PersistenceResult<()> {
+    commit_in_connection_inner(conn, event, commit, PolicyWriteContext::AcceptedReplica).await
+}
+
+async fn commit_in_connection_inner(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    commit: &RealmCommit,
+    context: PolicyWriteContext,
 ) -> PersistenceResult<()> {
     match event.kind {
         EventKind::PolicySet => {
             let payload: PolicySetStatePayload = payload(event)?;
             payload.validate().map_err(schema)?;
             let value = serde_json::to_value(&payload.value).map_err(schema)?;
-            let count = if let Some(expected) = &payload.expected_revision {
+            let count = if context == PolicyWriteContext::Admission
+                && let Some(expected) = &payload.expected_revision
+            {
                 // CAS predecessors order writes even when the new accepted
                 // stream position is lower than the previous stream's value.
                 let expected_position = expected

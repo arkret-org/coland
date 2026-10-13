@@ -501,7 +501,7 @@ fn require_member_event_read(
             ownership: Some((controller, agent)),
             operation: AgentPolicyOperation::Read,
             content_action: Some(
-                CapabilityActionId::from_wire("ak.event.read")
+                CapabilityActionId::from_wire(arkret_wire::CapabilityActionId::EVENT_READ)
                     .ok_or_else(|| unavailable("Event read action is unregistered"))?,
             ),
             resources: Some(&resources),
@@ -712,6 +712,10 @@ pub(crate) fn selector_content_resources(
 }
 
 /// This gate restricts an already proved content source; it never creates one.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Content admission binds the caller, scope, action and resources on the same database cut."
+)]
 pub(crate) async fn require_content_snapshot_in_connection(
     conn: &mut diesel_async::AsyncPgConnection,
     realm: &RealmId,
@@ -1474,18 +1478,17 @@ fn require_execution_event_scope(
     {
         return Err(unavailable("Agent execution differs from its signed scope"));
     }
-    if let arkret_wire::ScopeRef::Circle { circle_id, .. } = &event.scope_ref {
-        if operation
+    if let arkret_wire::ScopeRef::Circle { circle_id, .. } = &event.scope_ref
+        && (operation
             .target
             .circle_id
             .as_ref()
             .is_some_and(|target| target != circle_id)
-            || operation.facts.circle_id.as_deref() != Some(circle_id.as_str())
-        {
-            return Err(unavailable(
-                "Agent execution Circle differs from its signed scope",
-            ));
-        }
+            || operation.facts.circle_id.as_deref() != Some(circle_id.as_str()))
+    {
+        return Err(unavailable(
+            "Agent execution Circle differs from its signed scope",
+        ));
     }
     Ok(())
 }

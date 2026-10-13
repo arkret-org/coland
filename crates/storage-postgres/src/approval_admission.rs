@@ -176,7 +176,9 @@ fn validate_candidate_with_operation_digest<'a>(
         signature
             .validate()
             .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
-        if signature.input.operation != "ak.self.events.command.submit.v1" {
+        if signature.input.operation
+            != arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1
+        {
             return Err(error(
                 "schema_violation",
                 "approval operation has no registered Event carrier",
@@ -241,7 +243,7 @@ fn validate_candidate_with_operation_digest<'a>(
                         control,
                         signature,
                         event,
-                        "ak.self.events.command.submit.v1",
+                        arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
                         signature.input.action,
                         commit.committed_at,
                     )
@@ -250,7 +252,7 @@ fn validate_candidate_with_operation_digest<'a>(
                     arkret_signatures::approval_signature::verify_event_approval_signature(
                         signature,
                         event,
-                        "ak.self.events.command.submit.v1",
+                        arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
                         signature.input.action,
                         commit.committed_at,
                         &key,
@@ -566,7 +568,12 @@ pub(crate) async fn require_list_wip(
             continue;
         }
         vote.input
-            .validate_list_wip_binding(event, "ak.self.events.command.submit.v1", list, revision)
+            .validate_list_wip_binding(
+                event,
+                arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                list,
+                revision,
+            )
             .map_err(|e| error("approval_required", e))?;
         if let Some(basis) = approver_qualifies(
             conn,

@@ -320,7 +320,8 @@ fn validate_managed_actor_unit(
         || !matches!(&provision.actor_id, ActorId::Account { .. })
         || provision.actor_id.route_service_id() != station_id
         || provision.external_ref.as_ref() != external_ref
-        || provision_event.kind.as_str() != "ak.applet.managed_actor.provision"
+        || provision_event.kind.as_str()
+            != arkret_wire::event_kind_str::APPLET_MANAGED_ACTOR_PROVISION
         || provision_event.actor_id != service_actor_id
         || &provision_event.realm_id != authority_realm_id
         || &provision_event.scope_ref != authority_scope
@@ -597,7 +598,7 @@ impl AppletRecord {
                 [IssuerAuthorityRef::RealmRoot { realm_id, .. }]
                     if realm_id == &self.portal_realm_id
             );
-            if grant.schema != "ak.schema.capability.v1"
+            if grant.schema != arkret_wire::SchemaId::CAPABILITY_V1
                 || grant.issuer_id != self.owner_actor_id
                 || grant.realm_id.as_ref() != Some(&self.portal_realm_id)
                 || !matches!(&grant.subject, CapabilitySubject::Actor(subject)

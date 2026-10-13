@@ -1329,7 +1329,7 @@ mod tests {
         assert_eq!(err.1, "unauthenticated");
         assert_eq!(
             err.2,
-            "session grant device metadata does not match its holder binding"
+            "session grant introspection authorization metadata is incomplete"
         );
     }
 

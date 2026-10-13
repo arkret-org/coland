@@ -841,6 +841,10 @@ pub(crate) async fn owned_bootstrap_in_connection(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bootstrap verification binds independent controller, inception, authorization, scope and time evidence."
+)]
 fn validate_owned_bootstrap_history(
     history: &arkret_identity::VerifiedDidWebvhLog,
     initial: &arkret_models_identity::ResolutionCommitment,
@@ -1171,7 +1175,7 @@ pub(crate) async fn require_current_public_in_connection(
     controller: &AccountId,
     agent: &AccountId,
 ) -> PersistenceResult<()> {
-    let Some(row) = read_in_connection(conn, realm, agent).await? else {
+    let Some(row) = Box::pin(read_in_connection(conn, realm, agent)).await? else {
         return Err(denied("shared Agent authority is unavailable"));
     };
     let value: AgentInteractionCurrentValue = serde_json::from_value(row.value).map_err(invalid)?;

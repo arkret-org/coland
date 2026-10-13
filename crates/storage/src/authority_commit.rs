@@ -1561,6 +1561,18 @@ pub trait AccountContentDeliveryGuard: Send {
     async fn finish(self: Box<Self>) -> PersistenceResult<()>;
 }
 
+/// Exact principals, accepted source and current cut used to prepare a native reply.
+pub struct NativeMessageReplyPreparation<'a> {
+    pub agent: &'a arkret_wire::AccountId,
+    pub controller: &'a arkret_wire::AccountId,
+    pub caller: &'a arkret_wire::AccountId,
+    pub station: &'a arkret_wire::DidCoreId,
+    pub source: &'a arkret_wire::CommittedEventFullView,
+    pub strand: &'a arkret_wire::StrandId,
+    pub input: &'a AccountContentDeliveryInput,
+    pub deployment: arkret_models_collaboration::governance::agent_participation::ParticipationBits,
+}
+
 #[async_trait]
 pub trait AuthorityCommitStore: Send + Sync {
     /// Governing capability/management preflight for self or the exact verified
@@ -1595,18 +1607,8 @@ pub trait AuthorityCommitStore: Send + Sync {
     /// This creates neither a signed Event nor a quota operation identity.
     async fn acquire_native_message_reply_preparation(
         &self,
-        agent: &arkret_wire::AccountId,
-        controller: &arkret_wire::AccountId,
-        caller: &arkret_wire::AccountId,
-        station: &arkret_wire::DidCoreId,
-        source: &arkret_wire::CommittedEventFullView,
-        strand: &arkret_wire::StrandId,
-        input: &AccountContentDeliveryInput,
-        deployment: arkret_models_collaboration::governance::agent_participation::ParticipationBits,
+        _request: NativeMessageReplyPreparation<'_>,
     ) -> PersistenceResult<Box<dyn AccountContentDeliveryGuard>> {
-        let _ = (
-            agent, controller, caller, station, source, strand, input, deployment,
-        );
         Err(crate::PersistenceError::Conflict(
             "revision_unavailable: native reply preparation barrier is unavailable".into(),
         ))

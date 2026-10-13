@@ -2786,12 +2786,14 @@ async fn commit_prepared_event_inner(
 ) -> Result<(), PgTransactionError> {
     let event = &request.authority_commit.event;
 
-    let management_review = crate::agent_management_review::prepare_admission_in_connection(
-        conn,
-        event,
-        event_approvals,
-        request.authority_commit.commit.committed_at,
-    )
+    let management_review = crate::boxed_future(|| {
+        crate::agent_management_review::prepare_admission_in_connection(
+            conn,
+            event,
+            event_approvals,
+            request.authority_commit.commit.committed_at,
+        )
+    })
     .await?;
 
     if event.kind == arkret_wire::EventKind::AgentInteractionSet {
@@ -2809,109 +2811,137 @@ async fn commit_prepared_event_inner(
             )
             .into());
         }
-        crate::agent_interaction_current_results::admit_in_connection(
+        crate::boxed_future(|| {
+            crate::agent_interaction_current_results::admit_in_connection(
+                conn,
+                event,
+                &request.authority_commit.commit,
+                management_review.as_ref(),
+            )
+        })
+        .await?;
+    }
+
+    crate::boxed_future(|| {
+        crate::agent_participation_admission::require_current(
+            conn,
+            event,
+            &request.authority_commit.commit,
+            &request.authority_commit.expected_authority.service_id,
+            request.agent_deployment_ceiling,
+        )
+    })
+    .await?;
+
+    crate::boxed_future(|| {
+        crate::agent_interaction_current_results::require_shared_producer_in_connection(
+            conn,
+            event,
+            &request.authority_commit.commit,
+        )
+    })
+    .await?;
+
+    // contact-and-direct-conversation.md section 8.4: the profile table of a
+    // Direct Conversation Realm precedes every action authority and writer.
+    crate::boxed_future(|| {
+        crate::direct_conversation_admission::admit_direct_conversation_event_in_connection(
+            conn, event,
+        )
+    })
+    .await?;
+    crate::boxed_future(|| {
+        crate::organization_moderation_gate::require_organization_join_gate_in_connection(
+            conn,
+            event,
+            &request.authority_commit.commit,
+        )
+    })
+    .await?;
+
+    crate::boxed_future(|| prepare_parent_membership_transaction(conn, &request)).await?;
+    crate::boxed_future(|| {
+        crate::member_state_admission::admit_member_state_in_connection(
             conn,
             event,
             &request.authority_commit.commit,
             management_review.as_ref(),
         )
-        .await?;
-    }
-
-    crate::agent_participation_admission::require_current(
-        conn,
-        event,
-        &request.authority_commit.commit,
-        &request.authority_commit.expected_authority.service_id,
-        request.agent_deployment_ceiling,
-    )
+    })
     .await?;
-
-    crate::agent_interaction_current_results::require_shared_producer_in_connection(
-        conn,
-        event,
-        &request.authority_commit.commit,
-    )
-    .await?;
-
-    // contact-and-direct-conversation.md section 8.4: the profile table of a
-    // Direct Conversation Realm precedes every action authority and writer.
-    crate::direct_conversation_admission::admit_direct_conversation_event_in_connection(
-        conn, event,
-    )
-    .await?;
-    crate::organization_moderation_gate::require_organization_join_gate_in_connection(
-        conn,
-        event,
-        &request.authority_commit.commit,
-    )
-    .await?;
-
-    prepare_parent_membership_transaction(conn, &request).await?;
-    crate::member_state_admission::admit_member_state_in_connection(
-        conn,
-        event,
-        &request.authority_commit.commit,
-        management_review.as_ref(),
-    )
-    .await?;
-    crate::circle_current_results::admit_in_connection(
-        conn,
-        event,
-        &request.authority_commit.commit,
-        &request.authority_commit.expected_authority.service_id,
-    )
-    .await?;
-    crate::sidecar_current_results::admit_in_connection(
-        conn,
-        event,
-        &request.authority_commit.commit,
-    )
-    .await?;
-
-    if let Some(selector) = request.device_revocation_gate.as_ref() {
-        ensure_gate_allowed_in_transaction(conn, selector).await?;
-    }
-    ensure_applet_admission_in_transaction(conn, event, applet_record).await?;
-    crate::agent_confirmation_admission::admit_confirmation(
-        conn,
-        event,
-        &request.authority_commit.commit,
-    )
-    .await?;
-
-    let policy_approvals = if let Some(target) = crate::policy_current_results::admit_in_connection(
-        conn,
-        event,
-        &request.authority_commit.commit,
-    )
-    .await?
-    {
-        crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &event.realm_id).await?;
-        let cut =
-            crate::realm_authorization_cut::RealmAuthorizationCut::read_for_event(conn, event)
-                .await?;
-        crate::agent_management_admission::require_policy_write_with_approvals(
-            &cut,
+    crate::boxed_future(|| {
+        crate::circle_current_results::admit_in_connection(
             conn,
             event,
             &request.authority_commit.commit,
-            event_approvals,
-            &target,
+            &request.authority_commit.expected_authority.service_id,
         )
+    })
+    .await?;
+    crate::boxed_future(|| {
+        crate::sidecar_current_results::admit_in_connection(
+            conn,
+            event,
+            &request.authority_commit.commit,
+        )
+    })
+    .await?;
+
+    if let Some(selector) = request.device_revocation_gate.as_ref() {
+        crate::boxed_future(|| ensure_gate_allowed_in_transaction(conn, selector)).await?;
+    }
+    crate::boxed_future(|| ensure_applet_admission_in_transaction(conn, event, applet_record))
+        .await?;
+    crate::boxed_future(|| {
+        crate::agent_confirmation_admission::admit_confirmation(
+            conn,
+            event,
+            &request.authority_commit.commit,
+        )
+    })
+    .await?;
+
+    let policy_approvals = if let Some(target) = crate::boxed_future(|| {
+        crate::policy_current_results::admit_in_connection(
+            conn,
+            event,
+            &request.authority_commit.commit,
+        )
+    })
+    .await?
+    {
+        crate::boxed_future(|| {
+            crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &event.realm_id)
+        })
+        .await?;
+        let cut = crate::boxed_future(|| {
+            crate::realm_authorization_cut::RealmAuthorizationCut::read_for_event(conn, event)
+        })
+        .await?;
+        crate::boxed_future(|| {
+            crate::agent_management_admission::require_policy_write_with_approvals(
+                &cut,
+                conn,
+                event,
+                &request.authority_commit.commit,
+                event_approvals,
+                &target,
+            )
+        })
         .await?
     } else {
         Vec::new()
     };
 
-    let self_pcr_outcome =
+    let self_pcr_outcome = crate::boxed_future(|| {
         crate::agent_producer_signer_keys::prepare_self_pcr_outcome_in_connection(
             conn,
             event,
             &request.authority_commit.commit,
             request.self_producer_guard.as_ref(),
         )
-        .await?;
+    })
+    .await?;
     queue_event_in_connection(conn, event, request.event.received_at).await?;
 
     let authority_write = commit_transaction_in_connection(conn, &request.authority_commit).await?;

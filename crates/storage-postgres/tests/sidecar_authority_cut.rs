@@ -41,17 +41,24 @@ use coland_storage_postgres::{
     PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPersistenceStore,
 };
 
-async fn fixture_step<T: Send + 'static>(future: impl Future<Output = T> + Send + 'static) -> T {
+fn fixture_step<T: Send + 'static>(
+    future: impl Future<Output = T> + Send + 'static,
+) -> Pin<Box<dyn Future<Output = T> + Send>> {
     struct CancelOnDrop(tokio::task::AbortHandle);
     impl Drop for CancelOnDrop {
         fn drop(&mut self) {
             self.0.abort();
         }
     }
-    let task = tokio::spawn(future);
-    // Cancelling a caller's timeout must also drop the original pending future.
-    let _cancel = CancelOnDrop(task.abort_handle());
-    task.await.expect("original fixture step task")
+    // Allocate before entering another async state machine or spawning it.
+    // Otherwise large caller futures are copied through nested poll frames.
+    let future: Pin<Box<dyn Future<Output = T> + Send>> = Box::pin(future);
+    Box::pin(async move {
+        let task = tokio::spawn(future);
+        // Cancelling a caller's timeout must also drop the original pending future.
+        let _cancel = CancelOnDrop(task.abort_handle());
+        task.await.expect("original fixture step task")
+    })
 }
 
 // Run large production futures in independent ordinary tasks, preserving the
@@ -1814,6 +1821,7 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
         if let Some(scope) = &content_scope {
             authorization["agent_key_scope"] = serde_json::to_value(scope).unwrap();
             authorization["audience"] = serde_json::json!([historical_station.core]);
+            bind_native_pairing_approval(&mut authorization, &historical_station.core);
         }
         let key_event = sidecar_agent::agent_control_event(
             &principal.history.device_verification_method,
@@ -3011,41 +3019,55 @@ async fn provision_owned_agent_binding_phase_at_head(
             welcomes: Vec::new(),
             recipient_queue_capacity: 0,
         };
-    profiles
-        .admit_agent_provision(AgentProvisionAdmissionWrite {
-            commit: transaction(
-                controller_authority,
-                provision.clone(),
-                provision_commit.clone(),
-            ),
-            queued_at: provision_commit.committed_at,
-        })
+    let provision_write = AgentProvisionAdmissionWrite {
+        commit: transaction(
+            controller_authority,
+            provision.clone(),
+            provision_commit.clone(),
+        ),
+        queued_at: provision_commit.committed_at,
+    };
+    let provision_pool = pool.clone();
+    fixture_step(async move {
+        coland_storage_postgres::PgActorProfileStore {
+            pool: provision_pool,
+        }
+        .admit_agent_provision(provision_write)
         .await
-        .unwrap();
+    })
+    .await
+    .unwrap();
     let genesis_commit = sidecar_agent::station_genesis_commit(
         &controller_head,
         &genesis,
         &station_did,
         provision_commit.committed_at + chrono::TimeDelta::seconds(1),
     );
-    historical_control_source::admit_genesis(
-        &profiles,
-        &pool,
-        AgentPcrGenesisAdmissionWrite {
-            commit: transaction(
-                CurrentRealmAuthority {
-                    realm_id: agent_pcr.clone(),
-                    generation: 0,
-                    service_id: station.clone(),
-                    authority_ref: genesis_commit.authority_ref.clone(),
-                    last_handoff_ref: None,
-                },
-                genesis.clone(),
-                genesis_commit.clone(),
-            ),
-            queued_at: genesis_commit.committed_at,
-        },
-    )
+    let genesis_write = AgentPcrGenesisAdmissionWrite {
+        commit: transaction(
+            CurrentRealmAuthority {
+                realm_id: agent_pcr.clone(),
+                generation: 0,
+                service_id: station.clone(),
+                authority_ref: genesis_commit.authority_ref.clone(),
+                last_handoff_ref: None,
+            },
+            genesis.clone(),
+            genesis_commit.clone(),
+        ),
+        queued_at: genesis_commit.committed_at,
+    };
+    let genesis_pool = pool.clone();
+    fixture_step(async move {
+        Box::pin(historical_control_source::admit_genesis(
+            &coland_storage_postgres::PgActorProfileStore {
+                pool: genesis_pool.clone(),
+            },
+            &genesis_pool,
+            genesis_write,
+        ))
+        .await
+    })
     .await
     .unwrap();
 
@@ -4831,6 +4853,60 @@ impl Drop for DeliveryScopeVault {
         let _ = std::fs::remove_dir_all(&self.directory);
     }
 }
+// Freeze supplementary native custody metadata before the controller signs.
+fn native_pairing_instance(
+    key: &arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload,
+) -> (arkret_wire::OpaqueLocalId, chrono::DateTime<chrono::Utc>) {
+    let pairing = key.approval_evidence.pairing_request_id.as_ref().unwrap();
+    let uuid = pairing
+        .as_str()
+        .strip_prefix("agent_pairing_request:")
+        .unwrap();
+    // Historical control Events can predate today's supplementary native
+    // request. Freeze its live window at the fresh fixture handle allocation.
+    let (seconds, nanos) = uuid::Uuid::parse_str(uuid)
+        .unwrap()
+        .get_timestamp()
+        .unwrap()
+        .to_unix();
+    let allocated_at = arkret_canonical::normalize_timestamp_canonical(
+        chrono::DateTime::from_timestamp(seconds as i64, nanos).unwrap(),
+    );
+    (
+        arkret_wire::OpaqueLocalId::new(format!("agent_runtime_approval:{uuid}")).unwrap(),
+        allocated_at + chrono::TimeDelta::minutes(5),
+    )
+}
+
+fn bind_native_pairing_approval(payload: &mut serde_json::Value, station: &arkret_wire::DidCoreId) {
+    let mut key: arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload =
+        serde_json::from_value(payload.clone()).unwrap();
+    let (approval, expiry) = native_pairing_instance(&key);
+    let pairing = key.approval_evidence.pairing_request_id.as_ref().unwrap();
+    let binding = arkret_models_collaboration::agent_scope::agent_runtime_key_binding_digest(
+        &key.agent_id,
+        pairing,
+        &key.verification_method,
+        &key.public_key,
+        key.runtime_attestation.as_ref(),
+    )
+    .unwrap();
+    key.approval_evidence.request_canonical_digest = Some(
+        arkret_models_collaboration::agent_operations::agent_key_pairing_request_binding_digest(
+            arkret_wire::ServiceOperationId::GATE_ACCOUNT_COMMAND_PAIR_AGENT_KEY_V1,
+            &key.accountable_principal_id,
+            &key.agent_id,
+            pairing,
+            &approval,
+            expiry,
+            station,
+            &binding,
+        )
+        .unwrap(),
+    );
+    *payload = serde_json::to_value(key).unwrap();
+}
+
 async fn retain_delivery_scope(
     pool: &coland_storage_postgres::PgPool,
     station: &historical_control_source::HistoricalControlStation,
@@ -4873,6 +4949,7 @@ async fn retain_delivery_scope_for_runtime(
     let directory =
         std::env::temp_dir().join(format!("arkret-delivery-vault-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&directory).unwrap();
+    protect_owned_test_path(&directory, 0o700);
     let vault_path = directory.join("private-vault.enc");
     let values = std::collections::BTreeMap::from([
         (
@@ -4914,9 +4991,7 @@ async fn retain_delivery_scope_for_runtime(
         )
         .unwrap();
     let pairing_request_id = key.approval_evidence.pairing_request_id.clone().unwrap();
-    let approval_request_id =
-        arkret_wire::OpaqueLocalId::new(format!("agent_runtime_approval:{}", uuid::Uuid::now_v7()))
-            .unwrap();
+    let (approval_request_id, pairing_expires_at) = native_pairing_instance(&key);
     let now = chrono::Utc::now();
     let runtime_key = ed25519_dalek::SigningKey::from_bytes(&[0x61; 32]);
     let runtime = arkret_signatures::agent::RuntimeKeyRequestBuilder::new_with_verification_method(
@@ -4928,7 +5003,7 @@ async fn retain_delivery_scope_for_runtime(
             agent_id: agent.principal_id.clone(),
             pairing_request_id: pairing_request_id.clone(),
             pairing_code: "01234567".to_owned(),
-            pairing_expires_at: now + chrono::TimeDelta::minutes(5),
+            pairing_expires_at,
         },
         &key.verification_method,
     )
@@ -4960,7 +5035,7 @@ async fn retain_delivery_scope_for_runtime(
     );
     record.pairing_request_id = Some(pairing_request_id.clone());
     record.pairing_code = Some("01234567".to_owned());
-    record.pairing_expires_at = Some(now + chrono::TimeDelta::minutes(5));
+    record.pairing_expires_at = Some(pairing_expires_at);
     record.approval_request_id = Some(approval_request_id.clone());
     if activate_runtime {
         // Populate the original runtime approval material before creating its
@@ -4988,7 +5063,7 @@ async fn retain_delivery_scope_for_runtime(
                 &runtime.body.public_key,
                 &runtime_digest,
                 "01234567",
-                now + chrono::TimeDelta::minutes(5),
+                pairing_expires_at,
                 verified_at,
             )
             .unwrap();
@@ -5064,10 +5139,13 @@ async fn retain_delivery_scope_for_runtime(
         requested_scope_disclosure: disclosure,
         authorize_event: arkret_wire::EventAdmissionSubmission::new(key_event.clone()),
     };
-    let reference = state
-        .verify_and_retain_agent_scope_custody(&body)
-        .await
-        .unwrap();
+    let custody_state = state.clone();
+    let custody_body = body.clone();
+    let reference = fixture_step(async move {
+        Box::pin(custody_state.verify_and_retain_agent_scope_custody(&custody_body)).await
+    })
+    .await
+    .unwrap();
     let request_digest =
         arkret_canonical::sha256_digest(&arkret_canonical::canonical_json_bytes(&body).unwrap());
     let raw_key_digest = arkret_signatures::agent::agent_runtime_public_key_digest(
@@ -5083,7 +5161,7 @@ async fn retain_delivery_scope_for_runtime(
         .bind::<Text,_>(principal.history.account.principal_id.as_str()).bind::<Text,_>(pairing_request_id.as_str())
         .bind::<Text,_>(approval_request_id.as_str()).bind::<Text,_>(runtime_digest.as_str())
         .bind::<Text,_>(&request_digest).bind::<Text,_>(raw_key_digest.as_str())
-        .bind::<Timestamptz,_>(now + chrono::TimeDelta::minutes(5))
+        .bind::<Timestamptz,_>(pairing_expires_at)
         .bind::<Jsonb,_>(serde_json::to_value(&reference).unwrap()).execute(&mut conn).await.unwrap();
         drop(conn);
     }
@@ -5196,7 +5274,12 @@ async fn retain_delivery_scope_for_runtime(
         directory,
     };
     let cold = vault.reopen();
-    let evidence = cold.qualified_agent_scope_evidence(endpoint).await.unwrap();
+    let query_endpoint = endpoint.clone();
+    let evidence = fixture_step(async move {
+        Box::pin(cold.qualified_agent_scope_evidence(&query_endpoint)).await
+    })
+    .await
+    .unwrap();
     assert_eq!(evidence.custody_ref(), &reference);
     assert_eq!(evidence.command().authorize_event.event, *key_event);
     // A closed presentation window does not erase previously qualified custody.
@@ -5205,11 +5288,13 @@ async fn retain_delivery_scope_for_runtime(
         tokio::time::sleep(wait.to_std().unwrap() + std::time::Duration::from_millis(2)).await;
     }
     assert!(chrono::Utc::now() > evidence.command().requested_scope_disclosure.expires_at);
-    let reopened = vault
-        .reopen()
-        .qualified_agent_scope_evidence(endpoint)
-        .await
-        .unwrap();
+    let reopened_state = vault.reopen();
+    let query_endpoint = endpoint.clone();
+    let reopened = fixture_step(async move {
+        Box::pin(reopened_state.qualified_agent_scope_evidence(&query_endpoint)).await
+    })
+    .await
+    .unwrap();
     assert_eq!(reopened.custody_ref(), evidence.custody_ref());
     (vault, reopened)
 }
@@ -5298,6 +5383,7 @@ async fn owned_agent_delivery_cut_scenario(expiry_case: DeliveryExpiryCase) {
     );
     authorization["agent_key_scope"] = serde_json::to_value(&content_scope).unwrap();
     authorization["audience"] = serde_json::json!([station.core]);
+    bind_native_pairing_approval(&mut authorization, &station.core);
     if !matches!(expiry_case, DeliveryExpiryCase::NoExpiry) {
         authorization["expires_at"] =
             serde_json::json!(arkret_canonical::format_timestamp_canonical(expiry));
@@ -6802,7 +6888,6 @@ async fn management_review_atomic_join_scenario(
         }
     }
     if withdraw_approver {
-        use coland_storage::ResolutionStoreRegistry as _;
         let arkret_models_identity::principal_registration_anchor::PrincipalRegistrationAnchor::WebvhRegistration { log_entries, .. } = &approver.history.registration_anchor;
         let mut entries = log_entries
             .iter()
@@ -8107,6 +8192,7 @@ async fn owned_consumer_fixture(count: usize) -> OwnedConsumerFixture {
         );
         authorization["agent_key_scope"] = serde_json::to_value(&scope).unwrap();
         authorization["audience"] = serde_json::json!([station.core]);
+        bind_native_pairing_approval(&mut authorization, &station.core);
         let key = sidecar_agent::agent_control_event(
             &controller.history.device_verification_method,
             controller.history.founding_device_signing_seed,
@@ -8118,24 +8204,21 @@ async fn owned_consumer_fixture(count: usize) -> OwnedConsumerFixture {
             genesis.commit.committed_at,
         );
         let committed = sidecar_agent::station_successor(&genesis.commit, &key, &station.did, 1);
-        Box::pin(historical_control_source::admit_control(
-            &coland_storage_postgres::PgActorProfileStore { pool: pool.clone() },
-            &pool,
-            AgentControlAdmissionWrite {
-                commit: coland_storage::AuthorityCommitTransaction {
-                    expected_authority: genesis.expected_authority.clone(),
-                    event: key.clone(),
-                    commit: committed.clone(),
-                    producer_signer_fact: None,
-                    mls_state: None,
-                    welcomes: Vec::new(),
-                    recipient_queue_capacity: 0,
-                },
-                queued_at: committed.committed_at,
+        let key_write = AgentControlAdmissionWrite {
+            commit: coland_storage::AuthorityCommitTransaction {
+                expected_authority: genesis.expected_authority.clone(),
+                event: key.clone(),
+                commit: committed.clone(),
+                producer_signer_fact: None,
+                mls_state: None,
+                welcomes: Vec::new(),
+                recipient_queue_capacity: 0,
             },
-        ))
-        .await
-        .unwrap();
+            queued_at: committed.committed_at,
+        };
+        fixture_agent_control_step(pool.clone(), key_write)
+            .await
+            .unwrap();
         let agent_join = ordinary_realm::next_request_for_actor(
             &head,
             EventKind::MemberState,
@@ -8828,13 +8911,12 @@ async fn owned_consumer_http_for_endpoint_with_storage(
     // imports the owning Station's private custody nor asserts remote Agent
     // qualification. This request is rejected at the original Account binding.
     let receiver_directory = if receiving_station.is_some() {
-        use std::os::unix::fs::PermissionsExt;
         let directory = std::env::temp_dir().join(format!(
             "arkret-owned-receiver-vault-{}",
             uuid::Uuid::now_v7()
         ));
         std::fs::create_dir(&directory).unwrap();
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        protect_owned_test_path(&directory, 0o700);
         let directory = OwnedCertificateDirectory(directory);
         let values = std::collections::BTreeMap::from([
             (
@@ -10325,6 +10407,41 @@ impl Drop for OwnedOpenSslTransport {
     }
 }
 type OwnedTlsWebSocket = tokio_tungstenite::tungstenite::WebSocket<OwnedOpenSslTransport>;
+fn protect_owned_test_path(path: &std::path::Path, mode: u32) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        let _ = mode;
+        let identity = std::process::Command::new("whoami")
+            .args(["/user", "/fo", "csv", "/nh"])
+            .output()
+            .unwrap();
+        assert!(identity.status.success(), "actual test user SID lookup");
+        let identity = String::from_utf8(identity.stdout).unwrap();
+        let sid = identity.split(',').last().unwrap().trim().trim_matches('"');
+        assert!(sid.starts_with("S-1-"), "test user SID is malformed");
+        let grant = if path.is_dir() {
+            format!("*{sid}:(OI)(CI)F")
+        } else {
+            format!("*{sid}:F")
+        };
+        let protection = std::process::Command::new("icacls")
+            .arg(path)
+            .args(["/inheritance:r", "/grant:r"])
+            .arg(grant)
+            .output()
+            .unwrap();
+        assert!(
+            protection.status.success(),
+            "owned test ACL protection failed"
+        );
+    }
+}
+
 struct OwnedCertificateDirectory(std::path::PathBuf);
 impl Drop for OwnedCertificateDirectory {
     fn drop(&mut self) {
@@ -10344,7 +10461,7 @@ impl Drop for OwnedTlsServer {
 struct OwnedWebSocketFixture {
     socket: Option<OwnedTlsWebSocket>,
     server: OwnedTlsServer,
-    directory: OwnedCertificateDirectory,
+    _directory: OwnedCertificateDirectory,
     client_pid: u32,
     // A shared control shape is decoded only through this actual Open/Opened
     // channel binding, never through serde's untagged variant order.
@@ -10366,8 +10483,6 @@ impl Drop for OwnedWebSocketFixture {
     }
 }
 async fn owned_consumer_ws_connect(http: &OwnedConsumerHttpFixture) -> OwnedWebSocketFixture {
-    use std::os::unix::fs::PermissionsExt;
-
     use salvo::conn::rustls::{Keycert, RustlsConfig};
     use salvo::conn::{Acceptor, Listener, TcpListener};
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -10390,13 +10505,13 @@ async fn owned_consumer_ws_connect(http: &OwnedConsumerHttpFixture) -> OwnedWebS
     let directory =
         std::env::temp_dir().join(format!("arkret-owned-ws-tls-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir(&directory).unwrap();
-    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    protect_owned_test_path(&directory, 0o700);
     let directory = OwnedCertificateDirectory(directory);
     let certificate = directory.0.join("certificate.pem");
     let private_key = directory.0.join("private-key.pem");
     let config = directory.0.join("certificate.cnf");
     std::fs::write(&config,format!("[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=ext\n[dn]\nCN={host}\n[ext]\nsubjectAltName=DNS:{host}\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,digitalSignature,keyEncipherment,keyCertSign\nextendedKeyUsage=serverAuth\n")).unwrap();
-    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+    protect_owned_test_path(&config, 0o600);
     let generated = std::process::Command::new("openssl")
         .args([
             "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-config",
@@ -10412,7 +10527,7 @@ async fn owned_consumer_ws_connect(http: &OwnedConsumerHttpFixture) -> OwnedWebS
         .unwrap();
     assert!(generated.success(), "temporary pinned test CA creation");
     for path in [&certificate, &private_key] {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        protect_owned_test_path(path, 0o600);
     }
     let acceptor = TcpListener::new("127.0.0.1:0")
         .rustls(RustlsConfig::new(
@@ -10487,7 +10602,7 @@ async fn owned_consumer_ws_connect(http: &OwnedConsumerHttpFixture) -> OwnedWebS
     OwnedWebSocketFixture {
         socket: Some(socket),
         server,
-        directory,
+        _directory: directory,
         client_pid: pid,
         channels: std::collections::BTreeMap::new(),
     }
@@ -12060,7 +12175,7 @@ async fn native_reply_key_revoke_request(
     }
 }
 
-async fn native_reply_key_revoke_step(
+async fn fixture_agent_control_step(
     pool: coland_storage_postgres::PgPool,
     request: coland_storage::AgentControlAdmissionWrite,
 ) -> coland_storage::PersistenceResult<coland_storage::AgentControlAdmissionOutcome> {
@@ -12119,7 +12234,26 @@ async fn native_reply_preparation_fixture_in_scope(
     .await
 }
 
-async fn native_reply_preparation_fixture_with_body(
+fn native_reply_preparation_fixture_with_body(
+    controller_constraints: Option<serde_json::Value>,
+    grant_message: bool,
+    lifetime: chrono::TimeDelta,
+    in_circle: bool,
+    grant_body: bool,
+) -> Pin<Box<dyn Future<Output = NativeReplyPreparationFixture> + Send>> {
+    fixture_step(async move {
+        Box::pin(build_native_reply_preparation_fixture(
+            controller_constraints,
+            grant_message,
+            lifetime,
+            in_circle,
+            grant_body,
+        ))
+        .await
+    })
+}
+
+async fn build_native_reply_preparation_fixture(
     controller_constraints: Option<serde_json::Value>,
     grant_message: bool,
     lifetime: chrono::TimeDelta,
@@ -12279,6 +12413,15 @@ async fn native_reply_preparation_fixture_with_body(
     ))
     .await;
     let strand_request = if in_circle {
+        let mut payload: arkret_models_collaboration::events_payloads::strand::StrandCreatePayload =
+            serde_json::from_value(
+                serde_json::to_value(&strand_request.authority_commit.event.payload).unwrap(),
+            )
+            .unwrap();
+        let arkret_wire::ScopeRef::Circle { circle_id, .. } = &effective_scope else {
+            panic!("Circle fixture requires its exact signed scope");
+        };
+        payload.object.scope_circle_id = Some(circle_id.clone());
         Box::pin(native_reply_human_scoped_request(
             &original.pool,
             &head,
@@ -12286,7 +12429,7 @@ async fn native_reply_preparation_fixture_with_body(
             EventKind::StrandCreate,
             effective_scope.clone(),
             arkret_wire::ActorId::account(original.founder.clone()),
-            serde_json::to_value(&strand_request.authority_commit.event.payload).unwrap(),
+            serde_json::to_value(payload).unwrap(),
         ))
         .await
     } else {
@@ -12440,14 +12583,16 @@ fn native_reply_preparation_step(
         fixture_step(async move {
             PgAuthorityCommitStore { pool }
                 .acquire_native_message_reply_preparation(
-                    &agent,
-                    &controller,
-                    &caller,
-                    &station,
-                    &source,
-                    &strand,
-                    &input,
-                    deployment,
+                    coland_storage::NativeMessageReplyPreparation {
+                        agent: &agent,
+                        controller: &controller,
+                        caller: &caller,
+                        station: &station,
+                        source: &source,
+                        strand: &strand,
+                        input: &input,
+                        deployment,
+                    },
                 )
                 .await
         })
@@ -12494,7 +12639,7 @@ async fn native_reply_policy_deny(fixture: &NativeReplyPreparationFixture, opera
 #[tokio::test]
 async fn native_public_reply_unreserved_guard_uses_exact_accepted_source() {
     use arkret_models_collaboration::governance::agent_participation::ParticipationBits;
-    fixture_step(async {
+    fixture_step(Box::pin(async {
         let fixture = Box::pin(native_reply_preparation_fixture(
             None,
             true,
@@ -12559,14 +12704,14 @@ async fn native_public_reply_unreserved_guard_uses_exact_accepted_source() {
             .unwrap();
         assert!(guard.permits_handoff());
         guard.finish().await.unwrap();
-    })
+    }))
     .await;
 }
 
 #[tokio::test]
 async fn native_public_reply_quota_or_unknown_future_fields_never_consume() {
     use arkret_models_collaboration::governance::agent_participation::ParticipationBits;
-    fixture_step(async {
+    fixture_step(Box::pin(async {
         for constraints in [
             serde_json::json!([{"constraint_kind":"quota","constraint_subkind":"rate","effect":"allow",
                 "max_operations":1,"period":"P1D","constraint_scope":"per_realm"}]),
@@ -12588,14 +12733,14 @@ async fn native_public_reply_quota_or_unknown_future_fields_never_consume() {
                 "denied_strand_ids":[fixture.strand]}])))).await;
         fixture_commit_step(&fixture.original.pool,denying).await.unwrap();
         native_reply_refused_unchanged(&fixture,&fixture.input,ParticipationBits::ALL).await;
-    }).await;
+    })).await;
 }
 
 #[tokio::test]
 async fn native_public_reply_execute_serve_and_public_participation_are_independent() {
     use arkret_models_collaboration::governance::agent_participation::ParticipationBits;
     use coland_storage::AgentParticipationStore;
-    fixture_step(async {
+    fixture_step(Box::pin(async {
         for operation in ["execute", "serve"] {
             let fixture = Box::pin(native_reply_preparation_fixture(None, true, chrono::TimeDelta::hours(1))).await;
             let guard = native_reply_preparation_step(&fixture, &fixture.input, ParticipationBits::ALL).await.unwrap();
@@ -12632,13 +12777,13 @@ async fn native_public_reply_execute_serve_and_public_participation_are_independ
             }), &fixture.original.controller, &fixture.original.agents[0].account, &guard))).await;
         fixture_commit_step(&fixture.original.pool, request).await.unwrap();
         native_reply_refused_unchanged(&fixture, &fixture.input, ParticipationBits::ALL).await;
-    }).await;
+    })).await;
 }
 
 #[tokio::test]
 async fn native_public_reply_caller_membership_and_controller_upper_bound_are_required() {
     use arkret_models_collaboration::governance::agent_participation::ParticipationBits;
-    fixture_step(async {
+    fixture_step(Box::pin(async {
         let no_body = Box::pin(native_reply_preparation_fixture_with_body(
             None, true, chrono::TimeDelta::hours(1), false, false,
         )).await;
@@ -12657,13 +12802,13 @@ async fn native_public_reply_caller_membership_and_controller_upper_bound_are_re
                 fixture.head.commit.committed_at+chrono::TimeDelta::milliseconds(1)))).await;
         fixture_commit_step(&fixture.original.pool, leave).await.unwrap();
         native_reply_refused_unchanged(&fixture, &fixture.input, ParticipationBits::ALL).await;
-    }).await;
+    })).await;
 }
 
 #[tokio::test]
 async fn native_public_reply_real_session_expiry_and_accepted_key_revoke_close_handoff() {
     use arkret_models_collaboration::governance::agent_participation::ParticipationBits;
-    fixture_step(async {
+    fixture_step(Box::pin(async {
         let fixture = Box::pin(native_reply_preparation_fixture(
             None,
             true,
@@ -12696,11 +12841,11 @@ async fn native_public_reply_real_session_expiry_and_accepted_key_revoke_close_h
         assert!(live.permits_handoff());
         live.finish().await.unwrap();
         let request = native_reply_key_revoke_request(&fixture).await;
-        native_reply_key_revoke_step(fixture.original.pool.clone(), request)
+        fixture_agent_control_step(fixture.original.pool.clone(), request)
             .await
             .unwrap();
         native_reply_refused_unchanged(&fixture, &fixture.input, ParticipationBits::ALL).await;
-    })
+    }))
     .await;
 }
 
@@ -12714,7 +12859,7 @@ async fn native_public_reply_guard_holds_actual_writer_until_finish_or_cancel() 
         #[diesel(sql_type=BigInt)]
         number: i64,
     }
-    fixture_step(async {
+    fixture_step(Box::pin(async {
         // Original PCR lock contention must refuse without waiting while
         // the business cut is held. No caller/owner PCR proof is skipped.
         let contended = Box::pin(native_reply_preparation_fixture(None,true,chrono::TimeDelta::hours(1))).await;
@@ -12762,7 +12907,7 @@ async fn native_public_reply_guard_holds_actual_writer_until_finish_or_cancel() 
             assert!(!holders.is_empty());
             let pool = fixture.original.pool.clone();
             let writer = tokio::spawn(async move {
-                if pcr_writer {native_reply_key_revoke_step(pool,revoke).await.unwrap();}
+                if pcr_writer {fixture_agent_control_step(pool,revoke).await.unwrap();}
                 else {fixture_commit_step(&pool,leave).await.unwrap();}
             });
             struct Cancel(tokio::task::AbortHandle);
@@ -12785,5 +12930,5 @@ async fn native_public_reply_guard_holds_actual_writer_until_finish_or_cancel() 
             tokio::time::timeout(std::time::Duration::from_secs(5),writer).await.unwrap().unwrap();
             native_reply_refused_unchanged(&fixture, &fixture.input, ParticipationBits::ALL).await;
         }
-    }).await;
+    })).await;
 }

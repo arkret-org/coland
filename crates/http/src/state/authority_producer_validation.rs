@@ -217,7 +217,12 @@ pub(crate) async fn verify_account_device_producer(
         .producer_proof
         .as_ref()
         .ok_or_else(|| ServiceError::SchemaViolation("Event has no producer proof".into()))?;
-    let (key, _) = account_device_producer_key(state, account, &proof.verification_method).await?;
+    let (key, _) = Box::pin(account_device_producer_key(
+        state,
+        account,
+        &proof.verification_method,
+    ))
+    .await?;
     let digest_suite =
         arkret_canonical::canonical::digest_suite(event.event_id.digest_suite_code().as_str())
             .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
@@ -367,18 +372,21 @@ pub(super) async fn account_device_producer_key(
     ) {
         return Err(refusal);
     }
-    let facet =
+    let facet = Box::pin(
         crate::routing::identity::device_signing::try_resolve_device_signing_directory_facet(
             state,
             account.principal_id.as_str(),
             device_id.as_str(),
-        )
-        .await?;
-    let authorization = crate::routing::identity::device_signing::current_device_authorization(
-        state,
-        &ActorId::account(account.clone()),
-        &device_id,
-        &facet,
+        ),
+    )
+    .await?;
+    let authorization = Box::pin(
+        crate::routing::identity::device_signing::current_device_authorization(
+            state,
+            &ActorId::account(account.clone()),
+            &device_id,
+            &facet,
+        ),
     )
     .await?
     .ok_or_else(|| {
@@ -392,12 +400,13 @@ pub(super) async fn account_device_producer_key(
             "Event producer device authorization is not its current confirmed instance",
         ));
     }
-    let (evidence, _) =
+    let (evidence, _) = Box::pin(
         crate::routing::identity::keys::prepare_current_account_device_signer_evidence(
             state, account, &device_id, &facet,
-        )
-        .await?
-        .ok_or_else(|| rejected("native original Account Device root is unavailable"))?;
+        ),
+    )
+    .await?
+    .ok_or_else(|| rejected("native original Account Device root is unavailable"))?;
     let multibase = authorization
         .device_public_key_did
         .as_str()

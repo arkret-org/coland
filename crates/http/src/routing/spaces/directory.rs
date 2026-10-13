@@ -45,8 +45,8 @@ fn public_directory_entry(
 
 const DIRECTORY_RESOURCE_KINDS: &[DirectoryResourceKind] = &[DirectoryResourceKind::Realm];
 pub(crate) const DIRECTORY_OPERATION_BUNDLES: &[&str] = &[
-    "ak.operation_bundle.directory_service.describe.v1",
-    "ak.operation_bundle.directory_service.public_read.v1",
+    arkret_wire::OperationBundleDescriptor::DIRECTORY_SERVICE_DESCRIBE_V1,
+    arkret_wire::OperationBundleDescriptor::DIRECTORY_SERVICE_PUBLIC_READ_V1,
 ];
 
 pub(crate) fn protocol_router() -> Router {

@@ -188,7 +188,7 @@ fn fixture(remote: bool) -> Fixture {
     let mut intent = ContactCompletionDraft {
         event: event.clone(),
         operation_id: arkret_wire::ProtocolOperationId::new(
-            "ak:operation:ak.self.contact.command.commit",
+            "ak:operation:org.arkret.coland.contact.commit.v1",
         )
         .unwrap(),
         holder: holder.clone(),
@@ -398,7 +398,7 @@ async fn assert_terminal_once(pool: &PgPool, first: &Fixture) {
         count(
             pool,
             "SELECT count(*) AS count FROM idempotency_keys \
-             WHERE operation_id='ak.self.contact.command.commit'"
+             WHERE operation_id='org.arkret.coland.contact.commit.v1'"
         )
         .await,
         1

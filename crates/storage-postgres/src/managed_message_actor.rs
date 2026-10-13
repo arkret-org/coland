@@ -213,11 +213,10 @@ async fn require_applet_producer_inner(
     if grant_actor != &event.actor_id {
         let account_self = matches!(
             event.kind.as_str(),
-            "ak.invite.accept"
-                | "ak.invite.decline"
-                | "ak.profile.create"
-                | "ak.profile.update"
-                | "ak.capability.relinquish"
+            arkret_wire::CapabilityActionId::INVITE_ACCEPT
+                | arkret_wire::event_kind_str::PROFILE_CREATE
+                | arkret_wire::event_kind_str::PROFILE_UPDATE
+                | arkret_wire::CapabilityActionId::CAPABILITY_RELINQUISH
         ) || (event.kind == EventKind::MemberState
             && event.payload.get("member_id")
                 == serde_json::to_value(&event.actor_id).ok().as_ref());

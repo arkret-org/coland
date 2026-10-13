@@ -420,7 +420,8 @@ pub(crate) async fn event_visible_to_session(
     // the Events already named by this pair's accepted Contact are visible.
     if matches!(
         record.kind.as_str(),
-        "ak.contact.requested" | "ak.contact.accepted"
+        arkret_wire::event_kind_str::CONTACT_REQUESTED
+            | arkret_wire::event_kind_str::CONTACT_ACCEPTED
     ) {
         let Ok(author) = serde_json::from_str::<arkret_wire::ActorId>(&record.actor_id) else {
             return false;

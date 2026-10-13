@@ -47,34 +47,18 @@ jobs:
       - name: Checkout coland
         uses: actions/checkout@v6
         with:
-          path: coland
+          path: arkret-org/coland
 
-      - name: Checkout Arkret Rust SDK
-        uses: actions/checkout@v6
+      - name: Checkout workspace dependencies
+        uses: ./arkret-org/coland/.github/actions/checkout-workspace
         with:
-          repository: ${{ github.repository_owner }}/arkret-rust-sdk
-          path: arkret-rust-sdk
-          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
-
-      - name: Checkout Floria contracts workspace
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/floria
-          path: floria
-          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
-
-      - name: Checkout Arkret Spec
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/arkret-spec
-          path: arkret-spec
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Configure Windows OpenSSL
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/configure-windows-openssl.ps1
-        working-directory: coland
+        working-directory: arkret-org/coland
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -88,26 +72,26 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: coland -> target
+          workspaces: arkret-org/coland -> target
           key: ${{ matrix.target }}
 
       - name: Build (cargo)
         if: matrix.cross != true
         run: cargo build --release --locked --target ${{ matrix.target }}
-        working-directory: coland
+        working-directory: arkret-org/coland
 
       - name: Build (cross)
         if: matrix.cross == true
         run: cross build --release --locked --target ${{ matrix.target }}
-        working-directory: coland
+        working-directory: arkret-org/coland
 
       - name: Stage artifact
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p stage
-          cp "coland/target/${{ matrix.target }}/release/${{ matrix.artifact }}" "stage/${{ matrix.artifact }}"
-          cp coland/README.md coland/LICENSE stage/
+          cp "arkret-org/coland/target/${{ matrix.target }}/release/${{ matrix.artifact }}" "stage/${{ matrix.artifact }}"
+          cp arkret-org/coland/README.md arkret-org/coland/LICENSE stage/
 
       - name: Archive (tar.gz)
         if: matrix.archive == 'tar.gz'

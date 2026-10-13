@@ -399,7 +399,7 @@ pub(super) async fn account_response(
             return;
         }
         if initial_has_delta {
-            let delivery = match super::account_frame_delivery_guard(&state, &session, &response).await {
+            let delivery = match Box::pin(super::account_frame_delivery_guard(&state, &session, &response)).await {
                 Ok(guard) => guard,
                 Err(_) => {
                     yield Ok::<Bytes,std::io::Error>(ndjson_line(&account_unauthorized_frame()));
@@ -412,9 +412,7 @@ pub(super) async fn account_response(
                 return;
             }
             yield Ok::<Bytes, std::io::Error>(line);
-            if let Some(guard) = delivery {
-                if guard.finish().await.is_err() { return; }
-            };
+            if let Some(guard) = delivery && guard.finish().await.is_err() { return; };
             if body.catchup.unwrap_or(false) && initial_cursor.is_some() {
                 yield Ok::<Bytes, std::io::Error>(ndjson_line(&account_catchup_complete_frame(
                     initial_cursor.clone(),
@@ -464,7 +462,7 @@ pub(super) async fn account_response(
                             &account_checkpoint_frame(final_cursor.clone()),
                         ));
                     } else {
-                        let delivery = match super::account_frame_delivery_guard(&state, &session, &final_snapshot).await {
+                        let delivery = match Box::pin(super::account_frame_delivery_guard(&state, &session, &final_snapshot)).await {
                             Ok(guard) => guard,
                             Err(_) => {
                                 yield Ok::<Bytes,std::io::Error>(ndjson_line(&account_unauthorized_frame()));
@@ -477,9 +475,7 @@ pub(super) async fn account_response(
                             return;
                         }
                         yield Ok::<Bytes, std::io::Error>(line);
-                        if let Some(guard) = delivery {
-                            if guard.finish().await.is_err() { return; }
-                        };
+                        if let Some(guard) = delivery && guard.finish().await.is_err() { return; };
                     }
                     if body.catchup.unwrap_or(false) && final_cursor.is_some() {
                         yield Ok::<Bytes, std::io::Error>(ndjson_line(
@@ -553,7 +549,7 @@ pub(super) async fn account_response(
                             yield Err(std::io::Error::other("account cursor authority changed before publication"));
                             break;
                         }
-                        let delivery = match super::account_frame_delivery_guard(&state, &session, &delta).await {
+                        let delivery = match Box::pin(super::account_frame_delivery_guard(&state, &session, &delta)).await {
                             Ok(guard) => guard,
                             Err(_) => {
                                 yield Ok::<Bytes,std::io::Error>(ndjson_line(&account_unauthorized_frame()));
@@ -566,9 +562,7 @@ pub(super) async fn account_response(
                             return;
                         }
                         yield Ok::<Bytes, std::io::Error>(line);
-                        if let Some(guard) = delivery {
-                            if guard.finish().await.is_err() { return; }
-                        };
+                        if let Some(guard) = delivery && guard.finish().await.is_err() { return; };
                         if body.catchup.unwrap_or(false) && delta_cursor.is_some() {
                             yield Ok::<Bytes, std::io::Error>(ndjson_line(
                                 &account_catchup_complete_frame(delta_cursor),

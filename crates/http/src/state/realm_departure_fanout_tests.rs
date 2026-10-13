@@ -296,11 +296,17 @@ async fn departure(membership: &str, another_member_remains: bool) {
         );
     }
     let body = replication_body(&departing);
+    // A fresh transport key exercises semantic duplicate detection. Reusing
+    // the dispatch key can replay its original `stored` result (federation §4).
+    let duplicate_key = format!(
+        "{}:duplicate-check",
+        row["idempotency_key"].as_str().unwrap()
+    );
     let (status, value) = Box::pin(send_replication(
         &source.state,
         &receiver.state,
         &body,
-        row["idempotency_key"].as_str().unwrap(),
+        &duplicate_key,
         false,
     ))
     .await;

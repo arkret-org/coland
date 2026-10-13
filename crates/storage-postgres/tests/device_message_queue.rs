@@ -767,6 +767,81 @@ impl CommittedAgent {
         .await
         .unwrap();
 
+        // Publish the complete signed native binding after the real PCR acceptance.
+        // Membership qualification reads this current source, not an Agent cache row.
+        use coland_storage::{AuthorityCommitStore as _, DeliveryPolicyStoreRegistry as _};
+        let accepted_genesis = store
+            .committed_event(&genesis.event_id)
+            .await
+            .unwrap()
+            .unwrap();
+        // WebVH versionTime has whole-second precision and must follow acceptance.
+        let binding_at = chrono::DateTime::from_timestamp(
+            accepted_genesis.commit.committed_at.timestamp() + 1,
+            0,
+        )
+        .unwrap();
+        let future_root = arkret_canonical::ed25519_pubkey_to_did_key_multibase(
+            ed25519_dalek::SigningKey::from_bytes(&[103; 32])
+                .verifying_key()
+                .as_bytes(),
+        );
+        let binding = arkret_signatures::webvh::prepare_agent_binding_update(
+            &arkret_signatures::webvh::AgentBindingUpdateInput {
+                did: agent_did.as_str(),
+                local_id: &inception.local_id,
+                previous_entries: std::slice::from_ref(&inception.log_entry),
+                version_time: binding_at,
+                current_root_seed: &[102; 32],
+                next_root_public_key_multibase: &future_root,
+                controller_principal_id: &controller.account.principal_id,
+                principal_control_realm_id: &pcr_realm_id,
+                requested_scope_digest: &arkret_wire::Hash::new(format!(
+                    "sha256:{}",
+                    "9".repeat(64)
+                ))
+                .unwrap(),
+            },
+        )
+        .unwrap();
+        let entries = [inception.log_entry, binding.log_entry];
+        arkret_identity::verify_did_webvh_v1_chain(&agent_did, &entries).unwrap();
+        let persistence = coland_storage_postgres::PgPersistenceStore::new(pool.clone());
+        for (index, entry) in entries.iter().enumerate() {
+            persistence
+                .webvh()
+                .append_log_event(coland_storage::WebvhLogRecord {
+                    event_digest: arkret_canonical::canonical_sha256(entry).unwrap(),
+                    did: agent_did.to_string(),
+                    seq: index as u64 + 1,
+                    created_at: entry["versionTime"].as_str().unwrap().parse().unwrap(),
+                    operation: entry.clone(),
+                })
+                .await
+                .unwrap();
+        }
+        let now = Utc::now();
+        let head = entries.last().unwrap();
+        persistence
+            .webvh()
+            .put_document(coland_storage::WebvhDocumentRecord {
+                did: agent_did.to_string(),
+                did_document: head["state"].clone(),
+                key_log_head: Some(arkret_canonical::canonical_sha256(head).unwrap()),
+                seq: entries.len() as u64,
+                method_evidence: serde_json::Value::Null,
+                fetched_at: now,
+                expires_at: now + chrono::Duration::minutes(15),
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        // Qualify the published binding only once its real effective time arrives.
+        if let Ok(delay) = (binding_at - Utc::now()).to_std() {
+            tokio::time::sleep(delay).await;
+        }
+
         let runtime = ed25519_dalek::SigningKey::from_bytes(&AGENT_RUNTIME_SEED);
         let verification_method =
             arkret_wire::DidUrl::new(format!("{agent_did}#agent-runtime")).unwrap();
@@ -1346,453 +1421,474 @@ async fn controller_agent_discussion(
 /// cut. Revocation wins over a stale ciphertext epoch and both refuse writes.
 #[tokio::test]
 async fn postgres_agent_message_send_gate_checks_epoch_and_current_key() {
-    use coland_storage::{
-        AuthorityCommitStore as _, EventCommitUnitOfWork as _, MlsGroupCurrentStore as _,
-    };
+    agent_message_send_gate_scenario().await;
+}
 
-    let database = TestDatabase::lease().await;
-    let pool = database.pool();
-    let (agent, _recipient) = CommittedAgent::provision(&pool).await;
-    let controller_actor = arkret_wire::ActorId::account(agent.controller.account.clone());
-    ordinary_realm::human_profile::register_fixture_signer(
-        &agent.controller.account,
-        agent.controller.device_verification_method.clone(),
-        agent.controller.founding_device_signing_seed,
-    );
-    let mut discussion = Box::pin(controller_agent_discussion(&pool, &agent)).await;
-    let realm_id = discussion.realm_id();
-    let scope = arkret_wire::ScopeRef::Realm {
-        realm_id: realm_id.clone(),
-    };
-    let at = discussion.committed_at();
-    // Selection is an independent controller-owned prerequisite, not a
-    // capability. Reconstruct only the read-side Agent record from its exact
-    // accepted provision/PCR/status before using the real CAS selection store.
-    use arkret_models_collaboration::governance::agent_participation::{
-        ParticipationBits, ParticipationScope,
-    };
-    use coland_storage::{AgentParticipationStore as _, AgentStore as _};
-    #[derive(diesel::QueryableByName)]
-    struct AcceptedParticipationOwner {
-        #[diesel(sql_type = Jsonb)]
-        provision: serde_json::Value,
-        #[diesel(sql_type = Jsonb)]
-        status: serde_json::Value,
-        #[diesel(sql_type = diesel::sql_types::Timestamptz)]
-        created_at: chrono::DateTime<Utc>,
-    }
-    let mut conn = pool.get().await.unwrap();
-    let owner = sql_query("SELECT p.value AS provision,s.value AS status,c.committed_at AS created_at FROM agent_provisioning_current_results p JOIN pcr_genesis_units g ON g.realm_id=p.realm_id JOIN realm_commits c ON c.commit_id=p.current_commit_id AND c.realm_id=p.realm_id AND c.stream_position=p.current_stream_position JOIN agent_status_current_results s ON s.agent_id=p.agent_id AND s.realm_id=p.value->>'principal_control_realm_id' JOIN realm_commits sc ON sc.commit_id=s.current_commit_id AND sc.realm_id=s.realm_id AND sc.stream_position=s.current_stream_position WHERE p.agent_id=$1 AND g.station_id=$2 AND p.value->>'controller_principal_id'=g.principal_id")
+#[inline(never)]
+fn scenario_future<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future,
+{
+    Box::pin(make())
+}
+
+#[inline(never)]
+fn agent_message_send_gate_scenario() -> std::pin::Pin<Box<impl std::future::Future<Output = ()>>> {
+    Box::pin(async {
+        use coland_storage::{
+            AuthorityCommitStore as _, EventCommitUnitOfWork as _, MlsGroupCurrentStore as _,
+        };
+
+        let database = TestDatabase::lease().await;
+        let pool = database.pool();
+        let (agent, _recipient) = scenario_future(|| CommittedAgent::provision(&pool)).await;
+        let controller_actor = arkret_wire::ActorId::account(agent.controller.account.clone());
+        ordinary_realm::human_profile::register_fixture_signer(
+            &agent.controller.account,
+            agent.controller.device_verification_method.clone(),
+            agent.controller.founding_device_signing_seed,
+        );
+        let mut discussion = scenario_future(|| controller_agent_discussion(&pool, &agent)).await;
+        let realm_id = discussion.realm_id();
+        let scope = arkret_wire::ScopeRef::Realm {
+            realm_id: realm_id.clone(),
+        };
+        let at = discussion.committed_at();
+        // Selection is an independent controller-owned prerequisite, not a
+        // capability. Reconstruct only the read-side Agent record from its exact
+        // accepted provision/PCR/status before using the real CAS selection store.
+        use arkret_models_collaboration::governance::agent_participation::{
+            ParticipationBits, ParticipationScope,
+        };
+        use coland_storage::{AgentParticipationStore as _, AgentStore as _};
+        #[derive(diesel::QueryableByName)]
+        struct AcceptedParticipationOwner {
+            #[diesel(sql_type = Jsonb)]
+            provision: serde_json::Value,
+            #[diesel(sql_type = Jsonb)]
+            status: serde_json::Value,
+            #[diesel(sql_type = diesel::sql_types::Timestamptz)]
+            created_at: chrono::DateTime<Utc>,
+        }
+        let mut conn = pool.get().await.unwrap();
+        let owner = sql_query("SELECT p.value AS provision,s.value AS status,c.committed_at AS created_at FROM agent_provisioning_current_results p JOIN pcr_genesis_units g ON g.realm_id=p.realm_id JOIN realm_commits c ON c.commit_id=p.current_commit_id AND c.realm_id=p.realm_id AND c.stream_position=p.current_stream_position JOIN agent_status_current_results s ON s.agent_id=p.agent_id AND s.realm_id=p.value->>'principal_control_realm_id' JOIN realm_commits sc ON sc.commit_id=s.current_commit_id AND sc.realm_id=s.realm_id AND sc.stream_position=s.current_stream_position WHERE p.agent_id=$1 AND g.station_id=$2 AND p.value->>'controller_principal_id'=g.principal_id")
         .bind::<Text, _>(agent.agent_account.principal_id.as_str())
         .bind::<Text, _>(agent.agent_account.station_id.as_str())
         .get_result::<AcceptedParticipationOwner>(&mut *conn).await.unwrap();
-    drop(conn);
-    let provision: arkret_models_collaboration::events_payloads::agent::AgentProvisioningValue =
-        serde_json::from_value(owner.provision).unwrap();
-    let lifecycle: arkret_models_collaboration::agent_operations::AgentLifecycleState =
-        serde_json::from_value(owner.status).unwrap();
-    assert_eq!(
-        provision.controller_principal_id,
-        agent.controller.account.principal_id
-    );
-    assert_eq!(provision.principal_control_realm_id, agent.pcr_realm_id);
-    assert_eq!(
-        lifecycle,
-        arkret_models_collaboration::agent_operations::AgentLifecycleState::Active
-    );
-    coland_storage_postgres::PgAgentStore { pool: pool.clone() }
-        .put(coland_storage::AgentPrincipalRecord::new(
-            agent.agent_account.principal_id.to_string(),
-            provision.controller_principal_id.to_string(),
-            provision.principal_control_realm_id.to_string(),
-            provision.controller_authorization_ref,
-            lifecycle,
-            owner.created_at,
-        ))
-        .await
-        .unwrap();
-    let participation = coland_storage_postgres::PgAgentParticipationStore { pool: pool.clone() };
-    let selection_scope = ParticipationScope::Realm {
-        realm_id: realm_id.clone(),
-    };
-    let selection_bits = ParticipationBits {
-        reply_message: true,
-        ..ParticipationBits::NONE
-    };
-    let mut selection_record = serde_json::to_value(selection_bits).unwrap();
-    let record = selection_record.as_object_mut().unwrap();
-    for (key, value) in [
-        (
-            "agent_id",
-            serde_json::to_value(&agent.agent_account.principal_id).unwrap(),
-        ),
-        ("scope_kind", serde_json::json!("realm")),
-        ("scope_key", serde_json::json!(selection_scope.scope_key())),
-        ("realm_id", serde_json::to_value(&realm_id).unwrap()),
-        ("scope", serde_json::to_value(&selection_scope).unwrap()),
-        ("version", serde_json::json!(1)),
-    ] {
-        record.insert(key.to_owned(), value);
-    }
-    assert!(
-        participation
-            .compare_and_swap_selection(selection_record, 0)
-            .await
-            .unwrap()
-    );
-    let selections = participation
-        .list_selections(agent.agent_account.principal_id.as_str())
-        .await
-        .unwrap();
-    assert_eq!(selections.len(), 1);
-    assert_eq!(
-        selections[0]["scope"],
-        serde_json::to_value(&selection_scope).unwrap()
-    );
-    assert_eq!(selections[0]["reply_message"], true);
-    assert_eq!(selections[0]["reaction_add"], false);
-    let ceilings = participation
-        .ceilings_for_scope_keys(&[
-            selection_scope.scope_key(),
-            ParticipationScope::Strand {
-                realm_id: realm_id.clone(),
-                strand_id: discussion.strand_id.clone(),
-            }
-            .scope_key(),
-        ])
-        .await
-        .unwrap();
-    assert_eq!(ceilings.len(), 2);
-    assert!(
-        ceilings
-            .iter()
-            .all(|ceiling| ceiling["reply_message"] == true)
-    );
-    let uow = coland_storage_postgres::PgEventCommitUnitOfWork::new(pool.clone());
-    // Bind membership to the actual controller join Event from the accepted
-    // bootstrap, then commit public mode and both halves of bounded authority.
-    let controller_generation = discussion
-        .unit
-        .transactions
-        .iter()
-        .find(|tx| tx.event.kind == arkret_wire::EventKind::MemberState)
-        .expect("bootstrap contains the controller's accepted join")
-        .event
-        .event_id
-        .clone();
-    let mut membership =
-        arkret_models_collaboration::governance::membership_invite::MembershipPayload::join(
-            realm_id.clone(),
-            arkret_wire::ActorId::account(agent.agent_account.clone()),
-            "send-gate fixture",
+        drop(conn);
+        let provision: arkret_models_collaboration::events_payloads::agent::AgentProvisioningValue =
+            serde_json::from_value(owner.provision).unwrap();
+        let lifecycle: arkret_models_collaboration::agent_operations::AgentLifecycleState =
+            serde_json::from_value(owner.status).unwrap();
+        assert_eq!(
+            provision.controller_principal_id,
+            agent.controller.account.principal_id
         );
-    membership.agent_controller_binding = Some(
+        assert_eq!(provision.principal_control_realm_id, agent.pcr_realm_id);
+        assert_eq!(
+            lifecycle,
+            arkret_models_collaboration::agent_operations::AgentLifecycleState::Active
+        );
+        coland_storage_postgres::PgAgentStore { pool: pool.clone() }
+            .put(coland_storage::AgentPrincipalRecord::new(
+                agent.agent_account.principal_id.to_string(),
+                provision.controller_principal_id.to_string(),
+                provision.principal_control_realm_id.to_string(),
+                provision.controller_authorization_ref,
+                lifecycle,
+                owner.created_at,
+            ))
+            .await
+            .unwrap();
+        let participation =
+            coland_storage_postgres::PgAgentParticipationStore { pool: pool.clone() };
+        let selection_scope = ParticipationScope::Realm {
+            realm_id: realm_id.clone(),
+        };
+        let selection_bits = ParticipationBits {
+            reply_message: true,
+            ..ParticipationBits::NONE
+        };
+        let mut selection_record = serde_json::to_value(selection_bits).unwrap();
+        let record = selection_record.as_object_mut().unwrap();
+        for (key, value) in [
+            (
+                "agent_id",
+                serde_json::to_value(&agent.agent_account.principal_id).unwrap(),
+            ),
+            ("scope_kind", serde_json::json!("realm")),
+            ("scope_key", serde_json::json!(selection_scope.scope_key())),
+            ("realm_id", serde_json::to_value(&realm_id).unwrap()),
+            ("scope", serde_json::to_value(&selection_scope).unwrap()),
+            ("version", serde_json::json!(1)),
+        ] {
+            record.insert(key.to_owned(), value);
+        }
+        assert!(
+            participation
+                .compare_and_swap_selection(selection_record, 0)
+                .await
+                .unwrap()
+        );
+        let selections = participation
+            .list_selections(agent.agent_account.principal_id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(selections.len(), 1);
+        assert_eq!(
+            selections[0]["scope"],
+            serde_json::to_value(&selection_scope).unwrap()
+        );
+        assert_eq!(selections[0]["reply_message"], true);
+        assert_eq!(selections[0]["reaction_add"], false);
+        let ceilings = participation
+            .ceilings_for_scope_keys(&[
+                selection_scope.scope_key(),
+                ParticipationScope::Strand {
+                    realm_id: realm_id.clone(),
+                    strand_id: discussion.strand_id.clone(),
+                }
+                .scope_key(),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(ceilings.len(), 2);
+        assert!(
+            ceilings
+                .iter()
+                .all(|ceiling| ceiling["reply_message"] == true)
+        );
+        let uow = coland_storage_postgres::PgEventCommitUnitOfWork::new(pool.clone());
+        // Bind membership to the actual controller join Event from the accepted
+        // bootstrap, then commit public mode and both halves of bounded authority.
+        let controller_generation = discussion
+            .unit
+            .transactions
+            .iter()
+            .find(|tx| tx.event.kind == arkret_wire::EventKind::MemberState)
+            .expect("bootstrap contains the controller's accepted join")
+            .event
+            .event_id
+            .clone();
+        let mut membership =
+            arkret_models_collaboration::governance::membership_invite::MembershipPayload::join(
+                realm_id.clone(),
+                arkret_wire::ActorId::account(agent.agent_account.clone()),
+                "send-gate fixture",
+            );
+        membership.agent_controller_binding = Some(
         arkret_models_collaboration::governance::agent_membership_cascade::AgentControllerMembershipBinding {
             controller_account_id: agent.controller.account.clone(),
             controller_membership_generation_ref: controller_generation,
             controller_terminal_event_ref: None,
         },
     );
-    let join = ordinary_realm::next_human_request_for_actor(
-        &discussion.head.authority_commit,
-        arkret_wire::EventKind::MemberState,
-        controller_actor.clone(),
-        serde_json::to_value(membership).unwrap(),
-        at,
-    );
-    let join = ordinary_realm::source_request(&pool, join).await;
-    uow.commit_event(join.clone())
-        .await
-        .expect("admit the controller-bound Agent membership");
-    let mode = arkret_models_collaboration::agent_interaction::AgentInteractionSetPayload {
-        agent_account_id: agent.agent_account.clone(),
-        controller_account_id: agent.controller.account.clone(),
-        interaction_mode:
-            arkret_models_collaboration::agent_interaction::AgentInteractionMode::Public,
-        expected_revision: None,
-    };
-    let mode = ordinary_realm::next_human_request_for_actor(
-        &join.authority_commit,
-        arkret_wire::EventKind::AgentInteractionSet,
-        controller_actor.clone(),
-        serde_json::to_value(mode).unwrap(),
-        at,
-    );
-    let mut mode = ordinary_realm::source_request(&pool, mode).await;
-    let device_authorization = agent
-        .store
-        .committed_event(&agent.controller.events[1].event_id)
-        .await
-        .unwrap()
-        .expect("controller founding Device authorization is committed");
-    assert_eq!(
-        device_authorization.event.kind,
-        arkret_wire::EventKind::DeviceAuthorize
-    );
-    assert_eq!(device_authorization.event.actor_id, controller_actor);
-    mode.self_producer_guard = Some(coland_storage::SelfProducerCommitGuard::HumanDevice(
-        DeviceRevocationGateSelector {
-            principal_id: agent.controller.account.principal_id.clone(),
-            station_id: agent.controller.account.station_id.clone(),
-            device_id: agent.controller.founding_device_id.to_string(),
-            authorization_ref: arkret_wire::CommittedEventRef {
-                event_id: device_authorization.event.event_id.clone(),
-                commit_id: device_authorization.commit.commit_id.clone(),
-                stream_ref: device_authorization.commit.stream_ref.clone(),
-                stream_position: device_authorization.commit.stream_position,
-            },
-        },
-    ));
-    uow.commit_event(mode.clone())
-        .await
-        .expect("admit public Agent interaction mode");
-    let joined = agent
-        .store
-        .committed_event(&join.authority_commit.event.event_id)
-        .await
-        .unwrap()
-        .expect("Agent member binding has a durable source");
-    assert_eq!(joined.commit, join.authority_commit.commit);
-    assert_eq!(joined.event.actor_id, controller_actor);
-    let mut head = mode;
-    for subject in [
-        controller_actor.clone(),
-        arkret_wire::ActorId::account(agent.agent_account.clone()),
-    ] {
-        use arkret_models_collaboration::events_payloads::{
-            CapabilityGrantCreateBody, CapabilityGrantPayload,
-        };
-        use arkret_models_collaboration::governance::grant_constraint::{
-            CapabilitySubject, IssuerAuthorityRef,
-        };
-        let grant = CapabilityGrantPayload {
-            grant: CapabilityGrantCreateBody {
-                schema: "ak.schema.capability.v1".to_owned(),
-                realm_id: Some(realm_id.clone()),
-                issuer_id: controller_actor.clone(),
-                subject: CapabilitySubject::Actor(subject),
-                actions: vec!["ak.message.create".to_owned()],
-                resources: vec![arkret_wire::WireResourceSelector::realm(realm_id.clone())],
-                constraints: Vec::new(),
-                issuer_authority_refs: vec![IssuerAuthorityRef::RealmRoot {
-                    realm_id: realm_id.clone(),
-                    authority_event_ref: discussion.unit.transactions[0].event.event_id.clone(),
-                    authority_generation: 0,
-                }],
-                issued_at: at,
-            },
-        };
-        let grant = ordinary_realm::next_human_request_for_actor(
-            &head.authority_commit,
-            arkret_wire::EventKind::CapabilityGrant,
+        let join = ordinary_realm::next_human_request_for_actor(
+            &discussion.head.authority_commit,
+            arkret_wire::EventKind::MemberState,
             controller_actor.clone(),
-            serde_json::to_value(grant).unwrap(),
+            serde_json::to_value(membership).unwrap(),
             at,
         );
-        let grant = ordinary_realm::source_request(&pool, grant).await;
-        uow.commit_event(grant.clone())
+        let join = ordinary_realm::source_request(&pool, join).await;
+        uow.commit_event(join.clone())
             .await
-            .expect("admit the bounded message capability");
-        head = grant;
-    }
-    discussion.head = head;
-    let creator_leaf_authority =
-        arkret_models_collaboration::events_payloads::MlsGenesisCreatorLeafAuthority {
-            leaf_signature_key_b64u: arkret_wire::Base64UrlString::new(
-                arkret_canonical::base64url_encode(
-                    ed25519_dalek::SigningKey::from_bytes(
-                        &agent.controller.founding_device_signing_seed,
-                    )
-                    .verifying_key()
-                    .as_bytes(),
-                ),
+            .expect("admit the controller-bound Agent membership");
+        let mode = arkret_models_collaboration::agent_interaction::AgentInteractionSetPayload {
+            agent_account_id: agent.agent_account.clone(),
+            controller_account_id: agent.controller.account.clone(),
+            interaction_mode:
+                arkret_models_collaboration::agent_interaction::AgentInteractionMode::Public,
+            expected_revision: None,
+        };
+        let mode = ordinary_realm::next_human_request_for_actor(
+            &join.authority_commit,
+            arkret_wire::EventKind::AgentInteractionSet,
+            controller_actor.clone(),
+            serde_json::to_value(mode).unwrap(),
+            at,
+        );
+        let mut mode = ordinary_realm::source_request(&pool, mode).await;
+        let device_authorization = agent
+            .store
+            .committed_event(&agent.controller.events[1].event_id)
+            .await
+            .unwrap()
+            .expect("controller founding Device authorization is committed");
+        assert_eq!(
+            device_authorization.event.kind,
+            arkret_wire::EventKind::DeviceAuthorize
+        );
+        assert_eq!(device_authorization.event.actor_id, controller_actor);
+        mode.self_producer_guard = Some(coland_storage::SelfProducerCommitGuard::HumanDevice(
+            DeviceRevocationGateSelector {
+                principal_id: agent.controller.account.principal_id.clone(),
+                station_id: agent.controller.account.station_id.clone(),
+                device_id: agent.controller.founding_device_id.to_string(),
+                authorization_ref: arkret_wire::CommittedEventRef {
+                    event_id: device_authorization.event.event_id.clone(),
+                    commit_id: device_authorization.commit.commit_id.clone(),
+                    stream_ref: device_authorization.commit.stream_ref.clone(),
+                    stream_position: device_authorization.commit.stream_position,
+                },
+            },
+        ));
+        uow.commit_event(mode.clone())
+            .await
+            .expect("admit public Agent interaction mode");
+        let joined = agent
+            .store
+            .committed_event(&join.authority_commit.event.event_id)
+            .await
+            .unwrap()
+            .expect("Agent member binding has a durable source");
+        assert_eq!(joined.commit, join.authority_commit.commit);
+        assert_eq!(joined.event.actor_id, controller_actor);
+        let mut head = mode;
+        for subject in [
+            controller_actor.clone(),
+            arkret_wire::ActorId::account(agent.agent_account.clone()),
+        ] {
+            use arkret_models_collaboration::events_payloads::{
+                CapabilityGrantCreateBody, CapabilityGrantPayload,
+            };
+            use arkret_models_collaboration::governance::grant_constraint::{
+                CapabilitySubject, IssuerAuthorityRef,
+            };
+            let grant = CapabilityGrantPayload {
+                grant: CapabilityGrantCreateBody {
+                    schema: "ak.schema.capability.v1".to_owned(),
+                    realm_id: Some(realm_id.clone()),
+                    issuer_id: controller_actor.clone(),
+                    subject: CapabilitySubject::Actor(subject),
+                    actions: vec!["ak.message.create".to_owned()],
+                    resources: vec![arkret_wire::WireResourceSelector::realm(realm_id.clone())],
+                    constraints: Vec::new(),
+                    issuer_authority_refs: vec![IssuerAuthorityRef::RealmRoot {
+                        realm_id: realm_id.clone(),
+                        authority_event_ref: discussion.unit.transactions[0].event.event_id.clone(),
+                        authority_generation: 0,
+                    }],
+                    issued_at: at,
+                },
+            };
+            let grant = ordinary_realm::next_human_request_for_actor(
+                &head.authority_commit,
+                arkret_wire::EventKind::CapabilityGrant,
+                controller_actor.clone(),
+                serde_json::to_value(grant).unwrap(),
+                at,
+            );
+            let grant = ordinary_realm::source_request(&pool, grant).await;
+            uow.commit_event(grant.clone())
+                .await
+                .expect("admit the bounded message capability");
+            head = grant;
+        }
+        discussion.head = head;
+        let creator_leaf_authority =
+            arkret_models_collaboration::events_payloads::MlsGenesisCreatorLeafAuthority {
+                leaf_signature_key_b64u: arkret_wire::Base64UrlString::new(
+                    arkret_canonical::base64url_encode(
+                        ed25519_dalek::SigningKey::from_bytes(
+                            &agent.controller.founding_device_signing_seed,
+                        )
+                        .verifying_key()
+                        .as_bytes(),
+                    ),
+                )
+                .unwrap(),
+                endpoint: arkret_wire::MlsWelcomeRecipientEndpoint::Device {
+                    device_id: agent.controller.founding_device_id.clone(),
+                },
+                authorization_event_ref: agent.controller.events[1].event_id.clone(),
+            };
+        creator_leaf_authority.validate().unwrap();
+        let creator_authorization = agent
+            .store
+            .committed_event(&creator_leaf_authority.authorization_event_ref)
+            .await
+            .unwrap()
+            .expect("the creator Device authorization must already be committed");
+        assert_eq!(
+            creator_authorization.event.kind,
+            arkret_wire::EventKind::DeviceAuthorize
+        );
+        assert_eq!(
+            creator_authorization.event.actor_id,
+            discussion.head.authority_commit.event.actor_id
+        );
+        let founder_fact = discussion
+            .head
+            .authority_commit
+            .producer_signer_fact
+            .as_ref()
+            .and_then(|fact| fact.as_human())
+            .expect("discussion founder has accepted Human signer provenance");
+        assert_eq!(
+            creator_leaf_authority.endpoint,
+            arkret_wire::MlsWelcomeRecipientEndpoint::Device {
+                device_id: founder_fact.device_id.clone()
+            }
+        );
+        let genesis_payload = arkret_models_collaboration::events_payloads::MlsGenesisPayload {
+            cipher_suite: arkret_wire::NonEmptyString::new(
+                "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
             )
             .unwrap(),
-            endpoint: arkret_wire::MlsWelcomeRecipientEndpoint::Device {
-                device_id: agent.controller.founding_device_id.clone(),
-            },
-            authorization_event_ref: agent.controller.events[1].event_id.clone(),
+            group_info_ref: arkret_wire::BlobRef::new(format!("ak:blob:sha256:{}", "3".repeat(64)))
+                .unwrap(),
+            ratchet_tree_ref: arkret_wire::BlobRef::new(format!(
+                "ak:blob:sha256:{}",
+                "4".repeat(64)
+            ))
+            .unwrap(),
+            creator_leaf_authority,
+            governance_binding: arkret_models_crypto::MlsGovernanceBindingPayload::realm(
+                realm_id.clone(),
+                None,
+                0,
+                0,
+                0,
+            )
+            .unwrap(),
+            created_at: at,
         };
-    creator_leaf_authority.validate().unwrap();
-    let creator_authorization = agent
-        .store
-        .committed_event(&creator_leaf_authority.authorization_event_ref)
-        .await
-        .unwrap()
-        .expect("the creator Device authorization must already be committed");
-    assert_eq!(
-        creator_authorization.event.kind,
-        arkret_wire::EventKind::DeviceAuthorize
-    );
-    assert_eq!(
-        creator_authorization.event.actor_id,
-        discussion.head.authority_commit.event.actor_id
-    );
-    let founder_fact = discussion
-        .head
-        .authority_commit
-        .producer_signer_fact
-        .as_ref()
-        .and_then(|fact| fact.as_human())
-        .expect("discussion founder has accepted Human signer provenance");
-    assert_eq!(
-        creator_leaf_authority.endpoint,
-        arkret_wire::MlsWelcomeRecipientEndpoint::Device {
-            device_id: founder_fact.device_id.clone()
-        }
-    );
-    let genesis_payload = arkret_models_collaboration::events_payloads::MlsGenesisPayload {
-        cipher_suite: arkret_wire::NonEmptyString::new(
-            "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
-        )
-        .unwrap(),
-        group_info_ref: arkret_wire::BlobRef::new(format!("ak:blob:sha256:{}", "3".repeat(64)))
-            .unwrap(),
-        ratchet_tree_ref: arkret_wire::BlobRef::new(format!("ak:blob:sha256:{}", "4".repeat(64)))
-            .unwrap(),
-        creator_leaf_authority,
-        governance_binding: arkret_models_crypto::MlsGovernanceBindingPayload::realm(
-            realm_id.clone(),
-            None,
-            0,
-            0,
-            0,
-        )
-        .unwrap(),
-        created_at: at,
-    };
-    genesis_payload.validate().unwrap();
-    assert_eq!(genesis_payload.effective_scope(), &scope);
-    let mut genesis = ordinary_realm::next_human_request_for_actor(
-        &discussion.head.authority_commit,
-        arkret_wire::EventKind::MlsGenesis,
-        discussion.head.authority_commit.event.actor_id.clone(),
-        serde_json::to_value(genesis_payload).unwrap(),
-        at,
-    );
-    genesis.authority_commit.mls_state = Some(coland_storage::MlsStateInstallation {
-        effective_scope: scope.clone(),
-        base: None,
-        epoch: 0,
-        public_state: b"public-state-0".to_vec(),
-        member_principals: Default::default(),
-        consumed_proposals: Vec::new(),
-        public_blobs: Vec::new(),
-    });
-    genesis.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
-        genesis.authority_commit.event.clone(),
-    ));
-    uow.commit_event(genesis.clone()).await.unwrap();
-    let groups = coland_storage_postgres::PgMlsGroupCurrentStore { pool: pool.clone() };
-    let before = groups.current(&scope).await.unwrap().unwrap();
+        genesis_payload.validate().unwrap();
+        assert_eq!(genesis_payload.effective_scope(), &scope);
+        let mut genesis = ordinary_realm::next_human_request_for_actor(
+            &discussion.head.authority_commit,
+            arkret_wire::EventKind::MlsGenesis,
+            discussion.head.authority_commit.event.actor_id.clone(),
+            serde_json::to_value(genesis_payload).unwrap(),
+            at,
+        );
+        genesis.authority_commit.mls_state = Some(coland_storage::MlsStateInstallation {
+            effective_scope: scope.clone(),
+            base: None,
+            epoch: 0,
+            public_state: b"public-state-0".to_vec(),
+            member_principals: Default::default(),
+            consumed_proposals: Vec::new(),
+            public_blobs: Vec::new(),
+        });
+        genesis.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
+            genesis.authority_commit.event.clone(),
+        ));
+        uow.commit_event(genesis.clone()).await.unwrap();
+        let groups = coland_storage_postgres::PgMlsGroupCurrentStore { pool: pool.clone() };
+        let before = groups.current(&scope).await.unwrap().unwrap();
 
-    // The Agent's ciphertext is frozen at an epoch the scope never had.
-    let mut request = ordinary_realm::next_request_for_actor(
-        &genesis.authority_commit,
-        arkret_wire::EventKind::MessageCreate,
-        arkret_wire::ActorId::account(agent.agent_account.clone()),
-        serde_json::json!({
-            "strand_id": discussion.strand_id,
-            "track_name": "discussion",
-            "encrypted_content": arkret_models_crypto::EncryptedEnvelope {
-                version: "1.0".to_owned(),
-                content_type: "application/vnd.arkret.message+json".to_owned(),
-                encryption_context:
-                    arkret_models_crypto::EncryptedEnvelopeEncryptionContext::standard(
-                        7,
-                        genesis.authority_commit.event.event_id.clone(),
-                    ),
-                ciphertext: "Y2lwaGVydGV4dA".to_owned(),
-            },
-        }),
-        at,
-    );
-    let event = &mut request.authority_commit.event;
-    event.producer_proof.as_mut().unwrap().verification_method = agent.verification_method.clone();
-    request.event.envelope = serde_json::to_value(&*event).unwrap();
-    request.self_producer_guard = Some(coland_storage::SelfProducerCommitGuard::Agent {
-        pcr_realm_id: agent.pcr_realm_id.clone(),
-        agent_id: agent.agent_account.principal_id.clone(),
-        authorization_ref: agent.authorization_ref.clone(),
-        verification_method: agent.verification_method.clone(),
-    });
-    request.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
-        request.authority_commit.event.clone(),
-    ));
+        // The Agent's ciphertext is frozen at an epoch the scope never had.
+        let mut request = ordinary_realm::next_request_for_actor(
+            &genesis.authority_commit,
+            arkret_wire::EventKind::MessageCreate,
+            arkret_wire::ActorId::account(agent.agent_account.clone()),
+            serde_json::json!({
+                "strand_id": discussion.strand_id,
+                "track_name": "discussion",
+                "encrypted_content": arkret_models_crypto::EncryptedEnvelope {
+                    version: "1.0".to_owned(),
+                    content_type: "application/vnd.arkret.message+json".to_owned(),
+                    encryption_context:
+                        arkret_models_crypto::EncryptedEnvelopeEncryptionContext::standard(
+                            7,
+                            genesis.authority_commit.event.event_id.clone(),
+                        ),
+                    ciphertext: "Y2lwaGVydGV4dA".to_owned(),
+                },
+            }),
+            at,
+        );
+        let event = &mut request.authority_commit.event;
+        event.producer_proof.as_mut().unwrap().verification_method =
+            agent.verification_method.clone();
+        request.event.envelope = serde_json::to_value(&*event).unwrap();
+        request.self_producer_guard = Some(coland_storage::SelfProducerCommitGuard::Agent {
+            pcr_realm_id: agent.pcr_realm_id.clone(),
+            agent_id: agent.agent_account.principal_id.clone(),
+            authorization_ref: agent.authorization_ref.clone(),
+            verification_method: agent.verification_method.clone(),
+        });
+        request.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
+            request.authority_commit.event.clone(),
+        ));
 
-    let current = uow.commit_event(request.clone()).await.unwrap_err();
-    assert_eq!(
-        current.conflict_code(),
-        Some(coland_storage::ConflictCode::EpochMismatch),
-        "{current}"
-    );
+        let current = uow.commit_event(request.clone()).await.unwrap_err();
+        assert_eq!(
+            current.conflict_code(),
+            Some(coland_storage::ConflictCode::EpochMismatch),
+            "{current}"
+        );
 
-    assert!(
-        agent
-            .store
-            .committed_event(&request.authority_commit.event.event_id)
-            .await
+        assert!(
+            agent
+                .store
+                .committed_event(&request.authority_commit.event.event_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "stale epoch must leave no committed candidate"
+        );
+        assert_eq!(groups.current(&scope).await.unwrap().unwrap(), before);
+
+        let mut accepted = ordinary_realm::next_request_for_actor(
+            &genesis.authority_commit,
+            arkret_wire::EventKind::MessageCreate,
+            arkret_wire::ActorId::account(agent.agent_account.clone()),
+            serde_json::json!({
+                "strand_id": discussion.strand_id,
+                "track_name": "discussion",
+                "encrypted_content": arkret_models_crypto::EncryptedEnvelope {
+                    version: "1.0".to_owned(),
+                    content_type: "application/vnd.arkret.message+json".to_owned(),
+                    encryption_context:
+                        arkret_models_crypto::EncryptedEnvelopeEncryptionContext::standard(
+                            0,
+                            genesis.authority_commit.event.event_id.clone(),
+                        ),
+                    ciphertext: "Y2lwaGVydGV4dA".to_owned(),
+                },
+            }),
+            at,
+        );
+        let accepted_event = &mut accepted.authority_commit.event;
+        accepted_event
+            .producer_proof
+            .as_mut()
             .unwrap()
-            .is_none(),
-        "stale epoch must leave no committed candidate"
-    );
-    assert_eq!(groups.current(&scope).await.unwrap().unwrap(), before);
+            .verification_method = agent.verification_method.clone();
+        accepted.event.envelope = serde_json::to_value(&*accepted_event).unwrap();
+        accepted.self_producer_guard = request.self_producer_guard.clone();
+        accepted.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
+            accepted.authority_commit.event.clone(),
+        ));
+        uow.commit_event(accepted.clone()).await.unwrap();
+        assert!(
+            coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() }
+                .committed_event(&accepted.authority_commit.event.event_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
 
-    let mut accepted = ordinary_realm::next_request_for_actor(
-        &genesis.authority_commit,
-        arkret_wire::EventKind::MessageCreate,
-        arkret_wire::ActorId::account(agent.agent_account.clone()),
-        serde_json::json!({
-            "strand_id": discussion.strand_id,
-            "track_name": "discussion",
-            "encrypted_content": arkret_models_crypto::EncryptedEnvelope {
-                version: "1.0".to_owned(),
-                content_type: "application/vnd.arkret.message+json".to_owned(),
-                encryption_context:
-                    arkret_models_crypto::EncryptedEnvelopeEncryptionContext::standard(
-                        0,
-                        genesis.authority_commit.event.event_id.clone(),
-                    ),
-                ciphertext: "Y2lwaGVydGV4dA".to_owned(),
-            },
-        }),
-        at,
-    );
-    let accepted_event = &mut accepted.authority_commit.event;
-    accepted_event
-        .producer_proof
-        .as_mut()
-        .unwrap()
-        .verification_method = agent.verification_method.clone();
-    accepted.event.envelope = serde_json::to_value(&*accepted_event).unwrap();
-    accepted.self_producer_guard = request.self_producer_guard.clone();
-    accepted.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
-        accepted.authority_commit.event.clone(),
-    ));
-    uow.commit_event(accepted.clone()).await.unwrap();
-    assert!(
-        coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() }
-            .committed_event(&accepted.authority_commit.event.event_id)
-            .await
-            .unwrap()
-            .is_some()
-    );
-
-    agent.revoke_key().await;
-    let revoked = uow.commit_event(request.clone()).await.unwrap_err();
-    assert_eq!(
-        revoked.conflict_code(),
-        Some(coland_storage::ConflictCode::CapabilityDenied),
-        "{revoked}"
-    );
-    assert!(
-        coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() }
-            .committed_event(&request.authority_commit.event.event_id)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert_eq!(groups.current(&scope).await.unwrap().unwrap(), before);
+        agent.revoke_key().await;
+        let revoked = uow.commit_event(request.clone()).await.unwrap_err();
+        assert_eq!(
+            revoked.conflict_code(),
+            Some(coland_storage::ConflictCode::CapabilityDenied),
+            "{revoked}"
+        );
+        assert!(
+            coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() }
+                .committed_event(&request.authority_commit.event.event_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(groups.current(&scope).await.unwrap().unwrap(), before);
+    })
 }
 
 /// Freeze the key at a real guarded PostgreSQL commit. Signature validation

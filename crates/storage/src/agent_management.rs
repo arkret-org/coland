@@ -106,7 +106,7 @@ pub fn agent_management_actions<'a>(
             &AgentManagementContext {
                 realm_id: realm,
                 ownership: Some((controller, agent)),
-                operation: policy_operation.clone().unwrap_or_else(|| {
+                operation: policy_operation.unwrap_or({
                     if descriptor.target_event_kinds.is_empty() {
                         AgentPolicyOperation::Read
                     } else {

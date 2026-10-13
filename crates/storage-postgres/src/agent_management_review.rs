@@ -8,7 +8,7 @@ use arkret_wire::{
 };
 use chrono::{DateTime, Utc};
 use coland_storage::{ApprovalHistoricalMethod, PersistenceError, PersistenceResult};
-use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
+use diesel::sql_types::{Jsonb, Text, Timestamptz};
 use diesel::{OptionalExtension, QueryableByName, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::{Value, json};
@@ -421,7 +421,7 @@ async fn visible(
     Ok(cut.actor_is_joined()
         && (cut.actor_is_root_controller()
             || cut.permits_unreserved_current_actions(
-                &["ak.realm.admin"],
+                &[arkret_wire::CapabilityActionId::REALM_ADMIN],
                 &arkret_wire::WireResourceSelector::realm(event.realm_id.clone()),
                 at,
             )))
@@ -888,7 +888,7 @@ async fn qualify(
             control,
             vote,
             event,
-            "ak.self.events.command.submit.v1",
+            arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
             vote.input.action,
             at,
             &binding,

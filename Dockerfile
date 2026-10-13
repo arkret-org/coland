@@ -2,18 +2,21 @@
 
 FROM --platform=$BUILDPLATFORM rust:bookworm AS builder
 
-WORKDIR /workspace
+WORKDIR /workspace/arkret-org
 
 COPY --from=arkret-rust-sdk . ./arkret-rust-sdk
 COPY --from=arkret-spec . ./arkret-spec
 COPY --from=floria . ./floria
+COPY --from=garth . ./garth
+COPY --from=bridges . ./bridges
+COPY --from=savfox . /workspace/savfox-ai/savfox
 COPY . ./coland
 
-WORKDIR /workspace/coland
+WORKDIR /workspace/arkret-org/coland
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/workspace/coland/target \
+    --mount=type=cache,target=/workspace/arkret-org/coland/target \
     cargo build --locked --release --bin coland && \
     cargo build --locked --release -p coland-keystore-keygen && \
     cp target/release/coland /usr/local/bin/coland && \

@@ -282,7 +282,7 @@ async fn prepare(
     device_active(state, &generation).await?;
     let actor = ActorId::account(account);
     let scope = visible_target_scope(state, &body.realm_id, &body.intent.strand_id, &actor).await?;
-    let operation_id = "ak.self.messages.command.prepare.v1";
+    let operation_id = arkret_wire::ServiceOperationId::SELF_MESSAGES_COMMAND_PREPARE_V1;
     let key = format!(
         "{}:{}:{}",
         session.require_human_device_id(),

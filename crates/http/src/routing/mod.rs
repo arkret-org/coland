@@ -57,7 +57,7 @@ use identity::auth::{auth_or_render, authenticated_session};
 use spaces::space::realm_allows_plaintext_service_for_data_class;
 use spaces::space::{
     is_realm_deleted, realm_discoverability, realm_event_visible_to_session, realm_has_member,
-    realm_history_access, realm_id_accessible,
+    realm_id_accessible,
 };
 use system::extract::AuthArgs;
 

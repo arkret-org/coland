@@ -1,0 +1,45 @@
+name: Checkout Coland workspace dependencies
+description: Preserve the cross-repository Cargo path layout used by Coland and Savfox.
+inputs:
+  token:
+    description: Token for dependency repositories.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Checkout Arkret Rust SDK
+      uses: actions/checkout@v6
+      with:
+        repository: ${{ github.repository_owner }}/arkret-rust-sdk
+        path: arkret-org/arkret-rust-sdk
+        token: ${{ inputs.token }}
+    - name: Checkout Floria contracts workspace
+      uses: actions/checkout@v6
+      with:
+        repository: ${{ github.repository_owner }}/floria
+        path: arkret-org/floria
+        token: ${{ inputs.token }}
+    - name: Checkout Arkret Spec
+      uses: actions/checkout@v6
+      with:
+        repository: ${{ github.repository_owner }}/arkret-spec
+        path: arkret-org/arkret-spec
+        token: ${{ inputs.token }}
+    - name: Checkout Garth
+      uses: actions/checkout@v6
+      with:
+        repository: ${{ github.repository_owner }}/garth
+        path: arkret-org/garth
+        token: ${{ inputs.token }}
+    - name: Checkout bridge runtime workspace
+      uses: actions/checkout@v6
+      with:
+        repository: ${{ github.repository_owner }}/bridges
+        path: arkret-org/bridges
+        token: ${{ inputs.token }}
+    - name: Checkout Savfox gateway workspace
+      uses: actions/checkout@v6
+      with:
+        repository: savfox-ai/savfox
+        path: savfox-ai/savfox
+        token: ${{ inputs.token }}

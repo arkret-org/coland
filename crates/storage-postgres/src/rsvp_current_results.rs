@@ -104,7 +104,7 @@ pub(crate) async fn commit_rsvp_current_result_in_connection(
             .and_then(Value::as_array)
             .is_some_and(|refs| {
                 refs.iter()
-                    .any(|reference| reference == "ak.schema.calendar_event.v1")
+                    .any(|reference| reference == arkret_wire::SchemaId::CALENDAR_EVENT_V1)
             })
     {
         return Err(refused("not_found", "RSVP target is unavailable"));

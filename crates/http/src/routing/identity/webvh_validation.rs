@@ -5,7 +5,6 @@
 //! `WebvhLogEntry` wrapper used by routing code.
 
 use coland_http::error::{AppError, ErrorCode};
-use ed25519_dalek::VerifyingKey;
 use salvo::http::StatusCode;
 use serde_json::Value;
 
@@ -356,19 +355,6 @@ pub fn validate_rotation_authorization_for_log(
 pub fn verify_webvh_log_proof(entry: &Value) -> Result<(), String> {
     arkret_identity::verify_did_webvh_entry_controller_proofs(entry)
         .map_err(|error| error.to_string())
-}
-
-pub(crate) fn webvh_entry_hash_multibase(
-    entry: &Value,
-    previous_anchor: &str,
-) -> Result<String, String> {
-    arkret_identity::did_webvh_entry_hash(entry, previous_anchor).map_err(|error| error.to_string())
-}
-
-pub(crate) fn decode_ed25519_public_key(value: &str) -> Result<VerifyingKey, String> {
-    let key =
-        arkret_canonical::decode_ed25519_multibase(value).map_err(|error| error.to_string())?;
-    VerifyingKey::from_bytes(&key).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

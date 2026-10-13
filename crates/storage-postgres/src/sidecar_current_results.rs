@@ -412,7 +412,7 @@ pub(crate) async fn commit_in_connection(
         .map_err(|_| invalid("Sidecar stream position exceeds storage"))?;
     let value: Value = json!({
         "id": id,
-        "schema": "ak.schema.agent_sidecar.v1",
+        "schema": arkret_wire::SchemaId::AGENT_SIDECAR_V1,
         "realm_id": event.realm_id,
         "controller_account_id": controller,
         "state": "active",

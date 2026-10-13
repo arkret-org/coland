@@ -337,16 +337,17 @@ pub(crate) async fn prepare_current_account_device_signer_evidence(
     if expires_at <= attested_at {
         return Ok(None);
     }
-    let service_resolution =
-        crate::routing::system::service_resolution::current_authenticated_service_resolution(state)
-            .await
-            .map_err(|error| {
-                ServiceError::Conflict(format!(
-                    "{}: current Service resolution is unavailable: {}",
-                    coland_storage::ConflictCode::TemporarilyUnavailable,
-                    error.message
-                ))
-            })?;
+    let service_resolution = Box::pin(
+        crate::routing::system::service_resolution::current_authenticated_service_resolution(state),
+    )
+    .await
+    .map_err(|error| {
+        ServiceError::Conflict(format!(
+            "{}: current Service resolution is unavailable: {}",
+            coland_storage::ConflictCode::TemporarilyUnavailable,
+            error.message
+        ))
+    })?;
     let attestation = arkret_signatures::device_projection::sign_device_projection_attestation(
         DeviceProjectionAttestationCore {
             account_id: account_id.clone(),
@@ -768,7 +769,10 @@ async fn proxy_peer_keys_query(
             state.config().trust_domain.to_string(),
         ),
         ("destination-trust-domain", route.trust_domain),
-        ("arkret-operation", "ak.peer.keys.read.lookup.v1".to_owned()),
+        (
+            "arkret-operation",
+            arkret_wire::ServiceOperationId::PEER_KEYS_READ_LOOKUP_V1.to_owned(),
+        ),
     ] {
         crate::routing::federation::outbox::insert_header_if_valid(&mut headers, name, &value);
     }

@@ -774,7 +774,7 @@ impl Cut {
             } => WireResourceSelector::circle(realm_id.clone(), circle_id.clone()),
             _ => return false,
         };
-        let actions = ["ak.call.moderate"];
+        let actions = [arkret_wire::CapabilityActionId::CALL_MODERATE];
         let facts = OperationFacts::default();
         let effective=self.grants.iter().filter_map(|(id,g)| {
             (matches!(&g.subject,CapabilitySubject::Actor(subject) if subject==actor)

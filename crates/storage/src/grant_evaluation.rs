@@ -389,14 +389,13 @@ fn controller_grants_for_owned_action(
             let mut grant = (**grant).clone();
             if own {
                 for constraint in &mut grant.constraints {
-                    if let Some(condition) = &mut constraint.condition {
-                        if condition.kind == GrantConstraintConditionKind::ObjectIsOwnedByActor
-                            && condition.extra.is_empty()
-                        {
-                            // Only the registered own-author predicate is mapped.
-                            // Actual author, Device, claim and approver facts stay unchanged.
-                            condition.kind = GrantConstraintConditionKind::Always;
-                        }
+                    if let Some(condition) = &mut constraint.condition
+                        && condition.kind == GrantConstraintConditionKind::ObjectIsOwnedByActor
+                        && condition.extra.is_empty()
+                    {
+                        // Only the registered own-author predicate is mapped.
+                        // Actual author, Device, claim and approver facts stay unchanged.
+                        condition.kind = GrantConstraintConditionKind::Always;
                     }
                 }
             }

@@ -2,8 +2,7 @@
 //!
 //! `POST /_arkret/self/events` is mounted by the events router; this module
 //! contributes the self and peer stream scans and the open authority bundle.
-//! Peer handoff has no authenticated, fenced implementation and stays
-//! unmounted.
+//! Planned handoff installs only a complete, verified frozen migration cut.
 
 use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
 use arkret_wire::{AuthorityBundleRequest, ErrorCode, StreamScanRequest};
@@ -104,7 +103,9 @@ pub(super) fn self_router() -> Router {
 
 /// `ak.peer.committed_event.read.scan.v1`, under the signed `peer` tree.
 pub(super) fn peer_router() -> Router {
-    Router::with_path("streams/scan").post(peer_scan_stream)
+    Router::new()
+        .push(Router::with_path("streams/scan").post(peer_scan_stream))
+        .push(Router::with_path("realm-authority/handoff").post(peer_handoff))
 }
 
 /// `ak.open.realm_authority.read.bundle.v1`, under the unauthenticated `open` tree.
@@ -379,6 +380,8 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
                 | coland_storage::ConflictCode::AuthorityCycle
                 | coland_storage::ConflictCode::AuthorityExpiryWidening
                 | coland_storage::ConflictCode::AccountabilityGrantMissing
+                | coland_storage::ConflictCode::AgentGrantExceedsRequestedScope
+                | coland_storage::ConflictCode::AgentRequestedScopeCommitmentInvalid
                 | coland_storage::ConflictCode::AgentPcrGenesisDeclarationMissing
                 | coland_storage::ConflictCode::ReducerProjectionFailed),
             ) => {
@@ -833,6 +836,42 @@ async fn peer_scan_stream(req: &mut Request, depot: &mut Depot, res: &mut Respon
 }
 
 #[handler]
+async fn peer_handoff(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let app_state = match state(depot) {
+        Ok(state) => state.clone(),
+        Err(error) => {
+            return crate::error::render_error_code(ErrorCode::InternalError, res, &error);
+        }
+    };
+    let peer = match crate::routing::events::peer::authenticated_peer_context(&app_state, req, true)
+        .await
+    {
+        Ok(peer) => peer,
+        Err(error) => return error.write(req, depot, res).await,
+    };
+    let Some(request) = parse_closed_body::<
+        arkret_models_collaboration::authority_commit::AuthorityHandoffRequest,
+    >(req, res)
+    .await
+    else {
+        return;
+    };
+    if let Err(error) = request.validate_new_handoff() {
+        return crate::error::render_error_code(
+            ErrorCode::SchemaViolation,
+            res,
+            &validation_error(error),
+        );
+    }
+    let result = app_state
+        .authority()
+        .install_authority_handoff(&peer, request)
+        .await;
+    no_store(res);
+    render_result(res, result);
+}
+
+#[handler]
 async fn authority_bundle(req: &mut Request, depot: &Depot, res: &mut Response) {
     let Some(request) = parse_closed_body::<AuthorityBundleRequest>(req, res).await else {
         return;
@@ -1261,11 +1300,27 @@ mod tests {
             );
         }
 
-        // No legacy resolver and no unauthenticated peer handoff are mounted.
-        for path in [
-            "/_arkret/peer/streams/resolve",
+        let mut response = post(
             "/_arkret/peer/realm-authority/handoff",
-        ] {
+            arkret_wire::ServiceOperationId::PEER_REALM_AUTHORITY_COMMAND_HANDOFF_V1,
+        )
+        .json(&serde_json::json!({}))
+        .send(&service)
+        .await;
+        assert_eq!(response.status_code, Some(StatusCode::UNPROCESSABLE_ENTITY));
+        let problem: serde_json::Value = response.take_json().await.unwrap();
+        assert_eq!(
+            problem["type"],
+            "https://arkret.org/problems/schema_violation"
+        );
+        assert!(
+            problem["detail"]
+                .as_str()
+                .unwrap()
+                .contains("federation header")
+        );
+        // The retired resolver is still absent.
+        for path in ["/_arkret/peer/streams/resolve"] {
             let response = TestClient::post(format!("http://server{path}"))
                 .json(&serde_json::json!({}))
                 .send(&service)

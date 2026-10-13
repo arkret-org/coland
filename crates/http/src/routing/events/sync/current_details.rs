@@ -453,7 +453,14 @@ pub(super) async fn frame(
                     Ok(joined) => joined,
                     Err(error) => {
                         tracing::warn!(%error, realm_id = %realm, "Account membership proof unavailable");
-                        return Err(Box::new(continuation_unavailable()));
+                        if report_unavailable {
+                            entries.insert(
+                                realm.to_string(),
+                                unavailable(RealmDetailErrorCode::TemporarilyUnavailable),
+                            );
+                            last_realm = Some(realm.to_string());
+                        }
+                        continue;
                     }
                 }
             }
@@ -491,7 +498,14 @@ pub(super) async fn frame(
                     }
                     Err(error) => {
                         tracing::warn!(%error, realm_id = %realm, "Account visible stream heads unavailable");
-                        return Err(Box::new(continuation_unavailable()));
+                        if report_unavailable {
+                            entries.insert(
+                                realm.to_string(),
+                                unavailable(RealmDetailErrorCode::TemporarilyUnavailable),
+                            );
+                            last_realm = Some(realm.to_string());
+                        }
+                        continue;
                     }
                 };
                 let (selected_heads, streams_limited) =
@@ -534,13 +548,15 @@ pub(super) async fn frame(
                     Ok(Freeze::Unavailable(code)) => Some(code),
                     Err(error) => {
                         tracing::warn!(%error, realm_id = %realm, "Account window freeze failed");
-                        return Err(Box::new(continuation_unavailable()));
+                        Some(RealmDetailErrorCode::TemporarilyUnavailable)
                     }
                 }
             }
         };
         if let Some(code) = code {
-            positions.remove(realm.as_str());
+            if code == RealmDetailErrorCode::NotFound {
+                positions.remove(realm.as_str());
+            }
             if report_unavailable {
                 entries.insert(realm.to_string(), unavailable(code));
                 last_realm = Some(realm.to_string());

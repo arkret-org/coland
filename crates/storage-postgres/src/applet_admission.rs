@@ -887,13 +887,34 @@ async fn admit_in_connection(
             }
         };
         let creation_ref = creation_authorization_ref(input, p)?;
-        if !cut
-            .evaluate(&[action], &target, &facts, input.accepted_at)
-            .unreserved()
-            .iter()
-            .any(|g| g.id == creation_ref)
-        {
+        let actions = [action];
+        let evaluation = cut.evaluate(&actions, &target, &facts, input.accepted_at);
+        let coland_storage::GrantEvaluation::Allowed(satisfied) = evaluation else {
             return Err(rejected("exact managed provisioning grant is unavailable"));
+        };
+        let selected = satisfied
+            .iter()
+            .find(|grant| grant.grant.id == creation_ref)
+            .ok_or_else(|| rejected("exact managed provisioning grant is unavailable"))?;
+        if let Some(bundle) = bundle(input) {
+            // Identity creation and its quota share this aggregate transaction.
+            // The accepted provision is the operation identity, independent of
+            // HTTP retry keys; rollback restores every reservation on failure.
+            if !crate::capability_quota::try_reserve_in_connection(
+                conn,
+                &selected.reservations,
+                bundle.managed_actor_provision_event.event_id.as_str(),
+            )
+            .await?
+            {
+                return Err(PersistenceError::Conflict(
+                    "rate_limited: managed creation quota is exhausted".to_owned(),
+                ));
+            }
+        } else if !selected.reservations.is_empty() {
+            // Reuse is a mapping, not a new identity. Keep quota-bearing reuse
+            // closed until its mapping-specific accounting is implemented.
+            return Err(rejected("Ghost mapping quota accounting is unavailable"));
         }
     }
     let mut refs = if admin_count == 0 && bundle(input).is_none() {

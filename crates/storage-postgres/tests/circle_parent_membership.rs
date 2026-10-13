@@ -402,13 +402,13 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             payload.clone(),
             at,
         );
-        let genesis = sourced(ordinary_realm::request_for_event(
+        let mut genesis = sourced(ordinary_realm::request_for_event(
             &circle_join.authority_commit,
             event,
             at,
         ));
-        let mut genesis = heap_future(|| ordinary_realm::source_request(&pool, genesis)).await;
         genesis.authority_commit.commit.stream_ref = stream.clone();
+        let mut genesis = heap_future(|| ordinary_realm::source_request(&pool, genesis)).await;
         genesis.authority_commit.mls_state = Some(coland_storage::MlsStateInstallation {
             effective_scope: ScopeRef::Circle {
                 realm_id: realm.clone(),
@@ -687,6 +687,25 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                         },
                     ];
                     heads.sort_by(|a, b| a.stream_ref.cmp(&b.stream_ref));
+                    let material = store.realm_state_snapshot_material(&realm).await.unwrap().unwrap();
+                    assert_eq!(material.visible_stream_heads, heads);
+                    let mut inventory = Vec::new();
+                    for full in store.handoff_originals(&realm).await.unwrap() {
+                        if full.commit.producer_signer_fact_digest.is_some() {
+                            inventory.push(arkret_models_collaboration::authority_commit::HistoricalProducerSignerFactEntry {
+                                target: arkret_wire::CommittedEventRef {
+                                    event_id: full.event.event_id.clone(),
+                                    commit_id: full.commit.commit_id.clone(),
+                                    stream_ref: full.commit.stream_ref.clone(),
+                                    stream_position: full.commit.stream_position,
+                                },
+                                producer_signer_fact: store.producer_signer_fact(&full.event, &full.commit).await.unwrap().unwrap(),
+                            });
+                        }
+                    }
+                    inventory.sort_by_key(|entry| (arkret_canonical::canonical_json_bytes(&entry.target.stream_ref).unwrap(),
+                        entry.target.stream_position,entry.target.event_id.to_string(),entry.target.commit_id.to_string()));
+                    let inventory_digest = arkret_models_collaboration::authority_commit::historical_signer_facts_digest(&inventory).unwrap();
                     let mut snapshot_signature =
                         ordinary_realm::signature(&ordinary_realm::station(), signal_at);
                     snapshot_signature.context = arkret_wire::DetachedSignatureContext::RealmSnapshot;
@@ -695,17 +714,8 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                         realm_id: realm.clone(),
                         governance_generation: 0,
                         visible_stream_heads: heads.clone(),
-                        current_state_entries: Vec::new(),
-                        retention_and_history_floor: arkret_wire::RetentionAndHistoryFloor {
-                            history_access: arkret_wire::HistoryAccess::SinceJoin,
-                            stream_floors: heads
-                                .iter()
-                                .map(|head| arkret_wire::StreamHistoryFloor {
-                                    stream_ref: head.stream_ref.clone(),
-                                    oldest_position: 0,
-                                })
-                                .collect(),
-                        },
+                        current_state_entries: material.current_state_entries,
+                        retention_and_history_floor: material.retention_and_history_floor,
                         created_at: signal_at,
                         signature: snapshot_signature,
                     };
@@ -739,7 +749,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                         )
                         .unwrap(),
                         snapshot_ref: snapshot.snapshot_id.clone(),
-                        historical_signer_facts_digest: None,
+                        historical_signer_facts_digest: Some(inventory_digest),
                         change_event_ref: change.authority_commit.event.event_id.clone(),
                         change_commit_id: change.authority_commit.commit.commit_id.clone(),
                         old_authority_signature: old_signature,

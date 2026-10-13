@@ -246,8 +246,9 @@ pub struct AccountRealmWindowRequest {
     pub window_cursor: String,
     pub expires_at_ms: i64,
     pub now_ms: i64,
-    /// Canonical bytes the delivered rows may occupy. The window is atomic:
-    /// rows that do not fit fail the freeze instead of being truncated.
+    /// Canonical bytes available for all windows, committed rows, typed current
+    /// and coverage heads. The caller reserves the remaining frame envelope.
+    /// A payload that does not fit fails the entire freeze without truncation.
     pub byte_budget: usize,
     /// The Realm-stream head the Account cursor last delivered. When it is
     /// still an accepted ancestor of the head within `window_limit`, the
@@ -2853,6 +2854,13 @@ pub trait AuthorityCommitStore: Send + Sync {
         final_stream_heads: &[CommitStreamHead],
         snapshot: &RealmStateSnapshot,
     ) -> PersistenceResult<()>;
+
+    /// Full originals at the outgoing frozen cut, including private streams.
+    /// This is an internal migration verification read, never a member scan.
+    async fn handoff_originals(
+        &self,
+        realm_id: &arkret_wire::RealmId,
+    ) -> PersistenceResult<Vec<arkret_wire::CommittedEventFullView>>;
 
     /// Returns the consecutive, durable handoff chain used to verify the
     /// current Station from the Realm's genesis authority.

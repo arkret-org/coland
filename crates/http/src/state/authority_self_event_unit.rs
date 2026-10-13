@@ -512,11 +512,19 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             AdmittedProducer::ForwardedAgent(evidence) => (None, None, Some(*evidence), None),
             AdmittedProducer::Applet(guard) => (None, None, None, Some(guard)),
         };
+        let agent_grant_scope_evidence =
+            Box::pin(super::authority_agent_grant::prepare_agent_grant_scope(
+                state,
+                event,
+                transaction.commit.committed_at,
+            ))
+            .await?;
         let command = coland_services::events::CommitAcceptedEventCommand {
             authority_commit: transaction.clone(),
             self_producer_guard,
             applet_producer_guard,
             widget_token_gate: None,
+            agent_grant_scope_evidence,
             forwarded_producer_evidence,
             forwarded_agent_producer,
             agent_deployment_ceiling: state.config().agent_participation_ceiling,

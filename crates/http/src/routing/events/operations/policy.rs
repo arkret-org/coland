@@ -407,15 +407,19 @@ async fn validate_agent_grant_ceiling(
     {
         return Ok(());
     }
-    let grant = operation.payload.get("grant").unwrap_or(&operation.payload);
-    let Some(subject) = grant.get("subject").and_then(Value::as_str) else {
+    let payload: arkret_models_collaboration::events_payloads::CapabilityGrantPayload =
+        serde_json::from_value(operation.payload.clone())
+            .map_err(|_| "agent_grant_exceeds_requested_scope")?;
+    let grant = &payload.grant;
+    let arkret_models_collaboration::governance::grant_constraint::CapabilitySubject::Actor(
+        subject,
+    ) = &grant.subject
+    else {
         return Ok(());
     };
-    let record = state
-        .agent_pairings()
-        .agent(subject)
+    let record = crate::routing::identity::agent_pcr::agent_record_for_actor(state, subject)
         .await
-        .map_err(|_| "agent_grant_ceiling_lookup_failed")?;
+        .map_err(|_| "agent_requested_scope_commitment_invalid")?;
     let Some(record) = record else {
         return Ok(());
     };
@@ -427,35 +431,11 @@ async fn validate_agent_grant_ceiling(
     )
     .await
     .map_err(|_| "agent_requested_scope_commitment_invalid")?;
-    let Some(actions) = grant.get("actions").and_then(Value::as_array) else {
-        return Err("agent_grant_exceeds_requested_scope");
-    };
-    let actions = actions
-        .iter()
-        .map(|action| action.as_str().map(ToOwned::to_owned))
-        .collect::<Option<Vec<_>>>()
-        .ok_or("agent_grant_exceeds_requested_scope")?;
-    let Some(resources) = grant.get("resources").and_then(Value::as_array) else {
-        return Err("agent_grant_exceeds_requested_scope");
-    };
-    let resources = serde_json::from_value::<
-        Vec<arkret_wire::resource_selector::WireResourceSelector>,
-    >(Value::Array(resources.clone()))
-    .map_err(|_| "agent_grant_exceeds_requested_scope")?;
-    let constraints = grant
-        .get("constraints")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let constraints = serde_json::from_value::<
-        Vec<arkret_models_collaboration::governance::grant_constraint::GrantConstraint>,
-    >(Value::Array(constraints))
-    .map_err(|_| "agent_grant_exceeds_requested_scope")?;
     if crate::routing::identity::agents::agent_grant_within_requested_scope(
         &record,
-        &actions,
-        &resources,
-        &constraints,
+        &grant.actions,
+        &grant.resources,
+        &grant.constraints,
     ) {
         Ok(())
     } else {

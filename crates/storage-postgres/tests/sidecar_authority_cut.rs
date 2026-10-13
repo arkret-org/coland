@@ -2724,6 +2724,84 @@ async fn sidecar_snapshot_lists_and_scans_keep_private_stream_coordinates() {
                 }
             ))
     );
+    let key = ed25519_dalek::SigningKey::from_bytes(&[83; 32]);
+    let method = arkret_wire::DidUrl::new(format!("{did}#authority")).unwrap();
+    let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
+        coland_services::authority_commit::build_signed_realm_state_snapshot(
+            material,
+            method.clone(),
+            &key,
+            chrono::Utc::now(),
+        )
+        .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
+    };
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let window_request = coland_storage::AccountRealmWindowRequest {
+        realm_id: realm.clone(),
+        account: controller.clone(),
+        issuer: station.clone(),
+        window_limit: 20,
+        window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
+        expires_at_ms: now_ms + 300_000,
+        now_ms,
+        byte_budget: 7 * 1024 * 1024,
+        delivered_heads: Vec::new(),
+        selected_stream_refs: Some(vec![stream.clone()]),
+    };
+    let private = store
+        .freeze_account_realm_window(&window_request, &sign)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(private.window.stream_ref, stream);
+    assert_eq!(
+        private.window.head_commit_ref,
+        attach.authority_commit.commit.commit_id
+    );
+    assert_eq!(private.window.next_position, 1);
+    assert!(private.window.complete);
+    assert!(private.window.preview_only.is_none());
+    assert!(private.additional_windows.is_empty());
+    assert_eq!(private.current_stream_heads, snapshot.visible_stream_heads);
+    assert_eq!(
+        private.current_state_entries,
+        snapshot.current_state_entries
+    );
+    assert_eq!(
+        private.governance_generation,
+        snapshot.governance_generation
+    );
+    assert_eq!(private.committed_events.len(), 1);
+    assert_eq!(
+        private.committed_events[0].commit(),
+        &attach.authority_commit.commit
+    );
+    let public = store
+        .freeze_account_realm_window(
+            &coland_storage::AccountRealmWindowRequest {
+                account: foreign.clone(),
+                selected_stream_refs: None,
+                window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
+                ..window_request
+            },
+            &sign,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        public.current_stream_heads,
+        foreign_snapshot.visible_stream_heads
+    );
+    assert_eq!(
+        public.current_state_entries,
+        foreign_snapshot.current_state_entries
+    );
+    assert!(
+        std::iter::once(&public.window)
+            .chain(public.additional_windows.iter())
+            .all(|window| window.stream_ref != stream)
+    );
     let AccountRealmStreamList::Listed(streams) = store
         .list_realm_streams_for_account(&realm, controller, &station)
         .await
@@ -8394,6 +8472,17 @@ async fn owned_consumer_footprint(
         "delivery_digest":owned_welcome_footprint(pool, realm, realm).await})
 }
 
+fn owned_consumer_grant_scope_step(
+    state: coland_http::state::AppState,
+    endpoint: coland_storage::AgentEndpointGuard,
+) -> Pin<Box<dyn Future<Output = coland_storage::VerifiedAgentScopeEvidence> + Send>> {
+    fixture_step(async move {
+        Box::pin(state.qualified_agent_scope_evidence(&endpoint))
+            .await
+            .unwrap()
+    })
+}
+
 async fn owned_consumer_root_grant(
     fixture: &OwnedConsumerFixture,
     previous: &coland_storage::AuthorityCommitTransaction,
@@ -8416,9 +8505,26 @@ async fn owned_consumer_root_grant(
         EventKind::CapabilityGrant,
         arkret_wire::ActorId::account(fixture.founder.clone()),
         serde_json::json!({"grant":grant}),
-        previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
+        previous
+            .commit
+            .committed_at
+            .max(arkret_canonical::normalize_timestamp_canonical(
+                chrono::Utc::now(),
+            ))
+            + chrono::TimeDelta::milliseconds(1),
     );
-    Box::pin(ordinary_realm::source_request(&fixture.pool, request)).await
+    let mut request = Box::pin(ordinary_realm::source_request(&fixture.pool, request)).await;
+    if let Some(agent) = fixture
+        .agents
+        .iter()
+        .find(|agent| subject.as_account_id() == Some(&agent.account))
+    {
+        request.agent_grant_scope_evidence = Some(
+            owned_consumer_grant_scope_step(agent._vault.state.clone(), agent.endpoint.clone())
+                .await,
+        );
+    }
+    request
 }
 
 async fn owned_consumer_refused_without_effects(
@@ -12261,7 +12367,7 @@ async fn build_native_reply_preparation_fixture(
     grant_body: bool,
 ) -> NativeReplyPreparationFixture {
     use coland_storage::AgentParticipationStore;
-    let original = boxed_owned_consumer_fixture(1).await;
+    let original = fixture_step(boxed_owned_consumer_fixture(1)).await;
     let realm = original.head.event.realm_id.clone();
     let mut head = original.head.clone();
     if grant_message {

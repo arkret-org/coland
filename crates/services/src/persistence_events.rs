@@ -91,6 +91,7 @@ fn persistence_event_commit_request(
         self_producer_guard: command.self_producer_guard,
         applet_producer_guard: command.applet_producer_guard,
         widget_token_gate: command.widget_token_gate,
+        agent_grant_scope_evidence: command.agent_grant_scope_evidence,
         forwarded_producer_evidence: command.forwarded_producer_evidence,
         forwarded_agent_producer: command.forwarded_agent_producer,
         agent_deployment_ceiling: command.agent_deployment_ceiling,

@@ -333,18 +333,6 @@ pub(crate) fn agent_key_scope_within_requested_scope(
         && constraints_preserve_requested_scope(requested_scope, constraints)
 }
 
-/// Agent grants are always bounded by the immutable scope selected
-/// at provisioning. Realm membership and policy can only narrow this set.
-pub(crate) fn agent_actions_within_requested_scope(
-    record: &AgentPrincipalRecord,
-    actions: &[String],
-) -> bool {
-    let ceiling = requested_scope_actions(record);
-    actions
-        .iter()
-        .all(|action| ceiling.contains(action.as_str()))
-}
-
 /// Enforce the immutable provisioning ceiling during ordinary
 /// `ak.capability.grant` Event admission.
 pub(crate) fn agent_grant_within_requested_scope(
@@ -353,21 +341,24 @@ pub(crate) fn agent_grant_within_requested_scope(
     resources: &[arkret_wire::resource_selector::WireResourceSelector],
     constraints: &[arkret_models_collaboration::governance::grant_constraint::GrantConstraint],
 ) -> bool {
-    if !agent_actions_within_requested_scope(record, actions) {
-        return false;
-    }
-    let resources = resources
-        .iter()
-        .filter_map(|resource| serde_json::to_value(resource).ok())
-        .collect::<Vec<_>>();
-    let constraints = constraints
-        .iter()
-        .filter_map(|constraint| serde_json::to_value(constraint).ok())
-        .collect::<Vec<_>>();
-    record.requested_scope.as_ref().is_some_and(|scope| {
-        scope_resources_within_requested_scope(scope, &resources)
-            && constraints_preserve_requested_scope(scope, &constraints)
-    })
+    record
+        .requested_scope
+        .as_ref()
+        .and_then(|scope| {
+            serde_json::from_value::<
+                arkret_models_collaboration::events_payloads::agent::AgentKeyScope,
+            >(scope.clone())
+            .ok()
+        })
+        .is_some_and(|scope| {
+            arkret_models_collaboration::agent_scope::agent_grant_scope_within_provision(
+                &scope,
+                actions,
+                resources,
+                constraints,
+            )
+            .unwrap_or(false)
+        })
 }
 
 /// Project the DID of a verification method DID URL onto its Core
@@ -430,16 +421,21 @@ mod requested_scope_tests {
     #[test]
     fn realm_grant_actions_cannot_exceed_provision_ceiling() {
         let record = record_with_scope(json!({
-            "actions": [CapabilityActionId::MESSAGE_CREATE, CapabilityActionId::REACTION_ADD]
+            "actions": [CapabilityActionId::MESSAGE_CREATE, CapabilityActionId::REACTION_ADD],
+            "resources": []
         }));
 
-        assert!(agent_actions_within_requested_scope(
+        assert!(agent_grant_within_requested_scope(
             &record,
-            &[CapabilityActionId::MESSAGE_CREATE.to_owned()]
+            &[CapabilityActionId::MESSAGE_CREATE.to_owned()],
+            &[],
+            &[],
         ));
-        assert!(!agent_actions_within_requested_scope(
+        assert!(!agent_grant_within_requested_scope(
             &record,
-            &[CapabilityActionId::EVENT_READ.to_owned()]
+            &[CapabilityActionId::EVENT_READ.to_owned()],
+            &[],
+            &[],
         ));
     }
 

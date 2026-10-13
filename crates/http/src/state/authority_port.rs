@@ -69,6 +69,7 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         | EventKind::RealmRestore
         | EventKind::RealmFreeze
         | EventKind::RealmUnfreeze
+        | EventKind::RealmGovernanceStationChange
         | EventKind::StrandUpdate
         | EventKind::StrandTracksUpdate
         | EventKind::RsvpSet
@@ -829,11 +830,10 @@ impl AuthorityProtocolPort for AppState {
 
     async fn install_authority_handoff(
         &self,
-        _request: AuthorityHandoffRequest,
+        peer: &coland_services::authority_commit::AuthenticatedPeerContext,
+        request: AuthorityHandoffRequest,
     ) -> ServiceResult<RealmAuthorityHandoff> {
-        Err(ServiceError::Internal(
-            "peer handoff authentication and fencing are unavailable".to_owned(),
-        ))
+        super::authority_handoff::install(self, peer, request).await
     }
 }
 

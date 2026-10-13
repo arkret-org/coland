@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
+use arkret_models_collaboration::SignalStreamFrame;
 use arkret_models_collaboration::sync_frames::account_subscribe::{
     AccountSubscribeFrame, AccountSubscribeFrameKind,
 };
@@ -17,7 +18,7 @@ use arkret_wire::websocket_binding::{
     WEBSOCKET_SUBPROTOCOL, WebSocketChallengeRecord, WebSocketCloseCode, WebSocketOperationId,
     canonical_http_origin,
 };
-use arkret_wire::{ErrorCode, SignalStreamFrame, WebSocketTransportError};
+use arkret_wire::{ErrorCode, WebSocketTransportError};
 use futures_util::{SinkExt, StreamExt};
 use salvo::websocket::{Message, WebSocket, WebSocketUpgrade};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, watch};

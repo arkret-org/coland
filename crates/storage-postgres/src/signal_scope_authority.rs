@@ -282,6 +282,11 @@ async fn history(
 struct Cut {
     root: Option<RealmAuthorityRootCurrent>,
     snapshot_root_generation: Option<u64>,
+    snapshot_root_controller: Option<ActorId>,
+    policies: BTreeMap<
+        arkret_wire::PolicyId,
+        arkret_models_collaboration::governance::operation_wire::Policy,
+    >,
     circle_states: BTreeMap<
         arkret_wire::CircleId,
         arkret_models_collaboration::governance::circle::CircleState,
@@ -352,13 +357,14 @@ impl Cut {
                             .and_then(serde_json::Value::as_u64)
                             .ok_or_else(|| unavailable("snapshot root omits generation"))?,
                     );
-                    let _: ActorId = serde_json::from_value(
+                    let controller: ActorId = serde_json::from_value(
                         value
                             .get("controller_actor_id")
                             .cloned()
                             .ok_or_else(|| unavailable("snapshot root omits controller"))?,
                     )
                     .map_err(unavailable)?;
+                    cut.snapshot_root_controller = Some(controller);
                     value
                         .get("controller_epoch")
                         .and_then(serde_json::Value::as_u64)
@@ -418,6 +424,13 @@ impl Cut {
                         return Err(unavailable("snapshot Circle identity differs"));
                     }
                     cut.circle_states.insert(circle_id.clone(), circle.state);
+                }
+                S::Policy { policy_id } => {
+                    let value: arkret_models_collaboration::governance::operation_wire::PolicySetValue = serde_json::from_value(value.clone()).map_err(unavailable)?;
+                    if let arkret_models_collaboration::governance::operation_wire::PolicySetValue::Governance(policy) = value {
+                        if policy.id != *policy_id || policy.realm_id.as_ref() != Some(&snapshot.realm_id) { return Err(unavailable("Signal Policy identity differs")); }
+                        if policy.policy_kind == arkret_wire::PolicyKind::Agent { cut.policies.insert(policy_id.clone(), *policy); }
+                    }
                 }
                 S::CapabilityGrant { grant_id } => {
                     let grant: CapabilityGrant =
@@ -681,6 +694,12 @@ impl Cut {
                 grant.updated_by = Some(event.actor_id.clone());
                 grant.updated_at = Some(event.created_at);
             }
+            EventKind::PolicySet => {
+                let payload = event.as_policy_set().map_err(unavailable)?;
+                if let arkret_models_collaboration::governance::operation_wire::PolicySetValue::Governance(policy) = payload.value {
+                    if policy.policy_kind == arkret_wire::PolicyKind::Agent { self.policies.insert(policy.id.clone(), *policy); }
+                }
+            }
             EventKind::RealmPolicyBundle => {
                 self.policy = Some(event.as_realm_policy_bundle().map_err(unavailable)?);
             }
@@ -836,6 +855,254 @@ async fn declared_commit(
         .then_some(commit))
 }
 
+const PRODUCT_ACTIONS: [&str; 2] = [
+    arkret_wire::CapabilityActionId::MESSAGE_STREAM_SEND,
+    arkret_wire::CapabilityActionId::MESSAGE_CREATE,
+];
+
+fn qualified_chain(
+    cut: &Cut,
+    id: &GrantId,
+    realm: &RealmId,
+    at: DateTime<Utc>,
+    owned: Option<&IssuerAuthorityRef>,
+    visiting: &mut BTreeSet<GrantId>,
+    depth: usize,
+) -> bool {
+    if depth > 4 || !visiting.insert(id.clone()) {
+        return false;
+    }
+    let generation = cut
+        .root
+        .as_ref()
+        .map(|r| r.authority_generation)
+        .or(cut.snapshot_root_generation);
+    let root_matches = |r: &AuthorityRootRef| match r {
+        AuthorityRootRef::RealmRoot {
+            realm_id,
+            authority_event_ref,
+            authority_generation,
+        } => {
+            realm_id == realm
+                && Some(*authority_generation) == generation
+                && cut
+                    .root
+                    .as_ref()
+                    .is_none_or(|root| &root.authority_event_ref == authority_event_ref)
+        }
+        AuthorityRootRef::OwnedAgent {
+            realm_id,
+            controller_account_id,
+            controller_join_event_id,
+            agent_join_event_id,
+        } => {
+            matches!(owned, Some(IssuerAuthorityRef::OwnedAgent { realm_id: own_realm, controller_account_id: controller, controller_join_event_id: controller_join, agent_join_event_id: agent_join }) if realm_id == own_realm && controller_account_id == controller && controller_join_event_id == controller_join && agent_join_event_id == agent_join)
+        }
+    };
+    let valid = cut.grants.get(id).is_some_and(|grant| {
+        grant.realm_id.as_ref() == Some(realm)
+        && crate::capability_grant_current_results::grant_is_active_at(grant, at)
+        && !grant.issuer_authority_refs.is_empty() && !grant.authority_root_refs.is_empty()
+        && grant.authority_root_refs.iter().all(root_matches)
+        && grant.issuer_authority_refs.iter().all(|reference| match reference {
+            IssuerAuthorityRef::OwnedAgent { .. } => depth == 0 && Some(reference) == owned && grant.authority_depth == 1,
+            IssuerAuthorityRef::RealmRoot { realm_id, authority_event_ref, authority_generation } => grant.authority_root_refs.iter().any(|r| matches!(r, AuthorityRootRef::RealmRoot { realm_id: root_realm, authority_event_ref: root_event, authority_generation: root_generation } if root_realm == realm_id && root_event == authority_event_ref && root_generation == authority_generation)),
+            IssuerAuthorityRef::Grant { grant_id } => cut.grants.get(grant_id).is_some_and(|parent| matches!(&parent.subject, CapabilitySubject::Actor(subject) if subject == &grant.issuer_id) && !parent.issuer_authority_refs.iter().any(|r| matches!(r, IssuerAuthorityRef::OwnedAgent { .. }))) && qualified_chain(cut, grant_id, realm, at, None, visiting, depth + 1),
+        })
+    });
+    visiting.remove(id);
+    valid
+}
+
+fn product_grants(
+    cut: &Cut,
+    realm: &RealmId,
+    actor: &ActorId,
+    at: DateTime<Utc>,
+    owned: Option<&IssuerAuthorityRef>,
+) -> Vec<CapabilityGrant> {
+    cut.grants
+        .iter()
+        .filter(|(id, grant)| {
+            matches!(&grant.subject, CapabilitySubject::Actor(subject) if subject == actor)
+                && grant
+                    .actions
+                    .iter()
+                    .any(|action| PRODUCT_ACTIONS.contains(&action.as_str()))
+                && qualified_chain(cut, id, realm, at, owned, &mut BTreeSet::new(), 0)
+        })
+        .map(|(_, grant)| grant.clone())
+        .collect()
+}
+
+fn product_owner_actions(historical: &Cut, current: &Cut, actor: &ActorId) -> Vec<String> {
+    let controller = |cut: &Cut| {
+        cut.root
+            .as_ref()
+            .map(|r| &r.controller_actor_id)
+            .or(cut.snapshot_root_controller.as_ref())
+            .cloned()
+    };
+    if controller(historical).as_ref() != Some(actor) || controller(current).as_ref() != Some(actor)
+    {
+        return Vec::new();
+    }
+    PRODUCT_ACTIONS
+        .into_iter()
+        .filter(|action| arkret_policy::owner_may_author_action(action).unwrap_or(false))
+        .map(str::to_owned)
+        .collect()
+}
+
+async fn product_material(
+    conn: &mut AsyncPgConnection,
+    query: &SignalScopeAuthorityQuery<'_>,
+    historical_parent: &Cut,
+    current_parent: &Cut,
+    historical_scope: &Cut,
+    current_scope: &Cut,
+    current_realm_head: &arkret_wire::CommitStreamHead,
+    current_scope_head: &arkret_wire::CommitStreamHead,
+) -> PersistenceResult<Option<Box<arkret_models_collaboration::SignalProductAuthority>>> {
+    use arkret_models_collaboration::{SignalAgentProductAuthority, SignalProductAuthority};
+    let realm = query.scope.realm_id();
+    let mut owned = None;
+    let agent = if let Some((controller, key_scope)) = query.product_agent {
+        if key_scope.actions.is_empty() || key_scope.resources.is_empty() {
+            return Ok(None);
+        }
+        let verified = crate::realm_authorization_cut::owned_controller_snapshot_in_connection(
+            conn,
+            realm,
+            query.sender,
+            query.at,
+        )
+        .await?;
+        let controller_actor = ActorId::account(controller.clone());
+        if verified.as_ref() != Some(&controller_actor)
+            || !historical_parent.joined(&controller_actor)
+            || !current_parent.joined(&controller_actor)
+            || historical_parent
+                .member_revisions
+                .get(&controller_actor.to_string())
+                != current_parent
+                    .member_revisions
+                    .get(&controller_actor.to_string())
+            || historical_parent
+                .member_revisions
+                .get(&query.sender.to_string())
+                != current_parent
+                    .member_revisions
+                    .get(&query.sender.to_string())
+        {
+            return Ok(None);
+        }
+        owned = crate::realm_authorization_cut::owned_source_in_connection(
+            conn,
+            realm,
+            query.sender,
+            query.at,
+            false,
+        )
+        .await?;
+        if owned.is_none() {
+            return Ok(None);
+        }
+        let policies = |parent: &Cut, scope: &Cut| {
+            let mut policies = parent.policies.values().cloned().collect::<Vec<_>>();
+            if matches!(query.scope, ScopeRef::Circle { .. }) {
+                policies.extend(scope.policies.values().cloned());
+            }
+            policies
+        };
+        Some(SignalAgentProductAuthority {
+            controller_account_id: controller.clone(),
+            controller_grants: product_grants(
+                historical_parent,
+                realm,
+                &controller_actor,
+                query.sent_at,
+                None,
+            ),
+            current_controller_grants: product_grants(
+                current_parent,
+                realm,
+                &controller_actor,
+                query.at,
+                None,
+            ),
+            controller_owner_actions: product_owner_actions(
+                historical_parent,
+                current_parent,
+                &controller_actor,
+            ),
+            historical_management_policies: policies(historical_parent, historical_scope),
+            current_management_policies: policies(current_parent, current_scope),
+            key_scope: key_scope.clone(),
+        })
+    } else {
+        None
+    };
+    // Direct profile permission has already been established from its accepted
+    // stable pair and both independent contact permissions in this transaction.
+    let direct = historical_parent.direct && current_parent.direct;
+    let material = SignalProductAuthority {
+        authority_commit_id: query.authority_commit_id.clone(),
+        parent_realm_authority_commit_id: query.parent_realm_authority_commit_id.cloned(),
+        current_realm_head: current_realm_head.clone(),
+        current_scope_head: current_scope_head.clone(),
+        sent_at: query.sent_at,
+        grants: if direct {
+            Vec::new()
+        } else {
+            product_grants(
+                historical_parent,
+                realm,
+                query.sender,
+                query.sent_at,
+                owned.as_ref(),
+            )
+        },
+        current_grants: if direct {
+            Vec::new()
+        } else {
+            product_grants(
+                current_parent,
+                realm,
+                query.sender,
+                query.at,
+                owned.as_ref(),
+            )
+        },
+        owner_actions: if direct {
+            Vec::new()
+        } else {
+            product_owner_actions(historical_parent, current_parent, query.sender)
+        },
+        profile_actions: if direct {
+            vec![arkret_wire::CapabilityActionId::MESSAGE_CREATE.to_owned()]
+        } else {
+            Vec::new()
+        },
+        agent,
+    };
+    if material.agent.as_ref().is_some_and(|a| {
+        a.controller_grants.len() > 64
+            || a.current_controller_grants.len() > 64
+            || a.historical_management_policies.len() > 64
+            || a.current_management_policies.len() > 64
+    }) || material.grants.len() > 64
+        || material.current_grants.len() > 64
+        || arkret_canonical::canonical_json_bytes(&material)
+            .map_err(unavailable)?
+            .len()
+            > SignalProductAuthority::MAX_CANONICAL_BYTES
+    {
+        return Ok(None);
+    }
+    Ok(Some(Box::new(material)))
+}
+
 pub(crate) async fn read(
     pool: &PgPool,
     query: SignalScopeAuthorityQuery<'_>,
@@ -863,6 +1130,8 @@ async fn read_in_connection(
         signal_class: class,
         sent_at,
         at,
+        include_product_authority,
+        product_agent: _,
     } = query;
     let realm = scope.realm_id();
     let stream = CommitStreamRef::from_scope(scope, None).map_err(unavailable)?;
@@ -1084,7 +1353,7 @@ async fn read_in_connection(
             serde_json::from_value(row.value).map_err(unavailable)?
         }
     };
-    let Some(historical_mls_event_ref) = historical.mls else {
+    let Some(historical_mls_event_ref) = historical.mls.clone() else {
         return Ok(denied("declared cut predates MLS activation"));
     };
     if current.mls.as_ref() != Some(&current_mls.current_mls_commit_event_ref)
@@ -1105,11 +1374,33 @@ async fn read_in_connection(
     {
         return Err(unavailable("MLS suite differs from its accepted genesis"));
     }
+    let product_authority = if include_product_authority {
+        product_material(
+            conn,
+            &query,
+            &parent_historical,
+            &parent,
+            &historical,
+            &current,
+            &realm_rows.head,
+            &current_rows.head,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            tracing::debug!(%error, "Signal product material is unavailable");
+            None
+        })
+    } else {
+        None
+    };
     Ok(Some(SignalScopeAuthority {
         recipient_actors: recipients,
         historical_mls_event_ref,
         current_mls,
         cipher_suite,
+        current_realm_head: realm_rows.head,
+        current_scope_head: current_rows.head,
+        product_authority,
     }))
 }
 
@@ -1223,6 +1514,66 @@ mod typed_replay_tests {
                 sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
             },
         }
+    }
+
+    #[test]
+    fn product_graph_requires_exact_root_parent_and_owned_join_source() {
+        let actor = event(EventKind::MemberState, json!({})).actor_id;
+        let id = GrantId::from_event_id(&EventId::from_digest(
+            arkret_canonical::DigestSuite::Sha256,
+            [7; 32],
+        ));
+        let root_event = EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [8; 32]);
+        let root_ref = json!({"kind":"realm_root", "realm_id":realm_id(), "authority_event_ref":root_event, "authority_generation":0});
+        let grant: CapabilityGrant = serde_json::from_value(json!({"id":id,"schema":"ak.schema.capability.v1","realm_id":realm_id(),"issuer_id":actor,"subject":actor,"actions":PRODUCT_ACTIONS,"resources":[{"kind":"realm","realm_id":realm_id()}],"issuer_authority_refs":[root_ref],"authority_root_refs":[root_ref],"authority_depth":1,"status":"active","issued_at":arkret_canonical::format_timestamp_canonical(at())})).unwrap();
+        let mut cut = Cut {
+            snapshot_root_generation: Some(0),
+            snapshot_root_controller: Some(actor.clone()),
+            ..Cut::default()
+        };
+        cut.grants.insert(id.clone(), grant);
+        assert_eq!(
+            product_grants(&cut, &realm_id(), &actor, at(), None).len(),
+            1
+        );
+        cut.snapshot_root_generation = Some(1);
+        assert!(product_grants(&cut, &realm_id(), &actor, at(), None).is_empty());
+        cut.snapshot_root_generation = Some(0);
+        let controller = actor.as_account_id().unwrap().clone();
+        let owned = IssuerAuthorityRef::OwnedAgent {
+            realm_id: realm_id(),
+            controller_account_id: controller.clone(),
+            controller_join_event_id: root_event.clone(),
+            agent_join_event_id: EventId::from_digest(
+                arkret_canonical::DigestSuite::Sha256,
+                [9; 32],
+            ),
+        };
+        let owned_root: AuthorityRootRef =
+            serde_json::from_value(serde_json::to_value(&owned).unwrap()).unwrap();
+        let grant = cut.grants.get_mut(&id).unwrap();
+        grant.issuer_authority_refs = vec![owned.clone()];
+        grant.authority_root_refs = vec![owned_root];
+        assert_eq!(
+            product_grants(&cut, &realm_id(), &actor, at(), Some(&owned)).len(),
+            1
+        );
+        assert!(product_grants(&cut, &realm_id(), &actor, at(), None).is_empty());
+        let wrong = IssuerAuthorityRef::OwnedAgent {
+            realm_id: realm_id(),
+            controller_account_id: controller,
+            controller_join_event_id: EventId::from_digest(
+                arkret_canonical::DigestSuite::Sha256,
+                [10; 32],
+            ),
+            agent_join_event_id: EventId::from_digest(
+                arkret_canonical::DigestSuite::Sha256,
+                [9; 32],
+            ),
+        };
+        assert!(product_grants(&cut, &realm_id(), &actor, at(), Some(&wrong)).is_empty());
+        cut.grants.get_mut(&id).unwrap().status = CapabilityGrantStatus::Revoked;
+        assert!(product_grants(&cut, &realm_id(), &actor, at(), Some(&owned)).is_empty());
     }
 
     #[test]

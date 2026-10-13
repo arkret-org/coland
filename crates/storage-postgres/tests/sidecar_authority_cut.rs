@@ -4392,9 +4392,17 @@ async fn agent_publish_policy_scenario<F>(
             let expected = if effect == "deny" {
                 "forbids publishing"
             } else {
-                "unresolved quarantine or review evidence"
+                "approval_required"
             };
             assert!(error.to_string().contains(expected), "{error}");
+            if effect == "require_review" {
+                assert!(
+                    error
+                        .to_string()
+                        .contains("requires current management review"),
+                    "{error}"
+                );
+            }
             assert_eq!(agent_mode_footprint(&pool, realm_id).await, before);
         } else {
             let opening = ordinary_realm::source_request(&pool, opening).await;

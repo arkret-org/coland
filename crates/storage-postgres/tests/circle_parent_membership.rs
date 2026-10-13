@@ -476,6 +476,8 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                 genesis.authority_commit.commit.committed_at + chrono::TimeDelta::seconds(1);
             let authority = store
                 .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+ include_product_authority: false, product_agent: None,
+
                     scope: &material_request.effective_scope,
                     authority_commit_id: &genesis.authority_commit.commit.commit_id,
                     parent_realm_authority_commit_id: Some(&grant.authority_commit.commit.commit_id),
@@ -500,6 +502,8 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                 assert!(
                     store
                         .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+ include_product_authority: false, product_agent: None,
+
                             scope: &material_request.effective_scope,
                             authority_commit_id: &genesis.authority_commit.commit.commit_id,
                             parent_realm_authority_commit_id: parent,
@@ -532,6 +536,8 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             assert!(
                 store
                     .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+ include_product_authority: false, product_agent: None,
+
                         scope: &material_request.effective_scope,
                         authority_commit_id: &genesis.authority_commit.commit.commit_id,
                         parent_realm_authority_commit_id: Some(
@@ -549,6 +555,8 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             assert!(
                 store
                     .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+ include_product_authority: false, product_agent: None,
+
                         scope: &material_request.effective_scope,
                         authority_commit_id: &genesis.authority_commit.commit.commit_id,
                         parent_realm_authority_commit_id: Some(
@@ -832,6 +840,8 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             assert!(
                 store
                     .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+ include_product_authority: false, product_agent: None,
+
                         scope: &material_request.effective_scope,
                         authority_commit_id: &genesis.authority_commit.commit.commit_id,
                         parent_realm_authority_commit_id: Some(
@@ -933,6 +943,8 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             assert!(
                 store
                     .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+ include_product_authority: false, product_agent: None,
+
                         scope: &material_request.effective_scope,
                         authority_commit_id: &genesis.authority_commit.commit.commit_id,
                         parent_realm_authority_commit_id: Some(
@@ -994,6 +1006,8 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             assert!(
                 store
                     .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+ include_product_authority: false, product_agent: None,
+
                         scope: &material_request.effective_scope,
                         authority_commit_id: &genesis.authority_commit.commit.commit_id,
                         parent_realm_authority_commit_id: Some(

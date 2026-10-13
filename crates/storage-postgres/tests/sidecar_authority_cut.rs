@@ -8394,6 +8394,17 @@ async fn owned_consumer_footprint(
         "delivery_digest":owned_welcome_footprint(pool, realm, realm).await})
 }
 
+fn owned_consumer_grant_scope_step(
+    state: coland_http::state::AppState,
+    endpoint: coland_storage::AgentEndpointGuard,
+) -> Pin<Box<dyn Future<Output = coland_storage::VerifiedAgentScopeEvidence> + Send>> {
+    fixture_step(async move {
+        Box::pin(state.qualified_agent_scope_evidence(&endpoint))
+            .await
+            .unwrap()
+    })
+}
+
 async fn owned_consumer_root_grant(
     fixture: &OwnedConsumerFixture,
     previous: &coland_storage::AuthorityCommitTransaction,
@@ -8431,14 +8442,8 @@ async fn owned_consumer_root_grant(
         .find(|agent| subject.as_account_id() == Some(&agent.account))
     {
         request.agent_grant_scope_evidence = Some(
-            Box::pin(
-                agent
-                    ._vault
-                    .state
-                    .qualified_agent_scope_evidence(&agent.endpoint),
-            )
-            .await
-            .unwrap(),
+            owned_consumer_grant_scope_step(agent._vault.state.clone(), agent.endpoint.clone())
+                .await,
         );
     }
     request

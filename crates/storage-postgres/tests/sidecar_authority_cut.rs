@@ -8416,9 +8416,32 @@ async fn owned_consumer_root_grant(
         EventKind::CapabilityGrant,
         arkret_wire::ActorId::account(fixture.founder.clone()),
         serde_json::json!({"grant":grant}),
-        previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
+        previous
+            .commit
+            .committed_at
+            .max(arkret_canonical::normalize_timestamp_canonical(
+                chrono::Utc::now(),
+            ))
+            + chrono::TimeDelta::milliseconds(1),
     );
-    Box::pin(ordinary_realm::source_request(&fixture.pool, request)).await
+    let mut request = Box::pin(ordinary_realm::source_request(&fixture.pool, request)).await;
+    if let Some(agent) = fixture
+        .agents
+        .iter()
+        .find(|agent| subject.as_account_id() == Some(&agent.account))
+    {
+        request.agent_grant_scope_evidence = Some(
+            Box::pin(
+                agent
+                    ._vault
+                    .state
+                    .qualified_agent_scope_evidence(&agent.endpoint),
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    request
 }
 
 async fn owned_consumer_refused_without_effects(

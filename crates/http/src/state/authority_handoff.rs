@@ -149,7 +149,14 @@ async fn verify_uninventoried_producer(
         .producer_proof
         .as_ref()
         .ok_or_else(|| signature_refused("imported Event lacks producer proof"))?;
-    let key_bytes = if let Some(key) = native_genesis_key(state, full, originals).await? {
+    let suite = event.event_id.digest_suite_code().digest_suite();
+    let native_key = native_genesis_key(state, full, originals).await?;
+    if native_key.is_none() {
+        event
+            .verify_producer_proof_self_consistency(suite)
+            .map_err(signature_refused)?;
+    }
+    let key_bytes = if let Some(key) = native_key {
         key
     } else if event.actual_signer().as_account_id().is_some() {
         let target = arkret_wire::CommittedEventRef {
@@ -205,9 +212,6 @@ async fn verify_uninventoried_producer(
         .as_bytes()
         .to_vec()
     };
-    let suite =
-        arkret_canonical::canonical::digest_suite(event.event_id.digest_suite_code().as_str())
-            .map_err(refused)?;
     let bytes = arkret_signatures::EventProofBuilder::new()
         .envelope_bytes(event)
         .map_err(refused)?;
@@ -266,7 +270,9 @@ async fn native_genesis_key(
     if full.commit.commit_id != original.commit.commit_id
         || full.event.event_id != original.event.event_id
     {
-        return Ok(None);
+        return Err(key_unavailable(
+            "native PCR exact founding coordinate is unavailable",
+        ));
     }
     arkret_bootstrap::build_pcr_genesis_unit(create.event.clone(), authorize.event.clone())
         .map_err(signature_refused)?;
@@ -440,5 +446,46 @@ mod tests {
                 matches!(error, ServiceError::Conflict(detail) if detail.starts_with("temporarily_unavailable:"))
             );
         }
+        // A valid signature from another immutable DID cannot replace the
+        // actual producer, even though it binds the declared business actor.
+        let root_key = ed25519_dalek::SigningKey::from_bytes(&[211; 32]);
+        let root = arkret_canonical::ed25519_pubkey_to_did_key_multibase(
+            root_key.verifying_key().as_bytes(),
+        );
+        let proof_method = arkret_wire::DidUrl::new(format!("did:key:{root}#{root}")).unwrap();
+        let actor_did = arkret_wire::Did::new(format!(
+            "did:key:{}",
+            arkret_canonical::ed25519_pubkey_to_did_key_multibase(
+                ed25519_dalek::SigningKey::from_bytes(&[210; 32])
+                    .verifying_key()
+                    .as_bytes()
+            )
+        ))
+        .unwrap();
+        let actor =
+            arkret_wire::ActorId::service(arkret_wire::project_did_to_core_id(&actor_did).unwrap());
+        let raw = arkret_wire::test_support::raw_event_for_actor_at(
+            arkret_wire::EventKind::RealmProfile.as_str(),
+            arkret_wire::ScopeRef::Realm {
+                realm_id: originals[0].event.realm_id.clone(),
+            },
+            actor,
+            serde_json::json!({"schema":"ak.schema.realm_profile.v1","title":"Wrong producer"}),
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let mut wrong = originals[0].clone();
+        wrong.event = coland_test_support::device_authorization_history::sign_event(
+            raw,
+            proof_method,
+            [211; 32],
+        );
+        wrong.commit.stream_position = 2;
+        let error = verify_uninventoried_producer(&state, &wrong, &originals)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ServiceError::Conflict(detail) if detail.starts_with("signature_invalid:") && detail.contains("actual signer"))
+        );
     }
 }

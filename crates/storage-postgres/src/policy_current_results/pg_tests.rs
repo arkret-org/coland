@@ -157,6 +157,64 @@ async fn seed_management_circle(conn: &mut AsyncPgConnection) -> arkret_wire::Ci
     circle
 }
 
+/// Imported accepted history exercises the real scoped fanout gate; the joint
+/// suite supplies the producer verification and complete management HTTP path.
+#[tokio::test]
+async fn circle_management_policy_fanout_accepts_an_original_source_submission() {
+    // Imported signed-history shape isolates the fanout kind gate. The joint
+    // test separately exercises real authoring, admission and Circle privacy.
+    let database = TestDatabase::lease().await;
+    let mut conn = database.pool().get().await.unwrap();
+    sql_query("BEGIN").execute(&mut conn).await.unwrap();
+    seed_genesis(&mut conn).await;
+    let circle = seed_management_circle(&mut conn).await;
+    let accepted = arkret_wire::test_support::raw_event_for_actor_at(
+        EventKind::PolicySet.as_str(),
+        arkret_wire::ScopeRef::Circle {
+            realm_id: realm(),
+            circle_id: circle.clone(),
+        },
+        event(EventKind::RealmCreate, json!({}), 0).actor_id,
+        json!(management_policy(None, "deny")),
+        chrono::DateTime::parse_from_rfc3339("2026-10-05T12:00:02Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+    )
+    .unwrap();
+    let mut basis = commit(&accepted, 2);
+    basis.stream_ref = CommitStreamRef::Circle {
+        realm_id: realm(),
+        circle_id: circle,
+    };
+    basis.stream_position = 0;
+    basis.previous_commit_ref = None;
+    admit_in_connection(&mut conn, &accepted, &basis)
+        .await
+        .unwrap();
+    insert_history(&mut conn, &accepted, &basis).await;
+    commit_in_connection(&mut conn, &accepted, &basis)
+        .await
+        .unwrap();
+    let source: arkret_wire::EventAdmissionSubmission =
+        serde_json::from_value(json!({"event":accepted})).unwrap();
+    let targets = crate::realm_fanout::plan_realm_fanout_in_connection(
+        &mut conn,
+        &source.event,
+        &basis,
+        &"ak:did_core:web:station.example".parse().unwrap(),
+        Some(&source),
+        &[],
+        basis.committed_at.timestamp_millis(),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{}", error.into_persistence()));
+    assert_eq!(
+        targets, 0,
+        "an empty Circle never falls back to Realm members"
+    );
+    sql_query("ROLLBACK").execute(&mut conn).await.unwrap();
+}
+
 /// Imported accepted history isolates the classifier; this is not a claim
 /// that producer verification or the complete management HTTP path ran.
 #[tokio::test]

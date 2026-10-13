@@ -576,11 +576,17 @@ impl DeliveryClockProof {
                 };
                 [&self.provision_scope, &self.key_scope]
                     .iter()
-                    .all(|scope| {
-                        crate::agent_management_admission::require_key_scope_content_ceiling(
+                    .enumerate()
+                    .all(|(ceiling, scope)| {
+                        let allowed = crate::agent_management_admission::require_key_scope_content_ceiling(
                             scope, &operation,
                         )
-                        .is_ok()
+                        .is_ok();
+                        if !allowed {
+                            tracing::warn!(ceiling, action = action.as_str(), target_kind = ?target.kind,
+                                "owned content handoff ceiling is unavailable");
+                        }
+                        allowed
                     })
                     && self
                         .session_scope
@@ -2211,8 +2217,18 @@ async fn revalidate_content_inputs_in_connection(
             || !crate::committed_disclosure::full_event_for_member_in_connection(
                 &mut *conn, &full, &actor, at,
             )
-            .await?
+            .await
+            .inspect_err(|_| {
+                tracing::warn!(
+                    stage = "future_material_disclosure_error",
+                    "owned future material delivery is unavailable"
+                );
+            })?
         {
+            tracing::warn!(
+                stage = "future_material_disclosure",
+                "owned future material delivery is unavailable"
+            );
             return Err(unavailable(
                 "future material has no current disclosure proof",
             ));
@@ -2430,8 +2446,24 @@ async fn acquire_owned_delivery_guard(
             chrono::Utc::now(),
             true,
         ))
-        .await?
-        .ok_or_else(|| unavailable("current owned Agent source is unavailable"))?;
+        .await
+        .inspect_err(|_| {
+            if !input.future_materials.is_empty() {
+                tracing::warn!(
+                    stage = "future_material_owned_source",
+                    "owned future material delivery is unavailable"
+                );
+            }
+        })?
+        .ok_or_else(|| {
+            if !input.future_materials.is_empty() {
+                tracing::warn!(
+                    stage = "future_material_owned_source_absent",
+                    "owned future material delivery is unavailable"
+                );
+            }
+            unavailable("current owned Agent source is unavailable")
+        })?;
     }
     let at = chrono::Utc::now();
     Box::pin(
@@ -2466,7 +2498,15 @@ async fn acquire_owned_delivery_guard(
         &mut queued,
         at,
     ))
-    .await?;
+    .await
+    .inspect_err(|_| {
+        if !input.future_materials.is_empty() {
+            tracing::warn!(
+                stage = "future_material_content_inputs",
+                "owned future material delivery is unavailable"
+            );
+        }
+    })?;
     let QueuedContentFacts {
         mut object_sources,
         native_projection_reads,

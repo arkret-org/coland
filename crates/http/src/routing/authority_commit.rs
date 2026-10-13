@@ -30,12 +30,36 @@ pub(crate) fn trace_submission_refusal(
         .map(|code| code.as_str())
         .filter(|code| arkret_wire::ReasonCode::is_registered(code))
         .unwrap_or("unregistered");
+    // Local conformance diagnostics disclose only fixed implementation
+    // conditions, never request material or controller-private bindings.
+    let local_condition = match error {
+        Some(ServiceError::Conflict(detail)) => detail
+            .strip_prefix("failed_precondition: ")
+            .filter(|condition| {
+                matches!(
+                    *condition,
+                    "Agent join lacks its controller binding"
+                        | "controller is not in its bound joined generation"
+                        | "Agent has no accepted provision"
+                        | "Agent lifecycle is not active"
+                        | "Agent accountability grant is not active"
+                        | "Agent complete accepted ownership and DID binding are unavailable"
+                        | "Agent has no claimable membership KeyPackage"
+                        | "Agent accepted PCR genesis is unavailable"
+                        | "Agent accepted genesis inception is unavailable"
+                        | "Agent complete native DID history is unavailable"
+                )
+            })
+            .unwrap_or("other"),
+        _ => "other",
+    };
     tracing::warn!(
         stage,
         kind_class,
         actor_class,
         wire_code,
         reason_code,
+        local_condition,
         "self submission refusal boundary"
     );
 }

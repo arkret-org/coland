@@ -233,6 +233,166 @@ async fn ghost_creation_quota_rolls_back_with_the_unit_and_counts_exact_retry_on
 }
 
 #[tokio::test]
+async fn ghost_mapping_quota_is_atomic_and_exact_retries_do_not_reconsume_creation() {
+    let mut fixture = Fixture::new().await;
+    let namespace = format!("bridge.{}", uuid::Uuid::now_v7().simple());
+    let package = signed_applet_package(
+        &format!("ak:applet:{}", uuid::Uuid::now_v7()),
+        &namespace,
+        &fixture.state.service_core_id(),
+        None,
+    );
+    let quota = |max_operations| {
+        serde_json::from_value(json!({
+            "constraint_kind":"quota", "constraint_subkind":"rate", "effect":"allow",
+            "max_operations":max_operations, "period":"P1D", "constraint_scope":"per_realm"
+        }))
+        .unwrap()
+    };
+    let creation_install = fixture
+        .install_package_with_ghost_quota(
+            true,
+            package.clone(),
+            &namespace,
+            ScopeRef::Realm {
+                realm_id: fixture.realm.clone(),
+            },
+            Some(quota(2)),
+        )
+        .await;
+    let mut originals = Vec::new();
+    for external in ["mapping-first", "mapping-second"] {
+        let body = fixture
+            .ghost_body(&creation_install, &namespace, external)
+            .await;
+        let (status, original) = fixture
+            .ghost_commit(&creation_install, &body, external)
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{original}");
+        originals.push(original);
+    }
+    let creation_snapshot = authority_snapshot(&fixture.pool).await;
+    let creation_counter = creation_snapshot["quota_counters"].as_array().unwrap();
+    assert_eq!(creation_counter.len(), 1);
+    assert_eq!(creation_counter[0]["consumed"], 2);
+    let creation_grant = creation_counter[0]["grant_id"].clone();
+
+    fixture.new_realm().await;
+    let mapping_install = fixture
+        .install_package_with_ghost_quota(
+            true,
+            package,
+            &namespace,
+            ScopeRef::Realm {
+                realm_id: fixture.realm.clone(),
+            },
+            Some(quota(1)),
+        )
+        .await;
+    let mapping = fixture
+        .ghost_body(&mapping_install, &namespace, "mapping-first")
+        .await;
+    assert!(
+        mapping
+            .get("managed_actor_bundle")
+            .is_none_or(Value::is_null)
+    );
+    let before = authority_snapshot(&fixture.pool).await;
+    {
+        let mut conn = fixture.pool.get().await.unwrap();
+        diesel::sql_query("CREATE FUNCTION fail_ghost_mapping_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'mapping write fault'; END $$")
+            .execute(&mut *conn).await.unwrap();
+        diesel::sql_query("CREATE TRIGGER fail_ghost_mapping_write BEFORE INSERT OR UPDATE ON applet_installations FOR EACH ROW EXECUTE FUNCTION fail_ghost_mapping_write()")
+            .execute(&mut *conn).await.unwrap();
+    }
+    let (status, refusal) = fixture
+        .ghost_commit(&mapping_install, &mapping, "mapping-fault")
+        .await;
+    assert!(status.is_server_error(), "{status}: {refusal}");
+    assert_eq!(before, authority_snapshot(&fixture.pool).await);
+    {
+        let mut conn = fixture.pool.get().await.unwrap();
+        diesel::sql_query("DROP TRIGGER fail_ghost_mapping_write ON applet_installations")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        diesel::sql_query("DROP FUNCTION fail_ghost_mapping_write()")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    let (status, mapped) = fixture
+        .ghost_commit(&mapping_install, &mapping, "mapping-fault")
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{mapped}");
+    let after = authority_snapshot(&fixture.pool).await;
+    for key in [
+        "events",
+        "commits",
+        "profiles",
+        "completions",
+        "outbox",
+        "event_outbox",
+    ] {
+        assert_eq!(before[key], after[key], "mapping created {key}");
+    }
+    for key in [
+        "ghost_actor_id",
+        "managed_actor_provision_ref",
+        "principal_control_realm_id",
+        "profile_event_ref",
+        "accountability_grant_ref",
+    ] {
+        assert_eq!(originals[0][key], mapped[key], "mapping changed {key}");
+    }
+    let counters = after["quota_counters"].as_array().unwrap();
+    assert_eq!(counters.len(), 2);
+    for counter in counters {
+        assert_eq!(
+            counter["consumed"],
+            if counter["grant_id"] == creation_grant {
+                json!(2)
+            } else {
+                json!(1)
+            }
+        );
+    }
+    assert_eq!(after["quota_consumptions"].as_array().unwrap().len(), 3);
+    for key in ["mapping-fault", "mapping-new-http-key"] {
+        let (status, replay) = fixture.ghost_commit(&mapping_install, &mapping, key).await;
+        assert_eq!(status, StatusCode::OK, "{replay}");
+        assert_eq!(mapped, replay);
+        assert_eq!(after, authority_snapshot(&fixture.pool).await);
+    }
+    let second = fixture
+        .ghost_body(&mapping_install, &namespace, "mapping-second")
+        .await;
+    let exhausted_before = authority_snapshot(&fixture.pool).await;
+    let (status, refusal) = fixture
+        .ghost_commit(&mapping_install, &second, "mapping-exhausted")
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{refusal}");
+    assert_eq!(refusal["type"], "https://arkret.org/problems/rate_limited");
+    assert_eq!(exhausted_before, authority_snapshot(&fixture.pool).await);
+
+    // A replaced current preview does not invalidate an accepted operation.
+    let (status, replay) = fixture
+        .ghost_commit(&mapping_install, &mapping, "mapping-after-preview")
+        .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(mapped, replay);
+    assert_eq!(exhausted_before, authority_snapshot(&fixture.pool).await);
+    let mut forged = mapping;
+    forged["existing_managed_actor"]["profile_event_ref"] =
+        serde_json::to_value(&mapping_install.outcome.registration_event_ref).unwrap();
+    let (status, _) = fixture
+        .ghost_commit(&mapping_install, &forged, "mapping-forged")
+        .await;
+    assert!(status.is_client_error());
+    assert_eq!(exhausted_before, authority_snapshot(&fixture.pool).await);
+}
+
+#[tokio::test]
 async fn ghost_reuse_across_realms_preserves_anchors_without_events_or_completion() {
     let mut fixture = Fixture::new().await;
     let namespace = format!("bridge.{}", uuid::Uuid::now_v7().simple());
@@ -1116,6 +1276,7 @@ async fn authority_snapshot(pool: &PgPool) -> Value {
         'grants',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM capability_grant_current_results r), \
         'quota_counters',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM capability_quota_counters r), \
         'quota_consumptions',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM capability_quota_consumptions r), \
+        'quota_buckets',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM capability_quota_buckets r), \
         'managed',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM applet_managed_identities r), \
         'installs',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM applet_installations r), \
         'claims',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM managed_authority_claims r), \

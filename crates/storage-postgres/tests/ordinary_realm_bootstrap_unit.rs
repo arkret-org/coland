@@ -8551,137 +8551,150 @@ async fn poll_responses_keep_accepted_history_and_reject_invalid_partition_heads
 
 #[tokio::test]
 async fn replies_and_direct_mentions_require_accepted_visible_full_accounts() {
-    let database = TestDatabase::lease().await;
-    let pool = database.pool();
-    let (unit, head, strand_id) = admitted_message_discussion(&pool).await;
-    let creator = creator_account(&unit);
-    let uow = PgEventCommitUnitOfWork::new(pool.clone());
-    let store = PgAuthorityCommitStore { pool: pool.clone() };
-    let target = message_create_request(&head, &strand_id, "target");
-    let target = source_if_human(&pool, target).await;
-    uow.commit_event(target.clone()).await.unwrap();
-    let message_id = arkret_wire::MessageId::from_event_id(&target.authority_commit.event.event_id);
-    let reply = realm_event_request_as(
-        &target,
-        &creator,
-        arkret_wire::EventKind::MessageCreate,
-        serde_json::json!({"strand_id":strand_id,"track_name":"discussion","reply_to_id":message_id,
-            "content":{"kind":"ak.content.text","body":"reply","mentions":[{
-                "kind":"mention","subject_account_id":creator,"display_name_at_time":"untrusted audit"}]}}),
-    );
-    let reply = source_if_human(&pool, reply).await;
-    uow.commit_event(reply.clone()).await.unwrap();
-    let mut other_station = creator.clone();
-    other_station.station_id =
-        arkret_wire::DidCoreId::new("ak:did_core:web:other-station.example").unwrap();
-    for payload in [
-        serde_json::json!({"strand_id":strand_id,"track_name":"discussion",
-            "reply_to_id":arkret_wire::MessageId::from_event_id(&unit.transactions[0].event.event_id),
-            "content":{"kind":"ak.content.text","body":"missing target"}}),
-        serde_json::json!({"strand_id":strand_id,"track_name":"discussion",
-            "content":{"kind":"ak.content.text","body":"same principal elsewhere","mentions":[{
-                "kind":"mention","subject_account_id":other_station}]}}),
-        serde_json::json!({"strand_id":strand_id,"track_name":"discussion","reply_to":message_id,
-            "content":{"kind":"ak.content.text","body":"legacy alias"}}),
-    ] {
-        let request = realm_event_request_as(
-            &reply,
+    replies_and_mentions_scenario().await;
+}
+
+#[inline(never)]
+fn replies_and_mentions_scenario() -> std::pin::Pin<Box<impl std::future::Future<Output = ()>>> {
+    Box::pin(async move {
+        let database = TestDatabase::lease().await;
+        let pool = database.pool();
+        let (unit, head, strand_id) = scenario_future(|| admitted_message_discussion(&pool)).await;
+        let creator = creator_account(&unit);
+        let uow = PgEventCommitUnitOfWork::new(pool.clone());
+        let store = PgAuthorityCommitStore { pool: pool.clone() };
+        let target = message_create_request(&head, &strand_id, "target");
+        let target = scenario_future(|| source_if_human(&pool, target)).await;
+        uow.commit_event(target.clone()).await.unwrap();
+        let message_id =
+            arkret_wire::MessageId::from_event_id(&target.authority_commit.event.event_id);
+        let reply = realm_event_request_as(
+            &target,
             &creator,
             arkret_wire::EventKind::MessageCreate,
-            payload,
+            serde_json::json!({"strand_id":strand_id,"track_name":"discussion","reply_to_id":message_id,
+            "content":{"kind":"ak.content.text","body":"reply","mentions":[{
+                "kind":"mention","subject_account_id":creator,"display_name_at_time":"untrusted audit"}]}}),
         );
-        let request = source_if_human(&pool, request).await;
-        let before = message_families(&pool, &head.authority_commit.event.realm_id).await;
-        assert!(uow.commit_event(request.clone()).await.is_err());
-        assert!(
-            store
-                .committed_event(&request.authority_commit.event.event_id)
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(
-            message_families(&pool, &head.authority_commit.event.realm_id).await,
-            before
-        );
-    }
-    // The exact Account joins through accepted Invite/Accept facts without
-    // a display Profile. Mention admission is bound to membership and scope;
-    // Profile absence or classification cannot substitute for Agent gates.
-    let account_without_profile =
-        human_profile::admit_without_profile(&pool, &creator.station_id, "reply-late-member").await;
-    let mut conn = pool.get().await.unwrap();
-    let profiles = diesel::sql_query("SELECT count(*) AS count FROM actor_profile_current_results WHERE value->>'principal_id'=$1")
+        let reply = scenario_future(|| source_if_human(&pool, reply)).await;
+        uow.commit_event(reply.clone()).await.unwrap();
+        let mut other_station = creator.clone();
+        other_station.station_id =
+            arkret_wire::DidCoreId::new("ak:did_core:web:other-station.example").unwrap();
+        for payload in [
+            serde_json::json!({"strand_id":strand_id,"track_name":"discussion",
+            "reply_to_id":arkret_wire::MessageId::from_event_id(&unit.transactions[0].event.event_id),
+            "content":{"kind":"ak.content.text","body":"missing target"}}),
+            serde_json::json!({"strand_id":strand_id,"track_name":"discussion",
+            "content":{"kind":"ak.content.text","body":"same principal elsewhere","mentions":[{
+                "kind":"mention","subject_account_id":other_station}]}}),
+            serde_json::json!({"strand_id":strand_id,"track_name":"discussion","reply_to":message_id,
+            "content":{"kind":"ak.content.text","body":"legacy alias"}}),
+        ] {
+            let request = realm_event_request_as(
+                &reply,
+                &creator,
+                arkret_wire::EventKind::MessageCreate,
+                payload,
+            );
+            let request = scenario_future(|| source_if_human(&pool, request)).await;
+            let before = message_families(&pool, &head.authority_commit.event.realm_id).await;
+            assert!(uow.commit_event(request.clone()).await.is_err());
+            assert!(
+                store
+                    .committed_event(&request.authority_commit.event.event_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                message_families(&pool, &head.authority_commit.event.realm_id).await,
+                before
+            );
+        }
+        // The exact Account joins through accepted Invite/Accept facts without
+        // a display Profile. Mention admission is bound to membership and scope;
+        // Profile absence or classification cannot substitute for Agent gates.
+        let account_without_profile = scenario_future(|| {
+            human_profile::admit_without_profile(&pool, &creator.station_id, "reply-late-member")
+        })
+        .await;
+        let mut conn = pool.get().await.unwrap();
+        let profiles = diesel::sql_query("SELECT count(*) AS count FROM actor_profile_current_results WHERE value->>'principal_id'=$1")
         .bind::<Text, _>(account_without_profile.principal_id.as_str())
         .get_result::<CountRow>(&mut *conn).await.unwrap().count;
-    assert_eq!(
-        profiles, 0,
-        "membership and mention do not require a display Profile"
-    );
-    drop(conn);
-    let (late_member, joined) =
-        admit_joined_account(&pool, &uow, &reply, &unit, account_without_profile, 'c').await;
-    let root = realm_root_authority_event_ref(&pool, &head.authority_commit.event.realm_id).await;
-    let grant = invite_grant_request(
-        &pool,
-        &joined,
-        &unit,
-        &root,
-        &late_member,
-        &["ak.message.create"],
-    )
-    .await;
-    uow.commit_event(grant.clone()).await.unwrap();
-    let hidden_reply = realm_event_request_as(
-        &grant,
-        &late_member,
-        arkret_wire::EventKind::MessageCreate,
-        serde_json::json!({"strand_id":strand_id,"track_name":"discussion","reply_to_id":message_id,
+        assert_eq!(
+            profiles, 0,
+            "membership and mention do not require a display Profile"
+        );
+        drop(conn);
+        let (late_member, joined) = scenario_future(|| {
+            admit_joined_account(&pool, &uow, &reply, &unit, account_without_profile, 'c')
+        })
+        .await;
+        let root =
+            realm_root_authority_event_ref(&pool, &head.authority_commit.event.realm_id).await;
+        let grant = invite_grant_request(
+            &pool,
+            &joined,
+            &unit,
+            &root,
+            &late_member,
+            &["ak.message.create"],
+        )
+        .await;
+        uow.commit_event(grant.clone()).await.unwrap();
+        let hidden_reply = realm_event_request_as(
+            &grant,
+            &late_member,
+            arkret_wire::EventKind::MessageCreate,
+            serde_json::json!({"strand_id":strand_id,"track_name":"discussion","reply_to_id":message_id,
             "content":{"kind":"ak.content.text","body":"before my membership floor"}}),
-    );
-    let hidden_reply = source_if_human(&pool, hidden_reply).await;
-    assert_message_write_refused(
-        &uow,
-        &store,
-        &pool,
-        &hidden_reply,
-        Some(coland_storage::ConflictCode::FailedPrecondition),
-    )
-    .await;
-    let mention_member = realm_event_request_as(
-        &grant,
-        &creator,
-        arkret_wire::EventKind::MessageCreate,
-        serde_json::json!({"strand_id":strand_id,"track_name":"discussion",
+        );
+        let hidden_reply = scenario_future(|| source_if_human(&pool, hidden_reply)).await;
+        assert_message_write_refused(
+            &uow,
+            &store,
+            &pool,
+            &hidden_reply,
+            Some(coland_storage::ConflictCode::FailedPrecondition),
+        )
+        .await;
+        let mention_member = realm_event_request_as(
+            &grant,
+            &creator,
+            arkret_wire::EventKind::MessageCreate,
+            serde_json::json!({"strand_id":strand_id,"track_name":"discussion",
             "content":{"kind":"ak.content.text","body":"joined exact account","mentions":[{
                 "kind":"mention","subject_account_id":late_member}]}}),
-    );
-    let mention_member = source_if_human(&pool, mention_member).await;
-    uow.commit_event(mention_member.clone()).await.unwrap();
-    let redaction = realm_event_request_as(
-        &mention_member,
-        &creator,
-        arkret_wire::EventKind::MessageRedact,
-        serde_json::json!({"message_id":message_id}),
-    );
-    let redaction = source_if_human(&pool, redaction).await;
-    uow.commit_event(redaction.clone()).await.unwrap();
-    let refused = realm_event_request_as(
-        &redaction,
-        &creator,
-        arkret_wire::EventKind::MessageCreate,
-        serde_json::json!({"strand_id":strand_id,"track_name":"discussion","reply_to_id":message_id,
+        );
+        let mention_member = source_if_human(&pool, mention_member).await;
+        uow.commit_event(mention_member.clone()).await.unwrap();
+        let redaction = realm_event_request_as(
+            &mention_member,
+            &creator,
+            arkret_wire::EventKind::MessageRedact,
+            serde_json::json!({"message_id":message_id}),
+        );
+        let redaction = source_if_human(&pool, redaction).await;
+        uow.commit_event(redaction.clone()).await.unwrap();
+        let refused = realm_event_request_as(
+            &redaction,
+            &creator,
+            arkret_wire::EventKind::MessageCreate,
+            serde_json::json!({"strand_id":strand_id,"track_name":"discussion","reply_to_id":message_id,
             "content":{"kind":"ak.content.text","body":"reply to unavailable target"}}),
-    );
-    let refused = source_if_human(&pool, refused).await;
-    assert_message_write_refused(
-        &uow,
-        &store,
-        &pool,
-        &refused,
-        Some(coland_storage::ConflictCode::FailedPrecondition),
-    )
-    .await;
+        );
+        let refused = source_if_human(&pool, refused).await;
+        assert_message_write_refused(
+            &uow,
+            &store,
+            &pool,
+            &refused,
+            Some(coland_storage::ConflictCode::FailedPrecondition),
+        )
+        .await;
+    })
 }
 
 fn identity_payload(unit: &OrdinaryRealmBootstrapCommitUnit, name: &str) -> serde_json::Value {
@@ -8942,4 +8955,13 @@ fn seal_request_fact(mut request: EventCommitRequest) -> EventCommitRequest {
     }
     seal_suite_commit(&mut request.authority_commit.commit);
     request
+}
+
+#[inline(never)]
+fn scenario_future<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future,
+{
+    Box::pin(make())
 }

@@ -459,125 +459,140 @@ async fn stage_initial_cas_concurrent_winner_and_noop_revision_are_durable() {
 
 #[tokio::test]
 async fn archive_restore_fsm_and_accepting_time_replay_do_not_diverge() {
-    let database = TestDatabase::lease().await;
-    let pool = database.pool();
-    let discussion = Box::pin(open_discussion(&pool, "strand-lifecycle-fsm")).await;
-    assert_refused(
-        &pool,
-        &discussion.strand_id,
-        Box::pin(ordinary_realm::source_request(
+    archive_restore_scenario().await;
+}
+
+#[inline(never)]
+fn archive_restore_scenario() -> std::pin::Pin<Box<impl std::future::Future<Output = ()>>> {
+    Box::pin(async move {
+        let database = TestDatabase::lease().await;
+        let pool = database.pool();
+        let discussion = scenario_future(|| open_discussion(&pool, "strand-lifecycle-fsm")).await;
+        assert_refused(
             &pool,
-            lifecycle(
-                &discussion.head.authority_commit,
-                &discussion.strand_id,
-                EventKind::StrandRestore,
-                1,
-            ),
-        ))
-        .await,
-        "strand_not_archived",
-    )
-    .await;
-    let mut archive = lifecycle(
-        &discussion.head.authority_commit,
-        &discussion.strand_id,
-        EventKind::StrandArchive,
-        2,
-    );
-    let accepted_at = archive.authority_commit.event.created_at + chrono::Duration::seconds(7);
-    archive.authority_commit.commit.committed_at = accepted_at;
-    archive.authority_commit.commit.signature =
-        ordinary_realm::signature(&ordinary_realm::station(), accepted_at);
-    archive.event.received_at = accepted_at;
-    for projection in &mut archive.projections {
-        projection.received_at = accepted_at;
-    }
-    let archive = Box::pin(ordinary_realm::source_request(&pool, archive)).await;
-    let uow = PgEventCommitUnitOfWork::new(pool.clone());
-    uow.commit_event(archive.clone()).await.unwrap();
-    let archived = current(&pool, &discussion.strand_id).await;
-    assert_eq!(archived.value["state"], "archived");
-    assert_eq!(
-        archived.value["state_changed_at"],
-        arkret_canonical::format_timestamp_canonical(accepted_at)
-    );
-    assert_eq!(
-        archived.value["updated_at"],
-        archived.value["state_changed_at"]
-    );
-    assert_refused(
-        &pool,
-        &discussion.strand_id,
-        Box::pin(ordinary_realm::source_request(
-            &pool,
-            lifecycle(
-                &archive.authority_commit,
-                &discussion.strand_id,
-                EventKind::StrandArchive,
-                1,
-            ),
-        ))
-        .await,
-        "strand_not_active",
-    )
-    .await;
-    assert_refused(
-        &pool,
-        &discussion.strand_id,
-        Box::pin(ordinary_realm::source_request(
-            &pool,
-            stage(
-                &archive.authority_commit,
-                &discussion.strand_id,
-                "done",
-                None,
-                1,
-            ),
-        ))
-        .await,
-        "strand_not_active",
-    )
-    .await;
-    let restore = Box::pin(ordinary_realm::source_request(
-        &pool,
-        lifecycle(
-            &archive.authority_commit,
             &discussion.strand_id,
-            EventKind::StrandRestore,
+            scenario_future(|| {
+                ordinary_realm::source_request(
+                    &pool,
+                    lifecycle(
+                        &discussion.head.authority_commit,
+                        &discussion.strand_id,
+                        EventKind::StrandRestore,
+                        1,
+                    ),
+                )
+            })
+            .await,
+            "strand_not_archived",
+        )
+        .await;
+        let mut archive = lifecycle(
+            &discussion.head.authority_commit,
+            &discussion.strand_id,
+            EventKind::StrandArchive,
             2,
-        ),
-    ))
-    .await;
-    uow.commit_event(restore.clone()).await.unwrap();
-    let restored = current(&pool, &discussion.strand_id).await;
-    assert_eq!(restored.value["state"], "active");
-    assert_eq!(
-        restored.current_commit_id,
-        restore.authority_commit.commit.commit_id.as_str()
-    );
-    let baseline = footprint(&pool).await;
-    let reopened = PgEventCommitUnitOfWork::new(pool.clone());
-    let reader = coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() };
-    for request in [archive, restore] {
-        assert!(
-            !reopened
-                .commit_event(request.clone())
-                .await
-                .unwrap()
-                .event_inserted
+        );
+        let accepted_at = archive.authority_commit.event.created_at + chrono::Duration::seconds(7);
+        archive.authority_commit.commit.committed_at = accepted_at;
+        archive.authority_commit.commit.signature =
+            ordinary_realm::signature(&ordinary_realm::station(), accepted_at);
+        archive.event.received_at = accepted_at;
+        for projection in &mut archive.projections {
+            projection.received_at = accepted_at;
+        }
+        let archive = scenario_future(|| ordinary_realm::source_request(&pool, archive)).await;
+        let uow = PgEventCommitUnitOfWork::new(pool.clone());
+        uow.commit_event(archive.clone()).await.unwrap();
+        let archived = current(&pool, &discussion.strand_id).await;
+        assert_eq!(archived.value["state"], "archived");
+        assert_eq!(
+            archived.value["state_changed_at"],
+            arkret_canonical::format_timestamp_canonical(accepted_at)
         );
         assert_eq!(
-            reader
-                .committed_event(&request.authority_commit.event.event_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .commit,
-            request.authority_commit.commit
+            archived.value["updated_at"],
+            archived.value["state_changed_at"]
         );
-    }
-    assert_eq!(current(&pool, &discussion.strand_id).await, restored);
-    assert_eq!(footprint(&pool).await, baseline);
+        assert_refused(
+            &pool,
+            &discussion.strand_id,
+            scenario_future(|| {
+                ordinary_realm::source_request(
+                    &pool,
+                    lifecycle(
+                        &archive.authority_commit,
+                        &discussion.strand_id,
+                        EventKind::StrandArchive,
+                        1,
+                    ),
+                )
+            })
+            .await,
+            "strand_not_active",
+        )
+        .await;
+        assert_refused(
+            &pool,
+            &discussion.strand_id,
+            scenario_future(|| {
+                ordinary_realm::source_request(
+                    &pool,
+                    stage(
+                        &archive.authority_commit,
+                        &discussion.strand_id,
+                        "done",
+                        None,
+                        1,
+                    ),
+                )
+            })
+            .await,
+            "strand_not_active",
+        )
+        .await;
+        let restore = scenario_future(|| {
+            ordinary_realm::source_request(
+                &pool,
+                lifecycle(
+                    &archive.authority_commit,
+                    &discussion.strand_id,
+                    EventKind::StrandRestore,
+                    2,
+                ),
+            )
+        })
+        .await;
+        uow.commit_event(restore.clone()).await.unwrap();
+        let restored = current(&pool, &discussion.strand_id).await;
+        assert_eq!(restored.value["state"], "active");
+        assert_eq!(
+            restored.current_commit_id,
+            restore.authority_commit.commit.commit_id.as_str()
+        );
+        let baseline = footprint(&pool).await;
+        let reopened = PgEventCommitUnitOfWork::new(pool.clone());
+        let reader = coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() };
+        for request in [archive, restore] {
+            assert!(
+                !reopened
+                    .commit_event(request.clone())
+                    .await
+                    .unwrap()
+                    .event_inserted
+            );
+            assert_eq!(
+                reader
+                    .committed_event(&request.authority_commit.event.event_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .commit,
+                request.authority_commit.commit
+            );
+        }
+        assert_eq!(current(&pool, &discussion.strand_id).await, restored);
+        assert_eq!(footprint(&pool).await, baseline);
+    })
 }
 
 #[tokio::test]
@@ -776,4 +791,13 @@ async fn transition_update_fault_rolls_back_event_commit_and_current_together() 
         );
         previous = request.authority_commit;
     }
+}
+
+#[inline(never)]
+fn scenario_future<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future,
+{
+    Box::pin(make())
 }

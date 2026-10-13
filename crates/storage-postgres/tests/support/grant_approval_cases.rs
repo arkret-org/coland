@@ -165,7 +165,7 @@ async fn message_write_counts(pool: &PgPool, realm: &arkret_wire::RealmId) -> Ve
 async fn message_create_consumes_two_layers_atomically_and_preserves_nonce_on_failure() {
     let db = TestDatabase::lease().await;
     let pool = db.pool();
-    let setup = Box::pin(prepare_grant_setup(&pool)).await;
+    let setup = scenario_future(|| prepare_grant_setup(&pool)).await;
     Box::pin(message_create_approval_transaction(pool, setup)).await;
 }
 
@@ -315,44 +315,48 @@ async fn message_create_approval_transaction(pool: PgPool, setup: GrantSetup) {
 }
 
 async fn prepare_grant_setup(pool: &PgPool) -> GrantSetup {
-    let opened = Box::pin(open_discussion(&pool, "grant-approval-roster")).await;
+    let opened = scenario_future(|| open_discussion(&pool, "grant-approval-roster")).await;
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let mut head = opened.head.authority_commit.clone();
     let realm = head.event.realm_id.clone();
     let actor = head.event.actor_id.clone();
     let at = head.commit.committed_at;
-    let board = Box::pin(ordinary_realm::source_request(
-        &pool,
-        next_request(
-            &head,
-            arkret_wire::EventKind::SpaceCreate,
-            &founder(),
-            space_payload(&realm, &actor, at, "board", "Grant review", None, json!({})),
-            at,
-        ),
-    ))
+    let board = scenario_future(|| {
+        ordinary_realm::source_request(
+            &pool,
+            next_request(
+                &head,
+                arkret_wire::EventKind::SpaceCreate,
+                &founder(),
+                space_payload(&realm, &actor, at, "board", "Grant review", None, json!({})),
+                at,
+            ),
+        )
+    })
     .await;
     let board_id = arkret_wire::SpaceId::from_event_id(&board.authority_commit.event.event_id);
     uow.commit_event(board.clone()).await.unwrap();
     head = board.authority_commit;
-    let list = Box::pin(ordinary_realm::source_request(
-        &pool,
-        next_request(
-            &head,
-            arkret_wire::EventKind::SpaceCreate,
-            &founder(),
-            space_payload(
-                &realm,
-                &actor,
+    let list = scenario_future(|| {
+        ordinary_realm::source_request(
+            &pool,
+            next_request(
+                &head,
+                arkret_wire::EventKind::SpaceCreate,
+                &founder(),
+                space_payload(
+                    &realm,
+                    &actor,
+                    at,
+                    "list",
+                    "Destination",
+                    Some(&board_id),
+                    json!({}),
+                ),
                 at,
-                "list",
-                "Destination",
-                Some(&board_id),
-                json!({}),
             ),
-            at,
-        ),
-    ))
+        )
+    })
     .await;
     let list_id = arkret_wire::SpaceId::from_event_id(&list.authority_commit.event.event_id);
     uow.commit_event(list.clone()).await.unwrap();
@@ -360,12 +364,10 @@ async fn prepare_grant_setup(pool: &PgPool) -> GrantSetup {
     let target = arkret_wire::WireResourceSelector::strand(realm.clone(), opened.strand_id.clone());
     let mut roster = Vec::new();
     for seed in [81, 82] {
-        Box::pin(ordinary_realm::human_profile::admit(
-            &pool,
-            &ordinary_realm::station(),
-            &approval_account_label(seed),
-        ))
-        .await;
+        let station = ordinary_realm::station();
+        let account_label = approval_account_label(seed);
+        scenario_future(|| ordinary_realm::human_profile::admit(&pool, &station, &account_label))
+            .await;
         let (approver, ..) = approver(seed, &head.expected_authority.service_id);
         roster.push(approver.signing_principal_id().clone());
         let mut conn = pool.get().await.unwrap();
@@ -373,7 +375,7 @@ async fn prepare_grant_setup(pool: &PgPool) -> GrantSetup {
             .bind::<Text,_>(realm.as_str()).bind::<Text,_>(approver.to_string()).bind::<Text,_>(head.commit.commit_id.as_str())
             .bind::<BigInt,_>(head.commit.stream_position as i64).bind::<diesel::sql_types::Timestamptz,_>(at).execute(&mut conn).await.unwrap();
         drop(conn);
-        let grant = Box::pin(ordinary_realm::source_request(&pool, next_request(
+        let grant = scenario_future(|| ordinary_realm::source_request(&pool, next_request(
             &head,
             arkret_wire::EventKind::CapabilityGrant,
             &founder(),
@@ -386,7 +388,7 @@ async fn prepare_grant_setup(pool: &PgPool) -> GrantSetup {
         uow.commit_event(grant.clone()).await.unwrap();
         head = grant.authority_commit;
     }
-    let requirement = Box::pin(ordinary_realm::source_request(&pool, next_request(
+    let requirement = scenario_future(|| ordinary_realm::source_request(&pool, next_request(
         &head,
         arkret_wire::EventKind::CapabilityGrant,
         &founder(),
@@ -410,24 +412,26 @@ async fn prepare_grant_setup(pool: &PgPool) -> GrantSetup {
         ("disabled_review", false, 99, realm.to_string()),
         ("destination_review", true, 1, list_id.to_string()),
     ] {
-        let config = Box::pin(ordinary_realm::source_request(
-            &pool,
-            next_request(
-                &head,
-                arkret_wire::EventKind::PolicyAction,
-                &founder(),
-                json!({
+        let config = scenario_future(|| {
+            ordinary_realm::source_request(
+                &pool,
+                next_request(
+                    &head,
+                    arkret_wire::EventKind::PolicyAction,
+                    &founder(),
+                    json!({
             "action_id":id,"value":{"action":"ak.strand.move","approval_required":required,
                 "approval_quorum":quorum,"policy_scope":scope}}),
-                at,
-            ),
-        ))
+                    at,
+                ),
+            )
+        })
         .await;
         uow.commit_event(config.clone()).await.unwrap();
         head = config.authority_commit;
     }
     let command_at = at + chrono::TimeDelta::seconds(120);
-    let command = Box::pin(ordinary_realm::source_request(&pool, next_request(
+    let command = scenario_future(|| ordinary_realm::source_request(&pool, next_request(
         &head,
         arkret_wire::EventKind::StrandMove,
         &founder(),
@@ -446,72 +450,103 @@ async fn prepare_grant_setup(pool: &PgPool) -> GrantSetup {
 
 #[tokio::test]
 async fn grant_approval_roster_does_not_use_received_votes_as_the_threshold_denominator() {
-    let db = TestDatabase::lease().await;
-    let pool = db.pool();
-    let setup = Box::pin(prepare_grant_setup(&pool)).await;
-    let opened = &setup.opened;
-    let head = &setup.head;
-    let board_id = setup.board_id.clone();
-    let list_id = setup.list_id.clone();
-    let grant_id = setup.grant_id.clone();
-    let command = setup.command.clone();
-    let realm = head.event.realm_id.clone();
-    let at = opened.head.authority_commit.commit.committed_at;
-    let command_at = at + chrono::TimeDelta::seconds(120);
-    let uow = PgEventCommitUnitOfWork::new(pool.clone());
-    let before = (
-        count(&pool, &realm, "canonical_events").await,
-        count(&pool, &realm, "realm_commits").await,
-    );
-    for (seeds, governance) in [(vec![81], false), (vec![81, 82], true)] {
-        let failure = uow
-            .commit_event_batch(batch(
-                command.clone(),
-                proofs(&command, &grant_id, &seeds, governance),
-            ))
-            .await
-            .unwrap_err();
-        assert_eq!(
-            failure.conflict_code(),
-            Some(ConflictCode::ApprovalRequired),
-            "unexpected grant-vote failure: {failure:?}"
+    grant_approval_roster_scenario().await;
+}
+
+#[inline(never)]
+fn grant_approval_roster_scenario() -> std::pin::Pin<Box<impl std::future::Future<Output = ()>>> {
+    Box::pin(async move {
+        let db = TestDatabase::lease().await;
+        let pool = db.pool();
+        let setup = scenario_future(|| prepare_grant_setup(&pool)).await;
+        let opened = &setup.opened;
+        let head = &setup.head;
+        let board_id = setup.board_id.clone();
+        let list_id = setup.list_id.clone();
+        let grant_id = setup.grant_id.clone();
+        let command = setup.command.clone();
+        let realm = head.event.realm_id.clone();
+        let at = opened.head.authority_commit.commit.committed_at;
+        let command_at = at + chrono::TimeDelta::seconds(120);
+        let uow = PgEventCommitUnitOfWork::new(pool.clone());
+        let before = (
+            count(&pool, &realm, "canonical_events").await,
+            count(&pool, &realm, "realm_commits").await,
         );
-        assert_eq!(
-            before,
-            (
-                count(&pool, &realm, "canonical_events").await,
-                count(&pool, &realm, "realm_commits").await
-            )
-        );
-        assert_eq!(
-            count(&pool, &realm, "event_approval_private_audit").await,
-            0
-        );
-        assert!(!failure.to_string().contains("policy_id"));
-        assert!(!failure.to_string().contains("action_id"));
-    }
-    // These signatures are inside the timeout but precede respectively issued_at
-    // and the temporal not_before. Neither failure consumes their nonces.
-    let early = Box::pin(ordinary_realm::source_request(&pool, next_request(
+        for (seeds, governance) in [(vec![81], false), (vec![81, 82], true)] {
+            let failure = uow
+                .commit_event_batch(batch(
+                    command.clone(),
+                    proofs(&command, &grant_id, &seeds, governance),
+                ))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                failure.conflict_code(),
+                Some(ConflictCode::ApprovalRequired),
+                "unexpected grant-vote failure: {failure:?}"
+            );
+            assert_eq!(
+                before,
+                (
+                    count(&pool, &realm, "canonical_events").await,
+                    count(&pool, &realm, "realm_commits").await
+                )
+            );
+            assert_eq!(
+                count(&pool, &realm, "event_approval_private_audit").await,
+                0
+            );
+            assert!(!failure.to_string().contains("policy_id"));
+            assert!(!failure.to_string().contains("action_id"));
+        }
+        // These signatures are inside the timeout but precede respectively issued_at
+        // and the temporal not_before. Neither failure consumes their nonces.
+        let early = scenario_future(|| ordinary_realm::source_request(&pool, next_request(
         &head,
         arkret_wire::EventKind::StrandMove,
         &founder(),
         json!({"board_space_id":board_id,"strand_id":opened.strand_id,"target_space_id":list_id,"rank":"a"}),
         at + chrono::TimeDelta::seconds(30),
     ))).await;
-    for age in [
-        chrono::TimeDelta::seconds(31),
-        chrono::TimeDelta::seconds(25),
-    ] {
-        let proof = signed_age(proofs(&early, &grant_id, &[81, 82], false), age);
-        let failure = uow
-            .commit_event_batch(batch(early.clone(), proof))
-            .await
-            .unwrap_err();
+        for age in [
+            chrono::TimeDelta::seconds(31),
+            chrono::TimeDelta::seconds(25),
+        ] {
+            let proof = signed_age(proofs(&early, &grant_id, &[81, 82], false), age);
+            let failure = uow
+                .commit_event_batch(batch(early.clone(), proof))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                failure.conflict_code(),
+                Some(ConflictCode::ApprovalRequired),
+                "{failure:?}"
+            );
+            assert_eq!(
+                before,
+                (
+                    count(&pool, &realm, "canonical_events").await,
+                    count(&pool, &realm, "realm_commits").await
+                )
+            );
+            assert_eq!(
+                count(&pool, &realm, "event_approval_private_audit").await,
+                0
+            );
+        }
+        // Two genuine signatures older than the grant's signed-time deadline do not
+        // consume either nonce. The same nonces can then bind fresh valid evidence.
+        let expired = signed_age(
+            proofs(&command, &grant_id, &[81, 82], false),
+            chrono::TimeDelta::seconds(61),
+        );
         assert_eq!(
-            failure.conflict_code(),
-            Some(ConflictCode::ApprovalRequired),
-            "{failure:?}"
+            uow.commit_event_batch(batch(command.clone(), expired))
+                .await
+                .unwrap_err()
+                .conflict_code(),
+            Some(ConflictCode::ApprovalRequired)
         );
         assert_eq!(
             before,
@@ -524,54 +559,29 @@ async fn grant_approval_roster_does_not_use_received_votes_as_the_threshold_deno
             count(&pool, &realm, "event_approval_private_audit").await,
             0
         );
-    }
-    // Two genuine signatures older than the grant's signed-time deadline do not
-    // consume either nonce. The same nonces can then bind fresh valid evidence.
-    let expired = signed_age(
-        proofs(&command, &grant_id, &[81, 82], false),
-        chrono::TimeDelta::seconds(61),
-    );
-    assert_eq!(
-        uow.commit_event_batch(batch(command.clone(), expired))
+        let proof = signed_age(
+            proofs(&command, &grant_id, &[81, 82], false),
+            chrono::TimeDelta::seconds(60),
+        );
+        uow.commit_event_batch(batch(command.clone(), proof.clone()))
             .await
-            .unwrap_err()
-            .conflict_code(),
-        Some(ConflictCode::ApprovalRequired)
-    );
-    assert_eq!(
-        before,
-        (
-            count(&pool, &realm, "canonical_events").await,
-            count(&pool, &realm, "realm_commits").await
-        )
-    );
-    assert_eq!(
-        count(&pool, &realm, "event_approval_private_audit").await,
-        0
-    );
-    let proof = signed_age(
-        proofs(&command, &grant_id, &[81, 82], false),
-        chrono::TimeDelta::seconds(60),
-    );
-    uow.commit_event_batch(batch(command.clone(), proof.clone()))
-        .await
-        .unwrap();
-    assert_eq!(
-        count(&pool, &realm, "event_approval_private_audit").await,
-        2
-    );
-    uow.commit_event_batch(batch(command.clone(), proof))
-        .await
-        .unwrap();
-    assert_eq!(
-        count(&pool, &realm, "event_approval_private_audit").await,
-        2
-    );
-    assert_eq!(
-        position(&pool, &board_id, &opened.strand_id).await.value,
-        json!({"list_space_id":list_id,"rank":"a"})
-    );
-    let reused = Box::pin(ordinary_realm::source_request(&pool, next_request(
+            .unwrap();
+        assert_eq!(
+            count(&pool, &realm, "event_approval_private_audit").await,
+            2
+        );
+        uow.commit_event_batch(batch(command.clone(), proof))
+            .await
+            .unwrap();
+        assert_eq!(
+            count(&pool, &realm, "event_approval_private_audit").await,
+            2
+        );
+        assert_eq!(
+            position(&pool, &board_id, &opened.strand_id).await.value,
+            json!({"list_space_id":list_id,"rank":"a"})
+        );
+        let reused = scenario_future(|| ordinary_realm::source_request(&pool, next_request(
         &command.authority_commit,
         arkret_wire::EventKind::StrandMove,
         &founder(),
@@ -579,31 +589,41 @@ async fn grant_approval_roster_does_not_use_received_votes_as_the_threshold_deno
             "expected_position":{"list_space_id":list_id,"rank":"a"}}),
         command_at,
     ))).await;
-    let before = (
-        count(&pool, &realm, "canonical_events").await,
-        count(&pool, &realm, "realm_commits").await,
-    );
-    let proof = proofs(&reused, &grant_id, &[81, 82], false);
-    assert_eq!(
-        uow.commit_event_batch(batch(reused, proof))
-            .await
-            .unwrap_err()
-            .conflict_code(),
-        Some(ConflictCode::ApprovalNonceReused)
-    );
-    assert_eq!(
-        before,
-        (
+        let before = (
             count(&pool, &realm, "canonical_events").await,
-            count(&pool, &realm, "realm_commits").await
-        )
-    );
-    assert_eq!(
-        count(&pool, &realm, "event_approval_private_audit").await,
-        2
-    );
-    assert_eq!(
-        position(&pool, &board_id, &opened.strand_id).await.value,
-        json!({"list_space_id":list_id,"rank":"a"})
-    );
+            count(&pool, &realm, "realm_commits").await,
+        );
+        let proof = proofs(&reused, &grant_id, &[81, 82], false);
+        assert_eq!(
+            uow.commit_event_batch(batch(reused, proof))
+                .await
+                .unwrap_err()
+                .conflict_code(),
+            Some(ConflictCode::ApprovalNonceReused)
+        );
+        assert_eq!(
+            before,
+            (
+                count(&pool, &realm, "canonical_events").await,
+                count(&pool, &realm, "realm_commits").await
+            )
+        );
+        assert_eq!(
+            count(&pool, &realm, "event_approval_private_audit").await,
+            2
+        );
+        assert_eq!(
+            position(&pool, &board_id, &opened.strand_id).await.value,
+            json!({"list_space_id":list_id,"rank":"a"})
+        );
+    })
+}
+
+#[inline(never)]
+fn scenario_future<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future,
+{
+    Box::pin(make())
 }

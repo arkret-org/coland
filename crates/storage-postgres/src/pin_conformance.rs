@@ -38,28 +38,32 @@ pub async fn run_pin_admission_fixture() -> Vec<(&'static str, usize)> {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
-    let discussion = Box::pin(open_discussion(&pool, "pin-admission")).await;
+    let discussion = crate::boxed_future(|| open_discussion(&pool, "pin-admission")).await;
     let realm = discussion.realm_id();
     let at = discussion.committed_at();
-    let message = Box::pin(ordinary_realm::source_request(
-        &pool,
-        discussion.message_after(&discussion.head.authority_commit, "pin this", at),
-    ))
+    let message = crate::boxed_future(|| {
+        ordinary_realm::source_request(
+            &pool,
+            discussion.message_after(&discussion.head.authority_commit, "pin this", at),
+        )
+    })
     .await;
     uow.commit_event(message.clone()).await.unwrap();
     let target = arkret_wire::MessageId::from_event_id(&message.authority_commit.event.event_id);
     let home = json!({"kind":"strand","id":discussion.strand_id});
     let add = json!({"pin_scope":home,"target_ref":target,"rank":"a0"});
-    let no_grant = Box::pin(ordinary_realm::source_request(
-        &pool,
-        next_request(
-            &message.authority_commit,
-            arkret_wire::EventKind::PinAdd,
-            &founder(),
-            add.clone(),
-            at,
-        ),
-    ))
+    let no_grant = crate::boxed_future(|| {
+        ordinary_realm::source_request(
+            &pool,
+            next_request(
+                &message.authority_commit,
+                arkret_wire::EventKind::PinAdd,
+                &founder(),
+                add.clone(),
+                at,
+            ),
+        )
+    })
     .await;
     let baseline = count(&pool, "realm_commits", &realm).await;
     assert!(
@@ -79,7 +83,7 @@ pub async fn run_pin_admission_fixture() -> Vec<(&'static str, usize)> {
             .as_i64()
             .unwrap()
     );
-    let grant = Box::pin(ordinary_realm::source_request(&pool, next_request(
+    let grant = crate::boxed_future(|| ordinary_realm::source_request(&pool, next_request(
         &message.authority_commit,
         arkret_wire::EventKind::CapabilityGrant,
         &founder(),
@@ -92,16 +96,18 @@ pub async fn run_pin_admission_fixture() -> Vec<(&'static str, usize)> {
         at,
     ))).await;
     uow.commit_event(grant.clone()).await.unwrap();
-    let reorder = Box::pin(ordinary_realm::source_request(
-        &pool,
-        next_request(
-            &grant.authority_commit,
-            arkret_wire::EventKind::PinReorder,
-            &founder(),
-            json!({"pin_scope":home,"target_ref":target,"rank":"b0"}),
-            at,
-        ),
-    ))
+    let reorder = crate::boxed_future(|| {
+        ordinary_realm::source_request(
+            &pool,
+            next_request(
+                &grant.authority_commit,
+                arkret_wire::EventKind::PinReorder,
+                &founder(),
+                json!({"pin_scope":home,"target_ref":target,"rank":"b0"}),
+                at,
+            ),
+        )
+    })
     .await;
     let baseline = count(&pool, "realm_commits", &realm).await;
     assert!(
@@ -121,28 +127,32 @@ pub async fn run_pin_admission_fixture() -> Vec<(&'static str, usize)> {
             .as_i64()
             .unwrap()
     );
-    let add = Box::pin(ordinary_realm::source_request(
-        &pool,
-        next_request(
-            &grant.authority_commit,
-            arkret_wire::EventKind::PinAdd,
-            &founder(),
-            add,
-            at,
-        ),
-    ))
+    let add = crate::boxed_future(|| {
+        ordinary_realm::source_request(
+            &pool,
+            next_request(
+                &grant.authority_commit,
+                arkret_wire::EventKind::PinAdd,
+                &founder(),
+                add,
+                at,
+            ),
+        )
+    })
     .await;
     uow.commit_event(add.clone()).await.unwrap();
-    let stale = Box::pin(ordinary_realm::source_request(
-        &pool,
-        next_request(
-            &add.authority_commit,
-            arkret_wire::EventKind::PinReorder,
-            &founder(),
-            json!({"pin_scope":home,"target_ref":target,"rank":"b0","expected_rank":"wrong"}),
-            at,
-        ),
-    ))
+    let stale = crate::boxed_future(|| {
+        ordinary_realm::source_request(
+            &pool,
+            next_request(
+                &add.authority_commit,
+                arkret_wire::EventKind::PinReorder,
+                &founder(),
+                json!({"pin_scope":home,"target_ref":target,"rank":"b0","expected_rank":"wrong"}),
+                at,
+            ),
+        )
+    })
     .await;
     let baseline = count(&pool, "realm_commits", &realm).await;
     assert!(
@@ -158,40 +168,46 @@ pub async fn run_pin_admission_fixture() -> Vec<(&'static str, usize)> {
             .as_i64()
             .unwrap()
     );
-    let reorder = Box::pin(ordinary_realm::source_request(
-        &pool,
-        next_request(
-            &add.authority_commit,
-            arkret_wire::EventKind::PinReorder,
-            &founder(),
-            json!({"pin_scope":home,"target_ref":target,"rank":"b0","expected_rank":"a0"}),
-            at,
-        ),
-    ))
+    let reorder = crate::boxed_future(|| {
+        ordinary_realm::source_request(
+            &pool,
+            next_request(
+                &add.authority_commit,
+                arkret_wire::EventKind::PinReorder,
+                &founder(),
+                json!({"pin_scope":home,"target_ref":target,"rank":"b0","expected_rank":"a0"}),
+                at,
+            ),
+        )
+    })
     .await;
     uow.commit_event(reorder.clone()).await.unwrap();
-    let remove = Box::pin(ordinary_realm::source_request(
-        &pool,
-        next_request(
-            &reorder.authority_commit,
-            arkret_wire::EventKind::PinRemove,
-            &founder(),
-            json!({"pin_scope":home,"target_ref":target,"expected_rank":"b0"}),
-            at,
-        ),
-    ))
+    let remove = crate::boxed_future(|| {
+        ordinary_realm::source_request(
+            &pool,
+            next_request(
+                &reorder.authority_commit,
+                arkret_wire::EventKind::PinRemove,
+                &founder(),
+                json!({"pin_scope":home,"target_ref":target,"expected_rank":"b0"}),
+                at,
+            ),
+        )
+    })
     .await;
     uow.commit_event(remove.clone()).await.unwrap();
-    let resurrect = Box::pin(ordinary_realm::source_request(
-        &pool,
-        next_request(
-            &remove.authority_commit,
-            arkret_wire::EventKind::PinReorder,
-            &founder(),
-            json!({"pin_scope":home,"target_ref":target,"rank":"c0"}),
-            at,
-        ),
-    ))
+    let resurrect = crate::boxed_future(|| {
+        ordinary_realm::source_request(
+            &pool,
+            next_request(
+                &remove.authority_commit,
+                arkret_wire::EventKind::PinReorder,
+                &founder(),
+                json!({"pin_scope":home,"target_ref":target,"rank":"c0"}),
+                at,
+            ),
+        )
+    })
     .await;
     let baseline = count(&pool, "realm_commits", &realm).await;
     assert!(
@@ -237,10 +253,10 @@ pub async fn run_pin_admission_fixture() -> Vec<(&'static str, usize)> {
             .as_u64()
             .unwrap()
     );
-    let other = Box::pin(open_discussion(&pool, "foreign-pin-target")).await;
+    let other = crate::boxed_future(|| open_discussion(&pool, "foreign-pin-target")).await;
     let foreign = other.message_after(&other.head.authority_commit, "private foreign message", at);
     uow.commit_event(foreign.clone()).await.unwrap();
-    let forbidden = Box::pin(ordinary_realm::source_request(&pool, next_request(
+    let forbidden = crate::boxed_future(|| ordinary_realm::source_request(&pool, next_request(
         &remove.authority_commit,
         arkret_wire::EventKind::PinAdd,
         &founder(),

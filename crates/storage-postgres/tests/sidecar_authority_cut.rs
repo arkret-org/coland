@@ -3163,185 +3163,221 @@ fn boxed_ordinary_member_owned_agent_join() -> Pin<Box<dyn Future<Output = ()> +
     Box::pin(ordinary_member_owned_agent_join_scenario())
 }
 
-async fn ordinary_member_owned_agent_join_scenario() {
-    use diesel::sql_types::{Bool, Text};
-    use diesel_async::RunQueryDsl;
+#[inline(never)]
+fn ordinary_member_owned_agent_join_scenario() -> Pin<Box<impl Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        use diesel::sql_types::{Bool, Text};
+        use diesel_async::RunQueryDsl;
 
-    let database = TestDatabase::lease().await;
-    let pool = database.pool();
-    let station = historical_control_source::HistoricalControlStation::new(
-        "sidecar-native-control",
-        [83; 32],
-    );
-    let principal = accepted_controller(&pool, station.did.clone()).await;
-    let controller = &principal.history.account;
-    let founder = ordinary_realm::human_profile::admit_for_station_did(
-        &pool,
-        station.did.clone(),
-        "agent-self-add-founder",
-    )
-    .await;
-    let realm = ordinary_realm::bootstrap_unit_with_history_for_account(
-        "ordinary-member-agent-self-add",
-        "public",
-        "since_join",
-        &founder,
-        &station.did,
-    );
-    let realm = ordinary_realm::source_bootstrap(&pool, realm).await;
-    PgAuthorityCommitStore { pool: pool.clone() }
-        .admit_ordinary_realm_bootstrap_unit(&realm, realm.transactions[0].commit.committed_at)
-        .await
-        .unwrap();
-    let parent = realm.transactions.last().unwrap();
-    let member_join = ordinary_realm::next_request_for_actor(
-        parent,
-        EventKind::MemberState,
-        arkret_wire::ActorId::account(controller.clone()),
-        serde_json::json!({"member_id":arkret_wire::ActorId::account(controller.clone()),"membership":"join"}),
-        parent.commit.committed_at + chrono::TimeDelta::milliseconds(1),
-    );
-    let member_join = ordinary_realm::source_request(&pool, member_join).await;
-    let uow = PgEventCommitUnitOfWork::new(pool.clone());
-    uow.commit_event(member_join.clone()).await.unwrap();
-    let outsider = ordinary_realm::human_profile::admit_for_station_did(
-        &pool,
-        station.did.clone(),
-        "agent-self-add-human-target",
-    )
-    .await;
-    let human_add = ordinary_realm::next_request_for_actor(
-        &member_join.authority_commit,
-        EventKind::MemberState,
-        arkret_wire::ActorId::account(controller.clone()),
-        serde_json::json!({"member_id":arkret_wire::ActorId::account(outsider.clone()),"membership":"join"}),
-        member_join.authority_commit.commit.committed_at + chrono::TimeDelta::milliseconds(1),
-    );
-    let human_add = ordinary_realm::source_request(&pool, human_add).await;
-    let error = uow.commit_event(human_add).await.unwrap_err();
-    assert!(
-        error.to_string().contains("only the target itself"),
-        "{error}"
-    );
-    let (agent, genesis, _) = provision_owned_agent(&pool, &principal).await;
-    let agent_join = ordinary_realm::next_request_for_actor(
-        &member_join.authority_commit,
-        EventKind::MemberState,
-        arkret_wire::ActorId::account(controller.clone()),
-        serde_json::json!({"member_id":arkret_wire::ActorId::account(agent.clone()),"membership":"join",
+        let database = TestDatabase::lease().await;
+        let pool = database.pool();
+        let station = historical_control_source::HistoricalControlStation::new(
+            "sidecar-native-control",
+            [83; 32],
+        );
+        let principal =
+            scenario_future(|| async { accepted_controller(&pool, station.did.clone()).await })
+                .await;
+        let controller = &principal.history.account;
+        let founder = scenario_future(|| async {
+            ordinary_realm::human_profile::admit_for_station_did(
+                &pool,
+                station.did.clone(),
+                "agent-self-add-founder",
+            )
+            .await
+        })
+        .await;
+        let realm = ordinary_realm::bootstrap_unit_with_history_for_account(
+            "ordinary-member-agent-self-add",
+            "public",
+            "since_join",
+            &founder,
+            &station.did,
+        );
+        let realm =
+            scenario_future(|| async { ordinary_realm::source_bootstrap(&pool, realm).await })
+                .await;
+        PgAuthorityCommitStore { pool: pool.clone() }
+            .admit_ordinary_realm_bootstrap_unit(&realm, realm.transactions[0].commit.committed_at)
+            .await
+            .unwrap();
+        let parent = realm.transactions.last().unwrap();
+        let member_join = ordinary_realm::next_request_for_actor(
+            parent,
+            EventKind::MemberState,
+            arkret_wire::ActorId::account(controller.clone()),
+            serde_json::json!({"member_id":arkret_wire::ActorId::account(controller.clone()),"membership":"join"}),
+            parent.commit.committed_at + chrono::TimeDelta::milliseconds(1),
+        );
+        let member_join =
+            scenario_future(|| async { ordinary_realm::source_request(&pool, member_join).await })
+                .await;
+        let uow = PgEventCommitUnitOfWork::new(pool.clone());
+        uow.commit_event(member_join.clone()).await.unwrap();
+        let outsider = scenario_future(|| async {
+            ordinary_realm::human_profile::admit_for_station_did(
+                &pool,
+                station.did.clone(),
+                "agent-self-add-human-target",
+            )
+            .await
+        })
+        .await;
+        let human_add = ordinary_realm::next_request_for_actor(
+            &member_join.authority_commit,
+            EventKind::MemberState,
+            arkret_wire::ActorId::account(controller.clone()),
+            serde_json::json!({"member_id":arkret_wire::ActorId::account(outsider.clone()),"membership":"join"}),
+            member_join.authority_commit.commit.committed_at + chrono::TimeDelta::milliseconds(1),
+        );
+        let human_add =
+            scenario_future(|| async { ordinary_realm::source_request(&pool, human_add).await })
+                .await;
+        let error = uow.commit_event(human_add).await.unwrap_err();
+        assert!(
+            error.to_string().contains("only the target itself"),
+            "{error}"
+        );
+        let (agent, genesis, _) =
+            scenario_future(|| async { provision_owned_agent(&pool, &principal).await }).await;
+        let agent_join = ordinary_realm::next_request_for_actor(
+            &member_join.authority_commit,
+            EventKind::MemberState,
+            arkret_wire::ActorId::account(controller.clone()),
+            serde_json::json!({"member_id":arkret_wire::ActorId::account(agent.clone()),"membership":"join",
             "agent_controller_binding":{"controller_account_id":controller,
             "controller_membership_generation_ref":member_join.authority_commit.event.event_id}}),
-        genesis
-            .commit
-            .committed_at
-            .max(member_join.authority_commit.commit.committed_at)
-            + chrono::TimeDelta::milliseconds(1),
-    );
-    let agent_join = ordinary_realm::source_request(&pool, agent_join).await;
-    uow.commit_event(agent_join.clone()).await.unwrap();
+            genesis
+                .commit
+                .committed_at
+                .max(member_join.authority_commit.commit.committed_at)
+                + chrono::TimeDelta::milliseconds(1),
+        );
+        let agent_join =
+            scenario_future(|| async { ordinary_realm::source_request(&pool, agent_join).await })
+                .await;
+        uow.commit_event(agent_join.clone()).await.unwrap();
 
-    // Exercise admitted Policy writes, not imported management projections.
-    // The all-target join rule is the default for new Agents only; an explicit
-    // higher-priority controller exception must not relax another operation.
-    let realm_id = &agent_join.authority_commit.event.realm_id;
-    let policy_id = "ak:policy:0198ff00-0000-7000-8000-000000000001";
-    let make_policy = |previous: &coland_storage::AuthorityCommitTransaction,
-                       revision: Option<arkret_wire::CurrentRevision>,
-                       exception: bool| {
-        let mut rules = vec![serde_json::json!({
-            "rule_id":"new_agents", "kind":"agent", "effect":"deny",
-            "agent_target":{"kind":"all"}, "agent_operations":["join"]
-        })];
-        if exception {
-            rules.push(serde_json::json!({
+        // Exercise admitted Policy writes, not imported management projections.
+        // The all-target join rule is the default for new Agents only; an explicit
+        // higher-priority controller exception must not relax another operation.
+        let realm_id = &agent_join.authority_commit.event.realm_id;
+        let policy_id = "ak:policy:0198ff00-0000-7000-8000-000000000001";
+        let make_policy = |previous: &coland_storage::AuthorityCommitTransaction,
+                           revision: Option<arkret_wire::CurrentRevision>,
+                           exception: bool| {
+            let mut rules = vec![serde_json::json!({
+                "rule_id":"new_agents", "kind":"agent", "effect":"deny",
+                "agent_target":{"kind":"all"}, "agent_operations":["join"]
+            })];
+            if exception {
+                rules.push(serde_json::json!({
                 "rule_id":"controller_exception", "kind":"agent", "priority":10,
                 "effect":"allow", "agent_target":{"kind":"controller", "controller_account_id":controller},
                 "agent_operations":["join"]
             }));
-        }
-        ordinary_realm::next_request_for_actor(
-            previous,
-            EventKind::PolicySet,
-            arkret_wire::ActorId::account(founder.clone()),
-            serde_json::json!({"policy_id":policy_id, "expected_revision":revision,
+            }
+            ordinary_realm::next_request_for_actor(
+                previous,
+                EventKind::PolicySet,
+                arkret_wire::ActorId::account(founder.clone()),
+                serde_json::json!({"policy_id":policy_id, "expected_revision":revision,
                 "value":{"schema":"ak.schema.policy.v1", "id":policy_id, "realm_id":realm_id,
                     "policy_kind":"agent", "rules":rules, "default_effect":"allow",
                     "created_by":arkret_wire::ActorId::account(founder.clone()),
                     "created_at":previous.commit.committed_at}}),
-            previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
-        )
-    };
-    let ban = ordinary_realm::source_request(
-        &pool,
-        make_policy(&agent_join.authority_commit, None, false),
-    )
-    .await;
-    let before_ban = agent_mode_footprint(&pool, realm_id).await;
-    uow.commit_event(ban.clone()).await.unwrap();
-    let revision = arkret_wire::CurrentRevision {
-        commit_id: ban.authority_commit.commit.commit_id.clone(),
-        stream_position: ban.authority_commit.commit.stream_position,
-    };
-    // Accepted retries retain their exact outcome rather than repeating CAS.
-    let before_retry = agent_mode_footprint(&pool, realm_id).await;
-    assert_eq!(before_retry["membership"], before_ban["membership"]);
-    uow.commit_event(ban.clone()).await.unwrap();
-    assert_eq!(agent_mode_footprint(&pool, realm_id).await, before_retry);
-    uow.commit_event(agent_join.clone()).await.unwrap();
-    assert_eq!(agent_mode_footprint(&pool, realm_id).await, before_retry);
-    let removal = ordinary_realm::next_request_for_actor(
-        &ban.authority_commit,
-        EventKind::MemberState,
-        arkret_wire::ActorId::account(founder.clone()),
-        serde_json::json!({"member_id":arkret_wire::ActorId::account(agent.clone()),"membership":"leave"}),
-        ban.authority_commit.commit.committed_at + chrono::TimeDelta::milliseconds(1),
-    );
-    let removal = ordinary_realm::source_request(&pool, removal).await;
-    uow.commit_event(removal.clone()).await.unwrap();
-    let make_rejoin = |previous: &coland_storage::AuthorityCommitTransaction| {
-        ordinary_realm::next_request_for_actor(
-            previous,
+                previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
+            )
+        };
+        let ban = scenario_future(|| async {
+            ordinary_realm::source_request(
+                &pool,
+                make_policy(&agent_join.authority_commit, None, false),
+            )
+            .await
+        })
+        .await;
+        let before_ban = agent_mode_footprint(&pool, realm_id).await;
+        uow.commit_event(ban.clone()).await.unwrap();
+        let revision = arkret_wire::CurrentRevision {
+            commit_id: ban.authority_commit.commit.commit_id.clone(),
+            stream_position: ban.authority_commit.commit.stream_position,
+        };
+        // Accepted retries retain their exact outcome rather than repeating CAS.
+        let before_retry = agent_mode_footprint(&pool, realm_id).await;
+        assert_eq!(before_retry["membership"], before_ban["membership"]);
+        uow.commit_event(ban.clone()).await.unwrap();
+        assert_eq!(agent_mode_footprint(&pool, realm_id).await, before_retry);
+        uow.commit_event(agent_join.clone()).await.unwrap();
+        assert_eq!(agent_mode_footprint(&pool, realm_id).await, before_retry);
+        let removal = ordinary_realm::next_request_for_actor(
+            &ban.authority_commit,
             EventKind::MemberState,
-            arkret_wire::ActorId::account(controller.clone()),
-            serde_json::json!({"member_id":arkret_wire::ActorId::account(agent.clone()),"membership":"join",
+            arkret_wire::ActorId::account(founder.clone()),
+            serde_json::json!({"member_id":arkret_wire::ActorId::account(agent.clone()),"membership":"leave"}),
+            ban.authority_commit.commit.committed_at + chrono::TimeDelta::milliseconds(1),
+        );
+        let removal =
+            scenario_future(|| async { ordinary_realm::source_request(&pool, removal).await })
+                .await;
+        uow.commit_event(removal.clone()).await.unwrap();
+        let make_rejoin = |previous: &coland_storage::AuthorityCommitTransaction| {
+            ordinary_realm::next_request_for_actor(
+                previous,
+                EventKind::MemberState,
+                arkret_wire::ActorId::account(controller.clone()),
+                serde_json::json!({"member_id":arkret_wire::ActorId::account(agent.clone()),"membership":"join",
                 "agent_controller_binding":{"controller_account_id":controller,
                 "controller_membership_generation_ref":member_join.authority_commit.event.event_id}}),
-            previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
-        )
-    };
-    let rejected =
-        ordinary_realm::source_request(&pool, make_rejoin(&removal.authority_commit)).await;
-    let before_rejection = agent_mode_footprint(&pool, realm_id).await;
-    let error = uow.commit_event(rejected).await.unwrap_err();
-    assert!(error.to_string().contains("forbids joining"), "{error}");
-    assert_eq!(
-        agent_mode_footprint(&pool, realm_id).await,
-        before_rejection
-    );
-    let stale =
-        ordinary_realm::source_request(&pool, make_policy(&removal.authority_commit, None, true))
-            .await;
-    assert!(uow.commit_event(stale).await.is_err());
-    assert_eq!(
-        agent_mode_footprint(&pool, realm_id).await,
-        before_rejection
-    );
-    let exception = ordinary_realm::source_request(
-        &pool,
-        make_policy(&removal.authority_commit, Some(revision), true),
-    )
-    .await;
-    uow.commit_event(exception.clone()).await.unwrap();
-    let rejoin =
-        ordinary_realm::source_request(&pool, make_rejoin(&exception.authority_commit)).await;
-    uow.commit_event(rejoin).await.unwrap();
-    #[derive(diesel::QueryableByName)]
-    struct ResultRow {
-        #[diesel(sql_type = Bool)]
-        correct: bool,
-    }
-    let mut conn = pool.get().await.unwrap();
-    let result = diesel::sql_query(
+                previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
+            )
+        };
+        let rejected = scenario_future(|| async {
+            ordinary_realm::source_request(&pool, make_rejoin(&removal.authority_commit)).await
+        })
+        .await;
+        let before_rejection = agent_mode_footprint(&pool, realm_id).await;
+        let error = uow.commit_event(rejected).await.unwrap_err();
+        assert!(error.to_string().contains("forbids joining"), "{error}");
+        assert_eq!(
+            agent_mode_footprint(&pool, realm_id).await,
+            before_rejection
+        );
+        let stale = scenario_future(|| async {
+            ordinary_realm::source_request(
+                &pool,
+                make_policy(&removal.authority_commit, None, true),
+            )
+            .await
+        })
+        .await;
+        assert!(uow.commit_event(stale).await.is_err());
+        assert_eq!(
+            agent_mode_footprint(&pool, realm_id).await,
+            before_rejection
+        );
+        let exception = scenario_future(|| async {
+            ordinary_realm::source_request(
+                &pool,
+                make_policy(&removal.authority_commit, Some(revision), true),
+            )
+            .await
+        })
+        .await;
+        uow.commit_event(exception.clone()).await.unwrap();
+        let rejoin = scenario_future(|| async {
+            ordinary_realm::source_request(&pool, make_rejoin(&exception.authority_commit)).await
+        })
+        .await;
+        uow.commit_event(rejoin).await.unwrap();
+        #[derive(diesel::QueryableByName)]
+        struct ResultRow {
+            #[diesel(sql_type = Bool)]
+            correct: bool,
+        }
+        let mut conn = pool.get().await.unwrap();
+        let result = diesel::sql_query(
         "SELECT EXISTS(SELECT 1 FROM member_state_current_results WHERE realm_id=$1 AND member_id=$2 AND membership='join') \
          AND NOT EXISTS(SELECT 1 FROM member_state_current_results WHERE realm_id=$1 AND member_id=$3) \
          AND NOT EXISTS(SELECT 1 FROM capability_grant_current_results WHERE realm_id=$1) AS correct",
@@ -3352,7 +3388,8 @@ async fn ordinary_member_owned_agent_join_scenario() {
     .get_result::<ResultRow>(&mut *conn)
     .await
     .unwrap();
-    assert!(result.correct);
+        assert!(result.correct);
+    })
 }
 
 /// Storage admission only: accepted controller/Agent units are real; RFC
@@ -3936,7 +3973,10 @@ async fn agent_mode_controller_cas_scenario() -> AgentModeScenario {
         serde_json::json!({"member_id": arkret_wire::ActorId::account(agent.clone()), "membership":"join",
             "agent_controller_binding": {"controller_account_id":controller,
                 "controller_membership_generation_ref":parent.event.event_id}}),
-        key_commit.committed_at + chrono::TimeDelta::milliseconds(1),
+        key_commit
+            .committed_at
+            .max(create.authority_commit.commit.committed_at)
+            + chrono::TimeDelta::milliseconds(1),
     );
     let join = ordinary_realm::source_request(&pool, join).await;
     uow.commit_event(join.clone()).await.unwrap();
@@ -4251,7 +4291,7 @@ async fn agent_publish_policy_scenario<F>(
             let expected = if effect == "deny" {
                 "forbids publishing"
             } else {
-                "unresolved quarantine or review evidence"
+                "approval_required: Agent publishing requires current management review"
             };
             assert!(error.to_string().contains(expected), "{error}");
             assert_eq!(agent_mode_footprint(&pool, realm_id).await, before);
@@ -6284,8 +6324,10 @@ async fn management_review_atomic_join_scenario(
     let pool = database.pool();
     let station =
         historical_control_source::HistoricalControlStation::new("review-atomic-station", [83; 32]);
-    let requester = Box::pin(accepted_controller(&pool, station.did.clone())).await;
-    let approver = Box::pin(accepted_controller(&pool, station.did.clone())).await;
+    let requester =
+        scenario_future(|| async { accepted_controller(&pool, station.did.clone()).await }).await;
+    let approver =
+        scenario_future(|| async { accepted_controller(&pool, station.did.clone()).await }).await;
     let controller = &requester.history.account;
     let administrator = ActorId::account(approver.history.account.clone());
     assert_ne!(
@@ -6299,7 +6341,9 @@ async fn management_review_atomic_join_scenario(
         &approver.history.account,
         &station.did,
     );
-    let bootstrap = Box::pin(ordinary_realm::source_bootstrap(&pool, bootstrap)).await;
+    let bootstrap =
+        scenario_future(|| async { ordinary_realm::source_bootstrap(&pool, bootstrap).await })
+            .await;
     let store = PgAuthorityCommitStore { pool: pool.clone() };
     fixture_bootstrap_step(
         &pool,
@@ -6309,33 +6353,44 @@ async fn management_review_atomic_join_scenario(
     .await
     .unwrap();
     let parent = bootstrap.transactions.last().unwrap();
-    let join=Box::pin(ordinary_realm::source_request(&pool,ordinary_realm::next_request_for_actor(
+    let join = scenario_future(|| async {
+        ordinary_realm::source_request(&pool,ordinary_realm::next_request_for_actor(
         parent,EventKind::MemberState,ActorId::account(controller.clone()),
         serde_json::json!({"member_id":ActorId::account(controller.clone()),"membership":"join"}),
         parent.commit.committed_at+chrono::TimeDelta::milliseconds(1),
-    ))).await;
+    )).await
+    })
+    .await;
     fixture_commit_step(&pool, join.clone()).await.unwrap();
-    let (agent, genesis, _) = Box::pin(provision_owned_agent(&pool, &requester)).await;
+    let (agent, genesis, _) =
+        scenario_future(|| async { provision_owned_agent(&pool, &requester).await }).await;
     let mut current = if aa_case == Some(ManagementAaCase::EmptyAuthorityHead) {
-        Box::pin(management_unstored_current_for_accounts(
-            &pool,
-            &station,
-            &[controller.clone(), approver.history.account.clone()],
-        ))
+        scenario_future(|| async {
+            management_unstored_current_for_accounts(
+                &pool,
+                &station,
+                &[controller.clone(), approver.history.account.clone()],
+            )
+            .await
+        })
         .await
     } else {
-        Box::pin(management_current_for_accounts(
-            &pool,
-            &station,
-            &[controller.clone(), approver.history.account.clone()],
-        ))
+        scenario_future(|| async {
+            management_current_for_accounts(
+                &pool,
+                &station,
+                &[controller.clone(), approver.history.account.clone()],
+            )
+            .await
+        })
         .await
     };
     let http = if use_http {
         Some(
-            Box::pin(management_review_http_fixture(
-                &pool, &station, &requester, &approver, &current,
-            ))
+            scenario_future(|| async {
+                management_review_http_fixture(&pool, &station, &requester, &approver, &current)
+                    .await
+            })
             .await,
         )
     } else {
@@ -6361,7 +6416,7 @@ async fn management_review_atomic_join_scenario(
     } else {
         3600
     };
-    let policy=Box::pin(ordinary_realm::source_request(&pool,ordinary_realm::next_request_for_actor(
+    let policy=scenario_future(|| async { ordinary_realm::source_request(&pool,ordinary_realm::next_request_for_actor(
         &join.authority_commit,EventKind::PolicySet,administrator.clone(),
         serde_json::json!({"policy_id":policy_id,"expected_revision":null,
             "value":{"schema":"ak.schema.policy.v1","id":policy_id,"realm_id":realm,
@@ -6371,20 +6426,23 @@ async fn management_review_atomic_join_scenario(
                     "agent_target":{"kind":"all"},"agent_operations":["join","publish"],
                     "review_requirement":{"approver_actor_ids":designated_administrators,"threshold":1,"max_age_seconds":max_age_seconds}}]}}),
         genesis.commit.committed_at.max(join.authority_commit.commit.committed_at)+chrono::TimeDelta::milliseconds(1),
-    ))).await;
+    )).await }).await;
     fixture_commit_step(&pool, policy.clone()).await.unwrap();
-    let mut candidate = Box::pin(ordinary_realm::source_request(
-        &pool,
-        ordinary_realm::next_request_for_actor(
-            &policy.authority_commit,
-            EventKind::MemberState,
-            ActorId::account(controller.clone()),
-            serde_json::json!({"member_id":ActorId::account(agent.clone()),"membership":"join",
+    let mut candidate = scenario_future(|| async {
+        ordinary_realm::source_request(
+            &pool,
+            ordinary_realm::next_request_for_actor(
+                &policy.authority_commit,
+                EventKind::MemberState,
+                ActorId::account(controller.clone()),
+                serde_json::json!({"member_id":ActorId::account(agent.clone()),"membership":"join",
             "agent_controller_binding":{"controller_account_id":controller,
                 "controller_membership_generation_ref":join.authority_commit.event.event_id}}),
-            policy.authority_commit.commit.committed_at + chrono::TimeDelta::milliseconds(1),
-        ),
-    ))
+                policy.authority_commit.commit.committed_at + chrono::TimeDelta::milliseconds(1),
+            ),
+        )
+        .await
+    })
     .await;
     let authorized = &requester.unit.transactions[1].commit;
     let producer = SelfProducerCommitGuard::HumanDevice(DeviceRevocationGateSelector {
@@ -6440,9 +6498,10 @@ async fn management_review_atomic_join_scenario(
                     } else {
                         arkret_models_collaboration::objects::account_status::AccountStatus::Active
                     };
-                    let fresh = Box::pin(management_advance_current(
-                        &pool, &station, &current, controller, status,
-                    ))
+                    let fresh = scenario_future(|| async {
+                        management_advance_current(&pool, &station, &current, controller, status)
+                            .await
+                    })
                     .await;
                     if case == ManagementAaCase::CallerTerminal {
                         attempted = fresh;
@@ -6450,13 +6509,17 @@ async fn management_review_atomic_join_scenario(
                 }
                 _ => unreachable!(),
             }
-            let error = Box::pin(reviews.management_review_request(
-                &body.requester_actor_id,
-                &body,
-                &producer,
-                &attempted,
-                chrono::Utc::now(),
-            ))
+            let error = scenario_future(|| async {
+                reviews
+                    .management_review_request(
+                        &body.requester_actor_id,
+                        &body,
+                        &producer,
+                        &attempted,
+                        chrono::Utc::now(),
+                    )
+                    .await
+            })
             .await
             .unwrap_err();
             if case == ManagementAaCase::CallerTerminal {
@@ -6472,13 +6535,16 @@ async fn management_review_atomic_join_scenario(
         if case == ManagementAaCase::EmptyAuthorityHead {
             let http = http.as_ref().unwrap();
             http.aa_records.lock().unwrap().clear();
-            let problem = Box::pin(management_review_http_refusal(
-                http,
-                false,
-                "requests",
-                "ak.self.management_review.command.request.v1",
-                &body,
-            ))
+            let problem = scenario_future(|| async {
+                management_review_http_refusal(
+                    http,
+                    false,
+                    "requests",
+                    "ak.self.management_review.command.request.v1",
+                    &body,
+                )
+                .await
+            })
             .await;
             assert_eq!(problem.0, salvo::http::StatusCode::SERVICE_UNAVAILABLE);
             assert!(problem.1.contains("temporarily_unavailable"));
@@ -6495,13 +6561,16 @@ async fn management_review_atomic_join_scenario(
         }
     }
     let pending = if let Some(http) = &http {
-        Box::pin(management_review_http_post(
-            http,
-            false,
-            "requests",
-            "ak.self.management_review.command.request.v1",
-            &body,
-        ))
+        scenario_future(|| async {
+            management_review_http_post(
+                http,
+                false,
+                "requests",
+                "ak.self.management_review.command.request.v1",
+                &body,
+            )
+            .await
+        })
         .await
     } else {
         reviews
@@ -6517,24 +6586,30 @@ async fn management_review_atomic_join_scenario(
     };
     assert_eq!(pending.status, ManagementReviewStatus::Pending);
     if let Some(http) = &http {
-        let result = Box::pin(management_review_http_post(
-            http,
-            false,
-            "requests",
-            "ak.self.management_review.command.request.v1",
-            &body,
-        ))
+        let result = scenario_future(|| async {
+            management_review_http_post(
+                http,
+                false,
+                "requests",
+                "ak.self.management_review.command.request.v1",
+                &body,
+            )
+            .await
+        })
         .await;
         assert!(serde_json::to_value(&result).unwrap() == serde_json::to_value(&pending).unwrap());
-        let result = Box::pin(management_review_http_post(
-            http,
-            false,
-            "status",
-            "ak.self.management_review.read.status.v1",
-            &ManagementReviewLookupRequestBody {
-                request_id: body.request_id.clone(),
-            },
-        ))
+        let result = scenario_future(|| async {
+            management_review_http_post(
+                http,
+                false,
+                "status",
+                "ak.self.management_review.read.status.v1",
+                &ManagementReviewLookupRequestBody {
+                    request_id: body.request_id.clone(),
+                },
+            )
+            .await
+        })
         .await;
         assert!(serde_json::to_value(&result).unwrap() == serde_json::to_value(&pending).unwrap());
     }
@@ -6543,22 +6618,28 @@ async fn management_review_atomic_join_scenario(
         // Resolve the real administrator through the same authenticated status
         // operation, then use the exact receiver records for native follow-ups.
         // The pre-transport signed objects are not receiver observations.
-        let result = Box::pin(management_review_http_post(
-            http,
-            true,
-            "status",
-            "ak.self.management_review.read.status.v1",
-            &ManagementReviewLookupRequestBody {
-                request_id: body.request_id.clone(),
-            },
-        ))
+        let result = scenario_future(|| async {
+            management_review_http_post(
+                http,
+                true,
+                "status",
+                "ak.self.management_review.read.status.v1",
+                &ManagementReviewLookupRequestBody {
+                    request_id: body.request_id.clone(),
+                },
+            )
+            .await
+        })
         .await;
         assert!(serde_json::to_value(&result).unwrap() == serde_json::to_value(&pending).unwrap());
-        current = Box::pin(management_current_from_receiver(
-            &pool,
-            &station,
-            &[controller.clone(), approver.history.account.clone()],
-        ))
+        current = scenario_future(|| async {
+            management_current_from_receiver(
+                &pool,
+                &station,
+                &[controller.clone(), approver.history.account.clone()],
+            )
+            .await
+        })
         .await;
     }
     assert_eq!(agent_mode_footprint(&pool, realm).await, before);
@@ -6671,13 +6752,16 @@ async fn management_review_atomic_join_scenario(
         ManagementReviewStatus::Pending
     );
     let approved = if let Some(http) = &http {
-        Box::pin(management_review_http_post(
-            http,
-            true,
-            "decisions",
-            "ak.self.management_review.command.decide.v1",
-            &decision(&vote),
-        ))
+        scenario_future(|| async {
+            management_review_http_post(
+                http,
+                true,
+                "decisions",
+                "ak.self.management_review.command.decide.v1",
+                &decision(&vote),
+            )
+            .await
+        })
         .await
     } else {
         reviews
@@ -6702,29 +6786,39 @@ async fn management_review_atomic_join_scenario(
                 | ManagementAaCase::WriterHeldCut
         ) {
             if case == ManagementAaCase::WriterHeldCut {
-                Box::pin(management_review_writer_held_cut(
-                    &pool,
-                    &station,
-                    &reviews,
-                    &administrator,
-                    &lookup,
-                    &current,
-                    &approver.history.account,
-                ))
+                scenario_future(|| async {
+                    management_review_writer_held_cut(
+                        &pool,
+                        &station,
+                        &reviews,
+                        &administrator,
+                        &lookup,
+                        &current,
+                        &approver.history.account,
+                    )
+                    .await
+                })
                 .await;
-                let fresh = Box::pin(management_current_for_accounts(
-                    &pool,
-                    &station,
-                    &[controller.clone(), approver.history.account.clone()],
-                ))
+                let fresh = scenario_future(|| async {
+                    management_current_for_accounts(
+                        &pool,
+                        &station,
+                        &[controller.clone(), approver.history.account.clone()],
+                    )
+                    .await
+                })
                 .await;
                 assert_eq!(
-                    Box::pin(reviews.management_review_status(
-                        &body.requester_actor_id,
-                        &lookup,
-                        &fresh,
-                        chrono::Utc::now()
-                    ))
+                    scenario_future(|| async {
+                        reviews
+                            .management_review_status(
+                                &body.requester_actor_id,
+                                &lookup,
+                                &fresh,
+                                chrono::Utc::now(),
+                            )
+                            .await
+                    })
                     .await
                     .unwrap()
                     .status,
@@ -6750,30 +6844,37 @@ async fn management_review_atomic_join_scenario(
                 } else {
                     &approver.history.account
                 };
-                current = Box::pin(management_advance_current(&pool, &station, &current, changed,
-                    arkret_models_collaboration::objects::account_status::AccountStatus::Deactivated)).await;
+                current = scenario_future(|| async { management_advance_current(&pool, &station, &current, changed,
+                    arkret_models_collaboration::objects::account_status::AccountStatus::Deactivated).await }).await;
                 ManagementReviewStatus::Superseded
             };
             assert_eq!(
-                Box::pin(reviews.management_review_status(
-                    status_caller,
-                    &lookup,
-                    &current,
-                    chrono::Utc::now()
-                ))
+                scenario_future(|| async {
+                    reviews
+                        .management_review_status(
+                            status_caller,
+                            &lookup,
+                            &current,
+                            chrono::Utc::now(),
+                        )
+                        .await
+                })
                 .await
                 .unwrap()
                 .status,
                 expected
             );
-            let mut attempt = Box::pin(ordinary_realm::source_request(
-                &pool,
-                ordinary_realm::request_for_event(
-                    &policy.authority_commit,
-                    candidate.authority_commit.event.clone(),
-                    chrono::Utc::now(),
-                ),
-            ))
+            let mut attempt = scenario_future(|| async {
+                ordinary_realm::source_request(
+                    &pool,
+                    ordinary_realm::request_for_event(
+                        &policy.authority_commit,
+                        candidate.authority_commit.event.clone(),
+                        chrono::Utc::now(),
+                    ),
+                )
+                .await
+            })
             .await;
             attempt.self_producer_guard = Some(producer.clone());
             let batch = EventBatchCommitRequest {
@@ -6884,16 +6985,19 @@ async fn management_review_atomic_join_scenario(
             ManagementReviewStatus::Approved
         );
         // Current membership/admin loss is independent from historic key validity.
-        let leave = Box::pin(ordinary_realm::source_request(
-            &pool,
-            ordinary_realm::next_request_for_actor(
-                &policy.authority_commit,
-                EventKind::MemberState,
-                administrator.clone(),
-                serde_json::json!({"member_id":administrator,"membership":"leave"}),
-                chrono::Utc::now(),
-            ),
-        ))
+        let leave = scenario_future(|| async {
+            ordinary_realm::source_request(
+                &pool,
+                ordinary_realm::next_request_for_actor(
+                    &policy.authority_commit,
+                    EventKind::MemberState,
+                    administrator.clone(),
+                    serde_json::json!({"member_id":administrator,"membership":"leave"}),
+                    chrono::Utc::now(),
+                ),
+            )
+            .await
+        })
         .await;
         fixture_commit_step(&pool, leave.clone()).await.unwrap();
         let after_leave = agent_mode_footprint(&pool, realm).await;
@@ -6910,14 +7014,17 @@ async fn management_review_atomic_join_scenario(
                 .status,
             ManagementReviewStatus::Superseded
         );
-        let mut attempt = Box::pin(ordinary_realm::source_request(
-            &pool,
-            ordinary_realm::request_for_event(
-                &leave.authority_commit,
-                candidate.authority_commit.event.clone(),
-                chrono::Utc::now(),
-            ),
-        ))
+        let mut attempt = scenario_future(|| async {
+            ordinary_realm::source_request(
+                &pool,
+                ordinary_realm::request_for_event(
+                    &leave.authority_commit,
+                    candidate.authority_commit.event.clone(),
+                    chrono::Utc::now(),
+                ),
+            )
+            .await
+        })
         .await;
         attempt.self_producer_guard = Some(producer);
         let prepared = coland_storage::EventApprovalCommit {
@@ -6952,14 +7059,17 @@ async fn management_review_atomic_join_scenario(
     // Commit time follows the decision; the approved Event is byte-for-byte
     // identical, and current producer/source authority is freshly selected.
     let original_event = candidate.authority_commit.event.clone();
-    let mut execution = Box::pin(ordinary_realm::source_request(
-        &pool,
-        ordinary_realm::request_for_event(
-            &policy.authority_commit,
-            original_event.clone(),
-            chrono::Utc::now(),
-        ),
-    ))
+    let mut execution = scenario_future(|| async {
+        ordinary_realm::source_request(
+            &pool,
+            ordinary_realm::request_for_event(
+                &policy.authority_commit,
+                original_event.clone(),
+                chrono::Utc::now(),
+            ),
+        )
+        .await
+    })
     .await;
     execution.self_producer_guard = Some(producer.clone());
     let batch = EventBatchCommitRequest {
@@ -7029,24 +7139,31 @@ async fn management_review_atomic_join_scenario(
     let accepted = agent_mode_footprint(&pool, realm).await;
     assert_ne!(accepted, before);
     if aa_case == Some(ManagementAaCase::ConsumedReplay) {
-        let terminal = Box::pin(management_advance_current(
-            &pool,
-            &station,
-            &current,
-            controller,
-            arkret_models_collaboration::objects::account_status::AccountStatus::Deactivated,
-        ))
+        let terminal = scenario_future(|| async {
+            management_advance_current(
+                &pool,
+                &station,
+                &current,
+                controller,
+                arkret_models_collaboration::objects::account_status::AccountStatus::Deactivated,
+            )
+            .await
+        })
         .await;
         // Both exact durable receipts bypass new current qualification. This
         // never permits a new request, changed candidate or reused approval.
         assert_eq!(
-            Box::pin(reviews.management_review_request(
-                &body.requester_actor_id,
-                &body,
-                &producer,
-                &terminal,
-                chrono::Utc::now()
-            ))
+            scenario_future(|| async {
+                reviews
+                    .management_review_request(
+                        &body.requester_actor_id,
+                        &body,
+                        &producer,
+                        &terminal,
+                        chrono::Utc::now(),
+                    )
+                    .await
+            })
             .await
             .unwrap()
             .status,
@@ -7063,22 +7180,28 @@ async fn management_review_atomic_join_scenario(
     assert_eq!(agent_mode_footprint(&pool, realm).await, accepted);
     assert_eq!(management_review_consumed_vote_count(&pool, realm).await, 1);
     if let Some(http) = &http {
-        let consumed = Box::pin(management_review_http_post(
-            http,
-            false,
-            "status",
-            "ak.self.management_review.read.status.v1",
-            &lookup,
-        ))
+        let consumed = scenario_future(|| async {
+            management_review_http_post(
+                http,
+                false,
+                "status",
+                "ak.self.management_review.read.status.v1",
+                &lookup,
+            )
+            .await
+        })
         .await;
         assert_eq!(consumed.status, ManagementReviewStatus::Consumed);
-        let replay = Box::pin(management_review_http_post(
-            http,
-            false,
-            "requests",
-            "ak.self.management_review.command.request.v1",
-            &body,
-        ))
+        let replay = scenario_future(|| async {
+            management_review_http_post(
+                http,
+                false,
+                "requests",
+                "ak.self.management_review.command.request.v1",
+                &body,
+            )
+            .await
+        })
         .await;
         assert!(serde_json::to_value(&replay).unwrap() == serde_json::to_value(&consumed).unwrap());
         assert_eq!(agent_mode_footprint(&pool, realm).await, accepted);
@@ -7098,14 +7221,14 @@ async fn management_review_atomic_join_scenario(
     // Publish is a separate, original controller intent. A cancelled review
     // never becomes a mode write, and its terminal id cannot be revived.
     assert_eq!(accepted["interaction"], serde_json::json!([]));
-    let mut publish=Box::pin(ordinary_realm::source_request(&pool,ordinary_realm::next_request_for_actor(
+    let mut publish=scenario_future(|| async { ordinary_realm::source_request(&pool,ordinary_realm::next_request_for_actor(
         &execution.authority_commit,EventKind::AgentInteractionSet,body.requester_actor_id.clone(),
         serde_json::to_value(arkret_models_collaboration::agent_interaction::AgentInteractionSetPayload {
             agent_account_id:agent.clone(),controller_account_id:controller.clone(),
             interaction_mode:arkret_models_collaboration::agent_interaction::AgentInteractionMode::Public,
             expected_revision:None,
         }).unwrap(),chrono::Utc::now(),
-    ))).await;
+    )).await }).await;
     publish.self_producer_guard = Some(producer.clone());
     let mut public_body = ManagementReviewRequestBody {
         request_id: "management-review-publish-cancelled".into(),
@@ -7223,14 +7346,17 @@ async fn management_review_atomic_join_scenario(
         ManagementReviewStatus::Approved
     );
     assert_eq!(agent_mode_footprint(&pool, realm).await, accepted);
-    let mut execution_public = Box::pin(ordinary_realm::source_request(
-        &pool,
-        ordinary_realm::request_for_event(
-            &execution.authority_commit,
-            publish.authority_commit.event.clone(),
-            chrono::Utc::now(),
-        ),
-    ))
+    let mut execution_public = scenario_future(|| async {
+        ordinary_realm::source_request(
+            &pool,
+            ordinary_realm::request_for_event(
+                &execution.authority_commit,
+                publish.authority_commit.event.clone(),
+                chrono::Utc::now(),
+            ),
+        )
+        .await
+    })
     .await;
     execution_public.self_producer_guard = Some(producer);
     let public_batch = EventBatchCommitRequest {
@@ -7999,61 +8125,68 @@ struct OwnedConsumerFixture {
 fn boxed_owned_consumer_fixture(
     count: usize,
 ) -> Pin<Box<dyn Future<Output = OwnedConsumerFixture> + Send>> {
-    Box::pin(owned_consumer_fixture(count))
+    owned_consumer_fixture(count)
 }
 
-async fn owned_consumer_fixture(count: usize) -> OwnedConsumerFixture {
-    use coland_storage::{AgentControlAdmissionWrite, AgentParticipationStore};
-    let database = TestDatabase::lease().await;
-    let pool = database.pool();
-    let public = arkret_canonical::ed25519_pubkey_to_did_key_multibase(
-        ed25519_dalek::SigningKey::from_bytes(&[83; 32])
-            .verifying_key()
-            .as_bytes(),
-    );
-    let station = historical_control_source::HistoricalControlStation::new_with_assertion_keys(
-        "owned-consumer-supplement",
-        [83; 32],
-        &[("notary-key", &public)],
-    );
-    let controller = Box::pin(accepted_controller(&pool, station.did.clone())).await;
-    let founder = Box::pin(ordinary_realm::human_profile::admit_for_station_did(
-        &pool,
-        station.did.clone(),
-        "owned-consumer-founder",
-    ))
-    .await;
-    assert_ne!(controller.history.account, founder);
-    let bootstrap = ordinary_realm::bootstrap_unit_with_history_for_account(
-        &format!("owned-consumer-{}", uuid::Uuid::now_v7()),
-        "public",
-        "since_join",
-        &founder,
-        &station.did,
-    );
-    let bootstrap = Box::pin(ordinary_realm::source_bootstrap(&pool, bootstrap)).await;
-    fixture_bootstrap_step(
-        &pool,
-        &bootstrap,
-        bootstrap.transactions[0].commit.committed_at,
-    )
-    .await
-    .unwrap();
-    let root_event_ref = bootstrap.transactions[0].event.event_id.clone();
-    let parent = bootstrap.transactions.last().unwrap();
-    let controller_actor = arkret_wire::ActorId::account(controller.history.account.clone());
-    let join = ordinary_realm::next_request_for_actor(
-        parent,
-        EventKind::MemberState,
-        controller_actor.clone(),
-        serde_json::json!({"member_id":controller_actor,"membership":"join"}),
-        parent.commit.committed_at + chrono::TimeDelta::milliseconds(1),
-    );
-    let join = Box::pin(ordinary_realm::source_request(&pool, join)).await;
-    fixture_commit_step(&pool, join.clone()).await.unwrap();
-    let mut head = join.authority_commit.clone();
-    let realm = head.event.realm_id.clone();
-    let mut scope: arkret_models_collaboration::events_payloads::agent::AgentKeyScope =
+#[inline(never)]
+fn owned_consumer_fixture(
+    count: usize,
+) -> Pin<Box<impl Future<Output = OwnedConsumerFixture> + Send>> {
+    Box::pin(async move {
+        use coland_storage::{AgentControlAdmissionWrite, AgentParticipationStore};
+        let database = TestDatabase::lease().await;
+        let pool = database.pool();
+        let public = arkret_canonical::ed25519_pubkey_to_did_key_multibase(
+            ed25519_dalek::SigningKey::from_bytes(&[83; 32])
+                .verifying_key()
+                .as_bytes(),
+        );
+        let station = historical_control_source::HistoricalControlStation::new_with_assertion_keys(
+            "owned-consumer-supplement",
+            [83; 32],
+            &[("notary-key", &public)],
+        );
+        let controller = scenario_future(|| accepted_controller(&pool, station.did.clone())).await;
+        let founder = scenario_future(|| {
+            ordinary_realm::human_profile::admit_for_station_did(
+                &pool,
+                station.did.clone(),
+                "owned-consumer-founder",
+            )
+        })
+        .await;
+        assert_ne!(controller.history.account, founder);
+        let bootstrap = ordinary_realm::bootstrap_unit_with_history_for_account(
+            &format!("owned-consumer-{}", uuid::Uuid::now_v7()),
+            "public",
+            "since_join",
+            &founder,
+            &station.did,
+        );
+        let bootstrap =
+            scenario_future(|| ordinary_realm::source_bootstrap(&pool, bootstrap)).await;
+        fixture_bootstrap_step(
+            &pool,
+            &bootstrap,
+            bootstrap.transactions[0].commit.committed_at,
+        )
+        .await
+        .unwrap();
+        let root_event_ref = bootstrap.transactions[0].event.event_id.clone();
+        let parent = bootstrap.transactions.last().unwrap();
+        let controller_actor = arkret_wire::ActorId::account(controller.history.account.clone());
+        let join = ordinary_realm::next_request_for_actor(
+            parent,
+            EventKind::MemberState,
+            controller_actor.clone(),
+            serde_json::json!({"member_id":controller_actor,"membership":"join"}),
+            parent.commit.committed_at + chrono::TimeDelta::milliseconds(1),
+        );
+        let join = scenario_future(|| ordinary_realm::source_request(&pool, join)).await;
+        fixture_commit_step(&pool, join.clone()).await.unwrap();
+        let mut head = join.authority_commit.clone();
+        let realm = head.event.realm_id.clone();
+        let mut scope: arkret_models_collaboration::events_payloads::agent::AgentKeyScope =
         serde_json::from_value(serde_json::json!({
             "actions":[arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
                 arkret_wire::CapabilityActionId::CircleMemberAdd,
@@ -8068,155 +8201,166 @@ async fn owned_consumer_fixture(count: usize) -> OwnedConsumerFixture {
                 {"kind":"realm","realm_id":realm}]
         }))
         .unwrap();
-    scope.actions =
-        arkret_schema::agent_runtime_scope::complete_agent_runtime_scope(&scope.actions).unwrap();
-    let device_guard =
-        Box::pin(controller.admit_founding_device(&PgPersistenceStore::new(pool.clone())))
+        scope.actions =
+            arkret_schema::agent_runtime_scope::complete_agent_runtime_scope(&scope.actions)
+                .unwrap();
+        let persistence = PgPersistenceStore::new(pool.clone());
+        let profiles = coland_storage_postgres::PgActorProfileStore { pool: pool.clone() };
+        let device_guard = scenario_future(|| controller.admit_founding_device(&persistence))
             .await
             .unwrap();
-    let mut agents = Vec::new();
-    for index in 0..count {
-        // Each actual Provision advances the controller PCR. The next Agent
-        // must extend that accepted head, not reuse the genesis entry1 cut.
-        let controller_head = PgAuthorityCommitStore { pool: pool.clone() }
-            .held_stream_head_commit(&controller.unit.transactions[1].commit.stream_ref)
+        let mut agents = Vec::new();
+        for index in 0..count {
+            // Each actual Provision advances the controller PCR. The next Agent
+            // must extend that accepted head, not reuse the genesis entry1 cut.
+            let controller_head = PgAuthorityCommitStore { pool: pool.clone() }
+                .held_stream_head_commit(&controller.unit.transactions[1].commit.stream_ref)
+                .await
+                .unwrap()
+                .unwrap();
+            let did = historical_control_source::managed_agent_did(
+                &controller.history.account.principal_id,
+                &format!("consumer-{index}"),
+                controller_head.committed_at,
+            );
+            let (account, genesis, _) = scenario_future(|| {
+                provision_owned_agent_binding_phase_at_head(
+                    &pool,
+                    &controller,
+                    did.clone(),
+                    Some(&scope),
+                    true,
+                    None,
+                    &[102; 32],
+                    Some(&controller_head),
+                )
+            })
+            .await;
+            let mut authorization = sidecar_agent::agent_key_authorization(
+                &did,
+                &controller.history.account.principal_id,
+                genesis.commit.committed_at,
+            );
+            authorization["agent_key_scope"] = serde_json::to_value(&scope).unwrap();
+            authorization["audience"] = serde_json::json!([station.core]);
+            let key = sidecar_agent::agent_control_event(
+                &controller.history.device_verification_method,
+                controller.history.founding_device_signing_seed,
+                &controller.history.account,
+                &account,
+                &genesis.event.realm_id,
+                &format!("{did}#managed-controller"),
+                authorization,
+                genesis.commit.committed_at,
+            );
+            let committed =
+                sidecar_agent::station_successor(&genesis.commit, &key, &station.did, 1);
+            scenario_future(|| {
+                historical_control_source::admit_control(
+                    &profiles,
+                    &pool,
+                    AgentControlAdmissionWrite {
+                        commit: coland_storage::AuthorityCommitTransaction {
+                            expected_authority: genesis.expected_authority.clone(),
+                            event: key.clone(),
+                            commit: committed.clone(),
+                            producer_signer_fact: None,
+                            mls_state: None,
+                            welcomes: Vec::new(),
+                            recipient_queue_capacity: 0,
+                        },
+                        queued_at: committed.committed_at,
+                    },
+                )
+            })
             .await
-            .unwrap()
             .unwrap();
-        let did = historical_control_source::managed_agent_did(
-            &controller.history.account.principal_id,
-            &format!("consumer-{index}"),
-            controller_head.committed_at,
-        );
-        let (account, genesis, _) = Box::pin(provision_owned_agent_binding_phase_at_head(
-            &pool,
-            &controller,
-            did.clone(),
-            Some(&scope),
-            true,
-            None,
-            &[102; 32],
-            Some(&controller_head),
-        ))
-        .await;
-        let mut authorization = sidecar_agent::agent_key_authorization(
-            &did,
-            &controller.history.account.principal_id,
-            genesis.commit.committed_at,
-        );
-        authorization["agent_key_scope"] = serde_json::to_value(&scope).unwrap();
-        authorization["audience"] = serde_json::json!([station.core]);
-        let key = sidecar_agent::agent_control_event(
-            &controller.history.device_verification_method,
-            controller.history.founding_device_signing_seed,
-            &controller.history.account,
-            &account,
-            &genesis.event.realm_id,
-            &format!("{did}#managed-controller"),
-            authorization,
-            genesis.commit.committed_at,
-        );
-        let committed = sidecar_agent::station_successor(&genesis.commit, &key, &station.did, 1);
-        Box::pin(historical_control_source::admit_control(
-            &coland_storage_postgres::PgActorProfileStore { pool: pool.clone() },
-            &pool,
-            AgentControlAdmissionWrite {
-                commit: coland_storage::AuthorityCommitTransaction {
-                    expected_authority: genesis.expected_authority.clone(),
-                    event: key.clone(),
-                    commit: committed.clone(),
-                    producer_signer_fact: None,
-                    mls_state: None,
-                    welcomes: Vec::new(),
-                    recipient_queue_capacity: 0,
-                },
-                queued_at: committed.committed_at,
-            },
-        ))
-        .await
-        .unwrap();
-        let agent_join = ordinary_realm::next_request_for_actor(
-            &head,
-            EventKind::MemberState,
-            arkret_wire::ActorId::account(controller.history.account.clone()),
-            serde_json::json!({"member_id":arkret_wire::ActorId::account(account.clone()),"membership":"join",
+            let agent_join = ordinary_realm::next_request_for_actor(
+                &head,
+                EventKind::MemberState,
+                arkret_wire::ActorId::account(controller.history.account.clone()),
+                serde_json::json!({"member_id":arkret_wire::ActorId::account(account.clone()),"membership":"join",
                 "agent_controller_binding":{"controller_account_id":controller.history.account,
                     "controller_membership_generation_ref":join.authority_commit.event.event_id}}),
-            head.commit.committed_at.max(committed.committed_at)
-                + chrono::TimeDelta::milliseconds(1),
-        );
-        let agent_join = Box::pin(ordinary_realm::source_request(&pool, agent_join)).await;
-        fixture_commit_step(&pool, agent_join.clone())
-            .await
-            .unwrap();
-        let endpoint = coland_storage::AgentEndpointGuard {
-            pcr_realm_id: genesis.event.realm_id.clone(),
-            agent_id: account.principal_id.clone(),
-            authorization_ref: arkret_wire::CommittedEventRef {
-                event_id: key.event_id.clone(),
-                commit_id: committed.commit_id.clone(),
-                stream_ref: committed.stream_ref.clone(),
-                stream_position: committed.stream_position,
-            },
-            verification_method: arkret_wire::DidUrl::new(
-                key.payload["verification_method"].as_str().unwrap(),
-            )
-            .unwrap(),
-        };
-        let (vault, _) = Box::pin(retain_delivery_scope_for_runtime(
-            &pool,
-            &station,
-            &controller,
-            &account,
-            &key,
-            &scope,
-            &endpoint,
-            true,
-        ))
-        .await;
-        let public = agent_mode_request(
-            &agent_join.authority_commit,
-            "public",
-            None,
-            &controller,
-            &account,
-            &device_guard,
-        );
-        let public = Box::pin(ordinary_realm::source_request(&pool, public)).await;
-        fixture_commit_step(&pool, public.clone()).await.unwrap();
-        assert!(
-            coland_storage_postgres::PgAgentParticipationStore { pool: pool.clone() }
-                .compare_and_swap_selection(
-                    serde_json::json!({"agent_id":account.principal_id,
+                head.commit.committed_at.max(committed.committed_at)
+                    + chrono::TimeDelta::milliseconds(1),
+            );
+            let agent_join =
+                scenario_future(|| ordinary_realm::source_request(&pool, agent_join)).await;
+            fixture_commit_step(&pool, agent_join.clone())
+                .await
+                .unwrap();
+            let endpoint = coland_storage::AgentEndpointGuard {
+                pcr_realm_id: genesis.event.realm_id.clone(),
+                agent_id: account.principal_id.clone(),
+                authorization_ref: arkret_wire::CommittedEventRef {
+                    event_id: key.event_id.clone(),
+                    commit_id: committed.commit_id.clone(),
+                    stream_ref: committed.stream_ref.clone(),
+                    stream_position: committed.stream_position,
+                },
+                verification_method: arkret_wire::DidUrl::new(
+                    key.payload["verification_method"].as_str().unwrap(),
+                )
+                .unwrap(),
+            };
+            let (vault, _) = scenario_future(|| {
+                retain_delivery_scope_for_runtime(
+                    &pool,
+                    &station,
+                    &controller,
+                    &account,
+                    &key,
+                    &scope,
+                    &endpoint,
+                    true,
+                )
+            })
+            .await;
+            let public = agent_mode_request(
+                &agent_join.authority_commit,
+                "public",
+                None,
+                &controller,
+                &account,
+                &device_guard,
+            );
+            let public = Box::pin(ordinary_realm::source_request(&pool, public)).await;
+            fixture_commit_step(&pool, public.clone()).await.unwrap();
+            assert!(
+                coland_storage_postgres::PgAgentParticipationStore { pool: pool.clone() }
+                    .compare_and_swap_selection(
+                        serde_json::json!({"agent_id":account.principal_id,
                         "scope_kind":"realm","scope_key":format!("realm:{realm}"),
                         "realm_id":realm,"scope":{"kind":"realm","realm_id":realm},
                         "version":1,"reply_message":true,"reaction_add":false,
                         "reaction_remove":false,"accept_third_party_mention":false,
                         "act_on_behalf":false}),
-                    0,
-                )
-                .await
-                .unwrap()
-        );
-        head = public.authority_commit;
-        agents.push(OwnedConsumerCandidate {
-            account,
-            endpoint,
-            join: agent_join.authority_commit,
-            _vault: vault,
-        });
-    }
-    OwnedConsumerFixture {
-        _database: database,
-        pool,
-        station,
-        controller,
-        founder,
-        root_event_ref,
-        controller_join: join.authority_commit,
-        head,
-        agents,
-    }
+                        0,
+                    )
+                    .await
+                    .unwrap()
+            );
+            head = public.authority_commit;
+            agents.push(OwnedConsumerCandidate {
+                account,
+                endpoint,
+                join: agent_join.authority_commit,
+                _vault: vault,
+            });
+        }
+        OwnedConsumerFixture {
+            _database: database,
+            pool,
+            station,
+            controller,
+            founder,
+            root_event_ref,
+            controller_join: join.authority_commit,
+            head,
+            agents,
+        }
+    })
 }
 
 fn owned_consumer_signed_request(
@@ -12088,115 +12232,122 @@ struct NativeReplyPreparationFixture {
     input: coland_storage::AccountContentDeliveryInput,
 }
 
-async fn native_reply_preparation_fixture(
+#[inline(never)]
+fn native_reply_preparation_fixture(
     controller_constraints: Option<serde_json::Value>,
     grant_message: bool,
     lifetime: chrono::TimeDelta,
-) -> NativeReplyPreparationFixture {
-    Box::pin(native_reply_preparation_fixture_in_scope(
+) -> Pin<Box<impl Future<Output = NativeReplyPreparationFixture> + Send>> {
+    native_reply_preparation_fixture_in_scope(
         controller_constraints,
         grant_message,
         lifetime,
         false,
-    ))
-    .await
+    )
 }
 
-async fn native_reply_preparation_fixture_in_scope(
+#[inline(never)]
+fn native_reply_preparation_fixture_in_scope(
     controller_constraints: Option<serde_json::Value>,
     grant_message: bool,
     lifetime: chrono::TimeDelta,
     in_circle: bool,
-) -> NativeReplyPreparationFixture {
-    Box::pin(native_reply_preparation_fixture_with_body(
+) -> Pin<Box<impl Future<Output = NativeReplyPreparationFixture> + Send>> {
+    native_reply_preparation_fixture_with_body(
         controller_constraints,
         grant_message,
         lifetime,
         in_circle,
         true,
-    ))
-    .await
+    )
 }
 
-async fn native_reply_preparation_fixture_with_body(
+#[inline(never)]
+fn native_reply_preparation_fixture_with_body(
     controller_constraints: Option<serde_json::Value>,
     grant_message: bool,
     lifetime: chrono::TimeDelta,
     in_circle: bool,
     grant_body: bool,
-) -> NativeReplyPreparationFixture {
-    use coland_storage::AgentParticipationStore;
-    let original = boxed_owned_consumer_fixture(1).await;
-    let realm = original.head.event.realm_id.clone();
-    let mut head = original.head.clone();
-    if grant_message {
-        for actor in [
-            arkret_wire::ActorId::account(original.controller.history.account.clone()),
-            arkret_wire::ActorId::account(original.agents[0].account.clone()),
-        ] {
-            let constraints = if actor.as_account_id() == Some(&original.controller.history.account)
-            {
-                controller_constraints.clone()
-            } else {
-                None
-            };
-            let request = Box::pin(owned_consumer_root_grant(
-                &original,
-                &head,
-                &actor,
-                &["ak.message.create", "ak.circle.member.add"],
-                serde_json::json!([{"kind":"realm","realm_id":realm}]),
-                constraints,
-            ))
-            .await;
-            fixture_commit_step(&original.pool, request.clone())
-                .await
-                .unwrap();
-            head = request.authority_commit;
+) -> Pin<Box<impl Future<Output = NativeReplyPreparationFixture> + Send>> {
+    Box::pin(async move {
+        use coland_storage::AgentParticipationStore;
+        let original = boxed_owned_consumer_fixture(1).await;
+        let realm = original.head.event.realm_id.clone();
+        let mut head = original.head.clone();
+        if grant_message {
+            for actor in [
+                arkret_wire::ActorId::account(original.controller.history.account.clone()),
+                arkret_wire::ActorId::account(original.agents[0].account.clone()),
+            ] {
+                let constraints =
+                    if actor.as_account_id() == Some(&original.controller.history.account) {
+                        controller_constraints.clone()
+                    } else {
+                        None
+                    };
+                let request = scenario_future(|| {
+                    owned_consumer_root_grant(
+                        &original,
+                        &head,
+                        &actor,
+                        &["ak.message.create", "ak.circle.member.add"],
+                        serde_json::json!([{"kind":"realm","realm_id":realm}]),
+                        constraints,
+                    )
+                })
+                .await;
+                fixture_commit_step(&original.pool, request.clone())
+                    .await
+                    .unwrap();
+                head = request.authority_commit;
+            }
         }
-    }
-    if grant_body {
-        for actor in [
-            arkret_wire::ActorId::account(original.controller.history.account.clone()),
-            arkret_wire::ActorId::account(original.agents[0].account.clone()),
-        ] {
-            let request = Box::pin(owned_consumer_root_grant(
-                &original,
-                &head,
-                &actor,
-                &[arkret_wire::CapabilityActionId::ObjectReadContent.as_str()],
-                serde_json::json!([{"kind":"realm","realm_id":realm}]),
-                None,
-            ))
-            .await;
-            fixture_commit_step(&original.pool, request.clone())
-                .await
-                .unwrap();
-            head = request.authority_commit;
+        if grant_body {
+            for actor in [
+                arkret_wire::ActorId::account(original.controller.history.account.clone()),
+                arkret_wire::ActorId::account(original.agents[0].account.clone()),
+            ] {
+                let actions = [arkret_wire::CapabilityActionId::ObjectReadContent.as_str()];
+                let request = scenario_future(|| {
+                    owned_consumer_root_grant(
+                        &original,
+                        &head,
+                        &actor,
+                        &actions,
+                        serde_json::json!([{"kind":"realm","realm_id":realm}]),
+                        None,
+                    )
+                })
+                .await;
+                fixture_commit_step(&original.pool, request.clone())
+                    .await
+                    .unwrap();
+                head = request.authority_commit;
+            }
         }
-    }
-    assert!(
-        coland_storage_postgres::PgAgentParticipationStore {
-            pool: original.pool.clone(),
-        }
-        .compare_and_swap_selection(
-            serde_json::json!({"agent_id":original.agents[0].account.principal_id,
+        assert!(
+            coland_storage_postgres::PgAgentParticipationStore {
+                pool: original.pool.clone(),
+            }
+            .compare_and_swap_selection(
+                serde_json::json!({"agent_id":original.agents[0].account.principal_id,
             "scope_kind":"realm","scope_key":format!("realm:{realm}"),
             "realm_id":realm,"scope":{"kind":"realm","realm_id":realm},
             "version":2,"reply_message":true,"reaction_add":false,
             "reaction_remove":false,"accept_third_party_mention":true,
             "act_on_behalf":false}),
-            1,
-        )
-        .await
-        .unwrap()
-    );
-    let mut effective_scope = arkret_wire::ScopeRef::Realm {
-        realm_id: realm.clone(),
-    };
-    if in_circle {
-        let at = head.commit.committed_at + chrono::TimeDelta::milliseconds(1);
-        let create = Box::pin(ordinary_realm::source_request(&original.pool,
+                1,
+            )
+            .await
+            .unwrap()
+        );
+        let mut effective_scope = arkret_wire::ScopeRef::Realm {
+            realm_id: realm.clone(),
+        };
+        if in_circle {
+            let at = head.commit.committed_at + chrono::TimeDelta::milliseconds(1);
+            let create = scenario_future(|| ordinary_realm::source_request(&original.pool,
             ordinary_realm::next_request_for_actor(&head,EventKind::CircleCreate,
                 arkret_wire::ActorId::account(original.founder.clone()),
                 serde_json::json!({"object":{"schema":"ak.schema.circle.v1","realm_id":realm,
@@ -12204,214 +12355,242 @@ async fn native_reply_preparation_fixture_with_body(
                     "directory_visibility":"members","join_rule":"public","history_access":"since_join",
                     "state":"active","created_by":arkret_wire::ActorId::account(original.founder.clone()),
                     "created_at":arkret_canonical::format_timestamp_canonical(at)}}),at))).await;
-        fixture_commit_step(&original.pool, create.clone())
-            .await
-            .unwrap();
-        head = create.authority_commit;
-        let circle = arkret_wire::CircleId::from_event_id(&head.event.event_id);
-        effective_scope = arkret_wire::ScopeRef::Circle {
-            realm_id: realm.clone(),
-            circle_id: circle.clone(),
-        };
-        let mut circle_head: Option<coland_storage::AuthorityCommitTransaction> = None;
-        for account in [
-            &original.founder,
-            &original.controller.history.account,
-            &original.agents[0].account,
-        ] {
-            let actor = arkret_wire::ActorId::account(account.clone());
-            let parent = Box::pin(ordinary_realm::parent_membership_revision(
-                &original.pool,
-                &realm,
-                &actor,
-            ))
-            .await;
-            let payload = serde_json::json!({"circle_id":circle,"member_id":actor,"membership":"join",
-                "expected_membership":null,"parent_membership_revision":parent});
-            let request = if account == &original.agents[0].account {
-                let previous = circle_head.as_ref().unwrap();
-                Box::pin(ordinary_realm::source_request(
-                    &original.pool,
-                    owned_consumer_signed_request(
-                        previous,
-                        &original.agents[0],
-                        EventKind::CircleMemberState,
-                        effective_scope.clone(),
-                        payload,
-                        previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
-                    ),
-                ))
-                .await
-            } else {
-                Box::pin(native_reply_human_scoped_request(
-                    &original.pool,
-                    &head,
-                    circle_head.as_ref(),
-                    EventKind::CircleMemberState,
-                    effective_scope.clone(),
-                    actor,
-                    payload,
-                ))
-                .await
-            };
-            fixture_commit_step(&original.pool, request.clone())
+            fixture_commit_step(&original.pool, create.clone())
                 .await
                 .unwrap();
-            circle_head = Some(request.authority_commit);
+            head = create.authority_commit;
+            let circle = arkret_wire::CircleId::from_event_id(&head.event.event_id);
+            effective_scope = arkret_wire::ScopeRef::Circle {
+                realm_id: realm.clone(),
+                circle_id: circle.clone(),
+            };
+            let mut circle_head: Option<coland_storage::AuthorityCommitTransaction> = None;
+            for account in [
+                &original.founder,
+                &original.controller.history.account,
+                &original.agents[0].account,
+            ] {
+                let actor = arkret_wire::ActorId::account(account.clone());
+                let parent = scenario_future(|| {
+                    ordinary_realm::parent_membership_revision(&original.pool, &realm, &actor)
+                })
+                .await;
+                let payload = serde_json::json!({"circle_id":circle,"member_id":actor,"membership":"join",
+                "expected_membership":null,"parent_membership_revision":parent});
+                let request = if account == &original.agents[0].account {
+                    let previous = circle_head.as_ref().unwrap();
+                    scenario_future(|| {
+                        ordinary_realm::source_request(
+                            &original.pool,
+                            owned_consumer_signed_request(
+                                previous,
+                                &original.agents[0],
+                                EventKind::CircleMemberState,
+                                effective_scope.clone(),
+                                payload,
+                                previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
+                            ),
+                        )
+                    })
+                    .await
+                } else {
+                    scenario_future(|| {
+                        native_reply_human_scoped_request(
+                            &original.pool,
+                            &head,
+                            circle_head.as_ref(),
+                            EventKind::CircleMemberState,
+                            effective_scope.clone(),
+                            actor,
+                            payload,
+                        )
+                    })
+                    .await
+                };
+                fixture_commit_step(&original.pool, request.clone())
+                    .await
+                    .unwrap();
+                circle_head = Some(request.authority_commit);
+            }
+            head = circle_head.unwrap();
         }
-        head = circle_head.unwrap();
-    }
-    let at = head.commit.committed_at + chrono::TimeDelta::milliseconds(1);
-    let strand_request = Box::pin(ordinary_realm::source_request(
-        &original.pool,
-        ordinary_realm::next_request_for_actor(
-            &head,
-            EventKind::StrandCreate,
-            arkret_wire::ActorId::account(original.founder.clone()),
-            serde_json::json!({"object":{"schema":"ak.schema.strand.v1",
+        let at = head.commit.committed_at + chrono::TimeDelta::milliseconds(1);
+        let strand_request = scenario_future(|| {
+            ordinary_realm::source_request(
+                &original.pool,
+                ordinary_realm::next_request_for_actor(
+                    &head,
+                    EventKind::StrandCreate,
+                    arkret_wire::ActorId::account(original.founder.clone()),
+                    serde_json::json!({"object":{"schema":"ak.schema.strand.v1",
                 "realm_id":realm,"tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},
                 "metadata":{"title":"Native public reply input"},"state":"active",
                 "created_by":arkret_wire::ActorId::account(original.founder.clone()),
                 "created_at":arkret_canonical::format_timestamp_canonical(at)}}),
-            at,
-        ),
-    ))
-    .await;
-    let strand_request = if in_circle {
-        Box::pin(native_reply_human_scoped_request(
-            &original.pool,
-            &head,
-            Some(&head),
-            EventKind::StrandCreate,
-            effective_scope.clone(),
-            arkret_wire::ActorId::account(original.founder.clone()),
-            serde_json::to_value(&strand_request.authority_commit.event.payload).unwrap(),
-        ))
-        .await
-    } else {
-        strand_request
-    };
-    fixture_commit_step(&original.pool, strand_request.clone())
-        .await
-        .unwrap();
-    let strand =
-        arkret_wire::StrandId::from_event_id(&strand_request.authority_commit.event.event_id);
-    let message = Box::pin(ordinary_realm::source_request(
-        &original.pool,
-        ordinary_realm::next_request_for_actor(
-            &strand_request.authority_commit,
-            EventKind::MessageCreate,
-            arkret_wire::ActorId::account(original.founder.clone()),
-            ordinary_realm::message_payload(&strand, "Accepted third-party native reply source"),
-            at + chrono::TimeDelta::milliseconds(1),
-        ),
-    ))
-    .await;
-    let message = if in_circle {
-        Box::pin(native_reply_human_scoped_request(
-            &original.pool,
-            &strand_request.authority_commit,
-            Some(&strand_request.authority_commit),
-            EventKind::MessageCreate,
-            effective_scope,
-            arkret_wire::ActorId::account(original.founder.clone()),
-            ordinary_realm::message_payload(&strand, "Accepted third-party native reply source"),
-        ))
-        .await
-    } else {
-        message
-    };
-    fixture_commit_step(&original.pool, message.clone())
-        .await
-        .unwrap();
-    let source = PgAuthorityCommitStore {
-        pool: original.pool.clone(),
-    }
-    .committed_event(&message.authority_commit.event.event_id)
-    .await
-    .unwrap()
-    .unwrap();
-    let source = arkret_wire::CommittedEventFullView {
-        event: source.event,
-        commit: source.commit,
-    };
-    source.validate_shape().unwrap();
-    assert_eq!(
-        source.event.event_id,
-        message.authority_commit.event.event_id
-    );
-    assert_eq!(
-        source.commit.commit_id,
-        message.authority_commit.commit.commit_id
-    );
-    assert_eq!(
-        source.event.actor_id.as_account_id(),
-        Some(&original.founder)
-    );
-    let agent = &original.agents[0];
-    let http = Box::pin(owned_consumer_http_for_endpoint_with_storage(
-        &original.pool,
-        &original.station,
-        &original.controller.history.account,
-        &realm,
-        &agent.account,
-        &agent.endpoint,
-        &agent._vault,
-        None,
-        lifetime,
-        None,
-    ))
-    .await;
-    let mut response = Box::pin(owned_consumer_http_get(
-        &http,
-        &format!("/_arkret/self/committed-events/{}", source.event.event_id),
-        "ak.self.committed_event.resource.get.v1",
-    ))
-    .await;
-    owned_consumer_assert_http_status(
-        &mut response,
-        salvo::http::StatusCode::OK,
-        "native_reply_exact_input_authenticated_baseline",
-    )
-    .await;
-    let delivered =
-        owned_consumer_take_response_json::<arkret_wire::CommittedEventView>(&mut response)
+                    at,
+                ),
+            )
+        })
+        .await;
+        let strand_request = if in_circle {
+            let mut payload =
+                serde_json::to_value(&strand_request.authority_commit.event.payload).unwrap();
+            let arkret_wire::ScopeRef::Circle { circle_id, .. } = &effective_scope else {
+                unreachable!("the Circle fixture established its effective scope")
+            };
+            payload["object"]["scope_circle_id"] = serde_json::to_value(circle_id).unwrap();
+            scenario_future(|| {
+                native_reply_human_scoped_request(
+                    &original.pool,
+                    &head,
+                    Some(&head),
+                    EventKind::StrandCreate,
+                    effective_scope.clone(),
+                    arkret_wire::ActorId::account(original.founder.clone()),
+                    payload,
+                )
+            })
+            .await
+        } else {
+            strand_request
+        };
+        fixture_commit_step(&original.pool, strand_request.clone())
             .await
             .unwrap();
-    assert!(
-        delivered == arkret_wire::CommittedEventView::Full(source.clone()),
-        "normal DPoP route returns the same complete accepted source before native preparation"
-    );
-    let evidence = Box::pin(http.state.qualified_agent_scope_evidence(&agent.endpoint))
+        let strand =
+            arkret_wire::StrandId::from_event_id(&strand_request.authority_commit.event.event_id);
+        let message = scenario_future(|| {
+            ordinary_realm::source_request(
+                &original.pool,
+                ordinary_realm::next_request_for_actor(
+                    &strand_request.authority_commit,
+                    EventKind::MessageCreate,
+                    arkret_wire::ActorId::account(original.founder.clone()),
+                    ordinary_realm::message_payload(
+                        &strand,
+                        "Accepted third-party native reply source",
+                    ),
+                    at + chrono::TimeDelta::milliseconds(1),
+                ),
+            )
+        })
+        .await;
+        let message = if in_circle {
+            scenario_future(|| {
+                native_reply_human_scoped_request(
+                    &original.pool,
+                    &strand_request.authority_commit,
+                    Some(&strand_request.authority_commit),
+                    EventKind::MessageCreate,
+                    effective_scope,
+                    arkret_wire::ActorId::account(original.founder.clone()),
+                    ordinary_realm::message_payload(
+                        &strand,
+                        "Accepted third-party native reply source",
+                    ),
+                )
+            })
+            .await
+        } else {
+            message
+        };
+        fixture_commit_step(&original.pool, message.clone())
+            .await
+            .unwrap();
+        let source = PgAuthorityCommitStore {
+            pool: original.pool.clone(),
+        }
+        .committed_event(&message.authority_commit.event.event_id)
         .await
+        .unwrap()
         .unwrap();
-    let observed = Box::pin(management_current_for_accounts(
-        &original.pool,
-        &original.station,
-        &[
+        let source = arkret_wire::CommittedEventFullView {
+            event: source.event,
+            commit: source.commit,
+        };
+        source.validate_shape().unwrap();
+        assert_eq!(
+            source.event.event_id,
+            message.authority_commit.event.event_id
+        );
+        assert_eq!(
+            source.commit.commit_id,
+            message.authority_commit.commit.commit_id
+        );
+        assert_eq!(
+            source.event.actor_id.as_account_id(),
+            Some(&original.founder)
+        );
+        let agent = &original.agents[0];
+        let http = scenario_future(|| {
+            owned_consumer_http_for_endpoint_with_storage(
+                &original.pool,
+                &original.station,
+                &original.controller.history.account,
+                &realm,
+                &agent.account,
+                &agent.endpoint,
+                &agent._vault,
+                None,
+                lifetime,
+                None,
+            )
+        })
+        .await;
+        let source_url = format!("/_arkret/self/committed-events/{}", source.event.event_id);
+        let mut response = scenario_future(|| {
+            owned_consumer_http_get(
+                &http,
+                &source_url,
+                "ak.self.committed_event.resource.get.v1",
+            )
+        })
+        .await;
+        owned_consumer_assert_http_status(
+            &mut response,
+            salvo::http::StatusCode::OK,
+            "native_reply_exact_input_authenticated_baseline",
+        )
+        .await;
+        let delivered =
+            owned_consumer_take_response_json::<arkret_wire::CommittedEventView>(&mut response)
+                .await
+                .unwrap();
+        assert!(
+            delivered == arkret_wire::CommittedEventView::Full(source.clone()),
+            "normal DPoP route returns the same complete accepted source before native preparation"
+        );
+        let evidence =
+            scenario_future(|| http.state.qualified_agent_scope_evidence(&agent.endpoint))
+                .await
+                .unwrap();
+        let observed_accounts = [
             original.controller.history.account.clone(),
             original.founder.clone(),
-        ],
-    ))
-    .await;
-    let input = coland_storage::AccountContentDeliveryInput {
-        realms: vec![realm],
-        committed_events: vec![arkret_wire::CommittedEventView::Full(source.clone())],
-        agent_endpoint: Some(agent.endpoint.clone()),
-        qualified_agent_scope_evidence: Some(evidence),
-        credential_expires_at: Some(http.grant_expires_at),
-        agent_session_scope: Some(http.delivery_session_scope.clone()),
-        account_status_observations: observed.observations,
-        ..Default::default()
-    };
-    NativeReplyPreparationFixture {
-        original,
-        _http: http,
-        head: message.authority_commit,
-        strand,
-        source,
-        input,
-    }
+        ];
+        let observed = scenario_future(|| {
+            management_current_for_accounts(&original.pool, &original.station, &observed_accounts)
+        })
+        .await;
+        let input = coland_storage::AccountContentDeliveryInput {
+            realms: vec![realm],
+            committed_events: vec![arkret_wire::CommittedEventView::Full(source.clone())],
+            agent_endpoint: Some(agent.endpoint.clone()),
+            qualified_agent_scope_evidence: Some(evidence),
+            credential_expires_at: Some(http.grant_expires_at),
+            agent_session_scope: Some(http.delivery_session_scope.clone()),
+            account_status_observations: observed.observations,
+            ..Default::default()
+        };
+        NativeReplyPreparationFixture {
+            original,
+            _http: http,
+            head: message.authority_commit,
+            strand,
+            source,
+            input,
+        }
+    })
 }
 
 fn native_reply_preparation_step(
@@ -12787,4 +12966,13 @@ async fn native_public_reply_guard_holds_actual_writer_until_finish_or_cancel() 
             native_reply_refused_unchanged(&fixture, &fixture.input, ParticipationBits::ALL).await;
         }
     }).await;
+}
+
+#[inline(never)]
+fn scenario_future<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future,
+{
+    Box::pin(make())
 }

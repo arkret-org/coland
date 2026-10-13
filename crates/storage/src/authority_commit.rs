@@ -1382,6 +1382,11 @@ pub struct SignalScopeAuthorityQuery<'a> {
     pub signal_class: arkret_wire::SignalClass,
     pub sent_at: DateTime<Utc>,
     pub at: DateTime<Utc>,
+    pub include_product_authority: bool,
+    pub product_agent: Option<(
+        &'a arkret_wire::AccountId,
+        &'a arkret_models_collaboration::events_payloads::agent::AgentKeyScope,
+    )>,
 }
 
 /// Internal read-only eligibility at the Signal's signed and current cuts.
@@ -1391,6 +1396,9 @@ pub struct SignalScopeAuthority {
     pub historical_mls_event_ref: arkret_wire::EventId,
     pub current_mls: arkret_wire::MlsGroupCurrent,
     pub cipher_suite: String,
+    pub current_realm_head: arkret_wire::CommitStreamHead,
+    pub current_scope_head: arkret_wire::CommitStreamHead,
+    pub product_authority: Option<Box<arkret_models_collaboration::SignalProductAuthority>>,
 }
 
 /// One atomic read cut for a member's MLS Genesis material request. A member

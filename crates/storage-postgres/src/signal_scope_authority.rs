@@ -954,6 +954,21 @@ fn product_owner_actions(historical: &Cut, current: &Cut, actor: &ActorId) -> Ve
         .collect()
 }
 
+fn product_member_effective(scope: &ScopeRef, parent: &Cut, scoped: &Cut, actor: &ActorId) -> bool {
+    if !parent.joined(actor) {
+        return false;
+    }
+    if !matches!(scope, ScopeRef::Circle { .. }) {
+        return true;
+    }
+    let key = actor.to_string();
+    scoped.joined(actor)
+        && parent
+            .member_revisions
+            .get(&key)
+            .is_some_and(|revision| scoped.circle_parent_joins.get(&key) == Some(revision))
+}
+
 async fn product_material(
     conn: &mut AsyncPgConnection,
     query: &SignalScopeAuthorityQuery<'_>,
@@ -980,8 +995,18 @@ async fn product_material(
         .await?;
         let controller_actor = ActorId::account(controller.clone());
         if verified.as_ref() != Some(&controller_actor)
-            || !historical_parent.joined(&controller_actor)
-            || !current_parent.joined(&controller_actor)
+            || !product_member_effective(
+                query.scope,
+                historical_parent,
+                historical_scope,
+                &controller_actor,
+            )
+            || !product_member_effective(
+                query.scope,
+                current_parent,
+                current_scope,
+                &controller_actor,
+            )
             || historical_parent
                 .member_revisions
                 .get(&controller_actor.to_string())
@@ -1514,6 +1539,59 @@ mod typed_replay_tests {
                 sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
             },
         }
+    }
+
+    #[test]
+    fn product_controller_circle_membership_cannot_expand_realm_authority() {
+        let actor = event(EventKind::MemberState, json!({})).actor_id;
+        let key = actor.to_string();
+        let mut parent = Cut::default();
+        parent
+            .members
+            .insert(key.clone(), (actor.clone(), "join".into()));
+        let revision = arkret_wire::CurrentRevision {
+            commit_id: RealmCommitId::from_digest([3; 32]),
+            stream_position: 3,
+        };
+        parent
+            .member_revisions
+            .insert(key.clone(), revision.clone());
+        let realm = ScopeRef::Realm {
+            realm_id: realm_id(),
+        };
+        let circle = ScopeRef::Circle {
+            realm_id: realm_id(),
+            circle_id: arkret_wire::CircleId::from_event_id(&EventId::from_digest(
+                arkret_canonical::DigestSuite::Sha256,
+                [4; 32],
+            )),
+        };
+        let mut scoped = Cut::default();
+        assert!(product_member_effective(&realm, &parent, &scoped, &actor));
+        assert!(!product_member_effective(&circle, &parent, &scoped, &actor));
+        scoped
+            .members
+            .insert(key.clone(), (actor.clone(), "join".into()));
+        assert!(!product_member_effective(&circle, &parent, &scoped, &actor));
+        scoped.circle_parent_joins.insert(key.clone(), revision);
+        assert!(product_member_effective(&circle, &parent, &scoped, &actor));
+        parent
+            .member_revisions
+            .get_mut(&key)
+            .unwrap()
+            .stream_position += 1;
+        assert!(!product_member_effective(&circle, &parent, &scoped, &actor));
+        let revision = parent.member_revisions[&key].clone();
+        scoped.circle_parent_joins.insert(key.clone(), revision);
+        assert!(product_member_effective(&circle, &parent, &scoped, &actor));
+        scoped.members.get_mut(&key).unwrap().1 = "leave".into();
+        assert!(!product_member_effective(&circle, &parent, &scoped, &actor));
+        assert!(!product_member_effective(
+            &realm,
+            &Cut::default(),
+            &scoped,
+            &actor,
+        ));
     }
 
     #[test]

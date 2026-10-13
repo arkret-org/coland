@@ -12289,7 +12289,7 @@ async fn build_native_reply_preparation_fixture(
     grant_body: bool,
 ) -> NativeReplyPreparationFixture {
     use coland_storage::AgentParticipationStore;
-    let original = boxed_owned_consumer_fixture(1).await;
+    let original = fixture_step(boxed_owned_consumer_fixture(1)).await;
     let realm = original.head.event.realm_id.clone();
     let mut head = original.head.clone();
     if grant_message {

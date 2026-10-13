@@ -399,7 +399,7 @@ pub(super) async fn account_response(
             return;
         }
         if initial_has_delta {
-            let delivery = match super::account_frame_delivery_guard(&state, &session, &response).await {
+            let delivery = match Box::pin(super::account_frame_delivery_guard(&state, &session, &response)).await {
                 Ok(guard) => guard,
                 Err(_) => {
                     yield Ok::<Bytes,std::io::Error>(ndjson_line(&account_unauthorized_frame()));
@@ -462,7 +462,7 @@ pub(super) async fn account_response(
                             &account_checkpoint_frame(final_cursor.clone()),
                         ));
                     } else {
-                        let delivery = match super::account_frame_delivery_guard(&state, &session, &final_snapshot).await {
+                        let delivery = match Box::pin(super::account_frame_delivery_guard(&state, &session, &final_snapshot)).await {
                             Ok(guard) => guard,
                             Err(_) => {
                                 yield Ok::<Bytes,std::io::Error>(ndjson_line(&account_unauthorized_frame()));
@@ -549,7 +549,7 @@ pub(super) async fn account_response(
                             yield Err(std::io::Error::other("account cursor authority changed before publication"));
                             break;
                         }
-                        let delivery = match super::account_frame_delivery_guard(&state, &session, &delta).await {
+                        let delivery = match Box::pin(super::account_frame_delivery_guard(&state, &session, &delta)).await {
                             Ok(guard) => guard,
                             Err(_) => {
                                 yield Ok::<Bytes,std::io::Error>(ndjson_line(&account_unauthorized_frame()));

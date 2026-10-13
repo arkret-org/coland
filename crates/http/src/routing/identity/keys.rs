@@ -337,16 +337,17 @@ pub(crate) async fn prepare_current_account_device_signer_evidence(
     if expires_at <= attested_at {
         return Ok(None);
     }
-    let service_resolution =
-        crate::routing::system::service_resolution::current_authenticated_service_resolution(state)
-            .await
-            .map_err(|error| {
-                ServiceError::Conflict(format!(
-                    "{}: current Service resolution is unavailable: {}",
-                    coland_storage::ConflictCode::TemporarilyUnavailable,
-                    error.message
-                ))
-            })?;
+    let service_resolution = Box::pin(
+        crate::routing::system::service_resolution::current_authenticated_service_resolution(state),
+    )
+    .await
+    .map_err(|error| {
+        ServiceError::Conflict(format!(
+            "{}: current Service resolution is unavailable: {}",
+            coland_storage::ConflictCode::TemporarilyUnavailable,
+            error.message
+        ))
+    })?;
     let attestation = arkret_signatures::device_projection::sign_device_projection_attestation(
         DeviceProjectionAttestationCore {
             account_id: account_id.clone(),

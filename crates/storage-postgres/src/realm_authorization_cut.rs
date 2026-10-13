@@ -148,7 +148,10 @@ pub(crate) async fn owned_controller_in_connection(
     actor: &ActorId,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<Option<ActorId>> {
-    read_owned_controller_in_connection(conn, realm_id, actor, at, true).await
+    Box::pin(read_owned_controller_in_connection(
+        conn, realm_id, actor, at, true,
+    ))
+    .await
 }
 
 /// Read ownership without admission locks from one repeatable-read snapshot.

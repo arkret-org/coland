@@ -94,7 +94,10 @@ pub(crate) async fn read_scoped_agent_management_policies_in_connection(
     realm: &arkret_wire::RealmId,
     circle: Option<&arkret_wire::CircleId>,
 ) -> PersistenceResult<Vec<arkret_models_collaboration::governance::operation_wire::Policy>> {
-    read_scoped_agent_management_policies_at_cut(conn, realm, circle, true).await
+    Box::pin(read_scoped_agent_management_policies_at_cut(
+        conn, realm, circle, true,
+    ))
+    .await
 }
 
 /// Governing visibility from an enclosing repeatable-read transaction. This is

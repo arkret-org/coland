@@ -140,6 +140,7 @@ pub(crate) async fn commit_contact_event_unit(
         self_producer_guard: Some(guard),
         applet_producer_guard: None,
         widget_token_gate: None,
+        agent_grant_scope_evidence: None,
         forwarded_producer_evidence: None,
         forwarded_agent_producer: None,
         agent_deployment_ceiling:

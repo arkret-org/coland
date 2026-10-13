@@ -86,6 +86,8 @@ pub struct EventCommitRequest {
     pub self_producer_guard: Option<crate::SelfProducerCommitGuard>,
     pub applet_producer_guard: Option<AppletEventProducerGuard>,
     pub widget_token_gate: Option<crate::AppletWidgetTokenGateSelector>,
+    /// Verifier-private subject evidence, rechecked inside the grant transaction.
+    pub agent_grant_scope_evidence: Option<crate::VerifiedAgentScopeEvidence>,
     /// Cross-Station human-device producer evidence verified from an
     /// `authority_forward`; retained only with the Event's first Commit.
     pub forwarded_producer_evidence: Option<crate::ForwardedProducerDeviceEvidence>,

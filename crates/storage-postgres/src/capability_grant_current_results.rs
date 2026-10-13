@@ -1026,6 +1026,82 @@ fn materialized_grant(
     }
 }
 
+/// Enforce the subject's immutable ceiling under the actual grant transaction.
+/// Qualified encrypted custody supplies the controller disclosure. Its exact
+/// accepted provision, genesis, authorization and active receipt are rechecked
+/// under the same connection before evaluating any grant resource or action.
+async fn require_agent_provision_ceiling_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    commit: &arkret_wire::RealmCommit,
+    body: &arkret_models_collaboration::events_payloads::CapabilityGrantCreateBody,
+    evidence: Option<&coland_storage::VerifiedAgentScopeEvidence>,
+) -> PersistenceResult<()> {
+    let CapabilitySubject::Actor(subject) = &body.subject else {
+        return Ok(());
+    };
+    let Some(account) = subject.as_account_id() else {
+        return Ok(());
+    };
+    if !crate::realm_authorization_cut::is_owned_agent_in_connection(conn, &event.realm_id, account)
+        .await?
+    {
+        return Ok(());
+    }
+    let evidence = evidence.ok_or_else(|| conflict("agent_requested_scope_commitment_invalid"))?;
+    let binding = evidence.accepted_binding();
+    if binding.controller_account.station_id != account.station_id
+        || evidence.command().requested_scope_disclosure.agent_id != account.principal_id
+        || binding.verified_at > commit.committed_at
+    {
+        return Err(conflict("agent_requested_scope_commitment_invalid"));
+    }
+    let current = crate::realm_authorization_cut::owned_source_in_connection(
+        conn,
+        &event.realm_id,
+        subject,
+        commit.committed_at,
+        true,
+    )
+    .await
+    .map_err(|_| conflict("agent_requested_scope_commitment_invalid"))?;
+    if !matches!(current, Some(IssuerAuthorityRef::OwnedAgent { controller_account_id, .. })
+        if controller_account_id == binding.controller_account)
+    {
+        return Err(conflict("agent_requested_scope_commitment_invalid"));
+    }
+    let authorization =
+        arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload::try_from(
+            &evidence.command().authorize_event.event,
+        )
+        .map_err(|error| schema_violation(error.to_string()))?;
+    let endpoint = coland_storage::AgentEndpointGuard {
+        pcr_realm_id: binding.pcr_genesis_ref.stream_ref.realm_id().clone(),
+        agent_id: account.principal_id.clone(),
+        authorization_ref: evidence.accepted_authorization_ref().clone(),
+        verification_method: authorization.verification_method,
+    };
+    let scope = crate::account_content_delivery::provision_scope_in_connection(
+        conn,
+        &endpoint,
+        evidence,
+        &account.station_id,
+    )
+    .await
+    .map_err(|_| conflict("agent_requested_scope_commitment_invalid"))?;
+    if !arkret_models_collaboration::agent_scope::agent_grant_scope_within_provision(
+        &scope,
+        &body.actions,
+        &body.resources,
+        &body.constraints,
+    )
+    .map_err(|error| schema_violation(error.to_string()))?
+    {
+        return Err(conflict("agent_grant_exceeds_requested_scope"));
+    }
+    Ok(())
+}
+
 async fn materialize_capability_grant_inner(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
@@ -1304,7 +1380,18 @@ pub(crate) fn commit_capability_grant_current_result_in_connection<'a>(
     commit: &'a arkret_wire::RealmCommit,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PersistenceResult<()>> + Send + 'a>> {
     Box::pin(commit_capability_grant_current_result_inner(
-        conn, event, commit,
+        conn, event, commit, None,
+    ))
+}
+
+pub(crate) fn commit_qualified_capability_grant_current_result_in_connection<'a>(
+    conn: &'a mut AsyncPgConnection,
+    event: &'a arkret_wire::Event,
+    commit: &'a arkret_wire::RealmCommit,
+    evidence: Option<&'a coland_storage::VerifiedAgentScopeEvidence>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = PersistenceResult<()>> + Send + 'a>> {
+    Box::pin(commit_capability_grant_current_result_inner(
+        conn, event, commit, evidence,
     ))
 }
 
@@ -1312,6 +1399,7 @@ async fn commit_capability_grant_current_result_inner(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    evidence: Option<&coland_storage::VerifiedAgentScopeEvidence>,
 ) -> PersistenceResult<()> {
     let Some(mutation) = mutation_for_event(event)? else {
         return Ok(());
@@ -1401,6 +1489,9 @@ async fn commit_capability_grant_current_result_inner(
         )
     };
 
+    if let CapabilityGrantCurrentMutation::Create { body, .. } = &mutation {
+        require_agent_provision_ceiling_in_connection(conn, event, commit, body, evidence).await?;
+    }
     let (status, value) = match (mutation, current.as_ref()) {
         (CapabilityGrantCurrentMutation::Create { grant_id, body }, None) => (
             CapabilityGrantCurrentStatus::Active,

@@ -383,11 +383,15 @@ pub enum ConflictCode {
     AgentPcrGenesisDeclarationConflict,
     /// An Agent PCR genesis has no accepted provision declaring its id.
     AgentPcrGenesisDeclarationMissing,
+    /// An Agent grant exceeds the immutable disclosed provision ceiling.
+    AgentGrantExceedsRequestedScope,
+    /// The Agent scope lacks qualified accepted-at private evidence.
+    AgentRequestedScopeCommitmentInvalid,
 }
 
 impl ConflictCode {
     /// Every registered code, in the order the variants are declared.
-    pub const ALL: [Self; 84] = [
+    pub const ALL: [Self; 86] = [
         Self::ApprovalNonceReused,
         Self::ApprovalRequired,
         Self::AppletRevoked,
@@ -472,11 +476,19 @@ impl ConflictCode {
         Self::AgentProvisioningAlreadyDeclared,
         Self::AgentPcrGenesisDeclarationConflict,
         Self::AgentPcrGenesisDeclarationMissing,
+        Self::AgentGrantExceedsRequestedScope,
+        Self::AgentRequestedScopeCommitmentInvalid,
     ];
 
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::AgentGrantExceedsRequestedScope => {
+                arkret_wire::ReasonCode::AGENT_GRANT_EXCEEDS_REQUESTED_SCOPE
+            }
+            Self::AgentRequestedScopeCommitmentInvalid => {
+                arkret_wire::ReasonCode::AGENT_REQUESTED_SCOPE_COMMITMENT_INVALID
+            }
             Self::ApprovalNonceReused => arkret_wire::ReasonCode::APPROVAL_NONCE_REUSED,
             Self::ApprovalRequired => arkret_wire::ReasonCode::APPROVAL_REQUIRED,
             Self::AppletRevoked => "applet_revoked",

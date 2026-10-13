@@ -504,6 +504,8 @@ pub struct CommitAcceptedEventCommand {
     pub self_producer_guard: Option<coland_storage::SelfProducerCommitGuard>,
     pub applet_producer_guard: Option<coland_storage::AppletEventProducerGuard>,
     pub widget_token_gate: Option<coland_storage::AppletWidgetTokenGateSelector>,
+    /// Verifier-private subject evidence, rechecked inside the grant transaction.
+    pub agent_grant_scope_evidence: Option<coland_storage::VerifiedAgentScopeEvidence>,
     /// Verified `producer_device_evidence` of a cross-Station human-device
     /// producer, retained for audit with the Event's first Commit.
     pub forwarded_producer_evidence: Option<coland_storage::ForwardedProducerDeviceEvidence>,
@@ -1737,6 +1739,7 @@ mod tests {
                 self_producer_guard: None,
                 applet_producer_guard: None,
                 widget_token_gate: None,
+                agent_grant_scope_evidence: None,
                 forwarded_producer_evidence: None,
                 forwarded_agent_producer: None,
                 agent_deployment_ceiling: arkret_models_collaboration::governance::agent_participation::ParticipationBits::ALL,

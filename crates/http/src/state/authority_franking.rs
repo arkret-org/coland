@@ -372,6 +372,7 @@ async fn publish_one(
             self_producer_guard: None,
             applet_producer_guard: None,
             widget_token_gate: None,
+            agent_grant_scope_evidence: None,
             forwarded_producer_evidence: None,
             forwarded_agent_producer: None,
             agent_deployment_ceiling: arkret_models_collaboration::governance::agent_participation::ParticipationBits::ALL,

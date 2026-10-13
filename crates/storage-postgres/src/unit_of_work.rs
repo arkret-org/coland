@@ -24,10 +24,7 @@ use crate::authority_commit::{
     commit_transaction_in_connection, queue_event_in_connection,
     realm_state_snapshot_material_in_connection,
 };
-use crate::capability_grant_current_results::{
-    commit_capability_grant_current_result_in_connection,
-    commit_realm_authority_root_current_result_in_connection,
-};
+use crate::capability_grant_current_results::commit_realm_authority_root_current_result_in_connection;
 use crate::device_revocations::{
     commit_revocation_in_connection, ensure_gate_allowed_in_transaction,
 };
@@ -3245,8 +3242,8 @@ async fn commit_scope_current_results_inner(
     ))
     .await?;
 
-    Box::pin(commit_capability_grant_current_result_in_connection(
-        conn, event, commit,
+    Box::pin(crate::capability_grant_current_results::commit_qualified_capability_grant_current_result_in_connection(
+        conn, event, commit, request.agent_grant_scope_evidence.as_ref(),
     ))
     .await?;
     // An accepted Invite decides its accepting actor's `leave -> join`

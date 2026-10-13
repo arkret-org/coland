@@ -688,7 +688,7 @@ struct SourceEventRow {
     event_id: String,
 }
 
-async fn provision_scope_in_connection(
+pub(crate) async fn provision_scope_in_connection(
     conn: &mut AsyncPgConnection,
     endpoint: &coland_storage::AgentEndpointGuard,
     evidence: &coland_storage::VerifiedAgentScopeEvidence,

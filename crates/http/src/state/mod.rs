@@ -10,6 +10,7 @@ mod app_state;
 mod applet_completion;
 mod authority_accountability_grant;
 mod authority_agent_control;
+mod authority_agent_grant;
 mod authority_agent_pcr_genesis;
 mod authority_bootstrap_validation;
 pub(crate) mod authority_consent;

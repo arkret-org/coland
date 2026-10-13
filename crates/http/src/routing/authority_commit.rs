@@ -380,6 +380,8 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
                 | coland_storage::ConflictCode::AuthorityCycle
                 | coland_storage::ConflictCode::AuthorityExpiryWidening
                 | coland_storage::ConflictCode::AccountabilityGrantMissing
+                | coland_storage::ConflictCode::AgentGrantExceedsRequestedScope
+                | coland_storage::ConflictCode::AgentRequestedScopeCommitmentInvalid
                 | coland_storage::ConflictCode::AgentPcrGenesisDeclarationMissing
                 | coland_storage::ConflictCode::ReducerProjectionFailed),
             ) => {

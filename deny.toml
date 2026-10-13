@@ -16,7 +16,16 @@ targets = [
 # crc-fast 1.10.0. Keep this visible as a warning until crc-fast updates its
 # spin requirement; vulnerabilities remain denied.
 yanked = "warn"
-ignore = []
+# Informational maintenance notices in the pinned upstream Starlark evaluator
+# and Teloxide documentation macros. These have no reported vulnerability or
+# patched release; keep the runtime vulnerability checks enabled. Revisit on
+# upstream dependency changes rather than ignoring either owning crate.
+ignore = [
+  "RUSTSEC-2024-0388", # derivative: Starlark derive macro
+  "RUSTSEC-2024-0436", # paste: Starlark token-pasting macro
+  "RUSTSEC-2025-0057", # fxhash: Starlark's internal maps
+  "RUSTSEC-2026-0173", # proc-macro-error2: Teloxide/Aquamarine doc macros
+]
 
 [licenses]
 # Apache-2.0 + permissive licenses we already depend on. Add to this list only
@@ -57,4 +66,11 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = ["https://github.com/openmls/openmls.git"]
+allow-git = [
+  "https://github.com/openmls/openmls.git",
+  "https://github.com/open-telemetry/opentelemetry-rust.git",
+  "https://github.com/palpo-im/dingtalk-sdk",
+  "https://github.com/chrislearn/eventsource-stream.git",
+  "https://github.com/helix-editor/nucleo.git",
+  "https://github.com/dzbarsky/rules_rust",
+]

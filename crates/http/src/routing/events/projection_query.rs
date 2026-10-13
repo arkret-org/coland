@@ -33,29 +33,32 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use arkret_identifiers::{MorphId, RealmId, RelationId};
+#[cfg(test)]
+use arkret_identifiers::RelationId;
+use arkret_identifiers::{MorphId, RealmId};
 #[cfg(test)]
 use arkret_models_collaboration::objects::query_projection::ProjectionAssignedToRelation;
 use arkret_models_collaboration::objects::query_projection::{
-    DocumentMorphProjectionOutcome, ProjectionMorphList, ProjectionMorphRow, ProjectionSpaceList,
-    ProjectionStrandList, ReferenceProjectionState,
+    DocumentMorphProjectionOutcome, ProjectionMorphList, ProjectionSpaceList, ProjectionStrandList,
 };
 use arkret_models_collaboration::objects::relation::RelationEndpoint;
+#[cfg(test)]
 use arkret_wire::ObjectState;
 use chrono::{DateTime, Utc};
-use coland_domain::reducer::{
-    ColandRelationState, MessageState, MorphProjection, ObjectLifecycleState, ProjectionState,
-    SpaceContainerLifecycleState,
-};
+use coland_domain::reducer::ColandRelationState;
+#[cfg(test)]
+use coland_domain::reducer::{MorphProjection, ObjectLifecycleState, ProjectionState};
 use coland_http::error::AppError;
 use coland_http::result::{GuardedJsonResult, JsonResult, guarded_json_ok, json_ok};
+#[cfg(test)]
 use coland_services::identity::SessionIdentityState as SessionRecord;
-use coland_services::projection::morph_document_body;
 use salvo::oapi::extract::{PathParam, QueryParam};
 use salvo::prelude::*;
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 
-use super::{realm_history_access, realm_id_accessible};
+use super::realm_id_accessible;
 use crate::routing::system::extract::AuthArgs;
 use crate::state::AppState;
 
@@ -75,23 +78,13 @@ pub(super) fn local_router() -> Router {
     Router::new().push(Router::with_path("relations").get(list_relation_projections))
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────
-
-/// Terminal-state check for Strand / Morph. Mirror of
-/// `ObjectLifecycleState::is_terminal` but inlined here so the
-/// `filter` chain in the handlers reads as
-/// `!is_object_terminal(f.state)` for symmetry with the Space-container
-/// check (`state != SpaceContainerLifecycleState::Tombstoned`).
-fn is_object_terminal(state: ObjectLifecycleState) -> bool {
-    state.is_terminal()
-}
-
 fn validate_realm_id(realm_id: String) -> Result<String, AppError> {
     RealmId::new(realm_id.clone())
         .map_err(|_| AppError::param_invalid("invalid realm_id format"))?;
     Ok(realm_id)
 }
 
+#[cfg(test)]
 fn projection_object_state(state: ObjectLifecycleState) -> ObjectState {
     match state {
         ObjectLifecycleState::Active => ObjectState::Active,
@@ -110,6 +103,7 @@ where
         .map_err(|_| AppError::internal(format!("invalid {field} in projection state")))
 }
 
+#[cfg(test)]
 fn parse_projection_actor(value: &str, field: &str) -> Result<arkret_wire::ActorId, AppError> {
     serde_json::from_str(value)
         .map_err(|_| AppError::internal(format!("invalid {field} in projection state")))
@@ -143,6 +137,7 @@ fn total_count(len: usize) -> Result<u64, AppError> {
     u64::try_from(len).map_err(|_| AppError::internal("projection row count overflow"))
 }
 
+#[cfg(test)]
 fn projection_row_visible_to_session(
     state: &AppState,
     projection: &ProjectionState,
@@ -187,6 +182,7 @@ fn current_projection_scope_visible_to_actor(
     })
 }
 
+#[cfg(test)]
 fn projection_realm_history_allows(
     projection: &ProjectionState,
     realm_id: &str,
@@ -241,6 +237,7 @@ fn strand_assigned_to_relations(
         .collect()
 }
 
+#[cfg(test)]
 // ── Handlers ───────────────────────────────────────────────────────────
 
 fn document_projection_document(
@@ -307,545 +304,6 @@ fn document_projection_document(
     }
     serde_json::from_value(Value::Object(document))
         .map_err(|error| AppError::internal(format!("invalid document projection: {error}")))
-}
-
-fn document_projection_versions(morph: &MorphProjection) -> Vec<BTreeMap<String, Value>> {
-    morph
-        .versions
-        .iter()
-        .map(|version| {
-            let author = if version.author.trim().is_empty() {
-                morph.created_by.as_str()
-            } else {
-                version.author.as_str()
-            };
-            json_object(json!({
-                "version_id": version.version_id,
-                "event_id": version.event_id,
-                "author": author,
-                "created_at": arkret_canonical::format_timestamp_canonical(version.created_at),
-                "body_digest": version.body_digest,
-                "body": version.body,
-            }))
-        })
-        .collect()
-}
-
-fn document_relation_visible_to_actor(
-    projection: &ProjectionState,
-    relation: &ColandRelationState,
-    actor: &arkret_wire::ActorId,
-) -> bool {
-    relation.scope_circle_id.as_deref().is_none_or(|circle_id| {
-        projection.circle_scope_visible_to_actor_at(
-            circle_id,
-            &actor.to_string(),
-            relation.created_at,
-        )
-    })
-}
-
-#[derive(Clone, Debug)]
-struct DocumentRelationSnapshot {
-    relation: ColandRelationState,
-    anchor_ref: String,
-    direction: &'static str,
-    target_home_realm_id: Option<String>,
-    target_row_visibility: Option<TargetRowVisibilitySnapshot>,
-    target_projection_visible: bool,
-    target_requires_projection: bool,
-}
-
-#[derive(Clone, Debug)]
-struct TargetRowVisibilitySnapshot {
-    sender: String,
-    created_at: DateTime<Utc>,
-    scope_circle_id: Option<String>,
-}
-
-/// Whether this reference names a projected object the read path must resolve
-/// before it can answer. Only canonical typed ids do: a value that is not a
-/// valid id of one of these kinds resolves to no projection row.
-fn projection_ref_requires_lookup(ref_id: &str) -> bool {
-    arkret_identifiers::RealmId::new(ref_id).is_ok()
-        || arkret_identifiers::SpaceId::new(ref_id).is_ok()
-        || arkret_identifiers::StrandId::new(ref_id).is_ok()
-        || arkret_identifiers::MorphId::new(ref_id).is_ok()
-        || arkret_identifiers::RelationId::new(ref_id).is_ok()
-        || arkret_identifiers::EventId::new(ref_id).is_ok()
-        || arkret_identifiers::MessageId::new(ref_id).is_ok()
-}
-
-fn message_event_id_from_projection_ref(ref_id: &str) -> String {
-    ref_id
-        .strip_prefix("ak:message:")
-        .map(|suffix| format!("ak:event:{suffix}"))
-        .unwrap_or_else(|| ref_id.to_owned())
-}
-
-fn target_info_for_relation_ref(
-    projection: &ProjectionState,
-    target_ref: Option<&str>,
-    actor: &arkret_wire::ActorId,
-) -> (
-    Option<String>,
-    bool,
-    bool,
-    Option<TargetRowVisibilitySnapshot>,
-) {
-    let Some(target_ref) = target_ref else {
-        return (None, true, false, None);
-    };
-    if target_ref.starts_with("ak:realm:") {
-        return (Some(target_ref.to_owned()), true, true, None);
-    }
-    if let Some(space) = projection.space_containers.get(target_ref) {
-        return (
-            Some(space.realm_id.clone()),
-            !space.orphaned
-                && !projection.realm_is_in_terminal_state(&space.realm_id)
-                && space.state != SpaceContainerLifecycleState::Tombstoned
-                && space.scope_circle_id.as_deref().is_none_or(|circle_id| {
-                    projection.circle_scope_visible_to_actor_at(
-                        circle_id,
-                        &actor.to_string(),
-                        space.created_at,
-                    )
-                }),
-            true,
-            Some(TargetRowVisibilitySnapshot {
-                sender: space.created_by.clone(),
-                created_at: space.created_at,
-                scope_circle_id: space.scope_circle_id.clone(),
-            }),
-        );
-    }
-    if let Some(strand) = projection.strands.get(target_ref) {
-        return (
-            Some(strand.realm_id.clone()),
-            !strand.state.is_terminal()
-                && strand.scope_circle_id.as_deref().is_none_or(|circle_id| {
-                    projection.circle_scope_visible_to_actor_at(
-                        circle_id,
-                        &actor.to_string(),
-                        strand.created_at,
-                    )
-                }),
-            true,
-            Some(TargetRowVisibilitySnapshot {
-                sender: strand.created_by.clone(),
-                created_at: strand.created_at,
-                scope_circle_id: strand.scope_circle_id.clone(),
-            }),
-        );
-    }
-    if let Some(morph) = projection.morphs.get(target_ref) {
-        return (
-            Some(morph.realm_id.clone()),
-            !morph.state.is_terminal()
-                && morph.scope_circle_id.as_deref().is_none_or(|circle_id| {
-                    projection.circle_scope_visible_to_actor_at(
-                        circle_id,
-                        &actor.to_string(),
-                        morph.created_at,
-                    )
-                }),
-            true,
-            Some(TargetRowVisibilitySnapshot {
-                sender: morph.created_by.clone(),
-                created_at: morph.created_at,
-                scope_circle_id: morph.scope_circle_id.clone(),
-            }),
-        );
-    }
-    if let Some(relation) = projection.relations.get(target_ref) {
-        return (
-            Some(relation.realm_id.clone()),
-            relation.is_active() && document_relation_visible_to_actor(projection, relation, actor),
-            true,
-            None,
-        );
-    }
-    if arkret_identifiers::EventId::new(target_ref).is_ok()
-        || arkret_identifiers::MessageId::new(target_ref).is_ok()
-    {
-        let event_id = message_event_id_from_projection_ref(target_ref);
-        if let Some(message) = projection
-            .messages
-            .get(target_ref)
-            .or_else(|| projection.messages.get(&event_id))
-        {
-            return (
-                Some(message.realm_id.clone()),
-                !projection.redactions.contains(&message.event_id)
-                    && message_scope_circle_id(message).is_none_or(|circle_id| {
-                        projection.circle_scope_visible_to_actor_at(
-                            circle_id,
-                            &actor.to_string(),
-                            message.created_at,
-                        )
-                    }),
-                true,
-                Some(TargetRowVisibilitySnapshot {
-                    sender: message.sender.clone(),
-                    created_at: message.created_at,
-                    scope_circle_id: message_scope_circle_id(message).map(ToOwned::to_owned),
-                }),
-            );
-        }
-        return (None, false, true, None);
-    }
-    (None, true, projection_ref_requires_lookup(target_ref), None)
-}
-
-fn document_relation_snapshot(
-    projection: &ProjectionState,
-    relation: &ColandRelationState,
-    morph_id: &str,
-    actor: &arkret_wire::ActorId,
-) -> DocumentRelationSnapshot {
-    let (target_ref, direction) = if relation.from_object_ref() == Some(morph_id) {
-        (relation.to_ref.clone(), "outgoing")
-    } else {
-        (relation.from_ref.clone(), "incoming")
-    };
-    let (
-        target_home_realm_id,
-        target_projection_visible,
-        target_requires_projection,
-        target_row_visibility,
-    ) = target_info_for_relation_ref(
-        projection,
-        target_ref
-            .as_ref()
-            .and_then(RelationEndpoint::as_object_ref),
-        actor,
-    );
-    DocumentRelationSnapshot {
-        relation: relation.clone(),
-        anchor_ref: morph_id.to_owned(),
-        direction,
-        target_home_realm_id,
-        target_row_visibility,
-        target_projection_visible,
-        target_requires_projection,
-    }
-}
-
-async fn document_relation_reference_status(
-    state: &AppState,
-    snapshot: &DocumentRelationSnapshot,
-    realm_id: &str,
-    session: &SessionRecord,
-) -> ReferenceProjectionState {
-    if !snapshot.target_projection_visible {
-        return ReferenceProjectionState::Locked;
-    }
-    let Some(target_home_realm_id) = snapshot.target_home_realm_id.as_deref() else {
-        return if snapshot.target_requires_projection {
-            ReferenceProjectionState::Locked
-        } else {
-            ReferenceProjectionState::Accessible
-        };
-    };
-    if target_home_realm_id == realm_id {
-        return if document_relation_target_row_visible(
-            state,
-            snapshot,
-            target_home_realm_id,
-            session,
-        )
-        .await
-        {
-            ReferenceProjectionState::Accessible
-        } else {
-            ReferenceProjectionState::Locked
-        };
-    }
-    if realm_id_accessible(state, target_home_realm_id, Some(session)).await
-        && document_relation_target_row_visible(state, snapshot, target_home_realm_id, session)
-            .await
-    {
-        ReferenceProjectionState::LazyLink
-    } else {
-        ReferenceProjectionState::Locked
-    }
-}
-
-async fn document_relation_target_row_visible(
-    state: &AppState,
-    snapshot: &DocumentRelationSnapshot,
-    target_realm_id: &str,
-    session: &SessionRecord,
-) -> bool {
-    let Some(row) = snapshot.target_row_visibility.as_ref() else {
-        return true;
-    };
-    let history_access = realm_history_access(state, target_realm_id).await;
-    let projection = state.projections().snapshot();
-    projection_row_visible_to_session(
-        state,
-        &projection,
-        target_realm_id,
-        session,
-        &row.sender,
-        row.created_at,
-        row.scope_circle_id.as_deref(),
-        &history_access,
-    )
-}
-
-fn document_relation_reference_projection(
-    status: ReferenceProjectionState,
-    relation: &ColandRelationState,
-) -> Value {
-    let mut projection = serde_json::Map::new();
-    projection.insert("status".to_owned(), json!(status));
-    if matches!(status, ReferenceProjectionState::LazyLink)
-        && let Some(source_event_digest) = relation.source_event_digest.as_deref()
-    {
-        projection.insert(
-            "source_event_digest".to_owned(),
-            Value::String(source_event_digest.to_owned()),
-        );
-    }
-    Value::Object(projection)
-}
-
-fn document_relation_row(
-    snapshot: &DocumentRelationSnapshot,
-    status: ReferenceProjectionState,
-) -> Result<Value, AppError> {
-    parse_projection_id::<RelationId>(&snapshot.relation.relation_id, "relations.relation_id")?;
-    let reference_projection = document_relation_reference_projection(status, &snapshot.relation);
-    if status == ReferenceProjectionState::Accessible {
-        return Ok(json!({
-            "relation_id": snapshot.relation.relation_id.clone(),
-            "relation_kind": snapshot.relation.relation_kind.clone(),
-            "from": snapshot.relation.from_ref,
-            "to": snapshot.relation.to_ref,
-            "fields": snapshot.relation.fields.clone(),
-            "state": snapshot.relation.state.clone(),
-            "created_at": snapshot.relation.created_at,
-            "updated_at": snapshot.relation.updated_at,
-            "reference_projection": reference_projection,
-        }));
-    }
-    let mut row = serde_json::Map::new();
-    row.insert(
-        "relation_id".to_owned(),
-        Value::String(snapshot.relation.relation_id.clone()),
-    );
-    row.insert(
-        "relation_kind".to_owned(),
-        Value::String(snapshot.relation.relation_kind.clone()),
-    );
-    row.insert(
-        "anchor_ref".to_owned(),
-        Value::String(snapshot.anchor_ref.clone()),
-    );
-    row.insert(
-        "direction".to_owned(),
-        Value::String(snapshot.direction.to_owned()),
-    );
-    row.insert(
-        "state".to_owned(),
-        Value::String(snapshot.relation.state.clone()),
-    );
-    row.insert("reference_projection".to_owned(), reference_projection);
-    match status {
-        ReferenceProjectionState::LazyLink => {
-            row.insert("lazy_link".to_owned(), Value::Bool(true));
-            if let Some(source_event_id) = snapshot.relation.source_event_id.as_deref() {
-                row.insert(
-                    "source_event_id".to_owned(),
-                    Value::String(source_event_id.to_owned()),
-                );
-            }
-        }
-        ReferenceProjectionState::Locked => {
-            row.insert("locked".to_owned(), Value::Bool(true));
-        }
-        ReferenceProjectionState::Accessible => {}
-    }
-    Ok(Value::Object(row))
-}
-
-async fn document_projection_relations(
-    state: &AppState,
-    morph_id: &str,
-    realm_id: &str,
-    session: &SessionRecord,
-) -> Result<Vec<BTreeMap<String, Value>>, AppError> {
-    let actor =
-        crate::routing::identity::session_actor::session_actor_from_credential(state, session)?;
-    let snapshots = {
-        let projection = state.projections().snapshot();
-        projection
-            .relations
-            .values()
-            .filter(|relation| relation.realm_id == realm_id)
-            .filter(|relation| relation.is_active())
-            .filter(|relation| {
-                relation.from_object_ref() == Some(morph_id)
-                    || relation.to_object_ref() == Some(morph_id)
-            })
-            .filter(|relation| document_relation_visible_to_actor(&projection, relation, &actor))
-            .map(|relation| {
-                parse_projection_id::<RelationId>(&relation.relation_id, "relations.relation_id")?;
-                Ok(document_relation_snapshot(
-                    &projection,
-                    relation,
-                    morph_id,
-                    &actor,
-                ))
-            })
-            .collect::<Result<Vec<_>, AppError>>()?
-    };
-    let mut relations = Vec::with_capacity(snapshots.len());
-    for snapshot in snapshots {
-        let status = document_relation_reference_status(state, &snapshot, realm_id, session).await;
-        relations.push((
-            snapshot.relation.relation_kind.clone(),
-            snapshot.relation.relation_id.clone(),
-            document_relation_row(&snapshot, status)?,
-        ));
-    }
-    relations.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
-    Ok(relations
-        .into_iter()
-        .map(|(_, _, relation)| json_object(relation))
-        .collect())
-}
-
-fn json_object(value: Value) -> BTreeMap<String, Value> {
-    value
-        .as_object()
-        .expect("projection row must be an object")
-        .iter()
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect()
-}
-
-fn document_comment_anchor(content: &Value, morph_id: &str) -> Option<Value> {
-    let anchor = content.get("anchor_range")?;
-    (anchor.get("target_ref").and_then(Value::as_str) == Some(morph_id)).then(|| anchor.clone())
-}
-
-fn document_comment_body(content: &Value) -> Option<String> {
-    content
-        .get("body")
-        .or_else(|| content.get("text"))
-        .or_else(|| content.get("label"))
-        .and_then(Value::as_str)
-        .or_else(|| content.as_str())
-        .filter(|value| !value.trim().is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn document_body_text_len(body: &Value) -> usize {
-    if let Some(text) = body.as_str() {
-        return text.chars().count();
-    }
-    if let Some(blocks) = body.get("blocks").and_then(Value::as_array) {
-        return blocks
-            .iter()
-            .filter_map(|block| {
-                block
-                    .get("content")
-                    .or_else(|| block.get("text"))
-                    .or_else(|| block.get("body"))
-                    .and_then(Value::as_str)
-            })
-            .map(|text| text.chars().count())
-            .sum();
-    }
-    body.get("content")
-        .or_else(|| body.get("text"))
-        .or_else(|| body.get("body"))
-        .and_then(Value::as_str)
-        .map(|text| text.chars().count())
-        .unwrap_or_default()
-}
-
-fn document_comment_state(anchor_range: &Value, body: &Value) -> String {
-    let Some(end) = anchor_range.get("end").and_then(Value::as_u64) else {
-        return "active".to_owned();
-    };
-    let Ok(end) = usize::try_from(end) else {
-        return "orphaned".to_owned();
-    };
-    if end > document_body_text_len(body) {
-        "orphaned".to_owned()
-    } else {
-        "active".to_owned()
-    }
-}
-
-fn message_scope_circle_id(message: &MessageState) -> Option<&str> {
-    message
-        .content
-        .get("scope_circle_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-}
-
-fn document_projection_comments(
-    state: &AppState,
-    projection: &ProjectionState,
-    morph: &MorphProjection,
-    body: &Value,
-    session: &SessionRecord,
-    history_access: &str,
-) -> Vec<BTreeMap<String, Value>> {
-    let mut comments = projection
-        .messages
-        .values()
-        .filter(|message| message.realm_id == morph.realm_id)
-        .filter(|message| !projection.redactions.contains(&message.event_id))
-        .filter_map(|message| {
-            let anchor_range = document_comment_anchor(&message.content, &morph.morph_id)?;
-            let body_text = document_comment_body(&message.content)?;
-            Some((message, anchor_range, body_text))
-        })
-        .filter(|(message, ..)| {
-            projection_row_visible_to_session(
-                state,
-                projection,
-                &morph.realm_id,
-                session,
-                &message.sender,
-                message.created_at,
-                message_scope_circle_id(message),
-                history_access,
-            )
-        })
-        .map(|(message, anchor_range, body_text)| {
-            let actor_id = if message.sender.trim().is_empty() {
-                morph.created_by.as_str()
-            } else {
-                message.sender.as_str()
-            };
-            (
-                message.created_at,
-                message.event_id.clone(),
-                json!({
-                    "event_id": message.event_id,
-                    "actor_id": actor_id,
-                    "created_at": message.created_at,
-                    "body": body_text,
-                    "anchor_range": anchor_range,
-                    "state": document_comment_state(&anchor_range, body),
-                    "content": message.content,
-                }),
-            )
-        })
-        .collect::<Vec<_>>();
-    comments.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
-    comments
-        .into_iter()
-        .map(|(_, _, comment)| json_object(comment))
-        .collect()
 }
 
 #[salvo::oapi::endpoint(operation_id = "ak.self.space.read.list", tags("events"))]

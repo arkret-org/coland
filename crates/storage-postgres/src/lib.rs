@@ -319,3 +319,14 @@ mod ids {
 }
 
 mod mimi_admission;
+
+/// Construct large child futures outside the caller's poll frame. This keeps
+/// the existing transaction borrow and cancellation path on the same task.
+#[inline(never)]
+pub(crate) fn boxed_future<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future,
+{
+    Box::pin(make())
+}

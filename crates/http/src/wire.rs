@@ -645,6 +645,7 @@ pub fn describe(
             if config.third_party_invite_provider_enabled {
                 bundles.push("ak.operation_bundle.station.third_party_invite_handoff.v1".to_owned());
             }
+            bundles.sort_unstable();
             bundles
         },
         transport_bindings: {

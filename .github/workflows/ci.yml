@@ -39,40 +39,24 @@ jobs:
       - name: Checkout coland
         uses: actions/checkout@v6
         with:
-          path: coland
+          path: arkret-org/coland
 
-      - name: Checkout Arkret Rust SDK
-        uses: actions/checkout@v6
+      - name: Checkout workspace dependencies
+        uses: ./arkret-org/coland/.github/actions/checkout-workspace
         with:
-          repository: ${{ github.repository_owner }}/arkret-rust-sdk
-          path: arkret-rust-sdk
-          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
-
-      - name: Checkout Floria contracts workspace
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/floria
-          path: floria
-          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
-
-      - name: Checkout Arkret Spec
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/arkret-spec
-          path: arkret-spec
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Windows OpenSSL configuration regression tests
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/tests/configure-windows-openssl.tests.ps1
-        working-directory: coland
+        working-directory: arkret-org/coland
 
       - name: Configure Windows OpenSSL
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/configure-windows-openssl.ps1
-        working-directory: coland
+        working-directory: arkret-org/coland
 
       - name: Install Rust 1.98
         uses: dtolnay/rust-toolchain@master
@@ -88,57 +72,58 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: coland -> target
+          workspaces: arkret-org/coland -> target
 
       # ARC-0002 (重构计划 2026-07-10): legacy patterns must ratchet to zero.
       - name: Deletion gate
         run: bash scripts/deletion_gate.sh
-        working-directory: coland
+        working-directory: arkret-org/coland
         shell: bash
 
       - name: Environment documentation gate
         run: python scripts/check-env-docs.py
-        working-directory: coland
+        working-directory: arkret-org/coland
 
       - name: Test-support surface gate
         run: python scripts/check-test-support-surface.py
-        working-directory: coland
+        working-directory: arkret-org/coland
 
       - name: Typed error mapping gate regression tests
         run: python -m unittest discover -s scripts -p test_check_error_mapping.py
-        working-directory: coland
+        working-directory: arkret-org/coland
 
       - name: Typed error mapping gate
         run: python scripts/check-error-mapping.py
-        working-directory: coland
+        working-directory: arkret-org/coland
 
       - name: SDK wire type ownership gate
         run: python ../arkret-rust-sdk/tools/wire_type_ownership_audit.py --workspace-root .. --require-repository coland
-        working-directory: coland
+        working-directory: arkret-org/coland
 
       - name: Crate layering gate
         run: cargo +1.98 run -p xtask --bin check_layering --locked
-        working-directory: coland
+        working-directory: arkret-org/coland
 
       - name: Rustfmt
-        run: cargo +nightly fmt --all -- --check
-        working-directory: coland
+        # Format every Coland member; dependency repositories own their gates.
+        run: cargo +nightly fmt -- --check
+        working-directory: arkret-org/coland
 
       - name: Clippy
         run: cargo +1.98 clippy --all-targets --locked -- -D warnings
-        working-directory: coland
+        working-directory: arkret-org/coland
 
       - name: KeyStore keygen Clippy
         run: cargo +1.98 clippy --locked -p coland-keystore-keygen --all-targets -- -D warnings
-        working-directory: coland
+        working-directory: arkret-org/coland
 
       - name: KeyStore keygen tests
         run: cargo +1.98 test --locked -p coland-keystore-keygen
-        working-directory: coland
+        working-directory: arkret-org/coland
 
       - name: Clippy with OpenTelemetry
         run: cargo +1.98 clippy --features otel --all-targets --locked -- -D warnings
-        working-directory: coland
+        working-directory: arkret-org/coland
 
       # Keep test binaries separate from `target/dev`, matching the local
       # `just test` gate and preventing Windows dev-server file locks.
@@ -153,7 +138,7 @@ jobs:
         run: >-
           cargo +1.98 test --locked
           -p coland-domain -p coland-contracts -p coland-keystore-keygen
-        working-directory: coland
+        working-directory: arkret-org/coland
 
   postgres-workspace:
     name: Workspace tests (postgres)
@@ -188,27 +173,11 @@ jobs:
       - name: Checkout coland
         uses: actions/checkout@v6
         with:
-          path: coland
+          path: arkret-org/coland
 
-      - name: Checkout Arkret Rust SDK
-        uses: actions/checkout@v6
+      - name: Checkout workspace dependencies
+        uses: ./arkret-org/coland/.github/actions/checkout-workspace
         with:
-          repository: ${{ github.repository_owner }}/arkret-rust-sdk
-          path: arkret-rust-sdk
-          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
-
-      - name: Checkout Floria contracts workspace
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/floria
-          path: floria
-          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
-
-      - name: Checkout Arkret Spec
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/arkret-spec
-          path: arkret-spec
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Install Rust 1.98
@@ -219,19 +188,19 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: coland -> target
+          workspaces: arkret-org/coland -> target
 
       - name: Raise the PostgreSQL connection ceiling
         run: |
           docker exec "$(docker ps --filter ancestor=postgres:16 --format '{{.ID}}')"             psql -U coland -d coland_ws -c "ALTER SYSTEM SET max_connections = 500;"
           docker restart "$(docker ps --filter ancestor=postgres:16 --format '{{.ID}}')"
-          for i in {1..30}; do pg_isready -h localhost -p 5432 -U coland && break; sleep 1; done
+          for _ in {1..30}; do pg_isready -h localhost -p 5432 -U coland && break; sleep 1; done
 
       - name: Test (whole workspace, real database)
         env:
           CARGO_TARGET_DIR: target/test
         run: SSL_CERT_FILE="$PWD/crates/server/tests/fixtures/outbox-test-ca.pem" cargo +1.98 test --locked --workspace
-        working-directory: coland
+        working-directory: arkret-org/coland
 
   migration-cycle:
     name: Migration up/down/up cycle (postgres)
@@ -268,7 +237,7 @@ jobs:
 
       - name: Wait for postgres
         run: |
-          for i in {1..30}; do
+          for _ in {1..30}; do
             if pg_isready -h localhost -p 5432 -U coland; then
               exit 0
             fi
@@ -334,27 +303,11 @@ jobs:
       - name: Checkout coland
         uses: actions/checkout@v6
         with:
-          path: coland
+          path: arkret-org/coland
 
-      - name: Checkout Arkret Rust SDK
-        uses: actions/checkout@v6
+      - name: Checkout workspace dependencies
+        uses: ./arkret-org/coland/.github/actions/checkout-workspace
         with:
-          repository: ${{ github.repository_owner }}/arkret-rust-sdk
-          path: arkret-rust-sdk
-          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
-
-      - name: Checkout Floria contracts workspace
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/floria
-          path: floria
-          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
-
-      - name: Checkout Arkret Spec
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/arkret-spec
-          path: arkret-spec
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Install Rust
@@ -363,11 +316,11 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: coland -> target
+          workspaces: arkret-org/coland -> target
 
       - name: Wait for postgres
         run: |
-          for i in {1..30}; do
+          for _ in {1..30}; do
             pg_isready -h localhost -p 5432 -U coland && break
             sleep 1
           done
@@ -377,7 +330,7 @@ jobs:
       # breaks the build instead of emptying the suite.
       - name: Storage contract and durable-plane tests
         run: cargo test --locked -p coland-storage-postgres
-        working-directory: coland
+        working-directory: arkret-org/coland
 
   postgres-http-api:
     name: Postgres HTTP API cursor tests
@@ -402,27 +355,11 @@ jobs:
       - name: Checkout coland
         uses: actions/checkout@v6
         with:
-          path: coland
+          path: arkret-org/coland
 
-      - name: Checkout Arkret Rust SDK
-        uses: actions/checkout@v6
+      - name: Checkout workspace dependencies
+        uses: ./arkret-org/coland/.github/actions/checkout-workspace
         with:
-          repository: ${{ github.repository_owner }}/arkret-rust-sdk
-          path: arkret-rust-sdk
-          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
-
-      - name: Checkout Floria contracts workspace
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/floria
-          path: floria
-          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
-
-      - name: Checkout Arkret Spec
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/arkret-spec
-          path: arkret-spec
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: Install Rust
@@ -431,15 +368,15 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: coland -> target
+          workspaces: arkret-org/coland -> target
 
       - name: Wait for postgres
         run: |
-          for i in {1..30}; do
+          for _ in {1..30}; do
             pg_isready -h localhost -p 5432 -U coland && break
             sleep 1
           done
 
       - name: Test sync cursor restart behavior
         run: cargo test --locked -p coland --test http_api cursor_handle
-        working-directory: coland
+        working-directory: arkret-org/coland

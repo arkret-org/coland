@@ -44,6 +44,17 @@ use coland_storage_postgres::{
 
 use super::*;
 
+// Construct large fixture futures outside the enclosing poll frame.
+// The same task, database and cancellation path remain in use.
+#[inline(never)]
+fn scenario_future<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future,
+{
+    Box::pin(make())
+}
+
 struct VerifiedSourceRoute(VerifiedRouteCandidate);
 #[async_trait::async_trait]
 impl ServiceRouteFetcher for VerifiedSourceRoute {
@@ -2017,174 +2028,181 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
 #[tokio::test]
 async fn accepted_own_leave_returns_original_bound_result_after_terminal_membership_and_keeps_reads_closed()
  {
-    let listener = registered_tls_peer();
-    let base = format!("https://{}/", listener.listener.local_addr().unwrap());
-    let (governor_state, governor_pool, _governor_lease) = station_with_webvh(base.clone());
-    let (origin, origin_pool, _origin_lease) =
-        station_with_webvh("https://forward-recovery-origin.internal/".into());
-    let mut governor =
-        historical_human::HumanFixture::new(&governor_pool, governor_state.service_did()).await;
-    // The existing closed bootstrap facet must explicitly authorize the Origin
-    // to receive plaintext. Membership/action grants alone grant no such right.
-    // Author this before the unit is accepted; never patch accepted state.
-    let disclosure_index = governor
-        .unit
-        .transactions
-        .iter()
-        .position(|tx| tx.event.kind == EventKind::RealmPlaintextVisibleServices)
-        .unwrap();
-    assert!(disclosure_index > 0);
-    assert_eq!(
-        governor
+    accepted_own_leave_scenario().await;
+}
+
+// Run the complete large fixture on the same default-stack Tokio thread.
+#[inline(never)]
+fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<Output = ()>>> {
+    Box::pin(async {
+        let listener = registered_tls_peer();
+        let base = format!("https://{}/", listener.listener.local_addr().unwrap());
+        let (governor_state, governor_pool, _governor_lease) = station_with_webvh(base.clone());
+        let (origin, origin_pool, _origin_lease) =
+            station_with_webvh("https://forward-recovery-origin.internal/".into());
+        let mut governor =
+            historical_human::HumanFixture::new(&governor_pool, governor_state.service_did()).await;
+        // The existing closed bootstrap facet must explicitly authorize the Origin
+        // to receive plaintext. Membership/action grants alone grant no such right.
+        // Author this before the unit is accepted; never patch accepted state.
+        let disclosure_index = governor
             .unit
             .transactions
             .iter()
-            .filter(|tx| tx.event.kind == EventKind::RealmPlaintextVisibleServices)
-            .count(),
-        1
-    );
-    let mut disclosure: arkret_models_collaboration::governance::plaintext_visibility::PlaintextVisibleServicesPayload =
+            .position(|tx| tx.event.kind == EventKind::RealmPlaintextVisibleServices)
+            .unwrap();
+        assert!(disclosure_index > 0);
+        assert_eq!(
+            governor
+                .unit
+                .transactions
+                .iter()
+                .filter(|tx| tx.event.kind == EventKind::RealmPlaintextVisibleServices)
+                .count(),
+            1
+        );
+        let mut disclosure: arkret_models_collaboration::governance::plaintext_visibility::PlaintextVisibleServicesPayload =
         serde_json::from_value(
             serde_json::to_value(&governor.unit.transactions[disclosure_index].event.payload).unwrap(),
         ).unwrap();
-    assert_eq!(disclosure.services.len(), 1);
-    assert_eq!(
-        disclosure.services[0].service_id,
-        governor_state.service_core_id()
-    );
-    assert_ne!(governor_state.service_core_id(), origin.service_core_id());
-    disclosure.services.push(
-        serde_json::from_value(serde_json::json!({
-            "service_id":origin.service_core_id(), "service_kind":"station",
-            "data_classes":["message_content"],
-            "purposes":["accepted original recovery fixture"],
-            "visibility":"private_plaintext"
-        }))
-        .unwrap(),
-    );
-    let disclosure_event = historical_human::signed_ordinary_event(
-        &governor,
-        &governor.unit.transactions[disclosure_index - 1],
-        EventKind::RealmPlaintextVisibleServices,
-        disclosure.to_value().unwrap(),
-        governor.unit.transactions[disclosure_index]
-            .commit
-            .committed_at,
-    );
-    governor.unit.transactions[disclosure_index].event = disclosure_event;
-    let source = PgAuthorityCommitStore {
-        pool: governor_pool.clone(),
-    };
-    let mut previous_commit = None;
-    for (index, transaction) in governor.unit.transactions.iter_mut().enumerate() {
-        transaction.commit.event_ref = transaction.event.event_id.clone();
-        transaction.producer_signer_fact = source
-            .prepare_human_signer_fact(&transaction.event, transaction.commit.committed_at)
+        assert_eq!(disclosure.services.len(), 1);
+        assert_eq!(
+            disclosure.services[0].service_id,
+            governor_state.service_core_id()
+        );
+        assert_ne!(governor_state.service_core_id(), origin.service_core_id());
+        disclosure.services.push(
+            serde_json::from_value(serde_json::json!({
+                "service_id":origin.service_core_id(), "service_kind":"station",
+                "data_classes":["message_content"],
+                "purposes":["accepted original recovery fixture"],
+                "visibility":"private_plaintext"
+            }))
+            .unwrap(),
+        );
+        let disclosure_event = historical_human::signed_ordinary_event(
+            &governor,
+            &governor.unit.transactions[disclosure_index - 1],
+            EventKind::RealmPlaintextVisibleServices,
+            disclosure.to_value().unwrap(),
+            governor.unit.transactions[disclosure_index]
+                .commit
+                .committed_at,
+        );
+        governor.unit.transactions[disclosure_index].event = disclosure_event;
+        let source = PgAuthorityCommitStore {
+            pool: governor_pool.clone(),
+        };
+        let mut previous_commit = None;
+        for (index, transaction) in governor.unit.transactions.iter_mut().enumerate() {
+            transaction.commit.event_ref = transaction.event.event_id.clone();
+            transaction.producer_signer_fact = source
+                .prepare_human_signer_fact(&transaction.event, transaction.commit.committed_at)
+                .await
+                .unwrap()
+                .map(Into::into);
+            assert!(transaction.producer_signer_fact.is_some());
+            transaction.commit.producer_signer_fact_digest = transaction
+                .producer_signer_fact
+                .as_ref()
+                .map(|fact| fact.digest().unwrap());
+            transaction.commit.previous_commit_ref = previous_commit;
+            seal_service_commit(&mut transaction.commit, &governor_state);
+            previous_commit = Some(transaction.commit.commit_id.clone());
+            governor.unit.submission.events[index] =
+                EventAdmissionSubmission::new(transaction.event.clone());
+        }
+        governor.unit.exact_request_body = serde_json::to_vec(
+            &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(governor.unit.submission.clone()),
+        )
+        .unwrap();
+        governor.admit(&governor_pool).await;
+        assert_eq!(
+            source
+                .accepted_plaintext_visible_services(&governor.unit.transactions[0].event.realm_id,)
+                .await
+                .unwrap(),
+            Some(disclosure)
+        );
+        let human = historical_human::HumanFixture::new(&origin_pool, origin.service_did()).await;
+        let actor = ActorId::account(human.pcr.history.account.clone());
+        let previous = governor.unit.transactions.last().unwrap();
+        let at = previous.commit.committed_at + Duration::seconds(1);
+        let owner = ActorId::account(governor.pcr.history.account.clone());
+        let strand_event = historical_human::signed_ordinary_event(
+            &governor,
+            previous,
+            EventKind::StrandCreate,
+            serde_json::json!({"object":{
+                "schema":"ak.schema.strand.v1", "realm_id":previous.event.realm_id,
+                "tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},
+                "metadata":{"title":"forward recovery fixture discussion"}, "state":"active",
+                "created_by":owner, "created_at":arkret_canonical::format_timestamp_canonical(at)
+            }}),
+            at,
+        );
+        let mut strand = historical_human::request_for_event(&governor, previous, strand_event, at);
+        seal_service_commit(&mut strand.authority_commit.commit, &governor_state);
+        let uow = PgEventCommitUnitOfWork::new(governor_pool.clone());
+        Box::pin(uow.commit_event(strand.clone())).await.unwrap();
+        let create_at = strand.authority_commit.commit.committed_at + Duration::seconds(1);
+        let create_event = historical_human::signed_ordinary_event(
+            &governor,
+            &strand.authority_commit,
+            EventKind::CircleCreate,
+            serde_json::json!({"object":{
+                "schema":"ak.schema.circle.v1","realm_id":strand.authority_commit.event.realm_id,
+                "title":"Own leave bound result","display":{"short_name":"Leave","color_token":"blue","symbol":{"glyph":"lock"}},
+                "directory_visibility":"members","join_rule":"public","history_access":"since_join","state":"active",
+                "created_by":owner,"created_at":create_at
+            }}),
+            create_at,
+        );
+        let mut circle_create = historical_human::request_for_event(
+            &governor,
+            &strand.authority_commit,
+            create_event,
+            create_at,
+        );
+        seal_service_commit(&mut circle_create.authority_commit.commit, &governor_state);
+        Box::pin(uow.commit_event(circle_create.clone()))
+            .await
+            .unwrap();
+        let circle_id =
+            arkret_wire::CircleId::from_event_id(&circle_create.authority_commit.event.event_id);
+
+        // Membership is not an action grant. Read the actual accepted root cut,
+        // then admit the owner's narrow Grant before the foreign member joins. The
+        // Grant grants no membership; MessageCreate still runs after the real join.
+        #[derive(diesel::QueryableByName)]
+        struct RootCut {
+            #[diesel(sql_type = diesel::sql_types::Jsonb)]
+            controller_actor_id: serde_json::Value,
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            authority_event_ref: String,
+            #[diesel(sql_type = diesel::sql_types::BigInt)]
+            authority_generation: i64,
+        }
+        use diesel_async::RunQueryDsl as _;
+        let root_cut = {
+            let mut conn = governor_pool.get().await.unwrap();
+            diesel::sql_query(
+                "SELECT controller_actor_id, authority_event_ref, authority_generation \
+             FROM realm_authority_root_current_results WHERE realm_id=$1",
+            )
+            .bind::<diesel::sql_types::Text, _>(strand.authority_commit.event.realm_id.as_str())
+            .get_result::<RootCut>(&mut *conn)
             .await
             .unwrap()
-            .map(Into::into);
-        assert!(transaction.producer_signer_fact.is_some());
-        transaction.commit.producer_signer_fact_digest = transaction
-            .producer_signer_fact
-            .as_ref()
-            .map(|fact| fact.digest().unwrap());
-        transaction.commit.previous_commit_ref = previous_commit;
-        seal_service_commit(&mut transaction.commit, &governor_state);
-        previous_commit = Some(transaction.commit.commit_id.clone());
-        governor.unit.submission.events[index] =
-            EventAdmissionSubmission::new(transaction.event.clone());
-    }
-    governor.unit.exact_request_body = serde_json::to_vec(
-        &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(governor.unit.submission.clone()),
-    )
-    .unwrap();
-    governor.admit(&governor_pool).await;
-    assert_eq!(
-        source
-            .accepted_plaintext_visible_services(&governor.unit.transactions[0].event.realm_id,)
-            .await
-            .unwrap(),
-        Some(disclosure)
-    );
-    let human = historical_human::HumanFixture::new(&origin_pool, origin.service_did()).await;
-    let actor = ActorId::account(human.pcr.history.account.clone());
-    let previous = governor.unit.transactions.last().unwrap();
-    let at = previous.commit.committed_at + Duration::seconds(1);
-    let owner = ActorId::account(governor.pcr.history.account.clone());
-    let strand_event = historical_human::signed_ordinary_event(
-        &governor,
-        previous,
-        EventKind::StrandCreate,
-        serde_json::json!({"object":{
-            "schema":"ak.schema.strand.v1", "realm_id":previous.event.realm_id,
-            "tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},
-            "metadata":{"title":"forward recovery fixture discussion"}, "state":"active",
-            "created_by":owner, "created_at":arkret_canonical::format_timestamp_canonical(at)
-        }}),
-        at,
-    );
-    let mut strand = historical_human::request_for_event(&governor, previous, strand_event, at);
-    seal_service_commit(&mut strand.authority_commit.commit, &governor_state);
-    let uow = PgEventCommitUnitOfWork::new(governor_pool.clone());
-    Box::pin(uow.commit_event(strand.clone())).await.unwrap();
-    let create_at = strand.authority_commit.commit.committed_at + Duration::seconds(1);
-    let create_event = historical_human::signed_ordinary_event(
-        &governor,
-        &strand.authority_commit,
-        EventKind::CircleCreate,
-        serde_json::json!({"object":{
-            "schema":"ak.schema.circle.v1","realm_id":strand.authority_commit.event.realm_id,
-            "title":"Own leave bound result","display":{"short_name":"Leave","color_token":"blue","symbol":{"glyph":"lock"}},
-            "directory_visibility":"members","join_rule":"public","history_access":"since_join","state":"active",
-            "created_by":owner,"created_at":create_at
-        }}),
-        create_at,
-    );
-    let mut circle_create = historical_human::request_for_event(
-        &governor,
-        &strand.authority_commit,
-        create_event,
-        create_at,
-    );
-    seal_service_commit(&mut circle_create.authority_commit.commit, &governor_state);
-    Box::pin(uow.commit_event(circle_create.clone()))
-        .await
-        .unwrap();
-    let circle_id =
-        arkret_wire::CircleId::from_event_id(&circle_create.authority_commit.event.event_id);
-
-    // Membership is not an action grant. Read the actual accepted root cut,
-    // then admit the owner's narrow Grant before the foreign member joins. The
-    // Grant grants no membership; MessageCreate still runs after the real join.
-    #[derive(diesel::QueryableByName)]
-    struct RootCut {
-        #[diesel(sql_type = diesel::sql_types::Jsonb)]
-        controller_actor_id: serde_json::Value,
-        #[diesel(sql_type = diesel::sql_types::Text)]
-        authority_event_ref: String,
-        #[diesel(sql_type = diesel::sql_types::BigInt)]
-        authority_generation: i64,
-    }
-    use diesel_async::RunQueryDsl as _;
-    let root_cut = {
-        let mut conn = governor_pool.get().await.unwrap();
-        diesel::sql_query(
-            "SELECT controller_actor_id, authority_event_ref, authority_generation \
-             FROM realm_authority_root_current_results WHERE realm_id=$1",
-        )
-        .bind::<diesel::sql_types::Text, _>(strand.authority_commit.event.realm_id.as_str())
-        .get_result::<RootCut>(&mut *conn)
-        .await
-        .unwrap()
-    };
-    assert_eq!(
-        serde_json::from_value::<ActorId>(root_cut.controller_actor_id).unwrap(),
-        owner
-    );
-    let root_generation = u64::try_from(root_cut.authority_generation).unwrap();
-    let previous = &circle_create.authority_commit;
-    let grant_at = previous.commit.committed_at + Duration::seconds(1);
-    let grant_payload: arkret_models_collaboration::events_payloads::CapabilityGrantPayload =
+        };
+        assert_eq!(
+            serde_json::from_value::<ActorId>(root_cut.controller_actor_id).unwrap(),
+            owner
+        );
+        let root_generation = u64::try_from(root_cut.authority_generation).unwrap();
+        let previous = &circle_create.authority_commit;
+        let grant_at = previous.commit.committed_at + Duration::seconds(1);
+        let grant_payload: arkret_models_collaboration::events_payloads::CapabilityGrantPayload =
         serde_json::from_value(serde_json::json!({"grant": {
             "schema":"ak.schema.capability.v1",
             "realm_id":previous.event.realm_id,
@@ -2200,704 +2218,721 @@ async fn accepted_own_leave_returns_original_bound_result_after_terminal_members
             "issued_at":arkret_canonical::format_timestamp_canonical(grant_at)
         }}))
         .unwrap();
-    let grant_event = historical_human::signed_ordinary_event(
-        &governor,
-        previous,
-        EventKind::CapabilityGrant,
-        serde_json::to_value(grant_payload).unwrap(),
-        grant_at,
-    );
-    let mut grant = historical_human::request_for_event(&governor, previous, grant_event, grant_at);
-    // This is a fresh PG source candidate, not a cached authorizing capability.
-    // The UOW independently prepares and compares it under its admission locks.
-    let grant_fact = PgAuthorityCommitStore {
-        pool: governor_pool.clone(),
-    }
-    .prepare_human_signer_fact(&grant.authority_commit.event, grant_at)
-    .await
-    .unwrap()
-    .unwrap();
-    grant.authority_commit.commit.producer_signer_fact_digest = Some(grant_fact.digest().unwrap());
-    grant.authority_commit.producer_signer_fact = Some(grant_fact.into());
-    seal_service_commit(&mut grant.authority_commit.commit, &governor_state);
-    Box::pin(uow.commit_event(grant.clone())).await.unwrap();
-    let previous = &grant.authority_commit;
-    let mut join = Box::pin(foreign_request(&origin, &human, &governor, previous, EventKind::MemberState,
-        serde_json::json!({"realm_id":previous.event.realm_id,"member_id":actor,"membership":"join","reason":"real forward recovery membership"}))).await;
-    seal_service_commit(&mut join.authority_commit.commit, &governor_state);
-    Box::pin(uow.commit_event(join.clone())).await.unwrap();
-    let source = PgAuthorityCommitStore {
-        pool: governor_pool.clone(),
-    };
-    let store = PgAuthorityCommitStore {
-        pool: origin_pool.clone(),
-    };
-    let realm = &join.authority_commit.event.realm_id;
-    let event = &join.authority_commit.event;
-    let commit = &join.authority_commit.commit;
-    let key = ed25519_dalek::SigningKey::from_bytes(&historical_human::station_authority_seed());
-    let session = authenticated_context(&origin_pool, &human).await;
-    let route =
-        crate::routing::system::service_resolution::current_authenticated_service_resolution(
-            &governor_state,
-        )
-        .await
-        .unwrap();
-    let boundary = route.method_history_evidence.boundary();
-    let description = VerifiedServiceDescribeMetadata {
-        service_id: governor_state.service_core_id(),
-        service_kind: "station".into(),
-        service_resolution: ResolutionCommitment {
-            did: governor_state.service_did(),
-            method_history_head: boundary.to_method_history_head.clone(),
-            version_id: boundary.to_version_id.clone(),
-        },
-        http_json_base_url: base,
-        trust_domain: governor_state.config().trust_domain.clone(),
-        protocol_version: arkret_wire::PROTOCOL_VERSION.into(),
-        supported_operation_bundles: vec![
-            arkret_wire::role_describe_bundle_descriptor(arkret_wire::ServiceKind::Station)
-                .unwrap()
-                .operation_bundle_id
-                .into(),
-        ],
-    };
-    origin.test_install_service_route_fetcher(Arc::new(VerifiedSourceRoute(
-        VerifiedRouteCandidate {
-            evidence: route,
-            description,
-        },
-    )));
-    let nonce = Base64UrlString::new(arkret_canonical::base64url_encode([0x71; 32])).unwrap();
-    let bundle = crate::routing::realm_join::local_authority_bundle(&governor_state, realm, &nonce)
-        .await
-        .unwrap();
-    let mut keys = arkret_identity::RealmAuthorityKeyMap::new();
-    for sig in [
-        &bundle.genesis_commit.signature,
-        &bundle.current_assertion.signature,
-        &commit.signature,
-    ] {
-        keys.insert_at(
-            &sig.verification_method,
-            sig.created_at,
-            arkret_signatures::PublicKeyMaterial::Ed25519Raw {
-                bytes: key.verifying_key().to_bytes().to_vec(),
-            },
+        let grant_event = historical_human::signed_ordinary_event(
+            &governor,
+            previous,
+            EventKind::CapabilityGrant,
+            serde_json::to_value(grant_payload).unwrap(),
+            grant_at,
         );
-    }
-    let authority = arkret_identity::verify_realm_authority_bundle(
-        &bundle,
-        &arkret_identity::RealmAuthorityFreshness::new(Utc::now(), nonce),
-        &keys,
-    )
-    .unwrap();
-    let mut located = crate::routing::realm_join::LocatedRealmAuthority {
-        bundle,
-        authority,
-        keys,
-    };
-    store
-        .record_remote_authority(&located.current_authority(), &origin.service_core_id())
+        let mut grant =
+            historical_human::request_for_event(&governor, previous, grant_event, grant_at);
+        // This is a fresh PG source candidate, not a cached authorizing capability.
+        // The UOW independently prepares and compares it under its admission locks.
+        let grant_fact = PgAuthorityCommitStore {
+            pool: governor_pool.clone(),
+        }
+        .prepare_human_signer_fact(&grant.authority_commit.event, grant_at)
         .await
+        .unwrap()
         .unwrap();
-    store.queue_event(event, commit.committed_at).await.unwrap();
-    let intent = SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(event.clone()));
-    store
-        .retain_forwarded_submission(event, &intent, commit.committed_at)
-        .await
+        grant.authority_commit.commit.producer_signer_fact_digest =
+            Some(grant_fact.digest().unwrap());
+        grant.authority_commit.producer_signer_fact = Some(grant_fact.into());
+        seal_service_commit(&mut grant.authority_commit.commit, &governor_state);
+        Box::pin(uow.commit_event(grant.clone())).await.unwrap();
+        let previous = &grant.authority_commit;
+        let mut join = Box::pin(foreign_request(&origin, &human, &governor, previous, EventKind::MemberState,
+        serde_json::json!({"realm_id":previous.event.realm_id,"member_id":actor,"membership":"join","reason":"real forward recovery membership"}))).await;
+        seal_service_commit(&mut join.authority_commit.commit, &governor_state);
+        Box::pin(uow.commit_event(join.clone())).await.unwrap();
+        let source = PgAuthorityCommitStore {
+            pool: governor_pool.clone(),
+        };
+        let store = PgAuthorityCommitStore {
+            pool: origin_pool.clone(),
+        };
+        let realm = &join.authority_commit.event.realm_id;
+        let event = &join.authority_commit.event;
+        let commit = &join.authority_commit.commit;
+        let key =
+            ed25519_dalek::SigningKey::from_bytes(&historical_human::station_authority_seed());
+        let session = authenticated_context(&origin_pool, &human).await;
+        let route =
+            crate::routing::system::service_resolution::current_authenticated_service_resolution(
+                &governor_state,
+            )
+            .await
+            .unwrap();
+        let boundary = route.method_history_evidence.boundary();
+        let description = VerifiedServiceDescribeMetadata {
+            service_id: governor_state.service_core_id(),
+            service_kind: "station".into(),
+            service_resolution: ResolutionCommitment {
+                did: governor_state.service_did(),
+                method_history_head: boundary.to_method_history_head.clone(),
+                version_id: boundary.to_version_id.clone(),
+            },
+            http_json_base_url: base,
+            trust_domain: governor_state.config().trust_domain.clone(),
+            protocol_version: arkret_wire::PROTOCOL_VERSION.into(),
+            supported_operation_bundles: vec![
+                arkret_wire::role_describe_bundle_descriptor(arkret_wire::ServiceKind::Station)
+                    .unwrap()
+                    .operation_bundle_id
+                    .into(),
+            ],
+        };
+        origin.test_install_service_route_fetcher(Arc::new(VerifiedSourceRoute(
+            VerifiedRouteCandidate {
+                evidence: route,
+                description,
+            },
+        )));
+        let nonce = Base64UrlString::new(arkret_canonical::base64url_encode([0x71; 32])).unwrap();
+        let bundle =
+            crate::routing::realm_join::local_authority_bundle(&governor_state, realm, &nonce)
+                .await
+                .unwrap();
+        let mut keys = arkret_identity::RealmAuthorityKeyMap::new();
+        for sig in [
+            &bundle.genesis_commit.signature,
+            &bundle.current_assertion.signature,
+            &commit.signature,
+        ] {
+            keys.insert_at(
+                &sig.verification_method,
+                sig.created_at,
+                arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+                    bytes: key.verifying_key().to_bytes().to_vec(),
+                },
+            );
+        }
+        let authority = arkret_identity::verify_realm_authority_bundle(
+            &bundle,
+            &arkret_identity::RealmAuthorityFreshness::new(Utc::now(), nonce),
+            &keys,
+        )
         .unwrap();
-    store
-        .retain_forwarded_acceptance(event, commit, commit.committed_at)
-        .await
-        .unwrap();
-    assert!(
+        let mut located = crate::routing::realm_join::LocatedRealmAuthority {
+            bundle,
+            authority,
+            keys,
+        };
         store
-            .replica_anchor_for_stream(&commit.stream_ref)
+            .record_remote_authority(&located.current_authority(), &origin.service_core_id())
+            .await
+            .unwrap();
+        store.queue_event(event, commit.committed_at).await.unwrap();
+        let intent =
+            SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(event.clone()));
+        store
+            .retain_forwarded_submission(event, &intent, commit.committed_at)
+            .await
+            .unwrap();
+        store
+            .retain_forwarded_acceptance(event, commit, commit.committed_at)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .replica_anchor_for_stream(&commit.stream_ref)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .committed_event(&event.event_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let no_write = opening_footprint(&origin_pool, realm).await;
+        // A bare original or the wrong authenticated Account never starts a scan.
+        assert!(
+            Box::pin(super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
+                event,
+                None,
+                &mut located,
+                &session,
+            ))
+            .await
+            .is_err()
+        );
+        let mut other_session = session.clone();
+        other_session.session_grant.as_mut().unwrap().account_id =
+            governor.pcr.history.account.clone();
+        assert!(
+            Box::pin(super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
+                event,
+                Some(commit),
+                &mut located,
+                &other_session,
+            ))
+            .await
+            .is_err()
+        );
+        assert_eq!(opening_footprint(&origin_pool, realm).await, no_write);
+        let scan = StreamScanRequest {
+            realm_id: realm.clone(),
+            stream_ref: commit.stream_ref.clone(),
+            direction: StreamScanDirection::Before(Some(commit.stream_position + 1)),
+            limit: 1,
+        };
+        let coland_storage::PeerStreamScan::Page(page) = source
+            .scan_stream_for_peer(
+                &scan,
+                &human.pcr.history.account.station_id,
+                &governor_state.service_core_id(),
+            )
             .await
             .unwrap()
-            .is_none()
-    );
-    assert!(
-        store
+        else {
+            panic!("Gov accepted member grants its routed Station the opening floor");
+        };
+        page.validate_for_request(&scan).unwrap();
+        let full = page
+            .committed_events
+            .iter()
+            .find(|item| item.commit().commit_id == commit.commit_id)
+            .unwrap();
+        assert!(
+            matches!(full, arkret_wire::CommittedEventView::Full(view) if view.event == *event && view.commit == *commit)
+        );
+        let archived = source
+            .producer_signer_fact(event, commit)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            page.producer_signer_facts
+                .iter()
+                .find(|f| f.target.commit_id == commit.commit_id)
+                .unwrap()
+                .producer_signer_fact,
+            archived
+        );
+        let mut withheld = page.clone();
+        withheld.committed_events = vec![arkret_wire::CommittedEventView::Withheld(
+            arkret_wire::CommittedEventWithheldView {
+                commit: commit.clone(),
+                event_disclosure: arkret_wire::EventDisclosure {
+                    status: arkret_wire::EventDisclosureStatus::Withheld,
+                },
+            },
+        )];
+        withheld.producer_signer_facts.clear();
+        let reply = tokio::spawn(tcp_scan(
+            listener.clone(),
+            withheld,
+            scan.clone(),
+            human.pcr.history.account.clone(),
+            governor_state.service_core_id(),
+        ));
+        assert!(
+            Box::pin(super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
+                event,
+                Some(commit),
+                &mut located,
+                &session,
+            ))
+            .await
+            .is_err()
+        );
+        assert_eq!(reply.await.unwrap(), 1);
+        assert_eq!(opening_footprint(&origin_pool, realm).await, no_write);
+        let mut missing_fact = page.clone();
+        missing_fact.producer_signer_facts.clear();
+        let reply = tokio::spawn(tcp_scan(
+            listener.clone(),
+            missing_fact,
+            scan.clone(),
+            human.pcr.history.account.clone(),
+            governor_state.service_core_id(),
+        ));
+        assert!(
+            Box::pin(super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
+                event,
+                Some(commit),
+                &mut located,
+                &session,
+            ))
+            .await
+            .is_err()
+        );
+        assert_eq!(reply.await.unwrap(), 1);
+        assert_eq!(opening_footprint(&origin_pool, realm).await, no_write);
+        let response_listener = listener.clone();
+        let response_governor = governor_state.clone();
+        let response_pool = governor_pool.clone();
+        let response_account = human.pcr.history.account.clone();
+        let response_commit = commit.clone();
+        let history_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let response_stop = history_stop.clone();
+        let reply = tokio::spawn(async move {
+            assert_eq!(
+                tcp_scan(
+                    response_listener.clone(),
+                    page,
+                    scan,
+                    response_account.clone(),
+                    response_governor.service_core_id()
+                )
+                .await,
+                1
+            );
+            assert_eq!(
+                tcp_opening_bootstrap(
+                    response_listener,
+                    response_governor,
+                    response_pool,
+                    response_account,
+                    response_commit,
+                    response_stop,
+                )
+                .await,
+                1
+            );
+            2
+        });
+        let original = Box::pin(super::super::replica_anchor::ensure_forwarded_target(
+            &origin,
+            &governor_state.service_core_id(),
+            event,
+            Some(commit),
+            &mut located,
+            &session,
+        ))
+        .await;
+        history_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let original = original.unwrap().unwrap();
+        assert_eq!(original, *commit);
+        assert_eq!(reply.await.unwrap(), 2);
+        let held = store
             .committed_event(&event.event_id)
             .await
             .unwrap()
-            .is_none()
-    );
-    let no_write = opening_footprint(&origin_pool, realm).await;
-    // A bare original or the wrong authenticated Account never starts a scan.
-    assert!(
-        Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-            &origin,
-            &governor_state.service_core_id(),
-            event,
-            None,
-            &mut located,
-            &session,
-        ))
-        .await
-        .is_err()
-    );
-    let mut other_session = session.clone();
-    other_session.session_grant.as_mut().unwrap().account_id = governor.pcr.history.account.clone();
-    assert!(
-        Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-            &origin,
-            &governor_state.service_core_id(),
-            event,
-            Some(commit),
-            &mut located,
-            &other_session,
-        ))
-        .await
-        .is_err()
-    );
-    assert_eq!(opening_footprint(&origin_pool, realm).await, no_write);
-    let scan = StreamScanRequest {
-        realm_id: realm.clone(),
-        stream_ref: commit.stream_ref.clone(),
-        direction: StreamScanDirection::Before(Some(commit.stream_position + 1)),
-        limit: 1,
-    };
-    let coland_storage::PeerStreamScan::Page(page) = source
-        .scan_stream_for_peer(
-            &scan,
-            &human.pcr.history.account.station_id,
-            &governor_state.service_core_id(),
-        )
-        .await
-        .unwrap()
-    else {
-        panic!("Gov accepted member grants its routed Station the opening floor");
-    };
-    page.validate_for_request(&scan).unwrap();
-    let full = page
-        .committed_events
-        .iter()
-        .find(|item| item.commit().commit_id == commit.commit_id)
-        .unwrap();
-    assert!(
-        matches!(full, arkret_wire::CommittedEventView::Full(view) if view.event == *event && view.commit == *commit)
-    );
-    let archived = source
-        .producer_signer_fact(event, commit)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        page.producer_signer_facts
-            .iter()
-            .find(|f| f.target.commit_id == commit.commit_id)
-            .unwrap()
-            .producer_signer_fact,
-        archived
-    );
-    let mut withheld = page.clone();
-    withheld.committed_events = vec![arkret_wire::CommittedEventView::Withheld(
-        arkret_wire::CommittedEventWithheldView {
-            commit: commit.clone(),
-            event_disclosure: arkret_wire::EventDisclosure {
-                status: arkret_wire::EventDisclosureStatus::Withheld,
-            },
-        },
-    )];
-    withheld.producer_signer_facts.clear();
-    let reply = tokio::spawn(tcp_scan(
-        listener.clone(),
-        withheld,
-        scan.clone(),
-        human.pcr.history.account.clone(),
-        governor_state.service_core_id(),
-    ));
-    assert!(
-        Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-            &origin,
-            &governor_state.service_core_id(),
-            event,
-            Some(commit),
-            &mut located,
-            &session,
-        ))
-        .await
-        .is_err()
-    );
-    assert_eq!(reply.await.unwrap(), 1);
-    assert_eq!(opening_footprint(&origin_pool, realm).await, no_write);
-    let mut missing_fact = page.clone();
-    missing_fact.producer_signer_facts.clear();
-    let reply = tokio::spawn(tcp_scan(
-        listener.clone(),
-        missing_fact,
-        scan.clone(),
-        human.pcr.history.account.clone(),
-        governor_state.service_core_id(),
-    ));
-    assert!(
-        Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-            &origin,
-            &governor_state.service_core_id(),
-            event,
-            Some(commit),
-            &mut located,
-            &session,
-        ))
-        .await
-        .is_err()
-    );
-    assert_eq!(reply.await.unwrap(), 1);
-    assert_eq!(opening_footprint(&origin_pool, realm).await, no_write);
-    let response_listener = listener.clone();
-    let response_governor = governor_state.clone();
-    let response_pool = governor_pool.clone();
-    let response_account = human.pcr.history.account.clone();
-    let response_commit = commit.clone();
-    let history_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let response_stop = history_stop.clone();
-    let reply = tokio::spawn(async move {
+            .unwrap();
+        assert_eq!(held.event, *event);
+        assert_eq!(held.commit, *commit);
         assert_eq!(
-            tcp_scan(
-                response_listener.clone(),
-                page,
-                scan,
-                response_account.clone(),
-                response_governor.service_core_id()
-            )
-            .await,
-            1
+            store.producer_signer_fact(event, commit).await.unwrap(),
+            Some(archived)
         );
-        assert_eq!(
-            tcp_opening_bootstrap(
-                response_listener,
-                response_governor,
-                response_pool,
-                response_account,
-                response_commit,
-                response_stop,
-            )
-            .await,
-            1
-        );
-        2
-    });
-    let original = Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-        &origin,
-        &governor_state.service_core_id(),
-        event,
-        Some(commit),
-        &mut located,
-        &session,
-    ))
-    .await;
-    history_stop.store(true, std::sync::atomic::Ordering::SeqCst);
-    let original = original.unwrap().unwrap();
-    assert_eq!(original, *commit);
-    assert_eq!(reply.await.unwrap(), 2);
-    let held = store
-        .committed_event(&event.event_id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(held.event, *event);
-    assert_eq!(held.commit, *commit);
-    assert_eq!(
-        store.producer_signer_fact(event, commit).await.unwrap(),
-        Some(archived)
-    );
-    let anchor = store
-        .replica_anchor_for_stream(&commit.stream_ref)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(anchor.anchored_head.is_some());
-    assert_eq!(anchor.join_commit, *commit);
-    let before_replay = opening_footprint(&origin_pool, realm).await;
-    assert_eq!(
-        Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-            &origin,
-            &governor_state.service_core_id(),
-            event,
-            Some(commit),
-            &mut located,
-            &session,
-        ))
-        .await
-        .unwrap(),
-        Some(commit.clone())
-    );
-    assert_eq!(opening_footprint(&origin_pool, realm).await, before_replay);
-    let final_parent = Box::pin(circle_own_leave_bound_result_cases(
-        &origin,
-        &origin_pool,
-        &governor_state,
-        &governor_pool,
-        &human,
-        &governor,
-        &join.authority_commit,
-        &circle_id,
-        listener.clone(),
-        &mut located,
-        &session,
-    ))
-    .await;
-    // Author, sign and admit the real own leave on Gov; Origin keeps its frozen
-    // request and the authentic original acceptance without yet installing it.
-    let mut leave = Box::pin(foreign_request(&origin, &human, &governor, &final_parent,
-        EventKind::MemberState, serde_json::json!({"realm_id":realm,"member_id":actor,"membership":"leave","reason":"original own leave recovery"}))).await;
-    seal_service_commit(&mut leave.authority_commit.commit, &governor_state);
-    Box::pin(uow.commit_event(leave.clone())).await.unwrap();
-    let le = &leave.authority_commit.event;
-    let lc = &leave.authority_commit.commit;
-    let original_fact = source.producer_signer_fact(le, lc).await.unwrap().unwrap();
-    assert_eq!(
-        Some(original_fact.clone()),
-        leave.authority_commit.producer_signer_fact
-    );
-    store.queue_event(le, lc.committed_at).await.unwrap();
-    let intent = SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(le.clone()));
-    store
-        .retain_forwarded_submission(le, &intent, lc.committed_at)
-        .await
-        .unwrap();
-    store
-        .retain_forwarded_acceptance(le, lc, lc.committed_at)
-        .await
-        .unwrap();
-    let scan = StreamScanRequest {
-        realm_id: realm.clone(),
-        stream_ref: lc.stream_ref.clone(),
-        direction: StreamScanDirection::After(Some(final_parent.commit.stream_position)),
-        limit: 128,
-    };
-    let coland_storage::PeerStreamScan::Page(page) = source
-        .scan_stream_for_peer(
-            &scan,
-            &human.pcr.history.account.station_id,
-            &governor_state.service_core_id(),
-        )
-        .await
-        .unwrap()
-    else {
-        panic!("terminating peer interval unavailable")
-    };
-    assert_eq!(page.committed_events.len(), 1);
-    let arkret_wire::CommittedEventView::Full(full) = &page.committed_events[0] else {
-        panic!("terminating original is withheld")
-    };
-    assert_eq!(full.event, *le);
-    assert_eq!(full.commit, *lc);
-    assert_eq!(page.producer_signer_facts.len(), 1);
-    assert_eq!(
-        page.producer_signer_facts[0].producer_signer_fact,
-        original_fact
-    );
-    let (rl, rg, rp, ra) = (
-        listener.clone(),
-        governor_state.clone(),
-        governor_pool.clone(),
-        human.pcr.history.account.clone(),
-    );
-    let reply = tokio::spawn(async move {
-        assert_eq!(
-            tcp_scan(rl.clone(), page, scan, ra, rg.service_core_id()).await,
-            1
-        );
-        tcp_original_service_history_once(rl, rg, rp).await
-    });
-    assert_eq!(
-        Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-            &origin,
-            &governor_state.service_core_id(),
-            le,
-            Some(lc),
-            &mut located,
-            &session
-        ))
-        .await
-        .unwrap(),
-        Some(lc.clone())
-    );
-    assert_eq!(reply.await.unwrap(), 1);
-    assert_eq!(
-        store
-            .committed_event(&le.event_id)
+        let anchor = store
+            .replica_anchor_for_stream(&commit.stream_ref)
             .await
             .unwrap()
-            .unwrap()
-            .commit,
-        *lc
-    );
-    assert_eq!(
-        store.producer_signer_fact(le, lc).await.unwrap(),
-        Some(original_fact.clone())
-    );
-    assert!(
-        !store
-            .accepted_current_member_joined(realm, &actor)
-            .await
-            .unwrap()
-    );
-    assert!(
-        store
-            .accepted_own_leave_bound_result(
-                le,
-                lc,
-                &human.pcr.history.account,
-                &origin.service_core_id()
-            )
-            .await
-            .unwrap()
-    );
-    let read = StreamScanRequest {
-        realm_id: realm.clone(),
-        stream_ref: lc.stream_ref.clone(),
-        direction: StreamScanDirection::Before(Some(lc.stream_position + 1)),
-        limit: 1,
-    };
-    assert!(matches!(
-        store
-            .scan_stream_for_account(&read, &human.pcr.history.account, &origin.service_core_id())
+            .unwrap();
+        assert!(anchor.anchored_head.is_some());
+        assert_eq!(anchor.join_commit, *commit);
+        let before_replay = opening_footprint(&origin_pool, realm).await;
+        assert_eq!(
+            Box::pin(super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
+                event,
+                Some(commit),
+                &mut located,
+                &session,
+            ))
             .await
             .unwrap(),
-        coland_storage::AccountStreamScan::NotAuthorized
-    ));
-    // The governor has a real later Full, but the departed peer's original
-    // interval ends at the leave, including its terminal node only.
-    let future_at = lc.committed_at + Duration::seconds(1);
-    let future_event = historical_human::signed_ordinary_event(
-        &governor,
-        &leave.authority_commit,
-        EventKind::MessageCreate,
-        serde_json::json!({
-            "strand_id":arkret_wire::StrandId::from_event_id(&strand.authority_commit.event.event_id),
-            "track_name":"discussion","content":{"kind":"ak.content.text","body":"future owner original","format":"plain"}
-        }),
-        future_at,
-    );
-    let mut future = historical_human::request_for_event(
-        &governor,
-        &leave.authority_commit,
-        future_event,
-        future_at,
-    );
-    let future_fact = source
-        .prepare_human_signer_fact(&future.authority_commit.event, future_at)
-        .await
-        .unwrap()
-        .unwrap();
-    future.authority_commit.commit.producer_signer_fact_digest =
-        Some(future_fact.digest().unwrap());
-    future.authority_commit.producer_signer_fact = Some(future_fact.into());
-    seal_service_commit(&mut future.authority_commit.commit, &governor_state);
-    Box::pin(uow.commit_event(future.clone())).await.unwrap();
-    let future_read = StreamScanRequest {
-        realm_id: realm.clone(),
-        stream_ref: lc.stream_ref.clone(),
-        direction: StreamScanDirection::After(Some(lc.stream_position)),
-        limit: 1,
-    };
-    let coland_storage::PeerStreamScan::Page(no_future) = source
-        .scan_stream_for_peer(
-            &future_read,
-            &human.pcr.history.account.station_id,
-            &governor_state.service_core_id(),
-        )
-        .await
-        .unwrap()
-    else {
-        panic!("terminal interval read unavailable")
-    };
-    assert!(no_future.committed_events.is_empty());
-    assert!(
+            Some(commit.clone())
+        );
+        assert_eq!(opening_footprint(&origin_pool, realm).await, before_replay);
+        let final_parent = scenario_future(|| {
+            circle_own_leave_bound_result_cases(
+                &origin,
+                &origin_pool,
+                &governor_state,
+                &governor_pool,
+                &human,
+                &governor,
+                &join.authority_commit,
+                &circle_id,
+                listener.clone(),
+                &mut located,
+                &session,
+            )
+        })
+        .await;
+        // Author, sign and admit the real own leave on Gov; Origin keeps its frozen
+        // request and the authentic original acceptance without yet installing it.
+        let mut leave = Box::pin(foreign_request(&origin, &human, &governor, &final_parent,
+        EventKind::MemberState, serde_json::json!({"realm_id":realm,"member_id":actor,"membership":"leave","reason":"original own leave recovery"}))).await;
+        seal_service_commit(&mut leave.authority_commit.commit, &governor_state);
+        Box::pin(uow.commit_event(leave.clone())).await.unwrap();
+        let le = &leave.authority_commit.event;
+        let lc = &leave.authority_commit.commit;
+        let original_fact = source.producer_signer_fact(le, lc).await.unwrap().unwrap();
+        assert_eq!(
+            Some(original_fact.clone()),
+            leave.authority_commit.producer_signer_fact
+        );
+        store.queue_event(le, lc.committed_at).await.unwrap();
+        let intent = SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(le.clone()));
         store
-            .committed_event(&future.authority_commit.event.event_id)
+            .retain_forwarded_submission(le, &intent, lc.committed_at)
+            .await
+            .unwrap();
+        store
+            .retain_forwarded_acceptance(le, lc, lc.committed_at)
+            .await
+            .unwrap();
+        let scan = StreamScanRequest {
+            realm_id: realm.clone(),
+            stream_ref: lc.stream_ref.clone(),
+            direction: StreamScanDirection::After(Some(final_parent.commit.stream_position)),
+            limit: 128,
+        };
+        let coland_storage::PeerStreamScan::Page(page) = source
+            .scan_stream_for_peer(
+                &scan,
+                &human.pcr.history.account.station_id,
+                &governor_state.service_core_id(),
+            )
             .await
             .unwrap()
-            .is_none()
-    );
-    let before = opening_footprint(&origin_pool, realm).await;
-    assert_eq!(
-        Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-            &origin,
-            &governor_state.service_core_id(),
-            le,
-            Some(lc),
-            &mut located,
-            &session
-        ))
-        .await
-        .unwrap(),
-        Some(lc.clone())
-    );
-    assert_eq!(opening_footprint(&origin_pool, realm).await, before);
-    assert!(
-        Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-            &origin,
-            &governor_state.service_core_id(),
-            le,
-            None,
-            &mut located,
-            &session
-        ))
-        .await
-        .is_err()
-    );
-    assert!(
-        Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-            &origin,
-            &governor_state.service_core_id(),
-            le,
-            Some(lc),
-            &mut located,
-            &other_session
-        ))
-        .await
-        .is_err()
-    );
-    assert!(
-        !store
-            .accepted_own_leave_bound_result(
+        else {
+            panic!("terminating peer interval unavailable")
+        };
+        assert_eq!(page.committed_events.len(), 1);
+        let arkret_wire::CommittedEventView::Full(full) = &page.committed_events[0] else {
+            panic!("terminating original is withheld")
+        };
+        assert_eq!(full.event, *le);
+        assert_eq!(full.commit, *lc);
+        assert_eq!(page.producer_signer_facts.len(), 1);
+        assert_eq!(
+            page.producer_signer_facts[0].producer_signer_fact,
+            original_fact
+        );
+        let (rl, rg, rp, ra) = (
+            listener.clone(),
+            governor_state.clone(),
+            governor_pool.clone(),
+            human.pcr.history.account.clone(),
+        );
+        let reply = tokio::spawn(async move {
+            assert_eq!(
+                tcp_scan(rl.clone(), page, scan, ra, rg.service_core_id()).await,
+                1
+            );
+            tcp_original_service_history_once(rl, rg, rp).await
+        });
+        assert_eq!(
+            Box::pin(super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
                 le,
-                lc,
-                &governor.pcr.history.account,
-                &origin.service_core_id()
+                Some(lc),
+                &mut located,
+                &session
+            ))
+            .await
+            .unwrap(),
+            Some(lc.clone())
+        );
+        assert_eq!(reply.await.unwrap(), 1);
+        assert_eq!(
+            store
+                .committed_event(&le.event_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .commit,
+            *lc
+        );
+        assert_eq!(
+            store.producer_signer_fact(le, lc).await.unwrap(),
+            Some(original_fact.clone())
+        );
+        assert!(
+            !store
+                .accepted_current_member_joined(realm, &actor)
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .accepted_own_leave_bound_result(
+                    le,
+                    lc,
+                    &human.pcr.history.account,
+                    &origin.service_core_id()
+                )
+                .await
+                .unwrap()
+        );
+        let read = StreamScanRequest {
+            realm_id: realm.clone(),
+            stream_ref: lc.stream_ref.clone(),
+            direction: StreamScanDirection::Before(Some(lc.stream_position + 1)),
+            limit: 1,
+        };
+        assert!(matches!(
+            store
+                .scan_stream_for_account(
+                    &read,
+                    &human.pcr.history.account,
+                    &origin.service_core_id()
+                )
+                .await
+                .unwrap(),
+            coland_storage::AccountStreamScan::NotAuthorized
+        ));
+        // The governor has a real later Full, but the departed peer's original
+        // interval ends at the leave, including its terminal node only.
+        let future_at = lc.committed_at + Duration::seconds(1);
+        let future_event = historical_human::signed_ordinary_event(
+            &governor,
+            &leave.authority_commit,
+            EventKind::MessageCreate,
+            serde_json::json!({
+                "strand_id":arkret_wire::StrandId::from_event_id(&strand.authority_commit.event.event_id),
+                "track_name":"discussion","content":{"kind":"ak.content.text","body":"future owner original","format":"plain"}
+            }),
+            future_at,
+        );
+        let mut future = historical_human::request_for_event(
+            &governor,
+            &leave.authority_commit,
+            future_event,
+            future_at,
+        );
+        let future_fact = source
+            .prepare_human_signer_fact(&future.authority_commit.event, future_at)
+            .await
+            .unwrap()
+            .unwrap();
+        future.authority_commit.commit.producer_signer_fact_digest =
+            Some(future_fact.digest().unwrap());
+        future.authority_commit.producer_signer_fact = Some(future_fact.into());
+        seal_service_commit(&mut future.authority_commit.commit, &governor_state);
+        Box::pin(uow.commit_event(future.clone())).await.unwrap();
+        let future_read = StreamScanRequest {
+            realm_id: realm.clone(),
+            stream_ref: lc.stream_ref.clone(),
+            direction: StreamScanDirection::After(Some(lc.stream_position)),
+            limit: 1,
+        };
+        let coland_storage::PeerStreamScan::Page(no_future) = source
+            .scan_stream_for_peer(
+                &future_read,
+                &human.pcr.history.account.station_id,
+                &governor_state.service_core_id(),
             )
             .await
             .unwrap()
-    );
-    let mismatch = historical_human::signed_ordinary_event(
-        &human,
-        &join.authority_commit,
-        EventKind::MemberState,
-        serde_json::json!({"realm_id":realm,"member_id":owner,"membership":"leave"}),
-        lc.committed_at,
-    );
-    assert!(
-        !store
-            .accepted_own_leave_bound_result(
-                &mismatch,
-                lc,
-                &human.pcr.history.account,
-                &origin.service_core_id()
-            )
+        else {
+            panic!("terminal interval read unavailable")
+        };
+        assert!(no_future.committed_events.is_empty());
+        assert!(
+            store
+                .committed_event(&future.authority_commit.event.event_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let before = opening_footprint(&origin_pool, realm).await;
+        assert_eq!(
+            Box::pin(super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
+                le,
+                Some(lc),
+                &mut located,
+                &session
+            ))
             .await
-            .unwrap()
-    );
-    // Removing an original fact is a negative only: no fallback to today's key
-    // and no eligibility from a bare accepted witness.
-    {
-        let mut conn = origin_pool.get().await.unwrap();
-        diesel::sql_query(
+            .unwrap(),
+            Some(lc.clone())
+        );
+        assert_eq!(opening_footprint(&origin_pool, realm).await, before);
+        assert!(
+            Box::pin(super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
+                le,
+                None,
+                &mut located,
+                &session
+            ))
+            .await
+            .is_err()
+        );
+        assert!(
+            Box::pin(super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
+                le,
+                Some(lc),
+                &mut located,
+                &other_session
+            ))
+            .await
+            .is_err()
+        );
+        assert!(
+            !store
+                .accepted_own_leave_bound_result(
+                    le,
+                    lc,
+                    &governor.pcr.history.account,
+                    &origin.service_core_id()
+                )
+                .await
+                .unwrap()
+        );
+        let mismatch = historical_human::signed_ordinary_event(
+            &human,
+            &join.authority_commit,
+            EventKind::MemberState,
+            serde_json::json!({"realm_id":realm,"member_id":owner,"membership":"leave"}),
+            lc.committed_at,
+        );
+        assert!(
+            !store
+                .accepted_own_leave_bound_result(
+                    &mismatch,
+                    lc,
+                    &human.pcr.history.account,
+                    &origin.service_core_id()
+                )
+                .await
+                .unwrap()
+        );
+        // Removing an original fact is a negative only: no fallback to today's key
+        // and no eligibility from a bare accepted witness.
+        {
+            let mut conn = origin_pool.get().await.unwrap();
+            diesel::sql_query(
             "UPDATE agent_producer_signer_keys SET producer_source_fact=NULL WHERE commit_id=$1",
         )
         .bind::<diesel::sql_types::Text, _>(lc.commit_id.as_str())
         .execute(&mut *conn)
         .await
         .unwrap();
-    }
-    assert!(
-        !store
-            .accepted_own_leave_bound_result(
+        }
+        assert!(
+            !store
+                .accepted_own_leave_bound_result(
+                    le,
+                    lc,
+                    &human.pcr.history.account,
+                    &origin.service_core_id()
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            Box::pin(super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
                 le,
-                lc,
-                &human.pcr.history.account,
-                &origin.service_core_id()
-            )
+                Some(lc),
+                &mut located,
+                &session
+            ))
             .await
-            .unwrap()
-    );
-    assert!(
-        Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-            &origin,
-            &governor_state.service_core_id(),
-            le,
-            Some(lc),
-            &mut located,
-            &session
-        ))
-        .await
-        .is_err()
-    );
-    {
-        let mut conn = origin_pool.get().await.unwrap();
-        diesel::sql_query(
-            "UPDATE agent_producer_signer_keys SET producer_source_fact=$2 WHERE commit_id=$1",
-        )
-        .bind::<diesel::sql_types::Text, _>(lc.commit_id.as_str())
-        .bind::<diesel::sql_types::Jsonb, _>(serde_json::to_value(&original_fact).unwrap())
-        .execute(&mut *conn)
-        .await
-        .unwrap();
-    }
-    assert_eq!(opening_footprint(&origin_pool, realm).await, before);
-    // Corrupt durable coordinates only as a negative, then restore the original.
-    {
-        let mut conn = origin_pool.get().await.unwrap();
-        diesel::sql_query("UPDATE replica_stream_anchors SET join_commit_id=$2 WHERE realm_id=$1 AND stream_key=(SELECT stream_key FROM realm_commits WHERE commit_id=$2)")
+            .is_err()
+        );
+        {
+            let mut conn = origin_pool.get().await.unwrap();
+            diesel::sql_query(
+                "UPDATE agent_producer_signer_keys SET producer_source_fact=$2 WHERE commit_id=$1",
+            )
+            .bind::<diesel::sql_types::Text, _>(lc.commit_id.as_str())
+            .bind::<diesel::sql_types::Jsonb, _>(serde_json::to_value(&original_fact).unwrap())
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        }
+        assert_eq!(opening_footprint(&origin_pool, realm).await, before);
+        // Corrupt durable coordinates only as a negative, then restore the original.
+        {
+            let mut conn = origin_pool.get().await.unwrap();
+            diesel::sql_query("UPDATE replica_stream_anchors SET join_commit_id=$2 WHERE realm_id=$1 AND stream_key=(SELECT stream_key FROM realm_commits WHERE commit_id=$2)")
             .bind::<diesel::sql_types::Text, _>(realm.as_str())
             .bind::<diesel::sql_types::Text, _>(lc.commit_id.as_str())
             .execute(&mut *conn)
             .await
             .unwrap();
-    }
-    assert!(
-        !store
-            .accepted_own_leave_bound_result(
+        }
+        assert!(
+            !store
+                .accepted_own_leave_bound_result(
+                    le,
+                    lc,
+                    &human.pcr.history.account,
+                    &origin.service_core_id()
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            Box::pin(super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
                 le,
-                lc,
-                &human.pcr.history.account,
-                &origin.service_core_id()
-            )
+                Some(lc),
+                &mut located,
+                &session
+            ))
             .await
-            .unwrap()
-    );
-    assert!(
-        Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-            &origin,
-            &governor_state.service_core_id(),
-            le,
-            Some(lc),
-            &mut located,
-            &session
-        ))
-        .await
-        .is_err()
-    );
-    {
-        let mut conn = origin_pool.get().await.unwrap();
-        diesel::sql_query("UPDATE replica_stream_anchors SET join_commit_id=$2 WHERE realm_id=$1 AND stream_key=(SELECT stream_key FROM realm_commits WHERE commit_id=$2)")
+            .is_err()
+        );
+        {
+            let mut conn = origin_pool.get().await.unwrap();
+            diesel::sql_query("UPDATE replica_stream_anchors SET join_commit_id=$2 WHERE realm_id=$1 AND stream_key=(SELECT stream_key FROM realm_commits WHERE commit_id=$2)")
             .bind::<diesel::sql_types::Text, _>(realm.as_str())
             .bind::<diesel::sql_types::Text, _>(commit.commit_id.as_str())
             .execute(&mut *conn)
             .await
             .unwrap();
-        diesel::sql_query("UPDATE member_state_current_results SET current_commit_id=$3,current_stream_position=$4 WHERE realm_id=$1 AND member_id=$2")
+            diesel::sql_query("UPDATE member_state_current_results SET current_commit_id=$3,current_stream_position=$4 WHERE realm_id=$1 AND member_id=$2")
           .bind::<diesel::sql_types::Text,_>(realm.as_str()).bind::<diesel::sql_types::Text,_>(actor.to_string()).bind::<diesel::sql_types::Text,_>(commit.commit_id.as_str()).bind::<diesel::sql_types::BigInt,_>(i64::try_from(commit.stream_position).unwrap()).execute(&mut *conn).await.unwrap();
-    }
-    assert!(
-        !store
-            .accepted_own_leave_bound_result(
-                le,
-                lc,
-                &human.pcr.history.account,
-                &origin.service_core_id()
-            )
-            .await
-            .unwrap()
-    );
-    {
-        let mut conn = origin_pool.get().await.unwrap();
-        diesel::sql_query("UPDATE member_state_current_results SET current_commit_id=$3,current_stream_position=$4 WHERE realm_id=$1 AND member_id=$2")
+        }
+        assert!(
+            !store
+                .accepted_own_leave_bound_result(
+                    le,
+                    lc,
+                    &human.pcr.history.account,
+                    &origin.service_core_id()
+                )
+                .await
+                .unwrap()
+        );
+        {
+            let mut conn = origin_pool.get().await.unwrap();
+            diesel::sql_query("UPDATE member_state_current_results SET current_commit_id=$3,current_stream_position=$4 WHERE realm_id=$1 AND member_id=$2")
           .bind::<diesel::sql_types::Text,_>(realm.as_str()).bind::<diesel::sql_types::Text,_>(actor.to_string()).bind::<diesel::sql_types::Text,_>(lc.commit_id.as_str()).bind::<diesel::sql_types::BigInt,_>(i64::try_from(lc.stream_position).unwrap()).execute(&mut *conn).await.unwrap();
-    }
-    assert_eq!(opening_footprint(&origin_pool, realm).await, before);
-    assert!(matches!(
-        store
-            .scan_stream_for_account(&read, &human.pcr.history.account, &origin.service_core_id())
-            .await
-            .unwrap(),
-        coland_storage::AccountStreamScan::NotAuthorized
-    ));
+        }
+        assert_eq!(opening_footprint(&origin_pool, realm).await, before);
+        assert!(matches!(
+            store
+                .scan_stream_for_account(
+                    &read,
+                    &human.pcr.history.account,
+                    &origin.service_core_id()
+                )
+                .await
+                .unwrap(),
+            coland_storage::AccountStreamScan::NotAuthorized
+        ));
+    })
 }
 
 #[expect(
@@ -2935,17 +2970,19 @@ async fn circle_own_leave_bound_result_cases(
         .enumerate()
     {
         if index == 3 {
-            parent_join = Box::pin(circle_cleanup_parent_rejoin(
-                origin,
-                governor_state,
-                governor_pool,
-                human,
-                governor,
-                &parent_join,
-                listener.clone(),
-                located,
-                session,
-            ))
+            parent_join = scenario_future(|| {
+                circle_cleanup_parent_rejoin(
+                    origin,
+                    governor_state,
+                    governor_pool,
+                    human,
+                    governor,
+                    &parent_join,
+                    listener.clone(),
+                    located,
+                    session,
+                )
+            })
             .await;
         }
         let mut payload = serde_json::json!({"circle_id":circle_id,"member_id":actor,"membership":state,
@@ -3340,10 +3377,7 @@ async fn circle_cleanup_install_refusals(
         parent: Option<serde_json::Value>,
     }
     let store = origin.authority_commits();
-    Box::pin(circle_cleanup_missing_parent_is_frozen(
-        origin, pool, human, event,
-    ))
-    .await;
+    scenario_future(|| circle_cleanup_missing_parent_is_frozen(origin, pool, human, event)).await;
     let baseline = opening_footprint(pool, &event.realm_id).await;
     let replica = CommittedReplica {
         local_service_id: origin.service_core_id(),

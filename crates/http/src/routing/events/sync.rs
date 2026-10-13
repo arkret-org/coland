@@ -100,7 +100,23 @@ pub fn spawn_account_data_change_retention_sweeper(state: AppState) -> tokio::ta
     })
 }
 pub(crate) use cursor::*;
-pub(crate) async fn content_delivery_guard(
+pub(crate) fn content_delivery_guard<'a>(
+    state: &'a AppState,
+    session: &'a SessionIdentityState,
+    input: &'a coland_storage::AccountContentDeliveryInput,
+) -> impl std::future::Future<
+    Output = Result<
+        Option<Box<dyn coland_storage::AccountContentDeliveryGuard>>,
+        crate::error::AppError,
+    >,
+> + Send
++ 'a {
+    // Keep the credential preflight out of every enclosing stream's inline
+    // state machine. The held transaction and cancellation path stay intact.
+    Box::pin(content_delivery_guard_inner(state, session, input))
+}
+
+async fn content_delivery_guard_inner(
     state: &AppState,
     session: &SessionIdentityState,
     input: &coland_storage::AccountContentDeliveryInput,
@@ -389,24 +405,3 @@ pub(crate) fn scope_selector_to_realm_id(
 #[cfg(test)]
 #[path = "sync_tests.rs"]
 mod tests;
-
-/// Unknown projection carriers cannot turn a membership check into content authority.
-pub(crate) async fn require_registered_content_mapping(
-    state: &crate::state::AppState,
-    session: &SessionIdentityState,
-    realm: &arkret_wire::RealmId,
-) -> Result<(), crate::error::AppError> {
-    let input = coland_storage::AccountContentDeliveryInput {
-        realms: vec![realm.clone()],
-        unresolved_content_realms: vec![realm.clone()],
-        ..Default::default()
-    };
-    if let Some(guard) = content_delivery_guard(state, session, &input).await? {
-        guard
-            .finish()
-            .await
-            .map_err(|_| crate::error::AppError::not_found("not found"))?;
-        return Err(crate::error::AppError::not_found("not found"));
-    }
-    Ok(())
-}

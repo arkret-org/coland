@@ -349,7 +349,7 @@ async fn blob_get(depot: &mut Depot, req: &mut Request, res: &mut Response) {
                     res.headers_mut()
                         .insert(salvo::http::header::RETRY_AFTER, "1".parse().unwrap());
                 }
-                AppError::new(code, message)
+                AppError::from_rejection(code, message)
                     .with_status_context(arkret_wire::ErrorStatusContext::ProtectedResource)
                     .write(req, depot, res)
                     .await;

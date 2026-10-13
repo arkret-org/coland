@@ -174,12 +174,6 @@ async fn upsert_organization(
     json_ok(organization_record_view(state, &record))
 }
 
-/// SOL-ORG-05 — declared `owning_organization_ids` hints for a Realm. Display /
-/// discovery surface ONLY; never use this to drive policy inheritance.
-pub(crate) fn realm_organization_ids(state: &AppState, realm_id: &str) -> Vec<DidCoreId> {
-    state.governance().cached_realm_organizations(realm_id)
-}
-
 /// Resolve organization consent at its signed historical DID state before the
 /// authority transaction. PostgreSQL binds and verifies this internal evidence
 /// again against the exact accepted Event; it is never a caller-side sidecar.

@@ -172,7 +172,7 @@ mod tests {
             assert_eq!(error.code, ErrorCode::NotFound);
             let mut response = Response::new();
             let mut depot = Depot::new();
-            depot.inject(ErrorExposure { development_mode });
+            depot.insert_typed(ErrorExposure { development_mode });
             error
                 .write(&mut Request::new(), &mut depot, &mut response)
                 .await;

@@ -22,9 +22,10 @@ use salvo::prelude::*;
 use serde_json::Value;
 
 use super::AuthArgs;
+use crate::JsonResult;
 use crate::state::AppState;
+#[cfg(test)]
 use crate::wire::now;
-use crate::{JsonResult, json_ok};
 
 /// Spec `realm_read` operation group (`ak.self.realm.*`): Realm lifecycle read
 /// and full export. Canonical path

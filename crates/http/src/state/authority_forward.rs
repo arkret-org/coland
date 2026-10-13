@@ -58,7 +58,7 @@ fn verify_forwarded_producer(
     body_digest: &arkret_wire::Hash,
     now: DateTime<Utc>,
 ) -> ServiceResult<Option<ForwardedProducerDeviceEvidence>> {
-    arkret_schema::validate_event_for_submit(event)
+    arkret_event_draft::validate_event_for_submit(event)
         .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
     let digest_suite = state
         .projections()

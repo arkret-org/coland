@@ -70,7 +70,7 @@ pub(crate) async fn verify_self_event_producer_key(
     SelfProducerCommitGuard,
     arkret_signatures::PublicKeyMaterial,
 )> {
-    arkret_schema::validate_event_for_submit(event)
+    arkret_event_draft::validate_event_for_submit(event)
         .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
     let actor = crate::routing::identity::session_actor::validated_session_actor(state, session)
         .await

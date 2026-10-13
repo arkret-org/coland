@@ -12,6 +12,8 @@ mod realm_terminal_peer_tests;
 #[path = "../../../storage-postgres/tests/support/sql_fault_matrix.rs"]
 #[allow(dead_code)]
 mod sql_fault_matrix;
+#[path = "test_material_evidence_tests.rs"]
+mod test_material_evidence_tests;
 
 use std::io::{Read, Write};
 use std::sync::Arc;

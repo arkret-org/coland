@@ -515,6 +515,27 @@ pub(crate) async fn admit_profile_in_connection(
         PcrSelfEventCut::Fresh(signer) => signer,
     };
 
+    let next = materialize_profile_in_connection(conn, event, commit, &signer.account).await?;
+
+    commit_verified(conn, &write.commit, write.queued_at, WHAT).await?;
+    write_profile_current_in_connection(conn, event, commit, &next).await?;
+    Ok(ActorProfileAdmissionOutcome::Committed(
+        ActorProfileResultRecord {
+            profile: next,
+            event: event.clone(),
+            commit: commit.clone(),
+        },
+    ))
+}
+
+/// Validate and materialize a profile after its owning unit freezes the signer cut.
+pub(crate) async fn materialize_profile_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    commit: &RealmCommit,
+    subject: &arkret_wire::AccountId,
+) -> Result<ActorProfile, PgTransactionError> {
+    const WHAT: &str = "Actor Profile";
     let current = locked_profile(conn, &event.realm_id).await?;
     let next = match event.kind {
         EventKind::ProfileCreate => {
@@ -525,13 +546,13 @@ pub(crate) async fn admit_profile_in_connection(
                 ));
             }
             let create: ActorProfileCreatePayload = payload(event, WHAT)?;
-            if create.object.principal_id != signer.account.principal_id {
+            if create.object.principal_id != subject.principal_id {
                 return Err(rejected(
                     ConflictCode::FailedPrecondition,
                     "ak.profile.create principal_id is not the submitting actor",
                 ));
             }
-            if create.object.agent_slug.is_some() {
+            if event.executed_by.is_none() && create.object.agent_slug.is_some() {
                 return Err(rejected(
                     ConflictCode::FailedPrecondition,
                     "agent_slug needs the agent_selector_claim typed current, which this Station does not project",
@@ -555,7 +576,7 @@ pub(crate) async fn admit_profile_in_connection(
                     "ak.profile.update target_ref is not the PCR's accepted Actor Profile",
                 ));
             }
-            if current.principal_id != signer.account.principal_id {
+            if current.principal_id != subject.principal_id {
                 return Err(rejected(
                     ConflictCode::FailedPrecondition,
                     "the accepted Actor Profile belongs to another principal",
@@ -577,7 +598,10 @@ pub(crate) async fn admit_profile_in_connection(
             let next = update
                 .apply(event, &current)
                 .map_err(|error| rejected(ConflictCode::FailedPrecondition, &error.to_string()))?;
-            if next.agent_slug.is_some() && next.agent_slug != current.agent_slug {
+            if event.executed_by.is_none()
+                && next.agent_slug.is_some()
+                && next.agent_slug != current.agent_slug
+            {
                 return Err(rejected(
                     ConflictCode::FailedPrecondition,
                     "agent_slug needs the agent_selector_claim typed current, which this Station does not project",
@@ -600,15 +624,7 @@ pub(crate) async fn admit_profile_in_connection(
         ));
     }
 
-    commit_verified(conn, &write.commit, write.queued_at, WHAT).await?;
-    write_profile_current_in_connection(conn, event, commit, &next).await?;
-    Ok(ActorProfileAdmissionOutcome::Committed(
-        ActorProfileResultRecord {
-            profile: next,
-            event: event.clone(),
-            commit: commit.clone(),
-        },
-    ))
+    Ok(next)
 }
 
 /// Project a fully admitted SDK Actor Profile at its actual covering Commit.
@@ -896,6 +912,15 @@ impl coland_storage::ActorProfileStore for PgActorProfileStore {
         &self,
         write: coland_storage::AgentControlAdmissionWrite,
     ) -> PersistenceResult<coland_storage::AgentControlAdmissionOutcome> {
+        self.admit_agent_control_event_with_origin(write, None)
+            .await
+    }
+
+    async fn admit_agent_control_event_with_origin(
+        &self,
+        write: coland_storage::AgentControlAdmissionWrite,
+        origin: Option<coland_storage::AgentControlOriginSource>,
+    ) -> PersistenceResult<coland_storage::AgentControlAdmissionOutcome> {
         write.commit.validate().map_err(|error| {
             PersistenceError::SchemaViolation(format!(
                 "invalid Agent control authority transaction: {error}"
@@ -905,7 +930,12 @@ impl coland_storage::ActorProfileStore for PgActorProfileStore {
             .await
             .map_err(PersistenceError::database)?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            crate::agent_control::admit_agent_control_event_in_connection(conn, &write).await
+            crate::agent_control::admit_agent_control_event_in_connection(
+                conn,
+                &write,
+                origin.as_ref(),
+            )
+            .await
         })
         .await
         .map_err(PgTransactionError::into_persistence)

@@ -116,6 +116,11 @@ pub struct AgentControlAdmissionWrite {
     pub queued_at: chrono::DateTime<chrono::Utc>,
 }
 
+pub type AgentControlOriginSource = (
+    arkret_models_identity::AgentSignerDependency,
+    arkret_models_identity::AuthenticatedServiceResolution,
+);
+
 #[derive(Clone, Debug)]
 pub enum AgentControlAdmissionOutcome {
     Committed(RealmCommit),
@@ -172,6 +177,19 @@ pub trait ActorProfileStore: Send + Sync {
         &self,
         write: AgentControlAdmissionWrite,
     ) -> PersistenceResult<AgentControlAdmissionOutcome>;
+
+    async fn admit_agent_control_event_with_origin(
+        &self,
+        write: AgentControlAdmissionWrite,
+        origin: Option<AgentControlOriginSource>,
+    ) -> PersistenceResult<AgentControlAdmissionOutcome> {
+        if origin.is_some() {
+            return Err(crate::PersistenceError::Internal(
+                "atomic Agent origin admission unavailable".to_owned(),
+            ));
+        }
+        self.admit_agent_control_event(write).await
+    }
 
     /// The current profile of the account's local PCR, with the exact Event
     /// and Commit that produced it.

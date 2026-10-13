@@ -464,7 +464,9 @@ impl AuthorityProtocolPort for AppState {
             event.kind,
             arkret_wire::EventKind::ConsentGrant | arkret_wire::EventKind::ConsentRevoke
         ) {
-            let result = super::authority_consent::submit(self, session, &request).await?;
+            let result =
+                crate::boxed_future(|| super::authority_consent::submit(self, session, &request))
+                    .await?;
             let (status, record) = match result {
                 coland_storage::ConsentAdmissionOutcome::Committed(record) => {
                     (arkret_wire::AuthorityCommitStatus::Committed, record)
@@ -481,17 +483,21 @@ impl AuthorityProtocolPort for AppState {
         // The Agent PCR genesis is executed by the controller on the Agent's
         // behalf; its unit verifies that delegated producer itself.
         if super::authority_agent_pcr_genesis::is_agent_pcr_genesis(event) {
-            return super::authority_agent_pcr_genesis::submit_self_agent_pcr_genesis(
-                self, session, &request,
-            )
+            return crate::boxed_future(|| {
+                super::authority_agent_pcr_genesis::submit_self_agent_pcr_genesis(
+                    self, session, &request,
+                )
+            })
             .await;
         }
         // A key revocation is likewise controller-executed for the Agent and
         // decided by the Agent control unit.
         if event.kind == arkret_wire::EventKind::AgentKeyRevoke {
-            return super::authority_agent_control::submit_self_agent_key_revoke(
-                self, session, &request,
-            )
+            return crate::boxed_future(|| {
+                super::authority_agent_control::submit_self_agent_key_revoke(
+                    self, session, &request,
+                )
+            })
             .await;
         }
         // Native controller submissions keep authentication and shape checks,
@@ -592,22 +598,26 @@ impl AuthorityProtocolPort for AppState {
                         "an MLS Event carries no approval signatures".to_owned(),
                     ));
                 }
-                return super::authority_mls_unit::admit_mls_event(
-                    self,
-                    event,
-                    &[],
-                    None,
-                    super::authority_self_event_unit::AdmittedProducer::Local(Box::new(
-                        producer_guard,
-                    )),
-                    &producer_key,
-                )
+                return crate::boxed_future(|| {
+                    super::authority_mls_unit::admit_mls_event(
+                        self,
+                        event,
+                        &[],
+                        None,
+                        super::authority_self_event_unit::AdmittedProducer::Local(Box::new(
+                            producer_guard,
+                        )),
+                        &producer_key,
+                    )
+                })
                 .await;
             }
             SelfEventRoute::KeyBackupPointer => {
-                return super::authority_key_backup_pointer::submit_self_key_backup_pointer(
-                    self, &request,
-                )
+                return crate::boxed_future(|| {
+                    super::authority_key_backup_pointer::submit_self_key_backup_pointer(
+                        self, &request,
+                    )
+                })
                 .await
                 .inspect_err(|_error| {
                     #[cfg(feature = "conformance-harness")]
@@ -624,9 +634,11 @@ impl AuthorityProtocolPort for AppState {
                 });
             }
             SelfEventRoute::AccountabilityGrant => {
-                return super::authority_accountability_grant::submit_self_accountability_grant(
-                    self, &request,
-                )
+                return crate::boxed_future(|| {
+                    super::authority_accountability_grant::submit_self_accountability_grant(
+                        self, &request,
+                    )
+                })
                 .await;
             }
             SelfEventRoute::GuardedUnit => {}
@@ -635,12 +647,14 @@ impl AuthorityProtocolPort for AppState {
             }
         }
         require_guarded_unit_event(&request)?;
-        super::authority_self_event_unit::commit_event_unit(
-            self,
-            &request,
-            super::authority_self_event_unit::AdmittedProducer::Local(Box::new(producer_guard)),
-            super::authority_self_event_unit::SelfEventUnitEffects::default(),
-        )
+        crate::boxed_future(|| {
+            super::authority_self_event_unit::commit_event_unit(
+                self,
+                &request,
+                super::authority_self_event_unit::AdmittedProducer::Local(Box::new(producer_guard)),
+                super::authority_self_event_unit::SelfEventUnitEffects::default(),
+            )
+        })
         .await
         .inspect_err(|_error| {
             #[cfg(feature = "conformance-harness")]

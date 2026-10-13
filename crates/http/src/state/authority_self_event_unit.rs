@@ -550,9 +550,8 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             || invite_claim_proof.is_some()
             || event_approvals.is_some()
         {
-            state
-                .events()
-                .commit_accepted_event_batch(
+            crate::boxed_future(|| {
+                state.events().commit_accepted_event_batch(
                     coland_services::events::CommitAcceptedEventBatchCommand {
                         events: vec![command],
                         franking_replay_nonce,
@@ -564,9 +563,10 @@ fn commit_event_unit_with_idempotency_impl<'a>(
                         agent_membership_cascade: None,
                     },
                 )
-                .await
+            })
+            .await
         } else {
-            state.events().commit_accepted_event(command).await
+            crate::boxed_future(|| state.events().commit_accepted_event(command)).await
         };
         if let Err(error) = committed {
             // A concurrent exact replay may have won the same Event identity; it

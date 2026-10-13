@@ -1377,17 +1377,44 @@ pub(crate) async fn admit_in_connection(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PolicyWriteContext {
+    Admission,
+    AcceptedReplica,
+}
+
 pub(crate) async fn commit_in_connection(
     conn: &mut AsyncPgConnection,
     event: &Event,
     commit: &RealmCommit,
+) -> PersistenceResult<()> {
+    commit_in_connection_inner(conn, event, commit, PolicyWriteContext::Admission).await
+}
+
+// The caller has verified the accepted originals, native revision and prefix.
+// A disclosed snapshot does not fabricate the producer's local CAS predecessor.
+pub(crate) async fn commit_replica_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    commit: &RealmCommit,
+) -> PersistenceResult<()> {
+    commit_in_connection_inner(conn, event, commit, PolicyWriteContext::AcceptedReplica).await
+}
+
+async fn commit_in_connection_inner(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    commit: &RealmCommit,
+    context: PolicyWriteContext,
 ) -> PersistenceResult<()> {
     match event.kind {
         EventKind::PolicySet => {
             let payload: PolicySetStatePayload = payload(event)?;
             payload.validate().map_err(schema)?;
             let value = serde_json::to_value(&payload.value).map_err(schema)?;
-            let count = if let Some(expected) = &payload.expected_revision {
+            let count = if context == PolicyWriteContext::Admission
+                && let Some(expected) = &payload.expected_revision
+            {
                 // CAS predecessors order writes even when the new accepted
                 // stream position is lower than the previous stream's value.
                 let expected_position = expected

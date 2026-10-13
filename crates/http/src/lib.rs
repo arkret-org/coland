@@ -4,6 +4,16 @@
 
 extern crate self as coland_http;
 
+// Construct child futures outside a large enclosing poll frame.
+#[inline(never)]
+pub(crate) fn boxed_future<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future,
+{
+    Box::pin(make())
+}
+
 pub mod account_erasure_worker;
 mod approval_admission;
 pub mod authz;

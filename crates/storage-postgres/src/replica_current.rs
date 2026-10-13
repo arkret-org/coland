@@ -1330,7 +1330,8 @@ pub(crate) async fn advance_in_connection(
                 guard_snapshot_revisions(conn, &event.realm_id, std::slice::from_ref(&entry))
                     .await?;
             }
-            crate::policy_current_results::commit_in_connection(conn, event, commit).await?;
+            crate::policy_current_results::commit_replica_in_connection(conn, event, commit)
+                .await?;
             if agent {
                 crate::replica_authorization::save_row(
                     conn,

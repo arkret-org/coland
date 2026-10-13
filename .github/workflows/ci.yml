@@ -169,6 +169,10 @@ jobs:
       # runners give each test its own thread. A 12-thread local run peaks near
       # 50, so this leaves headroom on a larger runner.
       COLAND_TEST_DATABASE_SLOTS: "192"
+      # Keep the embedded runtime's test artifacts within hosted runner budgets.
+      # Source backtraces remain available; optimization and stack settings stay default.
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_BUILD_JOBS: "2"
     steps:
       - name: Checkout coland
         uses: actions/checkout@v6
@@ -195,6 +199,12 @@ jobs:
           docker exec "$(docker ps --filter ancestor=postgres:16 --format '{{.ID}}')"             psql -U coland -d coland_ws -c "ALTER SYSTEM SET max_connections = 500;"
           docker restart "$(docker ps --filter ancestor=postgres:16 --format '{{.ID}}')"
           for _ in {1..30}; do pg_isready -h localhost -p 5432 -U coland && break; sleep 1; done
+
+      - name: Report test build resources
+        run: |
+          df -h .
+          free -h
+        working-directory: arkret-org/coland
 
       - name: Test (whole workspace, real database)
         env:

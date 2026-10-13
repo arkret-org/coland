@@ -165,195 +165,230 @@ async fn circle_request(
 
 #[tokio::test]
 async fn circle_report_decision_lift_require_exact_circle_grant_and_source_cut() {
-    use diesel_async::RunQueryDsl;
-    let database = TestDatabase::lease().await;
-    let pool = database.pool();
-    let governing_did = device_authorization_history::did_web_station(&ordinary_realm::station());
-    let human = accepted_pcr_account::accepted_pcr_account(&pool, governing_did.clone()).await;
-    let unit = ordinary_realm::bootstrap_unit_for_account(
-        &uuid::Uuid::now_v7().to_string(),
-        human.as_account_id().unwrap(),
-        &governing_did,
-    );
-    let unit = ordinary_realm::source_bootstrap(&pool, unit).await;
-    let head = unit.transactions.last().unwrap();
-    let at = head.commit.committed_at;
-    let actor = head.event.actor_id.clone();
-    let principal = actor.signing_principal_id().clone();
-    let realm = head.event.realm_id.clone();
-    let store = PgAuthorityCommitStore { pool: pool.clone() };
-    store
-        .admit_ordinary_realm_bootstrap_unit(&unit, at)
-        .await
-        .unwrap();
-    let uow = PgEventCommitUnitOfWork::new(pool.clone());
-    let queue = PgModerationStore { pool: pool.clone() };
-    let create = ordinary_realm::next_request_for_actor(
-        head,
-        arkret_wire::EventKind::CircleCreate,
-        actor.clone(),
-        serde_json::json!({"object":{"schema":"ak.schema.circle.v1","realm_id":realm,
+    circle_review_scenario().await;
+}
+
+#[inline(never)]
+fn scenario_future<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future,
+{
+    Box::pin(make())
+}
+
+#[inline(never)]
+fn circle_review_scenario() -> std::pin::Pin<Box<impl std::future::Future<Output = ()>>> {
+    Box::pin(async {
+        use diesel_async::RunQueryDsl;
+        let database = TestDatabase::lease().await;
+        let pool = database.pool();
+        let governing_did =
+            device_authorization_history::did_web_station(&ordinary_realm::station());
+        let human = scenario_future(|| {
+            accepted_pcr_account::accepted_pcr_account(&pool, governing_did.clone())
+        })
+        .await;
+        let unit = ordinary_realm::bootstrap_unit_for_account(
+            &uuid::Uuid::now_v7().to_string(),
+            human.as_account_id().unwrap(),
+            &governing_did,
+        );
+        let unit = scenario_future(|| ordinary_realm::source_bootstrap(&pool, unit)).await;
+        let head = unit.transactions.last().unwrap();
+        let at = head.commit.committed_at;
+        let actor = head.event.actor_id.clone();
+        let principal = actor.signing_principal_id().clone();
+        let realm = head.event.realm_id.clone();
+        let store = PgAuthorityCommitStore { pool: pool.clone() };
+        store
+            .admit_ordinary_realm_bootstrap_unit(&unit, at)
+            .await
+            .unwrap();
+        let uow = PgEventCommitUnitOfWork::new(pool.clone());
+        let queue = PgModerationStore { pool: pool.clone() };
+        let create = ordinary_realm::next_request_for_actor(
+            head,
+            arkret_wire::EventKind::CircleCreate,
+            actor.clone(),
+            serde_json::json!({"object":{"schema":"ak.schema.circle.v1","realm_id":realm,
         "title":"Review Circle","display":{"short_name":"Review","color_token":"blue","symbol":{"glyph":"lock"}},
         "directory_visibility":"members","join_rule":"public","history_access":"since_join",
         "state":"active","created_by":actor,"created_at":arkret_canonical::format_timestamp_canonical(at)}}),
-        at,
-    );
-    let create = ordinary_realm::source_request(&pool, create).await;
-    uow.commit_event(create.clone()).await.unwrap();
-    let circle = arkret_wire::CircleId::from_event_id(&create.authority_commit.event.event_id);
-    let scope = arkret_wire::ScopeRef::Circle {
-        realm_id: realm.clone(),
-        circle_id: circle.clone(),
-    };
-    let join = circle_request(
-        &pool,
-        &create.authority_commit,
-        arkret_wire::EventKind::CircleMemberState,
-        actor.clone(),
-        &circle,
-        serde_json::json!({"circle_id":circle,"member_id":actor,"membership":"join",
-            "parent_membership_revision":ordinary_realm::parent_membership_revision(&pool,&realm,&actor).await,
+            at,
+        );
+        let create = scenario_future(|| ordinary_realm::source_request(&pool, create)).await;
+        uow.commit_event(create.clone()).await.unwrap();
+        let circle = arkret_wire::CircleId::from_event_id(&create.authority_commit.event.event_id);
+        let scope = arkret_wire::ScopeRef::Circle {
+            realm_id: realm.clone(),
+            circle_id: circle.clone(),
+        };
+        let parent_membership_revision =
+            ordinary_realm::parent_membership_revision(&pool, &realm, &actor).await;
+        let join = scenario_future(|| {
+            circle_request(
+                &pool,
+                &create.authority_commit,
+                arkret_wire::EventKind::CircleMemberState,
+                actor.clone(),
+                &circle,
+                serde_json::json!({"circle_id":circle,"member_id":actor,"membership":"join",
+            "parent_membership_revision":parent_membership_revision,
             "expected_membership":null}),
-    ).await;
-    uow.commit_event(join.clone()).await.unwrap();
-    let report_payload = serde_json::json!({"realm_id":realm,"effective_scope":scope,
+            )
+        })
+        .await;
+        uow.commit_event(join.clone()).await.unwrap();
+        let report_payload = serde_json::json!({"realm_id":realm,"effective_scope":scope,
         "target_ref":circle,"report_reason_code":"spam","reporter_id":principal});
-    let report = circle_request(
-        &pool,
-        &join.authority_commit,
-        arkret_wire::EventKind::SelfModerationReport,
-        actor.clone(),
-        &circle,
-        report_payload.clone(),
-    )
-    .await;
-    uow.commit_event(report.clone()).await.unwrap();
-    assert!(
-        queue
-            .management_view_for_actor(&actor, None)
-            .await
-            .unwrap()
-            .items
-            .is_empty(),
-        "Realm root alone must not disclose Circle reports"
-    );
-    let review_payload = serde_json::json!({"target_ref":circle,"decision":"require_review","issuer_id":principal,
+        let report = scenario_future(|| {
+            circle_request(
+                &pool,
+                &join.authority_commit,
+                arkret_wire::EventKind::SelfModerationReport,
+                actor.clone(),
+                &circle,
+                report_payload.clone(),
+            )
+        })
+        .await;
+        uow.commit_event(report.clone()).await.unwrap();
+        assert!(
+            queue
+                .management_view_for_actor(&actor, None)
+                .await
+                .unwrap()
+                .items
+                .is_empty(),
+            "Realm root alone must not disclose Circle reports"
+        );
+        let review_payload = serde_json::json!({"target_ref":circle,"decision":"require_review","issuer_id":principal,
         "request_canonical_digest":format!("sha256:{}","02".repeat(32))});
-    let denied = circle_request(
-        &pool,
-        &report.authority_commit,
-        arkret_wire::EventKind::ModerationDecision,
-        actor.clone(),
-        &circle,
-        review_payload.clone(),
-    )
-    .await;
-    assert!(uow.commit_event(denied.clone()).await.is_err());
-    assert!(
-        store
-            .committed_event(&denied.authority_commit.event.event_id)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    #[derive(diesel::QueryableByName)]
-    struct Root {
-        #[diesel(sql_type=diesel::sql_types::Text)]
-        authority_event_ref: String,
-    }
-    let mut conn = pool.get().await.unwrap();
-    let root = diesel::sql_query(
+        let denied = scenario_future(|| {
+            circle_request(
+                &pool,
+                &report.authority_commit,
+                arkret_wire::EventKind::ModerationDecision,
+                actor.clone(),
+                &circle,
+                review_payload.clone(),
+            )
+        })
+        .await;
+        assert!(uow.commit_event(denied.clone()).await.is_err());
+        assert!(
+            store
+                .committed_event(&denied.authority_commit.event.event_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        #[derive(diesel::QueryableByName)]
+        struct Root {
+            #[diesel(sql_type=diesel::sql_types::Text)]
+            authority_event_ref: String,
+        }
+        let mut conn = pool.get().await.unwrap();
+        let root = diesel::sql_query(
         "SELECT authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1",
     )
     .bind::<diesel::sql_types::Text, _>(realm.as_str())
     .get_result::<Root>(&mut *conn)
     .await
     .unwrap();
-    drop(conn);
-    let grant = ordinary_realm::next_request_for_actor(
-        &create.authority_commit,
-        arkret_wire::EventKind::CapabilityGrant,
-        actor.clone(),
-        serde_json::json!({"grant":{"schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":actor,"subject":actor,
+        drop(conn);
+        let grant = ordinary_realm::next_request_for_actor(
+            &create.authority_commit,
+            arkret_wire::EventKind::CapabilityGrant,
+            actor.clone(),
+            serde_json::json!({"grant":{"schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":actor,"subject":actor,
             "actions":["ak.moderation.decision","ak.moderation.decision.lift"],
             "resources":[{"kind":"circle","realm_id":realm,"circle_id":circle}],
             "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":root.authority_event_ref,"authority_generation":0}],
             "issued_at":arkret_canonical::format_timestamp_canonical(at)}}),
-        at,
-    );
-    uow.commit_event(ordinary_realm::source_request(&pool, grant).await)
-        .await
-        .unwrap();
-    let view = queue.management_view_for_actor(&actor, None).await.unwrap();
-    assert_eq!(view.items.len(), 1);
-    assert_eq!(
-        serde_json::to_value(&view.items[0].status).unwrap(),
-        serde_json::json!("submitted")
-    );
-    let wrong_target = circle_request(
-        &pool,
-        &report.authority_commit,
-        arkret_wire::EventKind::SelfModerationReport,
-        actor.clone(),
-        &circle,
-        {
-            let mut p = report_payload;
-            p["target_ref"] = serde_json::json!(realm);
-            p
-        },
-    )
-    .await;
-    assert!(uow.commit_event(wrong_target.clone()).await.is_err());
-    assert!(
-        store
-            .committed_event(&wrong_target.authority_commit.event.event_id)
+            at,
+        );
+        uow.commit_event(scenario_future(|| ordinary_realm::source_request(&pool, grant)).await)
             .await
-            .unwrap()
-            .is_none()
-    );
-    uow.commit_event(denied.clone()).await.unwrap();
-    let view = queue.management_view_for_actor(&actor, None).await.unwrap();
-    assert_eq!(
-        view.pending_review_events,
-        vec![denied.authority_commit.event.clone()]
-    );
-    assert_eq!(
-        serde_json::to_value(&view.items[0].status).unwrap(),
-        serde_json::json!("resolved")
-    );
-    let lift_payload = serde_json::json!({"target_ref":circle,"decision_ref":denied.authority_commit.event.event_id,
+            .unwrap();
+        let view = queue.management_view_for_actor(&actor, None).await.unwrap();
+        assert_eq!(view.items.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&view.items[0].status).unwrap(),
+            serde_json::json!("submitted")
+        );
+        let wrong_target = scenario_future(|| {
+            circle_request(
+                &pool,
+                &report.authority_commit,
+                arkret_wire::EventKind::SelfModerationReport,
+                actor.clone(),
+                &circle,
+                {
+                    let mut p = report_payload;
+                    p["target_ref"] = serde_json::json!(realm);
+                    p
+                },
+            )
+        })
+        .await;
+        assert!(uow.commit_event(wrong_target.clone()).await.is_err());
+        assert!(
+            store
+                .committed_event(&wrong_target.authority_commit.event.event_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        uow.commit_event(denied.clone()).await.unwrap();
+        let view = queue.management_view_for_actor(&actor, None).await.unwrap();
+        assert_eq!(
+            view.pending_review_events,
+            vec![denied.authority_commit.event.clone()]
+        );
+        assert_eq!(
+            serde_json::to_value(&view.items[0].status).unwrap(),
+            serde_json::json!("resolved")
+        );
+        let lift_payload = serde_json::json!({"target_ref":circle,"decision_ref":denied.authority_commit.event.event_id,
         "expected_revision":{"commit_id":denied.authority_commit.commit.commit_id,"stream_position":denied.authority_commit.commit.stream_position}});
-    let stale = circle_request(
-        &pool,
-        &denied.authority_commit,
-        arkret_wire::EventKind::ModerationDecisionLift,
-        actor.clone(),
-        &circle,
-        {
-            let mut p = lift_payload.clone();
-            p["expected_revision"]["stream_position"] = serde_json::json!(0);
-            p
-        },
-    )
-    .await;
-    assert_eq!(
-        uow.commit_event(stale).await.unwrap_err().conflict_code(),
-        Some(coland_storage::ConflictCode::CasConflict)
-    );
-    let lift = circle_request(
-        &pool,
-        &denied.authority_commit,
-        arkret_wire::EventKind::ModerationDecisionLift,
-        actor.clone(),
-        &circle,
-        lift_payload,
-    )
-    .await;
-    uow.commit_event(lift).await.unwrap();
-    let view = queue.management_view_for_actor(&actor, None).await.unwrap();
-    assert!(view.pending_review_events.is_empty());
-    assert_eq!(
-        serde_json::to_value(&view.items[0].status).unwrap(),
-        serde_json::json!("resolved")
-    );
+        let stale = scenario_future(|| {
+            circle_request(
+                &pool,
+                &denied.authority_commit,
+                arkret_wire::EventKind::ModerationDecisionLift,
+                actor.clone(),
+                &circle,
+                {
+                    let mut p = lift_payload.clone();
+                    p["expected_revision"]["stream_position"] = serde_json::json!(0);
+                    p
+                },
+            )
+        })
+        .await;
+        assert_eq!(
+            uow.commit_event(stale).await.unwrap_err().conflict_code(),
+            Some(coland_storage::ConflictCode::CasConflict)
+        );
+        let lift = scenario_future(|| {
+            circle_request(
+                &pool,
+                &denied.authority_commit,
+                arkret_wire::EventKind::ModerationDecisionLift,
+                actor.clone(),
+                &circle,
+                lift_payload,
+            )
+        })
+        .await;
+        uow.commit_event(lift).await.unwrap();
+        let view = queue.management_view_for_actor(&actor, None).await.unwrap();
+        assert!(view.pending_review_events.is_empty());
+        assert_eq!(
+            serde_json::to_value(&view.items[0].status).unwrap(),
+            serde_json::json!("resolved")
+        );
+    })
 }

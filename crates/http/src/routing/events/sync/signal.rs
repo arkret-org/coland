@@ -1160,6 +1160,7 @@ async fn signal_product_agent(
             action.as_str(),
             arkret_wire::CapabilityActionId::MESSAGE_STREAM_SEND
                 | arkret_wire::CapabilityActionId::MESSAGE_CREATE
+                | arkret_wire::CapabilityActionId::TYPING_BROADCAST
         )
     });
     let mut projected = Vec::new();

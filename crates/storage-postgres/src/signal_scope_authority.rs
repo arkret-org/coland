@@ -429,7 +429,7 @@ impl Cut {
                     let value: arkret_models_collaboration::governance::operation_wire::PolicySetValue = serde_json::from_value(value.clone()).map_err(unavailable)?;
                     if let arkret_models_collaboration::governance::operation_wire::PolicySetValue::Governance(policy) = value {
                         if policy.id != *policy_id || policy.realm_id.as_ref() != Some(&snapshot.realm_id) { return Err(unavailable("Signal Policy identity differs")); }
-                        if policy.policy_kind == arkret_wire::PolicyKind::Agent { cut.policies.insert(policy_id.clone(), *policy); }
+                        cut.policies.insert(policy_id.clone(), *policy);
                     }
                 }
                 S::CapabilityGrant { grant_id } => {
@@ -697,7 +697,7 @@ impl Cut {
             EventKind::PolicySet => {
                 let payload = event.as_policy_set().map_err(unavailable)?;
                 if let arkret_models_collaboration::governance::operation_wire::PolicySetValue::Governance(policy) = payload.value {
-                    if policy.policy_kind == arkret_wire::PolicyKind::Agent { self.policies.insert(policy.id.clone(), *policy); }
+                    self.policies.insert(policy.id.clone(), *policy);
                 }
             }
             EventKind::RealmPolicyBundle => {
@@ -855,9 +855,10 @@ async fn declared_commit(
         .then_some(commit))
 }
 
-const PRODUCT_ACTIONS: [&str; 2] = [
+const PRODUCT_ACTIONS: [&str; 3] = [
     arkret_wire::CapabilityActionId::MESSAGE_STREAM_SEND,
     arkret_wire::CapabilityActionId::MESSAGE_CREATE,
+    arkret_wire::CapabilityActionId::TYPING_BROADCAST,
 ];
 
 fn qualified_chain(
@@ -954,6 +955,25 @@ fn product_owner_actions(historical: &Cut, current: &Cut, actor: &ActorId) -> Ve
         .collect()
 }
 
+fn product_policies(
+    parent: &Cut,
+    scope: &Cut,
+    scoped: bool,
+) -> Vec<arkret_models_collaboration::governance::operation_wire::Policy> {
+    parent
+        .policies
+        .values()
+        .chain(scope.policies.values().filter(|_| scoped))
+        .filter(|policy| {
+            matches!(
+                policy.policy_kind,
+                arkret_wire::PolicyKind::Access | arkret_wire::PolicyKind::Moderation
+            )
+        })
+        .cloned()
+        .collect()
+}
+
 fn product_member_effective(scope: &ScopeRef, parent: &Cut, scoped: &Cut, actor: &ActorId) -> bool {
     if !parent.joined(actor) {
         return false;
@@ -1034,9 +1054,20 @@ async fn product_material(
             return Ok(None);
         }
         let policies = |parent: &Cut, scope: &Cut| {
-            let mut policies = parent.policies.values().cloned().collect::<Vec<_>>();
+            let mut policies = parent
+                .policies
+                .values()
+                .filter(|policy| policy.policy_kind == arkret_wire::PolicyKind::Agent)
+                .cloned()
+                .collect::<Vec<_>>();
             if matches!(query.scope, ScopeRef::Circle { .. }) {
-                policies.extend(scope.policies.values().cloned());
+                policies.extend(
+                    scope
+                        .policies
+                        .values()
+                        .filter(|policy| policy.policy_kind == arkret_wire::PolicyKind::Agent)
+                        .cloned(),
+                );
             }
             policies
         };
@@ -1056,8 +1087,13 @@ async fn product_material(
                 query.at,
                 None,
             ),
-            controller_owner_actions: product_owner_actions(
+            historical_controller_owner_actions: product_owner_actions(
                 historical_parent,
+                historical_parent,
+                &controller_actor,
+            ),
+            current_controller_owner_actions: product_owner_actions(
+                current_parent,
                 current_parent,
                 &controller_actor,
             ),
@@ -1099,13 +1135,26 @@ async fn product_material(
                 owned.as_ref(),
             )
         },
+        historical_product_policies: product_policies(
+            historical_parent,
+            historical_scope,
+            matches!(query.scope, ScopeRef::Circle { .. }),
+        ),
+        current_product_policies: product_policies(
+            current_parent,
+            current_scope,
+            matches!(query.scope, ScopeRef::Circle { .. }),
+        ),
         owner_actions: if direct {
             Vec::new()
         } else {
             product_owner_actions(historical_parent, current_parent, query.sender)
         },
         profile_actions: if direct {
-            vec![arkret_wire::CapabilityActionId::MESSAGE_CREATE.to_owned()]
+            vec![
+                arkret_wire::CapabilityActionId::MESSAGE_CREATE.to_owned(),
+                arkret_wire::CapabilityActionId::TYPING_BROADCAST.to_owned(),
+            ]
         } else {
             Vec::new()
         },
@@ -1116,7 +1165,9 @@ async fn product_material(
             || a.current_controller_grants.len() > 64
             || a.historical_management_policies.len() > 64
             || a.current_management_policies.len() > 64
-    }) || material.grants.len() > 64
+    }) || material.historical_product_policies.len() > 64
+        || material.current_product_policies.len() > 64
+        || material.grants.len() > 64
         || material.current_grants.len() > 64
         || arkret_canonical::canonical_json_bytes(&material)
             .map_err(unavailable)?
@@ -1652,6 +1703,35 @@ mod typed_replay_tests {
         assert!(product_grants(&cut, &realm_id(), &actor, at(), Some(&wrong)).is_empty());
         cut.grants.get_mut(&id).unwrap().status = CapabilityGrantStatus::Revoked;
         assert!(product_grants(&cut, &realm_id(), &actor, at(), Some(&owned)).is_empty());
+    }
+
+    #[test]
+    fn product_policy_projection_retains_parent_deny_and_circle_allow() {
+        let actor = ActorId::account(arkret_wire::AccountId::new(
+            "ak:did_core:web:alice.example".parse().unwrap(),
+            "ak:did_core:web:station.example".parse().unwrap(),
+        ));
+        let policy = |effect: &str| {
+            serde_json::from_value::<arkret_models_collaboration::governance::operation_wire::Policy>(json!({
+            "id":"ak:policy:0198ff00-0000-7000-8000-000000000001", "schema":"ak.schema.policy.v1", "realm_id":realm_id(),
+            "policy_kind":"access", "rules":[{"rule_id":"typing","kind":"action","effect":effect,"actions":[arkret_wire::CapabilityActionId::TYPING_BROADCAST]}],
+            "default_effect":"allow", "created_by":actor, "created_at":"2026-10-01T00:00:00.000Z"
+        })).unwrap()
+        };
+        let deny = policy("deny");
+        let allow = policy("allow");
+        let mut parent = Cut::default();
+        parent.policies.insert(deny.id.clone(), deny);
+        let mut circle = Cut::default();
+        circle.policies.insert(allow.id.clone(), allow);
+        let material = product_policies(&parent, &circle, true);
+        assert_eq!(material.len(), 2);
+        assert_eq!(material[0].rules[0].effect, arkret_wire::PolicyEffect::Deny);
+        assert_eq!(
+            material[1].rules[0].effect,
+            arkret_wire::PolicyEffect::Allow
+        );
+        assert_eq!(product_policies(&parent, &parent, false).len(), 1);
     }
 
     #[test]

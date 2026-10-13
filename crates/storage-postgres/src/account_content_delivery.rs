@@ -1092,7 +1092,7 @@ async fn acquire_with_native_reply(
     input: &coland_storage::AccountContentDeliveryInput,
     reply: Option<NativeReplyContext<'_>>,
 ) -> PersistenceResult<Option<Box<dyn AccountContentDeliveryGuard>>> {
-    let mut input = input.clone();
+    let input = input.clone();
     let mut guard = Box::new(DeliveryGuard {
         connection: Some(crate::pg_conn(pool).await?),
         runtime: tokio::runtime::Handle::current(),
@@ -1143,11 +1143,27 @@ async fn acquire_with_native_reply(
     }
     if realms.is_empty() {
         guard.finish().await?;
-        return crate::morph_projection_reads::ordinary_delivery_guard(
+        return Box::pin(crate::morph_projection_reads::ordinary_delivery_guard(
             pool, account, station, &input,
-        )
+        ))
         .await;
     }
+    // Keep the ordinary branch out of the owned-content state machine. Both
+    // branches preserve the same transaction and handoff ownership rules.
+    Box::pin(acquire_owned_delivery_guard(
+        guard, account, station, input, realms, reply,
+    ))
+    .await
+}
+
+async fn acquire_owned_delivery_guard(
+    mut guard: Box<DeliveryGuard>,
+    account: &AccountId,
+    station: &DidCoreId,
+    mut input: coland_storage::AccountContentDeliveryInput,
+    realms: std::collections::BTreeSet<arkret_wire::RealmId>,
+    reply: Option<NativeReplyContext<'_>>,
+) -> PersistenceResult<Option<Box<dyn AccountContentDeliveryGuard>>> {
     // Discover immutable PCR bindings without taking subordinate row locks.
     // Keep the original business-then-Agent-then-Human hierarchy. Original
     // ordinary Morph also sorts its business/PCR cuts together, so added PCR
@@ -1224,13 +1240,13 @@ async fn acquire_with_native_reply(
     // Acquire every membership, provisioning, accountability and lifecycle
     // dependency before fixing the content evaluation time.
     for realm in &realms {
-        crate::realm_authorization_cut::owned_source_in_connection(
+        Box::pin(crate::realm_authorization_cut::owned_source_in_connection(
             guard.connection(),
             realm,
             &actor,
             chrono::Utc::now(),
             true,
-        )
+        ))
         .await?
         .ok_or_else(|| unavailable("current owned Agent source is unavailable"))?;
     }
@@ -1256,13 +1272,13 @@ async fn acquire_with_native_reply(
         if !realms.contains(&export.realm_id) {
             continue;
         }
-        let (fresh, sources) = realm_export_in_connection(
+        let (fresh, sources) = Box::pin(realm_export_in_connection(
             guard.connection(),
             &export.realm_id,
             &actor,
             station,
             export.generated_at,
-        )
+        ))
         .await?
         .ok_or_else(|| unavailable("queued Realm export has no current caller cut"))?;
         if arkret_canonical::canonical_json_bytes(&export).map_err(PersistenceError::database)?
@@ -1295,16 +1311,18 @@ async fn acquire_with_native_reply(
             realm_id: Some(export.realm_id.clone()), resource_ref: Some(export.realm_id.to_string()),
         }];
         for operation in [AgentPolicyOperation::Read, AgentPolicyOperation::Deliver] {
-            crate::agent_management_admission::require_content_snapshot_in_connection(
-                guard.connection(),
-                &export.realm_id,
-                None,
-                owner,
-                account,
-                operation,
-                CapabilityActionId::EventRead,
-                &resources,
-                at,
+            Box::pin(
+                crate::agent_management_admission::require_content_snapshot_in_connection(
+                    guard.connection(),
+                    &export.realm_id,
+                    None,
+                    owner,
+                    account,
+                    operation,
+                    CapabilityActionId::EventRead,
+                    &resources,
+                    at,
+                ),
             )
             .await?;
         }
@@ -1355,14 +1373,14 @@ async fn acquire_with_native_reply(
         let owner = controller
             .as_account_id()
             .ok_or_else(|| unavailable("Morph controller is not an Account"))?;
-        let (fresh, facts) = crate::morph_projection_reads::list_in_connection(
+        let (fresh, facts) = Box::pin(crate::morph_projection_reads::list_in_connection(
             guard.connection(),
             realm,
             &actor,
             station,
             *include_terminal,
             at,
-        )
+        ))
         .await?
         .ok_or_else(|| unavailable("Morph list has no current actor cut"))?;
         if arkret_canonical::canonical_json_bytes(&fresh).map_err(PersistenceError::database)?
@@ -1372,14 +1390,14 @@ async fn acquire_with_native_reply(
                 "Morph list changed before publication, including empty output",
             ));
         }
-        let (owner_output, _) = crate::morph_projection_reads::list_in_connection(
+        let (owner_output, _) = Box::pin(crate::morph_projection_reads::list_in_connection(
             guard.connection(),
             realm,
             &controller,
             station,
             *include_terminal,
             at,
-        )
+        ))
         .await?
         .ok_or_else(|| unavailable("Morph list has no current controller cut"))?;
         for row in &output.morphs {
@@ -1400,13 +1418,13 @@ async fn acquire_with_native_reply(
             }
         }
         native_projection_reads.extend(
-            crate::morph_projection_reads::qualify_delivery_facts(
+            Box::pin(crate::morph_projection_reads::qualify_delivery_facts(
                 guard.connection(),
                 account,
                 owner,
                 facts,
                 at,
-            )
+            ))
             .await?,
         );
     }
@@ -1425,14 +1443,14 @@ async fn acquire_with_native_reply(
         let owner = controller
             .as_account_id()
             .ok_or_else(|| unavailable("document controller is not an Account"))?;
-        let (fresh, facts) = crate::morph_projection_reads::document_in_connection(
+        let (fresh, facts) = Box::pin(crate::morph_projection_reads::document_in_connection(
             guard.connection(),
             realm,
             morph,
             &actor,
             station,
             at,
-        )
+        ))
         .await?
         .ok_or_else(|| unavailable("document has no current actor cut"))?;
         if arkret_canonical::canonical_json_bytes(&fresh).map_err(PersistenceError::database)?
@@ -1442,14 +1460,14 @@ async fn acquire_with_native_reply(
                 "complete document output changed before publication",
             ));
         }
-        let (owner_output, _) = crate::morph_projection_reads::document_in_connection(
+        let (owner_output, _) = Box::pin(crate::morph_projection_reads::document_in_connection(
             guard.connection(),
             realm,
             morph,
             &controller,
             station,
             at,
-        )
+        ))
         .await?
         .ok_or_else(|| unavailable("document has no current controller cut"))?;
         if !crate::morph_projection_reads::owner_covers_document(output, &owner_output)? {
@@ -1458,13 +1476,13 @@ async fn acquire_with_native_reply(
             ));
         }
         native_projection_reads.extend(
-            crate::morph_projection_reads::qualify_delivery_facts(
+            Box::pin(crate::morph_projection_reads::qualify_delivery_facts(
                 guard.connection(),
                 account,
                 owner,
                 facts,
                 at,
-            )
+            ))
             .await?,
         );
     }
@@ -1483,32 +1501,36 @@ async fn acquire_with_native_reply(
         let owner = controller
             .as_account_id()
             .ok_or_else(|| unavailable("document absence controller is not an Account"))?;
-        let facts = crate::morph_projection_reads::document_absence_in_connection(
-            guard.connection(),
-            realm,
-            morph,
-            &actor,
-            station,
-            at,
+        let facts = Box::pin(
+            crate::morph_projection_reads::document_absence_in_connection(
+                guard.connection(),
+                realm,
+                morph,
+                &actor,
+                station,
+                at,
+            ),
         )
         .await?;
-        crate::morph_projection_reads::document_absence_in_connection(
-            guard.connection(),
-            realm,
-            morph,
-            &controller,
-            station,
-            at,
+        Box::pin(
+            crate::morph_projection_reads::document_absence_in_connection(
+                guard.connection(),
+                realm,
+                morph,
+                &controller,
+                station,
+                at,
+            ),
         )
         .await?;
         native_projection_reads.extend(
-            crate::morph_projection_reads::qualify_delivery_facts(
+            Box::pin(crate::morph_projection_reads::qualify_delivery_facts(
                 guard.connection(),
                 account,
                 owner,
                 facts,
                 at,
-            )
+            ))
             .await?,
         );
     }
@@ -1528,11 +1550,13 @@ async fn acquire_with_native_reply(
             .as_account_id()
             .ok_or_else(|| unavailable("current controller is not an Account"))?;
         for recipient in [account, owner] {
-            let fresh = crate::self_current_reads::exact_current_result_in_connection(
-                guard.connection(),
-                request,
-                recipient,
-                station,
+            let fresh = Box::pin(
+                crate::self_current_reads::exact_current_result_in_connection(
+                    guard.connection(),
+                    request,
+                    recipient,
+                    station,
+                ),
             )
             .await
             .map_err(crate::PgTransactionError::into_persistence)?;
@@ -1578,11 +1602,11 @@ async fn acquire_with_native_reply(
             .map(|action| action.action.as_str())
             .collect::<Vec<_>>();
             for recipient in [account, owner] {
-                let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
+                let cut = Box::pin(crate::realm_authorization_cut::RealmAuthorizationCut::read(
                     guard.connection(),
                     &request.realm_id,
                     &ActorId::account(recipient.clone()),
-                )
+                ))
                 .await?;
                 if !cut.permits_unreserved_current_actions(&actions, &target, at) {
                     return Err(unavailable("Policy current action coverage changed"));
@@ -1593,8 +1617,14 @@ async fn acquire_with_native_reply(
         let event =
             current_source_in_connection(guard.connection(), &request.realm_id, stream, revision)
                 .await?;
-        require_owned_current_source_in_connection(guard.connection(), &event, owner, account, at)
-            .await?;
+        Box::pin(require_owned_current_source_in_connection(
+            guard.connection(),
+            &event,
+            owner,
+            account,
+            at,
+        ))
+        .await?;
         object_sources
             .entry(request.realm_id.clone())
             .or_default()
@@ -1604,11 +1634,13 @@ async fn acquire_with_native_reply(
         if !realms.contains(&request.realm_id) {
             continue;
         }
-        let fresh = crate::self_current_reads::strand_watch_current_in_connection(
-            guard.connection(),
-            request,
-            account,
-            station,
+        let fresh = Box::pin(
+            crate::self_current_reads::strand_watch_current_in_connection(
+                guard.connection(),
+                request,
+                account,
+                station,
+            ),
         )
         .await
         .map_err(crate::PgTransactionError::into_persistence)?;
@@ -1637,9 +1669,11 @@ async fn acquire_with_native_reply(
         // The self-only watch cell is confirmed above, including native
         // never-written proof. Its content boundary is the actual Strand;
         // another recipient's watch cell is never a substitute read source.
-        let material = crate::authority_commit::realm_state_snapshot_material_in_connection(
-            guard.connection(),
-            &request.realm_id,
+        let material = Box::pin(
+            crate::authority_commit::realm_state_snapshot_material_in_connection(
+                guard.connection(),
+                &request.realm_id,
+            ),
         )
         .await?
         .ok_or_else(|| unavailable("watch target current material is unavailable"))?;
@@ -1688,14 +1722,14 @@ async fn acquire_with_native_reply(
             revision,
         )
         .await?;
-        require_owned_content_source_in_connection(
+        Box::pin(require_owned_content_source_in_connection(
             guard.connection(),
             &event,
             owner,
             account,
             at,
             CapabilityActionId::StrandRead,
-        )
+        ))
         .await?;
         object_sources
             .entry(request.realm_id.clone())
@@ -1703,13 +1737,13 @@ async fn acquire_with_native_reply(
             .push((event, CapabilityActionId::StrandRead));
     }
     for realm in &realms {
-        crate::realm_authorization_cut::owned_source_in_connection(
+        Box::pin(crate::realm_authorization_cut::owned_source_in_connection(
             guard.connection(),
             realm,
             &actor,
             at,
             true,
-        )
+        ))
         .await?
         .ok_or_else(|| unavailable("current owned Agent source is unavailable"))?;
     }
@@ -1856,7 +1890,7 @@ async fn acquire_with_native_reply(
             _ => None,
         };
         for operation in [AgentPolicyOperation::Read, AgentPolicyOperation::Deliver] {
-            crate::agent_management_admission::require_content_snapshot_in_connection(
+            Box::pin(crate::agent_management_admission::require_content_snapshot_in_connection(
                 guard.connection(),
                 &realm,
                 circle,
@@ -1866,17 +1900,17 @@ async fn acquire_with_native_reply(
                 *action,
                 &resources,
                 at,
-            )
+            ))
             .await?;
         }
                 for recipient in [account, owner] {
                     let recipient_actor = ActorId::account(recipient.clone());
-                    let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
+                    let cut = Box::pin(crate::realm_authorization_cut::RealmAuthorizationCut::read(
                         guard.connection(), &realm, &recipient_actor,
-                    ).await?;
-                    let source = crate::realm_authorization_cut::owned_source_in_connection(
+                    )).await?;
+                    let source = Box::pin(crate::realm_authorization_cut::owned_source_in_connection(
                         guard.connection(), &realm, &recipient_actor, at, false,
-                    ).await?;
+                    )).await?;
                     cut.require_content_read_constraints(
                         &full.event, at, source, *action,
                     )?;
@@ -1899,11 +1933,11 @@ async fn acquire_with_native_reply(
         }
         let full = selected
             .ok_or_else(|| unavailable("attachment has no currently readable signed source"))?;
-        let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
+        let cut = Box::pin(crate::realm_authorization_cut::RealmAuthorizationCut::read(
             guard.connection(),
             &realm,
             &actor,
-        )
+        ))
         .await?;
         let (_, facts) = cut.content_scope_facts(&full.event, *action)?;
         let mut target = arkret_wire::WireResourceSelector::realm(realm.clone());
@@ -1939,10 +1973,12 @@ async fn acquire_with_native_reply(
                 .iter()
                 .any(|snapshot| &snapshot.realm_id == realm)
         {
-            let current = crate::snapshot_disclosure_gate::account_snapshot_material_in_connection(
-                guard.connection(),
-                realm,
-                account,
+            let current = Box::pin(
+                crate::snapshot_disclosure_gate::account_snapshot_material_in_connection(
+                    guard.connection(),
+                    realm,
+                    account,
+                ),
             )
             .await?
             .ok_or_else(|| unavailable("current disclosure material is unavailable"))?;
@@ -2065,16 +2101,18 @@ async fn acquire_with_native_reply(
             arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
             _ => None,
         };
-        crate::agent_management_admission::require_content_snapshot_in_connection(
-            guard.connection(),
-            &welcome.realm_id,
-            circle,
-            owner,
-            account,
-            AgentPolicyOperation::Deliver,
-            CapabilityActionId::EventRead,
-            &resources,
-            at,
+        Box::pin(
+            crate::agent_management_admission::require_content_snapshot_in_connection(
+                guard.connection(),
+                &welcome.realm_id,
+                circle,
+                owner,
+                account,
+                AgentPolicyOperation::Deliver,
+                CapabilityActionId::EventRead,
+                &resources,
+                at,
+            ),
         )
         .await?;
     }
@@ -2138,14 +2176,15 @@ async fn acquire_with_native_reply(
                     let recipient = recipient
                         .as_account_id()
                         .ok_or_else(|| unavailable("delivery recipient is not an Account"))?;
-                    let material =
+                    let material = Box::pin(
                         crate::snapshot_disclosure_gate::account_snapshot_material_in_connection(
                             guard.connection(),
                             realm,
                             recipient,
-                        )
-                        .await?
-                        .ok_or_else(|| unavailable("Sidecar delivery floor is unavailable"))?;
+                        ),
+                    )
+                    .await?
+                    .ok_or_else(|| unavailable("Sidecar delivery floor is unavailable"))?;
                     let floor = material
                         .retention_and_history_floor
                         .stream_floors
@@ -2207,16 +2246,18 @@ async fn acquire_with_native_reply(
                     arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
                     _ => None,
                 };
-                crate::agent_management_admission::require_content_snapshot_in_connection(
-                    guard.connection(),
-                    realm,
-                    circle,
-                    controller_account,
-                    account,
-                    AgentPolicyOperation::Deliver,
-                    CapabilityActionId::EventRead,
-                    &resources,
-                    at,
+                Box::pin(
+                    crate::agent_management_admission::require_content_snapshot_in_connection(
+                        guard.connection(),
+                        realm,
+                        circle,
+                        controller_account,
+                        account,
+                        AgentPolicyOperation::Deliver,
+                        CapabilityActionId::EventRead,
+                        &resources,
+                        at,
+                    ),
                 )
                 .await?;
             }
@@ -2228,16 +2269,18 @@ async fn acquire_with_native_reply(
                     _ => None,
                 };
                 for operation in [AgentPolicyOperation::Read, AgentPolicyOperation::Deliver] {
-                    crate::agent_management_admission::require_content_snapshot_in_connection(
-                        guard.connection(),
-                        realm,
-                        circle,
-                        controller_account,
-                        account,
-                        operation,
-                        CapabilityActionId::EventRead,
-                        &resources,
-                        at,
+                    Box::pin(
+                        crate::agent_management_admission::require_content_snapshot_in_connection(
+                            guard.connection(),
+                            realm,
+                            circle,
+                            controller_account,
+                            account,
+                            operation,
+                            CapabilityActionId::EventRead,
+                            &resources,
+                            at,
+                        ),
                     )
                     .await?;
                 }
@@ -2278,14 +2321,14 @@ async fn acquire_with_native_reply(
                     "native reply body is not its exact current Message revision",
                 ));
             }
-            require_owned_content_source_in_connection(
+            Box::pin(require_owned_content_source_in_connection(
                 guard.connection(),
                 &full.event,
                 reply.as_ref().expect("native context").controller,
                 account,
                 at,
                 CapabilityActionId::ObjectReadContent,
-            )
+            ))
             .await?;
             object_sources
                 .entry(full.event.realm_id.clone())
@@ -2339,13 +2382,13 @@ async fn acquire_with_native_reply(
         ));
     }
     for realm in &realms {
-        let source = crate::realm_authorization_cut::owned_source_in_connection(
+        let source = Box::pin(crate::realm_authorization_cut::owned_source_in_connection(
             guard.connection(),
             realm,
             &actor,
             chrono::Utc::now(),
             true,
-        )
+        ))
         .await?
         .ok_or_else(|| unavailable("current owned Agent source is unavailable"))?;
         let arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::OwnedAgent { controller_account_id, .. } = &source else {
@@ -2409,11 +2452,11 @@ async fn acquire_with_native_reply(
             (actor.clone(), Some(source)),
             (ActorId::account(controller_account_id.clone()), None),
         ] {
-            let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
+            let cut = Box::pin(crate::realm_authorization_cut::RealmAuthorizationCut::read(
                 guard.connection(),
                 realm,
                 &recipient,
-            )
+            ))
             .await?;
             if recipient == actor {
                 if input
@@ -2504,27 +2547,27 @@ async fn acquire_with_native_reply(
             )
             .await?;
         }
-        let source = crate::realm_authorization_cut::owned_source_in_connection(
+        let source = Box::pin(crate::realm_authorization_cut::owned_source_in_connection(
             guard.connection(),
             realm,
             &actor,
             chrono::Utc::now(),
             true,
-        )
+        ))
         .await?
         .ok_or_else(|| unavailable("native reply has no accepted owned source"))?;
         let owner_actor = ActorId::account(reply.controller.clone());
-        let agent_cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
+        let agent_cut = Box::pin(crate::realm_authorization_cut::RealmAuthorizationCut::read(
             guard.connection(),
             realm,
             &actor,
-        )
+        ))
         .await?;
-        let controller_cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
+        let controller_cut = Box::pin(crate::realm_authorization_cut::RealmAuthorizationCut::read(
             guard.connection(),
             realm,
             &owner_actor,
-        )
+        ))
         .await?;
         let (target, facts) = agent_cut
             .native_message_reply_target_in_connection(

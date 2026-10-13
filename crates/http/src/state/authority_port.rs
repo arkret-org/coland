@@ -85,6 +85,7 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         | EventKind::SpaceTombstone
         | EventKind::SchemaDefine
         | EventKind::RealmPolicyBundle
+        | EventKind::PolicySet
         | EventKind::DirectConversationBound
         | EventKind::RealmSetDefaultStrand
         | EventKind::RealmReadReceiptPolicy
@@ -203,6 +204,7 @@ pub(super) fn require_guarded_unit_event(request: &EventAdmissionSubmission) -> 
             && matches!(
                 event.kind,
                 arkret_wire::EventKind::CircleMemberState
+                    | arkret_wire::EventKind::PolicySet
                     | arkret_wire::EventKind::StrandCreate
                     | arkret_wire::EventKind::AppletBridgeError
                     | arkret_wire::EventKind::MessageCreate
@@ -878,6 +880,7 @@ mod tests {
             EventKind::SpaceUpdate,
             EventKind::SchemaDefine,
             EventKind::RealmPolicyBundle,
+            EventKind::PolicySet,
             EventKind::DirectConversationBound,
             EventKind::InviteClaim,
             EventKind::CircleCreate,
@@ -1011,6 +1014,7 @@ mod tests {
             EventKind::PinRemove,
             EventKind::PinReorder,
             EventKind::RealmPolicyBundle,
+            EventKind::PolicySet,
             EventKind::SchemaDefine,
             EventKind::SidecarContextAttach,
             EventKind::AgentSidecarExchangeControl,

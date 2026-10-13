@@ -753,7 +753,7 @@ async fn policy_exact_read(
                 selector: selector.clone(),
                 source_stream_ref: source,
                 revision,
-                value: payload,
+                value: payload.value,
             }),
         },
         ManagementPolicyCurrentRead::NotFound => {

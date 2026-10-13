@@ -188,7 +188,34 @@ async fn content_delivery_guard_inner(
         .authority_commits()
         .acquire_committed_content_delivery(account, &state.service_core_id(), &input)
         .await
-        .map_err(|_| {
+        .map_err(|error| {
+            // Only fixed implementation literals reach this diagnostic; the
+            // source error can contain private SQL or authority material.
+            let diagnostic = match &error {
+                coland_services::ServiceError::Conflict(detail) => match detail.as_str() {
+                    "revision_unavailable: delivery provision source is unavailable" => "provision_source",
+                    "revision_unavailable: delivery provision is not the current accepted revision" => "provision_revision",
+                    "revision_unavailable: delivery private scope qualification differs from its accepted binding" => "provision_binding",
+                    "revision_unavailable: qualified Agent genesis differs from its exact accepted source" => "genesis_binding",
+                    "revision_unavailable: private scope custody belongs to a different accepted command" => "custody_command",
+                    "revision_unavailable: qualified pairing receipt is unavailable" => "pairing_receipt_absent",
+                    "revision_unavailable: private scope custody differs from its durable active receipt" => "pairing_receipt_binding",
+                    "revision_unavailable: qualified scope command or runtime binding differs" => "runtime_binding",
+                    "revision_unavailable: private disclosed scope differs from the immutable DID commitment" => "scope_commitment",
+                    "revision_unavailable: session scope differs from the current controller or key" => "session_binding",
+                    "revision_unavailable: delivery time authority changed before handoff" => "handoff_clock",
+                    "revision_unavailable: future material queue source changed" => "welcome_queue",
+                    "capability_denied: owned source join generation differs" => "owned_join_generation",
+                    "capability_denied: owned source Agent join is unavailable" => "owned_agent_join",
+                    "capability_denied: a current grant refuses canonical Event disclosure" => "content_constraint",
+                    _ => "other_conflict",
+                },
+                coland_services::ServiceError::Database(_) => "database",
+                coland_services::ServiceError::SchemaViolation(_) => "schema",
+                coland_services::ServiceError::NotFound(_) => "not_found",
+                _ => "other",
+            };
+            tracing::warn!(diagnostic, "current content delivery guard refused");
             crate::error::AppError::capability_denied("current content delivery is unavailable")
         })
 }

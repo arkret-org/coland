@@ -162,7 +162,12 @@ pub(super) async fn submit_provision_event(
             committed_at,
         )
         .await
-        .map_err(|error| agent_provision_admission_error(error.conflict_code(), error.detail()))?;
+        .map_err(|error| match error {
+            coland_services::ServiceError::SchemaViolation(detail) => {
+                AppError::schema_violation(detail)
+            }
+            error => agent_provision_admission_error(error.conflict_code(), error.detail()),
+        })?;
     state
         .persistence()
         .admit_agent_provision(coland_storage::AgentProvisionAdmissionWrite {
@@ -170,8 +175,11 @@ pub(super) async fn submit_provision_event(
             queued_at: committed_at,
         })
         .await
-        .map_err(|error| {
-            agent_provision_admission_error(error.conflict_code(), &error.to_string())
+        .map_err(|error| match error {
+            coland_storage::PersistenceError::SchemaViolation(detail) => {
+                AppError::schema_violation(detail)
+            }
+            error => agent_provision_admission_error(error.conflict_code(), &error.to_string()),
         })?;
     Ok(event_id)
 }

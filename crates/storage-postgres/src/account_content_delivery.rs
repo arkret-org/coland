@@ -554,6 +554,10 @@ impl DeliveryClockProof {
             || self.key_expiry.is_some_and(|expiry| now >= expiry)
             || self.credential_expiry.is_some_and(|expiry| now >= expiry)
         {
+            tracing::warn!(
+                diagnostic = "native_reply_or_expiry",
+                "owned content handoff clock refused"
+            );
             return false;
         }
         if self
@@ -561,6 +565,10 @@ impl DeliveryClockProof {
             .iter()
             .any(|values| !values.iter().any(|value| value.verifies_at(now)))
         {
+            tracing::warn!(
+                diagnostic = "accountability",
+                "owned content handoff clock refused"
+            );
             return false;
         }
         if !self
@@ -576,20 +584,31 @@ impl DeliveryClockProof {
                 };
                 [&self.provision_scope, &self.key_scope]
                     .iter()
-                    .all(|scope| {
-                        crate::agent_management_admission::require_key_scope_content_ceiling(
+                    .enumerate()
+                    .all(|(ceiling, scope)| {
+                        let allowed = crate::agent_management_admission::require_key_scope_content_ceiling(
                             scope, &operation,
                         )
-                        .is_ok()
+                        .is_ok();
+                        if !allowed {
+                            tracing::warn!(ceiling, action = action.as_str(), target_kind = ?target.kind,
+                                "owned content handoff ceiling is unavailable");
+                        }
+                        allowed
                     })
                     && self
                         .session_scope
                         .as_ref()
                         .is_none_or(|(actions, details)| {
-                            crate::agent_management_admission::require_session_content_ceiling(
+                            let allowed = crate::agent_management_admission::require_session_content_ceiling(
                                 actions, details, &operation,
                             )
-                            .is_ok()
+                            .is_ok();
+                            if !allowed {
+                                tracing::warn!(diagnostic = "session_scope", action = action.as_str(), target_kind = ?target.kind,
+                                    "owned content handoff clock refused");
+                            }
+                            allowed
                         })
             })
         {
@@ -600,38 +619,78 @@ impl DeliveryClockProof {
             policy.not_before.is_none_or(|start| at >= start)
                 && policy.expires_at.is_none_or(|end| at < end)
         };
-        self.policies
+        let policies = self
+            .policies
             .iter()
-            .all(|policy| active(policy, self.checked_at) == active(policy, now))
-            && self.positive_actions.iter().all(|(cut, target, actions)| {
-                cut.permits_unreserved_current_actions(actions, target, now)
-            })
-            && self
-                .native_projection_reads
-                .iter()
-                .all(|(cut, source, fact)| {
-                    cut.time_sources_unchanged(self.checked_at, now)
-                        && cut
-                            .require_native_projection_read(
-                                &fact.target,
-                                &fact.facts,
-                                fact.action,
-                                source.clone(),
-                                now,
-                            )
-                            .is_ok()
-                })
-            && self.reads.iter().all(|(cut, source, events, objects)| {
+            .all(|policy| active(policy, self.checked_at) == active(policy, now));
+        if !policies {
+            tracing::warn!(
+                diagnostic = "policy_time",
+                "owned content handoff clock refused"
+            );
+            return false;
+        }
+        if !self.positive_actions.iter().all(|(cut, target, actions)| {
+            cut.permits_unreserved_current_actions(actions, target, now)
+        }) {
+            tracing::warn!(
+                diagnostic = "positive_actions",
+                "owned content handoff clock refused"
+            );
+            return false;
+        }
+        if !self
+            .native_projection_reads
+            .iter()
+            .all(|(cut, source, fact)| {
                 cut.time_sources_unchanged(self.checked_at, now)
-                    && events.iter().all(|event| {
-                        cut.require_membership_read_constraints(event, now, source.clone())
-                            .is_ok()
-                    })
-                    && objects.iter().all(|(event, action)| {
-                        cut.require_content_read_constraints(event, now, source.clone(), *action)
-                            .is_ok()
-                    })
+                    && cut
+                        .require_native_projection_read(
+                            &fact.target,
+                            &fact.facts,
+                            fact.action,
+                            source.clone(),
+                            now,
+                        )
+                        .is_ok()
             })
+        {
+            tracing::warn!(
+                diagnostic = "native_projection_read",
+                "owned content handoff clock refused"
+            );
+            return false;
+        }
+        self.reads.iter().all(|(cut, source, events, objects)| {
+            if !cut.time_sources_unchanged(self.checked_at, now) {
+                tracing::warn!(
+                    diagnostic = "read_time_sources",
+                    "owned content handoff clock refused"
+                );
+                return false;
+            }
+            if !events.iter().all(|event| {
+                cut.require_membership_read_constraints(event, now, source.clone())
+                    .is_ok()
+            }) {
+                tracing::warn!(
+                    diagnostic = "membership_read",
+                    "owned content handoff clock refused"
+                );
+                return false;
+            }
+            let allowed = objects.iter().all(|(event, action)| {
+                cut.require_content_read_constraints(event, now, source.clone(), *action)
+                    .is_ok()
+            });
+            if !allowed {
+                tracing::warn!(
+                    diagnostic = "object_read",
+                    "owned content handoff clock refused"
+                );
+            }
+            allowed
+        })
     }
 }
 impl DeliveryGuard {
@@ -2211,8 +2270,18 @@ async fn revalidate_content_inputs_in_connection(
             || !crate::committed_disclosure::full_event_for_member_in_connection(
                 &mut *conn, &full, &actor, at,
             )
-            .await?
+            .await
+            .inspect_err(|_| {
+                tracing::warn!(
+                    stage = "future_material_disclosure_error",
+                    "owned future material delivery is unavailable"
+                );
+            })?
         {
+            tracing::warn!(
+                stage = "future_material_disclosure",
+                "owned future material delivery is unavailable"
+            );
             return Err(unavailable(
                 "future material has no current disclosure proof",
             ));
@@ -2430,8 +2499,24 @@ async fn acquire_owned_delivery_guard(
             chrono::Utc::now(),
             true,
         ))
-        .await?
-        .ok_or_else(|| unavailable("current owned Agent source is unavailable"))?;
+        .await
+        .inspect_err(|_| {
+            if !input.future_materials.is_empty() {
+                tracing::warn!(
+                    stage = "future_material_owned_source",
+                    "owned future material delivery is unavailable"
+                );
+            }
+        })?
+        .ok_or_else(|| {
+            if !input.future_materials.is_empty() {
+                tracing::warn!(
+                    stage = "future_material_owned_source_absent",
+                    "owned future material delivery is unavailable"
+                );
+            }
+            unavailable("current owned Agent source is unavailable")
+        })?;
     }
     let at = chrono::Utc::now();
     Box::pin(
@@ -2466,7 +2551,15 @@ async fn acquire_owned_delivery_guard(
         &mut queued,
         at,
     ))
-    .await?;
+    .await
+    .inspect_err(|_| {
+        if !input.future_materials.is_empty() {
+            tracing::warn!(
+                stage = "future_material_content_inputs",
+                "owned future material delivery is unavailable"
+            );
+        }
+    })?;
     let QueuedContentFacts {
         mut object_sources,
         native_projection_reads,

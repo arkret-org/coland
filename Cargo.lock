@@ -2079,7 +2079,6 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "chrono",
- "coland-domain",
  "coland-http",
  "coland-services",
  "coland-storage",

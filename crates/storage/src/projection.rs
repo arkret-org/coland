@@ -1,3 +1,9 @@
+// Durable adapters replay accepted originals through these shared contracts.
+pub use coland_domain::reducer::{
+    CommitStreamProjection, MorphProjection, ObjectLifecycleState, ProjectionEffect,
+    ProjectionState, ServerHlc, morph_document_body,
+};
+
 use super::{
     BTreeMap, PersistenceError, PersistenceResult, ProjectedEventOperation, ProjectionEventRecord,
     RealmMetaRecord, Value, async_trait,

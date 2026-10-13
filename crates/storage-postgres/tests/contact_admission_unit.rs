@@ -176,7 +176,7 @@ fn slot(
         peer_id: peer.contact_actor_id(),
         accepted_sequence: sequence,
         head_digest: head,
-        accepted_event_refs: coland_domain::identity::contact_event_prefix(refs.iter().copied()),
+        accepted_event_refs: coland_storage::contact_event_prefix(refs.iter().copied()),
     }
 }
 
@@ -386,7 +386,7 @@ async fn response(
         peer_id: alice().contact_actor_id(),
         accepted_sequence: absence.cas_sequence,
         head_digest: absence.digest().unwrap(),
-        accepted_event_refs: coland_domain::identity::contact_event_prefix(
+        accepted_event_refs: coland_storage::contact_event_prefix(
             absence.cas_revision.iter().chain([&event.event_id]),
         ),
     });
@@ -511,7 +511,7 @@ async fn request_and_normal_response_commit_with_the_slot_cas_they_sign() {
     assert_eq!(responder_slot.accepted_sequence, 1);
     assert_eq!(
         responder_slot.accepted_event_refs,
-        coland_domain::identity::contact_event_prefix([&request_id, &response_id])
+        coland_storage::contact_event_prefix([&request_id, &response_id])
     );
     assert_eq!(
         contacts

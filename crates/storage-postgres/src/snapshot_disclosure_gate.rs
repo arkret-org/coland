@@ -1570,6 +1570,14 @@ pub(crate) fn disclose_to_account(
             CurrentSelector::MlsGroup { scope_ref } => Some(
                 CommitStreamRef::from_scope(scope_ref, None).map_err(PersistenceError::database)?,
             ),
+            CurrentSelector::Policy { .. } => {
+                crate::policy_current_results::management_policy_scope_target(
+                    &material.realm_id,
+                    source_stream_ref,
+                )
+                .map_err(rejected)?;
+                Some(source_stream_ref.clone())
+            }
             CurrentSelector::MessageRevision { message_id } => Some(
                 facts
                     .message_streams
@@ -2991,9 +2999,8 @@ mod tests {
         let TypedCurrentRow::Value {
             source_stream_ref, ..
         } = &mut policy;
-        *source_stream_ref = CommitStreamRef::Circle {
-            realm_id: realm_id(),
-            circle_id: CircleId::from_event_id(&event_id(0x55)),
+        *source_stream_ref = CommitStreamRef::Realm {
+            realm_id: RealmId::from_event_id(&event_id(0x55)),
         };
         material.current_state_entries.push(policy);
         assert!(disclose_to_account(material, &caller, &facts).is_err());
@@ -3262,6 +3269,41 @@ mod tests {
             TypedCurrentRow::Value {
                 selector: CurrentSelector::Circle { .. }
                     | CurrentSelector::CircleMemberState { .. },
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn circle_agent_policy_preserves_exact_current_only_for_its_joined_members() {
+        let (caller, mut material, facts) = circle_fixture();
+        let circle_id = CircleId::from_event_id(&event_id(0x51));
+        let policy_id =
+            arkret_wire::PolicyId::new("ak:policy:0198ff00-0000-7000-8000-000000000001").unwrap();
+        let value = json!({"schema":"ak.schema.policy.v1","id":policy_id,"realm_id":realm_id(),
+            "policy_kind":"agent","rules":[{"rule_id":"ban","kind":"agent","effect":"deny",
+                "agent_target":{"kind":"all"},"agent_operations":["authorize"]}],
+            "default_effect":"allow","created_by":ActorId::account(caller.clone()),
+            "created_at":"2026-10-05T12:00:00.000Z"});
+        let mut policy = row(CurrentSelector::Policy { policy_id }, 1, value);
+        let TypedCurrentRow::Value {
+            source_stream_ref, ..
+        } = &mut policy;
+        *source_stream_ref = CommitStreamRef::Circle {
+            realm_id: realm_id(),
+            circle_id,
+        };
+        material.current_state_entries.push(policy.clone());
+        let disclosed = disclose_to_account(material.clone(), &caller, &facts).unwrap();
+        assert!(disclosed.current_state_entries.contains(&policy));
+        let mut outsider_facts = facts;
+        outsider_facts.circle_floors.clear();
+        let outsider = disclose_to_account(material, &caller, &outsider_facts).unwrap();
+        assert!(!outsider.current_state_entries.contains(&policy));
+        assert!(!outsider.current_state_entries.iter().any(|row| matches!(
+            row,
+            TypedCurrentRow::Value {
+                selector: CurrentSelector::Policy { .. },
                 ..
             }
         )));

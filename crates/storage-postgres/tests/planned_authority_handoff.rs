@@ -1,0 +1,471 @@
+//! Planned handoff freezing, complete import and historical Snapshot reads on PG.
+#[path = "../../test-support/src/device_authorization_history.rs"]
+#[allow(dead_code)]
+mod device_authorization_history;
+#[path = "support/historical_human.rs"]
+mod historical_human;
+
+use arkret_models_collaboration::authority_commit::{
+    HistoricalProducerSignerFactEntry, historical_signer_facts_digest,
+};
+use arkret_wire::{ActorId, DetachedSignatureContext, EventKind, RealmCommitAuthorityRef};
+use coland_storage::{AuthorityCommitStore, EventCommitUnitOfWork, SelfProducerCommitGuard};
+use coland_storage_postgres::test_database::TestDatabase;
+use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
+use historical_human::{HumanFixture, ordinary_realm};
+
+async fn request(
+    fixture: &HumanFixture,
+    pool: &PgPool,
+    previous: &coland_storage::AuthorityCommitTransaction,
+    kind: EventKind,
+    payload: serde_json::Value,
+) -> coland_storage::EventCommitRequest {
+    let at = previous.commit.committed_at + chrono::TimeDelta::seconds(1);
+    let raw = ordinary_realm::next_request_for_actor(
+        previous,
+        kind,
+        ActorId::account(fixture.pcr.history.account.clone()),
+        payload,
+        at,
+    );
+    let event = device_authorization_history::sign_event(
+        raw.authority_commit.event,
+        fixture.pcr.history.device_verification_method.clone(),
+        fixture.pcr.history.founding_device_signing_seed,
+    );
+    let mut request = ordinary_realm::request_for_event(previous, event, at);
+    request.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
+        request.authority_commit.event.clone(),
+    ));
+    request.self_producer_guard = Some(SelfProducerCommitGuard::HumanDevice(fixture.guard.clone()));
+    ordinary_realm::source_request(pool, request).await
+}
+
+async fn inventory(
+    store: &PgAuthorityCommitStore,
+    realm: &arkret_wire::RealmId,
+) -> Vec<HistoricalProducerSignerFactEntry> {
+    let mut entries = Vec::new();
+    for full in store.handoff_originals(realm).await.unwrap() {
+        if full.commit.producer_signer_fact_digest.is_some() {
+            entries.push(HistoricalProducerSignerFactEntry {
+                target: arkret_wire::CommittedEventRef {
+                    event_id: full.event.event_id.clone(),
+                    commit_id: full.commit.commit_id.clone(),
+                    stream_ref: full.commit.stream_ref.clone(),
+                    stream_position: full.commit.stream_position,
+                },
+                producer_signer_fact: store
+                    .producer_signer_fact(&full.event, &full.commit)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            });
+        }
+    }
+    entries.sort_by_key(|entry| {
+        (
+            arkret_canonical::canonical_json_bytes(&entry.target.stream_ref).unwrap(),
+            entry.target.stream_position,
+            entry.target.event_id.to_string(),
+            entry.target.commit_id.to_string(),
+        )
+    });
+    entries
+}
+
+#[tokio::test]
+async fn every_stream_checks_genesis_successors_and_cross_stream_predecessors() {
+    // This is the PG append boundary, after the caller's domain admission.
+    // It does not assert Circle/Sidecar membership or plaintext eligibility.
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let fixture = Box::pin(HumanFixture::new(
+        &pool,
+        "did:web:stream-chain.example".parse().unwrap(),
+    ))
+    .await;
+    Box::pin(fixture.admit(&pool)).await;
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let realm_tail = fixture.unit.transactions.last().unwrap().clone();
+    let pcr_tail = fixture.pcr.unit.transactions.last().unwrap().clone();
+    let circle = arkret_wire::CircleId::from_event_id(&arkret_wire::EventId::from_digest(
+        arkret_canonical::DigestSuite::Sha256,
+        [61; 32],
+    ));
+    let sidecar = arkret_wire::SidecarId::from_event_id(&arkret_wire::EventId::from_digest(
+        arkret_canonical::DigestSuite::Sha256,
+        [62; 32],
+    ));
+    let pcr_foreign = pcr_tail.commit.commit_id.clone();
+    let cases = [
+        (
+            arkret_wire::ScopeRef::Realm {
+                realm_id: realm_tail.event.realm_id.clone(),
+            },
+            realm_tail.clone(),
+            true,
+        ),
+        (
+            arkret_wire::ScopeRef::Circle {
+                realm_id: realm_tail.event.realm_id.clone(),
+                circle_id: circle,
+            },
+            realm_tail.clone(),
+            false,
+        ),
+        (
+            arkret_wire::ScopeRef::Sidecar {
+                realm_id: realm_tail.event.realm_id.clone(),
+                sidecar_id: sidecar,
+            },
+            realm_tail.clone(),
+            false,
+        ),
+        (
+            arkret_wire::ScopeRef::Realm {
+                realm_id: pcr_tail.event.realm_id.clone(),
+            },
+            pcr_tail,
+            true,
+        ),
+    ];
+    for (scope, mut previous, held) in cases {
+        let foreign = if previous.event.realm_id == realm_tail.event.realm_id {
+            pcr_foreign.clone()
+        } else {
+            realm_tail.commit.commit_id.clone()
+        };
+        let stream = arkret_wire::CommitStreamRef::from_scope(&scope, None).unwrap();
+        for offset in 0..2 {
+            let at = previous.commit.committed_at + chrono::TimeDelta::seconds(1);
+            let raw = ordinary_realm::event_for_actor(
+                EventKind::MessageCreate,
+                scope.clone(),
+                ActorId::account(fixture.pcr.history.account.clone()),
+                serde_json::json!({
+                    "strand_id":arkret_wire::StrandId::from_event_id(&arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256,[63;32])),
+                    "track_name":"discussion","content":{"kind":"ak.content.text","body":"append boundary","format":"plain"}
+                }),
+                at,
+            );
+            let event = device_authorization_history::sign_event(
+                raw,
+                fixture.pcr.history.device_verification_method.clone(),
+                fixture.pcr.history.founding_device_signing_seed,
+            );
+            let mut request = historical_human::request_for_event(&fixture, &previous, event, at);
+            request.authority_commit.commit.stream_ref = stream.clone();
+            if !held && offset == 0 {
+                request.authority_commit.commit.stream_position = 0;
+                request.authority_commit.commit.previous_commit_ref = None;
+            }
+            historical_human::seal_commit(
+                &mut request.authority_commit.commit,
+                &fixture.pcr.history.station_did,
+            );
+            store
+                .queue_event(&request.authority_commit.event, at)
+                .await
+                .unwrap();
+            let before = store.held_stream_head_commit(&stream).await.unwrap();
+            for negative in 0..3 {
+                let mut bad = request.authority_commit.clone();
+                match negative {
+                    0 => bad.commit.stream_position += 2,
+                    1 => {
+                        if bad.commit.stream_position > 0 {
+                            bad.commit.stream_position -= 1;
+                        } else {
+                            bad.commit.stream_position = 1;
+                        }
+                    }
+                    _ => bad.commit.previous_commit_ref = Some(foreign.clone()),
+                }
+                bad.commit.commit_id =
+                    arkret_wire::RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
+                        arkret_canonical::canonical_json_bytes(
+                            &arkret_canonical::unsigned_value(
+                                &bad.commit,
+                                &["commit_id", "signature"],
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap(),
+                    ));
+                bad.commit.signature = arkret_signatures::detached_object::sign_detached_object(
+                    &arkret_canonical::unsigned_value(&bad.commit, &["signature"]).unwrap(),
+                    DetachedSignatureContext::RealmCommit,
+                    bad.commit.signature.verification_method.clone(),
+                    bad.commit.committed_at,
+                    &ed25519_dalek::SigningKey::from_bytes(
+                        &historical_human::station_authority_seed(),
+                    ),
+                )
+                .unwrap();
+                assert!(
+                    store.commit_transaction(&bad).await.is_err(),
+                    "{stream:?} negative {negative}"
+                );
+                assert_eq!(
+                    store.held_stream_head_commit(&stream).await.unwrap(),
+                    before
+                );
+            }
+            assert_eq!(
+                store
+                    .commit_transaction(&request.authority_commit)
+                    .await
+                    .unwrap(),
+                coland_storage::AuthorityCommitWriteOutcome::Committed
+            );
+            assert_eq!(
+                store
+                    .commit_transaction(&request.authority_commit)
+                    .await
+                    .unwrap(),
+                coland_storage::AuthorityCommitWriteOutcome::Duplicate
+            );
+            previous = request.authority_commit;
+        }
+    }
+}
+
+#[tokio::test]
+async fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let fixture = Box::pin(HumanFixture::new(
+        &pool,
+        "did:web:handoff-old.example".parse().unwrap(),
+    ))
+    .await;
+    Box::pin(fixture.admit(&pool)).await;
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let tail = fixture.unit.transactions.last().unwrap();
+    let realm = tail.event.realm_id.clone();
+    let account = fixture.pcr.history.account.clone();
+    let next: arkret_wire::DidCoreId = "ak:did_core:web:handoff-new.example".parse().unwrap();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[83; 32]);
+    let at = chrono::Utc::now();
+    let sign_old = |material: &coland_storage::RealmStateSnapshotMaterial| {
+        coland_services::authority_commit::build_signed_realm_state_snapshot(
+            material,
+            arkret_wire::DidUrl::new("did:web:handoff-old.example#authority").unwrap(),
+            &key,
+            at,
+        )
+        .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
+    };
+    let old_snapshot = store
+        .issue_realm_state_snapshot_for_account(&realm, &account, &account.station_id, &sign_old)
+        .await
+        .unwrap()
+        .unwrap();
+    for payload in [
+        serde_json::json!({"expected_governance_generation":1,"expected_realm_stream_commit_id":tail.commit.commit_id,"new_governance_station_id":next}),
+        serde_json::json!({"expected_governance_generation":0,"expected_realm_stream_commit_id":arkret_wire::RealmCommitId::from_digest([7;32]),"new_governance_station_id":next}),
+        serde_json::json!({"expected_governance_generation":0,"expected_realm_stream_commit_id":tail.commit.commit_id,"new_governance_station_id":account.station_id}),
+    ] {
+        let bad = Box::pin(request(
+            &fixture,
+            &pool,
+            tail,
+            EventKind::RealmGovernanceStationChange,
+            payload,
+        ))
+        .await;
+        assert!(Box::pin(uow.commit_event(bad)).await.is_err());
+        assert_eq!(
+            store.current_authority(&realm).await.unwrap(),
+            Some(tail.expected_authority.clone())
+        );
+    }
+    let change = Box::pin(request(&fixture,&pool,tail,EventKind::RealmGovernanceStationChange,
+        serde_json::json!({"expected_governance_generation":0,"expected_realm_stream_commit_id":tail.commit.commit_id,"new_governance_station_id":next}))).await;
+    Box::pin(uow.commit_event(change.clone())).await.unwrap();
+    let later = Box::pin(request(
+        &fixture,
+        &pool,
+        &change.authority_commit,
+        EventKind::RealmProfile,
+        serde_json::json!({"schema":"ak.schema.realm_profile.v1","title":"Must not commit"}),
+    ))
+    .await;
+    assert!(Box::pin(uow.commit_event(later.clone())).await.is_err());
+    let material = store
+        .realm_state_snapshot_material(&realm)
+        .await
+        .unwrap()
+        .unwrap();
+    let snapshot = sign_old(&material).unwrap();
+    let facts = inventory(&store, &realm).await;
+    let heads = material.visible_stream_heads.clone();
+    let mut handoff = arkret_wire::RealmAuthorityHandoff {
+        handoff_id: arkret_wire::RealmAuthorityHandoffId::from_digest([41; 32]),
+        realm_id: realm.clone(),
+        from_generation: 0,
+        to_generation: 1,
+        from_service_id: account.station_id.clone(),
+        to_service_id: next.clone(),
+        change_event_ref: change.authority_commit.event.event_id.clone(),
+        change_commit_id: change.authority_commit.commit.commit_id.clone(),
+        final_stream_heads_digest: arkret_wire::Hash::new(
+            arkret_canonical::canonical_sha256(&heads).unwrap(),
+        )
+        .unwrap(),
+        historical_signer_facts_digest: Some(historical_signer_facts_digest(&facts).unwrap()),
+        snapshot_ref: snapshot.snapshot_id.clone(),
+        old_authority_signature: ordinary_realm::signature(&account.station_id, at),
+        new_authority_acceptance_signature: ordinary_realm::signature(&next, at),
+    };
+    let unsigned = arkret_canonical::unsigned_value(
+        &handoff,
+        &[
+            "old_authority_signature",
+            "new_authority_acceptance_signature",
+        ],
+    )
+    .unwrap();
+    handoff.old_authority_signature = arkret_signatures::detached_object::sign_detached_object(
+        &unsigned,
+        DetachedSignatureContext::RealmAuthorityHandoffOld,
+        arkret_wire::DidUrl::new("did:web:handoff-old.example#authority").unwrap(),
+        at,
+        &key,
+    )
+    .unwrap();
+    handoff.new_authority_acceptance_signature =
+        arkret_signatures::detached_object::sign_detached_object(
+            &unsigned,
+            DetachedSignatureContext::RealmAuthorityHandoffNewAcceptance,
+            arkret_wire::DidUrl::new("did:web:handoff-new.example#authority").unwrap(),
+            at,
+            &key,
+        )
+        .unwrap();
+    let mut missing = handoff.clone();
+    missing.historical_signer_facts_digest =
+        Some(historical_signer_facts_digest(&facts[1..]).unwrap());
+    assert!(
+        store
+            .install_handoff(&missing, &heads, &snapshot)
+            .await
+            .is_err()
+    );
+    let mut partial = material.clone();
+    partial.current_state_entries.pop();
+    let partial_snapshot = sign_old(&partial).unwrap();
+    let mut partial_handoff = handoff.clone();
+    partial_handoff.snapshot_ref = partial_snapshot.snapshot_id.clone();
+    assert!(
+        store
+            .install_handoff(&partial_handoff, &heads, &partial_snapshot)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store.current_authority(&realm).await.unwrap(),
+        Some(tail.expected_authority.clone())
+    );
+    store
+        .install_handoff(&handoff, &heads, &snapshot)
+        .await
+        .unwrap();
+    store
+        .install_handoff(&handoff, &heads, &snapshot)
+        .await
+        .unwrap();
+    assert!(Box::pin(uow.commit_event(later)).await.is_err());
+    let installed = store.current_authority(&realm).await.unwrap().unwrap();
+    assert_eq!(installed.generation, 1);
+    assert_eq!(installed.service_id, next);
+    let sign_new = |material: &coland_storage::RealmStateSnapshotMaterial| {
+        coland_services::authority_commit::build_signed_realm_state_snapshot(
+            material,
+            arkret_wire::DidUrl::new("did:web:handoff-new.example#authority").unwrap(),
+            &key,
+            at,
+        )
+        .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
+    };
+    let new_snapshot = store
+        .issue_realm_state_snapshot_for_account(&realm, &account, &next, &sign_new)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(new_snapshot.governance_generation, 1);
+    assert_eq!(
+        new_snapshot.current_state_entries,
+        old_snapshot.current_state_entries
+    );
+    assert_eq!(
+        store
+            .issued_realm_state_snapshot(&realm, &account, &old_snapshot.snapshot_id, &next)
+            .await
+            .unwrap(),
+        Some(old_snapshot)
+    );
+    let mut replay = handoff.clone();
+    replay.new_authority_acceptance_signature.sig =
+        arkret_wire::Base64UrlString::new("YmFk").unwrap();
+    assert!(
+        store
+            .install_handoff(&replay, &heads, &snapshot)
+            .await
+            .is_err()
+    );
+    // A new tenure extends the imported predecessor; it never restarts position.
+    let mut next_tail = change.authority_commit.clone();
+    next_tail.expected_authority = installed;
+    let mut fresh = Box::pin(request(
+        &fixture,
+        &pool,
+        &next_tail,
+        EventKind::RealmProfile,
+        serde_json::json!({"schema":"ak.schema.realm_profile.v1","title":"New tenure"}),
+    ))
+    .await;
+    fresh.authority_commit.commit.governance_generation = 1;
+    fresh.authority_commit.commit.authority_ref =
+        RealmCommitAuthorityRef::Handoff(handoff.handoff_id.clone());
+    historical_human::seal_commit(
+        &mut fresh.authority_commit.commit,
+        &"did:web:handoff-new.example".parse().unwrap(),
+    );
+    Box::pin(uow.commit_event(fresh.clone())).await.unwrap();
+    assert_eq!(
+        fresh.authority_commit.commit.previous_commit_ref,
+        Some(change.authority_commit.commit.commit_id)
+    );
+    store
+        .install_handoff(&handoff, &heads, &snapshot)
+        .await
+        .unwrap();
+    let application = coland_services::authority_commit::AuthorityCommitApplication::new(
+        coland_services::persistence::PersistenceHandle::new(std::sync::Arc::new(
+            coland_storage_postgres::PgPersistenceStore::new(pool),
+        )),
+        1024,
+    );
+    let frozen = application.handoff_originals(&realm, 0).await.unwrap();
+    assert!(
+        frozen
+            .iter()
+            .all(|full| full.commit.governance_generation == 0)
+    );
+    assert!(
+        !frozen
+            .iter()
+            .any(|full| full.event.event_id == fresh.authority_commit.event.event_id)
+    );
+    assert_eq!(
+        frozen
+            .iter()
+            .filter(|full| full.commit.producer_signer_fact_digest.is_some())
+            .count(),
+        facts.len()
+    );
+}

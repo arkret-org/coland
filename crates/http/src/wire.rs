@@ -623,6 +623,7 @@ pub fn describe(
             // its unavailability is runtime availability, not a missing member.
             arkret_wire::OperationBundleDescriptor::STATION_DEVICE_PAIRING_HANDOFF_V1.to_owned(),
             arkret_wire::OperationBundleDescriptor::STATION_HTTP_CORE_CURRENT_V1.to_owned(),
+            arkret_wire::OperationBundleDescriptor::STATION_REALM_AUTHORITY_HANDOFF_V1.to_owned(),
             // Private invite dispatch is a mounted optional operation. It has
             // its own bundle so core tier no longer implies reachability.
             arkret_wire::OperationBundleDescriptor::STATION_INVITE_DELIVERY_V1.to_owned(),

@@ -1373,6 +1373,67 @@ fn same_authority(left: &CurrentRealmAuthority, right: &CurrentRealmAuthority) -
         && left.last_handoff_ref == right.last_handoff_ref
 }
 
+/// A committed change freezes every stream of its outgoing tenure. The
+/// authority row is already locked, so change admission and every writer
+/// have one linearization point; an exact accepted replay remains readable.
+async fn require_planned_handoff_write_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    current: &CurrentRealmAuthority,
+) -> PersistenceResult<()> {
+    let pending = sql_query(
+        "SELECT EXISTS(SELECT 1 FROM realm_commits c \
+         JOIN canonical_events e ON e.pk=c.event_pk \
+         WHERE c.realm_id=$1 AND c.governance_generation=$2 \
+           AND e.kind='ak.realm.governance_station.change') AS present",
+    )
+    .bind::<Text, _>(current.realm_id.as_str())
+    .bind::<BigInt, _>(to_i64(current.generation, "governance generation")?)
+    .get_result::<PresenceRow>(&mut *conn)
+    .await
+    .map_err(PersistenceError::database)?;
+    if pending.present {
+        return Err(PersistenceError::Conflict(
+            "temporarily_unavailable: the outgoing authority tenure is frozen for planned handoff"
+                .into(),
+        ));
+    }
+    if event.kind != arkret_wire::EventKind::RealmGovernanceStationChange {
+        return Ok(());
+    }
+    let payload: arkret_models_collaboration::events_payloads::RealmGovernanceStationChangePayload =
+        serde_json::from_value(
+            serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
+        )
+        .map_err(invalid)?;
+    let head = sql_query(
+        "SELECT commit_json FROM realm_commits WHERE realm_id=$1 AND stream_key=$2 \
+         ORDER BY stream_position DESC LIMIT 1",
+    )
+    .bind::<Text, _>(current.realm_id.as_str())
+    .bind::<Text, _>(stream_key(&arkret_wire::CommitStreamRef::Realm {
+        realm_id: current.realm_id.clone(),
+    })?)
+    .get_result::<CommitRow>(&mut *conn)
+    .await
+    .optional()
+    .map_err(PersistenceError::database)?;
+    let head = head
+        .map(|row| decode_json::<arkret_wire::RealmCommit>(row.commit_json, "Realm stream head"))
+        .transpose()?;
+    if payload.expected_governance_generation != current.generation
+        || head.as_ref().map(|head| &head.commit_id)
+            != Some(&payload.expected_realm_stream_commit_id)
+        || payload.new_governance_station_id == current.service_id
+    {
+        return Err(PersistenceError::Conflict(
+            "failed_precondition: planned handoff does not match the current authority and Realm head"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn signature_service_id(
     signature: &arkret_wire::DetachedObjectSignature,
 ) -> PersistenceResult<arkret_wire::DidCoreId> {
@@ -1384,6 +1445,105 @@ fn signature_service_id(
         .ok_or_else(|| invalid("authority signature method has no fragment"))?;
     let did = arkret_wire::Did::new(controller.to_owned()).map_err(invalid)?;
     arkret_identifiers::project_did_to_core_id(&did).map_err(invalid)
+}
+
+async fn handoff_originals_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm_id: &arkret_wire::RealmId,
+) -> PersistenceResult<Vec<arkret_wire::CommittedEventFullView>> {
+    let rows = sql_query(
+        "SELECT c.commit_json,e.envelope FROM realm_commits c \
+         LEFT JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
+         WHERE c.realm_id=$1 ORDER BY c.stream_key,c.stream_position",
+    )
+    .bind::<Text, _>(realm_id.as_str())
+    .load::<StreamPageRow>(&mut *conn)
+    .await
+    .map_err(PersistenceError::database)?;
+    let mut fulls = Vec::with_capacity(rows.len());
+    let mut previous: Option<arkret_wire::RealmCommit> = None;
+    for row in rows {
+        let full = arkret_wire::CommittedEventFullView {
+            event: decode_json(
+                row.envelope
+                    .ok_or_else(|| invalid("handoff requires every original Event"))?,
+                "handoff Event",
+            )?,
+            commit: decode_json(row.commit_json, "handoff Commit")?,
+        };
+        full.validate_shape().map_err(invalid)?;
+        full.event
+            .verify_event_id_matches_content_with_digest_suite(
+                full.event.event_id.digest_suite_code().digest_suite(),
+            )
+            .map_err(invalid)?;
+        full.commit
+            .verify_commit_id_matches_content()
+            .map_err(invalid)?;
+        if previous
+            .as_ref()
+            .is_some_and(|previous| previous.stream_ref == full.commit.stream_ref)
+        {
+            full.commit
+                .validate_successor_of(previous.as_ref().unwrap())
+                .map_err(invalid)?;
+        } else if full.commit.stream_position != 0 || full.commit.previous_commit_ref.is_some() {
+            return Err(invalid(
+                "handoff requires a complete genesis-to-head chain for every stream",
+            ));
+        }
+        previous = Some(full.commit.clone());
+        fulls.push(full);
+    }
+    Ok(fulls)
+}
+
+async fn handoff_inventory_in_connection(
+    conn: &mut AsyncPgConnection,
+    fulls: &[arkret_wire::CommittedEventFullView],
+) -> PersistenceResult<
+    Vec<arkret_models_collaboration::authority_commit::HistoricalProducerSignerFactEntry>,
+> {
+    use arkret_models_collaboration::authority_commit::HistoricalProducerSignerFactEntry;
+    let mut entries = Vec::new();
+    for full in fulls
+        .iter()
+        .filter(|full| full.commit.producer_signer_fact_digest.is_some())
+    {
+        let fact = crate::agent_producer_signer_keys::producer_source_for_commit_in_connection(
+            conn,
+            &full.event,
+            &full.commit,
+        )
+        .await?
+        .ok_or_else(|| invalid("handoff original is missing its immutable signer fact"))?;
+        entries.push(HistoricalProducerSignerFactEntry {
+            target: arkret_wire::CommittedEventRef {
+                event_id: full.event.event_id.clone(),
+                commit_id: full.commit.commit_id.clone(),
+                stream_ref: full.commit.stream_ref.clone(),
+                stream_position: full.commit.stream_position,
+            },
+            producer_signer_fact: fact,
+        });
+    }
+    let mut keyed = entries
+        .into_iter()
+        .map(|entry| {
+            Ok((
+                (
+                    arkret_canonical::canonical_json_bytes(&entry.target.stream_ref)
+                        .map_err(PersistenceError::database)?,
+                    entry.target.stream_position,
+                    entry.target.event_id.to_string(),
+                    entry.target.commit_id.to_string(),
+                ),
+                entry,
+            ))
+        })
+        .collect::<PersistenceResult<Vec<_>>>()?;
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(keyed.into_iter().map(|(_, entry)| entry).collect())
 }
 
 /// Queue one producer Event on a caller-owned connection.
@@ -1825,6 +1985,8 @@ async fn commit_transaction_with_device_guard_inner(
         transaction.commit.committed_at,
     )
     .await?;
+
+    require_planned_handoff_write_in_connection(conn, &transaction.event, &current).await?;
 
     let previous = sql_query(
         "SELECT commit_json FROM realm_commits \
@@ -5140,6 +5302,21 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .await
     }
 
+    async fn handoff_originals(
+        &self,
+        realm_id: &arkret_wire::RealmId,
+    ) -> PersistenceResult<Vec<arkret_wire::CommittedEventFullView>> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *conn)
+                .await?;
+            Ok(handoff_originals_in_connection(conn, realm_id).await?)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
     async fn install_handoff(
         &self,
         handoff: &arkret_wire::RealmAuthorityHandoff,
@@ -5186,12 +5363,19 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 && current.service_id == handoff.to_service_id
                 && current.last_handoff_ref.as_ref() == Some(&handoff.handoff_id)
             {
+                let held = sql_query("SELECT handoff_json FROM realm_authority_handoffs WHERE handoff_id=$1")
+                    .bind::<Text,_>(handoff.handoff_id.as_str()).get_result::<HandoffRow>(&mut *conn).await?;
+                let held_snapshot = sql_query("SELECT snapshot_json FROM realm_state_snapshots WHERE snapshot_id=$1")
+                    .bind::<Text,_>(snapshot.snapshot_id.as_str()).get_result::<SnapshotRow>(&mut *conn).await?;
+                if held.handoff_json != handoff_json || held_snapshot.snapshot_json != snapshot_json {
+                    return Err(invalid("handoff replay differs from the installed original").into());
+                }
                 return Ok(());
             }
             if current.generation != handoff.from_generation
                 || current.service_id != handoff.from_service_id
             {
-                return Err(PersistenceError::Conflict("stale Realm authority handoff".into()).into());
+                return Err(PersistenceError::Conflict("failed_precondition: stale Realm authority handoff".into()).into());
             }
 
             let rows = sql_query(
@@ -5213,7 +5397,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             stored_heads.sort_by(|left, right| left.stream_ref.cmp(&right.stream_ref));
             if stored_heads != final_stream_heads {
                 return Err(PersistenceError::Conflict(
-                    "handoff final stream heads do not match durable stream tails".into(),
+                    "failed_precondition: handoff final stream heads do not match durable stream tails".into(),
                 )
                 .into());
             }
@@ -5227,10 +5411,38 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 return Err(invalid("handoff change commit is not the final Realm stream head").into());
             }
 
+            // The endpoint activates a pre-imported frozen state. A readable
+            // member suffix or an inline current-only snapshot is insufficient.
+            let originals = handoff_originals_in_connection(conn, &handoff.realm_id).await?;
+            let change = originals.iter().find(|full| full.commit.commit_id == handoff.change_commit_id)
+                .ok_or_else(|| invalid("handoff change original is not held"))?;
+            if change.event.event_id != handoff.change_event_ref
+                || change.event.kind != arkret_wire::EventKind::RealmGovernanceStationChange
+                || change.commit.governance_generation != handoff.from_generation {
+                return Err(invalid("handoff does not bind the outgoing committed change Event").into());
+            }
+            let payload: arkret_models_collaboration::events_payloads::RealmGovernanceStationChangePayload =
+                serde_json::from_value(serde_json::to_value(&change.event.payload).map_err(PersistenceError::database)?).map_err(invalid)?;
+            if payload.expected_governance_generation != handoff.from_generation
+                || payload.new_governance_station_id != handoff.to_service_id
+                || Some(&payload.expected_realm_stream_commit_id) != change.commit.previous_commit_ref.as_ref() {
+                return Err(invalid("handoff differs from the accepted change CAS").into());
+            }
+            let inventory = handoff_inventory_in_connection(conn, &originals).await?;
+            let digest = arkret_models_collaboration::authority_commit::historical_signer_facts_digest(&inventory).map_err(invalid)?;
+            if handoff.historical_signer_facts_digest.as_ref() != Some(&digest) {
+                return Err(invalid("handoff requires the complete imported signer fact inventory").into());
+            }
+            let material = realm_state_snapshot_material_in_connection(conn, &handoff.realm_id).await?
+                .ok_or_else(|| invalid("handoff typed current is not imported"))?;
+            if !coland_storage::signed_snapshot_matches_material(snapshot, &material) {
+                return Err(invalid("handoff Snapshot differs from the complete imported current and floors").into());
+            }
+
             sql_query(
                 "INSERT INTO realm_state_snapshots \
                  (snapshot_id, realm_id, governance_generation, snapshot_json, created_at) \
-                 VALUES ($1, $2, $3, $4, $5)",
+                 VALUES ($1, $2, $3, $4, $5) ON CONFLICT (snapshot_id) DO NOTHING",
             )
             .bind::<Text, _>(snapshot.snapshot_id.as_str())
             .bind::<Text, _>(snapshot.realm_id.as_str())

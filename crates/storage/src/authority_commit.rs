@@ -2854,6 +2854,13 @@ pub trait AuthorityCommitStore: Send + Sync {
         snapshot: &RealmStateSnapshot,
     ) -> PersistenceResult<()>;
 
+    /// Full originals at the outgoing frozen cut, including private streams.
+    /// This is an internal migration verification read, never a member scan.
+    async fn handoff_originals(
+        &self,
+        realm_id: &arkret_wire::RealmId,
+    ) -> PersistenceResult<Vec<arkret_wire::CommittedEventFullView>>;
+
     /// Returns the consecutive, durable handoff chain used to verify the
     /// current Station from the Realm's genesis authority.
     async fn authority_handoffs(

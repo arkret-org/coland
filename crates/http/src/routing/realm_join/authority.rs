@@ -95,7 +95,7 @@ pub(crate) async fn insert_method_key(
     Ok(())
 }
 
-async fn verified_keys(
+pub(crate) async fn verified_keys(
     state: &AppState,
     bundle: &RealmAuthorityBundle,
 ) -> Result<RealmAuthorityKeyMap, AppError> {

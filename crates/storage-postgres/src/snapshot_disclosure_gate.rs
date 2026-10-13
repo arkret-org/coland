@@ -8,8 +8,8 @@
 //! Reports and franking proofs additionally require exact target-scope
 //! moderator authority; a Realm-stream proof never broadens a Circle target.
 //!
-//! Every installed current family is audited. Unsupported families and imported handoff tenures
-//! remain unproved, so those cuts cannot be signed. Bootstrap changes only its own
+//! Every installed current family and the installed handoff tenure are audited.
+//! Unsupported families remain unproved. Bootstrap changes only its own
 //! join stream's history floor (`federation.md` section 4.1.1).
 
 use arkret_wire::{
@@ -473,6 +473,14 @@ pub async fn issue_account_snapshot(
                     rejected("the current governing Snapshot has not been installed").into()
                 });
             }
+            if material.governance_generation > 0 {
+                let full = crate::authority_commit::realm_state_snapshot_material_in_connection(
+                    conn, realm_id,
+                )
+                .await?
+                .ok_or_else(|| rejected("the governing handoff material is unavailable"))?;
+                prove_handoff_tenure_in_connection(conn, &full).await?;
+            }
             let snapshot = sign(&material)?;
             if !coland_storage::signed_snapshot_matches_material(&snapshot, &material) {
                 return Err(PersistenceError::Internal(
@@ -735,6 +743,60 @@ fn anchor_bootstrap_join(
         TypedCurrentRow::Value { selector: CurrentSelector::MessageRevision { .. }, source_stream_ref, revision, .. }
         if source_stream_ref == stream && revision.stream_position < floor_position
     ));
+    Ok(())
+}
+
+/// The Account's disclosed material on the caller's cut.
+async fn prove_handoff_tenure_in_connection(
+    conn: &mut AsyncPgConnection,
+    material: &coland_storage::RealmStateSnapshotMaterial,
+) -> PersistenceResult<()> {
+    if material.governance_generation == 0 {
+        return Ok(());
+    }
+    #[derive(QueryableByName)]
+    struct InstalledHandoff {
+        #[diesel(sql_type = Jsonb)]
+        handoff_json: serde_json::Value,
+        #[diesel(sql_type = Jsonb)]
+        snapshot_json: serde_json::Value,
+    }
+    let row = sql_query(
+        "SELECT h.handoff_json,s.snapshot_json FROM realm_authorities a \
+         JOIN realm_authority_handoffs h ON h.handoff_id=a.last_handoff_ref \
+           AND h.realm_id=a.realm_id AND h.to_generation=a.generation AND h.to_service_id=a.service_id \
+         JOIN realm_state_snapshots s ON s.snapshot_id=h.handoff_json->>'snapshot_ref' \
+         WHERE a.realm_id=$1 AND a.generation=$2",
+    )
+    .bind::<Text, _>(material.realm_id.as_str())
+    .bind::<super::BigInt, _>(i64::try_from(material.governance_generation).map_err(PersistenceError::database)?)
+    .get_result::<InstalledHandoff>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+    .ok_or_else(|| rejected("the nonzero tenure has no complete installed handoff cut"))?;
+    let handoff: arkret_wire::RealmAuthorityHandoff =
+        serde_json::from_value(row.handoff_json).map_err(rejected)?;
+    let snapshot: arkret_wire::RealmStateSnapshot =
+        serde_json::from_value(row.snapshot_json).map_err(rejected)?;
+    handoff.validate_shape().map_err(rejected)?;
+    if handoff.historical_signer_facts_digest.is_none()
+        || snapshot.snapshot_id != handoff.snapshot_ref
+        || snapshot.realm_id != material.realm_id
+        || snapshot.governance_generation != handoff.from_generation
+        || arkret_wire::Hash::new(
+            arkret_canonical::canonical_sha256(&snapshot.visible_stream_heads).map_err(rejected)?,
+        )
+        .map_err(rejected)?
+            != handoff.final_stream_heads_digest
+        || !snapshot.visible_stream_heads.iter().all(|old| {
+            material.visible_stream_heads.iter().any(|head| {
+                head.stream_ref == old.stream_ref
+                    && (head.stream_position > old.stream_position || head == old)
+            })
+        })
+    {
+        return Err(rejected(
+            "the nonzero tenure does not extend the complete installed handoff cut",
+        ));
+    }
     Ok(())
 }
 
@@ -1287,7 +1349,7 @@ async fn message_creation_stream(
     Ok(stream)
 }
 
-fn rejected(reason: &str) -> PersistenceError {
+fn rejected(reason: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::SchemaViolation(format!("snapshot disclosure is unproved: {reason}"))
 }
 
@@ -1353,11 +1415,6 @@ pub(crate) fn disclose_to_account(
         return Err(rejected(&format!(
             "accepted Event kind {kind} is outside the disclosure subset"
         )));
-    }
-    if material.governance_generation != 0 {
-        return Err(rejected(
-            "a handed-off tenure's imported current families are not proved",
-        ));
     }
     let caller = ActorId::account(account.clone());
     let Some(floor) = &facts.caller_floor else {
@@ -3089,7 +3146,7 @@ mod tests {
         assert!(disclose_to_account(material, &founder, &facts).is_err());
         let (founder, mut material, facts) = fixture();
         material.governance_generation = 1;
-        assert!(disclose_to_account(material, &founder, &facts).is_err());
+        assert!(disclose_to_account(material, &founder, &facts).is_ok());
     }
 
     #[test]

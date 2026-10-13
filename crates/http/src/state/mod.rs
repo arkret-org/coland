@@ -17,6 +17,7 @@ mod authority_contact;
 mod authority_direct_conversation;
 mod authority_forward;
 mod authority_franking;
+mod authority_handoff;
 mod authority_key_backup_pointer;
 mod authority_mls_unit;
 mod authority_port;

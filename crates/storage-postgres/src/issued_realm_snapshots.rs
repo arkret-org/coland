@@ -599,11 +599,23 @@ async fn recheck_disclosure_in_connection(
             .optional()
             .map_err(PersistenceError::database)?
             .ok_or_else(|| undisclosable("the Realm has no governing authority"))?;
-    if i64::try_from(snapshot.governance_generation).ok() != Some(tenure.generation) {
+    let snapshot_generation =
+        i64::try_from(snapshot.governance_generation).map_err(PersistenceError::database)?;
+    if snapshot_generation > tenure.generation {
         return Err(undisclosable(
-            "a later or different governing term cannot re-prove this object",
+            "a future governing term cannot re-prove this object",
         ));
     }
+    let snapshot_service = if snapshot_generation == tenure.generation {
+        tenure.service_id.clone()
+    } else {
+        sql_query("SELECT from_service_id AS service_id,from_generation AS generation FROM realm_authority_handoffs WHERE realm_id=$1 AND from_generation=$2")
+            .bind::<Text,_>(snapshot.realm_id.as_str())
+            .bind::<super::BigInt,_>(snapshot_generation)
+            .get_result::<ReadTenureRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+            .ok_or_else(|| undisclosable("the historical Snapshot tenure is not in the installed handoff chain"))?
+            .service_id
+    };
     let realm_stream = CommitStreamRef::Realm {
         realm_id: snapshot.realm_id.clone(),
     };
@@ -627,7 +639,7 @@ async fn recheck_disclosure_in_connection(
     if arkret_wire::project_did_to_core_id(&signer)
         .map_err(PersistenceError::database)?
         .as_str()
-        != tenure.service_id
+        != snapshot_service
         || snapshot.signature.context != arkret_wire::DetachedSignatureContext::RealmSnapshot
     {
         return Err(undisclosable(

@@ -2404,10 +2404,62 @@ impl AuthorityCommitApplication {
             .await?)
     }
 
+    pub async fn handoff_originals(
+        &self,
+        realm_id: &arkret_wire::RealmId,
+        through_generation: u64,
+    ) -> ServiceResult<Vec<arkret_wire::CommittedEventFullView>> {
+        // A retry still verifies the outgoing frozen cut even when the new
+        // Station has already appended its own accepted Events.
+        let mut originals = self.store().handoff_originals(realm_id).await?;
+        originals.retain(|full| full.commit.governance_generation <= through_generation);
+        Ok(originals)
+    }
+
     pub async fn install_handoff(&self, request: &AuthorityHandoffRequest) -> ServiceResult<()> {
-        request.validate_shape().map_err(|error| {
+        request.validate_new_handoff().map_err(|error| {
             crate::ServiceError::SchemaViolation(format!("invalid authority handoff: {error}"))
         })?;
+        let held = self
+            .store()
+            .authority_handoffs(&request.handoff.realm_id)
+            .await?;
+        let prior = request
+            .authority_bundle
+            .authority_transitions
+            .iter()
+            .take(
+                request
+                    .authority_bundle
+                    .authority_transitions
+                    .len()
+                    .saturating_sub(1),
+            )
+            .map(|transition| transition.handoff.clone())
+            .collect::<Vec<_>>();
+        if held != prior
+            && held
+                != request
+                    .authority_bundle
+                    .authority_transitions
+                    .iter()
+                    .map(|transition| transition.handoff.clone())
+                    .collect::<Vec<_>>()
+        {
+            return Err(crate::ServiceError::SchemaViolation(
+                "handoff requires the complete exact installed authority history".into(),
+            ));
+        }
+        let originals = self
+            .handoff_originals(&request.handoff.realm_id, request.handoff.from_generation)
+            .await?;
+        request
+            .validate_imported_signer_facts(&originals)
+            .map_err(|error| {
+                crate::ServiceError::SchemaViolation(format!(
+                    "incomplete authority handoff: {error}"
+                ))
+            })?;
         self.store()
             .install_handoff(
                 &request.handoff,
@@ -2864,6 +2916,7 @@ pub trait AuthorityProtocolPort: Send + Sync {
 
     async fn install_authority_handoff(
         &self,
+        peer: &AuthenticatedPeerContext,
         request: AuthorityHandoffRequest,
     ) -> ServiceResult<RealmAuthorityHandoff>;
 }

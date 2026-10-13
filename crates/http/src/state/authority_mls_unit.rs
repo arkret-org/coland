@@ -124,6 +124,14 @@ async fn admit_mls_event_inner(
             "the MLS effective scope has no supported authority cut".to_owned(),
         ));
     }
+    let refusal_authority = if event.kind == EventKind::MlsCommit {
+        state
+            .authority_commits()
+            .current_authority(&event.realm_id)
+            .await?
+    } else {
+        None
+    };
     let (installation, added_leaves) = match event.kind {
         EventKind::MlsGenesis => {
             if !welcomes.is_empty() {
@@ -134,7 +142,27 @@ async fn admit_mls_event_inner(
                 Vec::new(),
             )
         }
-        EventKind::MlsCommit if genesis_material.is_none() => verify_commit(state, event).await?,
+        EventKind::MlsCommit if genesis_material.is_none() => {
+            match prepare_commit(state, event).await? {
+                PreparedCommit::Ready(installation, added_leaves) => (installation, added_leaves),
+                PreparedCommit::KeyAccessRefused(added_leaves) => {
+                    // A malformed or unsealed Welcome is a request refusal,
+                    // never a durable Event-level rejection.
+                    verify_welcomes(state, event, welcomes, &added_leaves, producer_key).await?;
+                    let authority = refusal_authority.as_ref().ok_or_else(|| {
+                        failed_precondition("MLS refusal has no current authority")
+                    })?;
+                    return state
+                        .authority_commits()
+                        .finalize_mls_rejection(
+                            event,
+                            authority,
+                            arkret_wire::ReasonCode::GOVERNANCE_BINDING_MISMATCH,
+                        )
+                        .await;
+                }
+            }
+        }
         _ => {
             return Err(ServiceError::Internal(
                 "the MLS unit admits only ak.mls.genesis and ak.mls.commit".to_owned(),
@@ -142,14 +170,6 @@ async fn admit_mls_event_inner(
         }
     };
     let welcomes = verify_welcomes(state, event, welcomes, &added_leaves, producer_key).await?;
-    let refusal_authority = if event.kind == EventKind::MlsCommit {
-        state
-            .authority_commits()
-            .current_authority(&event.realm_id)
-            .await?
-    } else {
-        None
-    };
     let outcome = super::authority_self_event_unit::commit_event_unit(
         state,
         &EventAdmissionSubmission::new(event.clone()),
@@ -162,7 +182,29 @@ async fn admit_mls_event_inner(
             ..SelfEventUnitEffects::default()
         },
     )
-    .await?;
+    .await;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error)
+            if event.kind == EventKind::MlsCommit
+                && error.conflict_code() == Some(ConflictCode::GovernanceBindingMismatch) =>
+        {
+            // The complete request was verified above; a revision race at the
+            // locked admission cut needs the same exclusive refusal fence.
+            let authority = refusal_authority
+                .as_ref()
+                .ok_or_else(|| failed_precondition("MLS refusal has no current authority"))?;
+            return state
+                .authority_commits()
+                .finalize_mls_rejection(
+                    event,
+                    authority,
+                    arkret_wire::ReasonCode::GOVERNANCE_BINDING_MISMATCH,
+                )
+                .await;
+        }
+        Err(error) => return Err(error),
+    };
     if let AuthoritySubmitOutcome::Rejected {
         status: arkret_wire::AuthorityRejectionStatus::Rejected,
         reason_code,
@@ -560,10 +602,25 @@ async fn stage_mls_public_blob(
 /// §2.2 and §2.5: one member-sent public Commit processed against the
 /// scope's current group, whose resulting GroupContext binding is the
 /// payload binding and names the current base, epoch and key-access revision.
+enum PreparedCommit {
+    Ready(MlsStateInstallation, Vec<MlsPublicEndpointLeaf>),
+    KeyAccessRefused(Vec<MlsPublicEndpointLeaf>),
+}
+
+#[cfg(test)]
 async fn verify_commit(
     state: &AppState,
     event: &Event,
 ) -> ServiceResult<(MlsStateInstallation, Vec<MlsPublicEndpointLeaf>)> {
+    match prepare_commit(state, event).await? {
+        PreparedCommit::Ready(installation, leaves) => Ok((installation, leaves)),
+        PreparedCommit::KeyAccessRefused(_) => Err(binding_mismatch(
+            "the Commit does not cover the current key-access revision",
+        )),
+    }
+}
+
+async fn prepare_commit(state: &AppState, event: &Event) -> ServiceResult<PreparedCommit> {
     let payload: MlsCommitPayload = payload(event)?;
     let binding = payload.governance_binding();
     if binding.effective_scope() != &event.scope_ref {
@@ -622,7 +679,7 @@ async fn verify_commit(
     let extension = tracker
         .governance_binding()
         .map_err(|error| binding_mismatch(error.to_string()))?;
-    arkret_mls::verify_governance_binding_against_public_state_and_payload(
+    let binding_check = arkret_mls::verify_governance_binding_against_public_state_and_payload(
         &extension,
         &arkret_mls::MlsGovernanceBindingPublicState::new(
             event.scope_ref.clone(),
@@ -631,8 +688,8 @@ async fn verify_commit(
             group.current_key_access_revision,
         ),
         binding,
-    )
-    .map_err(|rejection| {
+    );
+    if let Err(rejection) = binding_check {
         #[cfg(feature = "conformance-harness")]
         tracing::warn!(
             extension_matches_payload = &extension == binding,
@@ -649,8 +706,22 @@ async fn verify_commit(
             current_key_access = group.current_key_access_revision,
             "MLS public binding coordinate refusal"
         );
-        binding_mismatch(rejection.code())
-    })?;
+        // Only the current membership revision may differ. The real public
+        // base, member-sent handshake and complete payload remain exact.
+        if extension.key_access_revision() != group.current_key_access_revision
+            && &extension == binding
+            && extension.effective_scope() == &event.scope_ref
+            && extension.base_group_state_ref() == Some(&group.current_mls_commit_event_ref)
+            && previous_epoch == group.epoch
+            && epoch == payload.next_epoch()
+            && payload.covers_key_access_revision() == extension.key_access_revision()
+            && arkret_mls::verify_next_epoch_governance_binding(&group_id, group.epoch, &extension)
+                .is_ok()
+        {
+            return Ok(PreparedCommit::KeyAccessRefused(added_leaves));
+        }
+        return Err(binding_mismatch(rejection.code()));
+    }
     if previous_epoch != group.epoch
         || epoch != payload.next_epoch()
         || payload.covers_key_access_revision() != group.current_key_access_revision
@@ -691,7 +762,7 @@ async fn verify_commit(
     ))
     .map_err(schema)?;
     let public_blobs = vec![stage_mls_public_blob(state, &tree_ref, tree).await?];
-    Ok((
+    Ok(PreparedCommit::Ready(
         MlsStateInstallation {
             effective_scope: event.scope_ref.clone(),
             base: Some(MlsInstalledBase {
@@ -1269,9 +1340,28 @@ mod tests {
         )
         .unwrap();
         let payload = add_member(&mut group, &genesis, &stale_revision);
-        let error = verify_commit(&state, &commit_event(actor(CREATOR), &payload))
-            .await
-            .unwrap_err();
+        let event = commit_event(actor(CREATOR), &payload);
+        let prepared = prepare_commit(&state, &event).await.unwrap();
+        let PreparedCommit::KeyAccessRefused(leaves) = prepared else {
+            panic!("a revision mismatch must not produce an installable state");
+        };
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(leaves[0].actor_id, actor(MEMBER));
+        let key = arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+            bytes: vec![0x44; 32],
+        };
+        assert!(
+            verify_welcomes(&state, &event, &[], &leaves, &key)
+                .await
+                .is_err()
+        );
+        let mut inconsistent_payload = event.clone();
+        inconsistent_payload
+            .payload
+            .get_mut("governance_binding")
+            .unwrap()["key_access_revision"] = serde_json::json!(4);
+        assert!(prepare_commit(&state, &inconsistent_payload).await.is_err());
+        let error = verify_commit(&state, &event).await.unwrap_err();
         assert_eq!(
             error.conflict_code(),
             Some(ConflictCode::GovernanceBindingMismatch),

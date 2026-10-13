@@ -632,7 +632,25 @@ async fn verify_commit(
         ),
         binding,
     )
-    .map_err(|rejection| binding_mismatch(rejection.code()))?;
+    .map_err(|rejection| {
+        #[cfg(feature = "conformance-harness")]
+        tracing::warn!(
+            extension_matches_payload = &extension == binding,
+            scope_matches = extension.effective_scope() == &event.scope_ref,
+            group_matches =
+                extension.mls_group_id().ok() == event.scope_ref.canonical_mls_group_id().ok(),
+            base_matches =
+                extension.base_group_state_ref() == Some(&group.current_mls_commit_event_ref),
+            previous_epoch_matches = extension.previous_epoch() == group.epoch,
+            next_epoch_matches = group.epoch.checked_add(1) == Some(extension.next_epoch()),
+            key_access_matches =
+                extension.key_access_revision() == group.current_key_access_revision,
+            extension_key_access = extension.key_access_revision(),
+            current_key_access = group.current_key_access_revision,
+            "MLS public binding coordinate refusal"
+        );
+        binding_mismatch(rejection.code())
+    })?;
     if previous_epoch != group.epoch
         || epoch != payload.next_epoch()
         || payload.covers_key_access_revision() != group.current_key_access_revision

@@ -1593,18 +1593,20 @@ impl EventService {
         Self { commits }
     }
 
-    pub async fn commit_accepted_event(
+    pub fn commit_accepted_event(
         &self,
         command: CommitAcceptedEventCommand,
-    ) -> ServiceResult<CommitAcceptedEventResult> {
-        self.commits.commit_accepted_event(command).await
+    ) -> impl std::future::Future<Output = ServiceResult<CommitAcceptedEventResult>> + Send + '_
+    {
+        self.commits.commit_accepted_event(command)
     }
 
-    pub async fn commit_accepted_event_batch(
+    pub fn commit_accepted_event_batch(
         &self,
         command: CommitAcceptedEventBatchCommand,
-    ) -> ServiceResult<CommitAcceptedEventResult> {
-        self.commits.commit_accepted_event_batch(command).await
+    ) -> impl std::future::Future<Output = ServiceResult<CommitAcceptedEventResult>> + Send + '_
+    {
+        self.commits.commit_accepted_event_batch(command)
     }
 }
 

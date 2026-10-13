@@ -323,7 +323,7 @@ fn commit_event_unit_with_idempotency_impl<'a>(
     // Construct the large accepting state machine outside its caller's poll frame.
     Box::pin(async move {
         let event = &submission.event;
-        if let Some(outcome) = exact_replay(state, event).await? {
+        if let Some(outcome) = Box::pin(exact_replay(state, event)).await? {
             return Ok(outcome);
         }
         let envelope = serde_json::to_value(event)
@@ -343,7 +343,11 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             arkret_canonical::DigestSuite::Sha256,
         )
         .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
-        refresh_direct_conversation_peer_claim(state, &event.realm_id).await?;
+        Box::pin(refresh_direct_conversation_peer_claim(
+            state,
+            &event.realm_id,
+        ))
+        .await?;
         // contact-and-direct-conversation.md section 8.4: a Direct Conversation
         // Realm's profile table precedes every other authority, so its Events
         // skip the reducer preflight; the accepting transaction evaluates the
@@ -378,14 +382,19 @@ fn commit_event_unit_with_idempotency_impl<'a>(
         let decided_at_cut =
             direct_conversation || decided_at_commit_cut(&event.kind) || poll_at_cut;
         if !decided_at_cut {
-            crate::routing::events::operations::validate_operation_policy(
-                state,
-                std::slice::from_ref(&operation),
+            Box::pin(
+                crate::routing::events::operations::validate_operation_policy(
+                    state,
+                    std::slice::from_ref(&operation),
+                ),
             )
             .await
             .map_err(|reason| ServiceError::Conflict(reason.to_owned()))?;
             if event.kind == arkret_wire::EventKind::MessageCreate {
-                crate::routing::message_authoring::message_create_send_gate(state, event).await?;
+                Box::pin(crate::routing::message_authoring::message_create_send_gate(
+                    state, event,
+                ))
+                .await?;
             }
             if let Some(reason) = state
                 .projections()
@@ -458,10 +467,18 @@ fn commit_event_unit_with_idempotency_impl<'a>(
                 ));
             }
         };
-        super::authority_forward::stage_control_source(state, &transaction, origin_source).await?;
+        Box::pin(super::authority_forward::stage_control_source(
+            state,
+            &transaction,
+            origin_source,
+        ))
+        .await?;
         if event.kind == arkret_wire::EventKind::MlsCommit {
-            super::authority_mls_unit::attach_local_roster_witnesses(state, &mut transaction)
-                .await?;
+            Box::pin(super::authority_mls_unit::attach_local_roster_witnesses(
+                state,
+                &mut transaction,
+            ))
+            .await?;
         }
         let canonical_bytes = arkret_canonical::canonical_json_bytes(
             &event
@@ -525,25 +542,26 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             deliveries: Vec::new(),
             realm_fanout_source: Some(EventAdmissionSubmission::new(submission.event.clone())),
         };
-        let invite_claim_proof = crate::invite_claim_admission::prepare_invite_claim_proof(
-            state,
-            event,
-            transaction.commit.committed_at,
-        )
-        .await?;
+        let invite_claim_proof =
+            Box::pin(crate::invite_claim_admission::prepare_invite_claim_proof(
+                state,
+                event,
+                transaction.commit.committed_at,
+            ))
+            .await?;
         let realm_organization_proof =
-            crate::routing::organizations::prepare_realm_organization_proof(state, event)
+            Box::pin(crate::routing::organizations::prepare_realm_organization_proof(state, event))
                 .await
                 .map_err(|reason| ServiceError::Conflict(reason.to_owned()))?;
         let franking_replay_nonce = franking_replay_nonce.map(|mut nonce| {
             nonce.consumed_at = committed_at;
             nonce
         });
-        let event_approvals = crate::approval_admission::prepare_event_approvals(
+        let event_approvals = Box::pin(crate::approval_admission::prepare_event_approvals(
             state,
             submission,
             transaction.commit.committed_at,
-        )
+        ))
         .await?;
         let committed = if franking_replay_nonce.is_some()
             || realm_organization_proof.is_some()
@@ -571,7 +589,7 @@ fn commit_event_unit_with_idempotency_impl<'a>(
         if let Err(error) = committed {
             // A concurrent exact replay may have won the same Event identity; it
             // answers with the stored outcome instead of the losing rollback.
-            if let Some(outcome) = exact_replay(state, event).await? {
+            if let Some(outcome) = Box::pin(exact_replay(state, event)).await? {
                 return Ok(outcome);
             }
             return super::authority_direct_conversation::relay_direct_conversation_refusal(error);
@@ -580,7 +598,10 @@ fn commit_event_unit_with_idempotency_impl<'a>(
         // rows are a derived projection; their failure never changes the outcome.
         #[cfg(feature = "conformance-harness")]
         tracing::warn!(phase = "unit_committed", kind = %event.kind.as_str(), "self Event execution boundary");
-        crate::routing::events::notify::dispatch_committed_event_notifications(state, event).await;
+        Box::pin(
+            crate::routing::events::notify::dispatch_committed_event_notifications(state, event),
+        )
+        .await;
         #[cfg(feature = "conformance-harness")]
         tracing::warn!(phase = "notifications_dispatched", kind = %event.kind.as_str(), "self Event execution boundary");
         if decided_at_cut && !poll_at_cut && event.kind != arkret_wire::EventKind::StrandCreate {

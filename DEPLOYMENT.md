@@ -200,6 +200,7 @@ and rollout-only switches that should be managed deliberately.
 | `COLAND_ADMIN_MAX_PAGE_LIMIT` | `1000` | Maximum admin API page size; clamped above the default. |
 | `COLAND_AGENT_PARTICIPATION_CEILING` | all five bits `true` | Closed JSON object with required boolean fields `reply_message`, `reaction_add`, `reaction_remove`, `accept_third_party_mention`, and `act_on_behalf`. This deployment ceiling only narrows participation; it does not grant permissions or override management restrictions. Invalid JSON or unknown fields fail startup. |
 | `COLAND_APPLET_TRANSACTION_INFLIGHT_CAPACITY` | `64` | Maximum concurrent applet transactions retained in memory. |
+| `COLAND_CONFORMANCE_CURSOR_EMISSION_PAUSE_FILE` | unset | Development-only Account WebSocket cursor delivery probe path for builds with `conformance-harness`. The file selects input cursor digests; a sibling `.pause` file pauses delivery for at most 15 seconds and `.reached.json` records the pending frame. Unset disables the probe; production mode ignores it. |
 | `COLAND_CONFORMANCE_SIGNAL_EMISSION_PAUSE_FILE` | unset | Development-only Signal frame scheduling probe path for builds with `conformance-harness`. Unset disables the probe; production mode ignores it. |
 | `COLAND_DB_POOL_ACQUIRE_TIMEOUT_SECS` | deadpool default | Positive database-pool acquisition timeout; unset means no explicit wait timeout. |
 | `COLAND_DB_POOL_MAX_SIZE` | CPU count × 4 | Positive database-pool size override. |

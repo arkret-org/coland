@@ -648,7 +648,9 @@ async fn joined_holder_terminal_real_fanout_signed_http_and_atomic_fence() {
         &source.state,
         &receiver.state,
         &body,
-        &key,
+        // A fresh request tests exact replica duplicate detection; the
+        // original key may replay its first Stored result (federation section 4).
+        "terminal-exact-original-new-request",
         false,
     ))
     .await;

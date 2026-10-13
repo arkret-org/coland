@@ -573,6 +573,16 @@ mod tests {
         (state, session, realm)
     }
 
+    // Keep the real database lease and bootstrap material in the fixture task;
+    // the test immediately awaits it on the runtime's default worker stack.
+    fn fixture_task() -> tokio::task::JoinHandle<(
+        AppState,
+        SessionIdentityState,
+        super::super::tests::CommittedRealm,
+    )> {
+        tokio::spawn(fixture())
+    }
+
     async fn next(body: &mut salvo::http::ResBody) -> Frame {
         let chunk = tokio::time::timeout(Duration::from_secs(4), body.next())
             .await
@@ -586,16 +596,16 @@ mod tests {
 
     #[tokio::test]
     async fn accepted_stream_baseline_then_tail_returns_formal_commits_and_bound_cursors() {
-        let (state, session, mut realm) = fixture().await;
+        let (state, session, mut realm) = fixture_task().await.unwrap();
         let selected = selection(&format!("realm_ids={}", realm.head.event.realm_id)).unwrap();
         let mut baseline = Response::new();
-        response(
+        Box::pin(response(
             state.clone(),
             session.clone(),
             None,
             selected.clone(),
             &mut baseline,
-        )
+        ))
         .await;
         assert!(
             baseline
@@ -609,22 +619,28 @@ mod tests {
         let token = checkpoint.cursor.unwrap();
         assert_ne!(token, realm.head.commit.commit_id.to_string());
         let peer = coland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
-        peer.admit_into(state.test_persistence().as_ref())
+        Box::pin(peer.admit_into(state.test_persistence().as_ref()))
             .await
             .unwrap();
-        realm
-            .member_state(
-                state.test_persistence().as_ref(),
-                &peer.history.account,
-                &peer.history.account,
-                "join",
-            )
-            .await;
+        Box::pin(realm.member_state(
+            state.test_persistence().as_ref(),
+            &peer.history.account,
+            &peer.history.account,
+            "join",
+        ))
+        .await;
         let mut resumed = selected.clone();
         resumed.after = Some(token.clone());
         resumed.catchup = true;
         let mut tail = Response::new();
-        response(state.clone(), session.clone(), None, resumed, &mut tail).await;
+        Box::pin(response(
+            state.clone(),
+            session.clone(),
+            None,
+            resumed,
+            &mut tail,
+        ))
+        .await;
         let mut body = tail.take_body();
         let event = next(&mut body).await;
         assert_eq!(event.kind, Kind::CommittedEvent);
@@ -669,7 +685,7 @@ mod tests {
 
     #[tokio::test]
     async fn established_stream_ends_at_original_session_expiry() {
-        let (state, mut session, realm) = fixture().await;
+        let (state, mut session, realm) = fixture_task().await.unwrap();
         session.expires_at = arkret_canonical::normalize_timestamp_canonical(
             Utc::now() + chrono::Duration::seconds(2),
         );

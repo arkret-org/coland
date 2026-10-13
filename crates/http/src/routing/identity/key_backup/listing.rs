@@ -33,7 +33,7 @@ pub(crate) async fn list_key_backups(
         backup_kind,
         limit,
         depot,
-        "ak.self.keys.backups.read.list.v1",
+        arkret_wire::ServiceOperationId::SELF_KEYS_BACKUPS_READ_LIST_V1,
     )
     .await
 }

@@ -63,7 +63,8 @@ pub fn payload_declares_minimal_metadata_realm(payload: &Value) -> bool {
         .and_then(Value::as_array)
         .is_some_and(|references| {
             references.iter().any(|reference| {
-                reference.as_str() == Some("ak.profile.mls.minimal_metadata_realm.v1")
+                reference.as_str()
+                    == Some(arkret_wire::RejectedProfileId::MLS_MINIMAL_METADATA_REALM_V1)
             })
         })
 }

@@ -296,11 +296,14 @@ async fn departure(membership: &str, another_member_remains: bool) {
         );
     }
     let body = replication_body(&departing);
+    // Federation section 4 preserves a cached first Stored result for the
+    // original idempotency key. A fresh request exercises duplicate detection
+    // of the exact original after hosted membership has closed.
     let (status, value) = Box::pin(send_replication(
         &source.state,
         &receiver.state,
         &body,
-        row["idempotency_key"].as_str().unwrap(),
+        "departure-exact-original-new-request",
         false,
     ))
     .await;

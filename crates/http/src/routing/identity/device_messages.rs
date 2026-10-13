@@ -143,8 +143,8 @@ pub(crate) enum ActorPrivateDeviceUpdate {
 impl ActorPrivateDeviceUpdate {
     fn kind(&self) -> &'static str {
         match self {
-            Self::AccountData { .. } => "ak.account_data.update",
-            Self::ReadCursor { .. } => "ak.read_cursor.update",
+            Self::AccountData { .. } => arkret_wire::ActorPrivateUpdateKind::ACCOUNT_DATA_UPDATE,
+            Self::ReadCursor { .. } => arkret_wire::ActorPrivateUpdateKind::READ_CURSOR_UPDATE,
         }
     }
 

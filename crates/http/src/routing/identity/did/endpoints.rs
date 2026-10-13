@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use super::*;
 
 pub(crate) const IDENTITY_REGISTRY_OPERATION_BUNDLES: &[&str] = &[
-    "ak.operation_bundle.identity_registry.describe.v1",
-    "ak.operation_bundle.identity_registry.http_core.v1",
+    arkret_wire::OperationBundleDescriptor::IDENTITY_REGISTRY_DESCRIBE_V1,
+    arkret_wire::OperationBundleDescriptor::IDENTITY_REGISTRY_HTTP_CORE_V1,
 ];
 
 #[salvo::oapi::endpoint(

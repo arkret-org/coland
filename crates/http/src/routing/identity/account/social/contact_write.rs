@@ -778,7 +778,7 @@ async fn store_prepare(
                     principal_id.clone(),
                     state.service_core_id(),
                 )),
-                operation_id: "ak.self.contact.command.prepare".to_owned(),
+                operation_id: "org.arkret.coland.contact.prepare.v1".to_owned(),
                 idempotency_key: key,
                 request_hash: request_hash.to_owned(),
                 response_status: StatusCode::OK.as_u16().into(),
@@ -879,7 +879,7 @@ async fn prepare<K: arkret_event_draft::EventSpec>(
     if let Some(outcome) = replay::<ContactOperationOutcome>(
         state,
         &session.actor,
-        "ak.self.contact.command.prepare",
+        "org.arkret.coland.contact.prepare.v1",
         &contact_phase_idempotency_key("prepare", &idempotency_key),
         &request_hash,
     )
@@ -1132,7 +1132,7 @@ async fn reservation_for_commit(
                 principal_id,
                 state.service_core_id(),
             )),
-            "ak.self.contact.command.prepare",
+            "org.arkret.coland.contact.prepare.v1",
             &contact_reservation_key(&body.reservation_handle),
         )
         .await
@@ -1577,7 +1577,7 @@ fn commit<'a>(
         if let Some(outcome) = replay::<ContactOperationOutcome>(
             state,
             &session.actor,
-            "ak.self.contact.command.commit",
+            "org.arkret.coland.contact.commit.v1",
             &contact_phase_idempotency_key("commit", &body.idempotency_key),
             &request_hash,
         )
@@ -1643,7 +1643,7 @@ fn commit<'a>(
                 persist_final(
                     state,
                     &session.actor,
-                    "ak.self.contact.command.commit",
+                    "org.arkret.coland.contact.commit.v1",
                     &response_binding.idempotency_key,
                     &request_hash,
                     &outcome,

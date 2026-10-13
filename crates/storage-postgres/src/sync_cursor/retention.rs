@@ -97,7 +97,7 @@ pub(super) fn cursor_floors(record: &SyncCursorRecord) -> PersistenceResult<Opti
                 integer(target.get("global_watermark"))?,
             )))
         }
-        "ak.self.account.stream.subscribe.v1" => {
+        arkret_wire::CapabilityActionId::SELF_ACCOUNT_STREAM_SUBSCRIBE_V1 => {
             let positions = record.positions.as_ref().ok_or_else(|| {
                 PersistenceError::SchemaViolation("account positions absent".into())
             })?;

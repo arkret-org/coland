@@ -201,7 +201,8 @@ pub async fn acquire_native_message_reply_cut(
     );
     if req.method() != salvo::http::Method::GET
         || req.uri().to_string() != expected
-        || operation.as_str() != "ak.self.committed_event.resource.get.v1"
+        || operation.as_str()
+            != arkret_wire::ServiceOperationId::SELF_COMMITTED_EVENT_RESOURCE_GET_V1
         || scope != &source.event.scope_ref
         || req.uri().query().is_some()
         || req

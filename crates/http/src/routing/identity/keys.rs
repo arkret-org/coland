@@ -768,7 +768,10 @@ async fn proxy_peer_keys_query(
             state.config().trust_domain.to_string(),
         ),
         ("destination-trust-domain", route.trust_domain),
-        ("arkret-operation", "ak.peer.keys.read.lookup.v1".to_owned()),
+        (
+            "arkret-operation",
+            arkret_wire::ServiceOperationId::PEER_KEYS_READ_LOOKUP_V1.to_owned(),
+        ),
     ] {
         crate::routing::federation::outbox::insert_header_if_valid(&mut headers, name, &value);
     }

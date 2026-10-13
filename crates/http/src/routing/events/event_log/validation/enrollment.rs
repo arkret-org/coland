@@ -327,8 +327,10 @@ mod applet_managed_delegation_tests {
             )
             .unwrap(),
             algorithms: vec![
-                arkret_wire::NonEmptyString::new("ak.hpke_x25519_aead_chacha20poly1305.v1")
-                    .unwrap(),
+                arkret_wire::NonEmptyString::new(
+                    arkret_wire::HpkeSuiteId::X25519_AEAD_CHACHA20POLY1305_V1,
+                )
+                .unwrap(),
             ],
             device_key_algorithm: arkret_wire::NonEmptyString::new("Ed25519").unwrap(),
             authorized_by: DeviceOrPrincipalRef::Principal(authorized_by.clone()),

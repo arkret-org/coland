@@ -993,7 +993,7 @@ fn validate_calendar_profile(
     if let Some(refs) = strand.schema_refs.as_ref() {
         // v1 registers exactly one Strand profile. A second spelling cannot
         // activate an unregistered namespace or the Strand container schema.
-        if refs.len() != 1 || refs[0] != "ak.schema.calendar_event.v1" {
+        if refs.len() != 1 || refs[0] != arkret_wire::SchemaId::CALENDAR_EVENT_V1 {
             return Err(PersistenceError::SchemaViolation(
                 "Strand schema_refs contains an unregistered or duplicate profile".to_owned(),
             ));
@@ -1017,7 +1017,7 @@ fn validate_calendar_profile(
     let calendar = fields.is_some_and(|fields| fields.contains_key("calendar"));
     let schema_ref = strand.schema_refs.as_ref().is_some_and(|refs| {
         refs.iter()
-            .any(|reference| reference == "ak.schema.calendar_event.v1")
+            .any(|reference| reference == arkret_wire::SchemaId::CALENDAR_EVENT_V1)
     });
     if calendar != schema_ref {
         return Err(PersistenceError::SchemaViolation(

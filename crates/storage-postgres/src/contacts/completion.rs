@@ -497,7 +497,7 @@ async fn persist_result(
     let changed = sql_query(
         "INSERT INTO idempotency_keys \
          (actor_key,authenticated_actor,operation_id,idempotency_key,request_hash,response_status,response_body,created_at,expires_at) \
-         VALUES($1,$2,'ak.self.contact.command.commit',$3,$4,$5,$6,$7,$8) \
+         VALUES($1,$2,'org.arkret.coland.contact.commit.v1',$3,$4,$5,$6,$7,$8) \
          ON CONFLICT(actor_key,operation_id,idempotency_key) DO UPDATE SET \
            response_body=idempotency_keys.response_body \
          WHERE idempotency_keys.request_hash=EXCLUDED.request_hash \

@@ -609,42 +609,43 @@ pub fn describe(
             let mut bundles = vec![
             // Caller-signed actor-private Events without a dedicated operation
             // (actor-private-effects.md §2.1).
-            "ak.operation_bundle.station.actor_private_events.v1".to_owned(),
-            "ak.operation_bundle.station.agent_pairing_handoff.v1".to_owned(),
-            "ak.operation_bundle.station.agent_runtime.v1".to_owned(),
-            "ak.operation_bundle.station.management_review.v1".to_owned(),
-            "ak.operation_bundle.station.applet.v1".to_owned(),
-            "ak.operation_bundle.station.applet_ghost.v1".to_owned(),
-            "ak.operation_bundle.station.applet_install.v1".to_owned(),
-            "ak.operation_bundle.station.describe.v1".to_owned(),
+            arkret_wire::OperationBundleDescriptor::STATION_ACTOR_PRIVATE_EVENTS_V1.to_owned(),
+            arkret_wire::OperationBundleDescriptor::STATION_AGENT_PAIRING_HANDOFF_V1.to_owned(),
+            arkret_wire::OperationBundleDescriptor::STATION_AGENT_RUNTIME_V1.to_owned(),
+            arkret_wire::OperationBundleDescriptor::STATION_MANAGEMENT_REVIEW_V1.to_owned(),
+            arkret_wire::OperationBundleDescriptor::STATION_APPLET_V1.to_owned(),
+            arkret_wire::OperationBundleDescriptor::STATION_APPLET_GHOST_V1.to_owned(),
+            arkret_wire::OperationBundleDescriptor::STATION_APPLET_INSTALL_V1.to_owned(),
+            arkret_wire::OperationBundleDescriptor::STATION_DESCRIBE_V1.to_owned(),
             // service-surface.md 2.7: the client-visible stage/resolve/status
             // origin is the Station, which forwards the exact DTO to its
             // Account Authority. The Authority is a Station-internal role, so
             // its unavailability is runtime availability, not a missing member.
-            "ak.operation_bundle.station.device_pairing_handoff.v1".to_owned(),
-            "ak.operation_bundle.station.http_core_current.v1".to_owned(),
+            arkret_wire::OperationBundleDescriptor::STATION_DEVICE_PAIRING_HANDOFF_V1.to_owned(),
+            arkret_wire::OperationBundleDescriptor::STATION_HTTP_CORE_CURRENT_V1.to_owned(),
             // Private invite dispatch is a mounted optional operation. It has
             // its own bundle so core tier no longer implies reachability.
-            "ak.operation_bundle.station.invite_delivery.v1".to_owned(),
+            arkret_wire::OperationBundleDescriptor::STATION_INVITE_DELIVERY_V1.to_owned(),
             // The recipient's own read of the claim a Welcome names
             // (device-lifecycle.md §9 `claims/query`, decision 0119).
-            "ak.operation_bundle.station.keypackage_claim_read.v1".to_owned(),
-            "ak.operation_bundle.station.mimi_interop.v1".to_owned(),
-            "ak.operation_bundle.station.push.v1".to_owned(),
+            arkret_wire::OperationBundleDescriptor::STATION_KEYPACKAGE_CLAIM_READ_V1.to_owned(),
+            arkret_wire::OperationBundleDescriptor::STATION_MIMI_INTEROP_V1.to_owned(),
+            arkret_wire::OperationBundleDescriptor::STATION_PUSH_V1.to_owned(),
             // Exact by-ref read of a Snapshot this Station issued to the
             // caller at `/head`, re-proved for disclosure at the read cut.
-            "ak.operation_bundle.station.snapshot_exact_read.v1".to_owned(),
+            arkret_wire::OperationBundleDescriptor::STATION_SNAPSHOT_EXACT_READ_V1.to_owned(),
             // The Station issues this proof independently of a third-party
             // provider's complete token handoff and delivery capabilities.
-            "ak.operation_bundle.station.third_party_invite_acceptance_attestation.v1".to_owned(),
-            "ak.operation_bundle.station.tus_upload.v1".to_owned(),
+            arkret_wire::OperationBundleDescriptor::STATION_THIRD_PARTY_INVITE_ACCEPTANCE_ATTESTATION_V1.to_owned(),
+            arkret_wire::OperationBundleDescriptor::STATION_TUS_UPLOAD_V1.to_owned(),
             ];
             if websocket_binding.is_some() {
-                bundles.push("ak.operation_bundle.station.websocket.v1".to_owned());
+                bundles.push(arkret_wire::OperationBundleDescriptor::STATION_WEBSOCKET_V1.to_owned());
             }
             if config.third_party_invite_provider_enabled {
-                bundles.push("ak.operation_bundle.station.third_party_invite_handoff.v1".to_owned());
+                bundles.push(arkret_wire::OperationBundleDescriptor::STATION_THIRD_PARTY_INVITE_HANDOFF_V1.to_owned());
             }
+            bundles.sort_unstable();
             bundles
         },
         transport_bindings: {
@@ -694,10 +695,10 @@ pub fn describe(
         egress_network_policy: Some(arkret_models_discovery::service_description::EgressNetworkPolicy::deny_private_defaults()),
         resource_kinds: Vec::new(),
         supported_features: vec![
-            "ak.feature.agent_runtime_approval_notifications.v1".to_owned(),
-            "ak.feature.blob.resumable_upload.tus.v1".to_owned(),
+            arkret_wire::FeatureDescriptor::AGENT_RUNTIME_APPROVAL_NOTIFICATIONS_V1.to_owned(),
+            arkret_wire::FeatureDescriptor::BLOB_RESUMABLE_UPLOAD_TUS_V1.to_owned(),
             arkret_models_collaboration::objects::direct_conversation::DIRECT_CONVERSATION_REALM_ROLE_FEATURE.to_owned(),
-            "ak.feature.mls_last_resort_keypackage.v1".to_owned(),
+            arkret_wire::FeatureDescriptor::MLS_LAST_RESORT_KEYPACKAGE_V1.to_owned(),
         ],
         auth_metadata,
         privacy_derivation: Some(crate::routing::push_target_privacy_derivation_claim(now())),

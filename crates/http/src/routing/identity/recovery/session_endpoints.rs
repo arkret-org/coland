@@ -587,7 +587,7 @@ fn materialize_recovery_authorization_rules(
         rules.push(AuthoritySetAuthorizationRule {
             rule_id: method.kind_str().to_owned(),
             issuer_role: role,
-            allowed_actions: vec!["ak.device.reanchor".to_owned()],
+            allowed_actions: vec![arkret_wire::event_kind_str::DEVICE_REANCHOR.to_owned()],
             issuers: methods
                 .into_iter()
                 .map(|verification_method| AuthoritySetAuthorizationIssuer {
@@ -649,7 +649,7 @@ async fn pcr_policy_recovery_publication_authority_context(
         authority_commit_id: active.acceptance_basis.clone(),
         scope_ref: authority_set_policy.scope_ref.clone(),
         authority_set_policy,
-        allowed_actions: vec!["ak.device.reanchor".to_owned()],
+        allowed_actions: vec![arkret_wire::event_kind_str::DEVICE_REANCHOR.to_owned()],
     };
     context.validate_shape().map_err(|error| {
         AppError::conflict(format!(

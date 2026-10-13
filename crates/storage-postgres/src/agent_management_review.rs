@@ -421,7 +421,7 @@ async fn visible(
     Ok(cut.actor_is_joined()
         && (cut.actor_is_root_controller()
             || cut.permits_unreserved_current_actions(
-                &["ak.realm.admin"],
+                &[arkret_wire::CapabilityActionId::REALM_ADMIN],
                 &arkret_wire::WireResourceSelector::realm(event.realm_id.clone()),
                 at,
             )))
@@ -888,7 +888,7 @@ async fn qualify(
             control,
             vote,
             event,
-            "ak.self.events.command.submit.v1",
+            arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
             vote.input.action,
             at,
             &binding,

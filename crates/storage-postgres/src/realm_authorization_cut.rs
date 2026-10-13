@@ -2685,10 +2685,10 @@ impl RealmLifecycleGates {
         let mut gates = Self::default();
         for event in events {
             match event.kind.as_str() {
-                "ak.realm.archive" => gates.archived = true,
-                "ak.realm.restore" => gates.archived = false,
-                "ak.realm.freeze" => gates.frozen = true,
-                "ak.realm.unfreeze" => gates.frozen = false,
+                arkret_wire::CapabilityActionId::REALM_ARCHIVE => gates.archived = true,
+                arkret_wire::event_kind_str::REALM_RESTORE => gates.archived = false,
+                arkret_wire::CapabilityActionId::REALM_FREEZE => gates.frozen = true,
+                arkret_wire::event_kind_str::REALM_UNFREEZE => gates.frozen = false,
                 _ => gates.terminal = true,
             }
         }

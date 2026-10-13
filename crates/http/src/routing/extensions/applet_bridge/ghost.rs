@@ -426,7 +426,7 @@ async fn validate_ghost_managed_actor_unit(
         .ok_or_else(|| AppError::conflict("Ghost reuse does not carry creation Events"))?
         .managed_actor_provision_event;
     let service_actor_id = ActorId::service(basis.service_id.clone());
-    if event.kind.as_str() != "ak.applet.managed_actor.provision"
+    if event.kind.as_str() != arkret_wire::event_kind_str::APPLET_MANAGED_ACTOR_PROVISION
         || event.actor_id != service_actor_id
         || event.applet_id.as_ref() != Some(&basis.applet_id)
         || &event.realm_id != basis.effective_scope.realm_id()

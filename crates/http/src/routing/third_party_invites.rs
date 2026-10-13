@@ -481,8 +481,17 @@ mod tests {
                     .is_some_and(|reference| reference.ends_with(response_model)),
                 "{suffix}: {response}"
             );
-            assert!(doc["components"]["schemas"][request_model].is_object());
-            assert!(doc["components"]["schemas"][response_model].is_object());
+            for schema in [request, response] {
+                let key = schema["$ref"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("#/components/schemas/")
+                    .unwrap();
+                assert!(
+                    doc["components"]["schemas"][key].is_object(),
+                    "unresolved {key}"
+                );
+            }
         }
         for nested in [
             "ThirdPartyInvite",
@@ -491,7 +500,11 @@ mod tests {
             "InviteClaimBindingProof",
         ] {
             assert!(
-                doc["components"]["schemas"][nested].is_object(),
+                doc["components"]["schemas"]
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .any(|(name, schema)| name.ends_with(nested) && schema.is_object()),
                 "missing {nested}"
             );
         }

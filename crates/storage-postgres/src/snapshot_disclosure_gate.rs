@@ -93,12 +93,12 @@ pub(crate) fn member_shared_event_kind(kind: &EventKind) -> bool {
         descriptor.wire_scope == arkret_wire::EventWireScope::DurableEvent
     }) && !matches!(
         kind.as_str(),
-        "ak.identity.accountability_grant"
-            | "ak.applet.managed_actor.provision"
-            | "ak.agent.provision"
-            | "ak.agent.key.authorize"
-            | "ak.agent.key.revoke"
-            | "ak.sidecar.create"
+        arkret_wire::event_kind_str::IDENTITY_ACCOUNTABILITY_GRANT
+            | arkret_wire::event_kind_str::APPLET_MANAGED_ACTOR_PROVISION
+            | arkret_wire::event_kind_str::AGENT_PROVISION
+            | arkret_wire::CapabilityActionId::AGENT_KEY_AUTHORIZE
+            | arkret_wire::CapabilityActionId::AGENT_KEY_REVOKE
+            | arkret_wire::event_kind_str::SIDECAR_CREATE
     ) && !kind.as_str().starts_with("ak.device.")
         && !kind.as_str().starts_with("ak.self.agent.")
         && !kind.as_str().starts_with("ak.consent.")

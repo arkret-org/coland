@@ -278,7 +278,7 @@ pub fn realm_genesis_payload(
 ) -> Value {
     serde_json::json!({
         "object": {
-            "schema": "ak.schema.realm_genesis.v1",
+            "schema": arkret_wire::SchemaId::REALM_GENESIS_V1,
             "purpose": "collaboration",
             "genesis_salt": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             "trust_domain": trust_domain,

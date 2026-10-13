@@ -680,11 +680,13 @@ version = "0.3.0"
 dependencies = [
  "arkret-canonical",
  "arkret-event-draft",
+ "arkret-identifiers",
  "arkret-models-collaboration",
  "arkret-models-integration",
  "arkret-schema",
  "arkret-wire",
  "chrono",
+ "chrono-tz",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

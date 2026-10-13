@@ -2303,6 +2303,9 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
     let signal_at = bound.authority_commit.commit.committed_at + chrono::TimeDelta::seconds(1);
     let signal = store
         .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+            include_product_authority: false,
+            product_agent: None,
+
             scope: &signal_scope,
             authority_commit_id: &bound.authority_commit.commit.commit_id,
             parent_realm_authority_commit_id: None,
@@ -2339,6 +2342,9 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
     assert!(
         store
             .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+                include_product_authority: false,
+                product_agent: None,
+
                 scope: &signal_scope,
                 authority_commit_id: &bound.authority_commit.commit.commit_id,
                 parent_realm_authority_commit_id: None,
@@ -2368,6 +2374,9 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
     assert!(
         store
             .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+                include_product_authority: false,
+                product_agent: None,
+
                 scope: &signal_scope,
                 authority_commit_id: &bound.authority_commit.commit.commit_id,
                 parent_realm_authority_commit_id: None,
@@ -3677,6 +3686,8 @@ async fn participant_authority_scenario() {
     let signal_at = head.commit.committed_at + chrono::TimeDelta::seconds(1);
     let signal_cut = store
         .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+ include_product_authority: false, product_agent: None,
+
             scope: &arkret_wire::ScopeRef::Realm {
                 realm_id: realm_id.clone(),
             },

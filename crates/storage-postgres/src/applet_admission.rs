@@ -711,6 +711,35 @@ async fn admit_in_connection(
             replayed: true,
         });
     }
+    if matches!(
+        &input.request,
+        coland_storage::AppletAdmissionRequest::Managed(
+            AppletManagedActorCommittedRequest::Ghost(body)
+        ) if body.managed_actor_bundle.is_none()
+    ) {
+        // A mapping has no new Event identity. Its signed preview and complete
+        // request identify the durable operation across HTTP retry keys.
+        let previous = sql_query("SELECT canonical_request_hash,committed_event_refs,response_body FROM applet_authoring_units WHERE actor_key=$1 AND operation_id=$2 AND request_digest=$3 ORDER BY accepted_at LIMIT 1 FOR SHARE")
+            .bind::<Text, _>(&actor_key)
+            .bind::<Text, _>(&input.operation_id)
+            .bind::<Text, _>(input.request_digest.as_str())
+            .get_result::<CompletionRow>(&mut *conn)
+            .await
+            .optional()
+            .map_err(PersistenceError::database)?;
+        if let Some(row) = previous {
+            if row.canonical_request_hash != input.canonical_request_hash.as_str() {
+                return Err(PersistenceError::Conflict(
+                    "duplicate_conflict: accepted Ghost mapping request differs".to_owned(),
+                ));
+            }
+            return Ok(AppletAuthoringUnitOutcome {
+                committed_event_refs: decode(row.committed_event_refs)?,
+                response_body: row.response_body,
+                replayed: true,
+            });
+        }
+    }
     let mut validated = validate_input(input)?;
     let managed_request = match &input.request {
         coland_storage::AppletAdmissionRequest::Install(_) => None,
@@ -911,10 +940,21 @@ async fn admit_in_connection(
                     "rate_limited: managed creation quota is exhausted".to_owned(),
                 ));
             }
-        } else if !selected.reservations.is_empty() {
-            // Reuse is a mapping, not a new identity. Keep quota-bearing reuse
-            // closed until its mapping-specific accounting is implemented.
-            return Err(rejected("Ghost mapping quota accounting is unavailable"));
+        } else {
+            // Reserve only the current mapping grant. The original accepted
+            // provision's creation grant and Event are never consumed again.
+            let operation_identity = format!("applet-ghost-map:{}", input.canonical_request_hash);
+            if !crate::capability_quota::try_reserve_in_connection(
+                conn,
+                &selected.reservations,
+                &operation_identity,
+            )
+            .await?
+            {
+                return Err(PersistenceError::Conflict(
+                    "rate_limited: Ghost mapping quota is exhausted".to_owned(),
+                ));
+            }
         }
     }
     let mut refs = if admin_count == 0 && bundle(input).is_none() {

@@ -3824,6 +3824,26 @@ fn agent_mode_request(
     agent: &AccountId,
     guard: &coland_storage::DeviceRevocationGateSelector,
 ) -> coland_storage::EventCommitRequest {
+    agent_mode_request_at(
+        previous,
+        mode,
+        expected,
+        principal,
+        agent,
+        guard,
+        previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
+    )
+}
+
+fn agent_mode_request_at(
+    previous: &coland_storage::AuthorityCommitTransaction,
+    mode: &str,
+    expected: Option<arkret_wire::CurrentRevision>,
+    principal: &pcr_genesis::PcrGenesisFixture,
+    agent: &AccountId,
+    guard: &coland_storage::DeviceRevocationGateSelector,
+    at: chrono::DateTime<chrono::Utc>,
+) -> coland_storage::EventCommitRequest {
     let controller = &principal.history.account;
     let payload = arkret_models_collaboration::agent_interaction::AgentInteractionSetPayload {
         agent_account_id: agent.clone(),
@@ -3840,18 +3860,14 @@ fn agent_mode_request(
         EventKind::AgentInteractionSet,
         &controller.principal_id,
         serde_json::to_value(payload).unwrap(),
-        previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
+        at,
     );
     request.authority_commit.event = device_authorization_history::sign_event(
         request.authority_commit.event,
         principal.history.device_verification_method.clone(),
         principal.history.founding_device_signing_seed,
     );
-    request = ordinary_realm::request_for_event(
-        previous,
-        request.authority_commit.event,
-        previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
-    );
+    request = ordinary_realm::request_for_event(previous, request.authority_commit.event, at);
     request.self_producer_guard = Some(coland_storage::SelfProducerCommitGuard::HumanDevice(
         guard.clone(),
     ));
@@ -4036,7 +4052,10 @@ async fn agent_mode_controller_cas_scenario() -> AgentModeScenario {
         serde_json::json!({"member_id": arkret_wire::ActorId::account(agent.clone()), "membership":"join",
             "agent_controller_binding": {"controller_account_id":controller,
                 "controller_membership_generation_ref":parent.event.event_id}}),
-        key_commit.committed_at + chrono::TimeDelta::milliseconds(1),
+        key_commit
+            .committed_at
+            .max(create.authority_commit.commit.committed_at)
+            + chrono::TimeDelta::milliseconds(1),
     );
     let join = ordinary_realm::source_request(&pool, join).await;
     uow.commit_event(join.clone()).await.unwrap();
@@ -4064,6 +4083,28 @@ async fn agent_mode_controller_cas_scenario() -> AgentModeScenario {
                      expected: Option<arkret_wire::CurrentRevision>| {
         agent_mode_request(previous, mode, expected, &principal, &agent, &guard)
     };
+    let historical_at = key_commit.committed_at + chrono::TimeDelta::milliseconds(2);
+    assert!(historical_at < parent.commit.committed_at);
+    let mut historical = agent_mode_request_at(
+        &join.authority_commit,
+        "public",
+        None,
+        &principal,
+        &agent,
+        &guard,
+        historical_at,
+    );
+    source_candidate(&pool, &mut historical).await;
+    let historical = ordinary_realm::source_request(&pool, historical).await;
+    let before = agent_mode_footprint(&pool, realm_id).await;
+    assert!(
+        uow.commit_event(historical)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("owned current source coordinates differ")
+    );
+    assert_eq!(agent_mode_footprint(&pool, realm_id).await, before);
     let mut public = make_mode(&join.authority_commit, "public", None);
     source_candidate(&pool, &mut public).await;
     let mut unguarded = public.clone();
@@ -4351,9 +4392,17 @@ async fn agent_publish_policy_scenario<F>(
             let expected = if effect == "deny" {
                 "forbids publishing"
             } else {
-                "unresolved quarantine or review evidence"
+                "approval_required"
             };
             assert!(error.to_string().contains(expected), "{error}");
+            if effect == "require_review" {
+                assert!(
+                    error
+                        .to_string()
+                        .contains("requires current management review"),
+                    "{error}"
+                );
+            }
             assert_eq!(agent_mode_footprint(&pool, realm_id).await, before);
         } else {
             let opening = ordinary_realm::source_request(&pool, opening).await;

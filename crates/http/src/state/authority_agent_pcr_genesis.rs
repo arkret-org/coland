@@ -41,7 +41,7 @@ pub(super) async fn submit_self_agent_pcr_genesis(
     request: &EventAdmissionSubmission,
 ) -> ServiceResult<AuthoritySubmitOutcome> {
     let event = &request.event;
-    arkret_schema::validate_event_for_submit(event)
+    arkret_event_draft::validate_event_for_submit(event)
         .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
     if request.approval_signatures.is_some() {
         return Err(ServiceError::SchemaViolation(

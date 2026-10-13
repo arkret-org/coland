@@ -464,7 +464,8 @@ impl AuthorityProtocolPort for AppState {
             event.kind,
             arkret_wire::EventKind::ConsentGrant | arkret_wire::EventKind::ConsentRevoke
         ) {
-            let result = super::authority_consent::submit(self, session, &request).await?;
+            let result =
+                Box::pin(super::authority_consent::submit(self, session, &request)).await?;
             let (status, record) = match result {
                 coland_storage::ConsentAdmissionOutcome::Committed(record) => {
                     (arkret_wire::AuthorityCommitStatus::Committed, record)
@@ -481,8 +482,10 @@ impl AuthorityProtocolPort for AppState {
         // The Agent PCR genesis is executed by the controller on the Agent's
         // behalf; its unit verifies that delegated producer itself.
         if super::authority_agent_pcr_genesis::is_agent_pcr_genesis(event) {
-            return super::authority_agent_pcr_genesis::submit_self_agent_pcr_genesis(
-                self, session, &request,
+            return Box::pin(
+                super::authority_agent_pcr_genesis::submit_self_agent_pcr_genesis(
+                    self, session, &request,
+                ),
             )
             .await;
         }
@@ -498,8 +501,10 @@ impl AuthorityProtocolPort for AppState {
                 .is_some_and(|actor| actor.as_account_id().is_some())
                 && event.actor_id.as_account_id().is_some())
         {
-            return super::authority_agent_control::submit_self_agent_controller_event(
-                self, session, &request,
+            return Box::pin(
+                super::authority_agent_control::submit_self_agent_controller_event(
+                    self, session, &request,
+                ),
             )
             .await;
         }
@@ -520,61 +525,61 @@ impl AuthorityProtocolPort for AppState {
                     "an Agent control Event carries no approval signatures".to_owned(),
                 ));
             }
-            let controller =
-                crate::routing::identity::session_actor::validated_session_actor(self, session)
-                    .await
-                    .map_err(|error| {
-                        ServiceError::Conflict(format!(
-                            "authenticated Account unavailable: {error}"
-                        ))
-                    })?;
+            let controller = Box::pin(
+                crate::routing::identity::session_actor::validated_session_actor(self, session),
+            )
+            .await
+            .map_err(|error| {
+                ServiceError::Conflict(format!("authenticated Account unavailable: {error}"))
+            })?;
             if event.executed_by.as_ref() != Some(&controller) {
                 return Err(ServiceError::Conflict(
                     "an Agent control Event is executed by the authenticated controller".to_owned(),
                 ));
             }
             if let Some(original) =
-                super::authority_self_event_unit::exact_replay(self, event).await?
+                Box::pin(super::authority_self_event_unit::exact_replay(self, event)).await?
             {
                 return Ok(original);
             }
         }
-        if let Some(original) = super::authority_forward::recover_forwarded_original(
+        if let Some(original) = Box::pin(super::authority_forward::recover_forwarded_original(
             self,
             session,
             &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
                 request.clone(),
             ),
-        )
+        ))
         .await?
         {
             return Ok(original);
         }
-        let (producer_guard, producer_key) =
+        let (producer_guard, producer_key) = Box::pin(
             super::authority_producer_validation::verify_self_event_producer_key(
                 self, session, event,
-            )
-            .await
-            .inspect_err(|_error| {
-                #[cfg(feature = "conformance-harness")]
-                crate::routing::trace_submission_refusal(
-                    "producer_preflight",
-                    crate::routing::submission_kind_class(&event.kind),
-                    if session.agent_session().is_some() {
-                        "agent"
-                    } else {
-                        "human"
-                    },
-                    Some(_error),
-                );
-            })?;
-        if let Some(governance) = remote_governance(self, &event.realm_id).await? {
-            let outcome = super::authority_forward::forward_self_event_with_session(
+            ),
+        )
+        .await
+        .inspect_err(|_error| {
+            #[cfg(feature = "conformance-harness")]
+            crate::routing::trace_submission_refusal(
+                "producer_preflight",
+                crate::routing::submission_kind_class(&event.kind),
+                if session.agent_session().is_some() {
+                    "agent"
+                } else {
+                    "human"
+                },
+                Some(_error),
+            );
+        })?;
+        if let Some(governance) = Box::pin(remote_governance(self, &event.realm_id)).await? {
+            let outcome = Box::pin(super::authority_forward::forward_self_event_with_session(
                 self,
                 &governance,
                 request,
                 session,
-            )
+            ))
             .await;
             #[cfg(feature = "conformance-harness")]
             if let Err(error) = &outcome {
@@ -591,7 +596,7 @@ impl AuthorityProtocolPort for AppState {
             }
             return outcome;
         }
-        if let Some(outcome) = refuse_unrouted_event(self, event).await? {
+        if let Some(outcome) = Box::pin(refuse_unrouted_event(self, event)).await? {
             return Ok(outcome);
         }
         match self_event_route(&event.kind)? {
@@ -614,8 +619,10 @@ impl AuthorityProtocolPort for AppState {
                 .await;
             }
             SelfEventRoute::KeyBackupPointer => {
-                return super::authority_key_backup_pointer::submit_self_key_backup_pointer(
-                    self, &request,
+                return Box::pin(
+                    super::authority_key_backup_pointer::submit_self_key_backup_pointer(
+                        self, &request,
+                    ),
                 )
                 .await
                 .inspect_err(|_error| {
@@ -633,8 +640,10 @@ impl AuthorityProtocolPort for AppState {
                 });
             }
             SelfEventRoute::AccountabilityGrant => {
-                return super::authority_accountability_grant::submit_self_accountability_grant(
-                    self, &request,
+                return Box::pin(
+                    super::authority_accountability_grant::submit_self_accountability_grant(
+                        self, &request,
+                    ),
                 )
                 .await;
             }

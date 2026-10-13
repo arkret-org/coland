@@ -120,6 +120,119 @@ async fn one_installation_creates_multiple_independent_bots() {
 }
 
 #[tokio::test]
+async fn ghost_creation_quota_rolls_back_with_the_unit_and_counts_exact_retry_once() {
+    let fixture = Fixture::new().await;
+    let namespace = format!("bridge.{}", uuid::Uuid::now_v7().simple());
+    let package = signed_applet_package(
+        &format!("ak:applet:{}", uuid::Uuid::now_v7()),
+        &namespace,
+        &fixture.state.service_core_id(),
+        None,
+    );
+    let quota = serde_json::from_value(json!({
+        "constraint_kind":"quota", "constraint_subkind":"rate", "effect":"allow",
+        "max_operations":1, "period":"P1D", "constraint_scope":"per_realm"
+    }))
+    .unwrap();
+    let installed = fixture
+        .install_package_with_ghost_quota(
+            true,
+            package,
+            &namespace,
+            ScopeRef::Realm {
+                realm_id: fixture.realm.clone(),
+            },
+            Some(quota),
+        )
+        .await;
+    let body = fixture
+        .ghost_body(&installed, &namespace, "quota-first")
+        .await;
+    let before = authority_snapshot(&fixture.pool).await;
+    {
+        let mut conn = fixture.pool.get().await.unwrap();
+        diesel::sql_query(
+            "CREATE FUNCTION fail_applet_profile_write() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN RAISE EXCEPTION 'applet profile write fault'; END $$",
+        )
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        diesel::sql_query(
+            "CREATE TRIGGER fail_applet_profile_write BEFORE INSERT OR UPDATE \
+             ON actor_profile_current_results FOR EACH ROW EXECUTE FUNCTION fail_applet_profile_write()",
+        ).execute(&mut *conn).await.unwrap();
+    }
+    let (status, failed) = fixture.ghost_commit(&installed, &body, "quota-first").await;
+    let failed_snapshot = authority_snapshot(&fixture.pool).await;
+    {
+        let mut conn = fixture.pool.get().await.unwrap();
+        diesel::sql_query(
+            "DROP TRIGGER fail_applet_profile_write ON actor_profile_current_results",
+        )
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        diesel::sql_query("DROP FUNCTION fail_applet_profile_write()")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "late write fault was not reached: {failed}"
+    );
+    assert_eq!(failed["type"], "https://arkret.org/problems/internal_error");
+    assert_eq!(
+        before, failed_snapshot,
+        "failed unit consumed quota or retained business state"
+    );
+    let (status, accepted) = fixture.ghost_commit(&installed, &body, "quota-first").await;
+    assert_eq!(status, StatusCode::CREATED, "{accepted}");
+    let after = authority_snapshot(&fixture.pool).await;
+    assert_eq!(after["quota_counters"].as_array().unwrap().len(), 1);
+    assert_eq!(after["quota_counters"][0]["consumed"], 1);
+    assert_eq!(after["quota_consumptions"].as_array().unwrap().len(), 1);
+    let (status, replay) = fixture.ghost_commit(&installed, &body, "quota-retry").await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(accepted, replay);
+    assert_eq!(after, authority_snapshot(&fixture.pool).await);
+    let mut changed = body.clone();
+    let mut proof = changed["managed_actor_bundle"]["proof"]["jws"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let signature_start = proof.rfind('.').unwrap() + 1;
+    let replacement = if proof.as_bytes()[signature_start] == b'A' {
+        "B"
+    } else {
+        "A"
+    };
+    proof.replace_range(signature_start..signature_start + 1, replacement);
+    changed["managed_actor_bundle"]["proof"]["jws"] = json!(proof);
+    let (status, refused) = fixture
+        .ghost_commit(&installed, &changed, "quota-mutated-retry")
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(
+        refused["type"],
+        "https://arkret.org/problems/duplicate_conflict"
+    );
+    assert_eq!(after, authority_snapshot(&fixture.pool).await);
+    let second = fixture
+        .ghost_body(&installed, &namespace, "quota-second")
+        .await;
+    let exhausted_before = authority_snapshot(&fixture.pool).await;
+    let (status, refused) = fixture
+        .ghost_commit(&installed, &second, "quota-second")
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{refused}");
+    assert_eq!(refused["type"], "https://arkret.org/problems/rate_limited");
+    assert_eq!(exhausted_before, authority_snapshot(&fixture.pool).await);
+}
+
+#[tokio::test]
 async fn ghost_reuse_across_realms_preserves_anchors_without_events_or_completion() {
     let mut fixture = Fixture::new().await;
     let namespace = format!("bridge.{}", uuid::Uuid::now_v7().simple());
@@ -1001,6 +1114,8 @@ async fn authority_snapshot(pool: &PgPool) -> Value {
         'commits',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM realm_commits r), \
         'profiles',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM actor_profile_current_results r), \
         'grants',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM capability_grant_current_results r), \
+        'quota_counters',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM capability_quota_counters r), \
+        'quota_consumptions',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM capability_quota_consumptions r), \
         'managed',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM applet_managed_identities r), \
         'installs',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM applet_installations r), \
         'claims',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM managed_authority_claims r), \
@@ -1806,6 +1921,18 @@ impl NativeAppletService {
         use std::io::{Read as _, Write as _};
 
         use rand_chacha::rand_core::SeedableRng as _;
+        let expected = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/outbox-test-ca.pem")
+            .canonicalize()
+            .expect("checked-in Applet TLS test CA");
+        let configured = std::env::var_os("SSL_CERT_FILE")
+            .and_then(|path| std::path::Path::new(&path).canonicalize().ok());
+        assert_eq!(
+            configured.as_deref(),
+            Some(expected.as_path()),
+            "native Applet history requires SSL_CERT_FILE={}",
+            expected.display(),
+        );
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let endpoint: Url = format!("https://{}/", listener.local_addr().unwrap())
@@ -2798,6 +2925,18 @@ impl Fixture {
         namespace: &str,
         scope: ScopeRef,
     ) -> Installed {
+        self.install_package_with_ghost_quota(ghost, package, namespace, scope, None)
+            .await
+    }
+
+    async fn install_package_with_ghost_quota(
+        &self,
+        ghost: bool,
+        package: AppletPackage,
+        namespace: &str,
+        scope: ScopeRef,
+        ghost_quota: Option<GrantConstraint>,
+    ) -> Installed {
         ingest_applet_service_id_document(&self.state, &package).await;
         let evidence = applet_registration_epoch_evidence(&package);
         let registration = self.admin_event(
@@ -2840,11 +2979,19 @@ impl Fixture {
                         }
                         _ => panic!("fixture only supports Realm/Circle"),
                     }],
-                    constraints: vec![GrantConstraint::applet_authority(
-                        package.applet_id.clone(),
-                        ActorId::service(package.service_id.clone()),
-                        package.registration_epoch.clone(),
-                    )],
+                    constraints: {
+                        let mut constraints = vec![GrantConstraint::applet_authority(
+                            package.applet_id.clone(),
+                            ActorId::service(package.service_id.clone()),
+                            package.registration_epoch.clone(),
+                        )];
+                        if *action == "ak.applet.ghost.provision"
+                            && let Some(quota) = &ghost_quota
+                        {
+                            constraints.push(quota.clone());
+                        }
+                        constraints
+                    },
                     issuer_authority_refs: vec![IssuerAuthorityRef::RealmRoot {
                         realm_id: self.realm.clone(),
                         authority_event_ref: self

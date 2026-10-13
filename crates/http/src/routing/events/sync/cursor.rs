@@ -49,9 +49,10 @@ pub enum SyncCursorError {
     Revoked,
 }
 
-pub(crate) const ACCOUNT_STREAM_CURSOR_PURPOSE: &str = "ak.self.account.stream.subscribe.v1";
+pub(crate) const ACCOUNT_STREAM_CURSOR_PURPOSE: &str =
+    arkret_wire::CapabilityActionId::SELF_ACCOUNT_STREAM_SUBSCRIBE_V1;
 pub(crate) const COMMITTED_STREAM_CURSOR_PURPOSE: &str =
-    "ak.self.committed_event.stream.subscribe.v1";
+    arkret_wire::CapabilityActionId::SELF_COMMITTED_EVENT_STREAM_SUBSCRIBE_V1;
 
 /// Independent stream coordinates stay behind the existing opaque handle;
 /// no private stream-set shape is exposed in the cursor token.
@@ -196,7 +197,8 @@ fn validate_sync_binding(
         })
 }
 
-pub(crate) const DEVICE_MESSAGES_CURSOR_PURPOSE: &str = "ak.self.device_messages.read.list.v1";
+pub(crate) const DEVICE_MESSAGES_CURSOR_PURPOSE: &str =
+    arkret_wire::ServiceOperationId::SELF_DEVICE_MESSAGES_READ_LIST_V1;
 #[cfg(test)]
 pub(crate) const STREAM_CURSOR_PURPOSE: &str = "stream";
 pub(crate) const BARRIER_CURSOR_PURPOSE: &str = "barrier";

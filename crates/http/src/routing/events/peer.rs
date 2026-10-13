@@ -1607,7 +1607,7 @@ pub(in crate::routing) async fn authenticated_peer_context(
         let now = chrono::Utc::now();
         Some(coland_storage::IdempotencyRecord {
             authenticated_actor: arkret_wire::ActorId::service(source_service_id.clone()),
-            operation_id: "ak.peer.events.command.submit.v1".to_owned(),
+            operation_id: arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1.to_owned(),
             // The registered request identity is canonical_hash of
             // the full body, also when no optional HTTP key is sent.
             idempotency_key: request_hash.clone(),

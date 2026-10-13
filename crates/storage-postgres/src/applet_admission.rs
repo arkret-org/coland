@@ -881,7 +881,7 @@ async fn admit_in_connection(
             ..Default::default()
         };
         let action = match p.actor_role {
-            AppletManagedActorRole::Bot => "ak.applet.bot.provision",
+            AppletManagedActorRole::Bot => arkret_wire::CapabilityActionId::APPLET_BOT_PROVISION,
             AppletManagedActorRole::Ghost => {
                 arkret_wire::CapabilityActionId::APPLET_GHOST_PROVISION
             }

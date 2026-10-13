@@ -249,7 +249,7 @@ pub(crate) async fn project_agent_key_in_connection(
             write_key(conn, event, commit, &payload.agent_id, &key_id, entries).await?;
             if !payload.supersedes.is_empty() {
                 let audit = json!({
-                    "action": "ak.agent.key.authorize",
+                    "action": arkret_wire::CapabilityActionId::AGENT_KEY_AUTHORIZE,
                     "outcome": "accepted",
                     "reason_code": arkret_wire::ReasonCode::SUPERSEDED_BY_REPAIRING,
                     "event_id": event.event_id,

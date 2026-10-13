@@ -49,7 +49,7 @@ mod tests {
         json!({
             "payload": {
                 "grant": {
-                    "schema": "ak.schema.capability.v1",
+                    "schema": arkret_wire::SchemaId::CAPABILITY_V1,
                     "realm_id": "ak:realm:AcnJ4V0xcEtprkV1EojkpKLTdP6Jene1sZpnjB6IqB8I",
                     "issuer_id": actor,
                     "subject": actor,

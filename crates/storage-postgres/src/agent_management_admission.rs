@@ -501,7 +501,7 @@ fn require_member_event_read(
             ownership: Some((controller, agent)),
             operation: AgentPolicyOperation::Read,
             content_action: Some(
-                CapabilityActionId::from_wire("ak.event.read")
+                CapabilityActionId::from_wire(arkret_wire::CapabilityActionId::EVENT_READ)
                     .ok_or_else(|| unavailable("Event read action is unregistered"))?,
             ),
             resources: Some(&resources),

@@ -19,7 +19,7 @@ pub(crate) fn service_id_and_did(
         .map_err(|e| AppError::internal(e.to_string()))?;
     Ok((core, commitment.did.clone()))
 }
-#[salvo::oapi::endpoint(operation_id = "ak.open.service.read.resolution.v1", tags("identity"))]
+#[salvo::oapi::endpoint(operation_id = "ak.open.service.read.resolution", tags("identity"))]
 async fn open_service_resolution(
     service_id: PathParam<String>,
     depot: &mut Depot,

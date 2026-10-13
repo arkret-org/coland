@@ -201,7 +201,10 @@ pub(crate) async fn commit_pin_in_connection(
             .bind::<BigInt,_>(position).get_result::<EventRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
         let rank = prior
             .as_ref()
-            .filter(|row| row.envelope.get("kind").and_then(Value::as_str) != Some("ak.pin.remove"))
+            .filter(|row| {
+                row.envelope.get("kind").and_then(Value::as_str)
+                    != Some(arkret_wire::CapabilityActionId::PIN_REMOVE)
+            })
             .and_then(|row| row.envelope.pointer("/payload/rank"))
             .and_then(Value::as_str);
         if event.kind == EventKind::PinReorder && rank.is_none() {

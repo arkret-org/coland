@@ -84,7 +84,7 @@ pub async fn run_pin_admission_fixture() -> Vec<(&'static str, usize)> {
         arkret_wire::EventKind::CapabilityGrant,
         &founder(),
         json!({"grant":{
-            "schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":founder_actor(),"subject":founder_actor(),
+            "schema":arkret_wire::SchemaId::CAPABILITY_V1,"realm_id":realm,"issuer_id":founder_actor(),"subject":founder_actor(),
             "actions":fixture["owner_grant_actions"],"resources":[{"kind":"realm","realm_id":realm}],
             "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":discussion.unit.transactions[0].event.event_id,"authority_generation":0}],
             "issued_at":arkret_canonical::format_timestamp_canonical(at)

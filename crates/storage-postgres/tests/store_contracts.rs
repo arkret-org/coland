@@ -895,7 +895,7 @@ fn fixture_idempotency_record(
 ) -> coland_storage::IdempotencyRecord {
     coland_storage::IdempotencyRecord {
         authenticated_actor: request.authority_commit.event.actor_id.clone(),
-        operation_id: "ak.moderation.franking_proof.submit".to_owned(),
+        operation_id: "ak.peer.events.command.submit.v1".to_owned(),
         idempotency_key,
         request_hash: request.event.canonical_digest.clone(),
         response_status: 202,

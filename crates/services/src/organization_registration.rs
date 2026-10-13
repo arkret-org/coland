@@ -24,7 +24,7 @@ use crate::identity::{DidService, PinnedDidDocumentState, PinnedDidVersionStatus
 
 const CHALLENGE_LIFETIME: Duration = Duration::seconds(300);
 const RECEIPT_LIFETIME: Duration = Duration::days(90);
-const GOVERNANCE_PROFILE: &str = "ak.org.governance.v1";
+const GOVERNANCE_PROFILE: &str = "ak.organization.governance.v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OrganizationRegistrationErrorCode {
@@ -1145,7 +1145,7 @@ fn governance_policy(
         })?;
     if governance.get("profile").and_then(Value::as_str) != Some(GOVERNANCE_PROFILE) {
         return Err(OrganizationRegistrationError::proof(
-            "pinned DID governance profile is not ak.org.governance.v1",
+            "pinned DID governance profile is not ak.organization.governance.v1",
         ));
     }
     Ok(governance)

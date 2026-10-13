@@ -451,7 +451,7 @@ pub(super) async fn issue_key_backup_unlock_challenge(
         challenge_id: random(16),
         challenge: random(32),
         nonce: random(16),
-        operation: "ak.self.keys.backups.command.unlock.v1".to_owned(),
+        operation: arkret_wire::ServiceOperationId::SELF_KEYS_BACKUPS_COMMAND_UNLOCK_V1.to_owned(),
         account_id: arkret_wire::AccountId::new(
             arkret_wire::DidCoreId::new(session.actor.clone())
                 .map_err(|error| AppError::internal(error.to_string()))?,

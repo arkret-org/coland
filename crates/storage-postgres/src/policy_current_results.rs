@@ -654,8 +654,10 @@ pub(crate) async fn read_management_policy_exact_in_connection(
                 value.get("schema").and_then(Value::as_str),
                 value.get("policy_kind").and_then(Value::as_str),
             ) {
-                (Some("ak.schema.policy.v1"), Some("agent")) => Some(PolicyKind::Agent),
-                (Some("ak.schema.policy.v1"), Some("applet")) => Some(PolicyKind::Applet),
+                (Some(arkret_wire::SchemaId::POLICY_V1), Some("agent")) => Some(PolicyKind::Agent),
+                (Some(arkret_wire::SchemaId::POLICY_V1), Some("applet")) => {
+                    Some(PolicyKind::Applet)
+                }
                 _ => None,
             }
         });
@@ -766,7 +768,8 @@ async fn check_policy_cas_in_connection(
         .bind::<Text,_>(payload.policy_id.as_str()).get_result::<Present>(&mut *conn)
         .await.map_err(PersistenceError::database)?.present;
     let current_kind = current.as_ref().and_then(|row| {
-        if row.value.get("schema").and_then(Value::as_str) != Some("ak.schema.policy.v1") {
+        if row.value.get("schema").and_then(Value::as_str) != Some(arkret_wire::SchemaId::POLICY_V1)
+        {
             return None;
         }
         match row.value.get("policy_kind").and_then(Value::as_str) {

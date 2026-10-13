@@ -94,8 +94,10 @@ pub(crate) use participation::load_agent_participation_outcome;
 use participation::*;
 use sidecar::*;
 
-const GET_AGENT_SERVICE_OPERATION: &str = "ak.self.agent.resource.get.v1";
-const PAIR_AGENT_KEY_SERVICE_OPERATION: &str = "ak.gate.account.command.pair_agent_key.v1";
+const GET_AGENT_SERVICE_OPERATION: &str =
+    arkret_wire::ServiceOperationId::SELF_AGENT_RESOURCE_GET_V1;
+const PAIR_AGENT_KEY_SERVICE_OPERATION: &str =
+    arkret_wire::ServiceOperationId::GATE_ACCOUNT_COMMAND_PAIR_AGENT_KEY_V1;
 
 fn agent_service_signature_present(req: &Request) -> bool {
     req.headers().contains_key("signature-input") || req.headers().contains_key("signature")

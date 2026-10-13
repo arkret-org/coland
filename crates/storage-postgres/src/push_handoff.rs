@@ -486,7 +486,7 @@ fn device_revocation_input_digest(
     transition: &coland_storage::DeviceRevocationTransition,
 ) -> PersistenceResult<Hash> {
     let input = serde_json::json!({
-        "operation": "ak.device.revoke.public_push",
+        "operation": "org.arkret.coland.push.device_revocation.v1",
         "selector": transition.selector,
         "revoke_ref": transition.revoke_ref,
     });
@@ -499,7 +499,7 @@ fn expiry_input_digest(
     expires_at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<Hash> {
     let input = serde_json::json!({
-        "operation": "ak.push.registration.expiry",
+        "operation": "org.arkret.coland.push.registration_expiry.v1",
         "source_station_id": stored.source_station_id,
         "registration_id": stored.registration_id,
         "expires_at": arkret_canonical::format_timestamp_canonical(expires_at),

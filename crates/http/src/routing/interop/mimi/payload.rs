@@ -37,7 +37,7 @@ pub(super) async fn persist_mimi_canonical_message_event(
     let mut receipt = json!({"schema":arkret_wire::SchemaId::MIMI_INTEROP_V1,
         "receipt_kind":"content_mapping_receipt","profile":arkret_wire::ProfileId::MIMI_INTEROP_V1,
         "mimi_room_uri":room_uri,"source_format":request.ciphertext.content_type,
-        "target_format":"ak.message.create","original_envelope_digest":event.payload["mimi_provenance"]["source_envelope_digest"],
+        "target_format":arkret_wire::CapabilityActionId::MESSAGE_CREATE,"original_envelope_digest":event.payload["mimi_provenance"]["source_envelope_digest"],
         "mapped_operation_id":event.event_id.as_str().trim_start_matches("ak:event:"),"arkret_event_id":event.event_id,
     });
     let bytes = arkret_canonical::canonical_json_bytes(&receipt)

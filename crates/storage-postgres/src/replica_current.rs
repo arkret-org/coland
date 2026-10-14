@@ -211,7 +211,7 @@ async fn guard_snapshot_revisions(
         let incoming_position = position(revision.stream_position)?;
         match selector {
             S::Policy { policy_id } => {
-                crate::policy_current_results::validate_disclosed_agent_policy(
+                crate::policy_current_results::validate_disclosed_shared_policy(
                     realm_id,
                     policy_id,
                     source_stream_ref,
@@ -228,7 +228,7 @@ async fn guard_snapshot_revisions(
                                 || old.value != *value))
                 }) {
                     return Err(malformed(
-                        "Agent Policy snapshot revision, source or value conflicts",
+                        "shared Policy snapshot revision, source or value conflicts",
                     ));
                 }
             }
@@ -677,13 +677,12 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
             #[diesel(sql_type = diesel::sql_types::Bool)]
             present: bool,
         }
-        let omitted = diesel::sql_query("SELECT EXISTS(SELECT 1 FROM replica_authorization_rows r WHERE r.realm_id=$1 AND r.selector->>'kind'='policy' AND r.value->>'schema'='ak.schema.policy.v1' AND r.value->>'policy_kind'='agent' AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements($2) incoming WHERE incoming->'selector'=r.selector)) AS present")
+        let omitted = diesel::sql_query("SELECT EXISTS(SELECT 1 FROM replica_authorization_rows r WHERE r.realm_id=$1 AND r.selector->>'kind'='policy' AND r.value->>'schema'='ak.schema.policy.v1' AND r.value->>'policy_kind' IN ('access','moderation','agent') AND EXISTS(SELECT 1 FROM jsonb_array_elements($3) h WHERE h->'stream_ref'=r.source_stream_ref) AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements($2) incoming WHERE incoming->'selector'=r.selector)) AS present")
             .bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(entries).map_err(malformed)?)
+            .bind::<Jsonb,_>(serde_json::to_value(visible_heads).map_err(malformed)?)
             .get_result::<Present>(&mut *conn).await.map_err(PersistenceError::database)?.present;
         if omitted {
-            return Err(malformed(
-                "snapshot cannot erase an accepted shared Agent Policy",
-            ));
+            return Err(malformed("snapshot cannot erase an accepted shared Policy"));
         }
     }
     if replaces_realm
@@ -753,7 +752,7 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
         };
         use arkret_wire::CurrentSelector as S;
         if let S::Policy { policy_id } = selector {
-            crate::policy_current_results::validate_disclosed_agent_policy(
+            crate::policy_current_results::validate_disclosed_shared_policy(
                 realm_id,
                 policy_id,
                 source_stream_ref,
@@ -1288,6 +1287,7 @@ pub(crate) async fn advance_in_connection(
                 policy_id: body.policy_id.clone(),
             };
             let value = serde_json::to_value(&body.value).map_err(malformed)?;
+            let shared = matches!(&body.value, PolicySetValue::Governance(p) if matches!(p.policy_kind, arkret_wire::PolicyKind::Access | arkret_wire::PolicyKind::Moderation | arkret_wire::PolicyKind::Agent));
             let agent = matches!(&body.value, PolicySetValue::Governance(p) if p.policy_kind == arkret_wire::PolicyKind::Agent);
             #[derive(diesel::QueryableByName)]
             struct Present {
@@ -1311,7 +1311,7 @@ pub(crate) async fn advance_in_connection(
                 },
                 value,
             };
-            if agent {
+            if shared {
                 if event.realm_id != commit.realm_id
                     || event.event_id != commit.event_ref
                     || arkret_wire::CommitStreamRef::from_scope(&event.scope_ref, None)
@@ -1321,7 +1321,7 @@ pub(crate) async fn advance_in_connection(
                     return Err(malformed("Policy replica Event and covering Commit differ"));
                 }
                 let arkret_wire::TypedCurrentRow::Value { value, .. } = &entry;
-                crate::policy_current_results::validate_disclosed_agent_policy(
+                crate::policy_current_results::validate_disclosed_shared_policy(
                     &event.realm_id,
                     &body.policy_id,
                     &commit.stream_ref,
@@ -1332,7 +1332,7 @@ pub(crate) async fn advance_in_connection(
             }
             crate::policy_current_results::commit_replica_in_connection(conn, event, commit)
                 .await?;
-            if agent {
+            if shared {
                 crate::replica_authorization::save_row(
                     conn,
                     &event.realm_id,
@@ -1660,6 +1660,17 @@ mod circle_revision_tests;
 mod tests {
     #[tokio::test]
     async fn agent_policy_snapshot_and_tail_keep_exact_current_without_fabricating_admission() {
+        shared_policy_snapshot_and_tail("agent").await;
+    }
+
+    #[tokio::test]
+    async fn product_policies_snapshot_and_tail_keep_exact_current_and_refuse_erasure() {
+        for kind in ["access", "moderation"] {
+            shared_policy_snapshot_and_tail(kind).await;
+        }
+    }
+
+    async fn shared_policy_snapshot_and_tail(kind: &str) {
         let database = TestDatabase::lease().await;
         let pool = database.pool();
         let mut conn = pool.get().await.unwrap();
@@ -1674,9 +1685,15 @@ mod tests {
             arkret_wire::DidCoreId::new("ak:did_core:web:policy-author.example").unwrap(),
             arkret_wire::DidCoreId::new("ak:did_core:web:policy-station.example").unwrap(),
         ));
+        let rules = if kind == "agent" {
+            json!([{"rule_id":"ban","kind":"agent","effect":"deny",
+                "agent_target":{"kind":"all"},"agent_operations":["execute"]}])
+        } else {
+            json!([{"rule_id":"ban","kind":"action","effect":"deny",
+                "actions":["ak.typing.broadcast"]}])
+        };
         let value = json!({"schema":"ak.schema.policy.v1","id":id,"realm_id":realm,
-            "policy_kind":"agent","rules":[{"rule_id":"ban","kind":"agent","effect":"deny",
-                "agent_target":{"kind":"all"},"agent_operations":["execute"]}],
+            "policy_kind":kind,"rules":rules,
             "default_effect":"allow","created_by":actor,"created_at":at});
         let head = arkret_wire::CommitStreamHead {
             stream_ref: arkret_wire::CommitStreamRef::Realm {
@@ -1726,7 +1743,11 @@ mod tests {
             value[field] = match field {
                 "id" => json!("ak:policy:0198ff00-0000-7000-8000-000000000002"),
                 "realm_id" => json!(null),
-                "policy_kind" => json!("access"),
+                "policy_kind" => json!(if kind == "agent" {
+                    "access"
+                } else {
+                    "retention"
+                }),
                 _ => json!("ak.schema.recovery_policy.v1"),
             };
             invalid.push(changed);
@@ -1785,13 +1806,17 @@ mod tests {
         // It does not exercise production signing or Agent management admission.
         let mut next_value = value.clone();
         next_value["rules"][0]["effect"] = json!("allow");
+        let mut body = json!({"policy_id":id,"value":next_value});
+        if kind == "agent" {
+            body["expected_revision"] = json!({"commit_id":head.commit_id,"stream_position":7});
+        }
         let event = arkret_wire::test_support::raw_event_for_actor_at(
             "ak.policy.set",
             arkret_wire::ScopeRef::Realm {
                 realm_id: realm.clone(),
             },
             actor,
-            json!({"policy_id":id,"expected_revision":{"commit_id":head.commit_id,"stream_position":7},"value":next_value}),
+            body,
             at,
         )
         .unwrap();
@@ -1835,6 +1860,9 @@ mod tests {
             json!(commit.commit_id)
         );
         assert_eq!(after.value["private_count"], 1);
+        if kind != "agent" {
+            return;
+        }
         // The historical reducer never re-applies the producer's old CAS.
         let mut rebound = next_value;
         rebound["policy_kind"] = json!("access");

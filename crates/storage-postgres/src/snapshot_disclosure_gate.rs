@@ -116,7 +116,7 @@ const AUDITED_FAMILIES: &[&str] = &[
     "capability_grant_current_results",
     "realm_policy_bundle_current_results",
     "schema_definition_current_results",
-    // Only exact Realm-bound generic Agent Policy has shared disclosure.
+    // Exact Realm-bound Access, Moderation and Agent policies are shared state.
     "policy_current_results",
     "policy_action_current_results",
     // Controller-PCR confirmation state has no ordinary Realm disclosure carrier.
@@ -939,7 +939,7 @@ async fn disclosure_facts_in_connection(
             OR EXISTS(SELECT 1 FROM mimi_room_binding_current_results WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM policy_current_results WHERE realm_id=$1 \
                 AND (value->>'schema' IS DISTINCT FROM 'ak.schema.policy.v1' \
-                    OR value->>'policy_kind' IS DISTINCT FROM 'agent' \
+                    OR COALESCE(value->>'policy_kind','') NOT IN ('access','moderation','agent') \
                     OR value->>'realm_id' IS DISTINCT FROM realm_id)) \
             OR EXISTS(SELECT 1 FROM agent_status_current_results WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM agent_key_current_results WHERE realm_id=$1) \
@@ -2070,7 +2070,7 @@ pub(crate) fn disclose_to_account(
             | CurrentSelector::InviteDirectedInvitee { .. }
             | CurrentSelector::CapabilityGrant { .. } => {}
             CurrentSelector::Policy { policy_id } => {
-                crate::policy_current_results::validate_disclosed_agent_policy(
+                crate::policy_current_results::validate_disclosed_shared_policy(
                     &material.realm_id,
                     policy_id,
                     source_stream_ref,
@@ -2960,6 +2960,47 @@ mod tests {
         // Governance current remains available below the caller's content floor.
         let TypedCurrentRow::Value { revision, .. } = &policy;
         assert!(revision.stream_position < facts.caller_floor.as_ref().unwrap().oldest_position);
+    }
+
+    #[test]
+    fn product_policy_disclosure_preserves_scope_and_signed_values_below_floor() {
+        for kind in ["access", "moderation"] {
+            for circle in [false, true] {
+                let (caller, mut material, facts) = if circle {
+                    circle_fixture()
+                } else {
+                    joined_fixture()
+                };
+                let policy_id =
+                    arkret_wire::PolicyId::new("ak:policy:0198ff00-0000-7000-8000-000000000001")
+                        .unwrap();
+                let value = json!({"schema":"ak.schema.policy.v1","id":policy_id,
+                    "realm_id":realm_id(),"policy_kind":kind,
+                    "rules":[{"rule_id":"typing","kind":"action","effect":"deny",
+                        "actions":["ak.typing.broadcast"]}],"default_effect":"allow",
+                    "created_by":ActorId::account(caller.clone()),
+                    "created_at":"2026-10-05T12:00:00.000Z"});
+                let mut policy = row(CurrentSelector::Policy { policy_id }, 1, value);
+                if circle {
+                    let TypedCurrentRow::Value {
+                        source_stream_ref, ..
+                    } = &mut policy;
+                    *source_stream_ref = CommitStreamRef::Circle {
+                        realm_id: realm_id(),
+                        circle_id: CircleId::from_event_id(&event_id(0x51)),
+                    };
+                }
+                material.current_state_entries.push(policy.clone());
+                let disclosed = disclose_to_account(material.clone(), &caller, &facts).unwrap();
+                assert!(disclosed.current_state_entries.contains(&policy));
+                if circle {
+                    let mut outsider_facts = facts;
+                    outsider_facts.circle_floors.clear();
+                    let outsider = disclose_to_account(material, &caller, &outsider_facts).unwrap();
+                    assert!(!outsider.current_state_entries.contains(&policy));
+                }
+            }
+        }
     }
 
     #[test]

@@ -86,13 +86,15 @@ pub(super) fn blob_upload_outcome(
         AppError::internal(format!("upload receipt canonicalization failed: {error}"))
     })?;
     let signature = state.notary_signing_key().sign(&canonical_bytes);
+    let signature_kid = arkret_wire::DidUrl::new(format!("{}#notary-key", state.service_did()))
+        .map_err(|error| AppError::internal(format!("notary key DID URL is invalid: {error}")))?;
     let upload_receipt = UploadReceipt {
         blob_ref: blob_ref.clone(),
         size_bytes,
         received_at,
-        issuer_id: issuer_id.clone(),
+        issuer_id,
         signature: SignatureValue {
-            kid: issuer_id,
+            kid: signature_kid,
             signature_algorithm: "Ed25519".to_owned(),
             sig: URL_SAFE_NO_PAD.encode(signature.to_bytes()),
         },

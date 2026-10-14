@@ -463,3 +463,359 @@ async fn changed_complete_pair_cannot_reuse_its_business_event_fence() {
     assert!(error.contains("duplicate_conflict"), "{error}");
     assert_eq!(event_count(&pool, &discussion.realm_id()).await, count);
 }
+
+async fn copy_private_database(source: &str, destination: &str) {
+    let source = source.to_owned();
+    let destination = destination.to_owned();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        // Planned handoff is activation of pre-imported private durable state.
+        // Transfer the whole database, including hidden streams, private audit,
+        // nonce fences and outbox, independently of ordinary member disclosure.
+        let dump = Command::new("pg_dump")
+            .args([
+                "--clean",
+                "--if-exists",
+                "--no-owner",
+                "--no-privileges",
+                &source,
+            ])
+            .output()
+            .expect("pg_dump available");
+        assert!(
+            dump.status.success(),
+            "private source export: {}",
+            String::from_utf8_lossy(&dump.stderr)
+        );
+        let mut child = Command::new("psql")
+            .args([
+                "--quiet",
+                "--single-transaction",
+                "--set=ON_ERROR_STOP=1",
+                &destination,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("psql available");
+        child.stdin.take().unwrap().write_all(&dump.stdout).unwrap();
+        let result = child.wait_with_output().unwrap();
+        assert!(
+            result.status.success(),
+            "private atomic import: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn complete_forward_unit_survives_independent_database_and_adapter_reopen() {
+    let source = TestDatabase::lease().await;
+    let destination = TestDatabase::lease().await;
+    assert_ne!(source.url(), destination.url());
+    let pool = source.pool();
+    let discussion = open(&pool, "audit-origin-cold").await;
+    let prepared = pair(
+        &pool,
+        &discussion,
+        &discussion.head.authority_commit,
+        "all",
+        None,
+    )
+    .await;
+    let RegisteredAuditCommit::Pair { request, .. } = prepared.audit_unit.as_ref().unwrap() else {
+        panic!("pair")
+    };
+    let request = request.clone();
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    store
+        .retain_registered_pair_forward(&request, None)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .registered_audit_result(&request.events[0].event.event_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let original = PgEventCommitUnitOfWork::new(pool.clone())
+        .commit_event_batch(prepared)
+        .await
+        .unwrap()
+        .audit_outcome
+        .unwrap();
+    let RegisteredAuditOutcome::Pair(accepted) = &original else {
+        panic!("pair")
+    };
+    store
+        .retain_registered_pair_forward(&request, Some(accepted))
+        .await
+        .unwrap();
+    copy_private_database(source.url(), destination.url()).await;
+    // Remove the governor archive on the origin copy: the cold origin must
+    // recover only from its own complete frozen request and verified ACK.
+    diesel::sql_query("DELETE FROM registered_audit_units")
+        .execute(&mut *destination.pool().get().await.unwrap())
+        .await
+        .unwrap();
+    let reopened = PgAuthorityCommitStore {
+        pool: destination.pool(),
+    };
+    for slot in &request.events {
+        let retained = reopened
+            .registered_audit_result(&slot.event.event_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retained.canonical_request,
+            arkret_canonical::canonical_json_bytes(&request).unwrap()
+        );
+        assert_eq!(retained.outcome, original);
+    }
+    let mut changed = *request.clone();
+    changed.events[1]
+        .event
+        .payload
+        .insert("purpose".into(), json!("changed origin"));
+    ordinary_realm::reseal(&mut changed.events[1].event);
+    let error = reopened
+        .retain_registered_pair_forward(&changed, None)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("duplicate_conflict"), "{error}");
+    assert_eq!(
+        event_count(&pool, &discussion.realm_id()).await,
+        event_count(&destination.pool(), &discussion.realm_id()).await
+    );
+}
+
+#[tokio::test]
+async fn independent_handoff_preserves_unit_fences_and_frozen_reads_and_rejects_incomplete_import()
+{
+    use arkret_models_collaboration::authority_commit::{
+        HistoricalProducerSignerFactEntry, historical_signer_facts_digest,
+    };
+    let source = TestDatabase::lease().await;
+    let destination = TestDatabase::lease().await;
+    let pool = source.pool();
+    let discussion = open(&pool, "audit-private-handoff").await;
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let observed = read(
+        &pool,
+        &discussion,
+        &discussion.head.authority_commit,
+        watcher(),
+        "before pair frozen",
+    )
+    .await;
+    let frozen = uow
+        .commit_event_batch(observed.clone())
+        .await
+        .unwrap()
+        .audit_outcome
+        .unwrap();
+    let pair = pair(
+        &pool,
+        &discussion,
+        &observed.events[0].authority_commit,
+        "all",
+        None,
+    )
+    .await;
+    let original = uow
+        .commit_event_batch(pair.clone())
+        .await
+        .unwrap()
+        .audit_outcome
+        .unwrap();
+    let old = PgAuthorityCommitStore { pool: pool.clone() };
+    let realm = discussion.realm_id();
+    let next: arkret_wire::DidCoreId = "ak:did_core:web:audit-next.example".parse().unwrap();
+    let previous = &pair.events[1].authority_commit;
+    let change = ordinary_realm::event(
+        EventKind::RealmGovernanceStationChange,
+        ScopeRef::Realm {
+            realm_id: realm.clone(),
+        },
+        previous.event.actor_id.signing_principal_id(),
+        &ordinary_realm::station(),
+        json!({"expected_governance_generation":0,"expected_realm_stream_commit_id":previous.commit.commit_id,"new_governance_station_id":next}),
+        discussion.committed_at(),
+    );
+    let change = ordinary_realm::source_request(
+        &pool,
+        ordinary_realm::request_for_event(previous, change, discussion.committed_at()),
+    )
+    .await;
+    uow.commit_event(change.clone()).await.unwrap();
+    let material = old
+        .realm_state_snapshot_material(&realm)
+        .await
+        .unwrap()
+        .unwrap();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[83; 32]);
+    let snapshot = coland_services::authority_commit::build_signed_realm_state_snapshot(
+        &material,
+        arkret_wire::DidUrl::new("did:web:ordinary-station.example#authority").unwrap(),
+        &key,
+        discussion.committed_at(),
+    )
+    .unwrap();
+    let mut facts = Vec::new();
+    for full in old.handoff_originals(&realm).await.unwrap() {
+        if let Some(fact) = old
+            .producer_signer_fact(&full.event, &full.commit)
+            .await
+            .unwrap()
+        {
+            facts.push(HistoricalProducerSignerFactEntry {
+                target: arkret_wire::CommittedEventRef {
+                    event_id: full.event.event_id,
+                    commit_id: full.commit.commit_id,
+                    stream_ref: full.commit.stream_ref,
+                    stream_position: full.commit.stream_position,
+                },
+                producer_signer_fact: fact,
+            });
+        }
+    }
+    facts.sort_by_key(|entry| {
+        (
+            arkret_canonical::canonical_json_bytes(&entry.target.stream_ref).unwrap(),
+            entry.target.stream_position,
+            entry.target.event_id.to_string(),
+            entry.target.commit_id.to_string(),
+        )
+    });
+    let heads = material.visible_stream_heads;
+    let mut handoff = arkret_wire::RealmAuthorityHandoff {
+        handoff_id: arkret_wire::RealmAuthorityHandoffId::from_digest([63; 32]),
+        realm_id: realm.clone(),
+        from_generation: 0,
+        to_generation: 1,
+        from_service_id: ordinary_realm::station(),
+        to_service_id: next.clone(),
+        change_event_ref: change.authority_commit.event.event_id.clone(),
+        change_commit_id: change.authority_commit.commit.commit_id.clone(),
+        final_stream_heads_digest: arkret_wire::Hash::new(
+            arkret_canonical::canonical_sha256(&heads).unwrap(),
+        )
+        .unwrap(),
+        historical_signer_facts_digest: Some(historical_signer_facts_digest(&facts).unwrap()),
+        snapshot_ref: snapshot.snapshot_id.clone(),
+        old_authority_signature: ordinary_realm::signature(
+            &ordinary_realm::station(),
+            discussion.committed_at(),
+        ),
+        new_authority_acceptance_signature: ordinary_realm::signature(
+            &next,
+            discussion.committed_at(),
+        ),
+    };
+    let unsigned = arkret_canonical::unsigned_value(
+        &handoff,
+        &[
+            "old_authority_signature",
+            "new_authority_acceptance_signature",
+        ],
+    )
+    .unwrap();
+    handoff.old_authority_signature = arkret_signatures::detached_object::sign_detached_object(
+        &unsigned,
+        arkret_wire::DetachedSignatureContext::RealmAuthorityHandoffOld,
+        arkret_wire::DidUrl::new("did:web:ordinary-station.example#authority").unwrap(),
+        discussion.committed_at(),
+        &key,
+    )
+    .unwrap();
+    handoff.new_authority_acceptance_signature =
+        arkret_signatures::detached_object::sign_detached_object(
+            &unsigned,
+            arkret_wire::DetachedSignatureContext::RealmAuthorityHandoffNewAcceptance,
+            arkret_wire::DidUrl::new("did:web:audit-next.example#authority").unwrap(),
+            discussion.committed_at(),
+            &key,
+        )
+        .unwrap();
+    copy_private_database(source.url(), destination.url()).await;
+    let new = PgAuthorityCommitStore {
+        pool: destination.pool(),
+    };
+    assert_ne!(source.url(), destination.url());
+    let business = &pair.events[0].authority_commit.event.event_id;
+    let mut conn = destination.pool().get().await.unwrap();
+    diesel::sql_query("UPDATE registered_audit_units SET private_audit_digest='incomplete' WHERE business_event_id=$1")
+        .bind::<Text,_>(business.as_str()).execute(&mut *conn).await.unwrap();
+    drop(conn);
+    let error = new
+        .install_handoff(&handoff, &heads, &snapshot)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("revision_unavailable"),
+        "{error}"
+    );
+    assert_eq!(
+        new.current_authority(&realm)
+            .await
+            .unwrap()
+            .unwrap()
+            .generation,
+        0
+    );
+    // Re-import the frozen complete source after the rejected activation.
+    copy_private_database(source.url(), destination.url()).await;
+    new.install_handoff(&handoff, &heads, &snapshot)
+        .await
+        .unwrap();
+    let reopened = PgAuthorityCommitStore {
+        pool: destination.pool(),
+    };
+    assert_eq!(
+        reopened
+            .current_authority(&realm)
+            .await
+            .unwrap()
+            .unwrap()
+            .service_id,
+        next
+    );
+    for (event_id, outcome) in [
+        (business, &original),
+        (&observed.events[0].authority_commit.event.event_id, &frozen),
+    ] {
+        assert_eq!(
+            &reopened
+                .registered_audit_result(event_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .outcome,
+            outcome
+        );
+    }
+    let before = event_count(&destination.pool(), &realm).await;
+    let replay = PgEventCommitUnitOfWork::new(destination.pool())
+        .commit_event_batch(pair)
+        .await
+        .unwrap()
+        .audit_outcome
+        .unwrap();
+    assert_eq!(replay, original);
+    // Old frozen reads cannot establish the new generation's current cut.
+    let error = PgEventCommitUnitOfWork::new(destination.pool())
+        .commit_event_batch(observed)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("revision_unavailable"),
+        "{error}"
+    );
+    assert_eq!(event_count(&destination.pool(), &realm).await, before);
+}

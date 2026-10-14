@@ -3893,19 +3893,30 @@ CREATE TABLE registered_audit_replica_units (
     canonical_submission BYTEA NOT NULL
 );
 
+-- Origin exact unit bytes and verified acknowledgement survive process loss.
+CREATE TABLE registered_audit_forward_units (
+    business_event_id TEXT PRIMARY KEY,
+    audit_event_id TEXT NOT NULL UNIQUE,
+    realm_id TEXT NOT NULL,
+    canonical_request BYTEA NOT NULL,
+    outcome JSONB
+);
+
 CREATE TABLE registered_audit_units (
     business_event_id TEXT PRIMARY KEY,
     audit_event_id TEXT NOT NULL UNIQUE,
     realm_id TEXT NOT NULL,
     canonical_request BYTEA NOT NULL,
-    outcome JSONB NOT NULL
+    outcome JSONB NOT NULL,
+    private_audit_digest TEXT NOT NULL
 );
 CREATE TABLE watch_audit_read_results (
     audit_event_id TEXT PRIMARY KEY,
     realm_id TEXT NOT NULL,
     auditor_actor_id TEXT NOT NULL,
     canonical_request BYTEA NOT NULL,
-    outcome JSONB NOT NULL
+    outcome JSONB NOT NULL,
+    private_audit_digest TEXT NOT NULL
 );
 
 CREATE TABLE strand_watch_current_results (

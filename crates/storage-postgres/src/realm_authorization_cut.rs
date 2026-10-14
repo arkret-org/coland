@@ -645,6 +645,8 @@ pub(crate) struct RealmAuthorizationCut {
     /// means the profile's evaluator or phase mask authorized the Event; no
     /// grant or owner aggregation may substitute it, and none is counted.
     direct_conversation: Option<ProfileAuthority>,
+    /// Narrow delegated Service admission to the signed authorization_ref.
+    selected_grant: Option<GrantId>,
 }
 
 impl RealmAuthorizationCut {
@@ -744,6 +746,7 @@ impl RealmAuthorizationCut {
             actor_membership,
             lifecycle,
             direct_conversation: None,
+            selected_grant: None,
         })
     }
 
@@ -1121,7 +1124,8 @@ impl RealmAuthorizationCut {
             let Some(root) = root else {
                 return false;
             };
-            matches!(&grant.subject, CapabilitySubject::Actor(subject) if subject == &self.actor)
+            self.selected_grant.as_ref().is_none_or(|selected| selected == *grant_id)
+                && matches!(&grant.subject, CapabilitySubject::Actor(subject) if subject == &self.actor)
                 && grant.realm_id.as_ref() == Some(&self.realm_id)
                 && grant_is_active_at(grant, at)
                 && !grant.issuer_authority_refs.is_empty()
@@ -2304,10 +2308,72 @@ impl RealmAuthorizationCut {
         let (_, mut facts) = self.event_operation(event);
         self.complete_applet_facts_in_connection(conn, event, &mut facts)
             .await?;
-        self.require_selected_action_with_approvals(
-            conn, event, commit, prepared, action, target, &facts, &actions,
-        )
-        .await
+        let mut qualified = self
+            .require_selected_action_with_approvals(
+                conn, event, commit, prepared, action, target, &facts, &actions,
+            )
+            .await?;
+        if event
+            .executed_by
+            .as_ref()
+            .is_some_and(|producer| matches!(producer, ActorId::Service { .. }))
+        {
+            let id: GrantId = event
+                .authorization_ref
+                .as_ref()
+                .ok_or_else(|| capability_denied("delegated audit lacks authorization_ref"))?
+                .as_str()
+                .parse()
+                .map_err(PersistenceError::database)?;
+            let mut service = Self::read(conn, &event.realm_id, event.actual_signer()).await?;
+            let (global_markers, global_approvals) = service
+                .prepare_grant_approvals(conn, event, commit, prepared, action, target, &facts)
+                .await?;
+            let service_actions = [action.as_str()];
+            let global = coland_storage::evaluate_grants_with_verified_approvals(
+                &AuthorizationOperation {
+                    actor: event.actual_signer(),
+                    actions: &service_actions,
+                    target,
+                    at: commit.committed_at,
+                    facts: &facts,
+                },
+                service
+                    .effective_grants(commit.committed_at)
+                    .map(|(_, grant)| grant),
+                &global_markers,
+            );
+            if matches!(
+                global,
+                GrantEvaluation::Denied
+                    | GrantEvaluation::Quarantined
+                    | GrantEvaluation::RequiresReview
+            ) {
+                return Err(capability_denied(
+                    "delegated Service has an unresolved global deny, quarantine or review",
+                ));
+            }
+            qualified.extend(global_approvals);
+            service.selected_grant = Some(id);
+            // Account membership/permissions and the original Service grant
+            // are separate obligations. The Service does not aggregate owner
+            // rights or borrow another independently granted action.
+            qualified.extend(
+                service
+                    .require_selected_action_with_approvals(
+                        conn,
+                        event,
+                        commit,
+                        prepared,
+                        action,
+                        target,
+                        &facts,
+                        &[action.as_str()],
+                    )
+                    .await?,
+            );
+        }
+        Ok(qualified)
     }
 
     #[expect(
@@ -3039,6 +3105,7 @@ mod operation_fact_tests {
             actor_membership: Some("join".to_owned()),
             lifecycle: RealmLifecycleGates::default(),
             direct_conversation: None,
+            selected_grant: None,
         };
         let before = "2026-09-21T01:00:00Z".parse().unwrap();
         let after = "2026-09-21T09:30:00Z".parse().unwrap();
@@ -3083,6 +3150,7 @@ mod operation_fact_tests {
             actor_membership: None,
             lifecycle: RealmLifecycleGates::default(),
             direct_conversation: None,
+            selected_grant: None,
         };
         let (target, facts) = cut.event_operation(&event);
         assert_eq!(
@@ -3151,6 +3219,7 @@ mod operation_fact_tests {
             actor_membership: None,
             lifecycle: RealmLifecycleGates::default(),
             direct_conversation: None,
+            selected_grant: None,
         };
         let (target, facts) = cut.event_operation(&event);
         assert_eq!(target, WireResourceSelector::realm(realm_id));

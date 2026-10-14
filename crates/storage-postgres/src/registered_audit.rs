@@ -24,6 +24,8 @@ use crate::PgTransactionError;
 
 #[derive(diesel::QueryableByName)]
 struct ArchiveRow {
+    #[diesel(sql_type = Text)]
+    private_audit_digest: String,
     #[diesel(sql_type = Binary)]
     canonical_request: Vec<u8>,
     #[diesel(sql_type = Jsonb)]
@@ -41,33 +43,87 @@ pub(crate) async fn original_in_connection(
     conn: &mut AsyncPgConnection,
     event: &EventId,
 ) -> PersistenceResult<Option<RegisteredAuditResult>> {
-    let pair = sql_query("SELECT canonical_request,outcome FROM registered_audit_units WHERE business_event_id=$1 OR audit_event_id=$1")
+    let pair = sql_query("SELECT canonical_request,outcome,private_audit_digest FROM registered_audit_units WHERE business_event_id=$1 OR audit_event_id=$1")
         .bind::<Text,_>(event.as_str()).get_result::<ArchiveRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     if let Some(row) = pair {
+        let request: arkret_models_collaboration::authority_commit::AuditPairedEventUnitSubmission =
+            serde_json::from_slice(&row.canonical_request).map_err(PersistenceError::database)?;
+        let outcome: AuditPairedEventAcceptanceOutcome =
+            serde_json::from_value(row.outcome).map_err(PersistenceError::database)?;
+        outcome
+            .validate_for_request(&request)
+            .map_err(PersistenceError::database)?;
+        require_archived_slots(
+            conn,
+            &request.events,
+            &outcome.commits,
+            &row.private_audit_digest,
+        )
+        .await?;
         return Ok(Some(RegisteredAuditResult {
             canonical_request: row.canonical_request,
-            outcome: RegisteredAuditOutcome::Pair(
-                serde_json::from_value(row.outcome).map_err(PersistenceError::database)?,
-            ),
+            outcome: RegisteredAuditOutcome::Pair(outcome),
         }));
     }
-    let read = sql_query(
-        "SELECT canonical_request,outcome FROM watch_audit_read_results WHERE audit_event_id=$1",
-    )
-    .bind::<Text, _>(event.as_str())
-    .get_result::<ArchiveRow>(&mut *conn)
-    .await
-    .optional()
-    .map_err(PersistenceError::database)?;
-    read.map(|row| {
-        Ok(RegisteredAuditResult {
+    let read = sql_query("SELECT canonical_request,outcome,private_audit_digest FROM watch_audit_read_results WHERE audit_event_id=$1")
+        .bind::<Text,_>(event.as_str()).get_result::<ArchiveRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    if let Some(row) = read {
+        let request: WatchAuditReadRequest =
+            serde_json::from_slice(&row.canonical_request).map_err(PersistenceError::database)?;
+        let outcome: WatchAuditReadOutcome =
+            serde_json::from_value(row.outcome).map_err(PersistenceError::database)?;
+        outcome
+            .validate_for_request(&request, outcome.audit_commit.governance_generation)
+            .map_err(PersistenceError::database)?;
+        require_archived_slots(
+            conn,
+            std::slice::from_ref(&request.audit_submission),
+            std::slice::from_ref(&outcome.audit_commit),
+            &row.private_audit_digest,
+        )
+        .await?;
+        return Ok(Some(RegisteredAuditResult {
             canonical_request: row.canonical_request,
-            outcome: RegisteredAuditOutcome::WatchRead(
-                serde_json::from_value(row.outcome).map_err(PersistenceError::database)?,
-            ),
-        })
-    })
-    .transpose()
+            outcome: RegisteredAuditOutcome::WatchRead(outcome),
+        }));
+    }
+    Ok(None)
+}
+
+async fn require_archived_slots(
+    conn: &mut AsyncPgConnection,
+    slots: &[arkret_wire::EventAdmissionSubmission],
+    commits: &[arkret_wire::RealmCommit],
+    expected_private_digest: &str,
+) -> PersistenceResult<()> {
+    #[derive(diesel::QueryableByName)]
+    struct Full {
+        #[diesel(sql_type=Jsonb)]
+        envelope: Value,
+        #[diesel(sql_type=Jsonb)]
+        commit_json: Value,
+    }
+    for (slot, commit) in slots.iter().zip(commits) {
+        let held = sql_query("SELECT e.envelope,c.commit_json FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.envelope->>'event_id'=$1 AND e.state='committed'")
+            .bind::<Text,_>(slot.event.event_id.as_str()).get_result::<Full>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+        let envelope = serde_json::to_value(&slot.event).map_err(PersistenceError::database)?;
+        let commit_json = serde_json::to_value(commit).map_err(PersistenceError::database)?;
+        if held.is_none_or(|held| held.envelope != envelope || held.commit_json != commit_json) {
+            return Err(unavailable(
+                "registered acceptance lacks its exact complete Event/Commit originals",
+            ));
+        }
+    }
+    let ids = slots
+        .iter()
+        .map(|slot| slot.event.event_id.clone())
+        .collect::<Vec<_>>();
+    if private_audit_digest(conn, &ids).await? != expected_private_digest {
+        return Err(unavailable(
+            "registered acceptance lacks its complete private approval audit",
+        ));
+    }
+    Ok(())
 }
 
 fn target(event: &arkret_wire::Event) -> PersistenceResult<WireResourceSelector> {
@@ -811,8 +867,8 @@ pub(crate) async fn finish_in_connection(
             outcome
                 .validate_for_request(request)
                 .map_err(PersistenceError::database)?;
-            sql_query("INSERT INTO registered_audit_units(business_event_id,audit_event_id,realm_id,canonical_request,outcome) VALUES($1,$2,$3,$4,$5)")
-                .bind::<Text,_>(request.events[0].event.event_id.as_str()).bind::<Text,_>(request.events[1].event.event_id.as_str()).bind::<Text,_>(request.events[0].event.realm_id.as_str()).bind::<Binary,_>(canonical).bind::<Jsonb,_>(serde_json::to_value(&outcome).map_err(PersistenceError::database)?).execute(&mut *conn).await?;
+            sql_query("INSERT INTO registered_audit_units(business_event_id,audit_event_id,realm_id,canonical_request,outcome,private_audit_digest) VALUES($1,$2,$3,$4,$5,$6)")
+                .bind::<Text,_>(request.events[0].event.event_id.as_str()).bind::<Text,_>(request.events[1].event.event_id.as_str()).bind::<Text,_>(request.events[0].event.realm_id.as_str()).bind::<Binary,_>(canonical).bind::<Jsonb,_>(serde_json::to_value(&outcome).map_err(PersistenceError::database)?).bind::<Text,_>(private_audit_digest(conn, &request.events.each_ref().map(|slot| slot.event.event_id.clone())).await?).execute(&mut *conn).await?;
             crate::realm_fanout::plan_audit_pair_in_connection(
                 conn,
                 request,
@@ -857,9 +913,233 @@ pub(crate) async fn finish_in_connection(
             outcome
                 .validate_for_request(request, transaction.expected_authority.generation)
                 .map_err(PersistenceError::database)?;
-            sql_query("INSERT INTO watch_audit_read_results(audit_event_id,realm_id,auditor_actor_id,canonical_request,outcome) VALUES($1,$2,$3,$4,$5)")
-                .bind::<Text,_>(request.audit_submission.event.event_id.as_str()).bind::<Text,_>(request.audit_submission.event.realm_id.as_str()).bind::<Text,_>(request.audit_submission.event.actor_id.to_string()).bind::<Binary,_>(canonical).bind::<Jsonb,_>(serde_json::to_value(&outcome).map_err(PersistenceError::database)?).execute(&mut *conn).await?;
+            sql_query("INSERT INTO watch_audit_read_results(audit_event_id,realm_id,auditor_actor_id,canonical_request,outcome,private_audit_digest) VALUES($1,$2,$3,$4,$5,$6)")
+                .bind::<Text,_>(request.audit_submission.event.event_id.as_str()).bind::<Text,_>(request.audit_submission.event.realm_id.as_str()).bind::<Text,_>(request.audit_submission.event.actor_id.to_string()).bind::<Binary,_>(canonical).bind::<Jsonb,_>(serde_json::to_value(&outcome).map_err(PersistenceError::database)?).bind::<Text,_>(private_audit_digest(conn, std::slice::from_ref(&request.audit_submission.event.event_id)).await?).execute(&mut *conn).await?;
             Ok(RegisteredAuditOutcome::WatchRead(outcome))
         }
     }
+}
+
+#[derive(diesel::QueryableByName)]
+struct ForwardRow {
+    #[diesel(sql_type=Binary)]
+    canonical_request: Vec<u8>,
+    #[diesel(sql_type=diesel::sql_types::Nullable<Jsonb>)]
+    outcome: Option<Value>,
+}
+
+pub(crate) async fn forward_original_in_connection(
+    conn: &mut AsyncPgConnection,
+    event_id: &arkret_wire::EventId,
+) -> PersistenceResult<Option<RegisteredAuditResult>> {
+    let row = sql_query("SELECT canonical_request,outcome FROM registered_audit_forward_units WHERE business_event_id=$1 OR audit_event_id=$1")
+        .bind::<Text,_>(event_id.as_str()).get_result::<ForwardRow>(conn).await.optional().map_err(PersistenceError::database)?;
+    row.and_then(|row| row.outcome.map(|value| (row.canonical_request, value))).map(|(canonical_request, value)| {
+        let request: arkret_models_collaboration::authority_commit::AuditPairedEventUnitSubmission = serde_json::from_slice(&canonical_request).map_err(PersistenceError::database)?;
+        let outcome: AuditPairedEventAcceptanceOutcome = serde_json::from_value(value).map_err(PersistenceError::database)?;
+        outcome.validate_for_request(&request).map_err(PersistenceError::database)?;
+        Ok(RegisteredAuditResult { canonical_request, outcome: RegisteredAuditOutcome::Pair(outcome) })
+    }).transpose()
+}
+
+pub(crate) async fn retain_forward_in_connection(
+    conn: &mut AsyncPgConnection,
+    request: &arkret_models_collaboration::authority_commit::AuditPairedEventUnitSubmission,
+    outcome: Option<&AuditPairedEventAcceptanceOutcome>,
+) -> Result<(), PgTransactionError> {
+    request.validate().map_err(PersistenceError::database)?;
+    if let Some(outcome) = outcome {
+        outcome
+            .validate_for_request(request)
+            .map_err(PersistenceError::database)?;
+    }
+    let canonical =
+        arkret_canonical::canonical_json_bytes(request).map_err(PersistenceError::database)?;
+    // Use the same complete Realm cut as local acceptance and handoff.
+    crate::realm_authorization_cut::lock_realm_authorization_cut(
+        conn,
+        &request.events[0].event.realm_id,
+    )
+    .await?;
+    let first = &request.events[0].event.event_id;
+    let second = &request.events[1].event.event_id;
+    for id in [first, second] {
+        sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+            .bind::<Text, _>(id.as_str())
+            .execute(&mut *conn)
+            .await?;
+    }
+    let row = sql_query("SELECT canonical_request,outcome FROM registered_audit_forward_units WHERE business_event_id IN ($1,$2) OR audit_event_id IN ($1,$2) FOR UPDATE")
+        .bind::<Text,_>(first.as_str()).bind::<Text,_>(second.as_str()).get_result::<ForwardRow>(&mut *conn).await.optional()?;
+    let value = outcome
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(PersistenceError::database)?;
+    if let Some(row) = row {
+        if row.canonical_request != canonical {
+            return Err(conflict(
+                "duplicate_conflict: origin Event belongs to another complete unit",
+            )
+            .into());
+        }
+        if let (Some(original), Some(next)) = (&row.outcome, &value) {
+            let original: AuditPairedEventAcceptanceOutcome =
+                serde_json::from_value(original.clone()).map_err(PersistenceError::database)?;
+            let next: AuditPairedEventAcceptanceOutcome =
+                serde_json::from_value(next.clone()).map_err(PersistenceError::database)?;
+            if original.commits != next.commits {
+                return Err(conflict(
+                    "duplicate_conflict: governing acknowledgement changed original Commits",
+                )
+                .into());
+            }
+        }
+        if row.outcome.is_none() && value.is_some() {
+            sql_query(
+                "UPDATE registered_audit_forward_units SET outcome=$2 WHERE business_event_id=$1",
+            )
+            .bind::<Text, _>(first.as_str())
+            .bind::<Jsonb, _>(value.unwrap())
+            .execute(&mut *conn)
+            .await?;
+        }
+    } else {
+        sql_query("INSERT INTO registered_audit_forward_units(business_event_id,audit_event_id,realm_id,canonical_request,outcome) VALUES($1,$2,$3,$4,$5)")
+            .bind::<Text,_>(first.as_str()).bind::<Text,_>(second.as_str()).bind::<Text,_>(request.events[0].event.realm_id.as_str())
+            .bind::<Binary,_>(canonical).bind::<diesel::sql_types::Nullable<Jsonb>,_>(value).execute(&mut *conn).await?;
+    }
+    Ok(())
+}
+
+async fn private_audit_digest(
+    conn: &mut AsyncPgConnection,
+    ids: &[EventId],
+) -> PersistenceResult<String> {
+    #[derive(diesel::QueryableByName)]
+    struct Audit {
+        #[diesel(sql_type=Jsonb)]
+        value: Value,
+    }
+    let rows = sql_query("SELECT jsonb_set(to_jsonb(a),'{accepted_at}',to_jsonb(to_char(a.accepted_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'))) AS value FROM event_approval_private_audit a WHERE event_id=ANY($1) ORDER BY approval_context,approver_did,nonce")
+        .bind::<diesel::sql_types::Array<Text>,_>(ids.iter().map(|id| id.as_str()).collect::<Vec<_>>())
+        .load::<Audit>(conn).await.map_err(PersistenceError::database)?;
+    arkret_canonical::canonical_sha256(&rows.into_iter().map(|row| row.value).collect::<Vec<_>>())
+        .map_err(PersistenceError::database)
+}
+
+/// Handoff activates pre-imported private state. A member replica or a
+/// current-only snapshot cannot replace the complete acceptance archive.
+pub(crate) async fn verify_handoff_archive(
+    conn: &mut AsyncPgConnection,
+    originals: &[arkret_wire::CommittedEventFullView],
+) -> PersistenceResult<()> {
+    #[derive(diesel::QueryableByName)]
+    struct Digest {
+        #[diesel(sql_type=Text)]
+        private_audit_digest: String,
+    }
+    let full_by_id = originals
+        .iter()
+        .map(|full| (&full.event.event_id, full))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut checked = std::collections::BTreeSet::new();
+    for full in originals {
+        if checked.contains(&full.event.event_id) {
+            continue;
+        }
+        let paired =
+            arkret_models_collaboration::authority_commit::is_audit_paired_event_slot(&full.event)
+                .map_err(PersistenceError::database)?;
+        let read = full.event.kind == arkret_wire::EventKind::AuditAccessed
+            && full
+                .event
+                .payload
+                .get("access_kind")
+                .and_then(Value::as_str)
+                == Some("watch_audit_read");
+        if !paired && !read {
+            continue;
+        }
+        let original = original_in_connection(conn, &full.event.event_id)
+            .await?
+            .ok_or_else(|| {
+                unavailable("handoff lacks the complete private audit acceptance fence")
+            })?;
+        let (ids, expected_commits, table) = match &original.outcome {
+            RegisteredAuditOutcome::Pair(outcome) if paired => {
+                let request: arkret_models_collaboration::authority_commit::AuditPairedEventUnitSubmission = serde_json::from_slice(&original.canonical_request).map_err(PersistenceError::database)?;
+                outcome
+                    .validate_for_request(&request)
+                    .map_err(PersistenceError::database)?;
+                for slot in &request.events {
+                    if full_by_id.get(&slot.event.event_id).map(|item| &item.event)
+                        != Some(&slot.event)
+                    {
+                        return Err(unavailable(
+                            "handoff audit unit request differs from its complete originals",
+                        ));
+                    }
+                }
+                (
+                    request
+                        .events
+                        .each_ref()
+                        .map(|slot| slot.event.event_id.clone())
+                        .to_vec(),
+                    outcome.commits.to_vec(),
+                    "registered_audit_units",
+                )
+            }
+            RegisteredAuditOutcome::WatchRead(outcome) if read => {
+                let request: WatchAuditReadRequest =
+                    serde_json::from_slice(&original.canonical_request)
+                        .map_err(PersistenceError::database)?;
+                outcome
+                    .validate_for_request(&request, outcome.audit_commit.governance_generation)
+                    .map_err(PersistenceError::database)?;
+                if request.audit_submission.event != full.event {
+                    return Err(unavailable(
+                        "handoff frozen audit request differs from original",
+                    ));
+                }
+                (
+                    vec![full.event.event_id.clone()],
+                    vec![outcome.audit_commit.clone()],
+                    "watch_audit_read_results",
+                )
+            }
+            _ => {
+                return Err(unavailable(
+                    "handoff audit acceptance kind conflicts with its original",
+                ));
+            }
+        };
+        for commit in expected_commits {
+            if full_by_id.get(&commit.event_ref).map(|item| &item.commit) != Some(&commit) {
+                return Err(unavailable(
+                    "handoff audit outcome does not bind exact source Commits",
+                ));
+            }
+        }
+        checked.extend(ids.iter().cloned());
+        let query = match table {
+            "registered_audit_units" => {
+                "SELECT private_audit_digest FROM registered_audit_units WHERE business_event_id=$1"
+            }
+            _ => {
+                "SELECT private_audit_digest FROM watch_audit_read_results WHERE audit_event_id=$1"
+            }
+        };
+        let digest = sql_query(query)
+            .bind::<Text, _>(ids[0].as_str())
+            .get_result::<Digest>(&mut *conn)
+            .await
+            .map_err(PersistenceError::database)?;
+        if digest.private_audit_digest != private_audit_digest(conn, &ids).await? {
+            return Err(unavailable(
+                "handoff private approval audit is incomplete or changed",
+            ));
+        }
+    }
+    Ok(())
 }

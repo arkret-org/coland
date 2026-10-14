@@ -766,26 +766,63 @@ async fn fill_to_head(
         if page.committed_events.is_empty() {
             return Ok(());
         }
-        for item in &page.committed_events {
-            let fact = page
-                .producer_signer_facts
-                .iter()
-                .find(|entry| entry.target.commit_id == item.commit().commit_id)
-                .map(|entry| &entry.producer_signer_fact);
-            store_scanned(
-                state,
-                realm_id,
-                anchored,
-                located,
-                &held,
-                item,
-                ScannedItemEvidence {
-                    producer_signer_fact: fact,
-                    exact_self_result_account: None,
-                },
-            )
-            .await?;
-            held = item.commit().clone();
+        let mut index = 0;
+        while index < page.committed_events.len() {
+            let item = &page.committed_events[index];
+            if is_pair_business(item)? {
+                let boundary;
+                let pair_page = if index + 1 == page.committed_events.len() {
+                    // Never persist the first half at a page boundary. The
+                    // next authorized scan starts at the same held prefix.
+                    let request = StreamScanRequest {
+                        realm_id: realm_id.clone(),
+                        stream_ref: realm_stream.clone(),
+                        direction: StreamScanDirection::After(Some(held.stream_position)),
+                        limit: 2,
+                    };
+                    let body =
+                        post_peer(state, governance, SCAN_PATH, &request, SCAN_MAX_BYTES).await?;
+                    boundary = serde_json::from_slice::<
+                        arkret_models_collaboration::authority_commit::PeerStreamScanOutcome,
+                    >(&body)
+                    .map_err(temporary)?;
+                    boundary.validate_for_request(&request).map_err(temporary)?;
+                    if boundary.committed_events.first() != Some(item) {
+                        return Err("revision_unavailable: paired scan boundary changed".into());
+                    }
+                    (&boundary, 0)
+                } else {
+                    (&page, index)
+                };
+                held = store_scanned_pair(
+                    state,
+                    realm_id,
+                    anchored,
+                    located,
+                    &held,
+                    pair_page.0,
+                    pair_page.1,
+                )
+                .await?;
+                index += 2;
+            } else {
+                let fact = scan_fact(&page, item.commit());
+                store_scanned(
+                    state,
+                    realm_id,
+                    anchored,
+                    located,
+                    &held,
+                    item,
+                    ScannedItemEvidence {
+                        producer_signer_fact: fact,
+                        exact_self_result_account: None,
+                    },
+                )
+                .await?;
+                held = item.commit().clone();
+                index += 1;
+            }
         }
         if !page.truncated {
             return Ok(());
@@ -1389,6 +1426,133 @@ async fn require_forward_visibility(
     }
 }
 
+fn scan_fact<'a>(
+    page: &'a arkret_models_collaboration::authority_commit::PeerStreamScanOutcome,
+    commit: &RealmCommit,
+) -> Option<&'a arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact> {
+    page.producer_signer_facts
+        .iter()
+        .find(|entry| entry.target.commit_id == commit.commit_id)
+        .map(|entry| &entry.producer_signer_fact)
+}
+
+fn is_pair_business(item: &CommittedEventView) -> Result<bool, String> {
+    match item {
+        CommittedEventView::Full(full)
+            if full.event.kind != arkret_wire::EventKind::AuditAccessed =>
+        {
+            arkret_models_collaboration::authority_commit::is_audit_paired_event_slot(&full.event)
+                .map_err(temporary)
+        }
+        _ => Ok(false),
+    }
+}
+
+async fn store_scanned_pair(
+    state: &AppState,
+    realm_id: &RealmId,
+    anchored: &CommitStreamHead,
+    located: &mut LocatedRealmAuthority,
+    held: &RealmCommit,
+    page: &arkret_models_collaboration::authority_commit::PeerStreamScanOutcome,
+    index: usize,
+) -> Result<RealmCommit, String> {
+    use arkret_models_collaboration::authority_commit::{
+        AuditPairedEventFederationSubmission, AuditPairedEventUnitKind, CommittedEventSubmission,
+    };
+    let items = page
+        .committed_events
+        .get(index..index + 2)
+        .ok_or("revision_unavailable: paired scan has no complete successor")?;
+    if let [
+        CommittedEventView::Full(business),
+        CommittedEventView::Full(audit),
+    ] = items
+    {
+        let source = AuditPairedEventFederationSubmission {
+            unit_kind: AuditPairedEventUnitKind::AuditPairedEvent,
+            committed_events: [business, audit].map(|full| CommittedEventSubmission {
+                event_submission: arkret_wire::EventAdmissionSubmission::new(full.event.clone()),
+                source_commit: full.commit.clone(),
+                genesis_event_ref: None,
+                welcomes: None,
+                producer_signer_fact: scan_fact(page, &full.commit).cloned(),
+            }),
+        };
+        source.validate().map_err(temporary)?;
+        let mut previous = held;
+        let mut replicas = Vec::with_capacity(2);
+        for slot in &source.committed_events {
+            ensure_historical_method_key(state, located, &slot.source_commit.signature).await?;
+            verify_committed_event_receipt_with_source(
+                state.persistence(),
+                &slot.event_submission.event,
+                &slot.source_commit,
+                CommitContinuity::After(previous),
+                &located.authority,
+                &located.keys,
+                &state.service_core_id(),
+                state.projections().realm_digest_suite(realm_id.as_str()),
+                slot.producer_signer_fact.as_ref(),
+            )
+            .await
+            .map_err(temporary)?;
+            replicas.push(CommittedReplica {
+                local_service_id: state.service_core_id(),
+                authority: located.current_authority(),
+                event: slot.event_submission.event.clone(),
+                commit: slot.source_commit.clone(),
+                producer_signer_fact: slot.producer_signer_fact.clone(),
+                genesis_event_ref: None,
+                role: CommittedReplicaRole::HeldStream,
+                received_at: crate::wire::now(),
+                welcomes: Vec::new(),
+            });
+            previous = &slot.source_commit;
+        }
+        let replicas: [CommittedReplica; 2] = replicas
+            .try_into()
+            .map_err(|_| "paired scan omitted a replica")?;
+        let status = state
+            .authority_commits()
+            .install_committed_audit_pair(&source, &replicas)
+            .await
+            .map_err(temporary)?;
+        if status
+            == arkret_models_collaboration::authority_commit::AggregateAcceptanceStatus::Committed
+        {
+            for slot in &source.committed_events {
+                if slot.source_commit.stream_position > anchored.stream_position {
+                    crate::routing::events::notify::dispatch_committed_event_notifications(
+                        state,
+                        &slot.event_submission.event,
+                    )
+                    .await;
+                }
+            }
+        }
+    } else {
+        let mut previous = held.clone();
+        for item in items {
+            store_scanned(
+                state,
+                realm_id,
+                anchored,
+                located,
+                &previous,
+                item,
+                ScannedItemEvidence {
+                    producer_signer_fact: scan_fact(page, item.commit()),
+                    exact_self_result_account: None,
+                },
+            )
+            .await?;
+            previous = item.commit().clone();
+        }
+    }
+    Ok(items[1].commit().clone())
+}
+
 struct ScannedItemEvidence<'a> {
     producer_signer_fact:
         Option<&'a arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact>,
@@ -1423,6 +1587,24 @@ async fn store_scanned(
             )
             .await
             .map_err(temporary)?;
+            if arkret_models_collaboration::authority_commit::is_audit_paired_event_slot(
+                &view.event,
+            )
+            .map_err(temporary)?
+            {
+                // A Full fragment still proves only continuity until the
+                // complete authorized pair is available. No business current
+                // or canonical Event is installed from this fragment.
+                commits
+                    .install_committed_chain_node(&CommittedChainNode {
+                        local_service_id: state.service_core_id(),
+                        authority: located.current_authority(),
+                        commit: commit.clone(),
+                    })
+                    .await
+                    .map_err(temporary)?;
+                return Ok(());
+            }
             let outcome = commits
                 .install_committed_replica(&CommittedReplica {
                     local_service_id: state.service_core_id(),

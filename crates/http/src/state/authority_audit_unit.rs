@@ -141,13 +141,20 @@ async fn commit(
         .iter()
         .map(|slot| slot.event.clone())
         .collect::<Vec<_>>();
-    let facts = producers
-        .iter()
-        .map(|producer| match producer {
+    let mut facts = Vec::with_capacity(producers.len());
+    for (event, producer) in events.iter().zip(&producers) {
+        facts.push(match producer {
             AdmittedProducer::Forwarded(source) => Some(source.producer_signer_fact.clone().into()),
+            AdmittedProducer::Applet(guard) => Some(
+                state
+                    .authority_commits()
+                    .prepare_service_signer_fact(event, guard, at)
+                    .await?
+                    .into(),
+            ),
             _ => None,
-        })
-        .collect::<Vec<_>>();
+        });
+    }
     let method = arkret_wire::DidUrl::new(
         crate::routing::federation::federation_service_signature_key_id(
             state.service_did().as_str(),
@@ -301,6 +308,13 @@ pub(super) async fn submit_self_pair(
     }
     let mut producers = Vec::with_capacity(2);
     for slot in &request.events {
+        if let Some((producer, _)) =
+            super::authority_forward::resolve_service_producer(state, &slot.event)?
+        {
+            producers.push(producer);
+            continue;
+        }
+
         let (guard, _) = super::authority_producer_validation::verify_self_event_producer_key(
             state,
             session,
@@ -373,6 +387,10 @@ async fn forward_pair(
     unit: AuditPairedEventUnitSubmission,
     authority: &coland_storage::CurrentRealmAuthority,
 ) -> ServiceResult<AuditPairedEventAcceptanceOutcome> {
+    state
+        .authority_commits()
+        .retain_registered_pair_forward(&unit, None)
+        .await?;
     let mut request = PeerAuthorityForwardAtomicRequest {
         branch: AuthorityForwardBranch::AuthorityForward,
         atomic_submission: unit,
@@ -384,11 +402,25 @@ async fn forward_pair(
     let digest =
         arkret_models_collaboration::authority_commit::authority_forward_body_digest(&request)
             .map_err(refusal)?;
-    for slot in &request.atomic_submission.events {
-        super::authority_forward::validate_recovery_caller(state, session, &slot.event).await?;
-    }
     let [first, second] = &request.atomic_submission.events;
-    request.atomic_producer_evidence = if let Some(agent) =
+    let service = matches!(
+        first.event.actual_signer(),
+        arkret_wire::ActorId::Service { .. }
+    );
+    if !service {
+        for slot in &request.atomic_submission.events {
+            super::authority_forward::validate_recovery_caller(state, session, &slot.event).await?;
+        }
+    }
+    request.atomic_producer_evidence = if service {
+        // The authenticated Account submits its original Service-signed unit.
+        // These empty slots assert no Device/Agent authority; the governor
+        // verifies both Service originals and their current grants at its cut.
+        [
+            AtomicSlotProducerEvidence::Service {},
+            AtomicSlotProducerEvidence::Service {},
+        ]
+    } else if let Some(agent) =
         super::authority_forward::fresh_producer_agent_evidence(state, &first.event).await?
     {
         let verified = arkret_identity::agent_authority_evidence::verify_forwarded_agent_producer(
@@ -505,11 +537,9 @@ async fn forward_pair(
         .iter()
         .zip(&outcome.commits)
     {
-        if commit.governance_generation != authority.generation {
-            return Err(ServiceError::Conflict(
-                "revision_unavailable: audit forward tenure changed".to_owned(),
-            ));
-        }
+        // Exact recovery may return an original from an earlier tenure.
+        // The freshly verified current chain must authorize that original
+        // generation; its Commit never becomes the new current predecessor.
         super::authority_forward::verify_forwarded_acknowledgement(
             state,
             &authority.service_id,
@@ -518,6 +548,11 @@ async fn forward_pair(
         )
         .await?;
     }
+    state
+        .authority_commits()
+        .retain_registered_pair_forward(&request.atomic_submission, Some(&outcome))
+        .await?;
+    super::replica_anchor::spawn_converge_stream(state, outcome.commits[0].stream_ref.clone());
     Ok(outcome)
 }
 

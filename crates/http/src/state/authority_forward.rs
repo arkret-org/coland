@@ -130,10 +130,67 @@ pub(super) fn resolve_forwarded_producer(
             key,
         ));
     }
+    if let Some(service) = resolve_service_producer(state, event)? {
+        return Ok(service);
+    }
     Err(ServiceError::protocol(
         ErrorCode::DependencyMissing,
-        "forwarded Service producer authority is unavailable",
+        "forwarded producer authority is unavailable",
     ))
+}
+
+pub(super) fn resolve_service_producer(
+    state: &AppState,
+    event: &Event,
+) -> ServiceResult<
+    Option<(
+        super::authority_self_event_unit::AdmittedProducer,
+        arkret_signatures::PublicKeyMaterial,
+    )>,
+> {
+    if matches!(event.actual_signer(), arkret_wire::ActorId::Service { .. }) {
+        let proof = event.producer_proof.as_ref().ok_or_else(|| {
+            ServiceError::protocol(
+                ErrorCode::SignatureInvalid,
+                "Service producer proof is absent",
+            )
+        })?;
+        crate::jws_verify::validate_verification_method_controller(
+            event.actual_signer().route_service_id().as_str(),
+            proof.verification_method.as_str(),
+        )
+        .map_err(|error| ServiceError::protocol(ErrorCode::SignatureInvalid, error))?;
+        let (controller, _) = proof
+            .verification_method
+            .as_str()
+            .rsplit_once('#')
+            .ok_or_else(|| {
+                ServiceError::protocol(
+                    ErrorCode::SignatureInvalid,
+                    "Service method has no fragment",
+                )
+            })?;
+        let did = arkret_wire::Did::new(controller.to_owned())
+            .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+        let document = crate::jws_verify::resolve_did_document(state, &did)
+            .map_err(temporarily_unavailable)?;
+        let key = arkret_identity::public_key_material_from_document(
+            &document,
+            &proof.verification_method,
+        )
+        .map_err(temporarily_unavailable)?;
+        // Registration epoch, installation, grant, producer proof and source
+        // fact are independently rechecked under the accepting transaction.
+        return Ok(Some((
+            super::authority_self_event_unit::AdmittedProducer::Applet(
+                coland_storage::AppletEventProducerGuard {
+                    service_did_document: document,
+                },
+            ),
+            key,
+        )));
+    }
+    Ok(None)
 }
 
 /// B: admit one forwarded ordinary Event at `now`.

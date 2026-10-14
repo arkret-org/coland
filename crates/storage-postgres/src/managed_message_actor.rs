@@ -366,7 +366,15 @@ async fn require_applet_producer_inner(
             ));
         }
     }
-    if !native_service {
+    let delegated_audit = !native_service
+        && event.actor_id.as_account_id().is_some()
+        && arkret_models_collaboration::authority_commit::is_audit_paired_event_slot(event)
+            .map_err(denied)?
+        && grant.issuer_id == event.actor_id;
+    // A native Account's explicit delegation to the exact registered Service
+    // is not a managed Account terminal child. Its scoped business grant and
+    // approvals are rechecked independently by the registered unit's cut.
+    if !native_service && !delegated_audit {
         let [
             arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::Grant {
                 grant_id: parent_id,

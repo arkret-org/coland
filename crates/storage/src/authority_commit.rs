@@ -2306,6 +2306,20 @@ pub trait AuthorityCommitStore: Send + Sync {
         ))
     }
 
+    /// Freeze the complete origin unit before I/O; retain only a verified
+    /// original acknowledgement, never an independently accepted slot.
+    async fn retain_registered_pair_forward(
+        &self,
+        _request: &arkret_models_collaboration::authority_commit::AuditPairedEventUnitSubmission,
+        _outcome: Option<
+            &arkret_models_collaboration::authority_commit::AuditPairedEventAcceptanceOutcome,
+        >,
+    ) -> PersistenceResult<()> {
+        Err(PersistenceError::Conflict(
+            "revision_unavailable: registered forward archive unavailable".into(),
+        ))
+    }
+
     async fn registered_audit_result(
         &self,
         _event_id: &arkret_wire::EventId,

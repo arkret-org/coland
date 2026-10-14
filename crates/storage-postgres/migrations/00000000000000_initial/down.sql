@@ -1,3 +1,4 @@
+DROP TABLE IF EXISTS registered_audit_forward_units;
 DROP TABLE IF EXISTS registered_audit_replica_units;
 DROP TABLE IF EXISTS watch_audit_read_results;
 DROP TABLE IF EXISTS registered_audit_units;

@@ -547,6 +547,19 @@ impl AuthorityCommitApplication {
             .await?)
     }
 
+    pub async fn retain_registered_pair_forward(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::AuditPairedEventUnitSubmission,
+        outcome: Option<
+            &arkret_models_collaboration::authority_commit::AuditPairedEventAcceptanceOutcome,
+        >,
+    ) -> ServiceResult<()> {
+        Ok(self
+            .store()
+            .retain_registered_pair_forward(request, outcome)
+            .await?)
+    }
+
     pub async fn registered_audit_result(
         &self,
         event_id: &arkret_wire::EventId,

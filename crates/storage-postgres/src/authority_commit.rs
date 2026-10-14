@@ -4005,12 +4005,32 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .map_err(PgTransactionError::into_persistence)
     }
 
+    async fn retain_registered_pair_forward(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::AuditPairedEventUnitSubmission,
+        outcome: Option<
+            &arkret_models_collaboration::authority_commit::AuditPairedEventAcceptanceOutcome,
+        >,
+    ) -> PersistenceResult<()> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::registered_audit::retain_forward_in_connection(conn, request, outcome).await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
     async fn registered_audit_result(
         &self,
         event_id: &arkret_wire::EventId,
     ) -> PersistenceResult<Option<coland_storage::RegisteredAuditResult>> {
         let mut conn = pg_conn(&self.pool).await?;
-        crate::registered_audit::original_in_connection(&mut conn, event_id).await
+        if let Some(original) =
+            crate::registered_audit::original_in_connection(&mut conn, event_id).await?
+        {
+            return Ok(Some(original));
+        }
+        crate::registered_audit::forward_original_in_connection(&mut conn, event_id).await
     }
 
     async fn current_authority(
@@ -5468,6 +5488,8 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 if held.handoff_json != handoff_json || held_snapshot.snapshot_json != snapshot_json {
                     return Err(invalid("handoff replay differs from the installed original").into());
                 }
+                let originals = handoff_originals_in_connection(conn, &handoff.realm_id).await?;
+                crate::registered_audit::verify_handoff_archive(conn, &originals).await?;
                 return Ok(());
             }
             if current.generation != handoff.from_generation
@@ -5512,6 +5534,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             // The endpoint activates a pre-imported frozen state. A readable
             // member suffix or an inline current-only snapshot is insufficient.
             let originals = handoff_originals_in_connection(conn, &handoff.realm_id).await?;
+            crate::registered_audit::verify_handoff_archive(conn, &originals).await?;
             let change = originals.iter().find(|full| full.commit.commit_id == handoff.change_commit_id)
                 .ok_or_else(|| invalid("handoff change original is not held"))?;
             if change.event.event_id != handoff.change_event_ref

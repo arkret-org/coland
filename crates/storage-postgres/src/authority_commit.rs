@@ -2172,7 +2172,7 @@ pub(crate) async fn check_self_producer_guard_in_connection(
         )
         .await;
     }
-    let actor = event.actor_id.as_account_id().ok_or_else(|| {
+    let actor = event.actual_signer().as_account_id().ok_or_else(|| {
         PersistenceError::Conflict("self Event producer is not an account".to_owned())
     })?;
     let method = &event
@@ -2182,11 +2182,6 @@ pub(crate) async fn check_self_producer_guard_in_connection(
             PersistenceError::Conflict("self Event producer proof is missing".to_owned())
         })?
         .verification_method;
-    if event.executed_by.is_some() {
-        return Err(PersistenceError::Conflict(
-            "self Event cannot delegate its producer".to_owned(),
-        ));
-    }
     match guard {
         SelfProducerCommitGuard::MimiFacade { .. } => unreachable!("MIMI guard dispatched above"),
         SelfProducerCommitGuard::HumanDevice(selector)

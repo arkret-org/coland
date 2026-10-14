@@ -980,8 +980,14 @@ pub(super) async fn validate_recovery_caller(
             "recovery requires a standard grant",
         )
     })?;
-    if event.actor_id != actor
-        || event.executed_by.is_some()
+    // Recovery authenticates the original actual producer. Attributed Agent
+    // commands retain the controller author in their immutable Event bytes;
+    // they must not be mistaken for a different caller on exact retry.
+    let delegated_agent = session.agent_session().is_some()
+        && event.executed_by.as_ref() == Some(&actor)
+        && event.actor_id != actor;
+    if event.actual_signer() != &actor
+        || (event.executed_by.is_some() && !delegated_agent)
         || grant.account_id != *account
         || grant.credential_class != SessionGrantCredentialClass::Standard
         || account.station_id != state.service_core_id()

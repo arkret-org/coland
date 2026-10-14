@@ -50,6 +50,7 @@ mod agent_principal_row;
 mod agent_producer_evidence;
 mod agent_producer_signer_keys;
 mod agent_provisioning;
+mod agent_session_authority;
 mod agents;
 mod applet_admission;
 mod applet_authority_material;

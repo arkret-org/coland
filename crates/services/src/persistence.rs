@@ -530,8 +530,19 @@ impl PersistenceHandle {
             .await
     }
 
-    /// The authorization inputs of `actor` in `realm_id`, read from one
-    /// snapshot and evaluated at `at`.
+    /// Deployment-private Agent content ceilings from one current snapshot.
+    pub async fn agent_session_authority(
+        &self,
+        request: &coland_storage::AgentSessionAuthorityRequest,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<coland_storage::AgentSessionAuthorityOutcome> {
+        self.persistence
+            .capability_grant_current_results()
+            .agent_session_authority(request, at)
+            .await
+    }
+
+    /// The authorization inputs of `actor` in `realm_id`, read at one cut.
     pub async fn actor_realm_authorization(
         &self,
         realm_id: &arkret_wire::RealmId,

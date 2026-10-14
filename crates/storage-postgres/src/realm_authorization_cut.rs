@@ -958,7 +958,7 @@ impl RealmAuthorizationCut {
                 true,
             ))
             .await?;
-            let producer_evaluation = coland_storage::evaluate_grants_with_verified_approvals(
+            let mut producer_evaluation = coland_storage::evaluate_grants_with_verified_approvals(
                 &producer_operation,
                 producer_cut
                     .effective_grants_with_owned_source(operation.at, source)
@@ -975,6 +975,31 @@ impl RealmAuthorizationCut {
             if producer_evaluation.is_refusal() {
                 return Err(capability_denied(
                     "current Agent producer sources refuse attributed execution",
+                ));
+            }
+            let selected: GrantId = event
+                .authorization_ref
+                .as_ref()
+                .ok_or_else(|| {
+                    capability_denied("attributed Agent execution lacks authorization_ref")
+                })?
+                .as_str()
+                .parse()
+                .map_err(|_| {
+                    capability_denied("attributed Agent execution must select a capability grant")
+                })?;
+            if let GrantEvaluation::Allowed(grants) = &mut producer_evaluation {
+                grants.retain(|row| {
+                    row.grant.id == selected && row.grant.owned_agent_issuer().is_none()
+                });
+                if grants.is_empty() {
+                    return Err(capability_denied(
+                        "selected grant does not authorize attributed Agent execution",
+                    ));
+                }
+            } else {
+                return Err(capability_denied(
+                    "Agent producer holds no complete attributed execution path",
                 ));
             }
             if let GrantEvaluation::Allowed(ref producer_grants) = producer_evaluation

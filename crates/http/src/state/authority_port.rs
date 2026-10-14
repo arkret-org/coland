@@ -80,6 +80,7 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         | EventKind::StrandReorder
         | EventKind::StrandWatchSet
         | EventKind::AgentInteractionSet
+        | EventKind::AgentActionApprove
         | EventKind::SpaceCreate
         | EventKind::SpaceUpdate
         | EventKind::SpaceParent
@@ -604,7 +605,7 @@ impl AuthorityProtocolPort for AppState {
             return Ok(original);
         }
         let (producer_guard, producer_key) = Box::pin(
-            super::authority_producer_validation::verify_self_event_producer_key(
+            super::authority_producer_validation::verify_self_event_submission_producer_key(
                 self, session, event,
             ),
         )

@@ -1701,6 +1701,22 @@ impl CapabilityGrantCurrentResultStore for PgCapabilityGrantCurrentResultStore {
         .map_err(PgTransactionError::into_persistence)
     }
 
+    async fn agent_session_authority(
+        &self,
+        request: &coland_storage::AgentSessionAuthorityRequest,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<coland_storage::AgentSessionAuthorityOutcome> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                .execute(&mut *conn)
+                .await?;
+            Ok(crate::agent_session_authority::read(conn, request, at).await?)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     async fn seed_test_realm_root(
         &self,

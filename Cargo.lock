@@ -2091,6 +2091,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "chrono-tz",
+ "coland-contracts",
  "coland-domain",
  "serde",
  "serde_json",

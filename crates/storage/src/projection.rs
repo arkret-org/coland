@@ -416,6 +416,17 @@ pub fn effective_capability_grant_state_digest(
 
 #[async_trait]
 pub trait CapabilityGrantCurrentResultStore: Send + Sync {
+    /// Deployment-private issuer source supply from one durable current cut.
+    async fn agent_session_authority(
+        &self,
+        _request: &crate::AgentSessionAuthorityRequest,
+        _at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<crate::AgentSessionAuthorityOutcome> {
+        Err(crate::PersistenceError::Database(
+            "Agent session authority source is unavailable".to_owned(),
+        ))
+    }
+
     async fn get(
         &self,
         realm_id: &arkret_wire::RealmId,

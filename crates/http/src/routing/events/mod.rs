@@ -74,6 +74,10 @@ pub fn local_router() -> Router {
 pub fn account_authority_private_router() -> Router {
     Router::with_path("account-authority")
         .push(
+            Router::with_path("agent-session-authority/read")
+                .post(account_authority_private::read_agent_session_authority),
+        )
+        .push(
             Router::with_path("agent-participation/read")
                 .post(account_authority_private::read_agent_participation),
         )

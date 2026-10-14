@@ -209,7 +209,9 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
         let (token, detail) = detail.split_once(": ").unwrap_or(("", ""));
         // encryption-and-audit.md §5.1.2: a forwarded Genesis whose carried
         // material does not address its refs.
-        if let Some(code @ ErrorCode::DigestMismatch) = ErrorCode::from_wire(token) {
+        if let Some(code @ (ErrorCode::DigestMismatch | ErrorCode::Unauthenticated)) =
+            ErrorCode::from_wire(token)
+        {
             return crate::error::render_error_code(code, res, detail);
         }
         match error.conflict_code() {
@@ -220,6 +222,16 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
                     ErrorCode::SCHEMA_VIOLATION,
                     "Event identity does not match its canonical content",
                     arkret_wire::ReasonCode::EVENT_ID_DIGEST_MISMATCH,
+                    None,
+                );
+            }
+            Some(coland_storage::ConflictCode::ApprovalNonceReused) => {
+                return crate::error::render_error_with_reason_code(
+                    res,
+                    crate::error::error_http_status(ErrorCode::FailedPrecondition),
+                    ErrorCode::FAILED_PRECONDITION,
+                    detail,
+                    arkret_wire::ReasonCode::APPROVAL_NONCE_REUSED,
                     None,
                 );
             }
@@ -1006,6 +1018,36 @@ mod tests {
             "https://arkret.org/problems/failed_precondition"
         );
         assert_eq!(body["reason_code"], "invalid_membership_transition");
+    }
+
+    #[tokio::test]
+    async fn recovery_actor_mismatch_retains_the_registered_authentication_error() {
+        let mut res = Response::new();
+        render_service_error(
+            &mut res,
+            ServiceError::Conflict(
+                "unauthenticated: recovery credential does not bind the exact original Account"
+                    .to_owned(),
+            ),
+        );
+        assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
+        let body: serde_json::Value = res.take_json().await.expect("problem body");
+        assert_eq!(body["type"], "https://arkret.org/problems/unauthenticated");
+    }
+
+    #[tokio::test]
+    async fn approval_nonce_rebinding_renders_registered_precondition_reason() {
+        let mut res = Response::new();
+        render_service_error(&mut res, ServiceError::Conflict(
+            "approval_nonce_reused: a controller nonce cannot bind different confirmation bytes".to_owned(),
+        ));
+        assert_eq!(res.status_code, Some(StatusCode::CONFLICT));
+        let body: serde_json::Value = res.take_json().await.expect("problem body");
+        assert_eq!(
+            body["type"],
+            "https://arkret.org/problems/failed_precondition"
+        );
+        assert_eq!(body["reason_code"], "approval_nonce_reused");
     }
 
     #[tokio::test]

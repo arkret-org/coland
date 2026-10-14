@@ -70,15 +70,44 @@ pub(crate) async fn verify_self_event_producer_key(
     SelfProducerCommitGuard,
     arkret_signatures::PublicKeyMaterial,
 )> {
+    verify_self_event_producer_key_inner(state, session, event, false).await
+}
+
+/// Ordinary shared Events may name an independently authenticated Agent as
+/// their actual producer. Private and dedicated commands retain direct authors.
+pub(crate) async fn verify_self_event_submission_producer_key(
+    state: &AppState,
+    session: &SessionIdentityState,
+    event: &Event,
+) -> ServiceResult<(
+    SelfProducerCommitGuard,
+    arkret_signatures::PublicKeyMaterial,
+)> {
+    verify_self_event_producer_key_inner(state, session, event, true).await
+}
+
+async fn verify_self_event_producer_key_inner(
+    state: &AppState,
+    session: &SessionIdentityState,
+    event: &Event,
+    allow_agent_execution: bool,
+) -> ServiceResult<(
+    SelfProducerCommitGuard,
+    arkret_signatures::PublicKeyMaterial,
+)> {
     arkret_event_draft::validate_event_for_submit(event)
         .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
     let actor = crate::routing::identity::session_actor::validated_session_actor(state, session)
         .await
         .map_err(|error| rejected(format!("authenticated Account unavailable: {error}")))?;
-    if event.actor_id != actor || event.executed_by.is_some() {
+    let delegated_agent = allow_agent_execution
+        && session.agent_session().is_some()
+        && event.executed_by.as_ref() == Some(&actor)
+        && event.actor_id != actor;
+    if event.actual_signer() != &actor || (event.executed_by.is_some() && !delegated_agent) {
         return Err(ServiceError::protocol(
             arkret_wire::ErrorCode::CapabilityDenied,
-            "self Event requires the exact authenticated actor without delegated execution"
+            "self Event requires the exact authenticated producer on its registered execution path"
                 .to_owned(),
         ));
     }
@@ -125,6 +154,8 @@ pub(crate) async fn verify_self_event_producer_key(
                 .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
             if authorized.agent_id != *agent_id
                 || authorized.verification_method != *verification_method
+                || (delegated_agent
+                    && committed.event.executed_by.as_ref() != Some(&event.actor_id))
             {
                 return Err(rejected(
                     "Agent grant authorization differs from accepted Event",

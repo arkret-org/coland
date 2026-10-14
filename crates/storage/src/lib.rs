@@ -13,6 +13,9 @@ pub(crate) use std::collections::{BTreeMap, BTreeSet};
 pub(crate) use arkret_event_draft::ProjectedEventOperation;
 pub(crate) use async_trait::async_trait;
 pub(crate) use chrono::Utc;
+pub use coland_contracts::agent_session_authority::{
+    AgentSessionAuthorityOutcome, AgentSessionAuthorityRequest,
+};
 pub use coland_domain::identity::{ContactRecord, ContactRequestSlotState};
 pub(crate) use serde_json::Value;
 pub(crate) use uuid::Uuid;

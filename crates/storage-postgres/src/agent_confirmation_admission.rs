@@ -2,17 +2,12 @@
 use arkret_models_collaboration::events_payloads::agent::{
     AgentActionApprovePayload, AgentActionRequestPayload,
 };
-use arkret_wire::{ActorId, Event, EventKind, RealmCommit};
+use arkret_wire::{AccountId, ActorId, Event, EventKind, RealmCommit};
 use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Jsonb, Nullable, Text, Timestamptz};
 use diesel::{OptionalExtension, QueryableByName, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 
-#[derive(QueryableByName)]
-struct Controller {
-    #[diesel(sql_type=Jsonb)]
-    controller_actor_id: serde_json::Value,
-}
 #[derive(QueryableByName)]
 struct Confirmation {
     #[diesel(sql_type=Jsonb)]
@@ -43,22 +38,40 @@ fn required() -> PersistenceError {
             .into(),
     )
 }
+/// The Agent PCR root belongs to the Agent, not to its human controller.
+/// Reuse the canonical accepted ownership closure, including its full Account,
+/// native provision witness, lifecycle, accountability and DID/PCR binding.
 async fn controller(
     conn: &mut AsyncPgConnection,
     agent: &arkret_wire::DidCoreId,
+    expected: &AccountId,
+    at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<ActorId> {
-    let row=sql_query("SELECT r.controller_actor_id FROM agent_principals a JOIN realm_authority_root_current_results r ON r.realm_id=a.principal_control_realm_id JOIN agent_status_current_results s ON s.realm_id=r.realm_id AND s.agent_id=a.id WHERE a.id=$1 AND s.value='\"active\"'::jsonb FOR SHARE OF a,r,s")
-        .bind::<Text,_>(agent.as_str()).get_result::<Controller>(&mut *conn).await.optional().map_err(PersistenceError::database)?
-        .ok_or_else(||invalid("Agent controller authority is unavailable at the current PCR cut"))?;
-    serde_json::from_value(row.controller_actor_id)
-        .map_err(|_| invalid("Agent controller authority is invalid"))
+    let agent_account = AccountId::new(agent.clone(), expected.station_id.clone());
+    if crate::boxed_future(|| {
+        crate::agent_interaction_current_results::owned_provenance_in_connection(
+            conn,
+            &agent_account,
+            expected,
+            at,
+            true,
+        )
+    })
+    .await?
+    .is_none()
+    {
+        return Err(invalid(
+            "Agent accepted current ownership source is unavailable",
+        ));
+    }
+    Ok(ActorId::account(expected.clone()))
 }
 
 pub(crate) async fn admit_confirmation(
     conn: &mut AsyncPgConnection,
     event: &Event,
     commit: &RealmCommit,
-    prepared: Option<&coland_storage::EventApprovalCommit>,
+    _prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if event.kind != EventKind::AgentActionApprove {
         return Ok(());
@@ -67,7 +80,24 @@ pub(crate) async fn admit_confirmation(
         serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
     )
     .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
-    if event.executed_by.is_some() || controller(conn, &payload.agent_id).await? != event.actor_id {
+    let expected = event
+        .actor_id
+        .as_account_id()
+        .ok_or_else(|| invalid("Agent confirmation requires a full controller Account"))?;
+    if event.executed_by.is_some()
+        || event.applet_id.is_some()
+        || event.producer_proof.is_none()
+        || event.scope_ref
+            != (arkret_wire::ScopeRef::Realm {
+                realm_id: event.realm_id.clone(),
+            })
+        || commit.stream_ref
+            != (arkret_wire::CommitStreamRef::Realm {
+                realm_id: event.realm_id.clone(),
+            })
+        || controller(conn, &payload.agent_id, expected, commit.committed_at).await?
+            != event.actor_id
+    {
         return Err(invalid(
             "Agent confirmation must be signed by its current exact controller Actor",
         ));
@@ -77,10 +107,105 @@ pub(crate) async fn admit_confirmation(
             "Agent confirmation covering committed_at is after expires_at",
         ));
     }
-    crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
-        conn, event, commit, prepared,
+    // This registered controller proof class has no capability grant shortcut.
+    // Lock and verify the same accepted ownership/member generation as mode writes.
+    crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &event.realm_id).await?;
+    let agent = AccountId::new(payload.agent_id.clone(), expected.station_id.clone());
+    if crate::agent_interaction_current_results::controller_in_connection(
+        conn,
+        &event.realm_id,
+        &agent,
+        commit.committed_at,
     )
-    .await?;
+    .await?
+    .as_ref()
+        != Some(expected)
+    {
+        return Err(invalid(
+            "Agent confirmation requires the current controller and Agent member generation",
+        ));
+    }
+    require_confirmation_source(conn, event, &payload, expected).await?;
+    Ok(())
+}
+
+/// The signed confirmation names immutable private input, never a caller-made
+/// controller row. The complete approved Event digest is checked at publication.
+async fn require_confirmation_source(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    payload: &AgentActionApprovePayload,
+    owner: &AccountId,
+) -> PersistenceResult<()> {
+    let agent_actor = ActorId::account(AccountId::new(
+        payload.agent_id.clone(),
+        owner.station_id.clone(),
+    ));
+    if payload.target.realm_id.as_ref() != Some(&event.realm_id) {
+        return Err(invalid("Agent confirmation target Realm differs"));
+    }
+    if let Some(request_id) = payload.request_id.as_deref() {
+        let source = sql_query("SELECT r.controller_account_key,r.request,r.workflow_state,e.envelope AS source FROM agent_action_requests r LEFT JOIN actor_private_events e ON e.event_id=r.accepted_event_id AND e.kind='ak.agent.action_request' WHERE r.controller_account_key=$1 AND r.agent_id=$2 AND r.request_id=$3 FOR SHARE OF r")
+            .bind::<Text,_>(owner.to_string()).bind::<Text,_>(payload.agent_id.as_str()).bind::<Text,_>(request_id)
+            .get_result::<RequestSource>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+            .ok_or_else(|| invalid("Agent confirmation request source is unavailable"))?;
+        let accepted: Event = serde_json::from_value(
+            source
+                .source
+                .ok_or_else(|| invalid("Agent confirmation accepted request is unavailable"))?,
+        )
+        .map_err(PersistenceError::database)?;
+        let request: AgentActionRequestPayload =
+            serde_json::from_value(source.request.clone()).map_err(PersistenceError::database)?;
+        if accepted.kind != EventKind::AgentActionRequest
+            || accepted.actor_id != agent_actor
+            || accepted.executed_by.is_some()
+            || serde_json::json!(accepted.payload) != source.request
+            || source.workflow_state != "requested"
+            || request.request_id != request_id
+            || request.agent_id != payload.agent_id
+            || request.controller_account_id != *owner
+            || request.proposed_action != payload.proposed_action
+            || serde_json::json!(request.target) != serde_json::json!(payload.target)
+            || payload
+                .draft_id
+                .as_ref()
+                .is_some_and(|id| request.draft_id.as_ref() != Some(id))
+        {
+            return Err(invalid(
+                "Agent confirmation differs from its immutable request",
+            ));
+        }
+        return Ok(());
+    }
+    let draft = payload
+        .draft_id
+        .as_deref()
+        .ok_or_else(|| invalid("Agent confirmation has no request or draft"))?;
+    let source = confirmation_draft_source(conn, owner, &payload.agent_id, draft)
+        .await?
+        .ok_or_else(|| invalid("Agent confirmation consumed draft source is unavailable"))?;
+    let accepted: Event =
+        serde_json::from_value(source.source).map_err(PersistenceError::database)?;
+    let proposed: arkret_models_collaboration::events_payloads::agent::AgentDraftProposePayload =
+        serde_json::from_value(serde_json::json!(accepted.payload))
+            .map_err(PersistenceError::database)?;
+    if accepted.kind != EventKind::AgentDraftPropose
+        || accepted.actor_id != agent_actor
+        || accepted.executed_by.is_some()
+        || proposed.agent_id != payload.agent_id
+        || proposed.controller_account_id != *owner
+        || proposed.draft_id != draft
+        || proposed.proposed_action != payload.proposed_action
+        || serde_json::json!(proposed.target) != serde_json::json!(payload.target)
+        || payload.draft_content_digest.as_ref() != Some(&proposed.content_digest)
+        || arkret_canonical::canonical_sha256(&accepted).map_err(PersistenceError::database)?
+            != source.canonical_event_digest
+    {
+        return Err(invalid(
+            "Agent confirmation differs from its immutable draft",
+        ));
+    }
     Ok(())
 }
 
@@ -101,15 +226,16 @@ pub(crate) async fn commit_confirmation(
         .bind::<Text,_>(commit.commit_id.as_str()).bind::<BigInt,_>(commit.stream_position as i64).bind::<Jsonb,_>(value)
         .bind::<Timestamptz,_>(commit.committed_at).execute(&mut *conn).await.map_err(PersistenceError::database)?;
     if inserted != 1 {
-        return Err(invalid(
-            "Agent confirmation identifier or controller nonce has already been allocated",
+        return Err(PersistenceError::Conflict(
+            "approval_nonce_reused: Agent confirmation identifier or controller nonce has already been allocated".into(),
         ));
     }
     Ok(())
 }
 
 /// An accepted private action request selects its complete pre-signed Event.
-/// Ordinary delegated writes with no such source retain their own admission.
+/// Direct writes with no selection retain their own admission; attributed
+/// Agent execution always requires its fresh controller confirmation.
 /// Draft-only publication is selected by an immutable controller confirmation
 /// and the accepted encrypted holder register, without exposing its plaintext.
 pub(crate) async fn require_publication(
@@ -142,6 +268,23 @@ pub(crate) async fn require_publication(
         if selected.present {
             return crate::boxed_future(|| require_draft_publication(conn, event, commit)).await;
         }
+        // Attribution cannot turn a reply grant or private participation bit
+        // into a fresh controller approval for a new, unselected Event.
+        if event.actual_signer() != &event.actor_id
+            && let (Some(agent), Some(expected)) = (
+                event.actual_signer().as_account_id(),
+                event.actor_id.as_account_id(),
+            )
+            && crate::realm_authorization_cut::is_owned_agent_in_connection(
+                conn,
+                &event.realm_id,
+                agent,
+            )
+            .await?
+        {
+            controller(conn, &agent.principal_id, expected, commit.committed_at).await?;
+            return Err(required());
+        }
         return Ok(());
     }
     for source in requests {
@@ -164,7 +307,13 @@ pub(crate) async fn require_publication(
         {
             continue;
         }
-        let current_controller = controller(conn, &agent.principal_id).await?;
+        let current_controller = controller(
+            conn,
+            &agent.principal_id,
+            &request.controller_account_id,
+            commit.committed_at,
+        )
+        .await?;
         let Some(controller_account) = current_controller.as_account_id() else {
             continue;
         };
@@ -302,6 +451,24 @@ struct DraftSource {
     canonical_event_digest: String,
 }
 
+async fn confirmation_draft_source(
+    conn: &mut AsyncPgConnection,
+    owner: &AccountId,
+    agent: &arkret_wire::DidCoreId,
+    draft: &str,
+) -> PersistenceResult<Option<DraftSource>> {
+    let key =
+        arkret_models_collaboration::events_payloads::account_data::agent_draft_account_data_key(
+            agent, draft,
+        )
+        .map_err(|_| required())?;
+    let source = sql_query("SELECT source.envelope AS source,p.canonical_event_digest FROM agent_draft_pending_intents p JOIN actor_private_events source ON source.event_id=p.accepted_event_id AND source.kind='ak.agent.draft.propose' JOIN actor_private_events consumed ON consumed.event_id=p.consumption->>'account_data_set_event_id' AND consumed.kind='ak.account_data.set' JOIN account_datas d ON d.actor_id=$1 AND d.account_data_key=$4 WHERE p.controller_account_key=$2 AND p.agent_id=$3 AND p.draft_id=$5 AND p.state='consumed' AND p.consumption->>'account_data_key'=$4 AND p.consumption->>'accepted_revision'='1' AND p.controller_account_id=$6 AND consumed.actor_id=$1 AND consumed.envelope->'payload'->>'key'=$4 AND consumed.envelope->'payload'->>'expected_server_revision'='0' AND consumed.envelope->'payload'->>'source_pending_event_id'=p.accepted_event_id AND consumed.envelope->'payload' ? 'encrypted_payload' AND NOT d.tombstone AND d.revision>=1 AND d.payload->>'schema'='ak.schema.account_data_encrypted_value.v1' FOR SHARE OF p,d")
+            .bind::<Text,_>(ActorId::account(owner.clone()).to_string()).bind::<Text,_>(owner.to_string())
+            .bind::<Text,_>(agent.as_str()).bind::<Text,_>(&key).bind::<Text,_>(draft).bind::<Jsonb,_>(serde_json::json!(owner))
+            .get_result::<DraftSource>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    Ok(source)
+}
+
 /// The holder's signed confirmation selects a draft publication. Its encrypted
 /// Account Data remains opaque: only accepted source coordinates are checked.
 async fn require_draft_publication(
@@ -326,8 +493,15 @@ async fn require_draft_publication(
         {
             continue;
         }
-        let current_controller =
-            crate::boxed_future(|| controller(conn, &payload.agent_id)).await?;
+        let confirmed_controller: ActorId =
+            serde_json::from_value(confirmation.controller_actor_id).map_err(|_| required())?;
+        let Some(expected) = confirmed_controller.as_account_id() else {
+            continue;
+        };
+        let current_controller = crate::boxed_future(|| {
+            controller(conn, &payload.agent_id, expected, commit.committed_at)
+        })
+        .await?;
         let Some(owner) = current_controller.as_account_id() else {
             continue;
         };
@@ -343,17 +517,10 @@ async fn require_draft_publication(
         if !(agent_owned || controller_owned) {
             continue;
         }
-        let confirmed_controller: ActorId =
-            serde_json::from_value(confirmation.controller_actor_id).map_err(|_| required())?;
         if confirmed_controller != current_controller {
             continue;
         }
-        let key = arkret_models_collaboration::events_payloads::account_data::agent_draft_account_data_key(&payload.agent_id, draft)
-            .map_err(|_| required())?;
-        let source = sql_query("SELECT source.envelope AS source,p.canonical_event_digest FROM agent_draft_pending_intents p JOIN actor_private_events source ON source.event_id=p.accepted_event_id AND source.kind='ak.agent.draft.propose' JOIN actor_private_events consumed ON consumed.event_id=p.consumption->>'account_data_set_event_id' AND consumed.kind='ak.account_data.set' JOIN account_datas d ON d.actor_id=$1 AND d.account_data_key=$4 WHERE p.controller_account_key=$2 AND p.agent_id=$3 AND p.draft_id=$5 AND p.state='consumed' AND p.consumption->>'account_data_key'=$4 AND p.consumption->>'accepted_revision'='1' AND p.controller_account_id=$6 AND consumed.actor_id=$1 AND consumed.envelope->'payload'->>'key'=$4 AND consumed.envelope->'payload'->>'expected_server_revision'='0' AND consumed.envelope->'payload'->>'source_pending_event_id'=p.accepted_event_id AND consumed.envelope->'payload' ? 'encrypted_payload' AND NOT d.tombstone AND d.revision>=1 AND d.payload->>'schema'='ak.schema.account_data_encrypted_value.v1' FOR SHARE OF p,d")
-            .bind::<Text,_>(current_controller.to_string()).bind::<Text,_>(owner.to_string())
-            .bind::<Text,_>(payload.agent_id.as_str()).bind::<Text,_>(&key).bind::<Text,_>(draft).bind::<Jsonb,_>(serde_json::json!(owner))
-            .get_result::<DraftSource>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+        let source = confirmation_draft_source(conn, owner, &payload.agent_id, draft).await?;
         let Some(source) = source else {
             continue;
         };

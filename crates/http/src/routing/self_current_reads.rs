@@ -385,6 +385,14 @@ async fn strand_watch_current(req: &mut Request, depot: &Depot, res: &mut Respon
                     .await
                 {
                     Ok(guard) => guard,
+                    Err(error) if error.code == ErrorCode::RevisionUnavailable => {
+                        return render_unresolved(
+                            res,
+                            ErrorCode::RevisionUnavailable,
+                            ServiceOperationId::SELF_STRAND_WATCH_READ_CURRENT_V1,
+                            "the final remote Watch delivery cut is unproved",
+                        );
+                    }
                     Err(_) => return not_found(res),
                 };
             no_store(res);

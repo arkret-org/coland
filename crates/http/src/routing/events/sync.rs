@@ -217,6 +217,12 @@ async fn content_delivery_guard_inner(
                 _ => "other",
             };
             tracing::warn!(diagnostic, "current content delivery guard refused");
+            if input.remote_watch_read.is_some() && !error.is_not_found() {
+                return crate::app_error!(
+                    RevisionUnavailable,
+                    "the remote Watch current delivery cut cannot be confirmed",
+                );
+            }
             crate::error::AppError::capability_denied("current content delivery is unavailable")
         })
 }

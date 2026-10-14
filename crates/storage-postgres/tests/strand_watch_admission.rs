@@ -749,12 +749,12 @@ async fn remote_watch_delivery_uses_the_verified_peer_cut_without_local_reducer_
         .await
         .unwrap();
     drop(conn);
-    assert!(
+    assert!(matches!(
         store
             .acquire_committed_content_delivery(&account, &local, &input)
-            .await
-            .is_err()
-    );
+            .await,
+        Err(coland_storage::PersistenceError::NotFound(_))
+    ));
     assert_eq!(footprint(&pool).await, baseline);
 }
 

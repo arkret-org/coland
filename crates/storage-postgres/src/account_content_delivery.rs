@@ -1165,8 +1165,8 @@ async fn acquire_remote_watch_delivery(
         .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(actor.to_string())
         .get_result::<crate::ExistsRow>(held.connection()).await.map_err(PersistenceError::database)?.present;
     if revoked {
-        return Err(unavailable(
-            "remote Watch member withdrawal has been observed",
+        return Err(PersistenceError::NotFound(
+            "remote Watch member withdrawal has been observed".to_owned(),
         ));
     }
     let strand_source = crate::object_projection_reads::current_source_sql(
@@ -1177,17 +1177,22 @@ async fn acquire_remote_watch_delivery(
         .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.strand_id.as_str())
         .get_result::<LocalCurrent>(held.connection()).await.optional().map_err(PersistenceError::database)?;
     if let Some(strand) = strand {
+        if strand
+            .value
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            != Some("active")
+        {
+            return Err(PersistenceError::NotFound(
+                "remote Watch Strand is no longer active".to_owned(),
+            ));
+        }
         let expected_circle = match &head.stream_ref {
             arkret_wire::CommitStreamRef::Circle { circle_id, .. } => Some(circle_id.as_str()),
             _ => None,
         };
         if strand.source_stream_ref.as_ref()
             != Some(&serde_json::to_value(&head.stream_ref).map_err(PersistenceError::database)?)
-            || strand
-                .value
-                .get("state")
-                .and_then(serde_json::Value::as_str)
-                != Some("active")
             || strand
                 .value
                 .get("scope_circle_id")
@@ -1204,8 +1209,8 @@ async fn acquire_remote_watch_delivery(
             .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).bind::<Text,_>(actor.to_string())
             .get_result::<crate::ExistsRow>(held.connection()).await.map_err(PersistenceError::database)?.present;
         if revoked {
-            return Err(unavailable(
-                "remote Watch Circle withdrawal has been observed",
+            return Err(PersistenceError::NotFound(
+                "remote Watch Circle withdrawal has been observed".to_owned(),
             ));
         }
     }
@@ -1367,7 +1372,7 @@ async fn acquire_remote_watch_delivery(
             .bind::<Text,_>(token).bind::<BigInt,_>(account_pk.0).bind::<Text,_>(account.principal_id.as_str())
             .bind::<Text,_>(account.station_id.as_str()).bind::<Text,_>(&device.device_id)
             .get_result::<LiveSession>(held.connection()).await.optional().map_err(PersistenceError::database)?
-            .ok_or_else(|| unavailable("local Watch session was withdrawn or changed"))?;
+            .ok_or_else(|| PersistenceError::NotFound("local Watch session was withdrawn or changed".to_owned()))?;
         if session.expires_at != expires_at || session.expires_at <= chrono::Utc::now() {
             return Err(unavailable("local Watch session expiry changed"));
         }

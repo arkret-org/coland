@@ -6,7 +6,6 @@
 //! members and schema-invalid values are `schema_violation`
 //! (`sync/service-http-binding.md` §6).
 
-use base64::Engine as _;
 use ed25519_dalek::Verifier;
 use serde_json::json;
 

@@ -79,7 +79,7 @@ pub(super) fn blob_upload_outcome(
     let signing_payload = json!({
         "blob_ref": blob_ref.as_str(),
         "size_bytes": size_bytes,
-        "received_at": received_at,
+        "received_at": canonical::format_timestamp_canonical(received_at),
         "issuer_id": issuer_id.as_str(),
     });
     let canonical_bytes = canonical::canonical_json_bytes(&signing_payload).map_err(|error| {

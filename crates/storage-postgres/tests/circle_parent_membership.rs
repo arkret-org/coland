@@ -589,6 +589,8 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                     assert!(
                         store
                             .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+include_product_authority: false,
+product_agent: None,
                                 scope,
                                 authority_commit_id: scope_head,
                                 parent_realm_authority_commit_id: Some(original_parent),
@@ -616,6 +618,8 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                     assert!(
                         store
                             .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+include_product_authority: false,
+product_agent: None,
                                 scope,
                                 authority_commit_id: scope_head,
                                 parent_realm_authority_commit_id: Some(original_parent),
@@ -655,6 +659,8 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                     assert!(
                         store
                             .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+include_product_authority: false,
+product_agent: None,
                                 scope,
                                 authority_commit_id: scope_head,
                                 parent_realm_authority_commit_id: Some(original_parent),
@@ -772,6 +778,8 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                     assert!(
                         store
                             .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+include_product_authority: false,
+product_agent: None,
                                 scope,
                                 authority_commit_id: scope_head,
                                 parent_realm_authority_commit_id: Some(original_parent),
@@ -804,6 +812,8 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                     assert!(
                         store
                             .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+include_product_authority: false,
+product_agent: None,
                                 scope,
                                 authority_commit_id: scope_head,
                                 parent_realm_authority_commit_id: Some(original_parent),

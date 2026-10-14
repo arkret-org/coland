@@ -810,16 +810,23 @@ dependencies = [
 name = "arkret-test-kit"
 version = "0.3.0"
 dependencies = [
+ "anyhow",
  "arkret-canonical",
  "arkret-event-draft",
  "arkret-identifiers",
+ "arkret-identity",
+ "arkret-models-collaboration",
+ "arkret-models-identity",
  "arkret-signatures",
  "arkret-wire",
  "chrono",
  "ed25519-dalek 3.0.0",
+ "rand_chacha 0.10.0",
+ "rand_core 0.10.1",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "url",
 ]
 
 [[package]]

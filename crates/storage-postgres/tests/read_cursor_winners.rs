@@ -285,15 +285,6 @@ async fn unprovable_or_foreign_positions_are_refused_with_zero_writes() {
         ReadCursorAdvanceRefusal::NotMember
     );
 
-    // A position before the owner's current join is outside its readable
-    // interval.
-    let genesis = discussion.unit.transactions[0].event.event_id.clone();
-    let before_join = advance(&discussion, principal, DEVICE_A, &genesis, hlc, 3);
-    assert_eq!(
-        refused(store.advance(&before_join).await.unwrap()),
-        ReadCursorAdvanceRefusal::PositionNotReadable
-    );
-
     // A Station that does not govern the Realm cannot classify the position.
     let elsewhere = advance(&discussion, principal, DEVICE_A, &second, hlc, 4);
     let elsewhere = with_event(
@@ -314,4 +305,189 @@ async fn unprovable_or_foreign_positions_are_refused_with_zero_writes() {
     unbound.owner = owner(&stranger);
     assert!(store.advance(&unbound).await.is_err());
     assert_eq!(count(&pool, "actor_private_events").await, 0);
+}
+
+#[tokio::test]
+async fn read_cursor_uses_the_same_readable_floor_as_stream_scans() {
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let discussion = open_human_discussion(&pool, "read-cursor-history-floor").await;
+    let founder = discussion
+        .head
+        .authority_commit
+        .event
+        .actor_id
+        .signing_principal_id();
+    let genesis = &discussion.unit.transactions[0].event.event_id;
+    let store = PgReadCursorStore::new(pool.clone());
+    let hlc = "019641370000-0000-00000001";
+    // The founder's join and position zero belong to one accepted atomic unit;
+    // since_join therefore starts at stream position zero, not its join slot.
+    let (position, _, won) = accepted(
+        store
+            .advance(&advance(&discussion, founder, DEVICE_A, genesis, hlc, 1))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(&position, genesis);
+    assert!(won);
+
+    let member = Box::pin(ordinary_realm::human_profile::admit(
+        &pool,
+        &station(),
+        "read-cursor-late-member",
+    ))
+    .await;
+    let joined_at = chrono::Utc::now();
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let joined = Box::pin(ordinary_realm::source_request(&pool,ordinary_realm::next_request(
+        &discussion.head.authority_commit,arkret_wire::EventKind::MemberState,&member.principal_id,
+        serde_json::json!({"member_id":arkret_wire::ActorId::account(member.clone()),"membership":"join"}),
+        joined_at,
+    ))).await;
+    uow.commit_event(joined.clone()).await.unwrap();
+    let before = (
+        count(&pool, "actor_private_events").await,
+        count(&pool, "read_cursor_winners").await,
+    );
+    assert_eq!(
+        refused(
+            store
+                .advance(&advance(
+                    &discussion,
+                    &member.principal_id,
+                    DEVICE_B,
+                    genesis,
+                    hlc,
+                    3
+                ))
+                .await
+                .unwrap()
+        ),
+        ReadCursorAdvanceRefusal::PositionNotReadable
+    );
+    assert_eq!(
+        (
+            count(&pool, "actor_private_events").await,
+            count(&pool, "read_cursor_winners").await
+        ),
+        before
+    );
+    let joined_id = &joined.authority_commit.event.event_id;
+    assert_eq!(
+        accepted(
+            store
+                .advance(&advance(
+                    &discussion,
+                    &member.principal_id,
+                    DEVICE_B,
+                    joined_id,
+                    hlc,
+                    4
+                ))
+                .await
+                .unwrap()
+        )
+        .0,
+        *joined_id
+    );
+}
+
+#[tokio::test]
+async fn all_history_positions_are_admitted_until_policy_tightens_without_rewriting_winners() {
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let discussion = ordinary_realm::open_discussion_with_history(
+        &pool,
+        "read-cursor-all-history",
+        "all_history_for_current_members",
+    )
+    .await;
+    let founder = discussion
+        .head
+        .authority_commit
+        .event
+        .actor_id
+        .signing_principal_id();
+    let member = Box::pin(ordinary_realm::human_profile::admit(
+        &pool,
+        &station(),
+        "read-cursor-history-member",
+    ))
+    .await;
+    let at = chrono::Utc::now();
+    let joined = Box::pin(ordinary_realm::source_request(&pool,ordinary_realm::next_request(
+        &discussion.head.authority_commit,arkret_wire::EventKind::MemberState,&member.principal_id,
+        serde_json::json!({"member_id":arkret_wire::ActorId::account(member.clone()),"membership":"join"}),at,
+    ))).await;
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    uow.commit_event(joined.clone()).await.unwrap();
+    let genesis = &discussion.unit.transactions[0].event.event_id;
+    let store = PgReadCursorStore::new(pool.clone());
+    let hlc = "019641370000-0000-00000001";
+    assert_eq!(
+        accepted(
+            store
+                .advance(&advance(
+                    &discussion,
+                    &member.principal_id,
+                    DEVICE_B,
+                    genesis,
+                    hlc,
+                    1
+                ))
+                .await
+                .unwrap()
+        )
+        .0,
+        *genesis
+    );
+    let history = Box::pin(ordinary_realm::source_request(
+        &pool,
+        ordinary_realm::next_request(
+            &joined.authority_commit,
+            arkret_wire::EventKind::RealmHistoryAccess,
+            founder,
+            serde_json::json!({"from":"all_history_for_current_members","to":"since_join"}),
+            at + chrono::Duration::milliseconds(1),
+        ),
+    ))
+    .await;
+    uow.commit_event(history).await.unwrap();
+    let before = (
+        count(&pool, "actor_private_events").await,
+        count(&pool, "read_cursor_winners").await,
+    );
+    assert_eq!(
+        refused(
+            store
+                .advance(&advance(
+                    &discussion,
+                    &member.principal_id,
+                    DEVICE_B,
+                    genesis,
+                    hlc,
+                    2
+                ))
+                .await
+                .unwrap()
+        ),
+        ReadCursorAdvanceRefusal::PositionNotReadable
+    );
+    assert_eq!(
+        (
+            count(&pool, "actor_private_events").await,
+            count(&pool, "read_cursor_winners").await
+        ),
+        before
+    );
+    assert_eq!(
+        store
+            .list(&member, Some(&discussion.realm_id()))
+            .await
+            .unwrap()[0]
+            .position
+            .event_id,
+        *genesis
+    );
 }

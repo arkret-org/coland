@@ -616,12 +616,53 @@ pub(super) async fn agent_view_from_record(
     let agent = agent_projection_from_record(record, runtime_state);
     let controller_account_id =
         crate::routing::identity::agent_pcr::agent_controller_account(state, record).await?;
-    let key_state = agent_key_state_from_record(
+    let mut key_state = agent_key_state_from_record(
         record,
         controller_account_id,
         active_authorizations,
         runtime_state,
     )?;
+    if key_state.active_authorizations.is_empty() {
+        key_state.authorized_event_ref = None;
+        key_state.authorized_verification_method = None;
+        key_state.authorized_public_key_digest = None;
+        key_state.signer_resolution_evidence_ref = None;
+        key_state.current_signer_evidence = None;
+    } else {
+        let reference = key_state.authorized_event_ref.as_ref().ok_or_else(|| {
+            crate::app_error!(
+                TemporarilyUnavailable,
+                "active Agent current source is unavailable"
+            )
+        })?;
+        let source = state
+            .authority_commits()
+            .committed_event(reference)
+            .await
+            .map_err(|error| {
+                AppError::internal(format!("Agent current authorization source: {error}"))
+            })?
+            .ok_or_else(|| {
+                crate::app_error!(
+                    TemporarilyUnavailable,
+                    "active Agent current source is unavailable"
+                )
+            })?;
+        key_state.current_key_authorization = Some(Box::new(
+            arkret_wire::CommittedEventView::Full(arkret_wire::CommittedEventFullView {
+                commit: source.commit,
+                event: source.event,
+            }),
+        ));
+    }
+    key_state
+        .validate_signer_evidence_delivery()
+        .map_err(|error| {
+            crate::app_error!(
+                TemporarilyUnavailable,
+                "Agent current source binding unavailable: {error}"
+            )
+        })?;
     Ok(AgentView {
         agent,
         grants: Vec::new(),
@@ -726,6 +767,7 @@ pub(super) fn agent_key_state_from_record(
         active_authorizations,
         signer_resolution_evidence_ref,
         current_signer_evidence,
+        current_key_authorization: None,
     })
 }
 

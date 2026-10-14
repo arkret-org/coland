@@ -645,6 +645,7 @@ async fn admit_member_state(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     review: Option<&crate::agent_management_review::ReviewAdmission>,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     let payload: MembershipPayload = serde_json::from_value(
         serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
@@ -740,10 +741,11 @@ async fn admit_member_state(
         }
         EdgeWriter::SelfOrAdmin if self_authored => Ok(()),
         EdgeWriter::SelfOrAdmin | EdgeWriter::Admin => {
-            RealmAuthorizationCut::read(conn, &event.realm_id, &event.actor_id)
-                .await?
-                .require_event_in_connection(conn, event, commit.committed_at)
-                .await
+            crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+                conn, event, commit, prepared,
+            )
+            .await
+            .map(|_| ())
         }
     }
 }
@@ -759,6 +761,7 @@ pub(crate) async fn admit_member_state_in_connection(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     review: Option<&crate::agent_management_review::ReviewAdmission>,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if event.kind != arkret_wire::EventKind::MemberState {
         return Ok(());
@@ -774,10 +777,10 @@ pub(crate) async fn admit_member_state_in_connection(
         .await?;
         RealmAuthorizationCut::read(conn, &event.realm_id, &event.actor_id)
             .await?
-            .require_managed_self_membership_action_in_connection(conn, event, commit.committed_at)
+            .require_managed_self_membership_action_in_connection(conn, event, commit, prepared)
             .await?;
     }
-    admit_member_state(conn, event, commit, review).await
+    admit_member_state(conn, event, commit, review, prepared).await
 }
 
 #[cfg(test)]

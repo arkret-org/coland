@@ -57,6 +57,7 @@ pub(crate) async fn commit_message_redact_current_result_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if event.kind != arkret_wire::EventKind::MessageRedact {
         return Ok(());
@@ -88,7 +89,8 @@ pub(crate) async fn commit_message_redact_current_result_in_connection(
             created_at: target.created_at,
             strand_id: &target.strand_id,
         },
-        commit.committed_at,
+        commit,
+        prepared,
     )
     .await?;
     if message_is_redacted(conn, &event.realm_id, &target.message_id).await? {

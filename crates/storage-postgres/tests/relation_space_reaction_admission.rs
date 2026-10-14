@@ -17,8 +17,10 @@ use serde_json::{Value, json};
 
 #[tokio::test]
 async fn pin_grants_are_explicit_and_assertions_preserve_removals_with_atomic_cas() {
-    let cases =
-        Box::pin(coland_storage_postgres::pin_conformance::run_pin_admission_fixture()).await;
+    let cases = ordinary_realm::case_future(
+        coland_storage_postgres::pin_conformance::run_pin_admission_fixture,
+    )
+    .await;
     assert_eq!(cases.len(), 6);
     assert!(cases.iter().all(|(_, assertions)| *assertions > 0));
 }

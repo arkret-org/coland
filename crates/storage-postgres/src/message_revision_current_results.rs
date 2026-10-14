@@ -842,6 +842,7 @@ pub(crate) async fn commit_message_revise_current_result_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if event.kind != arkret_wire::EventKind::MessageRevise {
         return Ok(());
@@ -890,7 +891,8 @@ pub(crate) async fn commit_message_revise_current_result_in_connection(
             created_at: target.created_at,
             strand_id: &target.strand_id,
         },
-        commit.committed_at,
+        commit,
+        prepared,
     )
     .await?;
     crate::message_interactions::require_message_actor(conn, event, commit.committed_at).await?;

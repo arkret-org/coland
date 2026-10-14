@@ -867,3 +867,13 @@ pub async fn parent_membership_revision(
         "stream_position": row.current_stream_position,
     })
 }
+
+/// Build a large case future outside the Tokio test wrapper's poll frame.
+#[inline(never)]
+pub fn case_future<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future,
+{
+    Box::pin(make())
+}

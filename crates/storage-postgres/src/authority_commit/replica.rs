@@ -348,7 +348,7 @@ pub(crate) async fn materialize_founding_in_connection(
         if event.kind == arkret_wire::EventKind::StrandCreate {
             crate::strand_current_results::commit_direct_conversation_founding_strand_in_connection(
                 conn, event, commit,
-            )
+             None)
             .await?;
         }
     }

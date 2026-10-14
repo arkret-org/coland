@@ -338,14 +338,13 @@ pub(crate) async fn commit_mimi_room_binding_current_result_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if event.kind != arkret_wire::EventKind::MimiRoomBinding {
         return Ok(());
     }
-    crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-        conn,
-        event,
-        commit.committed_at,
+    crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+        conn, event, commit, prepared,
     )
     .await?;
     let value = serde_json::to_value(&event.payload).map_err(PersistenceError::database)?;
@@ -1609,8 +1608,29 @@ pub(crate) async fn commit_transaction_in_connection(
     conn: &mut AsyncPgConnection,
     transaction: &AuthorityCommitTransaction,
 ) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
-    commit_transaction_in_connection_with_device_guard(conn, transaction, VerifiedPcrUnit::None)
-        .await
+    commit_transaction_in_connection_with_device_guard(
+        conn,
+        transaction,
+        VerifiedPcrUnit::None,
+        None,
+    )
+    .await
+}
+
+/// The registered Event carrier passes verified detached evidence to lifecycle
+/// admission before the fresh Commit, with consumption in the same transaction.
+pub(crate) async fn commit_transaction_with_approvals_in_connection(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
+) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
+    commit_transaction_in_connection_with_device_guard(
+        conn,
+        transaction,
+        VerifiedPcrUnit::None,
+        prepared,
+    )
+    .await
 }
 
 /// Only the registered PCR genesis, recovery and accepted-device UoWs may
@@ -1619,8 +1639,13 @@ pub(crate) async fn commit_verified_pcr_device_transaction_in_connection(
     conn: &mut AsyncPgConnection,
     transaction: &AuthorityCommitTransaction,
 ) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
-    commit_transaction_in_connection_with_device_guard(conn, transaction, VerifiedPcrUnit::Device)
-        .await
+    commit_transaction_in_connection_with_device_guard(
+        conn,
+        transaction,
+        VerifiedPcrUnit::Device,
+        None,
+    )
+    .await
 }
 
 /// Only the SecurityRotation proposal unit may call this after rechecking the
@@ -1633,6 +1658,7 @@ pub(crate) async fn commit_verified_pcr_revoke_proposal_in_connection(
         conn,
         transaction,
         VerifiedPcrUnit::RevokeProposal,
+        None,
     )
     .await
 }
@@ -1648,6 +1674,7 @@ pub(crate) async fn commit_verified_key_backup_pointer_in_connection(
         conn,
         transaction,
         VerifiedPcrUnit::KeyBackupPointer,
+        None,
     )
     .await
 }
@@ -1663,6 +1690,7 @@ pub(crate) async fn commit_verified_recovery_policy_in_connection(
         conn,
         transaction,
         VerifiedPcrUnit::RecoveryPolicy,
+        None,
     )
     .await
 }
@@ -1678,6 +1706,7 @@ pub(crate) async fn commit_verified_agent_provision_in_connection(
         conn,
         transaction,
         VerifiedPcrUnit::AgentProvision,
+        None,
     )
     .await
 }
@@ -1692,6 +1721,7 @@ pub(crate) async fn commit_verified_agent_control_in_connection(
         conn,
         transaction,
         VerifiedPcrUnit::AgentControl,
+        None,
     )
     .await
 }
@@ -1706,6 +1736,7 @@ pub(crate) async fn commit_verified_agent_pcr_genesis_in_connection(
         conn,
         transaction,
         VerifiedPcrUnit::AgentPcrGenesis,
+        None,
     )
     .await
 }
@@ -1721,6 +1752,7 @@ pub(crate) async fn commit_verified_pcr_typed_current_in_connection(
         conn,
         transaction,
         VerifiedPcrUnit::ProfileOrAccountability,
+        None,
     )
     .await
 }
@@ -1748,16 +1780,26 @@ pub(crate) async fn commit_verified_applet_in_connection(
     conn: &mut AsyncPgConnection,
     transaction: &AuthorityCommitTransaction,
 ) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
-    commit_transaction_in_connection_with_device_guard(conn, transaction, VerifiedPcrUnit::Applet)
-        .await
+    commit_transaction_in_connection_with_device_guard(
+        conn,
+        transaction,
+        VerifiedPcrUnit::Applet,
+        None,
+    )
+    .await
 }
 
 pub(crate) async fn commit_verified_consent_in_connection(
     conn: &mut AsyncPgConnection,
     transaction: &AuthorityCommitTransaction,
 ) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
-    commit_transaction_in_connection_with_device_guard(conn, transaction, VerifiedPcrUnit::Consent)
-        .await
+    commit_transaction_in_connection_with_device_guard(
+        conn,
+        transaction,
+        VerifiedPcrUnit::Consent,
+        None,
+    )
+    .await
 }
 
 fn is_agent_pcr_genesis(event: &arkret_wire::Event) -> bool {
@@ -1784,6 +1826,7 @@ fn commit_transaction_in_connection_with_device_guard<'a>(
     conn: &'a mut AsyncPgConnection,
     transaction: &'a AuthorityCommitTransaction,
     verified_unit: VerifiedPcrUnit,
+    prepared: Option<&'a coland_storage::EventApprovalCommit>,
 ) -> std::pin::Pin<
     Box<
         dyn std::future::Future<Output = Result<AuthorityCommitWriteOutcome, PgTransactionError>>
@@ -1791,17 +1834,16 @@ fn commit_transaction_in_connection_with_device_guard<'a>(
             + 'a,
     >,
 > {
-    Box::pin(commit_transaction_with_device_guard_inner(
-        conn,
-        transaction,
-        verified_unit,
-    ))
+    crate::boxed_future(|| {
+        commit_transaction_with_device_guard_inner(conn, transaction, verified_unit, prepared)
+    })
 }
 
 async fn commit_transaction_with_device_guard_inner(
     conn: &mut AsyncPgConnection,
     transaction: &AuthorityCommitTransaction,
     verified_unit: VerifiedPcrUnit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
     let verified_pcr_device_unit = verified_unit == VerifiedPcrUnit::Device;
     let verified_pcr_revoke_unit = verified_unit == VerifiedPcrUnit::RevokeProposal;
@@ -1979,11 +2021,14 @@ async fn commit_transaction_with_device_guard_inner(
         .into());
     }
 
-    crate::realm_authorization_cut::require_commit_lifecycle_in_connection(
-        conn,
-        &transaction.event,
-        transaction.commit.committed_at,
-    )
+    let lifecycle_approvals = crate::boxed_future(|| {
+        crate::realm_authorization_cut::prepare_commit_lifecycle_in_connection(
+            conn,
+            &transaction.event,
+            &transaction.commit,
+            prepared,
+        )
+    })
     .await?;
 
     require_planned_handoff_write_in_connection(conn, &transaction.event, &current).await?;
@@ -2067,6 +2112,18 @@ async fn commit_transaction_with_device_guard_inner(
         &transaction.event,
         &transaction.commit,
     )
+    .await?;
+
+    let lifecycle_basis = serde_json::json!({"lifecycle_admission":true});
+    crate::boxed_future(|| {
+        crate::approval_admission::consume_and_audit(
+            conn,
+            &transaction.event,
+            &transaction.commit,
+            &lifecycle_approvals,
+            &lifecycle_basis,
+        )
+    })
     .await?;
 
     Ok(AuthorityCommitWriteOutcome::Committed)
@@ -2471,13 +2528,13 @@ impl PgAuthorityCommitStore {
                     conn,
                     &transaction.event,
                     &transaction.commit,
-                )
+                 None)
                 .await?;
                 commit_mimi_room_binding_current_result_in_connection(
                     conn,
                     &transaction.event,
                     &transaction.commit,
-                )
+                 None)
                 .await?;
                 // This closed founding unit has no pre-existing Realm grants
                 // or governance Policy. Evidence is still verified and its
@@ -2861,7 +2918,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            crate::managed_message_actor::require_applet_producer_in_connection(
+            crate::managed_message_actor::prepare_applet_producer_in_connection(
                 conn, event, guard, at,
             )
             .await
@@ -3161,7 +3218,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                     }
                 }
                 commit_realm_authority_root_current_result_in_connection(conn, &transaction.event, &transaction.commit).await?;
-                commit_capability_grant_current_result_in_connection(conn, &transaction.event, &transaction.commit).await?;
+                commit_capability_grant_current_result_in_connection(conn, &transaction.event, &transaction.commit, None).await?;
                 crate::pcr_device_current_results::project_pcr_device_current_in_connection(
                     conn,
                     &transaction.event,
@@ -4633,12 +4690,14 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                     conn,
                     &transaction.event,
                     &transaction.commit,
+                    None,
                 )
                 .await?;
                 commit_mimi_room_binding_current_result_in_connection(
                     conn,
                     &transaction.event,
                     &transaction.commit,
+                    None,
                 )
                 .await?;
             }
@@ -4714,12 +4773,14 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                     conn,
                     &transaction.event,
                     &transaction.commit,
+                    None,
                 )
                 .await?;
                 commit_mimi_room_binding_current_result_in_connection(
                     conn,
                     &transaction.event,
                     &transaction.commit,
+                    None,
                 )
                 .await?;
             }
@@ -4741,12 +4802,14 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                     conn,
                     &transaction.event,
                     &transaction.commit,
+                    None,
                 )
                 .await?;
                 commit_mimi_room_binding_current_result_in_connection(
                     conn,
                     &transaction.event,
                     &transaction.commit,
+                    None,
                 )
                 .await?;
             }

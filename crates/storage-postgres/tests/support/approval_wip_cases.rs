@@ -281,7 +281,11 @@ async fn qualify_wip_review(pool: &PgPool, setup: &WipSetup) -> coland_storage::
 async fn list_wip_review_verifies_actual_signatures_and_consumes_only_at_success() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
-    let setup = Box::pin(prepare_wip_setup(&pool)).await;
+    let fixture_pool = pool.clone();
+    let setup =
+        tokio::spawn(async move { Box::new(Box::pin(prepare_wip_setup(&fixture_pool)).await) })
+            .await
+            .unwrap();
     let review = Box::pin(qualify_wip_review(&pool, &setup)).await;
     let opened = &setup.opened;
     let board_id = setup.board_id.clone();

@@ -47,6 +47,7 @@ pub(crate) async fn commit_rsvp_current_result_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if event.kind != arkret_wire::EventKind::RsvpSet {
         return Ok(());
@@ -80,10 +81,8 @@ pub(crate) async fn commit_rsvp_current_result_in_connection(
 
     // The ordinary capability evaluator now addresses RSVP at the exact
     // Strand resource. Its quota reservation is part of this same UOW.
-    crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-        conn,
-        event,
-        commit.committed_at,
+    crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+        conn, event, commit, prepared,
     )
     .await?;
 

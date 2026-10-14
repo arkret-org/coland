@@ -46,6 +46,7 @@ pub(crate) async fn commit_with_audit_in_connection(
     event: &Event,
     commit: &RealmCommit,
     audit_unit: Option<&coland_storage::RegisteredAuditCommit>,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if event.kind != EventKind::StrandWatchSet {
         return Ok(());
@@ -62,10 +63,8 @@ pub(crate) async fn commit_with_audit_in_connection(
         ));
     }
     if !audit_unit.is_some_and(|unit| unit.pair_for(event)) {
-        crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-            conn,
-            event,
-            commit.committed_at,
+        crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+            conn, event, commit, prepared,
         )
         .await?;
     }

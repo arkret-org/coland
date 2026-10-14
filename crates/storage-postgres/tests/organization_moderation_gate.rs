@@ -113,6 +113,7 @@ async fn snapshot(pool: &PgPool) -> serde_json::Value {
 async fn accepted_organization_scope_refuses_real_member_and_invite_join_with_zero_writes() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
+    ordinary_realm::case_future(|| async move {
     let founder_account = ordinary_realm::human_profile::admit(
         &pool,
         &ordinary_realm::station(),
@@ -272,88 +273,92 @@ async fn accepted_organization_scope_refuses_real_member_and_invite_join_with_ze
             .unwrap()
             .is_some()
     );
+    }).await;
 }
 
 #[tokio::test]
 async fn organization_writer_refuses_missing_or_false_proof_and_wrong_statement_reference() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
-    let founder_account = ordinary_realm::human_profile::admit(
-        &pool,
-        &ordinary_realm::station(),
-        "organization-founder",
-    )
-    .await;
-    let bootstrap = ordinary_realm::bootstrap_unit_for_account(
-        &uuid::Uuid::now_v7().to_string(),
-        &founder_account,
-        &ordinary_realm::human_profile::station_did(&ordinary_realm::station()),
-    );
-    let bootstrap = ordinary_realm::source_bootstrap(&pool, bootstrap).await;
-    let authority = PgAuthorityCommitStore { pool: pool.clone() };
-    let at = bootstrap.transactions[0].commit.committed_at;
-    authority
-        .admit_ordinary_realm_bootstrap_unit(&bootstrap, at)
-        .await
-        .unwrap();
-    let head = bootstrap.transactions.last().unwrap();
-    let uow = PgEventCommitUnitOfWork::new(pool.clone());
-    let (relationship, proof) =
-        organization_request(head, "active", serde_json::json!(["official_badge"]), None);
-    let relationship = ordinary_realm::source_request(&pool, relationship).await;
-    let proof = coland_storage::RealmOrganizationProofCommit {
-        event_id: relationship.authority_commit.event.event_id.clone(),
-        ..proof
-    };
-    let before = snapshot(&pool).await;
-    assert!(uow.commit_event(relationship.clone()).await.is_err());
-    assert_eq!(snapshot(&pool).await, before);
-    let mut forged = proof.clone();
-    forged.public_key = ed25519_dalek::SigningKey::from_bytes(&[82; 32])
-        .verifying_key()
-        .to_bytes();
-    assert!(
-        uow.commit_event_batch(batch(relationship.clone(), forged))
+    ordinary_realm::case_future(|| async move {
+        let founder_account = ordinary_realm::human_profile::admit(
+            &pool,
+            &ordinary_realm::station(),
+            "organization-founder",
+        )
+        .await;
+        let bootstrap = ordinary_realm::bootstrap_unit_for_account(
+            &uuid::Uuid::now_v7().to_string(),
+            &founder_account,
+            &ordinary_realm::human_profile::station_did(&ordinary_realm::station()),
+        );
+        let bootstrap = ordinary_realm::source_bootstrap(&pool, bootstrap).await;
+        let authority = PgAuthorityCommitStore { pool: pool.clone() };
+        let at = bootstrap.transactions[0].commit.committed_at;
+        authority
+            .admit_ordinary_realm_bootstrap_unit(&bootstrap, at)
             .await
-            .is_err()
-    );
-    assert_eq!(snapshot(&pool).await, before);
-    uow.commit_event_batch(batch(relationship.clone(), proof))
-        .await
-        .unwrap();
-    let (wrong_ref, proof) = organization_request(
-        &relationship.authority_commit,
-        "revoked",
-        serde_json::json!(["official_badge"]),
-        Some("not-the-accepted-statement"),
-    );
-    let wrong_ref = ordinary_realm::source_request(&pool, wrong_ref).await;
-    let proof = coland_storage::RealmOrganizationProofCommit {
-        event_id: wrong_ref.authority_commit.event.event_id.clone(),
-        ..proof
-    };
-    let before = snapshot(&pool).await;
-    assert!(
-        uow.commit_event_batch(batch(wrong_ref, proof))
+            .unwrap();
+        let head = bootstrap.transactions.last().unwrap();
+        let uow = PgEventCommitUnitOfWork::new(pool.clone());
+        let (relationship, proof) =
+            organization_request(head, "active", serde_json::json!(["official_badge"]), None);
+        let relationship = ordinary_realm::source_request(&pool, relationship).await;
+        let proof = coland_storage::RealmOrganizationProofCommit {
+            event_id: relationship.authority_commit.event.event_id.clone(),
+            ..proof
+        };
+        let before = snapshot(&pool).await;
+        assert!(uow.commit_event(relationship.clone()).await.is_err());
+        assert_eq!(snapshot(&pool).await, before);
+        let mut forged = proof.clone();
+        forged.public_key = ed25519_dalek::SigningKey::from_bytes(&[82; 32])
+            .verifying_key()
+            .to_bytes();
+        assert!(
+            uow.commit_event_batch(batch(relationship.clone(), forged))
+                .await
+                .is_err()
+        );
+        assert_eq!(snapshot(&pool).await, before);
+        uow.commit_event_batch(batch(relationship.clone(), proof))
             .await
-            .is_err()
-    );
-    assert_eq!(snapshot(&pool).await, before);
-    // A genuine accepted organization badge has no implicit moderation scope.
-    let joiner = ordinary_realm::human_profile::admit(
-        &pool,
-        &ordinary_realm::station(),
-        "organization-badge-joiner",
-    )
+            .unwrap();
+        let (wrong_ref, proof) = organization_request(
+            &relationship.authority_commit,
+            "revoked",
+            serde_json::json!(["official_badge"]),
+            Some("not-the-accepted-statement"),
+        );
+        let wrong_ref = ordinary_realm::source_request(&pool, wrong_ref).await;
+        let proof = coland_storage::RealmOrganizationProofCommit {
+            event_id: wrong_ref.authority_commit.event.event_id.clone(),
+            ..proof
+        };
+        let before = snapshot(&pool).await;
+        assert!(
+            uow.commit_event_batch(batch(wrong_ref, proof))
+                .await
+                .is_err()
+        );
+        assert_eq!(snapshot(&pool).await, before);
+        // A genuine accepted organization badge has no implicit moderation scope.
+        let joiner = ordinary_realm::human_profile::admit(
+            &pool,
+            &ordinary_realm::station(),
+            "organization-badge-joiner",
+        )
+        .await;
+        let joiner = arkret_wire::ActorId::account(joiner);
+        let member = ordinary_realm::next_request_for_actor(
+            &relationship.authority_commit,
+            arkret_wire::EventKind::MemberState,
+            joiner.clone(),
+            serde_json::json!({"member_id":joiner,"membership":"join"}),
+            at,
+        );
+        let member = ordinary_realm::source_request(&pool, member).await;
+        uow.commit_event(member).await.unwrap();
+    })
     .await;
-    let joiner = arkret_wire::ActorId::account(joiner);
-    let member = ordinary_realm::next_request_for_actor(
-        &relationship.authority_commit,
-        arkret_wire::EventKind::MemberState,
-        joiner.clone(),
-        serde_json::json!({"member_id":joiner,"membership":"join"}),
-        at,
-    );
-    let member = ordinary_realm::source_request(&pool, member).await;
-    uow.commit_event(member).await.unwrap();
 }

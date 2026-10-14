@@ -184,6 +184,7 @@ pub(crate) async fn admit_with_audit_in_connection(
     commit: &RealmCommit,
     _authority_station: &arkret_wire::DidCoreId,
     audit_unit: Option<&coland_storage::RegisteredAuditCommit>,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     let paired = audit_unit.is_some_and(|unit| unit.pair_for(event));
     match &event.kind {
@@ -230,10 +231,8 @@ pub(crate) async fn admit_with_audit_in_connection(
             )
             .await?;
             let short_name = folded_short_name(&object.display.short_name)?;
-            crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-                conn,
-                event,
-                commit.committed_at,
+            crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+                conn, event, commit, prepared,
             )
             .await?;
             let used_name = sql_query(
@@ -301,10 +300,8 @@ pub(crate) async fn admit_with_audit_in_connection(
                 ));
             }
             if !paired {
-                crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-                    conn,
-                    event,
-                    commit.committed_at,
+                crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+                    conn, event, commit, prepared,
                 )
                 .await?;
             }

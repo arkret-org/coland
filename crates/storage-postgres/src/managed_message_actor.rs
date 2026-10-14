@@ -69,7 +69,7 @@ pub(crate) fn registered_executor(
 
 /// The caller supplies a fresh DID document, not a verified flag. The current
 /// registration evidence re-binds its whole material and producer method here.
-pub(crate) fn require_applet_producer_in_connection<'a>(
+pub(crate) fn prepare_applet_producer_in_connection<'a>(
     conn: &'a mut AsyncPgConnection,
     event: &'a Event,
     guard: &'a AppletEventProducerGuard,
@@ -84,8 +84,40 @@ pub(crate) fn require_applet_producer_in_connection<'a>(
             + 'a,
     >,
 > {
-    // Ordinary Human commits must not inherit the Service admission frame.
-    Box::pin(require_applet_producer_inner(conn, event, guard, at))
+    crate::boxed_future(|| async move {
+        // Preparation resolves the producer's immutable signing fact. The
+        // accepting transaction checks business grants with its prepared votes.
+        let (fact, _) = require_applet_producer_inner(conn, event, guard, at, None).await?;
+        Ok(fact)
+    })
+}
+
+pub(crate) fn require_applet_producer_in_connection<'a>(
+    conn: &'a mut AsyncPgConnection,
+    event: &'a Event,
+    guard: &'a AppletEventProducerGuard,
+    commit: &'a arkret_wire::RealmCommit,
+    prepared: Option<&'a coland_storage::EventApprovalCommit>,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = PersistenceResult<(
+                    arkret_models_collaboration::authority_commit::ServiceHistoricalSignerFact,
+                    Vec<crate::approval_admission::QualifiedApproval>,
+                )>,
+            > + Send
+            + 'a,
+    >,
+> {
+    crate::boxed_future(|| {
+        require_applet_producer_inner(
+            conn,
+            event,
+            guard,
+            commit.committed_at,
+            Some((commit, prepared)),
+        )
+    })
 }
 
 async fn require_applet_producer_inner(
@@ -93,7 +125,15 @@ async fn require_applet_producer_inner(
     event: &Event,
     guard: &AppletEventProducerGuard,
     at: chrono::DateTime<chrono::Utc>,
-) -> PersistenceResult<arkret_models_collaboration::authority_commit::ServiceHistoricalSignerFact> {
+    acceptance: Option<(
+        &arkret_wire::RealmCommit,
+        Option<&coland_storage::EventApprovalCommit>,
+    )>,
+) -> PersistenceResult<(
+    arkret_models_collaboration::authority_commit::ServiceHistoricalSignerFact,
+    Vec<crate::approval_admission::QualifiedApproval>,
+)> {
+    let mut accepted = Vec::new();
     let registration = registration(conn, event).await?;
     let service = ActorId::service(registration.service_id.clone());
     if let Some(account) = event.actor_id.as_account_id() {
@@ -350,20 +390,23 @@ async fn require_applet_producer_inner(
             object_kind: (event.kind == EventKind::MessageCreate).then(|| "message".to_owned()),
             ..Default::default()
         };
-        let evaluation = coland_storage::evaluate_grants(
-            &coland_storage::AuthorizationOperation {
-                actor: grant_actor,
-                actions: &actions,
-                target: &resource,
-                at,
-                facts: &facts,
-            },
-            std::iter::once(grant),
-        );
-        if evaluation.unreserved().is_empty() {
-            return Err(denied(
-                "referenced Applet grant constraints are not satisfied without unresolved quota",
-            ));
+        if let Some((commit, prepared)) = acceptance {
+            accepted.extend(
+                crate::boxed_future(|| {
+                    require_producer_grant(
+                        conn,
+                        event,
+                        commit,
+                        prepared,
+                        grant,
+                        grant_actor,
+                        &actions,
+                        &resource,
+                        &facts,
+                    )
+                })
+                .await?,
+            );
         }
     }
     let delegated_audit = !native_service
@@ -398,22 +441,16 @@ async fn require_applet_producer_inner(
             ..Default::default()
         };
         let actions = grant.actions.iter().map(String::as_str).collect::<Vec<_>>();
-        if coland_storage::evaluate_grants(
-            &coland_storage::AuthorizationOperation {
-                actor: &service,
-                actions: &actions,
-                target: &resource,
-                at,
-                facts: &facts,
-            },
-            std::iter::once(parent),
-        )
-        .unreserved()
-        .is_empty()
-        {
-            return Err(denied(
-                "managed Actor parent current constraints unavailable",
-            ));
+        if let Some((commit, prepared)) = acceptance {
+            accepted.extend(
+                crate::boxed_future(|| {
+                    require_producer_grant(
+                        conn, event, commit, prepared, parent, &service, &actions, &resource,
+                        &facts,
+                    )
+                })
+                .await?,
+            );
         }
     }
     let root=sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1")
@@ -473,7 +510,74 @@ async fn require_applet_producer_inner(
         accepted_at: arkret_canonical::normalize_timestamp_canonical(at),
     };
     fact.validate_event_binding(event, suite).map_err(denied)?;
-    Ok(fact)
+    Ok((fact, accepted))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The exact producer grant is evaluated on the accepting Event cut."
+)]
+async fn require_producer_grant(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
+    grant: &arkret_models_collaboration::governance::grant_constraint::CapabilityGrant,
+    actor: &ActorId,
+    actions: &[&str],
+    target: &arkret_wire::WireResourceSelector,
+    facts: &coland_storage::OperationFacts,
+) -> PersistenceResult<Vec<crate::approval_admission::QualifiedApproval>> {
+    let mut markers = Vec::new();
+    let mut accepted = Vec::new();
+    let mut missing = false;
+    for action in actions
+        .iter()
+        .filter_map(|action| arkret_wire::CapabilityActionId::from_wire(action))
+    {
+        match crate::grant_approval_admission::require_grant_approvals(
+            conn, event, commit, prepared, grant, action, target, facts,
+        )
+        .await
+        {
+            Ok(requirements) => {
+                for requirement in requirements {
+                    markers.push(coland_storage::VerifiedGrantApproval {
+                        grant_id: requirement.grant_id,
+                        constraint_digest: requirement.constraint_digest,
+                        action,
+                    });
+                    accepted.extend(requirement.accepted);
+                }
+            }
+            Err(PersistenceError::Conflict(detail)) if detail.starts_with("approval_required:") => {
+                missing = true;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let evaluation = coland_storage::evaluate_grants_with_verified_approvals(
+        &coland_storage::AuthorizationOperation {
+            actor,
+            actions,
+            target,
+            at: commit.committed_at,
+            facts,
+        },
+        std::iter::once(grant),
+        &markers,
+    );
+    if matches!(evaluation, coland_storage::GrantEvaluation::RequiresReview) && missing {
+        return Err(PersistenceError::Conflict(
+            "approval_required: Applet producer grant approval is not satisfied".into(),
+        ));
+    }
+    if evaluation.unreserved().is_empty() {
+        return Err(denied(
+            "Applet producer grant constraints are not satisfied without unresolved quota",
+        ));
+    }
+    Ok(accepted)
 }
 
 async fn accepted_event(conn: &mut AsyncPgConnection, id: &EventId) -> PersistenceResult<Event> {

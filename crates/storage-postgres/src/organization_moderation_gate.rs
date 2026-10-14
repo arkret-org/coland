@@ -284,6 +284,7 @@ pub(crate) async fn commit_realm_organization_current_result_in_connection(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     proof: Option<&RealmOrganizationProofCommit>,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if event.kind != arkret_wire::EventKind::RealmOrganization {
         return Ok(());
@@ -317,20 +318,10 @@ pub(crate) async fn commit_realm_organization_current_result_in_connection(
         commit.committed_at,
         &proof.public_key,
     )?;
-    if !crate::moderation_report_current_results::scope_moderator(
-        conn,
-        &event.realm_id,
-        &event.scope_ref,
-        &event.actor_id,
-        &[arkret_wire::CapabilityActionId::REALM_ADMIN],
-        commit.committed_at,
+    crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+        conn, event, commit, prepared,
     )
-    .await?
-    {
-        return Err(PersistenceError::Conflict(
-            "capability_denied: organization relationship requires Realm admin".to_owned(),
-        ));
-    }
+    .await?;
     let position = i64::try_from(commit.stream_position).map_err(corrupt)?;
     let relationship = serde_json::to_value(value.relationship).map_err(corrupt)?;
     let relationship = relationship

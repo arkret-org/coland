@@ -8626,7 +8626,14 @@ async fn poll_responses_keep_accepted_history_and_reject_invalid_partition_heads
 async fn replies_and_direct_mentions_require_accepted_visible_full_accounts() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
-    let (unit, head, strand_id) = admitted_message_discussion(&pool).await;
+    ordinary_realm::case_future(|| async move {
+    let fixture_pool = pool.clone();
+    let setup = tokio::spawn(async move {
+        Box::new(Box::pin(admitted_message_discussion(&fixture_pool)).await)
+    })
+    .await
+    .unwrap();
+    let (unit, head, strand_id) = &*setup;
     let creator = creator_account(&unit);
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let store = PgAuthorityCommitStore { pool: pool.clone() };
@@ -8755,6 +8762,7 @@ async fn replies_and_direct_mentions_require_accepted_visible_full_accounts() {
         Some(coland_storage::ConflictCode::FailedPrecondition),
     )
     .await;
+    }).await;
 }
 
 fn identity_payload(unit: &OrdinaryRealmBootstrapCommitUnit, name: &str) -> serde_json::Value {

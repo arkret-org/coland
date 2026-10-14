@@ -16,6 +16,7 @@ pub(crate) async fn commit_in_connection(
     conn: &mut AsyncPgConnection,
     event: &Event,
     commit: &RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if event.kind != EventKind::CallCreate {
         return Ok(());
@@ -40,10 +41,8 @@ pub(crate) async fn commit_in_connection(
             ConflictCode::CallStateTransitionInvalid
         ))
     })?;
-    crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-        conn,
-        event,
-        commit.committed_at,
+    crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+        conn, event, commit, prepared,
     )
     .await?;
     if !crate::moderation_report_current_results::scope_member_in_connection(

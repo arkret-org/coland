@@ -1090,7 +1090,7 @@ async fn admit_in_connection(
             .await?;
         }
         if event.kind == EventKind::CapabilityGrant {
-            crate::capability_grant_current_results::commit_capability_grant_current_result_in_connection(conn,event,&commit).await?;
+            crate::capability_grant_current_results::commit_capability_grant_current_result_in_connection(conn,event,&commit, None).await?;
         }
         crate::applet_current_results::project_applet_event_in_connection(
             conn, event, &commit, provision,

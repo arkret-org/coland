@@ -1328,7 +1328,13 @@ async fn exercise_wip_after_override_revocation(
 async fn wip_override_requires_a_current_grant_matching_the_strand_and_destination() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
-    let setup = Box::pin(prepare_wip_override_setup(&pool)).await;
+    let fixture_pool = pool.clone();
+    let setup =
+        tokio::spawn(
+            async move { Box::new(Box::pin(prepare_wip_override_setup(&fixture_pool)).await) },
+        )
+        .await
+        .unwrap();
     let grant = Box::pin(exercise_wip_override_resource_grants(&pool, &setup)).await;
     let moved = Box::pin(exercise_wip_override_global_deny(&pool, &setup, &grant)).await;
     Box::pin(exercise_wip_after_override_revocation(

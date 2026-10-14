@@ -495,6 +495,8 @@ pub(crate) async fn consume_and_audit(
 ) -> PersistenceResult<()> {
     // The same grant-context evidence can satisfy independent grant and
     // governance requirements. Consume its nonce once and retain both bases.
+    // Separate consumers may extend the same row only in this transaction;
+    // an older transaction or another Event cannot reuse the nonce.
     let mut grouped = std::collections::BTreeMap::new();
     for qualified in methods {
         let vote = &qualified.method.signature;
@@ -516,8 +518,18 @@ pub(crate) async fn consume_and_audit(
                 "distinct evidence shares one approval nonce",
             ));
         }
-        if !entry.1.contains(&qualified.qualification_basis) {
-            entry.1.push(qualified.qualification_basis.clone());
+        let mut qualification = qualified.qualification_basis.clone();
+        qualification
+            .as_object_mut()
+            .ok_or_else(|| {
+                error(
+                    "schema_violation",
+                    "approval qualification must be an object",
+                )
+            })?
+            .insert("consumer_authority_cut".to_owned(), accepted_basis.clone());
+        if !entry.1.contains(&qualification) {
+            entry.1.push(qualification);
         }
     }
     let event_digest =
@@ -530,7 +542,7 @@ pub(crate) async fn consume_and_audit(
             "verified_at":arkret_canonical::format_timestamp_canonical(vote.input.approved_at),
             "public_key":arkret_canonical::ed25519_pubkey_to_did_key_multibase(&method.public_key),
             "authority_cut":accepted_basis,"qualifications":qualifications,"native_control_history":method.control_history});
-        let inserted = sql_query("INSERT INTO event_approval_private_audit (approval_context,approver_did,nonce,event_id,event_digest,realm_id,accepted_commit_id,evidence,accepted_basis,accepted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(approval_context,approver_did,nonce) DO NOTHING")
+        let inserted = sql_query("INSERT INTO event_approval_private_audit (approval_context,approver_did,nonce,event_id,event_digest,realm_id,accepted_commit_id,evidence,accepted_basis,accepted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(approval_context,approver_did,nonce) DO UPDATE SET accepted_basis=jsonb_set(event_approval_private_audit.accepted_basis,'{qualifications}',(SELECT jsonb_agg(DISTINCT q) FROM jsonb_array_elements((event_approval_private_audit.accepted_basis->'qualifications') || (EXCLUDED.accepted_basis->'qualifications')) AS q)) WHERE event_approval_private_audit.xmin=pg_current_xact_id()::xid AND event_approval_private_audit.event_id=EXCLUDED.event_id AND event_approval_private_audit.event_digest=EXCLUDED.event_digest AND event_approval_private_audit.accepted_commit_id=EXCLUDED.accepted_commit_id AND event_approval_private_audit.evidence=EXCLUDED.evidence AND event_approval_private_audit.accepted_basis->'public_key'=EXCLUDED.accepted_basis->'public_key' AND event_approval_private_audit.accepted_basis->'native_control_history'=EXCLUDED.accepted_basis->'native_control_history' ")
             .bind::<Text,_>(&context).bind::<Text,_>(vote.input.approver_did.as_str())
             .bind::<Text,_>(&vote.input.nonce).bind::<Text,_>(event.event_id.as_str())
             .bind::<Text,_>(&event_digest).bind::<Text,_>(event.realm_id.as_str())
@@ -656,7 +668,7 @@ pub(crate) async fn require_governance(
             }
             _ => continue,
         }
-        if let Some(basis) = approver_qualifies(
+        if let Some(mut basis) = approver_qualifies(
             conn,
             event,
             vote,
@@ -672,6 +684,11 @@ pub(crate) async fn require_governance(
                     .map_err(|e| error("schema_violation", e))?,
             )
         {
+            basis.as_object_mut().ok_or_else(|| error("schema_violation", "governance qualification must be an object"))?
+                .insert("governance_requirement".to_owned(), serde_json::json!({
+                    "action":action,"target":target,"effective_approval_quorum":quorum,
+                    "evaluated_at":arkret_canonical::format_timestamp_canonical(commit.committed_at),
+                }));
             accepted.push(QualifiedApproval {
                 method: method.clone(),
                 qualification_basis: basis,

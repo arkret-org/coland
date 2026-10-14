@@ -167,8 +167,12 @@ async fn message_write_counts(pool: &PgPool, realm: &arkret_wire::RealmId) -> Ve
 async fn message_create_consumes_two_layers_atomically_and_preserves_nonce_on_failure() {
     let db = TestDatabase::lease().await;
     let pool = db.pool();
-    let setup = Box::pin(prepare_grant_setup(&pool)).await;
-    Box::pin(message_create_approval_transaction(pool, setup)).await;
+    let fixture_pool = pool.clone();
+    let setup =
+        tokio::spawn(async move { Box::new(Box::pin(prepare_grant_setup(&fixture_pool)).await) })
+            .await
+            .unwrap();
+    Box::pin(message_create_approval_transaction(pool, *setup)).await;
 }
 
 async fn message_create_approval_transaction(pool: PgPool, setup: GrantSetup) {
@@ -450,7 +454,11 @@ async fn prepare_grant_setup(pool: &PgPool) -> GrantSetup {
 async fn grant_approval_roster_does_not_use_received_votes_as_the_threshold_denominator() {
     let db = TestDatabase::lease().await;
     let pool = db.pool();
-    let setup = Box::pin(prepare_grant_setup(&pool)).await;
+    let fixture_pool = pool.clone();
+    let setup =
+        tokio::spawn(async move { Box::new(Box::pin(prepare_grant_setup(&fixture_pool)).await) })
+            .await
+            .unwrap();
     let opened = &setup.opened;
     let head = &setup.head;
     let board_id = setup.board_id.clone();
@@ -608,4 +616,282 @@ async fn grant_approval_roster_does_not_use_received_votes_as_the_threshold_deno
         position(&pool, &board_id, &opened.strand_id).await.value,
         json!({"list_space_id":list_id,"rank":"a"})
     );
+}
+
+// Ordinary and authored-target writers must consume the same typed evidence.
+#[tokio::test]
+async fn reaction_approval_consumes_both_layers_and_rolls_back_missing_target() {
+    Box::pin(ordinary_writer_approval_transaction(
+        arkret_wire::EventKind::ReactionAdd,
+        CapabilityActionId::ReactionAdd,
+        false,
+    ))
+    .await;
+}
+#[tokio::test]
+async fn message_revise_approval_consumes_both_layers_and_exact_retry() {
+    Box::pin(ordinary_writer_approval_transaction(
+        arkret_wire::EventKind::MessageRevise,
+        CapabilityActionId::MessageRevise,
+        false,
+    ))
+    .await;
+}
+#[tokio::test]
+async fn message_redact_approval_consumes_both_layers_and_exact_retry() {
+    Box::pin(ordinary_writer_approval_transaction(
+        arkret_wire::EventKind::MessageRedact,
+        CapabilityActionId::MessageRedact,
+        false,
+    ))
+    .await;
+}
+
+fn ordinary_command_payload(
+    kind: arkret_wire::EventKind,
+    message: &arkret_wire::MessageId,
+    realm: &arkret_wire::RealmId,
+    strand: &arkret_wire::StrandId,
+) -> Value {
+    match kind {
+        arkret_wire::EventKind::ReactionAdd => json!({"target_ref":message,"key":"+1"}),
+        arkret_wire::EventKind::MessageRevise => {
+            json!({"message_id":message,"content":{"kind":"ak.content.text","body":"approved edit","format":"plain"}})
+        }
+        arkret_wire::EventKind::MessageRedact => json!({"message_id":message}),
+        arkret_wire::EventKind::RealmSetDefaultStrand => {
+            json!({"realm_id":realm,"strand_id":strand,"expected_default_strand_id":strand})
+        }
+        arkret_wire::EventKind::RealmArchive | arkret_wire::EventKind::RealmRestore => json!({}),
+        _ => unreachable!(),
+    }
+}
+
+async fn ordinary_writer_counts(pool: &PgPool, realm: &arkret_wire::RealmId) -> Vec<i64> {
+    let mut values = message_write_counts(pool, realm).await;
+    for table in [
+        "message_reactions_current_results",
+        "object_redaction_current_results",
+    ] {
+        values.push(count(pool, realm, table).await);
+    }
+    values
+}
+
+async fn ordinary_writer_approval_transaction(
+    kind: arkret_wire::EventKind,
+    action: CapabilityActionId,
+    alternative: bool,
+) {
+    let db = TestDatabase::lease().await;
+    let pool = db.pool();
+    let fixture_pool = pool.clone();
+    let setup =
+        tokio::spawn(async move { Box::new(Box::pin(prepare_grant_setup(&fixture_pool)).await) })
+            .await
+            .unwrap();
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let message = Box::pin(ordinary_realm::source_request(
+        &pool,
+        setup.opened.message_after(
+            &setup.head,
+            "ordinary approval target",
+            setup.opened.committed_at(),
+        ),
+    ))
+    .await;
+    uow.commit_event(message.clone()).await.unwrap();
+    let message_id =
+        arkret_wire::MessageId::from_event_id(&message.authority_commit.event.event_id);
+    let mut head = message.authority_commit;
+    let realm = head.event.realm_id.clone();
+    let actor = head.event.actor_id.clone();
+    let at = setup.opened.committed_at() + chrono::TimeDelta::seconds(120);
+
+    let scoped = matches!(
+        kind,
+        arkret_wire::EventKind::ReactionAdd
+            | arkret_wire::EventKind::MessageRevise
+            | arkret_wire::EventKind::MessageRedact
+    );
+    let target = if scoped {
+        arkret_wire::WireResourceSelector::strand(realm.clone(), setup.opened.strand_id.clone())
+    } else {
+        arkret_wire::WireResourceSelector::realm(realm.clone())
+    };
+
+    let mut roster = Vec::new();
+    for seed in [81, 82] {
+        let (approver, ..) = approver(seed, &ordinary_realm::station());
+        roster.push(approver.signing_principal_id().clone());
+        let grant = Box::pin(ordinary_realm::source_request(&pool, next_request(
+            &head, arkret_wire::EventKind::CapabilityGrant, &founder(),
+            json!({"grant":{"schema":"ak.schema.capability.v1","realm_id":realm,
+                "issuer_id":actor,"subject":approver,"actions":[action.as_str()],"resources":[target],"constraints":[],
+                "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":setup.opened.unit.transactions[0].event.event_id,"authority_generation":0}],
+                "issued_at":arkret_canonical::format_timestamp_canonical(at)}}), at,
+        ))).await;
+        uow.commit_event(grant.clone()).await.unwrap();
+        head = grant.authority_commit;
+    }
+    let requirement = Box::pin(ordinary_realm::source_request(&pool, next_request(
+        &head, arkret_wire::EventKind::CapabilityGrant, &founder(),
+        json!({"grant":{"schema":"ak.schema.capability.v1","realm_id":realm,
+            "issuer_id":actor,"subject":actor,"actions":[action.as_str()],"resources":[target],
+            "constraints":[{"constraint_kind":"claim_based","constraint_subkind":"approval","effect":if alternative { "allow" } else { "require_review" },"approval_required":true,
+                "approval_mode":"before_commit","approval_actor_ids":roster,"approval_threshold":if scoped { json!(1) } else { json!("majority") },"timeout":"PT60S"}],
+            "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":setup.opened.unit.transactions[0].event.event_id,"authority_generation":0}],
+            "issued_at":arkret_canonical::format_timestamp_canonical(at)}}), at,
+    ))).await;
+    let grant_id = GrantId::from_event_id(&requirement.authority_commit.event.event_id);
+    uow.commit_event(requirement.clone()).await.unwrap();
+    head = requirement.authority_commit;
+    let config = Box::pin(ordinary_realm::source_request(&pool, next_request(
+        &head, arkret_wire::EventKind::PolicyAction, &founder(),
+        json!({"action_id":"ordinary_event_review","value":{"action":action.as_str(),"approval_required":!alternative,"approval_quorum":2,"policy_scope":if scoped { json!(setup.opened.strand_id) } else { json!(realm) }}}), at,
+    ))).await;
+    uow.commit_event(config.clone()).await.unwrap();
+    head = config.authority_commit;
+
+    let command = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &head,
+            kind.clone(),
+            &founder(),
+            ordinary_command_payload(kind.clone(), &message_id, &realm, &setup.opened.strand_id),
+            at,
+        ),
+    ))
+    .await;
+    let proof = |request: &coland_storage::EventCommitRequest, seeds: &[u8], governance| {
+        proofs_for_action(request, &grant_id, seeds, governance, action)
+    };
+    let before = ordinary_writer_counts(&pool, &realm).await;
+    if alternative {
+        let accepted = uow.commit_event(command).await.unwrap();
+        assert!(accepted.event_inserted);
+        assert_eq!(
+            count(&pool, &realm, "event_approval_private_audit").await,
+            before[3]
+        );
+        return;
+    }
+    let missing = uow.commit_event(command.clone()).await.unwrap_err();
+    assert_eq!(
+        missing.conflict_code(),
+        Some(ConflictCode::ApprovalRequired),
+        "{missing:?}"
+    );
+    for (seeds, governance) in [(vec![81], false), (vec![81, 82], true)] {
+        let failure = uow
+            .commit_event_batch(batch(command.clone(), proof(&command, &seeds, governance)))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            failure.conflict_code(),
+            Some(ConflictCode::ApprovalRequired),
+            "{failure:?}"
+        );
+        assert_eq!(ordinary_writer_counts(&pool, &realm).await, before);
+    }
+    if kind != arkret_wire::EventKind::RealmArchive {
+        let absent = arkret_wire::MessageId::from_event_id(&head.event.event_id);
+
+        let mut bad_payload = ordinary_command_payload(
+            kind.clone(),
+            &absent,
+            &realm,
+            &arkret_wire::StrandId::from_event_id(&head.event.event_id),
+        );
+        if kind == arkret_wire::EventKind::RealmSetDefaultStrand {
+            bad_payload["expected_default_strand_id"] = json!(setup.opened.strand_id);
+        }
+        let bad_target = Box::pin(ordinary_realm::source_request(
+            &pool,
+            next_request(&head, kind.clone(), &founder(), bad_payload, at),
+        ))
+        .await;
+        let failure = uow
+            .commit_event_batch(batch(
+                bad_target.clone(),
+                proof(&bad_target, &[81, 82], false),
+            ))
+            .await
+            .unwrap_err();
+        assert_ne!(
+            failure.conflict_code(),
+            Some(ConflictCode::ApprovalRequired),
+            "{failure:?}"
+        );
+        assert_eq!(ordinary_writer_counts(&pool, &realm).await, before);
+    }
+    let approved = batch(command.clone(), proof(&command, &[81, 82], false));
+    let (first, retry) = tokio::join!(
+        uow.commit_event_batch(approved.clone()),
+        uow.commit_event_batch(approved)
+    );
+    assert_ne!(first.unwrap().event_inserted, retry.unwrap().event_inserted);
+    let after = ordinary_writer_counts(&pool, &realm).await;
+    assert_eq!(after[0], before[0] + 1);
+    assert_eq!(after[1], before[1] + 1);
+    assert_eq!(after[3], before[3] + 2);
+    let replay = uow.commit_event(command.clone()).await.unwrap();
+    assert!(!replay.event_inserted);
+    assert_eq!(ordinary_writer_counts(&pool, &realm).await, after);
+    let reused = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &command.authority_commit,
+            if kind == arkret_wire::EventKind::RealmArchive {
+                arkret_wire::EventKind::RealmRestore
+            } else {
+                kind.clone()
+            },
+            &founder(),
+            ordinary_command_payload(kind.clone(), &message_id, &realm, &setup.opened.strand_id),
+            at + chrono::TimeDelta::seconds(1),
+        ),
+    ))
+    .await;
+    let failure = uow
+        .commit_event_batch(batch(reused.clone(), proof(&reused, &[81, 82], false)))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        failure.conflict_code(),
+        Some(ConflictCode::ApprovalNonceReused),
+        "{failure:?}"
+    );
+    assert_eq!(ordinary_writer_counts(&pool, &realm).await, after);
+}
+
+#[tokio::test]
+async fn an_unproved_allow_approval_does_not_block_an_independent_owner_path() {
+    Box::pin(ordinary_writer_approval_transaction(
+        arkret_wire::EventKind::ReactionAdd,
+        CapabilityActionId::ReactionAdd,
+        true,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn default_strand_pointer_consumes_both_layers_and_rolls_back_bad_target() {
+    Box::pin(ordinary_writer_approval_transaction(
+        arkret_wire::EventKind::RealmSetDefaultStrand,
+        CapabilityActionId::RealmSetDefaultStrand,
+        false,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn realm_archive_and_restore_consume_exact_action_approvals() {
+    Box::pin(ordinary_writer_approval_transaction(
+        arkret_wire::EventKind::RealmArchive,
+        CapabilityActionId::RealmArchive,
+        false,
+    ))
+    .await;
 }

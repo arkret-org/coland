@@ -1431,8 +1431,10 @@ pub(crate) async fn advance_in_connection(
             .await?;
         }
         arkret_wire::EventKind::SchemaDefine => {
-            crate::unit_of_work::commit_schema_definition_in_connection(conn, event, commit, false)
-                .await?;
+            crate::unit_of_work::commit_schema_definition_in_connection(
+                conn, event, commit, false, None,
+            )
+            .await?;
         }
         arkret_wire::EventKind::MemberState
         | arkret_wire::EventKind::InviteAccept
@@ -1504,7 +1506,7 @@ pub(crate) async fn advance_in_connection(
         | arkret_wire::EventKind::StrandRestore
         | arkret_wire::EventKind::StrandStageSet => {
             crate::strand_current_results::commit_strand_transition_in_connection(
-                conn, event, commit, false,
+                conn, event, commit, false, None,
             )
             .await?;
         }
@@ -1518,13 +1520,13 @@ pub(crate) async fn advance_in_connection(
         | arkret_wire::EventKind::SpaceRestore
         | arkret_wire::EventKind::SpaceTombstone => {
             crate::space_current_results::commit_space_transition_in_connection(
-                conn, event, commit, false,
+                conn, event, commit, false, None,
             )
             .await?;
         }
         arkret_wire::EventKind::SpaceUpdate => {
             crate::space_current_results::commit_space_update_in_connection(
-                conn, event, commit, false,
+                conn, event, commit, false, None,
             )
             .await?;
         }
@@ -1546,20 +1548,20 @@ pub(crate) async fn advance_in_connection(
         | arkret_wire::EventKind::RelationUpdate
         | arkret_wire::EventKind::RelationTombstone => {
             crate::unit_of_work::commit_relation_current_result_in_connection(
-                conn, event, commit, false,
+                conn, event, commit, false, None,
             )
             .await?;
         }
         arkret_wire::EventKind::ReactionAdd | arkret_wire::EventKind::ReactionRemove => {
             crate::message_reactions_current_results::commit_reaction_current_result_in_connection(
-                conn, event, commit, false,
+                conn, event, commit, false, None,
             )
             .await?;
         }
         arkret_wire::EventKind::PinAdd
         | arkret_wire::EventKind::PinRemove
         | arkret_wire::EventKind::PinReorder => {
-            crate::pin_current_results::commit_pin_in_connection(conn, event, commit, false)
+            crate::pin_current_results::commit_pin_in_connection(conn, event, commit, false, None)
                 .await?;
         }
         arkret_wire::EventKind::SpaceCreate => {

@@ -1378,9 +1378,10 @@ pub(crate) fn commit_capability_grant_current_result_in_connection<'a>(
     conn: &'a mut AsyncPgConnection,
     event: &'a arkret_wire::Event,
     commit: &'a arkret_wire::RealmCommit,
+    prepared: Option<&'a coland_storage::EventApprovalCommit>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PersistenceResult<()>> + Send + 'a>> {
     Box::pin(commit_capability_grant_current_result_inner(
-        conn, event, commit, None,
+        conn, event, commit, None, prepared,
     ))
 }
 
@@ -1389,9 +1390,10 @@ pub(crate) fn commit_qualified_capability_grant_current_result_in_connection<'a>
     event: &'a arkret_wire::Event,
     commit: &'a arkret_wire::RealmCommit,
     evidence: Option<&'a coland_storage::VerifiedAgentScopeEvidence>,
+    prepared: Option<&'a coland_storage::EventApprovalCommit>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PersistenceResult<()>> + Send + 'a>> {
     Box::pin(commit_capability_grant_current_result_inner(
-        conn, event, commit, evidence,
+        conn, event, commit, evidence, prepared,
     ))
 }
 
@@ -1400,6 +1402,7 @@ async fn commit_capability_grant_current_result_inner(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     evidence: Option<&coland_storage::VerifiedAgentScopeEvidence>,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     let Some(mutation) = mutation_for_event(event)? else {
         return Ok(());
@@ -1480,10 +1483,8 @@ async fn commit_capability_grant_current_result_inner(
         None
     } else {
         Some(
-            crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-                conn,
-                event,
-                commit.committed_at,
+            crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+                conn, event, commit, prepared,
             )
             .await?,
         )

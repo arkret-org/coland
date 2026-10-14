@@ -19,6 +19,8 @@ struct Confirmation {
     value: serde_json::Value,
     #[diesel(sql_type=Timestamptz)]
     committed_at: chrono::DateTime<chrono::Utc>,
+    #[diesel(sql_type = Jsonb)]
+    controller_actor_id: serde_json::Value,
 }
 
 #[derive(QueryableByName)]
@@ -56,6 +58,7 @@ pub(crate) async fn admit_confirmation(
     conn: &mut AsyncPgConnection,
     event: &Event,
     commit: &RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if event.kind != EventKind::AgentActionApprove {
         return Ok(());
@@ -74,10 +77,8 @@ pub(crate) async fn admit_confirmation(
             "Agent confirmation covering committed_at is after expires_at",
         ));
     }
-    crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-        conn,
-        event,
-        commit.committed_at,
+    crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+        conn, event, commit, prepared,
     )
     .await?;
     Ok(())
@@ -109,7 +110,8 @@ pub(crate) async fn commit_confirmation(
 
 /// An accepted private action request selects its complete pre-signed Event.
 /// Ordinary delegated writes with no such source retain their own admission.
-/// Draft-only encrypted Account Data cannot supply a Station-visible selection.
+/// Draft-only publication is selected by an immutable controller confirmation
+/// and the accepted encrypted holder register, without exposing its plaintext.
 pub(crate) async fn require_publication(
     conn: &mut AsyncPgConnection,
     event: &Event,
@@ -138,9 +140,7 @@ pub(crate) async fn require_publication(
             .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(event.event_id.as_str())
             .get_result::<Present>(&mut *conn).await.map_err(PersistenceError::database)?;
         if selected.present {
-            // EventId excludes producer proof. A changed proof cannot turn a
-            // selected publication into an ordinary write with the same id.
-            return Err(required());
+            return crate::boxed_future(|| require_draft_publication(conn, event, commit)).await;
         }
         return Ok(());
     }
@@ -181,7 +181,7 @@ pub(crate) async fn require_publication(
         {
             continue;
         }
-        let rows=sql_query("SELECT a.value,c.committed_at FROM agent_action_approval_current_results a JOIN realm_commits c ON c.commit_id=a.current_commit_id AND c.realm_id=a.realm_id AND c.stream_position=a.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk WHERE a.realm_id=$1 AND a.approved_event_id=$2 AND a.controller_actor_key=$3 AND e.state='committed' AND e.kind='ak.agent.action_approve' AND e.envelope->>'event_id'=a.current_event_id AND e.envelope->'payload'=a.value AND e.envelope->'actor_id'=$4 FOR SHARE OF a")
+        let rows=sql_query("SELECT a.value,c.committed_at,e.envelope->'actor_id' AS controller_actor_id FROM agent_action_approval_current_results a JOIN realm_commits c ON c.commit_id=a.current_commit_id AND c.realm_id=a.realm_id AND c.stream_position=a.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk WHERE a.realm_id=$1 AND a.approved_event_id=$2 AND a.controller_actor_key=$3 AND e.state='committed' AND e.kind='ak.agent.action_approve' AND e.envelope->>'event_id'=a.current_event_id AND e.envelope->'payload'=a.value AND e.envelope->'actor_id'=$4 FOR SHARE OF a")
             .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(event.event_id.as_str()).bind::<Text,_>(current_controller.to_string())
             .bind::<Jsonb,_>(serde_json::to_value(&current_controller).map_err(PersistenceError::database)?)
             .load::<Confirmation>(&mut *conn).await.map_err(PersistenceError::database)?;
@@ -206,85 +206,169 @@ pub(crate) async fn require_publication(
             {
                 continue;
             }
-            let action = arkret_wire::CapabilityActionId::from_wire(&payload.proposed_action)
-                .ok_or_else(required)?;
-            if !arkret_schema::capability_action_descriptor(action)
-                .target_event_kinds
-                .contains(&event.kind.as_str())
-            {
-                continue;
-            }
-            let target = &payload.target;
-            if target
-                .realm_id
-                .as_ref()
-                .is_some_and(|realm| realm != &event.realm_id)
-                || target.operation_id.is_some()
-                || target.account_data_key.is_some()
-            {
-                continue;
-            }
-            let matches = match target.kind.as_str() {
-                "realm" => target.realm_id.as_ref() == Some(&event.realm_id),
-                "strand" => target.object_ref.as_ref().is_some_and(|expected| {
-                    arkret_wire::StrandId::new(expected.as_str()).is_ok()
-                        && (event
-                            .payload
-                            .get("strand_id")
-                            .and_then(serde_json::Value::as_str)
-                            == Some(expected.as_str())
-                            || (matches!(
-                                event.kind,
-                                EventKind::StrandArchive
-                                    | EventKind::StrandRestore
-                                    | EventKind::StrandStageSet
-                                    | EventKind::StrandTracksUpdate
-                            ) && event
-                                .payload
-                                .get("target_ref")
-                                .and_then(serde_json::Value::as_str)
-                                == Some(expected.as_str()))
-                            || (event.kind == EventKind::StrandCreate
-                                && arkret_wire::StrandId::from_event_id(&event.event_id).as_str()
-                                    == expected.as_str()))
-                }),
-                "space" => target.object_ref.as_ref().is_some_and(|expected| {
-                    arkret_wire::SpaceId::new(expected.as_str()).is_ok()
-                        && (event
-                            .payload
-                            .get("space_id")
-                            .and_then(serde_json::Value::as_str)
-                            == Some(expected.as_str())
-                            || (event.kind == EventKind::SpaceCreate
-                                && arkret_wire::SpaceId::from_event_id(&event.event_id).as_str()
-                                    == expected.as_str()))
-                }),
-                "message" => target.object_ref.as_ref().is_some_and(|expected| {
-                    arkret_wire::MessageId::new(expected.as_str()).is_ok()
-                        && (event
-                            .payload
-                            .get("message_id")
-                            .or_else(|| event.payload.get("target_ref"))
-                            .and_then(serde_json::Value::as_str)
-                            == Some(expected.as_str())
-                            || (event.kind == EventKind::MessageCreate
-                                && arkret_wire::MessageId::from_event_id(&event.event_id).as_str()
-                                    == expected.as_str()))
-                }),
-                "object" => target.object_ref.as_ref().is_some_and(|expected| {
-                    ["target_ref", "object_ref"].iter().any(|field| {
-                        event
-                            .payload
-                            .get(*field)
-                            .and_then(serde_json::Value::as_str)
-                            == Some(expected.as_str())
-                    })
-                }),
-                _ => false,
-            };
-            if matches {
+            if confirmation_target_matches(&payload, event) {
                 return Ok(());
             }
+        }
+    }
+    Err(required())
+}
+
+fn confirmation_target_matches(payload: &AgentActionApprovePayload, event: &Event) -> bool {
+    let Some(action) = arkret_wire::CapabilityActionId::from_wire(&payload.proposed_action) else {
+        return false;
+    };
+    if !arkret_schema::capability_action_descriptor(action)
+        .target_event_kinds
+        .contains(&event.kind.as_str())
+    {
+        return false;
+    }
+    let target = &payload.target;
+    if target
+        .realm_id
+        .as_ref()
+        .is_some_and(|realm| realm != &event.realm_id)
+        || target.operation_id.is_some()
+        || target.account_data_key.is_some()
+    {
+        return false;
+    }
+    match target.kind.as_str() {
+        "realm" => target.realm_id.as_ref() == Some(&event.realm_id),
+        "strand" => target.object_ref.as_ref().is_some_and(|expected| {
+            arkret_wire::StrandId::new(expected.as_str()).is_ok()
+                && (event
+                    .payload
+                    .get("strand_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(expected.as_str())
+                    || (matches!(
+                        event.kind,
+                        EventKind::StrandArchive
+                            | EventKind::StrandRestore
+                            | EventKind::StrandStageSet
+                            | EventKind::StrandTracksUpdate
+                    ) && event
+                        .payload
+                        .get("target_ref")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(expected.as_str()))
+                    || (event.kind == EventKind::StrandCreate
+                        && arkret_wire::StrandId::from_event_id(&event.event_id).as_str()
+                            == expected.as_str()))
+        }),
+        "space" => target.object_ref.as_ref().is_some_and(|expected| {
+            arkret_wire::SpaceId::new(expected.as_str()).is_ok()
+                && (event
+                    .payload
+                    .get("space_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(expected.as_str())
+                    || (event.kind == EventKind::SpaceCreate
+                        && arkret_wire::SpaceId::from_event_id(&event.event_id).as_str()
+                            == expected.as_str()))
+        }),
+        "message" => target.object_ref.as_ref().is_some_and(|expected| {
+            arkret_wire::MessageId::new(expected.as_str()).is_ok()
+                && (event
+                    .payload
+                    .get("message_id")
+                    .or_else(|| event.payload.get("target_ref"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(expected.as_str())
+                    || (event.kind == EventKind::MessageCreate
+                        && arkret_wire::MessageId::from_event_id(&event.event_id).as_str()
+                            == expected.as_str()))
+        }),
+        "object" => target.object_ref.as_ref().is_some_and(|expected| {
+            ["target_ref", "object_ref"].iter().any(|field| {
+                event
+                    .payload
+                    .get(*field)
+                    .and_then(serde_json::Value::as_str)
+                    == Some(expected.as_str())
+            })
+        }),
+        _ => false,
+    }
+}
+
+#[derive(QueryableByName)]
+struct DraftSource {
+    #[diesel(sql_type = Jsonb)]
+    source: serde_json::Value,
+    #[diesel(sql_type = Text)]
+    canonical_event_digest: String,
+}
+
+/// The holder's signed confirmation selects a draft publication. Its encrypted
+/// Account Data remains opaque: only accepted source coordinates are checked.
+async fn require_draft_publication(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    commit: &RealmCommit,
+) -> PersistenceResult<()> {
+    let rows = sql_query("SELECT a.value,c.committed_at,e.envelope->'actor_id' AS controller_actor_id FROM agent_action_approval_current_results a JOIN realm_commits c ON c.commit_id=a.current_commit_id AND c.realm_id=a.realm_id AND c.stream_position=a.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk WHERE a.realm_id=$1 AND a.approved_event_id=$2 AND e.state='committed' AND e.kind='ak.agent.action_approve' AND e.envelope->>'event_id'=a.current_event_id AND e.envelope->'payload'=a.value AND e.actor_id=a.controller_actor_key AND NOT (e.envelope ? 'executed_by') FOR SHARE OF a")
+        .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(event.event_id.as_str())
+        .load::<Confirmation>(&mut *conn).await.map_err(PersistenceError::database)?;
+    for confirmation in rows {
+        let payload: AgentActionApprovePayload =
+            serde_json::from_value(confirmation.value).map_err(|_| required())?;
+        let Some(draft) = payload.draft_id.as_deref() else {
+            continue;
+        };
+        if payload.request_id.is_some()
+            || payload.approved_event_id != event.event_id
+            || !payload.admits_commit_at(commit.committed_at)
+            || !payload.admits_commit_at(confirmation.committed_at)
+            || !confirmation_target_matches(&payload, event)
+        {
+            continue;
+        }
+        let current_controller =
+            crate::boxed_future(|| controller(conn, &payload.agent_id)).await?;
+        let Some(owner) = current_controller.as_account_id() else {
+            continue;
+        };
+        let agent = ActorId::account(arkret_wire::AccountId::new(
+            payload.agent_id.clone(),
+            owner.station_id.clone(),
+        ));
+        let agent_owned = event.actor_id == agent
+            && (event.executed_by.is_none()
+                || event.executed_by.as_ref() == Some(&current_controller));
+        let controller_owned =
+            event.actor_id == current_controller && event.executed_by.as_ref() == Some(&agent);
+        if !(agent_owned || controller_owned) {
+            continue;
+        }
+        let confirmed_controller: ActorId =
+            serde_json::from_value(confirmation.controller_actor_id).map_err(|_| required())?;
+        if confirmed_controller != current_controller {
+            continue;
+        }
+        let key = arkret_models_collaboration::events_payloads::account_data::agent_draft_account_data_key(&payload.agent_id, draft)
+            .map_err(|_| required())?;
+        let source = sql_query("SELECT source.envelope AS source,p.canonical_event_digest FROM agent_draft_pending_intents p JOIN actor_private_events source ON source.event_id=p.accepted_event_id AND source.kind='ak.agent.draft.propose' JOIN actor_private_events consumed ON consumed.event_id=p.consumption->>'account_data_set_event_id' AND consumed.kind='ak.account_data.set' JOIN account_datas d ON d.actor_id=$1 AND d.account_data_key=$4 WHERE p.controller_account_key=$2 AND p.agent_id=$3 AND p.draft_id=$5 AND p.state='consumed' AND p.consumption->>'account_data_key'=$4 AND p.consumption->>'accepted_revision'='1' AND p.controller_account_id=$6 AND consumed.actor_id=$1 AND consumed.envelope->'payload'->>'key'=$4 AND consumed.envelope->'payload'->>'expected_server_revision'='0' AND consumed.envelope->'payload'->>'source_pending_event_id'=p.accepted_event_id AND consumed.envelope->'payload' ? 'encrypted_payload' AND NOT d.tombstone AND d.revision>=1 AND d.payload->>'schema'='ak.schema.account_data_encrypted_value.v1' FOR SHARE OF p,d")
+            .bind::<Text,_>(current_controller.to_string()).bind::<Text,_>(owner.to_string())
+            .bind::<Text,_>(payload.agent_id.as_str()).bind::<Text,_>(&key).bind::<Text,_>(draft).bind::<Jsonb,_>(serde_json::json!(owner))
+            .get_result::<DraftSource>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+        let Some(source) = source else {
+            continue;
+        };
+        let accepted: Event = serde_json::from_value(source.source).map_err(|_| required())?;
+        let proposed: arkret_models_collaboration::events_payloads::agent::AgentDraftProposePayload =
+            serde_json::from_value(serde_json::json!(&accepted.payload)).map_err(|_| required())?;
+        if accepted.actor_id == agent
+            && accepted.executed_by.is_none()
+            && proposed.agent_id == payload.agent_id
+            && proposed.controller_account_id == *owner
+            && proposed.draft_id == draft
+            && arkret_canonical::canonical_sha256(&accepted).map_err(PersistenceError::database)?
+                == source.canonical_event_digest
+        {
+            return Ok(());
         }
     }
     Err(required())

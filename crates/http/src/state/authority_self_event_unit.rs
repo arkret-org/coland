@@ -116,6 +116,7 @@ fn decided_at_commit_cut(kind: &arkret_wire::EventKind) -> bool {
             | arkret_wire::EventKind::CircleMemberState
             | arkret_wire::EventKind::RealmOrganization
             | arkret_wire::EventKind::RealmLink
+            | arkret_wire::EventKind::RealmSetDefaultStrand
             | arkret_wire::EventKind::RealmJoinRule
             | arkret_wire::EventKind::SelfModerationReport
             | arkret_wire::EventKind::ModerationDecision

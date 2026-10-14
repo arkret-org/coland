@@ -53,6 +53,12 @@ struct PendingIntentRow {
     expired_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+#[derive(diesel::QueryableByName)]
+struct AcceptedDraftSource {
+    #[diesel(sql_type = Jsonb)]
+    envelope: serde_json::Value,
+}
+
 impl TryFrom<PendingIntentRow> for AgentDraftPendingIntentRecord {
     type Error = PersistenceError;
 
@@ -182,7 +188,7 @@ pub(crate) async fn lock_agent_draft_consumption_source(
     let row = sql_query(format!(
         "SELECT {SELECT_COLUMNS} FROM agent_draft_pending_intents pending \
          WHERE controller_account_key=$1 AND accepted_event_id=$2 \
-           AND EXISTS (SELECT 1 FROM committed_events source \
+           AND EXISTS (SELECT 1 FROM actor_private_events source \
                        WHERE source.id=$3 AND source.kind='ak.agent.draft.propose') \
          FOR UPDATE OF pending"
     ))
@@ -204,6 +210,46 @@ pub(crate) async fn lock_agent_draft_consumption_source(
         return Err(PersistenceError::Conflict(
             "failed_precondition: Agent draft pending source owner binding is inconsistent"
                 .to_owned(),
+        ));
+    }
+    let source = sql_query(
+        "SELECT envelope FROM actor_private_events WHERE id=$1 AND kind='ak.agent.draft.propose'",
+    )
+    .bind::<Binary, _>(source_pending_event_id.token_bytes().to_vec())
+    .get_result::<AcceptedDraftSource>(&mut *conn)
+    .await
+    .map_err(PersistenceError::database)?;
+    let source: arkret_wire::Event = serde_json::from_value(source.envelope).map_err(|_| {
+        PersistenceError::Conflict(
+            "failed_precondition: invalid accepted private draft source".into(),
+        )
+    })?;
+    let proposed: arkret_models_collaboration::events_payloads::agent::AgentDraftProposePayload =
+        serde_json::from_value(serde_json::json!(&source.payload)).map_err(|_| {
+            PersistenceError::Conflict(
+                "failed_precondition: invalid accepted private draft payload".into(),
+            )
+        })?;
+    let agent_actor = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+        record.agent_id.clone(),
+        controller_account_id.station_id.clone(),
+    ));
+    if source.actor_id != agent_actor
+        || source.executed_by.is_some()
+        || source.event_id != record.accepted_event_id
+        || arkret_canonical::canonical_sha256(&source).map_err(PersistenceError::database)?
+            != record.canonical_event_digest.as_str()
+        || proposed.controller_account_id != record.controller_account_id
+        || proposed.agent_id != record.agent_id
+        || proposed.draft_id != record.draft_id
+        || proposed.proposed_action != record.proposed_action
+        || serde_json::json!(proposed.target) != record.target
+        || proposed.content_digest != record.content_digest
+        || proposed.created_at != record.created_at
+        || proposed.expires_at != record.expires_at
+    {
+        return Err(PersistenceError::Conflict(
+            "failed_precondition: accepted private draft source binding is inconsistent".into(),
         ));
     }
     arkret_models_collaboration::events_payloads::account_data::validate_agent_draft_account_data_key_source(

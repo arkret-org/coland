@@ -66,6 +66,7 @@ async fn admit_reaction_in_connection(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     message_id: &arkret_wire::MessageId,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if event.executed_by.is_some() || event.applet_id.is_some() {
         return Err(conflict(
@@ -73,10 +74,8 @@ async fn admit_reaction_in_connection(
             "a delegated reaction producer needs its own admission cut",
         ));
     }
-    crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-        conn,
-        event,
-        commit.committed_at,
+    crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+        conn, event, commit, prepared,
     )
     .await?;
     if matches!(event.scope_ref, arkret_wire::ScopeRef::Circle { .. }) {
@@ -118,6 +117,7 @@ pub(crate) async fn commit_reaction_current_result_in_connection(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     authorize: bool,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if !matches!(
         event.kind,
@@ -138,7 +138,7 @@ pub(crate) async fn commit_reaction_current_result_in_connection(
     }
     let (payload, message_id) = reaction_payload(event)?;
     if authorize {
-        admit_reaction_in_connection(conn, event, commit, &message_id).await?;
+        admit_reaction_in_connection(conn, event, commit, &message_id, prepared).await?;
     }
     let position = i64::try_from(commit.stream_position)
         .map_err(|_| corrupt("reaction stream position exceeds BIGINT"))?;

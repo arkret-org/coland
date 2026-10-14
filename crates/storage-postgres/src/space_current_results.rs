@@ -215,6 +215,7 @@ pub(crate) async fn commit_space_create_current_results_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if event.kind != arkret_wire::EventKind::SpaceCreate {
         return Ok(());
@@ -229,10 +230,8 @@ pub(crate) async fn commit_space_create_current_results_in_connection(
     // The route bypasses the old in-process reducer preflight. Its capability
     // verdict and quota reservation must therefore be fixed by the same
     // locked PG cut as these result writes.
-    crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-        conn,
-        event,
-        commit.committed_at,
+    crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+        conn, event, commit, prepared,
     )
     .await?;
     let values = space_create_current_values(event)?;
@@ -287,6 +286,7 @@ pub(crate) async fn commit_space_transition_in_connection(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     authorize: bool,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     use arkret_wire::{EventKind, SpaceState};
     if !matches!(
@@ -326,10 +326,8 @@ pub(crate) async fn commit_space_transition_in_connection(
         .space_id
     };
     if authorize {
-        crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-            conn,
-            event,
-            commit.committed_at,
+        crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+            conn, event, commit, prepared,
         )
         .await?;
     }
@@ -420,6 +418,7 @@ pub(crate) async fn commit_space_update_in_connection(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     authorize: bool,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     use arkret_models_collaboration::events_payloads::space::SpacePatchPayload;
     use arkret_models_collaboration::objects::space::{ChildScopePolicy, Space};
@@ -445,10 +444,8 @@ pub(crate) async fn commit_space_update_in_connection(
         return Err(reject("Space update requires the Realm authority cut"));
     }
     if authorize {
-        crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-            conn,
-            event,
-            commit.committed_at,
+        crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+            conn, event, commit, prepared,
         )
         .await?;
     }
@@ -672,6 +669,7 @@ pub(crate) async fn commit_space_parent_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     use arkret_models_collaboration::events_payloads::space::SpaceParentPayload;
     use arkret_models_collaboration::objects::space::Space;
@@ -696,10 +694,8 @@ pub(crate) async fn commit_space_parent_in_connection(
     {
         return Err(reject("Space parent requires a Realm-scope authority cut"));
     }
-    crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-        conn,
-        event,
-        commit.committed_at,
+    crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+        conn, event, commit, prepared,
     )
     .await?;
     let metadata = diesel::sql_query("SELECT current_commit_id,current_stream_position,value FROM space_current_results WHERE realm_id=$1 AND space_id=$2 FOR UPDATE")

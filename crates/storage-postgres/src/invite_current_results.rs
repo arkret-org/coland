@@ -43,7 +43,7 @@ use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::Value;
 
 use crate::realm_authorization_cut::{
-    RealmAuthorizationCut, authorize_capability_gated_event_in_connection,
+    RealmAuthorizationCut, authorize_capability_gated_event_with_approvals,
     lock_realm_authorization_cut,
 };
 
@@ -345,8 +345,9 @@ async fn commit_invite_create(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
-    authorize_capability_gated_event_in_connection(conn, event, commit.committed_at).await?;
+    authorize_capability_gated_event_with_approvals(conn, event, commit, prepared).await?;
     let wire = serde_json::to_value(&event.payload).map_err(PersistenceError::database)?;
     validate_invite_create_wire_keys(&wire).map_err(schema_violation)?;
     let payload: InviteCreatePayload = serde_json::from_value(wire).map_err(schema_violation)?;
@@ -420,8 +421,9 @@ async fn commit_invite_third_party_create(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
-    authorize_capability_gated_event_in_connection(conn, event, commit.committed_at).await?;
+    authorize_capability_gated_event_with_approvals(conn, event, commit, prepared).await?;
     if event.actor_id.as_account_id().is_none() {
         return Err(coded(
             ConflictCode::CapabilityDenied,
@@ -529,8 +531,9 @@ async fn commit_invite_revoke(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
-    authorize_capability_gated_event_in_connection(conn, event, commit.committed_at).await?;
+    authorize_capability_gated_event_with_approvals(conn, event, commit, prepared).await?;
     let payload: InviteRevokePayload = typed_payload(event)?;
     payload.validate().map_err(schema_violation)?;
     let realm_id = event.realm_id.as_str();
@@ -579,7 +582,8 @@ async fn authorize_invite_cancel(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     payload: &InviteCancelPayload,
-    at: chrono::DateTime<chrono::Utc>,
+    commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     lock_realm_authorization_cut(conn, &event.realm_id).await?;
     match payload.target_state {
@@ -599,7 +603,11 @@ async fn authorize_invite_cancel(
             if inviter == event.actor_id && cut.actor_is_joined() {
                 return Ok(());
             }
-            cut.require_event_in_connection(conn, event, at).await
+            crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+                conn, event, commit, prepared,
+            )
+            .await
+            .map(|_| ())
         }
     }
 }
@@ -608,6 +616,7 @@ async fn commit_invite_cancel(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     let payload: InviteCancelPayload = typed_payload(event)?;
     payload
@@ -618,7 +627,7 @@ async fn commit_invite_cancel(
     let stored = locked_lifecycle(conn, realm_id, &payload.invite_id)
         .await?
         .ok_or_else(|| PersistenceError::NotFound("invite not found".to_owned()))?;
-    authorize_invite_cancel(conn, event, &payload, commit.committed_at).await?;
+    authorize_invite_cancel(conn, event, &payload, commit, prepared).await?;
     match directed_invitee(conn, realm_id, &payload.invite_id).await? {
         None => {
             return Err(coded(
@@ -768,6 +777,7 @@ pub(crate) async fn commit_invite_current_results_in_connection(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     claim_proof: Option<&coland_storage::InviteClaimProofCommit>,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if !matches!(
         event.kind,
@@ -782,13 +792,15 @@ pub(crate) async fn commit_invite_current_results_in_connection(
     }
     require_realm_stream_carrier(event, commit)?;
     match event.kind {
-        EventKind::InviteCreate => commit_invite_create(conn, event, commit).await,
-        EventKind::InviteThirdParty => commit_invite_third_party_create(conn, event, commit).await,
+        EventKind::InviteCreate => commit_invite_create(conn, event, commit, prepared).await,
+        EventKind::InviteThirdParty => {
+            commit_invite_third_party_create(conn, event, commit, prepared).await
+        }
         EventKind::InviteClaim => {
             claim_admission::commit_claim(conn, event, commit, claim_proof).await
         }
-        EventKind::InviteRevoke => commit_invite_revoke(conn, event, commit).await,
-        EventKind::InviteCancel => commit_invite_cancel(conn, event, commit).await,
+        EventKind::InviteRevoke => commit_invite_revoke(conn, event, commit, prepared).await,
+        EventKind::InviteCancel => commit_invite_cancel(conn, event, commit, prepared).await,
         EventKind::InviteAccept => commit_invite_accept(conn, event, commit).await,
         _ => Ok(()),
     }

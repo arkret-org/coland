@@ -3980,6 +3980,7 @@ fn franking_nonce(
     replay_nonce: &str,
 ) -> coland_storage::EventBatchCommitRequest {
     coland_storage::EventBatchCommitRequest {
+        audit_unit: None,
         events: vec![request.clone()],
         realm_organization_proof: None,
         invite_claim_proof: None,

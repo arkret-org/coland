@@ -15,6 +15,8 @@ pub struct ApprovalHistoricalMethod {
 /// be deserialized from a caller-supplied wire object.
 #[derive(Clone, Debug)]
 pub struct EventApprovalCommit {
+    /// Process-local binding selected only by the registered command executor.
+    pub carrier_binding: Option<ApprovalCarrierBinding>,
     pub event_id: EventId,
     pub event_digest: String,
     pub committed_at: DateTime<Utc>,
@@ -22,4 +24,31 @@ pub struct EventApprovalCommit {
     /// Only management reviews require these process-local current AA observations.
     /// They are not approval signatures or reusable lifecycle credentials.
     pub management_current: Option<crate::ManagementReviewCurrent>,
+}
+
+/// Closed registered carriers; never populated by deserializing peer input.
+#[derive(Clone, Debug)]
+pub enum ApprovalCarrierBinding {
+    AuditPair { request_digest: String },
+    WatchAuditRead { request_digest: String },
+}
+
+impl ApprovalCarrierBinding {
+    pub fn operation(&self) -> &'static str {
+        match self {
+            Self::AuditPair { .. } => {
+                arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1
+            }
+            Self::WatchAuditRead { .. } => {
+                arkret_wire::ServiceOperationId::SELF_STRAND_WATCH_COMMAND_AUDIT_READ_V1
+            }
+        }
+    }
+    pub fn request_digest(&self) -> &str {
+        match self {
+            Self::AuditPair { request_digest } | Self::WatchAuditRead { request_digest } => {
+                request_digest
+            }
+        }
+    }
 }

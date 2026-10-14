@@ -1557,6 +1557,7 @@ pub async fn assert_applet_formal_commit_transaction_contract(
     let error = stores
         .unit_of_work
         .commit_event_batch(EventBatchCommitRequest {
+            audit_unit: None,
             events: batch,
             realm_organization_proof: None,
             invite_claim_proof: None,

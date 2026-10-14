@@ -6990,7 +6990,9 @@ async fn management_review_atomic_join_scenario(
             .await;
             attempt.self_producer_guard = Some(producer.clone());
             let batch = EventBatchCommitRequest {
+                audit_unit: None,
                 event_approvals: Some(EventApprovalCommit {
+                    carrier_binding: None,
                     management_current: Some(current.clone()),
                     event_id: attempt.authority_commit.event.event_id.clone(),
                     event_digest: arkret_canonical::canonical_sha256(
@@ -7134,6 +7136,7 @@ async fn management_review_atomic_join_scenario(
         .await;
         attempt.self_producer_guard = Some(producer);
         let prepared = coland_storage::EventApprovalCommit {
+            carrier_binding: None,
             management_current: Some(current.clone()),
             event_id: attempt.authority_commit.event.event_id.clone(),
             event_digest: arkret_canonical::canonical_sha256(&attempt.authority_commit.event)
@@ -7142,6 +7145,7 @@ async fn management_review_atomic_join_scenario(
             methods: vec![vote],
         };
         let batch = EventBatchCommitRequest {
+            audit_unit: None,
             events: vec![attempt],
             event_approvals: Some(prepared),
             franking_replay_nonce: None,
@@ -7176,8 +7180,10 @@ async fn management_review_atomic_join_scenario(
     .await;
     execution.self_producer_guard = Some(producer.clone());
     let batch = EventBatchCommitRequest {
+        audit_unit: None,
         events: vec![execution.clone()],
         event_approvals: Some(EventApprovalCommit {
+            carrier_binding: None,
             management_current: Some(current.clone()),
             event_id: original_event.event_id.clone(),
             event_digest: arkret_canonical::canonical_sha256(&original_event).unwrap(),
@@ -7447,7 +7453,9 @@ async fn management_review_atomic_join_scenario(
     .await;
     execution_public.self_producer_guard = Some(producer);
     let public_batch = EventBatchCommitRequest {
+        audit_unit: None,
         event_approvals: Some(EventApprovalCommit {
+            carrier_binding: None,
             management_current: Some(current.clone()),
             event_id: execution_public.authority_commit.event.event_id.clone(),
             event_digest: arkret_canonical::canonical_sha256(

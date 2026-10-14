@@ -41,10 +41,11 @@ pub(crate) fn event_value(event: &Event) -> PersistenceResult<Value> {
     Ok(value)
 }
 
-pub(crate) async fn commit_in_connection(
+pub(crate) async fn commit_with_audit_in_connection(
     conn: &mut AsyncPgConnection,
     event: &Event,
     commit: &RealmCommit,
+    audit_unit: Option<&coland_storage::RegisteredAuditCommit>,
 ) -> PersistenceResult<()> {
     if event.kind != EventKind::StrandWatchSet {
         return Ok(());
@@ -53,17 +54,21 @@ pub(crate) async fn commit_in_connection(
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
     let payload: StrandWatchSetPayload =
         serde_json::from_value(json!(&event.payload)).map_err(PersistenceError::database)?;
-    if payload.watcher_actor_id != event.actor_id {
+    if payload.watcher_actor_id != event.actor_id
+        && !audit_unit.is_some_and(|unit| unit.pair_for(event))
+    {
         return Err(refusal(
             "other-actor watch has no registered same-batch audit admission",
         ));
     }
-    crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-        conn,
-        event,
-        commit.committed_at,
-    )
-    .await?;
+    if !audit_unit.is_some_and(|unit| unit.pair_for(event)) {
+        crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
+            conn,
+            event,
+            commit.committed_at,
+        )
+        .await?;
+    }
     let strand = sql_query("SELECT s.value FROM strand_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id WHERE s.realm_id=$1 AND s.strand_id=$2 AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position AND c.stream_ref=$3 FOR SHARE OF s")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(payload.strand_id.as_str())
         .bind::<Jsonb,_>(serde_json::to_value(&commit.stream_ref).map_err(PersistenceError::database)?)

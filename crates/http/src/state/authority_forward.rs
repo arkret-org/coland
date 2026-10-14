@@ -91,7 +91,7 @@ fn verify_forwarded_producer(
     )?))
 }
 
-fn resolve_forwarded_producer(
+pub(super) fn resolve_forwarded_producer(
     state: &AppState,
     peer: &AuthenticatedPeerContext,
     event: &Event,
@@ -1113,7 +1113,7 @@ async fn verify_bound_invite_claim(
     Ok(true)
 }
 
-async fn verify_forwarded_acknowledgement(
+pub(super) async fn verify_forwarded_acknowledgement(
     state: &AppState,
     governance: &DidCoreId,
     event: &Event,
@@ -1172,7 +1172,7 @@ async fn verify_forwarded_acknowledgement(
 /// refusal carries (such as `epoch_update_required` on
 /// `failed_precondition`) is kept so the relayed refusal renders identically.
 /// A server failure or an unregistered answer is retryable unavailability.
-fn relayed_refusal(status: u16, body: &[u8]) -> ServiceError {
+pub(super) fn relayed_refusal(status: u16, body: &[u8]) -> ServiceError {
     let problem = serde_json::from_slice::<arkret_wire::Problem>(body).ok();
     let code = problem.as_ref().and_then(arkret_wire::Problem::error_code);
     let (Some(problem), Some(code)) = (problem, code) else {
@@ -1227,7 +1227,15 @@ fn relay_governance_response(
             ));
         }
     };
-    if let AuthoritySubmitOutcome::Accepted { commit, .. } = &value.outcome {
+    let arkret_models_collaboration::authority_commit::PeerAuthorityForwardOutcomeValue::Ordinary(
+        outcome,
+    ) = value.outcome
+    else {
+        return Err(temporarily_unavailable(
+            "single Event forward received an atomic outcome",
+        ));
+    };
+    if let AuthoritySubmitOutcome::Accepted { commit, .. } = &outcome {
         let stream_ref = arkret_wire::CommitStreamRef::from_scope(
             &event.scope_ref,
             Some(event.realm_id.clone()),
@@ -1242,7 +1250,7 @@ fn relay_governance_response(
             ));
         }
     }
-    Ok(value.outcome)
+    Ok(outcome)
 }
 
 #[cfg(test)]

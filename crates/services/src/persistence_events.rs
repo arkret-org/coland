@@ -987,6 +987,7 @@ impl crate::events::EventCommitPort for PersistenceEventCommitter {
             .commit_event(persistence_event_commit_request(command))
             .await?;
         Ok(crate::events::CommitAcceptedEventResult {
+            audit_outcome: outcome.audit_outcome,
             projections_inserted: outcome.projections_inserted,
             deliveries_inserted: outcome.outbox_inserted,
         })
@@ -999,6 +1000,7 @@ impl crate::events::EventCommitPort for PersistenceEventCommitter {
         let outcome = self
             .0
             .commit_event_batch(coland_storage::EventBatchCommitRequest {
+                audit_unit: command.audit_unit,
                 events: command
                     .events
                     .into_iter()
@@ -1014,6 +1016,7 @@ impl crate::events::EventCommitPort for PersistenceEventCommitter {
             })
             .await?;
         Ok(crate::events::CommitAcceptedEventResult {
+            audit_outcome: outcome.audit_outcome,
             projections_inserted: outcome.projections_inserted,
             deliveries_inserted: outcome.outbox_inserted,
         })

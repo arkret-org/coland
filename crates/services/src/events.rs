@@ -542,6 +542,7 @@ pub use coland_storage::{
 
 #[derive(Clone, Debug)]
 pub struct CommitAcceptedEventBatchCommand {
+    pub audit_unit: Option<coland_storage::RegisteredAuditCommit>,
     pub events: Vec<CommitAcceptedEventCommand>,
     pub franking_replay_nonce: Option<coland_storage::FrankingReplayNonceCommit>,
     pub realm_organization_proof: Option<coland_storage::RealmOrganizationProofCommit>,
@@ -552,8 +553,9 @@ pub struct CommitAcceptedEventBatchCommand {
     pub agent_membership_cascade: Option<coland_storage::AgentMembershipCascadeCommit>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommitAcceptedEventResult {
+    pub audit_outcome: Option<coland_storage::RegisteredAuditOutcome>,
     pub projections_inserted: usize,
     pub deliveries_inserted: usize,
 }
@@ -1630,6 +1632,7 @@ mod tests {
             assert_eq!(command.projections.len(), 1);
             assert_eq!(command.deliveries.len(), 1);
             Ok(CommitAcceptedEventResult {
+                audit_outcome: None,
                 projections_inserted: 1,
                 deliveries_inserted: 1,
             })
@@ -1642,6 +1645,7 @@ mod tests {
             assert_eq!(command.events.len(), 2);
             assert!(command.applet_record.is_some());
             Ok(CommitAcceptedEventResult {
+                audit_outcome: None,
                 projections_inserted: 2,
                 deliveries_inserted: 0,
             })

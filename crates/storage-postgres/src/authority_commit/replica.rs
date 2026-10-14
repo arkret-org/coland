@@ -974,6 +974,18 @@ pub(super) async fn install_committed_replica_in_connection(
     conn: &mut AsyncPgConnection,
     replica: &CommittedReplica,
 ) -> Result<CommittedReplicaOutcome, PgTransactionError> {
+    if arkret_models_collaboration::authority_commit::is_audit_paired_event_slot(&replica.event)
+        .map_err(PersistenceError::database)?
+    {
+        return Err(PersistenceError::Conflict("revision_unavailable: paired source slot requires complete registered atomic replication".to_owned()).into());
+    }
+    install_registered_replica_in_connection(conn, replica).await
+}
+
+pub(super) async fn install_registered_replica_in_connection(
+    conn: &mut AsyncPgConnection,
+    replica: &CommittedReplica,
+) -> Result<CommittedReplicaOutcome, PgTransactionError> {
     crate::agent_producer_signer_keys::validate_producer_fact_binding(
         &replica.event,
         &replica.commit,

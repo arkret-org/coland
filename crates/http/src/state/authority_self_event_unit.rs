@@ -579,6 +579,7 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             crate::boxed_future(|| {
                 state.events().commit_accepted_event_batch(
                     coland_services::events::CommitAcceptedEventBatchCommand {
+                        audit_unit: None,
                         events: vec![command],
                         franking_replay_nonce,
                         realm_organization_proof,

@@ -110,6 +110,10 @@ pub(super) fn peer_router() -> Router {
             Router::with_path("strands/watch/current")
                 .post(super::self_current_reads::peer_strand_watch_current),
         )
+        .push(
+            Router::with_path("strands/watch/audit-read")
+                .post(super::self_current_reads::peer_strand_watch_audit_read),
+        )
 }
 
 /// `ak.open.realm_authority.read.bundle.v1`, under the unauthenticated `open` tree.
@@ -550,6 +554,7 @@ pub(crate) async fn submit_self(req: &mut Request, depot: &Depot, res: &mut Resp
             SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(_) => "realm_bootstrap",
             SelfAuthoritySubmitRequest::DirectConversationFounding(_) => "direct_founding",
             SelfAuthoritySubmitRequest::MembershipCompensation(_) => "membership_compensation",
+            SelfAuthoritySubmitRequest::AuditPairedEvent(_) => "audit_paired_event",
         };
         let actor_class = if session.agent_session().is_some() {
             "agent"

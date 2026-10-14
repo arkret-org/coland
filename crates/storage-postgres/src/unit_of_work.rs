@@ -2483,6 +2483,7 @@ fn commit_one_in_connection<'a>(
     invite_claim_proof: Option<&'a coland_storage::InviteClaimProofCommit>,
     event_approvals: Option<&'a coland_storage::EventApprovalCommit>,
     outcome: &'a mut EventCommitOutcome,
+    audit_unit: Option<&'a coland_storage::RegisteredAuditCommit>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PgTransactionError>> + Send + 'a>>
 {
     // Construct this state machine outside the batch caller's poll frame.
@@ -2494,6 +2495,7 @@ fn commit_one_in_connection<'a>(
         invite_claim_proof,
         event_approvals,
         outcome,
+        audit_unit,
     ))
 }
 
@@ -2505,6 +2507,7 @@ async fn commit_one_inner(
     invite_claim_proof: Option<&coland_storage::InviteClaimProofCommit>,
     event_approvals: Option<&coland_storage::EventApprovalCommit>,
     outcome: &mut EventCommitOutcome,
+    audit_unit: Option<&coland_storage::RegisteredAuditCommit>,
 ) -> Result<(), PgTransactionError> {
     if request.event.event_id != request.authority_commit.event.event_id.as_str() {
         return Err(PersistenceError::SchemaViolation(
@@ -2725,6 +2728,7 @@ async fn commit_one_inner(
         outcome,
         prepared_human,
         prepared_service,
+        audit_unit,
     ))
     .await
 }
@@ -2747,6 +2751,7 @@ fn commit_prepared_event<'a>(
     prepared_service: Option<
         arkret_models_collaboration::authority_commit::ServiceHistoricalSignerFact,
     >,
+    audit_unit: Option<&'a coland_storage::RegisteredAuditCommit>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PgTransactionError>> + Send + 'a>>
 {
     Box::pin(commit_prepared_event_inner(
@@ -2759,6 +2764,7 @@ fn commit_prepared_event<'a>(
         outcome,
         prepared_human,
         prepared_service,
+        audit_unit,
     ))
 }
 
@@ -2780,6 +2786,7 @@ async fn commit_prepared_event_inner(
     prepared_service: Option<
         arkret_models_collaboration::authority_commit::ServiceHistoricalSignerFact,
     >,
+    audit_unit: Option<&coland_storage::RegisteredAuditCommit>,
 ) -> Result<(), PgTransactionError> {
     let event = &request.authority_commit.event;
 
@@ -2867,11 +2874,12 @@ async fn commit_prepared_event_inner(
     })
     .await?;
     crate::boxed_future(|| {
-        crate::circle_current_results::admit_in_connection(
+        crate::circle_current_results::admit_with_audit_in_connection(
             conn,
             event,
             &request.authority_commit.commit,
             &request.authority_commit.expected_authority.service_id,
+            audit_unit,
         )
     })
     .await?;
@@ -3039,25 +3047,31 @@ async fn commit_prepared_event_inner(
             realm_organization_proof,
             invite_claim_proof,
             event_approvals,
+            audit_unit,
         ))
         .await?;
 
-        outcome.outbox_inserted += crate::realm_fanout::plan_realm_fanout_in_connection(
-            conn,
-            event,
-            commit,
-            &request.authority_commit.expected_authority.service_id,
-            request.realm_fanout_source.as_ref(),
-            &request
-                .authority_commit
-                .welcomes
-                .iter()
-                .filter(|welcome| welcome.claim.is_none())
-                .map(|welcome| &welcome.delivery)
-                .collect::<Vec<_>>(),
-            commit.committed_at.timestamp(),
-        )
-        .await?;
+        if !matches!(
+            audit_unit,
+            Some(coland_storage::RegisteredAuditCommit::Pair { .. })
+        ) {
+            outcome.outbox_inserted += crate::realm_fanout::plan_realm_fanout_in_connection(
+                conn,
+                event,
+                commit,
+                &request.authority_commit.expected_authority.service_id,
+                request.realm_fanout_source.as_ref(),
+                &request
+                    .authority_commit
+                    .welcomes
+                    .iter()
+                    .filter(|welcome| welcome.claim.is_none())
+                    .map(|welcome| &welcome.delivery)
+                    .collect::<Vec<_>>(),
+                commit.committed_at.timestamp(),
+            )
+            .await?;
+        }
     }
 
     let committed_ref = arkret_wire::CommittedEventRef {
@@ -3116,6 +3130,7 @@ fn commit_event_current_results_in_connection<'a>(
     realm_organization_proof: Option<&'a coland_storage::RealmOrganizationProofCommit>,
     invite_claim_proof: Option<&'a coland_storage::InviteClaimProofCommit>,
     event_approvals: Option<&'a coland_storage::EventApprovalCommit>,
+    audit_unit: Option<&'a coland_storage::RegisteredAuditCommit>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PgTransactionError>> + Send + 'a>>
 {
     Box::pin(commit_event_current_results_inner(
@@ -3124,6 +3139,7 @@ fn commit_event_current_results_in_connection<'a>(
         realm_organization_proof,
         invite_claim_proof,
         event_approvals,
+        audit_unit,
     ))
 }
 
@@ -3133,12 +3149,14 @@ async fn commit_event_current_results_inner(
     realm_organization_proof: Option<&coland_storage::RealmOrganizationProofCommit>,
     invite_claim_proof: Option<&coland_storage::InviteClaimProofCommit>,
     event_approvals: Option<&coland_storage::EventApprovalCommit>,
+    audit_unit: Option<&coland_storage::RegisteredAuditCommit>,
 ) -> Result<(), PgTransactionError> {
     Box::pin(commit_scope_current_results(
         conn,
         request,
         realm_organization_proof,
         invite_claim_proof,
+        audit_unit,
     ))
     .await?;
 
@@ -3163,6 +3181,7 @@ fn commit_scope_current_results<'a>(
     request: &'a EventCommitRequest,
     realm_organization_proof: Option<&'a coland_storage::RealmOrganizationProofCommit>,
     invite_claim_proof: Option<&'a coland_storage::InviteClaimProofCommit>,
+    audit_unit: Option<&'a coland_storage::RegisteredAuditCommit>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PgTransactionError>> + Send + 'a>>
 {
     Box::pin(commit_scope_current_results_inner(
@@ -3170,6 +3189,7 @@ fn commit_scope_current_results<'a>(
         request,
         realm_organization_proof,
         invite_claim_proof,
+        audit_unit,
     ))
 }
 
@@ -3178,6 +3198,7 @@ async fn commit_scope_current_results_inner(
     request: &EventCommitRequest,
     realm_organization_proof: Option<&coland_storage::RealmOrganizationProofCommit>,
     invite_claim_proof: Option<&coland_storage::InviteClaimProofCommit>,
+    audit_unit: Option<&coland_storage::RegisteredAuditCommit>,
 ) -> Result<(), PgTransactionError> {
     let event = &request.authority_commit.event;
     let commit = &request.authority_commit.commit;
@@ -3219,9 +3240,11 @@ async fn commit_scope_current_results_inner(
     ))
     .await?;
 
-    Box::pin(crate::strand_watch_current_results::commit_in_connection(
-        conn, event, commit,
-    ))
+    Box::pin(
+        crate::strand_watch_current_results::commit_with_audit_in_connection(
+            conn, event, commit, audit_unit,
+        ),
+    )
     .await?;
 
     Box::pin(crate::agent_interaction_current_results::project_in_connection(conn, event, commit))
@@ -3473,7 +3496,7 @@ async fn commit_content_current_results_inner(
 
 async fn commit_batch_in_connection(
     conn: &mut AsyncPgConnection,
-    request: EventBatchCommitRequest,
+    mut request: EventBatchCommitRequest,
 ) -> Result<EventCommitOutcome, PgTransactionError> {
     if request.events.is_empty() {
         return Err(PersistenceError::SchemaViolation("empty event batch".to_owned()).into());
@@ -3482,6 +3505,16 @@ async fn commit_batch_in_connection(
         &request.events,
         request.franking_replay_nonce.as_ref(),
     )?;
+    crate::registered_audit::bind_approvals(&mut request)?;
+    let audit_unit = request.audit_unit.as_ref();
+    if let Some(original) =
+        crate::boxed_future(|| crate::registered_audit::begin_in_connection(conn, &request)).await?
+    {
+        return Ok(EventCommitOutcome {
+            audit_outcome: Some(original),
+            ..Default::default()
+        });
+    }
     let mut snapshot_contexts = std::collections::BTreeMap::new();
     for request in &request.events {
         snapshot_contexts.insert(
@@ -3511,7 +3544,27 @@ async fn commit_batch_in_connection(
     .await?;
 
     let mut outcome = EventCommitOutcome::default();
+    let audit_events = request
+        .events
+        .iter()
+        .map(|event| event.authority_commit.clone())
+        .collect::<Vec<_>>();
     for event in request.events {
+        let slot_approvals = match audit_unit {
+            Some(coland_storage::RegisteredAuditCommit::Pair { request, approvals }) => {
+                let slot = request
+                    .events
+                    .iter()
+                    .position(|slot| slot.event.event_id == event.authority_commit.event.event_id)
+                    .ok_or_else(|| {
+                        PersistenceError::SchemaViolation(
+                            "audit unit contains an unrelated Event".to_owned(),
+                        )
+                    })?;
+                approvals[slot].as_ref()
+            }
+            _ => request.event_approvals.as_ref(),
+        };
         // Keep the per-Event admission state out of the enclosing batch future.
         Box::pin(commit_one_in_connection(
             conn,
@@ -3519,8 +3572,9 @@ async fn commit_batch_in_connection(
             request.applet_record.as_ref(),
             request.realm_organization_proof.as_ref(),
             request.invite_claim_proof.as_ref(),
-            request.event_approvals.as_ref(),
+            slot_approvals,
             &mut outcome,
+            audit_unit,
         ))
         .await?;
     }
@@ -3554,6 +3608,14 @@ async fn commit_batch_in_connection(
         )
         .await?;
     }
+    if let Some(unit) = audit_unit {
+        outcome.audit_outcome = Some(
+            crate::boxed_future(|| {
+                crate::registered_audit::finish_in_connection(conn, unit, &audit_events)
+            })
+            .await?,
+        );
+    }
     Ok(outcome)
 }
 
@@ -3564,6 +3626,7 @@ impl EventCommitUnitOfWork for PgEventCommitUnitOfWork {
         request: EventCommitRequest,
     ) -> PersistenceResult<EventCommitOutcome> {
         self.commit_event_batch(EventBatchCommitRequest {
+            audit_unit: None,
             events: vec![request],
             realm_organization_proof: None,
             invite_claim_proof: None,

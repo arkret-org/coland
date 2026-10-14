@@ -178,12 +178,14 @@ fn folded_short_name(name: &str) -> PersistenceResult<String> {
     Ok(name.to_ascii_lowercase())
 }
 
-pub(crate) async fn admit_in_connection(
+pub(crate) async fn admit_with_audit_in_connection(
     conn: &mut AsyncPgConnection,
     event: &Event,
     commit: &RealmCommit,
     _authority_station: &arkret_wire::DidCoreId,
+    audit_unit: Option<&coland_storage::RegisteredAuditCommit>,
 ) -> PersistenceResult<()> {
+    let paired = audit_unit.is_some_and(|unit| unit.pair_for(event));
     match &event.kind {
         EventKind::CircleCreate => {
             if event.scope_ref
@@ -271,7 +273,7 @@ pub(crate) async fn admit_in_connection(
                 return Err(schema("Circle membership scope and payload differ"));
             }
             let member = payload.member_id.clone();
-            if member != event.actor_id {
+            if member != event.actor_id && !paired {
                 return Err(conflict(
                     ConflictCode::UnsupportedFeature,
                     "cross-actor Circle membership needs its audit and manager cut",
@@ -298,12 +300,14 @@ pub(crate) async fn admit_in_connection(
                     "circle_member_must_be_realm_member",
                 ));
             }
-            crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-                conn,
-                event,
-                commit.committed_at,
-            )
-            .await?;
+            if !paired {
+                crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
+                    conn,
+                    event,
+                    commit.committed_at,
+                )
+                .await?;
+            }
             let circle = sql_query(
                 "SELECT value FROM circle_current_results WHERE realm_id=$1 AND circle_id=$2 FOR SHARE",
             )
@@ -322,7 +326,7 @@ pub(crate) async fn admit_in_connection(
                     "circle_not_active",
                 ));
             }
-            if next == "join" && circle.join_rule != CircleJoinRule::Public {
+            if !paired && next == "join" && circle.join_rule != CircleJoinRule::Public {
                 return Err(conflict(
                     ConflictCode::UnsupportedFeature,
                     "Circle self-entry requires a public Circle",

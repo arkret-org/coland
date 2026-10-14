@@ -12,6 +12,7 @@ mod authority_accountability_grant;
 mod authority_agent_control;
 mod authority_agent_grant;
 mod authority_agent_pcr_genesis;
+pub(crate) mod authority_audit_unit;
 mod authority_bootstrap_validation;
 pub(crate) mod authority_consent;
 mod authority_contact;

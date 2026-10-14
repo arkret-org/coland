@@ -668,6 +668,13 @@ async fn remote_watch_delivery_uses_the_verified_peer_cut_without_local_reducer_
         .bind::<Text, _>(local.as_str())
         .bind::<diesel::sql_types::Timestamptz, _>(expires_at)
         .execute(&mut *conn).await.unwrap();
+    // A stale cache without any accepted provenance cannot override the
+    // authenticated governor's current active namespace. This is not a replica.
+    diesel::sql_query("INSERT INTO strand_current_results(realm_id,strand_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,9,$4,now())")
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(request.strand_id.as_str())
+        .bind::<Text,_>(arkret_wire::RealmCommitId::from_digest([70;32]).as_str())
+        .bind::<Jsonb,_>(json!({"id":request.strand_id,"realm_id":realm,"state":"archived"}))
+        .execute(&mut *conn).await.unwrap();
     drop(conn);
     let input = AccountContentDeliveryInput {
         remote_watch_read: Some((request, outcome, authority)),

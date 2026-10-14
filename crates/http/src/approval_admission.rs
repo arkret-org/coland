@@ -126,6 +126,7 @@ pub(crate) async fn prepare_event_approvals_with_management_current(
         Some(observe_management_accounts(state, accounts).await?)
     };
     Ok(Some(EventApprovalCommit {
+        carrier_binding: None,
         event_id: submission.event.event_id.clone(),
         event_digest: arkret_canonical::canonical_sha256(&submission.event)
             .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?,

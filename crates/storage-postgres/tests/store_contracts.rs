@@ -1591,6 +1591,7 @@ async fn postgres_franking_nonce_ledger_case() {
         )
     };
     let commit = |event, nonce| EventBatchCommitRequest {
+        audit_unit: None,
         events: vec![event],
         realm_organization_proof: None,
         invite_claim_proof: None,
@@ -1816,6 +1817,7 @@ async fn postgres_franking_target_proof_case() {
         created_at,
     ));
     let failing_batch = EventBatchCommitRequest {
+        audit_unit: None,
         events: vec![target.clone(), proof.clone()],
         realm_organization_proof: None,
         invite_claim_proof: None,
@@ -1858,6 +1860,7 @@ async fn postgres_franking_target_proof_case() {
         created_at,
     ));
     let clean_batch = EventBatchCommitRequest {
+        audit_unit: None,
         events: vec![target, proof],
         realm_organization_proof: None,
         invite_claim_proof: None,
@@ -1908,6 +1911,7 @@ async fn postgres_queue_refuses_a_second_envelope_under_one_event_id() {
     let created_at =
         chrono::DateTime::from_timestamp_micros(chrono::Utc::now().timestamp_micros()).unwrap();
     let batch = |event| EventBatchCommitRequest {
+        audit_unit: None,
         events: vec![event],
         realm_organization_proof: None,
         invite_claim_proof: None,

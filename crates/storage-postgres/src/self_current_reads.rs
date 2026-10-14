@@ -955,9 +955,27 @@ pub(crate) async fn strand_watch_current_in_connection(
     account: &AccountId,
     issuer: &DidCoreId,
 ) -> Result<SelfExactCurrentRead<StrandWatchCurrentOutcome>, PgTransactionError> {
+    strand_watch_observation_in_connection(conn, request, account, issuer, None).await
+}
+
+pub(crate) async fn strand_watch_observation_in_connection(
+    conn: &mut AsyncPgConnection,
+    request: &StrandWatchCurrentRequestBody,
+    account: &AccountId,
+    issuer: &DidCoreId,
+    audit: Option<&arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest>,
+) -> Result<SelfExactCurrentRead<StrandWatchCurrentOutcome>, PgTransactionError> {
     let caller = ActorId::account(account.clone());
-    if request.watcher_actor_id != caller {
+    if audit.is_none() && request.watcher_actor_id != caller {
         return Ok(SelfExactCurrentRead::NotFound);
+    }
+    if let Some(audit) = audit {
+        audit.validate().map_err(PersistenceError::database)?;
+        if audit.audit_submission.event.actor_id != caller
+            || audit.selector().map_err(PersistenceError::database)? != *request
+        {
+            return Ok(SelfExactCurrentRead::NotFound);
+        }
     }
     let (generation, head) = match member_cut(conn, &request.realm_id, &caller, issuer).await? {
         MemberCut::NotVisible => return Ok(SelfExactCurrentRead::NotFound),
@@ -1015,7 +1033,7 @@ pub(crate) async fn strand_watch_current_in_connection(
     let head = if let ScopeRef::Circle { circle_id, .. } = &scope {
         let visible = sql_query("SELECT EXISTS(SELECT 1 FROM circle_member_state_current_results m JOIN circle_current_results c ON c.realm_id=m.realm_id AND c.circle_id=m.circle_id JOIN realm_commits mc ON mc.commit_id=m.current_commit_id AND mc.realm_id=m.realm_id AND mc.stream_ref=m.source_stream_ref AND mc.stream_position=m.current_stream_position JOIN realm_commits cc ON cc.commit_id=c.current_commit_id AND cc.realm_id=c.realm_id AND cc.stream_ref=c.source_stream_ref AND cc.stream_position=c.current_stream_position WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id=$3 AND m.membership='join' AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) AND c.value->>'state'='active') AS present")
             .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).bind::<Text,_>(caller.to_string()).get_result::<ExistsRow>(&mut *conn).await?.present;
-        if !visible {
+        if !visible && audit.is_none() {
             return Ok(SelfExactCurrentRead::NotFound);
         }
         let key = crate::authority_commit::stream_key(&stream)?;
@@ -1055,7 +1073,7 @@ pub(crate) async fn strand_watch_current_in_connection(
         &request.realm_id,
         &head,
         &request.strand_id,
-        &caller,
+        &request.watcher_actor_id,
         "",
     )
     .await
@@ -1094,12 +1112,22 @@ pub(crate) async fn strand_watch_current_in_connection(
         false,
     )
     .await?;
+    let markers = if let Some(audit) = audit {
+        crate::registered_audit::read_approval_markers_in_connection(conn, audit).await?
+    } else {
+        Vec::new()
+    };
     if cut
-        .require_content_read_constraints(
+        .require_content_read_constraints_with_approvals(
             &source,
             chrono::Utc::now(),
             owned,
-            arkret_wire::CapabilityActionId::ObjectRead,
+            if audit.is_some() {
+                arkret_wire::CapabilityActionId::RealmNotificationAudit
+            } else {
+                arkret_wire::CapabilityActionId::ObjectRead
+            },
+            &markers,
         )
         .is_err()
     {
@@ -1108,12 +1136,12 @@ pub(crate) async fn strand_watch_current_in_connection(
     let selector = StrandWatchCurrentSelector {
         kind: StrandWatchSelectorKind::StrandWatch,
         strand_id: request.strand_id.clone(),
-        watcher_actor_id: caller.clone(),
+        watcher_actor_id: request.watcher_actor_id.clone(),
     };
     let row = sql_query(WATCH_CURRENT_SQL)
         .bind::<Text, _>(request.realm_id.as_str())
         .bind::<Text, _>(request.strand_id.as_str())
-        .bind::<Text, _>(caller.to_string())
+        .bind::<Text, _>(request.watcher_actor_id.to_string())
         .get_result::<CurrentRow>(&mut *conn)
         .await
         .optional()?;
@@ -1151,13 +1179,16 @@ pub(crate) async fn strand_watch_current_in_connection(
         let previously_written = sql_query(crate::strand_watch_current_results::WATCH_HISTORY_SQL)
             .bind::<Text, _>(request.realm_id.as_str())
             .bind::<Text, _>(request.strand_id.as_str())
-            .bind::<Text, _>(caller.to_string())
+            .bind::<Jsonb, _>(
+                serde_json::to_value(&request.watcher_actor_id)
+                    .map_err(PersistenceError::database)?,
+            )
             .bind::<Text, _>("")
             .get_result::<ExistsRow>(&mut *conn)
             .await?
             .present;
         let orphan_current = sql_query("SELECT EXISTS(SELECT 1 FROM strand_watch_current_results WHERE realm_id=$1 AND strand_id=$2 AND watcher_actor_id=$3) AS present")
-            .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.strand_id.as_str()).bind::<Text,_>(caller.to_string()).get_result::<ExistsRow>(&mut *conn).await?.present;
+            .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.strand_id.as_str()).bind::<Text,_>(request.watcher_actor_id.to_string()).get_result::<ExistsRow>(&mut *conn).await?.present;
         if previously_written || orphan_current {
             return Ok(SelfExactCurrentRead::Unresolved(
                 "written watch current or tenure import is unavailable",

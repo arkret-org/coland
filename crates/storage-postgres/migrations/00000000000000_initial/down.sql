@@ -1,3 +1,6 @@
+DROP TABLE IF EXISTS registered_audit_replica_units;
+DROP TABLE IF EXISTS watch_audit_read_results;
+DROP TABLE IF EXISTS registered_audit_units;
 DROP TABLE IF EXISTS management_review_requests;
 DROP TABLE IF EXISTS agent_approval_publications;
 DROP TABLE IF EXISTS key_backup_list_revisions;

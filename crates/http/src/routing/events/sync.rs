@@ -209,6 +209,10 @@ async fn content_delivery_guard_inner(
                     "capability_denied: owned source join generation differs" => "owned_join_generation",
                     "capability_denied: owned source Agent join is unavailable" => "owned_agent_join",
                     "capability_denied: a current grant refuses canonical Event disclosure" => "content_constraint",
+                    "revision_unavailable: remote Watch Strand scope or lifecycle conflicts with observed current" => "watch_scope_conflict",
+                    "revision_unavailable: remote Watch authority was superseded or conflicts" => "watch_authority_conflict",
+                    "revision_unavailable: remote Watch current is older than or conflicts with observed current" => "watch_value_conflict",
+                    "revision_unavailable: local Watch session expiry changed" => "watch_session_expiry",
                     _ => "other_conflict",
                 },
                 coland_services::ServiceError::Database(_) => "database",
@@ -217,7 +221,7 @@ async fn content_delivery_guard_inner(
                 _ => "other",
             };
             tracing::warn!(diagnostic, "current content delivery guard refused");
-            if input.remote_watch_read.is_some() && !error.is_not_found() {
+            if (input.remote_watch_read.is_some() || input.audited_watch_read.is_some()) && !error.is_not_found() {
                 return crate::app_error!(
                     RevisionUnavailable,
                     "the remote Watch current delivery cut cannot be confirmed",

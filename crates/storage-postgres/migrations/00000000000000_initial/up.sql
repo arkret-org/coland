@@ -3885,6 +3885,29 @@ CREATE TABLE realm_set_default_strand_current_results (
 -- same MessageId replaces it whole, so the carrier is either the create payload
 -- (naming its Strand) or a revise payload (naming this Message).
 -- Whole-value watch CAS preserves written null and its accepting revision.
+-- Registered audit fences retain the full original inner request and outcome.
+CREATE TABLE registered_audit_replica_units (
+    business_event_id TEXT PRIMARY KEY,
+    audit_event_id TEXT NOT NULL UNIQUE,
+    realm_id TEXT NOT NULL,
+    canonical_submission BYTEA NOT NULL
+);
+
+CREATE TABLE registered_audit_units (
+    business_event_id TEXT PRIMARY KEY,
+    audit_event_id TEXT NOT NULL UNIQUE,
+    realm_id TEXT NOT NULL,
+    canonical_request BYTEA NOT NULL,
+    outcome JSONB NOT NULL
+);
+CREATE TABLE watch_audit_read_results (
+    audit_event_id TEXT PRIMARY KEY,
+    realm_id TEXT NOT NULL,
+    auditor_actor_id TEXT NOT NULL,
+    canonical_request BYTEA NOT NULL,
+    outcome JSONB NOT NULL
+);
+
 CREATE TABLE strand_watch_current_results (
  realm_id TEXT NOT NULL,
  strand_id TEXT NOT NULL,

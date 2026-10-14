@@ -3448,6 +3448,59 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .map_err(PgTransactionError::into_persistence)
     }
 
+    async fn install_committed_audit_pair(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::AuditPairedEventFederationSubmission,
+        replicas: &[coland_storage::CommittedReplica; 2],
+    ) -> PersistenceResult<arkret_models_collaboration::authority_commit::AggregateAcceptanceStatus>
+    {
+        request.validate().map_err(PersistenceError::database)?;
+        for (slot, replica) in request.committed_events.iter().zip(replicas) {
+            if slot.event_submission.event != replica.event
+                || slot.source_commit != replica.commit
+                || slot.producer_signer_fact != replica.producer_signer_fact
+            {
+                return Err(PersistenceError::SchemaViolation(
+                    "audit replica differs from verified source slot".to_owned(),
+                ));
+            }
+        }
+        let canonical =
+            arkret_canonical::canonical_json_bytes(request).map_err(PersistenceError::database)?;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            #[derive(diesel::QueryableByName)]
+            struct Fence { #[diesel(sql_type=diesel::sql_types::Binary)] canonical_submission: Vec<u8> }
+            crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &replicas[0].event.realm_id).await?;
+            let original = sql_query("SELECT canonical_submission FROM registered_audit_replica_units WHERE business_event_id=$1 OR audit_event_id=$1 OR business_event_id=$2 OR audit_event_id=$2")
+                .bind::<Text,_>(replicas[0].event.event_id.as_str()).bind::<Text,_>(replicas[1].event.event_id.as_str())
+                .get_result::<Fence>(&mut *conn).await.optional()?;
+            if original.as_ref().is_some_and(|original| original.canonical_submission != canonical) {
+                return Err(PersistenceError::Conflict("duplicate_conflict: source audit pair has another complete submission".to_owned()).into());
+            }
+            if original.is_none() {
+                #[derive(diesel::QueryableByName)]
+                struct Existing { #[diesel(sql_type=diesel::sql_types::Bool)] present: bool }
+                let existing = sql_query("SELECT EXISTS(SELECT 1 FROM canonical_events WHERE envelope->>'event_id' IN ($1,$2)) AS present")
+                    .bind::<Text,_>(replicas[0].event.event_id.as_str()).bind::<Text,_>(replicas[1].event.event_id.as_str())
+                    .get_result::<Existing>(&mut *conn).await?;
+                if existing.present { return Err(PersistenceError::Conflict("revision_unavailable: existing source slot has no complete unit fence".to_owned()).into()); }
+            }
+            let first = replica::install_registered_replica_in_connection(conn, &replicas[0]).await?;
+            let second = replica::install_registered_replica_in_connection(conn, &replicas[1]).await?;
+            if matches!((first,second), (coland_storage::CommittedReplicaOutcome::Stored,coland_storage::CommittedReplicaOutcome::Duplicate) | (coland_storage::CommittedReplicaOutcome::Duplicate,coland_storage::CommittedReplicaOutcome::Stored)) {
+                return Err(PersistenceError::Conflict("revision_unavailable: audit pair has a partial source installation".to_owned()).into());
+            }
+            if original.is_none() {
+                sql_query("INSERT INTO registered_audit_replica_units(business_event_id,audit_event_id,realm_id,canonical_submission) VALUES($1,$2,$3,$4)")
+                    .bind::<Text,_>(replicas[0].event.event_id.as_str()).bind::<Text,_>(replicas[1].event.event_id.as_str())
+                    .bind::<Text,_>(replicas[0].event.realm_id.as_str()).bind::<diesel::sql_types::Binary,_>(&canonical)
+                    .execute(&mut *conn).await?;
+            }
+            Ok(if first==coland_storage::CommittedReplicaOutcome::Duplicate { arkret_models_collaboration::authority_commit::AggregateAcceptanceStatus::Duplicate } else { arkret_models_collaboration::authority_commit::AggregateAcceptanceStatus::Committed })
+        }).await.map_err(PgTransactionError::into_persistence)
+    }
+
     async fn install_committed_replica(
         &self,
         replica: &coland_storage::CommittedReplica,
@@ -3913,6 +3966,51 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .map_err(PersistenceError::database)?
         .map(|row| decode_json(row.commit_json, "held stream head"))
         .transpose()
+    }
+
+    async fn watch_audit_read_delivery_guard(
+        &self,
+        request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
+        outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+        issuer: &arkret_wire::DidCoreId,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<Box<dyn coland_storage::AccountContentDeliveryGuard>> {
+        crate::account_content_delivery::acquire_governor_audit_delivery(
+            &self.pool, request, outcome, issuer, expires_at,
+        )
+        .await
+    }
+
+    async fn watch_audit_read_disclosure(
+        &self,
+        request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
+        outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+        issuer: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<()> {
+        outcome
+            .validate_for_request(request, outcome.audit_commit.governance_generation)
+            .map_err(PersistenceError::database)?;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::registered_audit::read_visibility_in_connection(
+                conn,
+                request,
+                issuer,
+                Some(outcome.audit_commit.governance_generation),
+            )
+            .await?;
+            Ok(())
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn registered_audit_result(
+        &self,
+        event_id: &arkret_wire::EventId,
+    ) -> PersistenceResult<Option<coland_storage::RegisteredAuditResult>> {
+        let mut conn = pg_conn(&self.pool).await?;
+        crate::registered_audit::original_in_connection(&mut conn, event_id).await
     }
 
     async fn current_authority(

@@ -134,6 +134,7 @@ fn attach_request(
 
 fn batch(create: EventCommitRequest, attach: EventCommitRequest) -> EventBatchCommitRequest {
     EventBatchCommitRequest {
+        audit_unit: None,
         events: vec![create, attach],
         realm_organization_proof: None,
         invite_claim_proof: None,

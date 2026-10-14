@@ -1489,6 +1489,12 @@ pub struct AccountContentDeliveryInput {
         arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome,
         CurrentRealmAuthority,
     )>,
+    /// A fresh governing audited-read response or its durable local freeze.
+    pub audited_watch_read: Option<(
+        arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
+        arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+        CurrentRealmAuthority,
+    )>,
     pub watch_delivery_device: Option<crate::DeviceRevocationGateSelector>,
     /// Local bearer sessions retain their exact stored Account through handoff.
     /// Request-scoped signed grants are freshly introspected at the HTTP cut.
@@ -1931,6 +1937,17 @@ pub trait AuthorityCommitStore: Send + Sync {
     /// Store one verified committed replica with its held-stream continuity,
     /// anchor state, hosted-member basis and projected typed current in one
     /// transaction.
+    async fn install_committed_audit_pair(
+        &self,
+        _request: &arkret_models_collaboration::authority_commit::AuditPairedEventFederationSubmission,
+        _replicas: &[CommittedReplica; 2],
+    ) -> PersistenceResult<arkret_models_collaboration::authority_commit::AggregateAcceptanceStatus>
+    {
+        Err(PersistenceError::Conflict(
+            "revision_unavailable: atomic audit replication unavailable".to_owned(),
+        ))
+    }
+
     async fn install_committed_replica(
         &self,
         replica: &CommittedReplica,
@@ -2265,6 +2282,38 @@ pub trait AuthorityCommitStore: Send + Sync {
         submission: &arkret_models_collaboration::authority_commit::OrdinaryRealmBootstrapUnitSubmission,
         exact_request_body: &[u8],
     ) -> PersistenceResult<Option<Vec<arkret_wire::RealmCommit>>>;
+
+    async fn watch_audit_read_delivery_guard(
+        &self,
+        _request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
+        _outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+        _issuer: &arkret_wire::DidCoreId,
+        _expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<Box<dyn AccountContentDeliveryGuard>> {
+        Err(PersistenceError::Conflict(
+            "revision_unavailable: governing audit delivery unavailable".to_owned(),
+        ))
+    }
+
+    async fn watch_audit_read_disclosure(
+        &self,
+        _request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
+        _outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+        _issuer: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<()> {
+        Err(PersistenceError::Conflict(
+            "revision_unavailable: audit disclosure unavailable".to_owned(),
+        ))
+    }
+
+    async fn registered_audit_result(
+        &self,
+        _event_id: &arkret_wire::EventId,
+    ) -> PersistenceResult<Option<crate::RegisteredAuditResult>> {
+        Err(PersistenceError::Conflict(
+            "unsupported_feature: registered audit archive unavailable".to_owned(),
+        ))
+    }
 
     /// Install the entire registered ordinary Realm bootstrap in one DB
     /// transaction, including genesis authority, every Event/Commit and all

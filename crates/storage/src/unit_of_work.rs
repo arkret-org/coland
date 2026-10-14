@@ -403,6 +403,7 @@ pub struct InviteClaimProofCommit {
 
 #[derive(Clone, Debug)]
 pub struct EventBatchCommitRequest {
+    pub audit_unit: Option<crate::RegisteredAuditCommit>,
     pub events: Vec<EventCommitRequest>,
     /// One moderation franking nonce consumed by a report Event in this
     /// batch. The ledger write is inseparable from the report Event: a failed
@@ -496,8 +497,9 @@ pub struct AppletAuthoringPreviewCommit {
     pub request_digest: String,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct EventCommitOutcome {
+    pub audit_outcome: Option<crate::RegisteredAuditOutcome>,
     pub event_inserted: bool,
     pub projections_inserted: usize,
     pub outbox_inserted: usize,

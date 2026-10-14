@@ -617,6 +617,7 @@ pub fn describe(
             arkret_wire::OperationBundleDescriptor::STATION_APPLET_GHOST_V1.to_owned(),
             arkret_wire::OperationBundleDescriptor::STATION_APPLET_INSTALL_V1.to_owned(),
             arkret_wire::OperationBundleDescriptor::STATION_DESCRIBE_V1.to_owned(),
+            arkret_wire::OperationBundleDescriptor::STATION_HTTP_AUDIT_OPERATIONS_V1.to_owned(),
             // service-surface.md 2.7: the client-visible stage/resolve/status
             // origin is the Station, which forwards the exact DTO to its
             // Account Authority. The Authority is a Station-internal role, so

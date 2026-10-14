@@ -212,12 +212,13 @@ async fn prepare_replica_roster_witnesses(
     Ok(prepared)
 }
 
-async fn replicate_one(
+async fn prepare_or_replicate_one(
     state: &AppState,
     peer: &AuthenticatedPeerContext,
     authorities: &mut BTreeMap<RealmId, LocatedRealmAuthority>,
     item: &CommittedEventSubmission,
     receipt: Option<&coland_storage::IdempotencyRecord>,
+    deferred: Option<&mut Vec<CommittedReplica>>,
 ) -> ServiceResult<(CommittedReplicaOutcome, bool)> {
     item.validate()
         .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
@@ -277,6 +278,7 @@ async fn replicate_one(
         .authority_commits()
         .committed_event_by_commit_id(&commit.commit_id)
         .await?
+        .filter(|_| deferred.is_none())
     {
         if existing.commit == *commit && existing.event == *event {
             let original_fact = state
@@ -398,6 +400,10 @@ async fn replicate_one(
         received_at: crate::wire::now(),
         welcomes,
     };
+    if let Some(deferred) = deferred {
+        deferred.push(replica);
+        return Ok((CommittedReplicaOutcome::Stored, false));
+    }
     let (outcome, fresh) = if let Some(receipt) = receipt {
         state
             .authority_commits()
@@ -414,6 +420,67 @@ async fn replicate_one(
         crate::routing::events::notify::dispatch_committed_event_notifications(state, event).await;
     }
     Ok((outcome, fresh))
+}
+
+async fn replicate_one(
+    state: &AppState,
+    peer: &AuthenticatedPeerContext,
+    authorities: &mut BTreeMap<RealmId, LocatedRealmAuthority>,
+    item: &CommittedEventSubmission,
+    receipt: Option<&coland_storage::IdempotencyRecord>,
+) -> ServiceResult<(CommittedReplicaOutcome, bool)> {
+    prepare_or_replicate_one(state, peer, authorities, item, receipt, None).await
+}
+
+pub(super) async fn receive_audit_pair(
+    state: &AppState,
+    peer: &AuthenticatedPeerContext,
+    request: arkret_models_collaboration::authority_commit::AuditPairedEventFederationSubmission,
+) -> ServiceResult<arkret_models_collaboration::authority_commit::AuditPairedEventAcceptanceOutcome>
+{
+    request
+        .validate()
+        .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+    let mut authorities = BTreeMap::new();
+    let mut prepared = Vec::with_capacity(2);
+    for slot in &request.committed_events {
+        prepare_or_replicate_one(
+            state,
+            peer,
+            &mut authorities,
+            slot,
+            None,
+            Some(&mut prepared),
+        )
+        .await?;
+    }
+    let replicas: [CommittedReplica; 2] = prepared
+        .try_into()
+        .map_err(|_| ServiceError::internal("audit pair replica preparation omitted a slot"))?;
+    let status = state
+        .authority_commits()
+        .install_committed_audit_pair(&request, &replicas)
+        .await?;
+    if status == arkret_models_collaboration::authority_commit::AggregateAcceptanceStatus::Committed
+    {
+        for slot in &request.committed_events {
+            crate::routing::events::notify::dispatch_committed_event_notifications(
+                state,
+                &slot.event_submission.event,
+            )
+            .await;
+        }
+    }
+    Ok(
+        arkret_models_collaboration::authority_commit::AuditPairedEventAcceptanceOutcome {
+            unit_kind: request.unit_kind,
+            status,
+            commits: request
+                .committed_events
+                .each_ref()
+                .map(|slot| slot.source_commit.clone()),
+        },
+    )
 }
 
 /// Judge every item of one `committed_replication` request in order.

@@ -18,7 +18,7 @@ use arkret_wire::{
     RealmAuthorityBundle, RealmAuthorityHandoff, StreamScanRequest,
 };
 use chrono::Utc;
-use coland_services::authority_commit::AuthorityProtocolPort;
+use coland_services::authority_commit::{AuthenticatedPeerContext, AuthorityProtocolPort};
 use coland_services::identity::SessionIdentityState;
 use coland_services::{ServiceError, ServiceResult};
 
@@ -252,6 +252,34 @@ async fn remote_governance(
 
 #[async_trait::async_trait]
 impl AuthorityProtocolPort for AppState {
+    async fn submit_self_audit_pair(
+        &self,
+        session: &SessionIdentityState,
+        request: arkret_models_collaboration::authority_commit::AuditPairedEventUnitSubmission,
+    ) -> ServiceResult<
+        arkret_models_collaboration::authority_commit::AuditPairedEventAcceptanceOutcome,
+    > {
+        super::authority_audit_unit::submit_self_pair(self, session, request).await
+    }
+    async fn replicate_peer_audit_pair(
+        &self,
+        peer: &AuthenticatedPeerContext,
+        request: arkret_models_collaboration::authority_commit::AuditPairedEventFederationSubmission,
+    ) -> ServiceResult<
+        arkret_models_collaboration::authority_commit::AuditPairedEventAcceptanceOutcome,
+    > {
+        super::committed_replication::receive_audit_pair(self, peer, request).await
+    }
+    async fn submit_peer_audit_pair(
+        &self,
+        peer: &AuthenticatedPeerContext,
+        request: arkret_models_collaboration::authority_commit::PeerAuthorityForwardAtomicRequest,
+    ) -> ServiceResult<
+        arkret_models_collaboration::authority_commit::AuditPairedEventAcceptanceOutcome,
+    > {
+        super::authority_audit_unit::submit_peer_pair(self, peer, request).await
+    }
+
     async fn submit_self_ordinary_realm_bootstrap(
         &self,
         session: &SessionIdentityState,

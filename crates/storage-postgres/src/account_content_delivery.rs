@@ -1077,16 +1077,34 @@ async fn acquire_remote_watch_delivery(
     input: &coland_storage::AccountContentDeliveryInput,
 ) -> PersistenceResult<Option<Box<dyn AccountContentDeliveryGuard>>> {
     use diesel::sql_types::{BigInt, Jsonb};
-    let (request, outcome, authority) = input
-        .remote_watch_read
-        .as_ref()
-        .ok_or_else(|| unavailable("remote Watch witness is missing"))?;
+    let audited_selector;
+    let audited = input.audited_watch_read.as_ref();
+    let (request, outcome, authority) = match (&input.remote_watch_read, audited) {
+        (Some(watch), None) => (&watch.0, &watch.1, &watch.2),
+        (None, Some((request, outcome, authority))) => {
+            outcome
+                .validate_for_request(request, authority.generation)
+                .map_err(|error| unavailable(&error.to_string()))?;
+            if request.audit_submission.event.actor_id.as_account_id() != Some(account) {
+                return Err(PersistenceError::NotFound(
+                    "audited Watch caller differs".to_owned(),
+                ));
+            }
+            audited_selector = request.selector().map_err(PersistenceError::database)?;
+            (&audited_selector, &outcome.current, authority)
+        }
+        _ => {
+            return Err(unavailable(
+                "delivery needs exactly one current or audited Watch witness",
+            ));
+        }
+    };
     let expires_at = input
         .credential_expires_at
         .ok_or_else(|| unavailable("remote Watch credential has no expiry"))?;
-    if request.watcher_actor_id.as_account_id() != Some(account)
+    if (audited.is_none() && request.watcher_actor_id.as_account_id() != Some(account))
         || &account.station_id != station
-        || authority.service_id == *station
+        || (audited.is_none() && authority.service_id == *station)
         || authority.realm_id != request.realm_id
         || !input.realms.is_empty()
         || !input.watch_reads.is_empty()
@@ -1110,7 +1128,7 @@ async fn acquire_remote_watch_delivery(
     }
     outcome
         .validate_for_generation(request, authority.generation)
-        .map_err(unavailable)?;
+        .map_err(|error| unavailable(&error.to_string()))?;
     let mut held = Box::new(DeliveryGuard {
         connection: Some(crate::pg_conn(pool).await?),
         runtime: tokio::runtime::Handle::current(),
@@ -1145,6 +1163,17 @@ async fn acquire_remote_watch_delivery(
             ));
         }
     }
+    if let Some((request, outcome, _)) = audited {
+        if authority.service_id == *station {
+            crate::registered_audit::read_visibility_in_connection(
+                held.connection(),
+                request,
+                station,
+                Some(outcome.audit_commit.governance_generation),
+            )
+            .await?;
+        }
+    }
     let actor = ActorId::account(account.clone());
     #[derive(QueryableByName)]
     struct LocalCurrent {
@@ -1176,7 +1205,9 @@ async fn acquire_remote_watch_delivery(
     let strand = sql_query(format!("SELECT s.value,s.current_commit_id,s.current_stream_position,{strand_source} AS source_stream_ref FROM strand_current_results s WHERE s.realm_id=$1 AND s.strand_id=$2 FOR SHARE OF s"))
         .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.strand_id.as_str())
         .get_result::<LocalCurrent>(held.connection()).await.optional().map_err(PersistenceError::database)?;
-    if let Some(strand) = strand {
+    // Only retained accepted provenance can contradict the verified governor.
+    // An unproved hydration/cache row is not a second current authority cut.
+    if let Some(strand) = strand.filter(|row| row.source_stream_ref.is_some()) {
         if strand
             .value
             .get("state")
@@ -1208,7 +1239,7 @@ async fn acquire_remote_watch_delivery(
         let revoked = sql_query("SELECT EXISTS(SELECT 1 FROM circle_member_state_current_results m WHERE realm_id=$1 AND circle_id=$2 AND member_id=$3 AND (membership<>'join' OR NOT circle_member_parent_join_current(m.realm_id,m.member_id,m.value))) AS present")
             .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).bind::<Text,_>(actor.to_string())
             .get_result::<crate::ExistsRow>(held.connection()).await.map_err(PersistenceError::database)?.present;
-        if revoked {
+        if revoked && audited.is_none() {
             return Err(PersistenceError::NotFound(
                 "remote Watch Circle withdrawal has been observed".to_owned(),
             ));
@@ -1219,9 +1250,9 @@ async fn acquire_remote_watch_delivery(
         "jsonb_build_object('kind','strand_watch','strand_id',w.strand_id,'watcher_actor_id',w.watcher_actor_id::jsonb)",
     );
     let current = sql_query(format!("SELECT w.value,w.current_commit_id,w.current_stream_position,{watch_source} AS source_stream_ref FROM strand_watch_current_results w WHERE w.realm_id=$1 AND w.strand_id=$2 AND w.watcher_actor_id=$3 FOR SHARE OF w"))
-        .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.strand_id.as_str()).bind::<Text,_>(actor.to_string())
+        .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.strand_id.as_str()).bind::<Text,_>(request.watcher_actor_id.to_string())
         .get_result::<LocalCurrent>(held.connection()).await.optional().map_err(PersistenceError::database)?;
-    if let Some(current) = current {
+    if let Some(current) = current.filter(|_| audited.is_none()) {
         if current.source_stream_ref.as_ref()
             != Some(&serde_json::to_value(&head.stream_ref).map_err(PersistenceError::database)?)
         {
@@ -1329,7 +1360,11 @@ async fn acquire_remote_watch_delivery(
                     request.strand_id.clone(),
                 ),
                 facts,
-                CapabilityActionId::ObjectRead,
+                if audited.is_some() {
+                    CapabilityActionId::RealmNotificationAudit
+                } else {
+                    CapabilityActionId::ObjectRead
+                },
             )],
             accountability: Vec::new(),
             policies: Vec::new(),
@@ -1392,7 +1427,7 @@ pub(crate) async fn acquire(
     station: &DidCoreId,
     input: &coland_storage::AccountContentDeliveryInput,
 ) -> PersistenceResult<Option<Box<dyn AccountContentDeliveryGuard>>> {
-    if input.remote_watch_read.is_some() {
+    if input.remote_watch_read.is_some() || input.audited_watch_read.is_some() {
         return Box::pin(acquire_remote_watch_delivery(pool, account, station, input)).await;
     }
     // Bound the nested admission future without changing the caller stack budget.
@@ -1449,6 +1484,7 @@ pub(crate) async fn acquire_native_message_reply_preparation(
         || !input.exact_reads.is_empty()
         || !input.watch_reads.is_empty()
         || input.remote_watch_read.is_some()
+        || input.audited_watch_read.is_some()
         || !input.blobs.is_empty()
         || !input.unresolved_content_realms.is_empty()
         || !input
@@ -3171,4 +3207,34 @@ async fn acquire_owned_delivery_guard(
         ));
     }
     Ok(Some(guard))
+}
+
+/// Hold the governing authorization cut until a signed peer audit answer is serialized.
+pub(crate) async fn acquire_governor_audit_delivery(
+    pool: &crate::PgPool,
+    request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
+    outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+    issuer: &DidCoreId,
+    expires_at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<Box<dyn AccountContentDeliveryGuard>> {
+    outcome
+        .validate_for_request(request, outcome.audit_commit.governance_generation)
+        .map_err(PersistenceError::database)?;
+    let mut held = Box::new(DeliveryGuard {
+        connection: Some(crate::pg_conn(pool).await?),
+        runtime: tokio::runtime::Handle::current(),
+        clock: None,
+    });
+    sql_query("BEGIN")
+        .execute(held.connection())
+        .await
+        .map_err(PersistenceError::database)?;
+    crate::registered_audit::read_visibility_in_connection(
+        held.connection(),
+        request,
+        issuer,
+        Some(outcome.audit_commit.governance_generation),
+    )
+    .await?;
+    Ok(Box::new(RemoteWatchGuard { held, expires_at }))
 }

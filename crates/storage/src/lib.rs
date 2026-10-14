@@ -835,3 +835,6 @@ mod conflict_code_tests {
         }
     }
 }
+
+mod registered_audit;
+pub use registered_audit::*;

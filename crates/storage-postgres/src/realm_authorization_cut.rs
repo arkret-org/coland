@@ -1333,6 +1333,17 @@ impl RealmAuthorizationCut {
         source: Option<IssuerAuthorityRef>,
         action: CapabilityActionId,
     ) -> PersistenceResult<()> {
+        self.require_content_read_constraints_with_approvals(event, at, source, action, &[])
+    }
+
+    pub(crate) fn require_content_read_constraints_with_approvals(
+        &self,
+        event: &arkret_wire::Event,
+        at: chrono::DateTime<chrono::Utc>,
+        source: Option<IssuerAuthorityRef>,
+        action: CapabilityActionId,
+        approvals: &[coland_storage::VerifiedGrantApproval],
+    ) -> PersistenceResult<()> {
         let (content_target, mut facts) = self.event_operation(event);
         facts.write_fields = None;
         // A patch Event's author/time is not the target object's creator/time.
@@ -1370,7 +1381,13 @@ impl RealmAuthorizationCut {
                 at,
                 facts: &facts,
             };
-            if evaluate_grants(&operation, grants.iter().copied()).is_refusal() {
+            if coland_storage::evaluate_grants_with_verified_approvals(
+                &operation,
+                grants.iter().copied(),
+                approvals,
+            )
+            .is_refusal()
+            {
                 return Err(capability_denied(
                     "a current grant refuses canonical Event disclosure",
                 ));
@@ -2248,6 +2265,66 @@ impl RealmAuthorizationCut {
         facts: &OperationFacts,
     ) -> PersistenceResult<Vec<crate::approval_admission::QualifiedApproval>> {
         let actions = Self::unconditional_actions(&event.kind);
+        self.require_selected_action_with_approvals(
+            conn, event, commit, prepared, action, target, facts, &actions,
+        )
+        .await
+    }
+
+    pub(crate) async fn require_registered_audit_action(
+        &self,
+        conn: &mut AsyncPgConnection,
+        event: &arkret_wire::Event,
+        commit: &arkret_wire::RealmCommit,
+        prepared: Option<&coland_storage::EventApprovalCommit>,
+        action: CapabilityActionId,
+        target: &WireResourceSelector,
+    ) -> PersistenceResult<Vec<crate::approval_admission::QualifiedApproval>> {
+        if !matches!(
+            action,
+            CapabilityActionId::StrandWatchSetOthers
+                | CapabilityActionId::CircleMemberManage
+                | CapabilityActionId::CircleMemberAddOthers
+                | CapabilityActionId::AuditAccessed
+                | CapabilityActionId::RealmNotificationAudit
+                | CapabilityActionId::CircleAudit
+        ) {
+            return Err(capability_denied(
+                "unregistered action in an audit transaction",
+            ));
+        }
+        self.require_open_lifecycle(event)?;
+        self.require_governed_member(&event.kind)?;
+        let mut actions = vec![action.as_str()];
+        if arkret_policy::owner_may_author_action(action.as_str())
+            .map_err(PersistenceError::database)?
+        {
+            actions.push(CapabilityActionId::REALM_OWNER);
+        }
+        let (_, mut facts) = self.event_operation(event);
+        self.complete_applet_facts_in_connection(conn, event, &mut facts)
+            .await?;
+        self.require_selected_action_with_approvals(
+            conn, event, commit, prepared, action, target, &facts, &actions,
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "One accepting cut binds action, resource, approvals and evaluator checks."
+    )]
+    async fn require_selected_action_with_approvals(
+        &self,
+        conn: &mut AsyncPgConnection,
+        event: &arkret_wire::Event,
+        commit: &arkret_wire::RealmCommit,
+        prepared: Option<&coland_storage::EventApprovalCommit>,
+        action: CapabilityActionId,
+        target: &WireResourceSelector,
+        facts: &OperationFacts,
+        actions: &[&str],
+    ) -> PersistenceResult<Vec<crate::approval_admission::QualifiedApproval>> {
         let owner =
             self.actor_is_root_controller() && actions.contains(&CapabilityActionId::REALM_OWNER);
         if matches!(
@@ -2479,7 +2556,7 @@ impl RealmAuthorizationCut {
         }
     }
 
-    fn event_operation(
+    pub(crate) fn event_operation(
         &self,
         event: &arkret_wire::Event,
     ) -> (WireResourceSelector, OperationFacts) {

@@ -547,6 +547,50 @@ impl AuthorityCommitApplication {
             .await?)
     }
 
+    pub async fn registered_audit_result(
+        &self,
+        event_id: &arkret_wire::EventId,
+    ) -> ServiceResult<Option<coland_storage::RegisteredAuditResult>> {
+        Ok(self.store().registered_audit_result(event_id).await?)
+    }
+
+    pub async fn watch_audit_read_disclosure(
+        &self,
+        request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
+        outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+        issuer: &DidCoreId,
+    ) -> ServiceResult<()> {
+        Ok(self
+            .store()
+            .watch_audit_read_disclosure(request, outcome, issuer)
+            .await?)
+    }
+
+    pub async fn watch_audit_read_delivery_guard(
+        &self,
+        request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
+        outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+        issuer: &DidCoreId,
+        expires_at: DateTime<Utc>,
+    ) -> ServiceResult<Box<dyn coland_storage::AccountContentDeliveryGuard>> {
+        Ok(self
+            .store()
+            .watch_audit_read_delivery_guard(request, outcome, issuer, expires_at)
+            .await?)
+    }
+
+    pub async fn install_committed_audit_pair(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::AuditPairedEventFederationSubmission,
+        replicas: &[coland_storage::CommittedReplica; 2],
+    ) -> ServiceResult<arkret_models_collaboration::authority_commit::AggregateAcceptanceStatus>
+    {
+        Ok(self
+            .store()
+            .install_committed_audit_pair(request, replicas)
+            .await?)
+    }
+
     fn store(&self) -> &dyn AuthorityCommitStore {
         self.persistence.authority_commit_store()
     }
@@ -1266,6 +1310,62 @@ impl AuthorityCommitApplication {
             ServiceError::SchemaViolation(format!("invalid authority transaction: {error}"))
         })?;
         Ok(transaction)
+    }
+
+    pub async fn prepare_registered_event_transactions(
+        &self,
+        events: &[arkret_wire::Event],
+        local_service_id: &DidCoreId,
+        verification_method: DidUrl,
+        signing_key: &SigningKey,
+        committed_at: DateTime<Utc>,
+        facts: &[Option<HistoricalProducerSignerFact>],
+    ) -> ServiceResult<Vec<AuthorityCommitTransaction>> {
+        if events.is_empty() || events.len() != facts.len() {
+            return Err(ServiceError::SchemaViolation(
+                "registered unit has inconsistent slots".to_owned(),
+            ));
+        }
+        let mut transactions: Vec<AuthorityCommitTransaction> = Vec::with_capacity(events.len());
+        for (event, fact) in events.iter().zip(facts) {
+            let mut transaction = self
+                .prepare_self_event_transaction_with_signer_fact(
+                    event,
+                    local_service_id,
+                    verification_method.clone(),
+                    signing_key,
+                    committed_at,
+                    fact.as_ref(),
+                )
+                .await?;
+            if let Some(previous) = transactions.last() {
+                if transaction.expected_authority != previous.expected_authority
+                    || transaction.commit.stream_ref != previous.commit.stream_ref
+                {
+                    return Err(ServiceError::Conflict(
+                        "stale_authority: registered unit crossed a governing cut".to_owned(),
+                    ));
+                }
+                transaction.commit = build_signed_event_commit(
+                    event,
+                    &transaction.expected_authority,
+                    Some(&arkret_wire::CommitStreamHead {
+                        stream_ref: previous.commit.stream_ref.clone(),
+                        stream_position: previous.commit.stream_position,
+                        commit_id: previous.commit.commit_id.clone(),
+                    }),
+                    verification_method.clone(),
+                    signing_key,
+                    committed_at,
+                    transaction.producer_signer_fact.as_ref(),
+                )?;
+                transaction
+                    .validate()
+                    .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+            }
+            transactions.push(transaction);
+        }
+        Ok(transactions)
     }
 
     /// Prepare the position-zero Commit of a Realm this Station would create
@@ -2645,7 +2745,7 @@ fn authority_forward_outcome(
 ) -> ServiceResult<PeerAuthoritySubmitOutcome> {
     let outcome = PeerAuthoritySubmitOutcome::AuthorityForward(PeerAuthorityForwardOutcome {
         branch: AuthorityForwardBranch::AuthorityForward,
-        outcome,
+        outcome: arkret_models_collaboration::authority_commit::PeerAuthorityForwardOutcomeValue::Ordinary(outcome),
     });
     outcome.validate().map_err(|error| {
         ServiceError::Internal(format!(
@@ -2707,6 +2807,42 @@ pub trait AuthorityProtocolPort: Send + Sync {
         ))
     }
 
+    async fn submit_self_audit_pair(
+        &self,
+        _session: &crate::identity::SessionIdentityState,
+        _request: arkret_models_collaboration::authority_commit::AuditPairedEventUnitSubmission,
+    ) -> ServiceResult<
+        arkret_models_collaboration::authority_commit::AuditPairedEventAcceptanceOutcome,
+    > {
+        Err(crate::ServiceError::Conflict(
+            "failed_precondition: audit pair admission unavailable".to_owned(),
+        ))
+    }
+
+    async fn submit_peer_audit_pair(
+        &self,
+        _peer: &AuthenticatedPeerContext,
+        _request: arkret_models_collaboration::authority_commit::PeerAuthorityForwardAtomicRequest,
+    ) -> ServiceResult<
+        arkret_models_collaboration::authority_commit::AuditPairedEventAcceptanceOutcome,
+    > {
+        Err(crate::ServiceError::Conflict(
+            "failed_precondition: audit pair forwarding unavailable".to_owned(),
+        ))
+    }
+
+    async fn replicate_peer_audit_pair(
+        &self,
+        _peer: &AuthenticatedPeerContext,
+        _request: arkret_models_collaboration::authority_commit::AuditPairedEventFederationSubmission,
+    ) -> ServiceResult<
+        arkret_models_collaboration::authority_commit::AuditPairedEventAcceptanceOutcome,
+    > {
+        Err(crate::ServiceError::Conflict(
+            "revision_unavailable: audit pair materialization unavailable".to_owned(),
+        ))
+    }
+
     async fn submit_self_membership_compensation(
         &self,
         _session: &crate::identity::SessionIdentityState,
@@ -2748,6 +2884,11 @@ pub trait AuthorityProtocolPort: Send + Sync {
                 SelfAuthoritySubmitOutcome::DirectConversationFounding(
                     self.submit_self_direct_conversation_founding(session, value)
                         .await?,
+                )
+            }
+            SelfAuthoritySubmitRequest::AuditPairedEvent(value) => {
+                SelfAuthoritySubmitOutcome::AuditPairedEvent(
+                    self.submit_self_audit_pair(session, value).await?,
                 )
             }
             SelfAuthoritySubmitRequest::MembershipCompensation(value) => {
@@ -2842,6 +2983,13 @@ pub trait AuthorityProtocolPort: Send + Sync {
                     .await?;
                 return authority_forward_outcome(outcome);
             }
+            PeerAuthoritySubmitRequest::AuthorityForwardAtomic(value) => {
+                let outcome = self.submit_peer_audit_pair(peer, value).await?;
+                outcome
+                    .validate()
+                    .map_err(|error| ServiceError::Internal(error.to_string()))?;
+                return Ok(PeerAuthoritySubmitOutcome::AuthorityForward(PeerAuthorityForwardOutcome { branch: AuthorityForwardBranch::AuthorityForward, outcome: arkret_models_collaboration::authority_commit::PeerAuthorityForwardOutcomeValue::AuditPairedEvent(outcome) }));
+            }
             PeerAuthoritySubmitRequest::AuthorityForwardMls(value) => {
                 let outcome = self.submit_peer_authority_forward_mls(peer, value).await?;
                 return authority_forward_outcome(outcome);
@@ -2855,7 +3003,8 @@ pub trait AuthorityProtocolPort: Send + Sync {
         })?;
         let outcome = match request.clone() {
             PeerAuthoritySubmitRequest::AuthorityForwardEvent(_)
-            | PeerAuthoritySubmitRequest::AuthorityForwardMls(_) => {
+            | PeerAuthoritySubmitRequest::AuthorityForwardMls(_)
+            | PeerAuthoritySubmitRequest::AuthorityForwardAtomic(_) => {
                 return Err(crate::ServiceError::internal(
                     "authority_forward is dispatched before whole-request validation",
                 ));
@@ -2872,6 +3021,11 @@ pub trait AuthorityProtocolPort: Send + Sync {
                         PeerRegisteredAtomicUnitOutcomeValue::DirectConversationFounding(
                             self.submit_peer_direct_conversation_founding(peer, unit)
                                 .await?,
+                        )
+                    }
+                    PeerRegisteredAtomicUnit::AuditPairedEvent(unit) => {
+                        PeerRegisteredAtomicUnitOutcomeValue::AuditPairedEvent(
+                            self.replicate_peer_audit_pair(peer, unit).await?,
                         )
                     }
                     PeerRegisteredAtomicUnit::MembershipCompensation(unit) => {

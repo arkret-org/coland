@@ -88,6 +88,7 @@ fn proofs_for_action(
         })
         .collect();
     coland_storage::EventApprovalCommit {
+        carrier_binding: None,
         management_current: None,
         event_id: event.event_id.clone(),
         event_digest: digest,
@@ -100,6 +101,7 @@ fn batch(
     proof: coland_storage::EventApprovalCommit,
 ) -> coland_storage::EventBatchCommitRequest {
     coland_storage::EventBatchCommitRequest {
+        audit_unit: None,
         events: vec![request],
         franking_replay_nonce: None,
         realm_organization_proof: None,

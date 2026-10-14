@@ -29,6 +29,7 @@ pub(super) fn router() -> Router {
         .push(Router::with_path("realms/{realm_id}/streams").get(stream_listing::realm_streams))
         .push(Router::with_path("current-results/exact").post(exact_current_results))
         .push(Router::with_path("strands/watch/current").post(strand_watch_current))
+        .push(Router::with_path("strands/watch/audit-read").post(strand_watch_audit_read))
         .push(Router::with_path("media-service-bindings/query").post(media_service_binding))
 }
 
@@ -533,5 +534,166 @@ pub(super) async fn peer_strand_watch_current(
             reason,
         ),
         Err(error) => render_service_error(res, error),
+    }
+}
+
+#[handler]
+async fn strand_watch_audit_read(req: &mut Request, depot: &Depot, res: &mut Response) {
+    no_store(res);
+    let Some(state) = app_state(depot, res) else {
+        return;
+    };
+    let Some((session, account)) = authenticated_reader(
+        state,
+        req,
+        res,
+        ServiceOperationId::SELF_STRAND_WATCH_COMMAND_AUDIT_READ_V1,
+    )
+    .await
+    else {
+        return;
+    };
+    let Some(request) = parse_closed_body::<
+        arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
+    >(req, res)
+    .await
+    else {
+        return;
+    };
+    let delivery_device = if let Some(device) = session.human_device_id() {
+        match crate::routing::identity::device_generation::active_device_revocation_gate_selector(
+            state,
+            &session.actor,
+            device,
+        )
+        .await
+        {
+            Ok(gate) => Some(gate),
+            Err(error) => return render_service_error(res, error),
+        }
+    } else {
+        None
+    };
+    let (outcome, authority) =
+        match crate::state::authority_audit_unit::submit_self_read(state, &session, &request).await
+        {
+            Ok(result) => result,
+            Err(error) => return render_service_error(res, error),
+        };
+    if request.audit_submission.event.actor_id.as_account_id() != Some(&account) {
+        return not_found(res);
+    }
+    if let Err((status, code, message)) =
+        crate::routing::identity::auth::revalidate_current_read_session(
+            state,
+            &session,
+            coland_http::util::dpop_token(req),
+        )
+        .await
+    {
+        return crate::routing::render_error(res, status, code, message);
+    }
+    let input = coland_storage::AccountContentDeliveryInput {
+        audited_watch_read: Some((request, outcome.clone(), authority)),
+        watch_delivery_device: delivery_device,
+        watch_local_session: if session.session_grant.is_none() {
+            session
+                .account_pk
+                .map(|pk| (session.token_hash.clone(), pk))
+        } else {
+            None
+        },
+        ..Default::default()
+    };
+    let guard =
+        match crate::routing::events::sync::content_delivery_guard(state, &session, &input).await {
+            Ok(guard) => guard,
+            Err(error) if error.code == ErrorCode::RevisionUnavailable => {
+                return render_unresolved(
+                    res,
+                    ErrorCode::RevisionUnavailable,
+                    ServiceOperationId::SELF_STRAND_WATCH_COMMAND_AUDIT_READ_V1,
+                    "audit delivery cut unavailable",
+                );
+            }
+            Err(_) => return not_found(res),
+        };
+    if let Ok(response) = coland_http::result::guarded_json_ok(outcome, guard) {
+        salvo::Scribe::render(response, res);
+    }
+}
+
+#[handler]
+pub(super) async fn peer_strand_watch_audit_read(
+    req: &mut Request,
+    depot: &Depot,
+    res: &mut Response,
+) {
+    no_store(res);
+    let Some(state) = app_state(depot, res) else {
+        return;
+    };
+    let peer = match super::events::peer::authenticated_peer_context(state, req, true).await {
+        Ok(peer) => peer,
+        Err(error) => {
+            return crate::routing::render_error(
+                res,
+                error.http_status(),
+                error.wire_code(),
+                &error.message,
+            );
+        }
+    };
+    let Some(request) = parse_closed_body::<
+        arkret_models_collaboration::strand_watch_operations::PeerWatchAuditReadRequest,
+    >(req, res)
+    .await
+    else {
+        return;
+    };
+    if let Err(error) = request.validate_carrier_shape() {
+        return crate::error::render_error_code(
+            ErrorCode::SchemaViolation,
+            res,
+            &error.to_string(),
+        );
+    }
+    let outcome =
+        match crate::state::authority_audit_unit::submit_peer_read(state, &peer, &request).await {
+            Ok(outcome) => outcome,
+            Err(error) => return render_service_error(res, error),
+        };
+    let signature = match coland_http::http_signature::parse_signature_input_header(req) {
+        Ok(signature) => signature,
+        Err(error) => {
+            return crate::error::render_error_code(
+                ErrorCode::SignatureInvalid,
+                res,
+                &error.to_string(),
+            );
+        }
+    };
+    let Some(expires_at) = chrono::DateTime::from_timestamp(signature.expires as i64, 0) else {
+        return crate::error::render_error_code(
+            ErrorCode::SignatureWindowInvalid,
+            res,
+            "peer signature expiry invalid",
+        );
+    };
+    let guard = match state
+        .authority_commits()
+        .watch_audit_read_delivery_guard(
+            &request.logical_request(),
+            &outcome,
+            &state.service_core_id(),
+            expires_at,
+        )
+        .await
+    {
+        Ok(guard) => guard,
+        Err(error) => return render_service_error(res, error.into()),
+    };
+    if let Ok(response) = coland_http::result::guarded_json_ok(outcome, Some(guard)) {
+        salvo::Scribe::render(response, res);
     }
 }

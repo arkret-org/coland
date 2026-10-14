@@ -163,6 +163,15 @@ fn validate_candidate_with_operation_digest<'a>(
             "approval history does not bind this accepting cut",
         ));
     }
+    let operation = prepared.carrier_binding.as_ref().map_or(
+        arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+        coland_storage::ApprovalCarrierBinding::operation,
+    );
+    let operation_digest = prepared
+        .carrier_binding
+        .as_ref()
+        .map(|binding| binding.request_digest())
+        .or(operation_digest);
     for method in &prepared.methods {
         let signature = &method.signature;
         let crypt_code = if matches!(
@@ -176,9 +185,7 @@ fn validate_candidate_with_operation_digest<'a>(
         signature
             .validate()
             .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
-        if signature.input.operation
-            != arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1
-        {
+        if signature.input.operation != operation {
             return Err(error(
                 "schema_violation",
                 "approval operation has no registered Event carrier",
@@ -243,7 +250,7 @@ fn validate_candidate_with_operation_digest<'a>(
                         control,
                         signature,
                         event,
-                        arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                        operation,
                         signature.input.action,
                         commit.committed_at,
                     )
@@ -252,7 +259,7 @@ fn validate_candidate_with_operation_digest<'a>(
                     arkret_signatures::approval_signature::verify_event_approval_signature(
                         signature,
                         event,
-                        arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                        operation,
                         signature.input.action,
                         commit.committed_at,
                         &key,

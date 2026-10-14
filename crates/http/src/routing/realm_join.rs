@@ -18,10 +18,9 @@ use crate::state::AppState;
 mod authority;
 mod preview;
 
-pub(in crate::routing) use authority::resolve_verified_authority;
 pub(crate) use authority::{
     LocatedRealmAuthority, fetch_authority_bundle_of_service, insert_historical_method_key,
-    insert_method_key, resolve_verified_authority_of_service,
+    insert_method_key, resolve_verified_authority, resolve_verified_authority_of_service,
     verified_keys as verified_bundle_keys, verify_served_bundle,
 };
 

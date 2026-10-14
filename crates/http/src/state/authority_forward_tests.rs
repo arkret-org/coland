@@ -203,7 +203,7 @@ fn forward_outcome(outcome: AuthoritySubmitOutcome) -> serde_json::Value {
     serde_json::to_value(PeerAuthoritySubmitOutcome::AuthorityForward(
         arkret_models_collaboration::authority_commit::PeerAuthorityForwardOutcome {
             branch: arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,
-            outcome,
+            outcome: arkret_models_collaboration::authority_commit::PeerAuthorityForwardOutcomeValue::Ordinary(outcome),
         },
     ))
     .unwrap()

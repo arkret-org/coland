@@ -77,6 +77,7 @@ fn batch(
     proof: coland_storage::RealmOrganizationProofCommit,
 ) -> coland_storage::EventBatchCommitRequest {
     coland_storage::EventBatchCommitRequest {
+        audit_unit: None,
         events: vec![request],
         realm_organization_proof: Some(proof),
         invite_claim_proof: None,

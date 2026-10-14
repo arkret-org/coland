@@ -324,7 +324,7 @@ pub(crate) async fn resolve_verified_authority_of_service(
     Ok(located)
 }
 
-pub(in crate::routing) async fn resolve_verified_authority(
+pub(crate) async fn resolve_verified_authority(
     state: &AppState,
     realm_id: &RealmId,
     hints: &[RealmJoinCandidate],

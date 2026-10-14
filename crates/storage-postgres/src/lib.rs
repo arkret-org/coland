@@ -330,3 +330,5 @@ where
 {
     Box::pin(make())
 }
+
+mod registered_audit;

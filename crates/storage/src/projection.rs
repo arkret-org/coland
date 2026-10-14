@@ -270,6 +270,16 @@ impl ActorRealmAuthorization {
         target: &'a arkret_wire::WireResourceSelector,
         facts: &'a crate::OperationFacts,
     ) -> crate::GrantEvaluation<'a> {
+        self.evaluate_with_approvals(actions, target, facts, &[])
+    }
+
+    pub fn evaluate_with_approvals<'a>(
+        &'a self,
+        actions: &'a [&'a str],
+        target: &'a arkret_wire::WireResourceSelector,
+        facts: &'a crate::OperationFacts,
+        approvals: &[crate::VerifiedGrantApproval],
+    ) -> crate::GrantEvaluation<'a> {
         let operation = crate::AuthorizationOperation {
             actor: &self.actor,
             actions,
@@ -278,9 +288,10 @@ impl ActorRealmAuthorization {
             facts,
         };
         let Some(ceiling) = &self.agent_ceiling else {
-            return crate::evaluate_grants(
+            return crate::evaluate_grants_with_verified_approvals(
                 &operation,
                 self.grants.iter().map(|effective| &effective.grant),
+                approvals,
             );
         };
         let controller = &ceiling.controller;
@@ -306,7 +317,7 @@ impl ActorRealmAuthorization {
             &agent_grants,
             &controller.actor,
             &controller_grants,
-            &[],
+            approvals,
             owner_covers,
         );
         if matches!(
@@ -345,7 +356,7 @@ impl ActorRealmAuthorization {
             &agent_grants,
             &controller.actor,
             &controller_grants,
-            &[],
+            approvals,
             managed_owner_covers,
         )
     }

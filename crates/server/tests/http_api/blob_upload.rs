@@ -6,6 +6,7 @@
 //! members and schema-invalid values are `schema_violation`
 //! (`sync/service-http-binding.md` §6).
 
+use ed25519_dalek::Verifier;
 use serde_json::json;
 
 use super::common::*;
@@ -94,6 +95,25 @@ async fn storage_encryption_is_required_and_ciphertext_cannot_be_presigned_body(
     )
     .await;
     assert_eq!(status, 200, "{body}");
+    let receipt = &body["upload_receipt"];
+    assert_eq!(
+        receipt["signature"]["kid"],
+        format!("{}#notary-key", state.service_did())
+    );
+    let mut signed_fields = receipt.clone();
+    signed_fields.as_object_mut().unwrap().remove("signature");
+    let signature_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(receipt["signature"]["sig"].as_str().unwrap())
+        .unwrap();
+    let signature = ed25519_dalek::Signature::from_slice(&signature_bytes).unwrap();
+    state
+        .notary_signing_key()
+        .verifying_key()
+        .verify(
+            &arkret_wire::canonical::canonical_json_bytes(&signed_fields).unwrap(),
+            &signature,
+        )
+        .unwrap();
     let blob_ref = body["blob_ref"].as_str().unwrap();
     let stored = state
         .test_persistence()

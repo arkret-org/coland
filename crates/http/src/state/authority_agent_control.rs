@@ -1,4 +1,4 @@
-//! Controller-signed Agent key revocations and Actor Profile writes.
+//! Controller-signed Agent key renewals, revocations and Actor Profile writes.
 //!
 //! The authenticated controller acts under the accepted native delegation.
 //! The Agent control unit freezes the Agent PCR, controller device and
@@ -21,7 +21,8 @@ pub(super) async fn submit_self_agent_controller_event(
     let event = &request.event;
     if !matches!(
         event.kind,
-        arkret_wire::EventKind::AgentKeyRevoke
+        arkret_wire::EventKind::AgentKeyAuthorize
+            | arkret_wire::EventKind::AgentKeyRevoke
             | arkret_wire::EventKind::ProfileCreate
             | arkret_wire::EventKind::ProfileUpdate
     ) {
@@ -72,20 +73,28 @@ pub(super) async fn submit_self_agent_controller_event(
         event.kind,
         arkret_wire::EventKind::ProfileCreate | arkret_wire::EventKind::ProfileUpdate
     );
-    if !profile {
+    if !profile && event.kind != arkret_wire::EventKind::AgentKeyAuthorize {
         super::authority_forward::stage_control_source(state, &transaction, origin_source.clone())
             .await?;
     }
-    let outcome = state
-        .persistence()
-        .admit_agent_control_event_with_origin(
-            AgentControlAdmissionWrite {
-                commit: transaction,
-                queued_at: committed_at,
-            },
-            if profile { origin_source } else { None },
-        )
-        .await?;
+    let write = AgentControlAdmissionWrite {
+        commit: transaction,
+        queued_at: committed_at,
+    };
+    let outcome = if event.kind == arkret_wire::EventKind::AgentKeyAuthorize {
+        state
+            .persistence()
+            .admit_agent_same_key_renewal(write, origin_source)
+            .await?
+    } else {
+        state
+            .persistence()
+            .admit_agent_control_event_with_origin(
+                write,
+                if profile { origin_source } else { None },
+            )
+            .await?
+    };
     Ok(match outcome {
         AgentControlAdmissionOutcome::Committed(commit) => AuthoritySubmitOutcome::Accepted {
             status: AuthorityCommitStatus::Committed,

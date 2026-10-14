@@ -147,10 +147,183 @@ async fn accepted_lifecycle(
     .transpose()
 }
 
+async fn validate_same_key_renewal(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    payload: &AgentKeyAuthorizePayload,
+    provision: &arkret_models_collaboration::events_payloads::agent::AgentProvisioningValue,
+) -> Result<(), PgTransactionError> {
+    use arkret_models_collaboration::events_payloads::agent::AgentKeyScope;
+    if !payload.audience.iter().any(|audience| {
+        audience
+            == event
+                .actor_id
+                .as_account_id()
+                .expect("validated Agent account")
+                .station_id
+                .as_str()
+    }) {
+        return Err(precondition(
+            "Agent key authorization audience excludes its Station",
+        ));
+    }
+    #[derive(QueryableByName)]
+    struct KeyRow {
+        #[diesel(sql_type = Jsonb)]
+        value: Value,
+        #[diesel(sql_type = Jsonb)]
+        commit_json: Value,
+    }
+    let key_id =
+        arkret_wire::AgentKeyId::new(payload.key_id.as_str().to_owned()).map_err(corrupt)?;
+    let key =
+        arkret_wire::derive_agent_key_current_key(&payload.agent_id, &key_id).map_err(corrupt)?;
+    let row = sql_query("SELECT k.value,c.commit_json FROM agent_key_current_results k JOIN realm_commits c ON c.realm_id=k.realm_id AND c.commit_id=k.current_commit_id AND c.stream_position=k.current_stream_position WHERE k.realm_id=$1 AND k.current_key=$2 FOR UPDATE OF k")
+        .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(&key)
+        .get_result::<KeyRow>(&mut *conn).await.optional()?
+        .ok_or_else(|| precondition("same-key renewal requires a current accepted key"))?;
+    let covering: RealmCommit = serde_json::from_value(row.commit_json).map_err(corrupt)?;
+    covering.validate_content_address().map_err(corrupt)?;
+    if covering.realm_id != event.realm_id {
+        return Err(corrupt(
+            "Agent current key covering Commit belongs to another Realm",
+        ));
+    }
+    let entries = row
+        .value
+        .get("authorizations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| corrupt("Agent current key entries are malformed"))?;
+    let mut active = 0;
+    for entry in entries {
+        if entry.pointer("/value/verification_method").is_none() {
+            continue;
+        }
+        let prior: AgentKeyAuthorizePayload =
+            serde_json::from_value(entry["value"].clone()).map_err(corrupt)?;
+        let reference = entry
+            .get("tag_id")
+            .and_then(Value::as_str)
+            .and_then(|tag| tag.rsplit_once(':'))
+            .map(|(id, _)| id)
+            .ok_or_else(|| corrupt("Agent authorization dot has no original Event id"))?;
+        let original = sql_query("SELECT e.envelope,c.commit_json FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.envelope->>'event_id'=$1 AND e.state='committed'")
+            .bind::<Text,_>(reference).get_result::<KnownEventRow>(&mut *conn).await.optional()?
+            .ok_or_else(|| corrupt("Agent authorization dot has no accepted original"))?;
+        let original_event: arkret_wire::Event =
+            serde_json::from_value(original.envelope).map_err(corrupt)?;
+        let original_commit: RealmCommit = serde_json::from_value(
+            original
+                .commit_json
+                .ok_or_else(|| corrupt("Agent authorization has no covering Commit"))?,
+        )
+        .map_err(corrupt)?;
+        original_commit
+            .validate_content_address()
+            .map_err(corrupt)?;
+        original_event
+            .verify_event_id_matches_content_with_digest_suite(
+                event.realm_id.digest_suite_code().digest_suite(),
+            )
+            .map_err(corrupt)?;
+        if original_event.kind != EventKind::AgentKeyAuthorize
+            || original_event.realm_id != event.realm_id
+            || original_event.event_id.as_str() != reference
+            || original_commit.event_ref != original_event.event_id
+            || original_commit.realm_id != event.realm_id
+            || serde_json::to_value(&original_event.payload).map_err(corrupt)?
+                != serde_json::to_value(&prior).map_err(corrupt)?
+        {
+            return Err(corrupt(
+                "Agent active key differs from its accepted original",
+            ));
+        }
+        if prior.key_id != payload.key_id
+            || prior.verification_method != payload.verification_method
+            || serde_json::to_value(&prior.public_key).map_err(corrupt)?
+                != serde_json::to_value(&payload.public_key).map_err(corrupt)?
+        {
+            return Err(precondition(
+                "same-key renewal cannot replace key material; fresh keys require pairing",
+            ));
+        }
+        if !payload.supersedes.iter().any(|basis| {
+            basis.key_id == prior.key_id && basis.authorized_event_ref.as_str() == reference
+        }) {
+            return Err(precondition(
+                "same-key renewal has a stale or incomplete signed basis",
+            ));
+        }
+        active += 1;
+    }
+    if active == 0 {
+        return Err(precondition(
+            "revoked keys require fresh pairing and cannot be renewed",
+        ));
+    }
+    let row = sql_query("SELECT requested_scope AS value FROM agent_principals WHERE id=$1 AND principal_control_realm_id=$2 AND controller_principal_id=$3 FOR SHARE")
+        .bind::<Text,_>(payload.agent_id.as_str()).bind::<Text,_>(event.realm_id.as_str())
+        .bind::<Text,_>(payload.accountable_principal_id.as_str()).get_result::<ValueRow>(&mut *conn).await.optional()?
+        .ok_or_else(|| precondition("same-key renewal has no private provision selection"))?;
+    let ceiling: AgentKeyScope = serde_json::from_value(row.value).map_err(corrupt)?;
+    if payload.agent_key_scope.actions.iter().any(|action| {
+        arkret_wire::ServiceOperationId::from_wire(action).is_none()
+            && arkret_schema::capability_action(action).is_none()
+    }) || arkret_schema::agent_runtime_scope::assess_agent_runtime_key_scopes(
+        &ceiling.actions,
+        &payload.agent_key_scope.actions,
+    )
+    .map_err(corrupt)?
+    .is_some()
+    {
+        return Err(precondition(
+            "Agent key scope omits required or contains unregistered operations",
+        ));
+    }
+    let digest = arkret_models_collaboration::agent_scope::agent_requested_scope_digest(
+        &payload.agent_id,
+        &payload.accountable_principal_id,
+        &ceiling,
+    );
+    if digest.map_err(corrupt)? != provision.requested_scope_digest
+        || !arkret_models_collaboration::agent_scope::agent_key_scope_within_provision(
+            &ceiling,
+            &payload.agent_key_scope,
+        )
+    {
+        return Err(precondition(
+            "same-key authorization exceeds its immutable provision ceiling",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn admit_agent_control_event_in_connection(
     conn: &mut AsyncPgConnection,
     write: &AgentControlAdmissionWrite,
     origin: Option<&coland_storage::AgentControlOriginSource>,
+) -> Result<AgentControlAdmissionOutcome, PgTransactionError> {
+    admit_agent_control_in_connection(conn, write, origin, false).await
+}
+
+pub(crate) async fn admit_agent_same_key_renewal_in_connection(
+    conn: &mut AsyncPgConnection,
+    write: &AgentControlAdmissionWrite,
+    origin: Option<&coland_storage::AgentControlOriginSource>,
+) -> Result<AgentControlAdmissionOutcome, PgTransactionError> {
+    if write.commit.event.kind != EventKind::AgentKeyAuthorize {
+        return Err(schema(
+            "same-key renewal requires an Agent key authorization",
+        ));
+    }
+    admit_agent_control_in_connection(conn, write, origin, true).await
+}
+
+async fn admit_agent_control_in_connection(
+    conn: &mut AsyncPgConnection,
+    write: &AgentControlAdmissionWrite,
+    origin: Option<&coland_storage::AgentControlOriginSource>,
+    same_key_renewal: bool,
 ) -> Result<AgentControlAdmissionOutcome, PgTransactionError> {
     let transaction = &write.commit;
     let event = &transaction.event;
@@ -340,6 +513,9 @@ pub(crate) async fn admit_agent_control_event_in_connection(
                     "an Agent key is authorized only while the Agent is active or paused",
                 ));
             }
+            if same_key_renewal {
+                validate_same_key_renewal(conn, event, &payload, &provisioning).await?;
+            }
         }
         EventKind::AgentKeyRevoke => {
             let payload: AgentKeyRevokePayload = serde_json::from_value(payload_value)
@@ -477,6 +653,36 @@ pub(crate) async fn admit_agent_control_event_in_connection(
             &format!("Agent control projection refused: {error}"),
         )
     })?;
+    if same_key_renewal {
+        let payload: AgentKeyAuthorizePayload =
+            serde_json::from_value(Value::Object(event.payload.clone().into_iter().collect()))
+                .map_err(corrupt)?;
+        let jwk = arkret_signatures::jwk::JsonWebKey::ed25519(payload.public_key.key.clone());
+        let evidence = arkret_models_identity::authenticated_signer_resolution_evidence::build_agent_signer_evidence(
+            payload.agent_id.clone(), payload.verification_method.clone(),
+            serde_json::from_value(serde_json::to_value(jwk).map_err(corrupt)?).map_err(corrupt)?,
+            commit.commit_id.clone(), commit.committed_at,
+        ).map_err(corrupt)?;
+        let reference = evidence.signer_evidence_ref().map_err(corrupt)?;
+        let material = crate::agent_principal_row::pack_authorized_key_material(
+            Some(event.clone()),
+            Some(reference),
+            Some(evidence),
+        )?
+        .ok_or_else(|| corrupt("same-key renewal produced no authorized material"))?;
+        // The original qualified receipt and sequence allocator stay attached
+        // to this same key. Only its current authorization witness advances.
+        let count = sql_query("UPDATE agent_principals SET authorized_event_ref=$1,authorized_key_event=$2,updated_at=$3 WHERE id=$4 AND principal_control_realm_id=$5 AND authorized_verification_method=$6 AND paired_pairing_request_id IS NOT NULL AND authorized_event_ref IS NOT NULL")
+            .bind::<Text,_>(event.event_id.as_str()).bind::<Jsonb,_>(material)
+            .bind::<diesel::sql_types::Timestamptz,_>(commit.committed_at)
+            .bind::<Text,_>(payload.agent_id.as_str()).bind::<Text,_>(event.realm_id.as_str())
+            .bind::<Text,_>(payload.verification_method.as_str()).execute(&mut *conn).await?;
+        if count != 1 {
+            return Err(precondition(
+                "same-key renewal lost its qualified runtime binding",
+            ));
+        }
+    }
     crate::sidecar_authority_change_guard::after_current_writes_in_connection(conn, event).await?;
     crate::agent_producer_signer_keys::retain_self_outcome_in_connection(
         conn, event, commit, historical,

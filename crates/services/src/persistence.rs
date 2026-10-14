@@ -360,6 +360,18 @@ impl PersistenceHandle {
             .await
     }
 
+    /// Admit a same-key replacement without bypassing fresh-key pairing.
+    pub async fn admit_agent_same_key_renewal(
+        &self,
+        write: coland_storage::AgentControlAdmissionWrite,
+        origin: Option<coland_storage::AgentControlOriginSource>,
+    ) -> PersistenceResult<coland_storage::AgentControlAdmissionOutcome> {
+        self.persistence
+            .actor_profiles()
+            .admit_agent_same_key_renewal(write, origin)
+            .await
+    }
+
     /// Retain a prepared origin only with the accepted Agent control Event.
     pub async fn admit_agent_control_event_with_origin(
         &self,

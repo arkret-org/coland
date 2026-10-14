@@ -1349,12 +1349,14 @@ pub(super) async fn prepare_control_source(
     if !relevant {
         return Ok(None);
     }
-    let transactional_profile = matches!(
+    let transactional_origin = matches!(
         event.kind,
-        arkret_wire::EventKind::ProfileCreate | arkret_wire::EventKind::ProfileUpdate
+        arkret_wire::EventKind::AgentKeyAuthorize
+            | arkret_wire::EventKind::ProfileCreate
+            | arkret_wire::EventKind::ProfileUpdate
     );
     let dependency = if let Some(root) =
-        prepare_directory_device_evidence(state, event, !transactional_profile).await?
+        prepare_directory_device_evidence(state, event, !transactional_origin).await?
     {
         arkret_models_identity::AgentSignerDependency::AccountDevice {
             signer_resolution_evidence_ref: root.signer_evidence_ref().map_err(wire_refusal)?,

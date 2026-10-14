@@ -941,6 +941,30 @@ impl coland_storage::ActorProfileStore for PgActorProfileStore {
         .map_err(PgTransactionError::into_persistence)
     }
 
+    async fn admit_agent_same_key_renewal(
+        &self,
+        write: coland_storage::AgentControlAdmissionWrite,
+        origin: Option<coland_storage::AgentControlOriginSource>,
+    ) -> PersistenceResult<coland_storage::AgentControlAdmissionOutcome> {
+        write
+            .commit
+            .validate()
+            .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            crate::agent_control::admit_agent_same_key_renewal_in_connection(
+                conn,
+                &write,
+                origin.as_ref(),
+            )
+            .await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
     async fn current_profile(
         &self,
         account: &AccountId,

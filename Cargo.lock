@@ -502,6 +502,7 @@ dependencies = [
  "ed25519-dalek 3.0.0",
  "futures-util",
  "getrandom 0.4.3",
+ "js-sys",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
@@ -510,6 +511,7 @@ dependencies = [
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "web-sys",
  "web-time",
 ]
 

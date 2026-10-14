@@ -1188,9 +1188,9 @@ fn payload<T: serde::de::DeserializeOwned>(event: &Event) -> PersistenceResult<T
     serde_json::from_value(serde_json::to_value(&event.payload).map_err(schema)?).map_err(schema)
 }
 
-/// Shared Agent policy values may be carried by verified scope snapshots.
+/// Shared Access, Moderation and Agent policies require verified scope snapshots.
 /// This does not recreate their private admission Event or enable writes.
-pub(crate) fn validate_disclosed_agent_policy(
+pub(crate) fn validate_disclosed_shared_policy(
     realm: &arkret_wire::RealmId,
     policy_id: &arkret_wire::PolicyId,
     source: &CommitStreamRef,
@@ -1202,7 +1202,10 @@ pub(crate) fn validate_disclosed_agent_policy(
         PolicySetValue::Governance(policy)
             if policy.id == *policy_id
                 && policy.realm_id.as_ref() == Some(realm)
-                && policy.policy_kind == PolicyKind::Agent
+                && matches!(
+                    policy.policy_kind,
+                    PolicyKind::Access | PolicyKind::Moderation | PolicyKind::Agent
+                )
                 && source.realm_id() == realm
                 && matches!(
                     source,
@@ -1211,9 +1214,7 @@ pub(crate) fn validate_disclosed_agent_policy(
         {
             Ok(())
         }
-        _ => Err(schema(
-            "Policy current has no proved shared Agent scope binding",
-        )),
+        _ => Err(schema("Policy current has no proved shared scope binding")),
     }
 }
 

@@ -173,7 +173,16 @@ pub(super) fn validate_agent_runtime_key_scopes(
             "generated Agent runtime key registry is inconsistent",
         )
     })?;
-    deficiency.map_or(Ok(()), |value| Err(map_agent_runtime_deficiency(value)))
+    deficiency.map_or(Ok(()), |value| Err(map_agent_runtime_deficiency(value)))?;
+    if !arkret_models_collaboration::agent_scope::agent_key_scope_within_provision(
+        provision_scope,
+        key_scope,
+    ) {
+        return Err(AppError::param_invalid(
+            "authorize_event.payload.agent_key_scope must be within the provisioned requested_scope",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) async fn require_agent_controller(
@@ -192,145 +201,22 @@ pub(super) async fn require_agent_controller(
     Ok(record)
 }
 
-fn requested_scope_actions(record: &AgentPrincipalRecord) -> BTreeSet<&str> {
-    record
-        .requested_scope
-        .as_ref()
-        .and_then(|scope| scope.get("actions"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .collect()
-}
-
-fn is_content_scope_kind(kind: Option<&str>) -> bool {
-    matches!(
-        kind,
-        Some(
-            "realm"
-                | "space"
-                | "circle"
-                | "strand"
-                | "message"
-                | "morph"
-                | "object"
-                | "relation"
-                | "view"
-                | "event"
-                | "actor"
-                | "schema"
-                | "policy"
-                | "invite"
-                | "notification"
-                | "read_cursor"
-                | "blob"
-        )
-    )
-}
-
-fn scope_resource_ref(resource: &Value) -> Option<&Value> {
-    resource
-        .get("resource_ref")
-        .or_else(|| resource.get("space_id"))
-        .or_else(|| resource.get("circle_id"))
-        .or_else(|| resource.get("strand_id"))
-        .or_else(|| resource.get("message_id"))
-        .or_else(|| resource.get("morph_id"))
-        .or_else(|| resource.get("object_ref"))
-        .or_else(|| resource.get("relation_id"))
-        .or_else(|| resource.get("view_id"))
-        .or_else(|| resource.get("event_id"))
-        .or_else(|| resource.get("actor_id"))
-        .or_else(|| resource.get("policy_id"))
-        .or_else(|| resource.get("invite_id"))
-        .or_else(|| resource.get("blob_ref"))
-}
-
-fn scope_resource_selector_covers(ceiling: &Value, resource: &Value) -> bool {
-    let ceiling_kind = ceiling.get("kind").and_then(Value::as_str);
-    let resource_kind = resource.get("kind").and_then(Value::as_str);
-    let kind_covers = ceiling_kind == resource_kind
-        || (ceiling_kind == Some("realm") && is_content_scope_kind(resource_kind));
-    if !kind_covers {
-        return false;
-    }
-    if ceiling
-        .get("realm_id")
-        .is_some_and(|value| resource.get("realm_id") != Some(value))
-    {
-        return false;
-    }
-    match ceiling_kind {
-        Some("operation") => ceiling
-            .get("operation")
-            .is_none_or(|value| resource.get("operation") == Some(value)),
-        Some("service") => ceiling
-            .get("service_id")
-            .is_none_or(|value| resource.get("service_id") == Some(value)),
-        Some("schema") => ceiling
-            .get("schema_ref")
-            .is_none_or(|value| resource.get("schema_ref") == Some(value)),
-        _ => scope_resource_ref(ceiling)
-            .is_none_or(|value| scope_resource_ref(resource) == Some(value)),
-    }
-}
-
-fn scope_resources_within_requested_scope(requested_scope: &Value, resources: &[Value]) -> bool {
-    let ceilings = requested_scope
-        .get("resources")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    let has_content_ceiling = ceilings
-        .iter()
-        .any(|ceiling| is_content_scope_kind(ceiling.get("kind").and_then(Value::as_str)));
-    resources.iter().all(|resource| {
-        let resource_kind = resource.get("kind").and_then(Value::as_str);
-        (is_content_scope_kind(resource_kind) && !has_content_ceiling)
-            || ceilings
-                .iter()
-                .any(|ceiling| scope_resource_selector_covers(ceiling, resource))
-    })
-}
-
-fn constraints_preserve_requested_scope(requested_scope: &Value, constraints: &[Value]) -> bool {
-    let mandatory = requested_scope
-        .get("constraints")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    mandatory
-        .iter()
-        .all(|constraint| constraints.contains(constraint))
-}
-
 /// A per-key scope may narrow, but never widen, the immutable provision scope.
 pub(crate) fn agent_key_scope_within_requested_scope(
     record: &AgentPrincipalRecord,
     scope: &Value,
 ) -> bool {
-    let Some(requested_scope) = record.requested_scope.as_ref() else {
+    let Some(ceiling) = record
+        .requested_scope
+        .as_ref()
+        .and_then(|value| serde_json::from_value::<AgentKeyScope>(value.clone()).ok())
+    else {
         return false;
     };
-    let Some(actions) = scope.get("actions").and_then(Value::as_array) else {
+    let Ok(key_scope) = serde_json::from_value::<AgentKeyScope>(scope.clone()) else {
         return false;
     };
-    let Some(resources) = scope.get("resources").and_then(Value::as_array) else {
-        return false;
-    };
-    let constraints = scope
-        .get("constraints")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    let requested_actions = requested_scope_actions(record);
-    actions.iter().all(|action| {
-        action
-            .as_str()
-            .is_some_and(|action| requested_actions.contains(action))
-    }) && scope_resources_within_requested_scope(requested_scope, resources)
-        && constraints_preserve_requested_scope(requested_scope, constraints)
+    arkret_models_collaboration::agent_scope::agent_key_scope_within_provision(&ceiling, &key_scope)
 }
 
 /// Enforce the immutable provisioning ceiling during ordinary

@@ -80,6 +80,7 @@ url = "2.5"
 uuid = { workspace = true, features = ["v4", "v7", "serde"] }
 
 [dev-dependencies]
+coland-contracts.workspace = true
 diesel = { workspace = true, features = ["postgres", "serde_json"] }
 diesel-async = { workspace = true, features = ["postgres", "deadpool"] }
 arkret-schema-conformance = { workspace = true }

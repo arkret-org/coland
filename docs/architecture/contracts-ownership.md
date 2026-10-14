@@ -26,7 +26,7 @@
 | `admin::queries` | `AdminAuditEntry` | local contract | Coland、Codmin | `/_coland/admin` 操作面审计投影；未命中 spec wire 类型 |
 | `admin::queries` | `AdminAuditList` | local contract | Coland、Codmin | `/_coland/admin` 操作面列表 envelope；未命中 spec wire 类型 |
 | `admin::queries` | `CapabilityGrantState` | local contract | Coland、Codmin | `/_coland/admin` 操作面枚举；未命中 spec wire 类型 |
-| `admin::queries` | `CapabilitySummary` | local contract | Coland、Codmin | `/_coland/admin` 操作面投影；字段复用 SDK 类型，整体未命中 spec wire 类型 |
+| `admin::queries` | `CapabilitySummary` | SDK re-export | Coland、Codmin | Alias of SDK CapabilityGrantExactCurrentRow; operator metadata review preserves full Actor/subject and durable revision, never substitutes the registered effective-grants authoring carrier. |
 | `admin::queries` | `AdminCapabilityList` | local contract | Coland、Codmin | `/_coland/admin` 操作面列表 envelope；未命中 spec wire 类型 |
 | `admin::queries` | `AdminDevice` | local contract | Coland、Codmin | `/_coland/admin` 操作面投影；字段复用 SDK 类型，整体未命中 spec wire 类型 |
 | `admin::queries` | `AdminDeviceList` | local contract | Coland、Codmin | `/_coland/admin` 操作面列表 envelope；未命中 spec wire 类型 |

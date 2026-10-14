@@ -24,9 +24,6 @@
 use std::collections::BTreeMap;
 
 use arkret_identifiers::DidCoreId;
-use arkret_models_collaboration::governance::grant_constraint::{
-    GrantConstraint, IssuerAuthorityRef,
-};
 use arkret_models_collaboration::objects::account_status::AccountStatus;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -178,6 +175,7 @@ pub struct AdminAuditList {
 pub enum CapabilityGrantState {
     Active,
     Revoked,
+    Relinquished,
     All,
 }
 
@@ -186,6 +184,7 @@ impl CapabilityGrantState {
         match self {
             CapabilityGrantState::Active => "active",
             CapabilityGrantState::Revoked => "revoked",
+            CapabilityGrantState::Relinquished => "relinquished",
             CapabilityGrantState::All => "all",
         }
     }
@@ -194,63 +193,25 @@ impl CapabilityGrantState {
         match value {
             "active" => Some(CapabilityGrantState::Active),
             "revoked" => Some(CapabilityGrantState::Revoked),
+            "relinquished" => Some(CapabilityGrantState::Relinquished),
             "all" => Some(CapabilityGrantState::All),
             _ => None,
         }
     }
 }
 
-/// One capability grant row in the admin capabilities projection.
-///
-/// Flat summary of the authz read-index `Grant` (the projection of
-/// `ak.component.capability.grant.v1` cells).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(salvo_oapi::ToSchema))]
-#[serde(deny_unknown_fields)]
-pub struct CapabilitySummary {
-    pub grant_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub realm_id: Option<String>,
-    pub issuer_id: arkret_identifiers::DidCoreId,
-    pub subject_id: arkret_identifiers::DidCoreId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resource: Option<String>,
-    #[serde(default)]
-    pub actions: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[cfg_attr(
-        feature = "openapi",
-        salvo(schema(value_type = Vec<serde_json::Value>))
-    )]
-    pub constraints: Vec<GrantConstraint>,
-    pub revoked: bool,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "arkret_canonical::serde_helpers::optional_canonical_timestamp"
-    )]
-    pub created_at: Option<DateTime<Utc>>,
-    /// The authority this grant was issued under (`capabilities.md` §10).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[cfg_attr(
-        feature = "openapi",
-        salvo(schema(value_type = Vec<serde_json::Value>))
-    )]
-    pub issuer_authority_refs: Vec<IssuerAuthorityRef>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "arkret_canonical::serde_helpers::optional_canonical_timestamp"
-    )]
-    pub expires_at: Option<DateTime<Utc>>,
-}
+/// Accepted grant metadata for deployment-local operator review.
+/// The SDK owns the closed current row, complete Actor/subject and revision.
+/// This operator carrier does not replace the registered effective-grants
+/// read required for authorization or relinquish authoring.
+pub use arkret_models_collaboration::exact_current_results::CapabilityGrantExactCurrentRow as CapabilitySummary;
 
 /// Cursor-paginated admin capabilities page.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(salvo_oapi::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AdminCapabilityList {
-    #[serde(default)]
+    #[cfg_attr(feature = "openapi", salvo(schema(value_type = Vec<serde_json::Value>)))]
     pub capabilities: Vec<CapabilitySummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
@@ -387,20 +348,34 @@ mod tests {
     }
 
     #[test]
-    fn capability_summary_round_trip() {
+    fn capability_summary_round_trip_preserves_sdk_current_row() {
+        use arkret_wire::{AccountId, ActorId, EventId, GrantId, RealmId};
+        let event = EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [0x61; 32]);
+        let realm = RealmId::from_event_id(&event);
+        let grant = GrantId::from_event_id(&event);
+        let actor = ActorId::account(AccountId::new(
+            "ak:did_core:web:member.example".parse().unwrap(),
+            "ak:did_core:web:station.example".parse().unwrap(),
+        ));
+        let commit = event.as_str().replacen("ak:event:", "ak:realm_commit:", 1);
+        let root = serde_json::json!({"kind":"realm_root","realm_id":realm,"authority_event_ref":event,"authority_generation":0});
         let wire = serde_json::json!({
-            "grant_id": "ak:grant:AYTeR35PxnHtaUMXFLoHqGA1yiou3pai07-tzQyViJnt",
-            "realm_id": "ak:realm:AWEs1cV4Rn1CVWdYoOUZ1yiMPe9Ze6ZYmP0ChDr89cPl",
-            "issuer_id": "ak:did_core:web:owner.example",
-            "subject_id": "ak:did_core:web:member.example",
-            "resource": "realm",
-            "actions": ["ak.realm.read"],
-            "revoked": false,
-            "created_at": "2026-07-10T00:00:00.000Z",
+            "selector":{"kind":"capability_grant","grant_id":grant},
+            "source_stream_ref":{"kind":"realm","realm_id":realm},
+            "revision":{"commit_id":commit,"stream_position":2},
+            "value":{"id":grant,"schema":arkret_wire::SchemaId::CAPABILITY_V1,
+                "realm_id":realm,"issuer_id":actor,"subject":actor,
+                "actions":[arkret_wire::CapabilityActionId::MESSAGE_CREATE],
+                "resources":[{"kind":"realm","realm_id":realm}],
+                "issuer_authority_refs":[root],"authority_depth":1,"authority_root_refs":[root],
+                "issued_at":"2026-10-14T00:00:00.000Z","status":"active"}
         });
-        let summary: CapabilitySummary = serde_json::from_value(wire).expect("parses");
-        assert_eq!(summary.actions, vec!["ak.realm.read".to_owned()]);
-        assert!(!summary.revoked);
-        assert!(summary.issuer_authority_refs.is_empty());
+        let summary: CapabilitySummary = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(summary.selector.grant_id, summary.value.id);
+        assert_eq!(
+            serde_json::to_value(&summary.value.subject).unwrap(),
+            serde_json::to_value(actor).unwrap()
+        );
+        assert_eq!(serde_json::to_value(summary).unwrap(), wire);
     }
 }

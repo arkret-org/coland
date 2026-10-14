@@ -7,6 +7,8 @@
 //! decision is unit-tested next to the handler where a production-mode
 //! session can be constructed directly).
 
+use serde_json::json;
+
 use super::common::*;
 
 fn assert_no_production_gap(body: &Value) {
@@ -485,4 +487,191 @@ async fn admin_collection_no_longer_serves_migrated_resources_body() {
         realms["production_gap"], "admin_authorization_and_durable_pagination",
         "dev collection keeps its explicit gap marker: {realms}"
     );
+}
+
+#[test]
+fn admin_capabilities_accepted_rows_preserve_complete_subjects_and_revisions() {
+    run_on_test_runtime(
+        "admin_capabilities_accepted_rows_preserve_complete_subjects_and_revisions",
+        admin_capabilities_accepted_rows_preserve_complete_subjects_and_revisions_body,
+    );
+}
+
+async fn admin_capabilities_accepted_rows_preserve_complete_subjects_and_revisions_body() {
+    use arkret_wire::{AccountId, ActorId, CurrentRevision, EventId, GrantId, RealmCommitId};
+    use coland_contracts::admin::AdminCapabilityList;
+    use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
+    use diesel_async::RunQueryDsl;
+
+    let (state, pool) = coland_test_support::app_state_with_pool(test_config());
+    let token = dev_token(state.clone()).await;
+    let realm_event = EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [0x79; 32]);
+    let realm = RealmId::from_event_id(&realm_event);
+    let principal = DidCoreId::new("ak:did_core:web:holder.example").unwrap();
+    let local = ActorId::account(AccountId::new(principal.clone(), state.service_core_id()));
+    let foreign = ActorId::account(AccountId::new(
+        principal.clone(),
+        DidCoreId::new("ak:did_core:web:foreign.example").unwrap(),
+    ));
+    let service = ActorId::service(principal);
+    let subjects = [
+        serde_json::to_value(&local).unwrap(),
+        serde_json::to_value(&foreign).unwrap(),
+        serde_json::to_value(&service).unwrap(),
+        json!({"kind":"condition", "required_claims":[{"claim_kind":"membership"}]}),
+        serde_json::to_value(&local).unwrap(),
+    ];
+    let commit_event = EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [0x7a; 32]);
+    let commit = RealmCommitId::new(commit_event.as_str().replacen(
+        "ak:event:",
+        "ak:realm_commit:",
+        1,
+    ))
+    .unwrap();
+    let root = json!({"kind":"realm_root","realm_id":realm,"authority_event_ref":realm_event,"authority_generation":0});
+    let revision = CurrentRevision {
+        commit_id: commit.clone(),
+        stream_position: 41,
+    };
+    let stream = json!({"kind":"realm","realm_id":realm});
+    let mut conn = pool.get().await.unwrap();
+    for (index, subject) in subjects.iter().enumerate() {
+        let event = EventId::from_digest(
+            arkret_canonical::DigestSuite::Sha256,
+            [0x80 + index as u8; 32],
+        );
+        let grant = GrantId::from_event_id(&event);
+        let status = match index {
+            2 => "revoked",
+            4 => "relinquished",
+            _ => "active",
+        };
+        let mut value = json!({"id":grant,"schema":arkret_wire::SchemaId::CAPABILITY_V1,
+            "realm_id":realm,"issuer_id":local,"subject":subject,
+            "actions":[arkret_wire::CapabilityActionId::MESSAGE_CREATE],
+            "resources":[{"kind":"realm","realm_id":realm}],
+            "issuer_authority_refs":[root],"authority_depth":1,"authority_root_refs":[root],
+            "issued_at":"2026-10-14T00:00:00.000Z","status":status});
+        if status != "active" {
+            value["revoked_at"] = json!("2026-10-14T00:01:00.000Z");
+            value["revoked_by"] = json!(local);
+        }
+        diesel::sql_query("INSERT INTO capability_grant_current_results
+            (realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value,updated_at)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+            .bind::<Text,_>(realm.as_str()).bind::<Text,_>(grant.as_str())
+            .bind::<Text,_>(status).bind::<Text,_>(event.as_str()).bind::<Text,_>(commit.as_str())
+            .bind::<Jsonb,_>(&stream).bind::<BigInt,_>(41_i64).bind::<Jsonb,_>(&value)
+            .bind::<Timestamptz,_>(chrono::Utc::now()).execute(&mut *conn).await.unwrap();
+    }
+    drop(conn);
+    let base = format!("http://server/_coland/admin/capabilities?filter[realm_id]={realm}");
+    if let Ok(path) = std::env::var("R08_ACCEPTED_BROWSER_FIXTURE") {
+        let mut response = TestClient::get(&base)
+            .add_header("authorization", format!("Bearer {token}"), true)
+            .send(&app_from_state(state.clone()))
+            .await;
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        let page: Value = response.take_json().await.unwrap();
+        std::fs::write(path, serde_json::to_vec_pretty(&page).unwrap()).unwrap();
+    }
+
+    let mut seen = Vec::new();
+    let mut cursor = None::<String>;
+    loop {
+        let url = format!(
+            "{base}&limit=1{}",
+            cursor
+                .as_ref()
+                .map(|cursor| format!("&cursor={cursor}"))
+                .unwrap_or_default()
+        );
+        let mut response = TestClient::get(url)
+            .add_header("authorization", format!("Bearer {token}"), true)
+            .send(&app_from_state(state.clone()))
+            .await;
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        let page: AdminCapabilityList = response.take_json().await.unwrap();
+        assert_eq!(page.total, Some(5));
+        assert_eq!(page.capabilities.len(), 1);
+        let row = &page.capabilities[0];
+        assert_eq!(row.selector.grant_id, row.value.id);
+        assert_eq!(row.revision, revision);
+        assert_eq!(row.source_stream_ref.realm_id(), &realm);
+        seen.push(serde_json::to_value(&row.value.subject).unwrap());
+        if !page.has_more {
+            assert!(page.next_cursor.is_none());
+            break;
+        }
+        assert_ne!(cursor, page.next_cursor);
+        cursor = page.next_cursor;
+        assert!(seen.len() < 6);
+    }
+    assert_eq!(seen.len(), 5);
+    for subject in &subjects {
+        assert!(seen.contains(subject));
+    }
+    for actor in [&local, &foreign, &service] {
+        let actor_json = arkret_canonical::canonical_json_string(actor).unwrap();
+        let mut url = url::Url::parse(&base).unwrap();
+        url.query_pairs_mut()
+            .append_pair("filter[subject_actor_id]", &actor_json);
+        let mut response = TestClient::get(url.as_str())
+            .add_header("authorization", format!("Bearer {token}"), true)
+            .send(&app_from_state(state.clone()))
+            .await;
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        let page: AdminCapabilityList = response.take_json().await.unwrap();
+        assert_eq!(page.total, Some(if actor == &local { 2 } else { 1 }));
+        assert_eq!(
+            serde_json::to_value(&page.capabilities[0].value.subject).unwrap(),
+            serde_json::to_value(actor).unwrap()
+        );
+        assert_eq!(page.filters["subject_actor_id"], actor_json);
+    }
+    for query in [
+        "filter[subject]=ak:did_core:web:holder.example",
+        "filter[subject_actor_id]=ak:did_core:web:holder.example",
+        "filter[realm_id]=invalid-realm",
+    ] {
+        let response = TestClient::get(format!("http://server/_coland/admin/capabilities?{query}"))
+            .add_header("authorization", format!("Bearer {token}"), true)
+            .send(&app_from_state(state.clone()))
+            .await;
+        assert_eq!(response.status_code, Some(StatusCode::BAD_REQUEST));
+    }
+    let mut response = TestClient::get(format!("{base}&filter[state]=revoked"))
+        .add_header("authorization", format!("Bearer {token}"), true)
+        .send(&app_from_state(state.clone()))
+        .await;
+    let page: AdminCapabilityList = response.take_json().await.unwrap();
+    assert_eq!(page.total, Some(1));
+    assert_eq!(
+        page.capabilities[0].value.status,
+        arkret_models_collaboration::governance::grant_constraint::CapabilityGrantStatus::Revoked
+    );
+    let mut response = TestClient::get(format!("{base}&filter[state]=relinquished"))
+        .add_header("authorization", format!("Bearer {token}"), true)
+        .send(&app_from_state(state.clone()))
+        .await;
+    let page: AdminCapabilityList = response.take_json().await.unwrap();
+    assert_eq!(page.total, Some(1));
+    assert_eq!(page.capabilities[0].value.status,arkret_models_collaboration::governance::grant_constraint::CapabilityGrantStatus::Relinquished);
+    let mut response = TestClient::get(format!("{base}&filter[state]=active"))
+        .add_header("authorization", format!("Bearer {token}"), true)
+        .send(&app_from_state(state.clone()))
+        .await;
+    let page: AdminCapabilityList = response.take_json().await.unwrap();
+    assert_eq!(page.total, Some(3));
+    let mut response = TestClient::get(
+        "http://server/_coland/admin/audit?filter[action]=admin.capabilities.query",
+    )
+    .add_header("authorization", format!("Bearer {token}"), true)
+    .send(&app_from_state(state.clone()))
+    .await;
+    let audits: Value = response.take_json().await.unwrap();
+    assert!(audits["entries"].as_array().unwrap().iter().any(
+        |entry| entry["payload"]["operator_actor_id"]["account_id"]["station_id"]
+            == state.service_core_id().as_str()
+    ));
 }

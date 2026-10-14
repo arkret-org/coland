@@ -26,7 +26,7 @@ pub fn query_param(req: &Request, key: &str) -> Option<String> {
     req.uri().query().and_then(|query| {
         query.split('&').find_map(|pair| {
             let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-            (name == key).then(|| percent_decode_query_value(value))
+            (percent_decode_query_value(name) == key).then(|| percent_decode_query_value(value))
         })
     })
 }
@@ -79,7 +79,7 @@ pub fn query_param_all(req: &Request, key: &str) -> Vec<String> {
         .split('&')
         .filter_map(|pair| {
             let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-            if name == key && !value.is_empty() {
+            if percent_decode_query_value(name) == key && !value.is_empty() {
                 Some(percent_decode_query_value(value))
             } else {
                 None
@@ -299,6 +299,20 @@ pub fn is_valid_discoverability(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_parameters_decode_names_as_well_as_values() {
+        let mut req = Request::new();
+        *req.uri_mut() =
+            "http://server/?filter%5Bstate%5D=active&filter%5Btag%5D=a%2Bb&filter[tag]=c+d"
+                .parse()
+                .unwrap();
+        assert_eq!(
+            query_param(&req, "filter[state]").as_deref(),
+            Some("active")
+        );
+        assert_eq!(query_param_all(&req, "filter[tag]"), vec!["a+b", "c d"]);
+    }
 
     /// AKP-0008 / AKP-0009 (B-D, P2-G) — coland's inbound DID validator
     /// MUST route through the SDK `Did::new` parser. Regression guard so

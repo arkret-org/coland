@@ -1861,6 +1861,62 @@ mod tests {
         );
         assert_eq!(after.value["private_count"], 1);
         if kind != "agent" {
+            // A complete Realm cut cannot erase a visible Policy, but a Circle
+            // omitted from visible heads proves no authority over that stream.
+            let current = arkret_wire::TypedCurrentRow::Value {
+                selector: arkret_wire::CurrentSelector::Policy {
+                    policy_id: id.clone(),
+                },
+                source_stream_ref: commit.stream_ref.clone(),
+                revision: arkret_wire::CurrentRevision {
+                    commit_id: commit.commit_id.clone(),
+                    stream_position: 8,
+                },
+                value: next_value.clone(),
+            };
+            let circle_source = arkret_wire::CommitStreamRef::Circle {
+                realm_id: realm.clone(),
+                circle_id: arkret_wire::CircleId::from_event_id(
+                    &arkret_wire::EventId::from_digest(
+                        arkret_canonical::DigestSuite::Sha256,
+                        [0x62; 32],
+                    ),
+                ),
+            };
+            let circle_head = arkret_wire::CommitStreamHead {
+                stream_ref: circle_source.clone(),
+                stream_position: 3,
+                commit_id: arkret_wire::RealmCommitId::from_digest([3; 32]),
+            };
+            let circle_id =
+                arkret_wire::PolicyId::new("ak:policy:0198ff00-0000-7000-8000-000000000002")
+                    .unwrap();
+            let mut circle_value = next_value;
+            circle_value["id"] = json!(circle_id);
+            let circle = arkret_wire::TypedCurrentRow::Value {
+                selector: arkret_wire::CurrentSelector::Policy {
+                    policy_id: circle_id,
+                },
+                source_stream_ref: circle_source,
+                revision: arkret_wire::CurrentRevision {
+                    commit_id: circle_head.commit_id.clone(),
+                    stream_position: 3,
+                },
+                value: circle_value,
+            };
+            install_snapshot_at_heads_in_connection(
+                &mut conn,
+                &realm,
+                &next_head,
+                &[next_head.clone(), circle_head],
+                &[current.clone(), circle],
+                at,
+            )
+            .await
+            .unwrap();
+            install_snapshot_in_connection(&mut conn, &realm, &next_head, &[current], at)
+                .await
+                .unwrap();
             return;
         }
         // The historical reducer never re-applies the producer's old CAS.

@@ -194,6 +194,7 @@ pub(super) async fn refuse_unrouted_event(
 /// whether its producer was resolved locally or from a forward.
 pub(super) fn require_guarded_unit_event(request: &EventAdmissionSubmission) -> ServiceResult<()> {
     let event = &request.event;
+    refuse_deferred_call_payload(event)?;
     if self_event_route(&event.kind)? != SelfEventRoute::GuardedUnit {
         return Err(ServiceError::UnsupportedEventKind(format!(
             "{} is admitted only on its producer's own Station",
@@ -205,6 +206,7 @@ pub(super) fn require_guarded_unit_event(request: &EventAdmissionSubmission) -> 
             && matches!(
                 event.kind,
                 arkret_wire::EventKind::CircleMemberState
+                    | arkret_wire::EventKind::StrandWatchSet
                     | arkret_wire::EventKind::PolicySet
                     | arkret_wire::EventKind::StrandCreate
                     | arkret_wire::EventKind::AppletBridgeError
@@ -230,6 +232,18 @@ pub(super) fn require_guarded_unit_event(request: &EventAdmissionSubmission) -> 
     {
         return Err(ServiceError::Conflict(
             "this Event kind has no source target cut in its signed scope".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn refuse_deferred_call_payload(event: &arkret_wire::Event) -> ServiceResult<()> {
+    if event.kind == arkret_wire::EventKind::CallState
+        && event.payload.contains_key("mute_override")
+    {
+        return Err(ServiceError::protocol(
+            arkret_wire::ErrorCode::UnsupportedFeature,
+            "mute_override is deferred in v1",
         ));
     }
     Ok(())
@@ -490,6 +504,7 @@ impl AuthorityProtocolPort for AppState {
             .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
         let event = &request.event;
         super::authority_self_event_unit::validate_replay_event_identity(event)?;
+        refuse_deferred_call_payload(event)?;
         refuse_actor_private_event(&event.kind)?;
         if matches!(
             event.kind,
@@ -824,38 +839,21 @@ impl AuthorityProtocolPort for AppState {
             .await
     }
 
-    /// The nonce-bound genesis-to-current chain, signed by this Station's
-    /// notary method and carrying its current authenticated service route.
+    /// The current governor's nonce-bound original. A known former governor
+    /// remains a locator and never signs a replacement current assertion.
     async fn authority_bundle(
         &self,
         request: AuthorityBundleRequest,
     ) -> ServiceResult<RealmAuthorityBundle> {
-        let route =
-            crate::routing::system::service_resolution::current_authenticated_service_resolution(
-                self,
-            )
+        crate::routing::realm_join::local_authority_bundle(self, &request.realm_id, &request.nonce)
             .await
             .map_err(|error| {
-                ServiceError::Internal(format!(
-                    "current authenticated service route is unavailable: {}",
-                    error.message
-                ))
-            })?;
-        let route = serde_json::to_value(route)
-            .map_err(|error| ServiceError::Internal(error.to_string()))?;
-        let verification_method = self
-            .service_verification_method("notary-key")
-            .map_err(|error| ServiceError::Internal(error.to_string()))?;
-        self.authority_commits()
-            .authority_bundle(
-                &request,
-                &self.service_core_id(),
-                route,
-                verification_method,
-                self.notary_signing_key().as_ref(),
-                crate::wire::now(),
-            )
-            .await
+                if error.code == crate::error::ErrorCode::NotFound {
+                    ServiceError::NotFound(error.message.to_string())
+                } else {
+                    ServiceError::Conflict(format!("temporarily_unavailable: {}", error.message))
+                }
+            })
     }
 
     async fn install_authority_handoff(

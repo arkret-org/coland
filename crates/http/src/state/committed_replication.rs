@@ -392,6 +392,14 @@ async fn prepare_or_replicate_one(
     let replica = CommittedReplica {
         local_service_id: state.service_core_id(),
         authority: located.current_authority(),
+        historical_commit: (commit.governance_generation < located.authority.current_generation())
+            .then(|| {
+                located
+                    .authority
+                    .verify_historical_commit(commit, &located.keys)
+            })
+            .transpose()
+            .map_err(temporarily_unavailable)?,
         event: event.clone(),
         commit: commit.clone(),
         producer_signer_fact: item.producer_signer_fact.clone(),

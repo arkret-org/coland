@@ -888,6 +888,7 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
         .install_committed_replica(&CommittedReplica {
             local_service_id: human.pcr.history.account.station_id.clone(),
             authority: join.authority_commit.expected_authority.clone(),
+            historical_commit: None,
             event: join.authority_commit.event.clone(),
             commit: join.authority_commit.commit.clone(),
             producer_signer_fact: join.authority_commit.producer_signer_fact.clone(),
@@ -3389,6 +3390,7 @@ async fn circle_cleanup_install_refusals(
             .await
             .unwrap()
             .unwrap(),
+        historical_commit: None,
         event: event.clone(),
         commit: commit.clone(),
         producer_signer_fact: fact,

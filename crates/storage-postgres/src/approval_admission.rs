@@ -327,6 +327,7 @@ pub(crate) async fn approver_qualifies(
     facts: &OperationFacts,
     at: chrono::DateTime<chrono::Utc>,
     allow_owner: bool,
+    registered_pair: bool,
 ) -> PersistenceResult<Option<serde_json::Value>> {
     let principal = arkret_wire::project_did_to_core_id(&vote.input.approver_did)
         .map_err(|e| error("schema_violation", e))?;
@@ -339,6 +340,7 @@ pub(crate) async fn approver_qualifies(
         facts,
         at,
         allow_owner,
+        registered_pair,
     )
     .await
 }
@@ -356,6 +358,7 @@ pub(crate) async fn qualify_principal(
     facts: &OperationFacts,
     at: chrono::DateTime<chrono::Utc>,
     allow_owner: bool,
+    registered_pair: bool,
 ) -> PersistenceResult<Option<serde_json::Value>> {
     qualify_principal_or_actor(
         conn,
@@ -367,6 +370,7 @@ pub(crate) async fn qualify_principal(
         at,
         allow_owner,
         None,
+        registered_pair,
     )
     .await
 }
@@ -397,6 +401,7 @@ pub(crate) async fn qualify_actor(
         at,
         allow_owner,
         Some(actor),
+        false,
     )
     .await
 }
@@ -415,6 +420,7 @@ async fn qualify_principal_or_actor(
     at: chrono::DateTime<chrono::Utc>,
     allow_owner: bool,
     exact_actor: Option<&ActorId>,
+    registered_pair: bool,
 ) -> PersistenceResult<Option<serde_json::Value>> {
     if principal == event.actor_id.signing_principal_id() {
         return Ok(None);
@@ -433,6 +439,12 @@ async fn qualify_principal_or_actor(
         let checks = arkret_schema::capability_action_descriptor(action).required_evaluator_checks;
         if checks.iter().any(|check| match *check {
             "actor_eq_target_author" => facts.target_owner.as_ref() != Some(&actor),
+            "actor_ne_watcher_actor" => serde_json::to_value(&event.payload)
+                .ok()
+                .and_then(|p| p.get("watcher_actor_id").cloned())
+                .and_then(|v| serde_json::from_value::<ActorId>(v).ok())
+                .is_none_or(|watcher| watcher == event.actor_id),
+            "audit_pair_required" => !registered_pair,
             _ => true,
         }) {
             continue;
@@ -591,6 +603,7 @@ pub(crate) async fn require_list_wip(
             &facts,
             commit.committed_at,
             true,
+            false,
         )
         .await?
             && counted.insert(
@@ -665,6 +678,12 @@ pub(crate) async fn require_governance(
             facts,
             commit.committed_at,
             false,
+            prepared.is_some_and(|p| {
+                matches!(
+                    p.carrier_binding,
+                    Some(coland_storage::ApprovalCarrierBinding::AuditPair { .. })
+                )
+            }),
         )
         .await?
             && counted.insert(

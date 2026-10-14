@@ -7,6 +7,41 @@ const CIRCLE: &str = "ak:circle:AUiSHUfqumU5_UtRrOIga2jjSmucw5MpSQdam3TtzPQu";
 const ALICE: &str = "ak:did_core:web:alice";
 const BOB: &str = "ak:did_core:web:bob";
 
+#[test]
+fn accepted_circle_cache_restoration_does_not_invent_parent_authority() {
+    let mut state = ProjectionState::new();
+    let at = Utc.with_ymd_and_hms(2026, 10, 15, 0, 0, 0).unwrap();
+    let create = make_operation(
+        arkret_wire::EventKind::CircleCreate,
+        REALM,
+        serde_json::json!({"object":{"id":CIRCLE,"realm_id":REALM,"title":"Accepted replica",
+            "display":{"short_name":"Replica"},"join_rule":"public","history_access":"since_join"}}),
+    );
+    assert!(
+        matches!(state.apply(&create, &ServerHlc::new("live-parent-check")),
+        ProjectionEffect::Rejected { reason } if reason=="circle_realm_unknown")
+    );
+    assert!(!matches!(
+        state.restore_accepted_circle_create(&create, at),
+        ProjectionEffect::Rejected { .. }
+    ));
+    let joined = make_operation(
+        arkret_wire::EventKind::CircleMemberState,
+        REALM,
+        serde_json::json!({"circle_id":CIRCLE,"member_id":account_actor(ALICE),"membership":"join"}),
+    );
+    assert!(
+        matches!(state.apply(&joined, &ServerHlc::new("live-member-check")),
+        ProjectionEffect::Rejected { reason } if reason=="circle_member_must_be_realm_member")
+    );
+    assert!(matches!(
+        state.restore_accepted_circle_membership(&joined, at),
+        ProjectionEffect::CircleMemberStateChanged { .. }
+    ));
+    assert!(!state.realm_states.contains_key(REALM));
+    assert!(state.member(REALM, &account_actor_string(ALICE)).is_none());
+}
+
 fn seed_state(history_access: &str) -> (ProjectionState, ServerHlc, chrono::DateTime<Utc>) {
     let mut state = ProjectionState::new();
     let base = Utc.with_ymd_and_hms(2026, 6, 19, 8, 0, 0).unwrap();

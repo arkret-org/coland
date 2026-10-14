@@ -414,10 +414,18 @@ pub(crate) async fn commit_in_connection(
             let short_name = folded_short_name(&payload.object.display.short_name)?;
             payload.object.id = Some(id.clone());
             let value = serde_json::to_value(payload.object).map_err(PersistenceError::database)?;
-            sql_query(
+            let changed = sql_query(
                 "INSERT INTO circle_current_results \
                  (realm_id,circle_id,create_event_id,current_commit_id,current_stream_position,source_stream_ref,short_name_folded,value,updated_at) \
-                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) \
+                 ON CONFLICT(circle_id) DO UPDATE SET circle_id=EXCLUDED.circle_id \
+                 WHERE circle_current_results.realm_id=EXCLUDED.realm_id \
+                   AND circle_current_results.create_event_id=EXCLUDED.create_event_id \
+                   AND circle_current_results.current_commit_id=EXCLUDED.current_commit_id \
+                   AND circle_current_results.current_stream_position=EXCLUDED.current_stream_position \
+                   AND circle_current_results.source_stream_ref=EXCLUDED.source_stream_ref \
+                   AND circle_current_results.short_name_folded=EXCLUDED.short_name_folded \
+                   AND circle_current_results.value=EXCLUDED.value",
             )
             .bind::<Text, _>(event.realm_id.as_str())
             .bind::<Text, _>(id.as_str())
@@ -431,6 +439,12 @@ pub(crate) async fn commit_in_connection(
             .execute(&mut *conn)
             .await
             .map_err(PersistenceError::database)?;
+            if changed != 1 {
+                return Err(conflict(
+                    ConflictCode::FailedPrecondition,
+                    "Circle create current differs from its accepted original",
+                ));
+            }
         }
         EventKind::CircleMemberState => {
             let ScopeRef::Circle { circle_id, .. } = &event.scope_ref else {
@@ -493,6 +507,81 @@ pub(crate) async fn commit_in_connection(
 #[cfg(test)]
 mod typed_membership_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn full_circle_create_can_fill_an_identical_snapshot_current_only() {
+        let database = crate::test_database::TestDatabase::lease().await;
+        let mut conn = database.pool().get().await.unwrap();
+        let template = event(EventKind::CircleCreate, json!({}));
+        let original = event(
+            EventKind::CircleCreate,
+            json!({"object":{
+            "schema":"ak.schema.circle.v1", "realm_id":template.realm_id,
+            "title":"Snapshot original", "display":{"short_name":"Snapshot","color_token":"blue","symbol":{"glyph":"lock"}},
+            "directory_visibility":"members", "join_rule":"public", "history_access":"since_join",
+            "state":"active", "created_by":template.actor_id,
+            "created_at":arkret_canonical::format_timestamp_canonical(template.created_at)}}),
+        );
+        let commit = RealmCommit {
+            producer_signer_fact_digest: None,
+            commit_id: arkret_wire::RealmCommitId::from_digest([5; 32]),
+            realm_id: original.realm_id.clone(),
+            stream_ref: CommitStreamRef::Realm {
+                realm_id: original.realm_id.clone(),
+            },
+            stream_position: 5,
+            previous_commit_ref: None,
+            event_ref: original.event_id.clone(),
+            governance_generation: 0,
+            authority_ref: arkret_wire::RealmCommitAuthorityRef::GenesisOrChangeEvent(
+                original.event_id.clone(),
+            ),
+            committed_at: original.created_at,
+            signature: arkret_wire::DetachedObjectSignature {
+                context: arkret_wire::DetachedSignatureContext::RealmCommit,
+                signature_algorithm: arkret_wire::DetachedSignatureAlgorithm::Ed25519,
+                verification_method: arkret_wire::DidUrl::new(
+                    "did:web:circle-station.example#notary",
+                )
+                .unwrap(),
+                signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "3".repeat(64)))
+                    .unwrap(),
+                created_at: original.created_at,
+                sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
+            },
+        };
+        commit_in_connection(&mut conn, &original, &commit)
+            .await
+            .unwrap();
+        commit_in_connection(&mut conn, &original, &commit)
+            .await
+            .unwrap();
+        let mut conflicting_commit = commit.clone();
+        conflicting_commit.commit_id = arkret_wire::RealmCommitId::from_digest([6; 32]);
+        assert!(
+            commit_in_connection(&mut conn, &original, &conflicting_commit)
+                .await
+                .is_err()
+        );
+        let mut conflicting_value = original.clone();
+        conflicting_value.payload.get_mut("object").unwrap()["title"] = json!("Changed original");
+        assert!(
+            commit_in_connection(&mut conn, &conflicting_value, &commit)
+                .await
+                .is_err()
+        );
+        #[derive(diesel::QueryableByName)]
+        struct Stored {
+            #[diesel(sql_type=Jsonb)]
+            value: Value,
+        }
+        let stored = sql_query("SELECT value FROM circle_current_results WHERE circle_id=$1")
+            .bind::<Text, _>(circle_id(&original).as_str())
+            .get_result::<Stored>(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(stored.value["title"], "Snapshot original");
+    }
 
     fn event(kind: EventKind, payload: Value) -> Event {
         let realm = arkret_wire::RealmId::from_event_id(&arkret_wire::EventId::from_digest(

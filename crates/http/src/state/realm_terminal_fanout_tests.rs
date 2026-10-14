@@ -194,6 +194,7 @@ async fn install_opening_anchor(
         .install_committed_replica(&CommittedReplica {
             local_service_id: receiver.state.service_core_id(),
             authority: tx.expected_authority.clone(),
+            historical_commit: None,
             event: tx.event.clone(),
             commit: tx.commit.clone(),
             producer_signer_fact: tx.producer_signer_fact.clone(),

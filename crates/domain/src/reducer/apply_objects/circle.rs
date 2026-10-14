@@ -16,6 +16,31 @@ impl ProjectionState {
         operation: &Operation,
         now: chrono::DateTime<chrono::Utc>,
     ) -> ProjectionEffect {
+        self.project_circle_create(operation, now, true)
+    }
+
+    /// Restore a verified accepted original into the process cache. A lawful
+    /// since-join replica may not retain the earlier parent genesis Full.
+    /// This does not establish a Realm owner or authorize a new command.
+    pub fn restore_accepted_circle_create(
+        &mut self,
+        operation: &Operation,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> ProjectionEffect {
+        if operation.event_kind != arkret_wire::EventKind::CircleCreate {
+            return ProjectionEffect::Rejected {
+                reason: "circle_create_wrong_kind".to_owned(),
+            };
+        }
+        self.project_circle_create(operation, now, false)
+    }
+
+    fn project_circle_create(
+        &mut self,
+        operation: &Operation,
+        now: chrono::DateTime<chrono::Utc>,
+        require_current_parent: bool,
+    ) -> ProjectionEffect {
         let payload = &operation.payload;
         let Some(object) = payload.get("object").and_then(Value::as_object) else {
             return ProjectionEffect::Rejected {
@@ -44,12 +69,14 @@ impl ProjectionState {
         // Parent Realm MUST exist and not be in a terminal state — both
         // checks rely on the same projection cache the Strand create path
         // uses.
-        if self.realm_is_in_terminal_state(&realm_id) {
+        if require_current_parent && self.realm_is_in_terminal_state(&realm_id) {
             return ProjectionEffect::Rejected {
                 reason: arkret_wire::ErrorCode::FAILED_PRECONDITION.to_owned(),
             };
         }
-        if !self.realm_states.contains_key(&realm_id) && self.realm_create_log(&realm_id).is_none()
+        if require_current_parent
+            && !self.realm_states.contains_key(&realm_id)
+            && self.realm_create_log(&realm_id).is_none()
         {
             return ProjectionEffect::Rejected {
                 reason: "circle_realm_unknown".to_owned(),
@@ -257,6 +284,30 @@ impl ProjectionState {
         operation: &Operation,
         now: chrono::DateTime<chrono::Utc>,
     ) -> ProjectionEffect {
+        self.project_circle_member_state(operation, now, true)
+    }
+
+    /// Reconstruct accepted membership without reauthorizing it against an
+    /// incomplete parent cache. Current reads still use durable parent cuts.
+    pub fn restore_accepted_circle_membership(
+        &mut self,
+        operation: &Operation,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> ProjectionEffect {
+        if operation.event_kind != arkret_wire::EventKind::CircleMemberState {
+            return ProjectionEffect::Rejected {
+                reason: "circle_member_state_wrong_kind".to_owned(),
+            };
+        }
+        self.project_circle_member_state(operation, now, false)
+    }
+
+    fn project_circle_member_state(
+        &mut self,
+        operation: &Operation,
+        now: chrono::DateTime<chrono::Utc>,
+        require_current_parent: bool,
+    ) -> ProjectionEffect {
         let payload = &operation.payload;
         let Some(circle_id) = payload
             .get("circle_id")
@@ -300,7 +351,7 @@ impl ProjectionState {
             ),
             None => return ProjectionEffect::Ignored,
         };
-        if target_state == "join" {
+        if require_current_parent && target_state == "join" {
             // AKP-0007 strict subset invariant: Circle.members ⊆
             // Realm.members. Reducer reason
             // `circle_member_must_be_realm_member`.

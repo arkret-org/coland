@@ -59,6 +59,35 @@ pub(crate) async fn local_authority_bundle(
     realm_id: &arkret_wire::RealmId,
     nonce: &Base64UrlString,
 ) -> Result<arkret_wire::RealmAuthorityBundle, AppError> {
+    if let Some(current) = state
+        .authority_commits()
+        .current_authority(realm_id)
+        .await
+        .map_err(unavailable)?
+        && current.service_id != state.service_core_id()
+    {
+        // A known former governor remains a locator after a planned handoff.
+        // Relay the new governor's nonce-bound original; never sign a cached
+        // assertion or treat the old Station's route as current authority.
+        let bundle = authority::fetch_authority_bundle_of_service(
+            state,
+            realm_id,
+            &current.service_id,
+            nonce,
+        )
+        .await?;
+        let located = authority::verify_served_bundle(state, bundle, nonce).await?;
+        let verified = located.current_authority();
+        if verified.realm_id != *realm_id
+            || verified.generation < current.generation
+            || (verified.generation == current.generation && verified != current)
+        {
+            return Err(unavailable(
+                "relayed authority conflicts with the observed governing cut",
+            ));
+        }
+        return Ok(located.bundle);
+    }
     let route =
         crate::routing::system::service_resolution::current_authenticated_service_resolution(state)
             .await?;

@@ -499,6 +499,12 @@ fn agent_recipient_operation(method: &str, path: &str) -> Option<&'static str> {
             Some(ServiceOperationId::SELF_CURRENT_RESULTS_READ_EXACT_V1)
         }
         ("POST", "/_arkret/self/events") => Some(ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1),
+        ("POST", "/_arkret/self/strands/watch/audit-read") => {
+            Some(ServiceOperationId::SELF_STRAND_WATCH_COMMAND_AUDIT_READ_V1)
+        }
+        ("POST", "/_arkret/self/strands/watch/current") => {
+            Some(ServiceOperationId::SELF_STRAND_WATCH_READ_CURRENT_V1)
+        }
         ("POST", "/_arkret/self/signal") => Some(ServiceOperationId::SELF_SIGNAL_COMMAND_SEND_V1),
         ("GET", "/_arkret/self/device_messages") => {
             Some(ServiceOperationId::SELF_DEVICE_MESSAGES_READ_LIST_V1)

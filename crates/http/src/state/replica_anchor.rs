@@ -1241,6 +1241,15 @@ async fn open_forwarded_join(
             .install_committed_replica(&CommittedReplica {
                 local_service_id: state.service_core_id(),
                 authority: located.current_authority(),
+                historical_commit: (full.commit.governance_generation
+                    < located.authority.current_generation())
+                .then(|| {
+                    located
+                        .authority
+                        .verify_historical_commit(&full.commit, &located.keys)
+                })
+                .transpose()
+                .map_err(temporary)?,
                 event: full.event,
                 commit: full.commit,
                 producer_signer_fact: fact,
@@ -1500,6 +1509,15 @@ async fn store_scanned_pair(
             replicas.push(CommittedReplica {
                 local_service_id: state.service_core_id(),
                 authority: located.current_authority(),
+                historical_commit: (slot.source_commit.governance_generation
+                    < located.authority.current_generation())
+                .then(|| {
+                    located
+                        .authority
+                        .verify_historical_commit(&slot.source_commit, &located.keys)
+                })
+                .transpose()
+                .map_err(temporary)?,
                 event: slot.event_submission.event.clone(),
                 commit: slot.source_commit.clone(),
                 producer_signer_fact: slot.producer_signer_fact.clone(),
@@ -1599,6 +1617,15 @@ async fn store_scanned(
                     .install_committed_chain_node(&CommittedChainNode {
                         local_service_id: state.service_core_id(),
                         authority: located.current_authority(),
+                        historical_commit: (commit.governance_generation
+                            < located.authority.current_generation())
+                        .then(|| {
+                            located
+                                .authority
+                                .verify_historical_commit(commit, &located.keys)
+                        })
+                        .transpose()
+                        .map_err(temporary)?,
                         commit: commit.clone(),
                     })
                     .await
@@ -1609,6 +1636,15 @@ async fn store_scanned(
                 .install_committed_replica(&CommittedReplica {
                     local_service_id: state.service_core_id(),
                     authority: located.current_authority(),
+                    historical_commit: (commit.governance_generation
+                        < located.authority.current_generation())
+                    .then(|| {
+                        located
+                            .authority
+                            .verify_historical_commit(commit, &located.keys)
+                    })
+                    .transpose()
+                    .map_err(temporary)?,
                     event: view.event.clone(),
                     commit: commit.clone(),
                     producer_signer_fact: fact.cloned(),
@@ -1649,6 +1685,15 @@ async fn store_scanned(
                 .install_committed_chain_node(&CommittedChainNode {
                     local_service_id: state.service_core_id(),
                     authority: located.current_authority(),
+                    historical_commit: (commit.governance_generation
+                        < located.authority.current_generation())
+                    .then(|| {
+                        located
+                            .authority
+                            .verify_historical_commit(commit, &located.keys)
+                    })
+                    .transpose()
+                    .map_err(temporary)?,
                     commit: commit.clone(),
                 })
                 .await

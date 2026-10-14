@@ -282,6 +282,12 @@ async fn list_wip_review_verifies_actual_signatures_and_consumes_only_at_success
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let setup = Box::pin(prepare_wip_setup(&pool)).await;
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(async move { Box::pin(list_wip_review_transaction(pool, setup)).await });
+    tasks.join_next().await.unwrap().unwrap();
+}
+
+async fn list_wip_review_transaction(pool: PgPool, setup: WipSetup) {
     let review = Box::pin(qualify_wip_review(&pool, &setup)).await;
     let opened = &setup.opened;
     let board_id = setup.board_id.clone();

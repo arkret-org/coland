@@ -1310,6 +1310,8 @@ pub struct CommittedReplica {
     pub local_service_id: arkret_wire::DidCoreId,
     /// The verified remote current authority the source Commit verified under.
     pub authority: CurrentRealmAuthority,
+    /// Required for a verified older-tenure Full received under a newer cut.
+    pub historical_commit: Option<arkret_identity::VerifiedHistoricalRealmCommit>,
     pub event: arkret_wire::Event,
     pub commit: arkret_wire::RealmCommit,
     pub producer_signer_fact:
@@ -1333,6 +1335,8 @@ pub struct CommittedReplica {
 pub struct CommittedChainNode {
     pub local_service_id: arkret_wire::DidCoreId,
     pub authority: CurrentRealmAuthority,
+    /// The same proof is required for continuity-only older-tenure nodes.
+    pub historical_commit: Option<arkret_identity::VerifiedHistoricalRealmCommit>,
     pub commit: arkret_wire::RealmCommit,
 }
 

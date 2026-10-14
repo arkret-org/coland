@@ -168,7 +168,9 @@ async fn message_create_consumes_two_layers_atomically_and_preserves_nonce_on_fa
     let db = TestDatabase::lease().await;
     let pool = db.pool();
     let setup = Box::pin(prepare_grant_setup(&pool)).await;
-    Box::pin(message_create_approval_transaction(pool, setup)).await;
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(async move { Box::pin(message_create_approval_transaction(pool, setup)).await });
+    tasks.join_next().await.unwrap().unwrap();
 }
 
 async fn message_create_approval_transaction(pool: PgPool, setup: GrantSetup) {
@@ -451,6 +453,12 @@ async fn grant_approval_roster_does_not_use_received_votes_as_the_threshold_deno
     let db = TestDatabase::lease().await;
     let pool = db.pool();
     let setup = Box::pin(prepare_grant_setup(&pool)).await;
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(async move { Box::pin(grant_approval_roster_transaction(pool, setup)).await });
+    tasks.join_next().await.unwrap().unwrap();
+}
+
+async fn grant_approval_roster_transaction(pool: PgPool, setup: GrantSetup) {
     let opened = &setup.opened;
     let head = &setup.head;
     let board_id = setup.board_id.clone();

@@ -3751,14 +3751,14 @@ async fn verify_device_keypackage_signature(
                 FailedPrecondition,
                 "accepted device authorization is required for KeyPackage signature",
             )
-            .with_reason_code("claim_generation_mismatch")
+            .with_internal_reason("claim_generation_mismatch")
         })?;
     if device.verification_state != "verified" || device.revoked_at.is_some() {
         return Err(crate::app_error!(
             FailedPrecondition,
             "KeyPackage signature requires a verified, non-revoked device",
         )
-        .with_reason_code("claim_generation_mismatch"));
+        .with_internal_reason("claim_generation_mismatch"));
     }
     let device_public_key = device
         .payload
@@ -3832,7 +3832,7 @@ async fn verify_session_keypackage_write_signature(
                     FailedPrecondition,
                     "Agent KeyPackage write binding differs from current authorization",
                 )
-                .with_reason_code("claim_generation_mismatch"));
+                .with_internal_reason("claim_generation_mismatch"));
             }
             validate_agent_keypackage_upload(
                 state,
@@ -3908,7 +3908,7 @@ async fn verify_session_keypackage_revoke_signature(
                     FailedPrecondition,
                     "Agent KeyPackage write binding differs from current authorization",
                 )
-                .with_reason_code("claim_generation_mismatch"));
+                .with_internal_reason("claim_generation_mismatch"));
             }
         }
         return Ok(());
@@ -3955,21 +3955,21 @@ async fn current_agent_keypackage_trust_binding(
             FailedPrecondition,
             "Agent must be active before publishing or claiming a KeyPackage",
         )
-        .with_reason_code("claim_generation_mismatch"));
+        .with_internal_reason("claim_generation_mismatch"));
     }
     let event_ref = agent.authorized_event_ref.as_deref().ok_or_else(|| {
         crate::app_error!(
             FailedPrecondition,
             "Agent has no accepted key authorization",
         )
-        .with_reason_code("claim_generation_mismatch")
+        .with_internal_reason("claim_generation_mismatch")
     })?;
     let verification_method = agent
         .authorized_verification_method
         .as_deref()
         .ok_or_else(|| {
             crate::app_error!(FailedPrecondition, "Agent key authorization is incomplete",)
-                .with_reason_code("claim_generation_mismatch")
+                .with_internal_reason("claim_generation_mismatch")
         })?;
     let active_event =
         crate::routing::identity::agents::accepted_active_agent_key_authorizations(state, &agent)
@@ -3981,7 +3981,7 @@ async fn current_agent_keypackage_trust_binding(
             FailedPrecondition,
             "Agent key authorization is no longer active",
         )
-        .with_reason_code("claim_generation_mismatch"));
+        .with_internal_reason("claim_generation_mismatch"));
     }
     let accepted = state
         .event_queries()
@@ -3995,7 +3995,7 @@ async fn current_agent_keypackage_trust_binding(
                 FailedPrecondition,
                 "Agent key authorization Event is unavailable",
             )
-            .with_reason_code("claim_generation_mismatch")
+            .with_internal_reason("claim_generation_mismatch")
         })?;
     let event =
         serde_json::from_value::<arkret_wire::Event>(accepted.envelope).map_err(|error| {
@@ -4020,7 +4020,7 @@ async fn current_agent_keypackage_trust_binding(
             FailedPrecondition,
             "Agent key authorization does not match current accepted state",
         )
-        .with_reason_code("claim_generation_mismatch"));
+        .with_internal_reason("claim_generation_mismatch"));
     }
     Ok(Some(KeyPackageTrustBinding::agent_key_authorize(
         event_ref.to_owned(),
@@ -4082,14 +4082,14 @@ async fn current_keypackage_trust_binding(
                 FailedPrecondition,
                 "accepted device authorization is required for KeyPackage publish",
             )
-            .with_reason_code("claim_generation_mismatch")
+            .with_internal_reason("claim_generation_mismatch")
         })?;
     device_authorize_trust_binding(&device).ok_or_else(|| {
         crate::app_error!(
             FailedPrecondition,
             "accepted device authorization is required for KeyPackage publish",
         )
-        .with_reason_code("claim_generation_mismatch")
+        .with_internal_reason("claim_generation_mismatch")
     })
 }
 

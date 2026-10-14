@@ -1078,6 +1078,7 @@ fn replica(
         producer_signer_fact: request.authority_commit.producer_signer_fact.clone(),
         local_service_id: member_station(),
         authority: governance_authority(unit),
+        historical_commit: None,
         event: event.clone(),
         commit: request.authority_commit.commit.clone(),
         genesis_event_ref: None,
@@ -1731,6 +1732,7 @@ async fn old_governance_replica_replay_is_idempotent_but_successor_writes_nothin
         .install_committed_chain_node(&CommittedChainNode {
             local_service_id: member_station(),
             authority: governance_authority(&unit),
+            historical_commit: None,
             commit: leave.authority_commit.commit.clone(),
         })
         .await
@@ -2286,6 +2288,7 @@ async fn circle_create_withheld_gap_allows_next_realm_replica() {
             .install_committed_chain_node(&CommittedChainNode {
                 local_service_id: member_station(),
                 authority: governance_authority(&unit),
+                historical_commit: None,
                 commit: withheld.commit.clone(),
             })
             .await
@@ -4086,6 +4089,7 @@ async fn member_station_anchors_on_the_bootstrap_snapshot_and_keeps_chain_nodes(
     let chain_node = |commit: &arkret_wire::RealmCommit| CommittedChainNode {
         local_service_id: member_station(),
         authority: governance_authority(&unit),
+        historical_commit: None,
         commit: commit.clone(),
     };
     assert_code(
@@ -5587,6 +5591,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
             .install_committed_chain_node(&CommittedChainNode {
                 local_service_id: member_station(),
                 authority: governance_authority(&unit),
+                historical_commit: None,
                 commit: withheld.commit.clone(),
             })
             .await

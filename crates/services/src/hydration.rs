@@ -154,21 +154,16 @@ fn replay_hydration_record_with_commit(
             .with_committed_ref(reference)
             .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))?;
     }
-    if record.kind == arkret_wire::EventKind::CircleMemberState.as_str() {
-        let payload = operation.payload.as_object_mut().ok_or_else(|| {
-            coland_storage::PersistenceError::Internal(format!(
-                "{projection_name} projection event {} has a non-object payload",
-                record.event_id
-            ))
-        })?;
-        // This replay source was selected from confirmed command results. Restore
-        // that trusted verdict on the reducer-only DTO; the canonical Event
-        // payload remains closed and never persists this internal field.
-        payload.insert("manage_capability_verified".to_owned(), Value::Bool(true));
-    }
-    if let coland_domain::reducer::ProjectionEffect::Rejected { reason } =
-        proj.apply(&operation, hydration_hlc)
-    {
+    let effect = match operation.event_kind {
+        arkret_wire::EventKind::CircleCreate => {
+            proj.restore_accepted_circle_create(&operation, operation.created_at)
+        }
+        arkret_wire::EventKind::CircleMemberState => {
+            proj.restore_accepted_circle_membership(&operation, operation.created_at)
+        }
+        _ => proj.apply(&operation, hydration_hlc),
+    };
+    if let coland_domain::reducer::ProjectionEffect::Rejected { reason } = effect {
         return Err(coland_storage::PersistenceError::Internal(format!(
             "{projection_name} projection event {} failed deterministic hydration: {reason}",
             record.event_id

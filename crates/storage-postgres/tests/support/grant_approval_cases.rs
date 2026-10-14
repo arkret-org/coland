@@ -172,10 +172,12 @@ async fn message_create_consumes_two_layers_atomically_and_preserves_nonce_on_fa
         tokio::spawn(async move { Box::new(Box::pin(prepare_grant_setup(&fixture_pool)).await) })
             .await
             .unwrap();
-    Box::pin(message_create_approval_transaction(pool, *setup)).await;
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(async move { Box::pin(message_create_approval_transaction(pool, setup)).await });
+    tasks.join_next().await.unwrap().unwrap();
 }
 
-async fn message_create_approval_transaction(pool: PgPool, setup: GrantSetup) {
+async fn message_create_approval_transaction(pool: PgPool, setup: Box<GrantSetup>) {
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let mut head = setup.head;
     let realm = head.event.realm_id.clone();
@@ -459,6 +461,12 @@ async fn grant_approval_roster_does_not_use_received_votes_as_the_threshold_deno
         tokio::spawn(async move { Box::new(Box::pin(prepare_grant_setup(&fixture_pool)).await) })
             .await
             .unwrap();
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(async move { Box::pin(grant_approval_roster_transaction(pool, setup)).await });
+    tasks.join_next().await.unwrap().unwrap();
+}
+
+async fn grant_approval_roster_transaction(pool: PgPool, setup: Box<GrantSetup>) {
     let opened = &setup.opened;
     let head = &setup.head;
     let board_id = setup.board_id.clone();

@@ -136,7 +136,7 @@ async fn commit(
     read: Option<&WatchAuditReadRequest>,
     pair: Option<&AuditPairedEventUnitSubmission>,
 ) -> ServiceResult<RegisteredAuditOutcome> {
-    let at = chrono::Utc::now();
+    let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let events = submissions
         .iter()
         .map(|slot| slot.event.clone())

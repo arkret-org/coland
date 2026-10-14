@@ -625,6 +625,7 @@ async fn withheld_full_upgrade_atomically_retains_original_human_fact_without_he
     let replica = |request: &coland_storage::EventCommitRequest, role| CommittedReplica {
         local_service_id: member_account.station_id.clone(),
         authority: authority.clone(),
+        historical_commit: None,
         event: request.authority_commit.event.clone(),
         commit: request.authority_commit.commit.clone(),
         producer_signer_fact: request.authority_commit.producer_signer_fact.clone(),
@@ -708,6 +709,7 @@ async fn withheld_full_upgrade_atomically_retains_original_human_fact_without_he
         .install_committed_chain_node(&CommittedChainNode {
             local_service_id: member_account.station_id.clone(),
             authority: authority.clone(),
+            historical_commit: None,
             commit: target.authority_commit.commit.clone(),
         })
         .await

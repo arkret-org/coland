@@ -151,7 +151,7 @@ fn advance_refusal(refusal: ReadCursorAdvanceRefusal) -> AppError {
         // Decision 0108 (0809): a known position outside the owner's readable
         // interval is `param_invalid`, not a retryable unproved position.
         ReadCursorAdvanceRefusal::PositionNotReadable => {
-            AppError::param_invalid("position.event_id precedes the owner's current join")
+            AppError::param_invalid("position.event_id is outside the owner's readable interval")
         }
         ReadCursorAdvanceRefusal::Unproved(detail) => {
             crate::app_error!(

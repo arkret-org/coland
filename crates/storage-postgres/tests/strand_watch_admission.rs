@@ -84,6 +84,94 @@ async fn read(
 }
 
 #[tokio::test]
+async fn complete_watch_reads_with_ten_thousand_accepted_history_events_meet_latency_budget() {
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let discussion = ordinary_realm::open_human_discussion(&pool, "watch-complete-history").await;
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let mut head = discussion.head.authority_commit.clone();
+    let creator = head.event.actor_id.clone();
+    let at = head.commit.committed_at + chrono::Duration::seconds(1);
+    let empty = ordinary_realm::next_request(
+        &head,
+        arkret_wire::EventKind::StrandCreate,
+        creator.signing_principal_id(),
+        json!({"object":{
+            "schema":"ak.schema.strand.v1", "realm_id":discussion.realm_id(),
+            "tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},
+            "metadata":{"title":"Never watched"}, "state":"active", "created_by":creator,
+            "created_at":arkret_canonical::format_timestamp_canonical(at)}}),
+        at,
+    );
+    let empty = Box::pin(ordinary_realm::source_request(&pool, empty)).await;
+    uow.commit_event(empty.clone()).await.unwrap();
+    let empty_id = arkret_wire::StrandId::from_event_id(&empty.authority_commit.event.event_id);
+    head = empty.authority_commit;
+    let watch = write(&pool, &discussion, &head, json!("all"), None, None, 2).await;
+    uow.commit_event(watch.clone()).await.unwrap();
+    head = watch.authority_commit.clone();
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let account = creator.as_account_id().unwrap();
+    let requests = [
+        read_request(&discussion),
+        StrandWatchCurrentRequestBody {
+            strand_id: empty_id,
+            ..read_request(&discussion)
+        },
+    ];
+    for ordinal in 1..=10_000 {
+        let request = discussion.message_after(
+            &head,
+            &format!("accepted-history-{ordinal}"),
+            discussion.committed_at() + chrono::Duration::seconds(ordinal + 2),
+        );
+        let request = Box::pin(ordinary_realm::source_request(&pool, request)).await;
+        uow.commit_event(request.clone()).await.unwrap();
+        head = request.authority_commit;
+        if ![100, 1000, 10_000].contains(&ordinal) {
+            continue;
+        }
+        for (index, request) in requests.iter().enumerate() {
+            let mut samples = Vec::new();
+            for _ in 0..12 {
+                let started = std::time::Instant::now();
+                let outcome = store
+                    .strand_watch_current_for_account(request, account, &ordinary_realm::station())
+                    .await
+                    .unwrap();
+                samples.push(started.elapsed());
+                assert!(match (index, outcome) {
+                    (
+                        0,
+                        SelfExactCurrentRead::Answer(StrandWatchCurrentOutcome::Current {
+                            result,
+                            ..
+                        }),
+                    ) => result.revision.commit_id == watch.authority_commit.commit.commit_id,
+                    (
+                        1,
+                        SelfExactCurrentRead::Answer(StrandWatchCurrentOutcome::NeverWritten {
+                            ..
+                        }),
+                    ) => true,
+                    _ => false,
+                });
+            }
+            samples.sort();
+            let maximum = samples.last().unwrap();
+            println!(
+                "[complete-watch-budget] accepted_history={ordinal} selector={index} samples=12 max_ms={:.3} budget_ms=250",
+                maximum.as_secs_f64() * 1000.0
+            );
+            assert!(
+                *maximum < std::time::Duration::from_millis(250),
+                "complete namespace and authorization read exceeded the 250ms engineering budget"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn realm_watch_current_remains_provable_after_private_sidecar_history() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();

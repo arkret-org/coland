@@ -1117,20 +1117,18 @@ pub(crate) async fn strand_watch_observation_in_connection(
     } else {
         Vec::new()
     };
-    if cut
-        .require_content_read_constraints_with_approvals(
-            &source,
-            chrono::Utc::now(),
-            owned,
-            if audit.is_some() {
-                arkret_wire::CapabilityActionId::RealmNotificationAudit
-            } else {
-                arkret_wire::CapabilityActionId::ObjectRead
-            },
-            &markers,
-        )
-        .is_err()
-    {
+    if let Err(error) = cut.require_content_read_constraints_with_approvals(
+        &source,
+        chrono::Utc::now(),
+        owned,
+        if audit.is_some() {
+            arkret_wire::CapabilityActionId::RealmNotificationAudit
+        } else {
+            arkret_wire::CapabilityActionId::ObjectRead
+        },
+        &markers,
+    ) {
+        tracing::debug!(error = %error, "Strand Watch disclosure refused at the accepting cut");
         return Ok(SelfExactCurrentRead::NotFound);
     }
     let selector = StrandWatchCurrentSelector {

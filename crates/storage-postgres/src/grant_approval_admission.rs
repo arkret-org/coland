@@ -125,6 +125,12 @@ pub(crate) async fn require_grant_approvals(
                 facts,
                 commit.committed_at,
                 false,
+                prepared.is_some_and(|p| {
+                    matches!(
+                        p.carrier_binding,
+                        Some(coland_storage::ApprovalCarrierBinding::AuditPair { .. })
+                    )
+                }),
             )
             .await?
             {

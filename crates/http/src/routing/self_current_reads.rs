@@ -273,6 +273,20 @@ async fn strand_watch_current(req: &mut Request, depot: &Depot, res: &mut Respon
                 "observed authority conflicts with the peer chain",
             );
         }
+        if verified.service_id != state.service_core_id()
+            && state
+                .authority_commits()
+                .record_remote_authority(&verified, &state.service_core_id())
+                .await
+                .is_err()
+        {
+            return render_unresolved(
+                res,
+                ErrorCode::RevisionUnavailable,
+                ServiceOperationId::SELF_STRAND_WATCH_READ_CURRENT_V1,
+                "the verified governing observation could not be retained",
+            );
+        }
         Some(verified)
     } else {
         None

@@ -1092,6 +1092,88 @@ async fn arkret_rtc_token(
 mod tests {
     use super::*;
 
+    #[test]
+    #[ignore = "requires the configured real LiveKit server and Python RTC SDK"]
+    fn real_livekit_media_token_cannot_mute_another_publishers_track() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let lease = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = lease.local_addr().unwrap().port();
+        drop(lease);
+        let focus = MediaProviderConfig {
+            provider: MediaProviderKind::LiveKit,
+            focus_id: "livekit_test".to_owned(),
+            token_endpoint: "https://station.example/_arkret/self/rtc/token".to_owned(),
+            connect_url: format!("ws://127.0.0.1:{port}"),
+        };
+        let config = crate::config::LiveKitConfig {
+            api_key: Some("2136-test-key".to_owned()),
+            api_secret: Some("2136-owned-test-secret-at-least-32-bytes".to_owned()),
+        };
+        let issued_at = now();
+        let mut tokens = Vec::new();
+        for _ in 0..2 {
+            let participant = format!("ak:rtc_participant:{}", uuid::Uuid::now_v7());
+            let request = MediaTokenIssueRequestBody {
+                focus: &focus,
+                issuer_kid: "did:web:station.example#notary-key",
+                realm_id: "ak:realm:AW2XhEBfjbMHqDBzRGwBXCaBZtSGUQTBe5CkC4pjU8O2",
+                call_id: "ak:call:AbhvODyrIRCskAIoS9IXLjMfD-Zsr8lwDpiCU_zLR4it",
+                participant_id: &participant,
+                desired_media: (true, false, false),
+                allow_screen_share: false,
+                issued_at,
+                expires_at: issued_at + Duration::seconds(300),
+            };
+            let issued = issue_livekit_backend_token(&request, &config).unwrap();
+            let MediaBackendToken::Opaque(token) = issued.backend_token else {
+                panic!("LiveKit issuer returned another backend branch");
+            };
+            tokens.push(token);
+        }
+        let moderator = arkret_models_collaboration::call_signal::CallMuteStateSignalData {
+            audio_muted: true,
+            video_muted: false,
+            changed_by: arkret_models_collaboration::call_signal::MuteChangedBy::Moderator,
+            target_actor_id: None,
+            target_device_id: None,
+        };
+        assert!(
+            moderator
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported_feature")
+        );
+        let mut child =
+            Command::new(std::env::var("COLAND_TEST_SFU_PYTHON").expect("real Python RTC SDK"))
+                .arg(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/support/livekit_mute_probe.py"
+                ))
+                .env("LIVEKIT_LOG_LEVEL", "error")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+        serde_json::to_writer(
+            child.stdin.as_mut().unwrap(),
+            &json!({
+                "tokens":tokens,"port":port,"api_key":config.api_key,"api_secret":config.api_secret,
+            }),
+        )
+        .unwrap();
+        child.stdin.take().unwrap().flush().unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "real SFU probe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        println!("{}", String::from_utf8_lossy(&output.stdout));
+    }
+
     fn actor(principal: &str) -> arkret_wire::ActorId {
         arkret_wire::ActorId::account(arkret_wire::AccountId::new(
             arkret_wire::DidCoreId::new(principal).unwrap(),

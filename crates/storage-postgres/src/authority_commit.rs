@@ -5428,6 +5428,28 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 || Some(&payload.expected_realm_stream_commit_id) != change.commit.previous_commit_ref.as_ref() {
                 return Err(invalid("handoff differs from the accepted change CAS").into());
             }
+            let mut watch_cells = std::collections::BTreeSet::new();
+            for full in &originals {
+                if full.event.kind == arkret_wire::EventKind::StrandWatchSet {
+                    let payload: arkret_models_collaboration::events_payloads::strand::StrandWatchSetPayload = serde_json::from_value(
+                        serde_json::to_value(&full.event.payload).map_err(PersistenceError::database)?
+                    ).map_err(PersistenceError::database)?;
+                    watch_cells.insert((full.commit.stream_ref.clone(), payload.strand_id, payload.watcher_actor_id));
+                }
+            }
+            for row in &snapshot.current_state_entries {
+                let arkret_wire::TypedCurrentRow::Value { selector, source_stream_ref, .. } = row;
+                if let arkret_wire::CurrentSelector::StrandWatch { strand_id, watcher_actor_id } = selector {
+                    watch_cells.insert((source_stream_ref.clone(), strand_id.clone(), watcher_actor_id.clone()));
+                }
+            }
+            for (stream, strand, actor) in watch_cells {
+                let head = final_stream_heads.iter().find(|head| head.stream_ref == stream)
+                    .ok_or_else(|| invalid("handoff Watch namespace has no final head"))?;
+                crate::strand_watch_current_results::require_current_basis_in_connection(
+                    conn, &handoff.realm_id, head, &strand, &actor, ""
+                ).await?;
+            }
             let inventory = handoff_inventory_in_connection(conn, &originals).await?;
             let digest = arkret_models_collaboration::authority_commit::historical_signer_facts_digest(&inventory).map_err(invalid)?;
             if handoff.historical_signer_facts_digest.as_ref() != Some(&digest) {

@@ -1558,6 +1558,11 @@ pub(crate) fn disclose_to_account(
             CurrentSelector::Strand { .. }
             | CurrentSelector::Space { .. }
             | CurrentSelector::Relation { .. } => Some(object_scope(value)?),
+            CurrentSelector::StrandWatch { strand_id, .. } => {
+                Some(object_scope(strands.get(strand_id).ok_or_else(|| {
+                    rejected("Watch target has no Strand current")
+                })?)?)
+            }
             CurrentSelector::Rsvp { event_ref, .. }
             | CurrentSelector::CalendarScheduleSource {
                 strand_id: event_ref,

@@ -106,6 +106,10 @@ pub(super) fn peer_router() -> Router {
     Router::new()
         .push(Router::with_path("streams/scan").post(peer_scan_stream))
         .push(Router::with_path("realm-authority/handoff").post(peer_handoff))
+        .push(
+            Router::with_path("strands/watch/current")
+                .post(super::self_current_reads::peer_strand_watch_current),
+        )
 }
 
 /// `ak.open.realm_authority.read.bundle.v1`, under the unauthenticated `open` tree.

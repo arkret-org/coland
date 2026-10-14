@@ -6,7 +6,7 @@
 //!
 //! These are the only spec-registered media surfaces. Both are stateless with
 //! respect to any ephemeral signaling session: the media token issuer reads the
-//! independent durable focus, moderation, and per-leg mute-override cells; ICE
+//! independent durable focus and moderation cells; ICE
 //! config is a transport-layer
 //! discovery surface bound to the authenticated `(actor, device)`. STUN/TURN
 //! URLs, credential TTLs, and the optional TURN shared secret are
@@ -558,14 +558,8 @@ async fn handle_rtc_token(
     // Read the independent durable media-policy cells once. They MAY all be
     // absent when a brand-new call initiator redeems a token before writing its
     // first `ak.call.state` event. Absent cells mean no committed focus or ban.
-    let call_cells = CallMediaCells::load(
-        state,
-        body.realm_id.as_str(),
-        body.call_id.as_str(),
-        &body.actor_id,
-        body.device_id.as_str(),
-    )
-    .await?;
+    let call_cells =
+        CallMediaCells::load(state, body.realm_id.as_str(), body.call_id.as_str()).await?;
 
     // (3) `webrtc-signaling.md` §3a — a banned actor MUST NOT re-issue a join
     // token for this call's lifetime. The ban set is the durable
@@ -760,32 +754,8 @@ struct CallMediaCells {
 }
 
 impl CallMediaCells {
-    async fn load(
-        state: &AppState,
-        realm_id: &str,
-        call_id: &str,
-        actor_id: &arkret_wire::ActorId,
-        device_id: &str,
-    ) -> Result<Self, AppError> {
+    async fn load(state: &AppState, realm_id: &str, call_id: &str) -> Result<Self, AppError> {
         let projection = state.projections().snapshot();
-        if projection
-            .facet_value(
-                realm_id,
-                &FacetRef::composite(
-                    facet::CALL_MUTE_OVERRIDE,
-                    &[call_id, &actor_id.to_string(), device_id],
-                ),
-            )
-            .is_some()
-            || projection
-                .facet_value(realm_id, &FacetRef::new(facet::CALL_MUTE_OVERRIDE, call_id))
-                .is_some()
-        {
-            return Err(crate::app_error!(
-                FailedPrecondition,
-                "v1 cannot interpret a retained moderator mute override"
-            ));
-        }
         Ok(Self {
             focus: projection
                 .facet_value(realm_id, &FacetRef::new(facet::CALL_FOCUS, call_id))

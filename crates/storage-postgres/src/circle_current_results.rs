@@ -328,6 +328,12 @@ pub(crate) async fn admit_in_connection(
                     "Circle self-entry requires a public Circle",
                 ));
             }
+            if next == "knock" && circle.join_rule != CircleJoinRule::Knock {
+                return Err(conflict(
+                    ConflictCode::FailedPrecondition,
+                    "Circle knock requires its knock join rule",
+                ));
+            }
             let current = sql_query(
                 "SELECT membership FROM circle_member_state_current_results \
                  WHERE circle_id=$1 AND member_id=$2 FOR UPDATE",
@@ -352,7 +358,7 @@ pub(crate) async fn admit_in_connection(
             }
             if !matches!(
                 (previous, next),
-                (None | Some("leave"), "join") | (Some("join"), "leave")
+                (None | Some("leave"), "join" | "knock") | (Some("join" | "knock"), "leave")
             ) {
                 return Err(conflict(
                     ConflictCode::InvalidMembershipTransition,

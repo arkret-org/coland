@@ -18,7 +18,6 @@ pub mod facet {
     pub const CALENDAR_RSVP: &str = "calendar.rsvp";
     pub const CALL_FOCUS: &str = "call.focus";
     pub const CALL_MODERATION: &str = "call.moderation";
-    pub const CALL_MUTE_OVERRIDE: &str = "call.mute_override";
     pub const CALL_RECORDING: &str = "call.recording";
     pub const CALL_RECORDING_RESULT: &str = "call.recording_result";
     pub const CALL_ROSTER: &str = "call.roster";

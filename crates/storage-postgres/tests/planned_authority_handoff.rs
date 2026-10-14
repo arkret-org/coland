@@ -244,8 +244,37 @@ async fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
     Box::pin(fixture.admit(&pool)).await;
     let store = PgAuthorityCommitStore { pool: pool.clone() };
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
-    let tail = fixture.unit.transactions.last().unwrap();
-    let realm = tail.event.realm_id.clone();
+    let mut watch_tail = fixture.unit.transactions.last().unwrap().clone();
+    let realm = watch_tail.event.realm_id.clone();
+    let watcher = ActorId::account(fixture.pcr.history.account.clone());
+    let mut strands = Vec::new();
+    for label in ["Written Watch", "Never Written Watch"] {
+        let created_at = watch_tail.commit.committed_at + chrono::TimeDelta::seconds(1);
+        let create = Box::pin(request(
+            &fixture,
+            &pool,
+            &watch_tail,
+            EventKind::StrandCreate,
+            serde_json::json!({"object":{"schema":"ak.schema.strand.v1","realm_id":realm,
+                "tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},
+                "metadata":{"title":label},"state":"active","created_by":watcher,
+                "created_at":arkret_canonical::format_timestamp_canonical(created_at)}}),
+        ))
+        .await;
+        Box::pin(uow.commit_event(create.clone())).await.unwrap();
+        strands.push(arkret_wire::StrandId::from_event_id(
+            &create.authority_commit.event.event_id,
+        ));
+        watch_tail = create.authority_commit;
+    }
+    let set = Box::pin(request(&fixture, &pool, &watch_tail, EventKind::StrandWatchSet,
+        serde_json::json!({"strand_id":strands[0],"watcher_actor_id":watcher,"level":"all","level_public":true}))).await;
+    Box::pin(uow.commit_event(set.clone())).await.unwrap();
+    let clear = Box::pin(request(&fixture, &pool, &set.authority_commit, EventKind::StrandWatchSet,
+        serde_json::json!({"strand_id":strands[0],"watcher_actor_id":watcher,"level":null,"expected_value":{"level":"all","level_public":true}}))).await;
+    Box::pin(uow.commit_event(clear.clone())).await.unwrap();
+    watch_tail = clear.authority_commit.clone();
+    let tail = &watch_tail;
     let account = fixture.pcr.history.account.clone();
     let next: arkret_wire::DidCoreId = "ak:did_core:web:handoff-new.example".parse().unwrap();
     let key = ed25519_dalek::SigningKey::from_bytes(&[83; 32]);
@@ -382,6 +411,23 @@ async fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
     let installed = store.current_authority(&realm).await.unwrap().unwrap();
     assert_eq!(installed.generation, 1);
     assert_eq!(installed.service_id, next);
+    for (index, strand) in strands.iter().enumerate() {
+        let query =
+            arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentRequestBody {
+                realm_id: realm.clone(),
+                strand_id: strand.clone(),
+                watcher_actor_id: watcher.clone(),
+            };
+        match store.strand_watch_current_for_account(&query, &account, &next).await.unwrap() {
+            coland_storage::SelfExactCurrentRead::Answer(arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome::Current { governance_generation, result, .. }) if index == 0 => {
+                assert_eq!(governance_generation, 1);
+                assert_eq!(result.revision.commit_id, clear.authority_commit.commit.commit_id);
+                assert_eq!(serde_json::to_value(result.value).unwrap(), serde_json::Value::Null);
+            },
+            coland_storage::SelfExactCurrentRead::Answer(arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome::NeverWritten { governance_generation, .. }) if index == 1 => assert_eq!(governance_generation, 1),
+            other => panic!("complete nonzero tenure must retain Watch presence: {other:?}"),
+        }
+    }
     let sign_new = |material: &coland_storage::RealmStateSnapshotMaterial| {
         coland_services::authority_commit::build_signed_realm_state_snapshot(
             material,

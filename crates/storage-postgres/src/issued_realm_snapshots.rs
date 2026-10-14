@@ -728,6 +728,7 @@ async fn recheck_disclosure_in_connection(
             | CurrentSelector::Circle { .. }
             | CurrentSelector::Sidecar { .. }
             | CurrentSelector::Strand { .. }
+            | CurrentSelector::StrandWatch { .. }
             | CurrentSelector::CalendarScheduleSource { .. }
             | CurrentSelector::Space { .. }
             | CurrentSelector::SpaceParent { .. }

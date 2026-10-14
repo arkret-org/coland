@@ -1048,12 +1048,348 @@ async fn require_owned_content_source_in_connection(
     Ok(())
 }
 
+/// A peer read linearizes Realm authorization remotely. This lease holds only
+/// the local Account/endpoint and already observed conflicting evidence.
+struct RemoteWatchGuard {
+    held: Box<DeliveryGuard>,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[async_trait::async_trait]
+impl AccountContentDeliveryGuard for RemoteWatchGuard {
+    fn permits_handoff(&self) -> bool {
+        chrono::Utc::now() < self.expires_at
+            && self
+                .held
+                .clock
+                .as_ref()
+                .is_none_or(|clock| clock.permits_at(chrono::Utc::now()))
+    }
+    async fn finish(self: Box<Self>) -> PersistenceResult<()> {
+        self.held.finish().await
+    }
+}
+
+async fn acquire_remote_watch_delivery(
+    pool: &crate::PgPool,
+    account: &AccountId,
+    station: &DidCoreId,
+    input: &coland_storage::AccountContentDeliveryInput,
+) -> PersistenceResult<Option<Box<dyn AccountContentDeliveryGuard>>> {
+    use diesel::sql_types::{BigInt, Jsonb};
+    let (request, outcome, authority) = input
+        .remote_watch_read
+        .as_ref()
+        .ok_or_else(|| unavailable("remote Watch witness is missing"))?;
+    let expires_at = input
+        .credential_expires_at
+        .ok_or_else(|| unavailable("remote Watch credential has no expiry"))?;
+    if request.watcher_actor_id.as_account_id() != Some(account)
+        || &account.station_id != station
+        || authority.service_id == *station
+        || authority.realm_id != request.realm_id
+        || !input.realms.is_empty()
+        || !input.watch_reads.is_empty()
+        || !input.committed_events.is_empty()
+        || !input.current_views.is_empty()
+        || !input.projection_lists.is_empty()
+        || !input.morph_lists.is_empty()
+        || !input.morph_documents.is_empty()
+        || !input.morph_absences.is_empty()
+        || !input.realm_exports.is_empty()
+        || !input.snapshots.is_empty()
+        || !input.future_materials.is_empty()
+        || !input.notifications.is_empty()
+        || !input.exact_reads.is_empty()
+        || !input.blobs.is_empty()
+        || !input.unresolved_content_realms.is_empty()
+    {
+        return Err(unavailable(
+            "remote Watch delivery is not one exact self response",
+        ));
+    }
+    outcome
+        .validate_for_generation(request, authority.generation)
+        .map_err(unavailable)?;
+    let mut held = Box::new(DeliveryGuard {
+        connection: Some(crate::pg_conn(pool).await?),
+        runtime: tokio::runtime::Handle::current(),
+        clock: None,
+    });
+    sql_query("BEGIN")
+        .execute(held.connection())
+        .await
+        .map_err(PersistenceError::database)?;
+    #[derive(QueryableByName)]
+    struct ObservedAuthority {
+        #[diesel(sql_type=BigInt)]
+        generation: i64,
+        #[diesel(sql_type=Text)]
+        service_id: String,
+        #[diesel(sql_type=Jsonb)]
+        authority_ref: serde_json::Value,
+    }
+    let observed = sql_query("SELECT generation,service_id,authority_ref FROM realm_authorities WHERE realm_id=$1 FOR SHARE")
+        .bind::<Text,_>(request.realm_id.as_str()).get_result::<ObservedAuthority>(held.connection()).await.optional().map_err(PersistenceError::database)?;
+    if let Some(observed) = observed {
+        let generation = u64::try_from(observed.generation).map_err(PersistenceError::database)?;
+        if generation > authority.generation
+            || (generation == authority.generation
+                && (observed.service_id != authority.service_id.as_str()
+                    || observed.authority_ref
+                        != serde_json::to_value(&authority.authority_ref)
+                            .map_err(PersistenceError::database)?))
+        {
+            return Err(unavailable(
+                "remote Watch authority was superseded or conflicts",
+            ));
+        }
+    }
+    let actor = ActorId::account(account.clone());
+    #[derive(QueryableByName)]
+    struct LocalCurrent {
+        #[diesel(sql_type=Jsonb)]
+        value: serde_json::Value,
+        #[diesel(sql_type=BigInt)]
+        current_stream_position: i64,
+        #[diesel(sql_type=Text)]
+        current_commit_id: String,
+        #[diesel(sql_type=diesel::sql_types::Nullable<Jsonb>)]
+        source_stream_ref: Option<serde_json::Value>,
+    }
+    let (head, result) = match outcome {
+        arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome::Current { stream_head, result, .. } => (stream_head, Some(result)),
+        arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome::NeverWritten { stream_head, .. } => (stream_head, None),
+    };
+    let revoked = sql_query("SELECT EXISTS(SELECT 1 FROM member_state_current_results WHERE realm_id=$1 AND member_id=$2 AND membership<>'join') AS present")
+        .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(actor.to_string())
+        .get_result::<crate::ExistsRow>(held.connection()).await.map_err(PersistenceError::database)?.present;
+    if revoked {
+        return Err(unavailable(
+            "remote Watch member withdrawal has been observed",
+        ));
+    }
+    let strand_source = crate::object_projection_reads::current_source_sql(
+        "s",
+        "jsonb_build_object('kind','strand','strand_id',s.strand_id)",
+    );
+    let strand = sql_query(format!("SELECT s.value,s.current_commit_id,s.current_stream_position,{strand_source} AS source_stream_ref FROM strand_current_results s WHERE s.realm_id=$1 AND s.strand_id=$2 FOR SHARE OF s"))
+        .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.strand_id.as_str())
+        .get_result::<LocalCurrent>(held.connection()).await.optional().map_err(PersistenceError::database)?;
+    if let Some(strand) = strand {
+        let expected_circle = match &head.stream_ref {
+            arkret_wire::CommitStreamRef::Circle { circle_id, .. } => Some(circle_id.as_str()),
+            _ => None,
+        };
+        if strand.source_stream_ref.as_ref()
+            != Some(&serde_json::to_value(&head.stream_ref).map_err(PersistenceError::database)?)
+            || strand
+                .value
+                .get("state")
+                .and_then(serde_json::Value::as_str)
+                != Some("active")
+            || strand
+                .value
+                .get("scope_circle_id")
+                .and_then(serde_json::Value::as_str)
+                != expected_circle
+        {
+            return Err(unavailable(
+                "remote Watch Strand scope or lifecycle conflicts with observed current",
+            ));
+        }
+    }
+    if let arkret_wire::CommitStreamRef::Circle { circle_id, .. } = &head.stream_ref {
+        let revoked = sql_query("SELECT EXISTS(SELECT 1 FROM circle_member_state_current_results m WHERE realm_id=$1 AND circle_id=$2 AND member_id=$3 AND (membership<>'join' OR NOT circle_member_parent_join_current(m.realm_id,m.member_id,m.value))) AS present")
+            .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).bind::<Text,_>(actor.to_string())
+            .get_result::<crate::ExistsRow>(held.connection()).await.map_err(PersistenceError::database)?.present;
+        if revoked {
+            return Err(unavailable(
+                "remote Watch Circle withdrawal has been observed",
+            ));
+        }
+    }
+    let watch_source = crate::object_projection_reads::current_source_sql(
+        "w",
+        "jsonb_build_object('kind','strand_watch','strand_id',w.strand_id,'watcher_actor_id',w.watcher_actor_id::jsonb)",
+    );
+    let current = sql_query(format!("SELECT w.value,w.current_commit_id,w.current_stream_position,{watch_source} AS source_stream_ref FROM strand_watch_current_results w WHERE w.realm_id=$1 AND w.strand_id=$2 AND w.watcher_actor_id=$3 FOR SHARE OF w"))
+        .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.strand_id.as_str()).bind::<Text,_>(actor.to_string())
+        .get_result::<LocalCurrent>(held.connection()).await.optional().map_err(PersistenceError::database)?;
+    if let Some(current) = current {
+        if current.source_stream_ref.as_ref()
+            != Some(&serde_json::to_value(&head.stream_ref).map_err(PersistenceError::database)?)
+        {
+            return Err(unavailable(
+                "observed Watch current belongs to another or unproved stream",
+            ));
+        }
+        let Some(result) = result else {
+            return Err(unavailable(
+                "accepted local Watch excludes remote never-written",
+            ));
+        };
+        let position =
+            u64::try_from(current.current_stream_position).map_err(PersistenceError::database)?;
+        if position > result.revision.stream_position
+            || (position == result.revision.stream_position
+                && (current.current_commit_id != result.revision.commit_id.as_str()
+                    || current.value
+                        != serde_json::to_value(result.value)
+                            .map_err(PersistenceError::database)?))
+        {
+            return Err(unavailable(
+                "remote Watch current is older than or conflicts with observed current",
+            ));
+        }
+    }
+    if let Some(endpoint) = &input.agent_endpoint {
+        if endpoint.agent_id != account.principal_id || input.watch_delivery_device.is_some() {
+            return Err(unavailable(
+                "remote Watch endpoint differs from its Agent credential",
+            ));
+        }
+        let evidence = input
+            .qualified_agent_scope_evidence
+            .as_ref()
+            .ok_or_else(|| unavailable("remote Watch lacks qualified Agent scope"))?;
+        let (_, details) = input
+            .agent_session_scope
+            .as_ref()
+            .ok_or_else(|| unavailable("remote Watch lacks the Agent session content ceiling"))?;
+        if details.get("controller_principal_id")
+            != Some(&serde_json::json!(
+                evidence.accepted_binding().controller_account.principal_id
+            ))
+            || details.get("agent_key_authorization_ref")
+                != Some(&serde_json::json!(endpoint.authorization_ref.event_id))
+        {
+            return Err(unavailable(
+                "remote Watch session controller or key differs",
+            ));
+        }
+        Box::pin(crate::agent_current_results::lock_agent_producer_current(
+            held.connection(),
+            &endpoint.pcr_realm_id,
+            &endpoint.agent_id,
+        ))
+        .await?;
+        let at = chrono::Utc::now();
+        Box::pin(
+            crate::authority_commit::check_agent_endpoint_current_in_connection(
+                held.connection(),
+                &endpoint.pcr_realm_id,
+                &endpoint.agent_id,
+                &endpoint.authorization_ref,
+                &endpoint.verification_method,
+                at,
+            ),
+        )
+        .await?;
+        let source = crate::committed_disclosure::accepted_full_event_in_connection(
+            held.connection(),
+            &endpoint.authorization_ref.event_id,
+        )
+        .await?
+        .ok_or_else(|| unavailable("remote Watch Agent key original is unavailable"))?;
+        let key: arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload =
+            serde_json::from_value(
+                serde_json::to_value(&source.event.payload).map_err(PersistenceError::database)?,
+            )
+            .map_err(PersistenceError::database)?;
+        let provision_scope = Box::pin(provision_scope_in_connection(
+            held.connection(),
+            endpoint,
+            evidence,
+            station,
+        ))
+        .await?;
+        let mut facts = coland_storage::OperationFacts::default();
+        facts.strand_id = Some(request.strand_id.to_string());
+        facts.object_kind = Some("strand".to_owned());
+        if let arkret_wire::CommitStreamRef::Circle { circle_id, .. } = &head.stream_ref {
+            facts.circle_id = Some(circle_id.to_string());
+        }
+        held.clock = Some(DeliveryClockProof {
+            checked_at: at,
+            key_expiry: key.expires_at,
+            credential_expiry: Some(expires_at),
+            key_scope: key.agent_key_scope,
+            provision_scope,
+            session_scope: input.agent_session_scope.clone(),
+            scope_operations: vec![(
+                actor,
+                arkret_wire::WireResourceSelector::strand(
+                    request.realm_id.clone(),
+                    request.strand_id.clone(),
+                ),
+                facts,
+                CapabilityActionId::ObjectRead,
+            )],
+            accountability: Vec::new(),
+            policies: Vec::new(),
+            positive_actions: Vec::new(),
+            native_projection_reads: Vec::new(),
+            native_reply: None,
+            reads: Vec::new(),
+        });
+    } else {
+        if input.agent_session_scope.is_some() || input.qualified_agent_scope_evidence.is_some() {
+            return Err(unavailable(
+                "remote Watch Agent cannot use a Human endpoint",
+            ));
+        }
+        let device = input
+            .watch_delivery_device
+            .as_ref()
+            .ok_or_else(|| unavailable("remote Watch has no bound device"))?;
+        if device.principal_id != account.principal_id || device.station_id != account.station_id {
+            return Err(unavailable("remote Watch Device binds another Account"));
+        }
+        crate::device_revocations::lock_artifact_devices_in_transaction(
+            held.connection(),
+            &[device],
+        )
+        .await?;
+        crate::ensure_gate_allowed_in_transaction(held.connection(), device).await?;
+    }
+    if let Some((token, account_pk)) = &input.watch_local_session {
+        #[derive(QueryableByName)]
+        struct LiveSession {
+            #[diesel(sql_type=diesel::sql_types::Timestamptz)]
+            expires_at: chrono::DateTime<chrono::Utc>,
+        }
+        let device = input
+            .watch_delivery_device
+            .as_ref()
+            .ok_or_else(|| unavailable("local Watch session has no Device binding"))?;
+        let session = sql_query("SELECT s.expires_at FROM sessions s JOIN accounts a ON a.pk=s.account_pk WHERE s.id=$1 AND s.account_pk=$2 AND s.actor_id=$3 AND s.audience=$4 AND s.device_id=$5 AND s.revoked_at IS NULL AND a.principal_id=$3 AND a.station_id=$4 AND a.disabled_at IS NULL FOR SHARE OF s,a")
+            .bind::<Text,_>(token).bind::<BigInt,_>(account_pk.0).bind::<Text,_>(account.principal_id.as_str())
+            .bind::<Text,_>(account.station_id.as_str()).bind::<Text,_>(&device.device_id)
+            .get_result::<LiveSession>(held.connection()).await.optional().map_err(PersistenceError::database)?
+            .ok_or_else(|| unavailable("local Watch session was withdrawn or changed"))?;
+        if session.expires_at != expires_at || session.expires_at <= chrono::Utc::now() {
+            return Err(unavailable("local Watch session expiry changed"));
+        }
+    }
+    let guard = Box::new(RemoteWatchGuard { held, expires_at });
+    if !guard.permits_handoff() {
+        return Err(unavailable(
+            "remote Watch credential or content ceiling expired",
+        ));
+    }
+    Ok(Some(guard))
+}
+
 pub(crate) async fn acquire(
     pool: &crate::PgPool,
     account: &AccountId,
     station: &DidCoreId,
     input: &coland_storage::AccountContentDeliveryInput,
 ) -> PersistenceResult<Option<Box<dyn AccountContentDeliveryGuard>>> {
+    if input.remote_watch_read.is_some() {
+        return Box::pin(acquire_remote_watch_delivery(pool, account, station, input)).await;
+    }
     // Bound the nested admission future without changing the caller stack budget.
     Box::pin(acquire_with_native_reply(
         pool, account, station, input, None,
@@ -1107,6 +1443,7 @@ pub(crate) async fn acquire_native_message_reply_preparation(
         || !input.notifications.is_empty()
         || !input.exact_reads.is_empty()
         || !input.watch_reads.is_empty()
+        || input.remote_watch_read.is_some()
         || !input.blobs.is_empty()
         || !input.unresolved_content_realms.is_empty()
         || !input

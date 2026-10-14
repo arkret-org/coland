@@ -3896,7 +3896,7 @@ CREATE TABLE strand_watch_current_results (
  PRIMARY KEY(strand_id,watcher_actor_id)
 );
 CREATE INDEX strand_watch_current_results_realm_idx ON strand_watch_current_results (realm_id,strand_id,watcher_actor_id);
-CREATE INDEX canonical_events_watch_key_idx ON public.canonical_events (realm_id,((envelope->'payload'->>'strand_id')),actor_id) WHERE kind='ak.strand.watch.set' AND state='committed';
+CREATE INDEX canonical_events_watch_key_idx ON public.canonical_events (realm_id,((envelope->'payload'->>'strand_id')),((envelope->'payload'->'watcher_actor_id'))) WHERE kind='ak.strand.watch.set' AND state='committed';
 
 -- Poll response history references its canonical truth in the same acceptance
 -- transaction. No independently mutable selections or Actor claims are stored.

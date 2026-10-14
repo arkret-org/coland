@@ -127,6 +127,7 @@ async fn content_delivery_guard_inner(
         crate::error::AppError::capability_denied("content recipient is not an Account")
     })?;
     let mut input = input.clone();
+    input.credential_expires_at = Some(session.expires_at);
     if let Some(agent_session) = session.agent_session() {
         let grant = session.session_grant.as_ref().ok_or_else(|| {
             crate::error::AppError::capability_denied("Agent delivery credential is unavailable")

@@ -198,6 +198,23 @@ pub(crate) async fn revalidate_stream_session(
     original: &SessionRecord,
     grant_jwt: Option<&str>,
 ) -> Result<(), (StatusCode, &'static str, &'static str)> {
+    revalidate_session(state, original, grant_jwt, false).await
+}
+
+pub(crate) async fn revalidate_current_read_session(
+    state: &AppState,
+    original: &SessionRecord,
+    grant_jwt: Option<&str>,
+) -> Result<(), (StatusCode, &'static str, &'static str)> {
+    revalidate_session(state, original, grant_jwt, true).await
+}
+
+async fn revalidate_session(
+    state: &AppState,
+    original: &SessionRecord,
+    grant_jwt: Option<&str>,
+    force_fresh: bool,
+) -> Result<(), (StatusCode, &'static str, &'static str)> {
     let rejected = (
         StatusCode::UNAUTHORIZED,
         "unauthenticated",
@@ -208,9 +225,12 @@ pub(crate) async fn revalidate_stream_session(
     }
     let mut current = if let Some(context) = original.session_grant.as_ref() {
         let grant_jwt = grant_jwt.ok_or(rejected)?;
-        let grant =
-            super::super::auth_grant_dpop::introspect_session_grant_cached(state, grant_jwt, false)
-                .await?;
+        let grant = super::super::auth_grant_dpop::introspect_session_grant_cached(
+            state,
+            grant_jwt,
+            force_fresh,
+        )
+        .await?;
         if grant.id != context.grant_id
             || grant.account_id != context.account_id
             || grant.issuer_id != context.issuer_id

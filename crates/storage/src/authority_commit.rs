@@ -1482,6 +1482,17 @@ pub struct AccountContentDeliveryInput {
         arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentRequestBody,
         arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome,
     )>,
+    /// Trusted in-process witness from a fresh authenticated governing peer.
+    /// It is only consumed by this one response's local delivery guard.
+    pub remote_watch_read: Option<(
+        arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentRequestBody,
+        arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome,
+        CurrentRealmAuthority,
+    )>,
+    pub watch_delivery_device: Option<crate::DeviceRevocationGateSelector>,
+    /// Local bearer sessions retain their exact stored Account through handoff.
+    /// Request-scoped signed grants are freshly introspected at the HTTP cut.
+    pub watch_local_session: Option<(String, crate::AccountPk)>,
     pub blobs: Vec<(
         arkret_wire::BlobRef,
         crate::BlobRecord,

@@ -802,6 +802,50 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn peer_watch_current_is_advertised_and_reaches_the_signature_gate() {
+        use salvo::test::{ResponseExt as _, TestClient};
+        let state = AppState::new(crate::config::AppConfig::test_default(), Db { pool: None });
+        let operation = arkret_wire::ServiceOperationId::PeerStrandWatchReadCurrentV1;
+        assert!(locally_advertises(
+            &state,
+            operation,
+            arkret_wire::BindingKind::HttpJson
+        ));
+        let source =
+            arkret_wire::DidCoreId::new("ak:did_core:web:remote-watch-reader.example").unwrap();
+        let destination = state.service_core_id();
+        let domain = state.config().trust_domain.to_string();
+        let body = serde_json::json!({"realm_id":"ak:realm:AdkQ-RmB1a8zyc52yl9GWAsodQ_EUle1WAVZqbO7pc19", "strand_id":"ak:strand:AdP2S6y0Ms7yp9-GNvXZ3sVfvTEo8mtnV3G_RfApIOn0", "watcher_actor_id":arkret_wire::ActorId::account(arkret_wire::AccountId::new(source.clone(),source.clone()))});
+        let service = crate::service(state);
+        let mut response = TestClient::post("http://server/_arkret/peer/strands/watch/current")
+            .add_header("Arkret-Operation", operation.as_str(), true)
+            .add_header("Source-Service-ID", source.as_str(), true)
+            .add_header("Destination-Service-ID", destination.as_str(), true)
+            .add_header("Source-Trust-Domain", &domain, true)
+            .add_header("Destination-Trust-Domain", &domain, true)
+            .add_header(
+                "Content-Digest",
+                crate::routing::federation::rfc9530_content_digest(
+                    &arkret_canonical::canonical_json_bytes(&body).unwrap(),
+                ),
+                true,
+            )
+            .json(&body)
+            .send(&service)
+            .await;
+        let problem: serde_json::Value = response.take_json().await.unwrap();
+        assert!(!response.status_code.unwrap().is_success());
+        assert_ne!(
+            problem["type"],
+            "https://arkret.org/problems/unrecognized_endpoint"
+        );
+        assert_ne!(
+            problem["type"],
+            "https://arkret.org/problems/unsupported_operation_version"
+        );
+    }
+
     #[test]
     fn device_pairing_selectors_are_reachable_through_the_registered_bundle() {
         let state = AppState::new(crate::config::AppConfig::test_default(), Db { pool: None });

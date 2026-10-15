@@ -604,14 +604,15 @@ async fn recheck_disclosure_in_connection(
     // historical object is still readable only while every one of its streams
     // and rows remains disclosed to this Account. New visible streams may have
     // appeared since issuance; they do not invalidate the older exact slice.
-    let current_material =
+    let current_material = crate::boxed_future(|| {
         crate::snapshot_disclosure_gate::account_snapshot_material_in_connection(
             conn,
             &snapshot.realm_id,
             account,
         )
-        .await?
-        .ok_or_else(|| undisclosable("the Account has no current disclosed cut"))?;
+    })
+    .await?
+    .ok_or_else(|| undisclosable("the Account has no current disclosed cut"))?;
     require_snapshot_serving_cut(conn, account, issuer, &tenure.service_id, &current_material)
         .await?;
     let signer =
@@ -644,12 +645,14 @@ async fn recheck_disclosure_in_connection(
         current_state_entries: snapshot.current_state_entries.clone(),
         retention_and_history_floor: snapshot.retention_and_history_floor.clone(),
     };
-    let disclosed = crate::snapshot_disclosure_gate::account_snapshot_candidate_in_connection(
-        conn,
-        &snapshot.realm_id,
-        account,
-        Some(original),
-    )
+    let disclosed = crate::boxed_future(|| {
+        crate::snapshot_disclosure_gate::account_snapshot_candidate_in_connection(
+            conn,
+            &snapshot.realm_id,
+            account,
+            Some(original),
+        )
+    })
     .await?
     .ok_or_else(|| undisclosable("the Account has no current disclosure"))?;
     if disclosed.current_state_entries != snapshot.current_state_entries {
@@ -826,6 +829,139 @@ fn basis_from_snapshot(
         })
 }
 
+/// Resolve cross-stream authorization sources from the exact issued cut, then
+/// apply the same current interval and per-Event disclosure as Account reads.
+/// A signed current row is not a promise that its original remains readable.
+async fn disclosed_basis_from_snapshot(
+    conn: &mut AsyncPgConnection,
+    account: &arkret_wire::AccountId,
+    snapshot: &arkret_wire::RealmStateSnapshot,
+    stream_ref: &arkret_wire::CommitStreamRef,
+    anchor: &arkret_wire::CommitStreamHead,
+    floor: u64,
+) -> PersistenceResult<
+    Option<arkret_models_collaboration::sync_frames::account_sync::StreamWindowStartBasis>,
+> {
+    use arkret_wire::{CommitStreamRef, CurrentSelector, TypedCurrentRow};
+
+    let Some(mut basis) = basis_from_snapshot(snapshot, stream_ref, anchor, floor) else {
+        return Ok(None);
+    };
+    let caller = arkret_wire::ActorId::account(account.clone());
+    let mut selectors = match stream_ref {
+        CommitStreamRef::Realm { .. } => return Ok(Some(basis)),
+        CommitStreamRef::Circle { circle_id, .. } => vec![CurrentSelector::Circle {
+            circle_id: circle_id.clone(),
+        }],
+        CommitStreamRef::Sidecar { sidecar_id, .. } => vec![CurrentSelector::Sidecar {
+            sidecar_id: sidecar_id.clone(),
+        }],
+        _ => return Ok(None),
+    };
+    selectors.push(CurrentSelector::MemberState {
+        actor_id: caller.clone(),
+    });
+    let realm_stream = CommitStreamRef::Realm {
+        realm_id: snapshot.realm_id.clone(),
+    };
+    let Some(readable) = crate::boxed_future(|| {
+        crate::account_stream_scan::snapshot_realm_floor_in_connection(
+            conn,
+            &snapshot.realm_id,
+            &caller,
+        )
+    })
+    .await?
+    else {
+        return Ok(None);
+    };
+    let Some(head) = snapshot
+        .visible_stream_heads
+        .iter()
+        .find(|head| head.stream_ref == realm_stream)
+    else {
+        return Ok(None);
+    };
+    let mut dependencies = Vec::with_capacity(selectors.len());
+    for selector in selectors {
+        let Some(TypedCurrentRow::Value {
+            source_stream_ref,
+            revision,
+            ..
+        }) = snapshot.current_state_entries.iter().find(|row| {
+            matches!(row, TypedCurrentRow::Value { selector: actual, .. } if actual == &selector)
+        }) else {
+            return Ok(None);
+        };
+        if source_stream_ref != &realm_stream
+            || revision.stream_position < readable.oldest_position
+            || revision.stream_position > head.stream_position
+            || (revision.stream_position == head.stream_position
+                && revision.commit_id != head.commit_id)
+        {
+            return Ok(None);
+        }
+        let Some(row) = sql_query(
+            "SELECT c.commit_json,e.envelope FROM realm_commits c \
+             JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
+             WHERE c.realm_id=$1 AND c.commit_id=$2 AND c.stream_ref=$3 AND c.stream_position=$4",
+        )
+        .bind::<Text, _>(snapshot.realm_id.as_str())
+        .bind::<Text, _>(revision.commit_id.as_str())
+        .bind::<Jsonb, _>(serde_json::to_value(&realm_stream).map_err(PersistenceError::database)?)
+        .bind::<super::BigInt, _>(
+            i64::try_from(revision.stream_position)
+                .map_err(|_| window_rejected("dependency position exceeds storage"))?,
+        )
+        .get_result::<WindowCommitRow>(&mut *conn)
+        .await
+        .optional()
+        .map_err(PersistenceError::database)?
+        else {
+            return Ok(None);
+        };
+        let Some(envelope) = row.envelope else {
+            return Ok(None);
+        };
+        let full = arkret_wire::CommittedEventFullView {
+            commit: serde_json::from_value(row.commit_json).map_err(PersistenceError::database)?,
+            event: serde_json::from_value(envelope).map_err(PersistenceError::database)?,
+        };
+        if full.commit.realm_id != snapshot.realm_id
+            || full.commit.stream_ref != *source_stream_ref
+            || full.commit.commit_id != revision.commit_id
+            || full.commit.stream_position != revision.stream_position
+        {
+            return Err(window_rejected(
+                "dependency original differs from its exact current source",
+            ));
+        }
+        let disclosed = crate::boxed_future(|| {
+            crate::committed_disclosure::disclose_to_member_in_connection(conn, vec![full], &caller)
+        })
+        .await?;
+        let [arkret_wire::CommittedEventView::Full(full)] = disclosed.as_slice() else {
+            return Ok(None);
+        };
+        disclosed[0]
+            .validate_shape()
+            .map_err(PersistenceError::database)?;
+        let dependency = arkret_wire::CommittedEventRef {
+            event_id: full.event.event_id.clone(),
+            commit_id: full.commit.commit_id.clone(),
+            stream_ref: full.commit.stream_ref.clone(),
+            stream_position: full.commit.stream_position,
+        };
+        if !dependencies.contains(&dependency) {
+            dependencies.push(dependency);
+        }
+    }
+    dependencies.sort();
+    basis.accepted_dependency_refs = Some(dependencies);
+    basis.validate().map_err(PersistenceError::database)?;
+    Ok(Some(basis))
+}
+
 /// Re-prove an issued object for a basis at the caller's cut. Only a
 /// disclosure failure means "not guaranteed"; any other error is a fault.
 async fn still_disclosable(
@@ -907,13 +1043,14 @@ pub(crate) async fn freeze_account_realm_window(
             else {
                 return Ok(None);
             };
-            let Some(material) =
+            let Some(material) = crate::boxed_future(|| {
                 crate::snapshot_disclosure_gate::account_snapshot_material_in_connection(
                     conn,
                     &request.realm_id,
                     &request.account,
                 )
-                .await?
+            })
+            .await?
             else {
                 return Ok(None);
             };
@@ -1025,10 +1162,28 @@ pub(crate) async fn freeze_account_realm_window(
                         let snapshot: arkret_wire::RealmStateSnapshot =
                             serde_json::from_value(candidate.snapshot_json)
                                 .map_err(PersistenceError::database)?;
-                        if basis_from_snapshot(&snapshot, &stream_ref, head, floor).is_some()
+                        if crate::boxed_future(|| {
+                            disclosed_basis_from_snapshot(
+                                conn,
+                                &request.account,
+                                &snapshot,
+                                &stream_ref,
+                                head,
+                                floor,
+                            )
+                        })
+                        .await?
+                        .is_some()
                             && derived_snapshot_id(&snapshot)? == snapshot.snapshot_id
-                            && still_disclosable(conn, &request.account, &request.issuer, &snapshot)
-                                .await?
+                            && crate::boxed_future(|| {
+                                still_disclosable(
+                                    conn,
+                                    &request.account,
+                                    &request.issuer,
+                                    &snapshot,
+                                )
+                            })
+                            .await?
                         {
                             head_basis_available = true;
                             break;
@@ -1203,18 +1358,29 @@ pub(crate) async fn freeze_account_realm_window(
                         let snapshot: arkret_wire::RealmStateSnapshot =
                             serde_json::from_value(candidate.snapshot_json)
                                 .map_err(PersistenceError::database)?;
-                        let Some(candidate_basis) =
-                            basis_from_snapshot(&snapshot, &stream_ref, &anchor, floor)
+                        let Some(candidate_basis) = crate::boxed_future(|| {
+                            disclosed_basis_from_snapshot(
+                                conn,
+                                &request.account,
+                                &snapshot,
+                                &stream_ref,
+                                &anchor,
+                                floor,
+                            )
+                        })
+                        .await?
                         else {
                             continue;
                         };
                         if derived_snapshot_id(&snapshot)? != snapshot.snapshot_id
-                            || !still_disclosable(
-                                conn,
-                                &request.account,
-                                &request.issuer,
-                                &snapshot,
-                            )
+                            || !crate::boxed_future(|| {
+                                still_disclosable(
+                                    conn,
+                                    &request.account,
+                                    &request.issuer,
+                                    &snapshot,
+                                )
+                            })
                             .await?
                         {
                             continue;
@@ -1364,11 +1530,21 @@ pub(crate) async fn account_window_basis(
             return Ok(None);
         };
         // The recheck below proves this floor is still the Account's own.
-        let Some(basis) = basis_from_snapshot(&snapshot, stream_ref, anchor, floor.oldest_position)
+        let Some(basis) = crate::boxed_future(|| {
+            disclosed_basis_from_snapshot(
+                conn,
+                account,
+                &snapshot,
+                stream_ref,
+                anchor,
+                floor.oldest_position,
+            )
+        })
+        .await?
         else {
             return Ok(None);
         };
-        if !still_disclosable(conn, account, issuer, &snapshot).await? {
+        if !crate::boxed_future(|| still_disclosable(conn, account, issuer, &snapshot)).await? {
             return Ok(None);
         }
         Ok(Some(basis))

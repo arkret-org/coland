@@ -2883,6 +2883,47 @@ async fn sidecar_snapshot_lists_and_scans_keep_private_stream_coordinates() {
             coland_storage::PeerStreamScan::NotAuthorized
         ));
     }
+    Box::pin(async {
+        // A nonempty tail extends the issued private head, retaining exact
+        // parent Realm authorization sources instead of an empty dependency list.
+        let mut event = ordinary_realm::event_for_actor(
+            EventKind::SidecarContextAttach,
+            arkret_wire::ScopeRef::Sidecar { realm_id:realm.clone(), sidecar_id:sidecar.clone() },
+            actor.clone(),
+            serde_json::json!({"sidecar_id":sidecar,"source_context_ref":{"kind":"strand","strand_id":source},"version":2,
+                "predecessor_event_ref":attach.authority_commit.event.event_id}),
+            parent.commit.committed_at,
+        );
+        event.semantic_refs = vec![arkret_wire::SemanticRef::new(create.authority_commit.event.event_id.to_string(), "after")];
+        ordinary_realm::reseal(&mut event);
+        let mut next = ordinary_realm::request_for_event(&attach.authority_commit, event, parent.commit.committed_at);
+        next.authority_commit.commit.stream_ref = stream.clone();
+        let next = ordinary_realm::source_request(&pool, next).await;
+        uow.commit_event(next.clone()).await.unwrap();
+        let bounded = coland_storage::AccountRealmWindowRequest {
+            realm_id:realm.clone(), account:controller.clone(), issuer:station.clone(), window_limit:1,
+            window_cursor:format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
+            expires_at_ms:now_ms + 300_000, now_ms, byte_budget:7 * 1024 * 1024,
+            delivered_heads:Vec::new(), selected_stream_refs:Some(vec![stream.clone()]),
+        };
+        let frozen = store.freeze_account_realm_window(&bounded, &sign).await.unwrap().unwrap();
+        assert_eq!(frozen.window.preview_only, None);
+        assert_eq!(frozen.committed_events.len(), 1);
+        assert_eq!(frozen.committed_events[0].commit(), &next.authority_commit.commit);
+        let basis = frozen.window.window_start_basis.unwrap();
+        assert_eq!(basis.snapshot_ref, issued.snapshot_id);
+        assert_eq!(basis.anchor_commit_ref, attach.authority_commit.commit.commit_id);
+        let refs = basis.accepted_dependency_refs.as_ref().unwrap();
+        assert_eq!(refs.len(), 2);
+        let member = unit.transactions.iter().find(|row|row.event.kind == EventKind::MemberState).unwrap();
+        for accepted in [&create.authority_commit, member] {
+            assert!(refs.iter().any(|reference| reference.event_id == accepted.event.event_id
+                && reference.commit_id == accepted.commit.commit_id
+                && reference.stream_ref == accepted.commit.stream_ref
+                && reference.stream_position == accepted.commit.stream_position));
+        }
+        assert_eq!(store.account_window_basis(&realm, controller, &bounded.window_cursor, &stream, &station, now_ms).await.unwrap(), Some(basis));
+    }).await;
 }
 
 async fn provision_owned_agent(

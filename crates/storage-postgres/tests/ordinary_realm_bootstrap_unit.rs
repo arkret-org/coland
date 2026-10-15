@@ -7071,8 +7071,12 @@ async fn circle_create_and_self_join_write_same_cut_current() {
             if view.event.event_id == create.authority_commit.event.event_id
     ));
 
+    let circle_tail = Box::pin(assert_circle_window_dependencies(
+        &pool, &store, &uow, &unit, &create, &join, &request, &sign,
+    ))
+    .await;
     let stale = circle_self_member_request(
-        &join,
+        &circle_tail,
         &creator,
         &circle_id,
         "leave",
@@ -7105,7 +7109,7 @@ async fn circle_create_and_self_join_write_same_cut_current() {
     assert_eq!(unchanged.count, 1);
     drop(conn);
     let leave = circle_self_member_request(
-        &join,
+        &circle_tail,
         &creator,
         &circle_id,
         "leave",
@@ -7158,6 +7162,134 @@ async fn circle_create_and_self_join_write_same_cut_current() {
         coland_storage::MemberCommittedEventRead::Read(view)
             if matches!(*view, arkret_wire::CommittedEventView::Withheld(_))
     ));
+}
+
+async fn assert_circle_window_dependencies(
+    pool: &coland_storage_postgres::PgPool,
+    store: &PgAuthorityCommitStore,
+    uow: &PgEventCommitUnitOfWork,
+    unit: &OrdinaryRealmBootstrapCommitUnit,
+    create: &EventCommitRequest,
+    join: &EventCommitRequest,
+    request: &coland_storage::AccountRealmWindowRequest,
+    sign: coland_storage::RealmStateSnapshotSigner<'_>,
+) -> EventCommitRequest {
+    use coland_storage::RetentionTombstoneStore as _;
+    let circle_id = arkret_wire::CircleId::from_event_id(&create.authority_commit.event.event_id);
+    let creator = creator_account(unit);
+    let strand = scoped_event_request_as(
+        join,
+        &creator,
+        arkret_wire::EventKind::StrandCreate,
+        serde_json::json!({"object": {
+            "schema":"ak.schema.strand.v1", "realm_id":request.realm_id,
+            "scope_circle_id":circle_id,
+            "tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},
+            "metadata":{"title":"Bounded Circle tail"}, "state":"active",
+            "created_by":arkret_wire::ActorId::account(creator.clone()),
+            "created_at":arkret_canonical::format_timestamp_canonical(join.authority_commit.commit.committed_at)
+        }}),
+        arkret_wire::ScopeRef::Circle {
+            realm_id: request.realm_id.clone(),
+            circle_id,
+        },
+    );
+    uow.commit_event(strand.clone()).await.unwrap();
+    let bounded = coland_storage::AccountRealmWindowRequest {
+        window_limit: 1,
+        window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
+        selected_stream_refs: Some(vec![join.authority_commit.commit.stream_ref.clone()]),
+        ..request.clone()
+    };
+    let frozen = store
+        .freeze_account_realm_window(&bounded, sign)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(frozen.window.preview_only, None);
+    assert_eq!(frozen.committed_events.len(), 1);
+    assert_eq!(
+        frozen.committed_events[0].commit(),
+        &strand.authority_commit.commit
+    );
+    let basis = frozen.window.window_start_basis.unwrap();
+    assert_eq!(
+        basis.anchor_commit_ref,
+        join.authority_commit.commit.commit_id
+    );
+    let refs = basis.accepted_dependency_refs.as_ref().unwrap();
+    let parent = unit
+        .transactions
+        .iter()
+        .find(|row| row.event.kind == arkret_wire::EventKind::MemberState)
+        .unwrap();
+    assert_eq!(refs.len(), 2);
+    for accepted in [&create.authority_commit, parent] {
+        assert!(
+            refs.iter()
+                .any(|reference| reference.event_id == accepted.event.event_id
+                    && reference.commit_id == accepted.commit.commit_id
+                    && reference.stream_ref == accepted.commit.stream_ref
+                    && reference.stream_position == accepted.commit.stream_position)
+        );
+    }
+    assert_eq!(
+        store
+            .account_window_basis(
+                &bounded.realm_id,
+                &creator,
+                &bounded.window_cursor,
+                &join.authority_commit.commit.stream_ref,
+                &bounded.issuer,
+                bounded.now_ms,
+            )
+            .await
+            .unwrap(),
+        Some(basis)
+    );
+    // Current metadata remains valid when retention withholds the original.
+    // Both an existing reservation and a new window must withdraw the basis.
+    let tombstones = coland_storage_postgres::PgRetentionTombstoneStore { pool: pool.clone() };
+    tombstones
+        .put(&coland_storage::RetentionTombstoneRecord {
+            event_id: create.authority_commit.event.event_id.to_string(),
+            realm_id: bounded.realm_id.to_string(),
+            reason: "retention_policy.ttl".into(),
+            policy_ttl_seconds: 60,
+            expired_at: chrono::Utc::now(),
+            tombstoned_at: chrono::Utc::now(),
+            sealed: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        store
+            .account_window_basis(
+                &bounded.realm_id,
+                &creator,
+                &bounded.window_cursor,
+                &join.authority_commit.commit.stream_ref,
+                &bounded.issuer,
+                bounded.now_ms,
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let withdrawn = store
+        .freeze_account_realm_window(
+            &coland_storage::AccountRealmWindowRequest {
+                window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
+                ..bounded
+            },
+            sign,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(withdrawn.window.preview_only, Some(true));
+    assert!(withdrawn.window.window_start_basis.is_none());
+    strand
 }
 
 /// Real PostgreSQL: the same-cut evaluator refuses an actor without an

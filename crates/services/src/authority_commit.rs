@@ -406,6 +406,47 @@ pub struct AuthorityCommitApplication {
 }
 
 impl AuthorityCommitApplication {
+    pub async fn check_call_media_release(
+        &self,
+        request: &arkret_models_collaboration::objects::media::CallMediaTokenExchangeRequestBody,
+        issuer: &arkret_wire::DidCoreId,
+        candidate: &arkret_models_collaboration::call_invitation::CallMediaRosterIdentity,
+        participant: &str,
+    ) -> ServiceResult<bool> {
+        Ok(self
+            .store()
+            .check_call_media_release(request, issuer, candidate, participant)
+            .await?)
+    }
+    pub async fn call_media_identity_candidate(
+        &self,
+        request: &arkret_models_collaboration::objects::media::CallMediaTokenExchangeRequestBody,
+        candidate: &arkret_models_collaboration::call_invitation::CallMediaRosterIdentity,
+        participant: &str,
+    ) -> ServiceResult<(
+        arkret_models_collaboration::call_invitation::CallMediaRosterIdentity,
+        String,
+    )> {
+        Ok(self
+            .store()
+            .call_media_identity_candidate(request, candidate, participant)
+            .await?)
+    }
+    pub async fn call_current_cut(
+        &self,
+        realm: &arkret_wire::RealmId,
+        call: &arkret_wire::CallId,
+        actor: &arkret_wire::ActorId,
+    ) -> ServiceResult<Option<coland_storage::CallCurrentCut>> {
+        Ok(self.store().call_current_cut(realm, call, actor).await?)
+    }
+    pub async fn realm_media_service_current(
+        &self,
+        realm: &arkret_wire::RealmId,
+    ) -> ServiceResult<Option<arkret_models_collaboration::events_payloads::RealmMediaServiceValue>>
+    {
+        Ok(self.store().realm_media_service_current(realm).await?)
+    }
     pub async fn morph_list_for_actor(
         &self,
         realm: &arkret_wire::RealmId,
@@ -2529,6 +2570,16 @@ impl AuthorityCommitApplication {
         Ok(originals)
     }
 
+    pub async fn admit_pcr_governance_change(
+        &self,
+        transaction: &AuthorityCommitTransaction,
+    ) -> ServiceResult<AuthorityCommitWriteOutcome> {
+        Ok(self
+            .store()
+            .admit_pcr_governance_change(transaction)
+            .await?)
+    }
+
     pub async fn install_handoff(&self, request: &AuthorityHandoffRequest) -> ServiceResult<()> {
         request.validate_new_handoff().map_err(|error| {
             crate::ServiceError::SchemaViolation(format!("invalid authority handoff: {error}"))
@@ -2574,10 +2625,11 @@ impl AuthorityCommitApplication {
                 ))
             })?;
         self.store()
-            .install_handoff(
+            .install_handoff_with_private_state(
                 &request.handoff,
                 &request.final_stream_heads,
                 &request.snapshot,
+                request.pcr_private_state.as_ref(),
             )
             .await?;
         Ok(())

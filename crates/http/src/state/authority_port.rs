@@ -95,6 +95,8 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         | EventKind::RealmPreviewPolicy
         | EventKind::MemberIdentityUpdate
         | EventKind::CallCreate
+        | EventKind::CallState
+        | EventKind::RealmMediaService
         | EventKind::MessageCreate
         | EventKind::MemberState
         | EventKind::CapabilityGrant
@@ -207,6 +209,8 @@ pub(super) fn require_guarded_unit_event(request: &EventAdmissionSubmission) -> 
             && matches!(
                 event.kind,
                 arkret_wire::EventKind::CircleMemberState
+                    | arkret_wire::EventKind::CallCreate
+                    | arkret_wire::EventKind::CallState
                     | arkret_wire::EventKind::StrandWatchSet
                     | arkret_wire::EventKind::PolicySet
                     | arkret_wire::EventKind::StrandCreate
@@ -243,7 +247,7 @@ fn refuse_deferred_call_payload(event: &arkret_wire::Event) -> ServiceResult<()>
         && event.payload.contains_key("mute_override")
     {
         return Err(ServiceError::protocol(
-            arkret_wire::ErrorCode::UnsupportedFeature,
+            arkret_wire::ErrorCode::SchemaViolation,
             "mute_override is deferred in v1",
         ));
     }
@@ -507,6 +511,12 @@ impl AuthorityProtocolPort for AppState {
         super::authority_self_event_unit::validate_replay_event_identity(event)?;
         refuse_deferred_call_payload(event)?;
         refuse_actor_private_event(&event.kind)?;
+        if let Some(outcome) =
+            crate::boxed_future(|| super::authority_pcr::submit_self(self, session, &request))
+                .await?
+        {
+            return Ok(outcome);
+        }
         if matches!(
             event.kind,
             arkret_wire::EventKind::ConsentGrant | arkret_wire::EventKind::ConsentRevoke

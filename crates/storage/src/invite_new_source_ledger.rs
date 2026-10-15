@@ -37,6 +37,18 @@ pub enum NewSourceAdmission {
 /// store a readable list of every stranger who contacted a holder.
 #[async_trait]
 pub trait InviteNewSourceLedgerStore: Send + Sync {
+    /// Read the immutable holder key and derive a tag without creating state.
+    /// No signing-key rotation or authority handoff may replace this key.
+    async fn source_digest(
+        &self,
+        _holder: &AccountId,
+        _source: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<String> {
+        Err(crate::PersistenceError::Conflict(
+            "temporarily_unavailable: holder quota key unavailable".into(),
+        ))
+    }
+
     /// Prune expired rows, test membership, count both sliding windows and
     /// append on admission -- linearized per holder, as one step.
     ///

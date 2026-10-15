@@ -286,6 +286,8 @@ mod tests {
         };
         let route = VerifiedServiceRoute::new(projection, now);
         ResolvedServiceRoute {
+            authenticated_resolution: None,
+            supported_profiles: Vec::new(),
             route: route.clone(),
             trust_domain: TrustDomainId::new("ak:trust_domain:push.example").unwrap(),
             protocol_version: "1".to_owned(),

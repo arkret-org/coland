@@ -7,17 +7,10 @@ use arkret_models_collaboration::consent_operations::{
     ConsentGrantRequestBody, ConsentList, ConsentRequestOutcome, ConsentRequestRequestBody,
     ConsentRevokeRequestBody, ConsentView,
 };
-use arkret_wire::AccountDataKey;
-use chrono::{DateTime, Utc};
-use coland_storage::{ConsentRequestQuarantineInput, ConsentRequestQuarantineOutcome};
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
 
 use super::AuthArgs;
-use super::device_messages::{
-    ActorPrivateAccountDataOperation, ActorPrivateAccountDataUpdate, ActorPrivateDeviceUpdate,
-    fanout_actor_private_update, station_device_message_sender,
-};
 use crate::error::AppError;
 use crate::state::AppState;
 use crate::{JsonResult, json_ok};
@@ -40,15 +33,8 @@ async fn list_consents(
 ) -> JsonResult<ConsentList> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
-    let holder = super::auth_grant_dpop::authenticated_session_account_id(state, &session).await?;
-    let records = state
-        .persistence()
-        .consent_current(&holder)
-        .await
-        .map_err(|error| consent_error(error.into()))?;
-    json_ok(ConsentList {
-        consents: records.iter().map(|record| record.view()).collect(),
-    })
+    super::auth_grant_dpop::authenticated_session_account_id(state, &session).await?;
+    json_ok(crate::routing::consent_private::list(state, &session).await?)
 }
 
 #[salvo::handler]
@@ -60,7 +46,7 @@ async fn get_consent(
 ) -> JsonResult<ConsentView> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
-    let holder = super::auth_grant_dpop::authenticated_session_account_id(state, &session).await?;
+    super::auth_grant_dpop::authenticated_session_account_id(state, &session).await?;
     let peer_raw = req
         .query::<String>("peer")
         .ok_or_else(|| AppError::param_invalid("peer is required"))?;
@@ -73,15 +59,12 @@ async fn get_consent(
         })
         .transpose()
         .map_err(|e| AppError::param_invalid(e.to_string()))?;
-    let mut records = state
-        .persistence()
-        .consent_current(&holder)
-        .await
-        .map_err(|error| consent_error(error.into()))?
+    let mut records = crate::routing::consent_private::list(state, &session)
+        .await?
+        .consents
         .into_iter()
         .filter(|record| {
-            record.value.peer == peer
-                && scope.is_none_or(|scope| record.value.consent_scope == scope)
+            record.peer == peer && scope.is_none_or(|scope| record.consent_scope == scope)
         });
     let record = records
         .next()
@@ -92,7 +75,7 @@ async fn get_consent(
             "Consent peer and scope match multiple IDs"
         ));
     }
-    json_ok(record.view())
+    json_ok(record)
 }
 
 #[salvo::handler]
@@ -108,14 +91,9 @@ async fn grant_consent(
     let body = body.into_inner();
     body.validate()
         .map_err(|error| AppError::param_invalid(format!("grant_event: {error}")))?;
-    let outcome = crate::state::authority_consent::submit(state, &session, &body.grant_event)
-        .await
-        .map_err(consent_error)?;
-    let record = match outcome {
-        coland_storage::ConsentAdmissionOutcome::Committed(record)
-        | coland_storage::ConsentAdmissionOutcome::Duplicate(record) => record,
-    };
-    json_ok(record.view())
+    json_ok(
+        crate::routing::consent_private::submit_consent(state, &session, &body.grant_event).await?,
+    )
 }
 
 #[salvo::handler]
@@ -131,14 +109,10 @@ async fn revoke_consent(
     let body = body.into_inner();
     body.validate()
         .map_err(|error| AppError::param_invalid(format!("revoke_event: {error}")))?;
-    let outcome = crate::state::authority_consent::submit(state, &session, &body.revoke_event)
-        .await
-        .map_err(consent_error)?;
-    let record = match outcome {
-        coland_storage::ConsentAdmissionOutcome::Committed(record)
-        | coland_storage::ConsentAdmissionOutcome::Duplicate(record) => record,
-    };
-    json_ok(record.view())
+    json_ok(
+        crate::routing::consent_private::submit_consent(state, &session, &body.revoke_event)
+            .await?,
+    )
 }
 
 #[salvo::handler]
@@ -167,52 +141,25 @@ async fn request_consent(
     if body.holder_account_id.station_id != state.service_core_id() {
         return json_ok(ConsentRequestOutcome::accepted());
     }
-    let quota_constraints = state
-        .config()
-        .receive_policy_constraints
-        .as_ref()
-        .and_then(|constraints| constraints.new_source_quota.clone())
-        .unwrap_or_default();
-    let received_at = arkret_canonical::normalize_timestamp_canonical(Utc::now());
-    let source_digest = crate::routing::invites::new_source_ledger_digest(
+    use arkret_models_collaboration::consent_private::*;
+    let result = crate::routing::consent_private::execute(
         state,
         &body.holder_account_id,
-        requester.principal_id.as_str(),
-    );
-    let admitted = state
-        .persistence()
-        .admit_consent_request_quarantine(ConsentRequestQuarantineInput {
-            holder: body.holder_account_id.clone(),
-            requester,
-            consent_scope: body.consent_scope,
-            source_digest,
-            received_at,
-            quota_constraints,
-        })
-        .await;
-    if let Ok(ConsentRequestQuarantineOutcome::Queued(record)) = admitted {
-        // Only the committed CAS winner is delivered, and its complete row is
-        // the content every active holder device can read independently.
-        fanout_actor_private_update(
-            state,
-            body.holder_account_id.principal_id.as_str(),
-            ActorPrivateDeviceUpdate::AccountData {
-                sender: station_device_message_sender(state),
-                content: ActorPrivateAccountDataUpdate {
-                    operation: ActorPrivateAccountDataOperation::Put,
-                    account_data_key: AccountDataKey::ACCOUNT_HOLDER_QUARANTINE.to_owned(),
-                    revision: record.revision,
-                    content: Some(record.payload),
-                    updated_at: record.updated_at,
-                },
-                created_at: record.updated_at,
+        ConsentPrivateContext::Station(ConsentPrivateStationContext {
+            kind: ConsentPrivateStationContextKind::Station,
+            actor_id: arkret_wire::ActorId::service(state.service_core_id()),
+        }),
+        ConsentPrivateCommand::Request(ConsentPrivateRequestCommand {
+            kind: ConsentPrivateRequestCommandKind::Request,
+            body: ConsentPrivateRequestBody {
+                requester_actor_id: actor,
+                request: body.clone(),
             },
-        )
-        .await;
-    } else if let Err(error) = admitted {
-        // A storage refusal must not reveal holder presence or policy through
-        // the requester's response. The transaction has already rolled back.
-        tracing::warn!(%error, "Consent request quarantine admission failed closed");
+        }),
+    )
+    .await;
+    if result.is_err() {
+        tracing::debug!("Consent request admission deferred without disclosure");
     }
     json_ok(ConsentRequestOutcome::accepted())
 }
@@ -224,42 +171,16 @@ pub(crate) fn consent_error(error: coland_services::ServiceError) -> AppError {
         ServiceError::NotFound(_) => ErrorCode::NotFound,
         ServiceError::SchemaViolation(_) => ErrorCode::SchemaViolation,
         ServiceError::UnsupportedEventKind(_) => ErrorCode::UnsupportedEventKind,
-        ServiceError::Conflict(_) => error
-            .conflict_code()
-            .and_then(|code| ErrorCode::from_wire(code.as_str()))
+        ServiceError::Conflict(detail) => detail
+            .split_once(':')
+            .and_then(|(code, _)| ErrorCode::from_wire(code.trim()))
+            .or_else(|| {
+                error
+                    .conflict_code()
+                    .and_then(|code| ErrorCode::from_wire(code.as_str()))
+            })
             .unwrap_or(ErrorCode::CapabilityDenied),
         ServiceError::Database(_) | ServiceError::Internal(_) => ErrorCode::InternalError,
     };
     AppError::from_rejection(code, error.to_string())
-}
-
-/// Introduction evidence must be checked against the holder's current
-/// authority. A local legacy grant-dot cache is never proof of freshness.
-pub(crate) async fn has_active_consent_grant_evidence(
-    state: &AppState,
-    subject: &str,
-    holder_station_id: &str,
-    inviter_actor_id: &arkret_wire::ActorId,
-    consent_grant_ref: &str,
-    consent_id: Option<&str>,
-    at: DateTime<Utc>,
-) -> bool {
-    let Ok(principal) = arkret_wire::DidCoreId::new(subject.to_owned()) else {
-        return false;
-    };
-    let Ok(station) = arkret_wire::DidCoreId::new(holder_station_id.to_owned()) else {
-        return false;
-    };
-    if station != state.service_core_id() {
-        return false;
-    }
-    let holder = arkret_wire::AccountId::new(principal, station);
-    let Ok(records) = state.persistence().consent_current(&holder).await else {
-        return false;
-    };
-    records.iter().any(|record| {
-        record.event.event_id.as_str() == consent_grant_ref
-            && consent_id.is_none_or(|id| record.value.consent_id.as_str() == id)
-            && record.permits(inviter_actor_id, arkret_wire::ConsentScope::Invite, at)
-    })
 }

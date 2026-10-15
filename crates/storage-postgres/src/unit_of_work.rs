@@ -3299,7 +3299,11 @@ async fn commit_scope_current_results_inner(
     .await?;
 
     Box::pin(crate::call_state_current_results::commit_in_connection(
-        conn, event, commit, prepared,
+        conn,
+        event,
+        commit,
+        prepared,
+        request.verified_media_participant.as_ref(),
     ))
     .await?;
 

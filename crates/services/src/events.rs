@@ -497,6 +497,7 @@ use crate::federation::FederationDeliveryRecord;
 
 #[derive(Clone, Debug)]
 pub struct CommitAcceptedEventCommand {
+    pub verified_media_participant: Option<arkret_signatures::media::VerifiedCallParticipant>,
     /// Current-authority transaction that orders this Event on its Realm,
     /// Circle or Sidecar stream. One `RealmCommit` accepts exactly one Event,
     /// so the signed commit travels with the Event it admits.
@@ -1739,6 +1740,7 @@ mod tests {
         let service = EventService::new(Arc::new(RecordingCommitter));
         let result = service
             .commit_accepted_event(CommitAcceptedEventCommand {
+                verified_media_participant: None,
                 authority_commit,
                 self_producer_guard: None,
                 applet_producer_guard: None,

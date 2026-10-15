@@ -203,6 +203,102 @@ impl PersistenceHandle {
             .await
     }
 
+    pub async fn consent_historical_basis(
+        &self,
+        holder: &arkret_wire::AccountId,
+        id: &arkret_wire::ConsentId,
+        revision: &arkret_wire::CurrentRevision,
+    ) -> PersistenceResult<Option<coland_storage::CommittedEventRecord>> {
+        self.persistence
+            .consent_current()
+            .historical_basis(holder, id, revision)
+            .await
+    }
+    pub async fn pending_consent_effect_holders(
+        &self,
+        issuer: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Vec<arkret_wire::AccountId>> {
+        self.persistence
+            .consent_current()
+            .pending_effect_holders(issuer)
+            .await
+    }
+    pub async fn prepare_consent_effect_publication(
+        &self,
+        holder: &arkret_wire::AccountId,
+        issuer: &arkret_wire::DidCoreId,
+        nonce: String,
+    ) -> PersistenceResult<Option<coland_storage::PrivateEffectsPublication>> {
+        self.persistence
+            .consent_current()
+            .prepare_effect_publication(holder, issuer, nonce)
+            .await
+    }
+    pub async fn acknowledge_consent_effect_publication(
+        &self,
+        holder: &arkret_wire::AccountId,
+        issuer: &arkret_wire::DidCoreId,
+        sequence: u64,
+    ) -> PersistenceResult<()> {
+        self.persistence
+            .consent_current()
+            .acknowledge_effect_publication(holder, issuer, sequence)
+            .await
+    }
+    pub async fn project_consent_effect_publication(
+        &self,
+        request: &arkret_models_collaboration::consent_private::ConsentPrivateEffectsPublishRequest,
+        source: &arkret_wire::DidCoreId,
+        receiver: &arkret_wire::DidCoreId,
+        authority: &coland_storage::CurrentRealmAuthority,
+        known_head: &arkret_wire::CommitStreamHead,
+    ) -> PersistenceResult<coland_storage::PrivateEffectsProjection> {
+        self.persistence
+            .consent_current()
+            .project_effect_publication(request, source, receiver, authority, known_head)
+            .await
+    }
+
+    pub async fn observe_consent_private_cut(
+        &self,
+        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,
+        outcome: &arkret_models_collaboration::consent_private::ConsentPrivateProxyOutcome,
+    ) -> PersistenceResult<()> {
+        self.persistence
+            .consent_current()
+            .observe_private_cut(request, outcome)
+            .await
+    }
+
+    pub async fn consent_private_command_prepared(
+        &self,
+        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,
+        source: &arkret_wire::DidCoreId,
+        acceptor: &arkret_wire::DidCoreId,
+        quota: &arkret_wire::NewSourceQuotaConstraints,
+        prepared: Option<&coland_storage::PreparedPrivateInviteDelivery>,
+    ) -> PersistenceResult<arkret_models_collaboration::consent_private::ConsentPrivateProxyOutcome>
+    {
+        self.persistence
+            .consent_current()
+            .private_command_prepared(request, source, acceptor, quota, prepared)
+            .await
+    }
+
+    pub async fn consent_private_command(
+        &self,
+        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,
+        source: &arkret_wire::DidCoreId,
+        acceptor: &arkret_wire::DidCoreId,
+        quota: &arkret_wire::NewSourceQuotaConstraints,
+    ) -> PersistenceResult<arkret_models_collaboration::consent_private::ConsentPrivateProxyOutcome>
+    {
+        self.persistence
+            .consent_current()
+            .private_command(request, source, acceptor, quota)
+            .await
+    }
+
     pub async fn admit_consent(
         &self,
         write: coland_storage::ConsentAdmissionWrite,
@@ -225,6 +321,18 @@ impl PersistenceHandle {
         holder: &arkret_wire::AccountId,
     ) -> PersistenceResult<Vec<coland_storage::ConsentCurrentRecord>> {
         self.persistence.consent_current().list(holder).await
+    }
+    pub async fn consent_current_cut(
+        &self,
+        holder: &arkret_wire::AccountId,
+        peer: &arkret_models_collaboration::events_payloads::consent::ConsentPeer,
+        scope: arkret_wire::ConsentScope,
+        device: Option<&arkret_wire::DeviceId>,
+    ) -> PersistenceResult<coland_storage::ConsentCurrentCut> {
+        self.persistence
+            .consent_current()
+            .read_cut(holder, peer, scope, device)
+            .await
     }
     pub async fn retain_forward_current_signer_evidence(
         &self,

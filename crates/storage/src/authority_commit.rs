@@ -101,13 +101,16 @@ pub enum SelfExactCurrentRead<T> {
 
 /// Anchor state behind `ak.self.media_service_binding.read.resolve.v1` for one
 /// authenticated Account at one governing read cut.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MediaServiceAnchorRead {
     /// Invisible Realm, non-member caller, or no accepted media service
     /// assignment in the Realm.
     NotFound,
     /// A media service assignment was accepted in the visible Realm.
-    Anchored,
+    Anchored {
+        value: arkret_models_collaboration::events_payloads::realm::RealmMediaServiceValue,
+        revision: arkret_wire::CurrentRevision,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1405,6 +1408,25 @@ pub struct SignalScopeAuthority {
     pub product_authority: Option<Box<arkret_models_collaboration::SignalProductAuthority>>,
 }
 
+/// Accepted Call state and anonymous roster at one held stream head.
+#[derive(Clone, Debug)]
+pub struct CallCurrentCut {
+    pub scope_ref: arkret_wire::ScopeRef,
+    pub head: arkret_wire::CommitStreamHead,
+    pub generation: u64,
+    pub lifecycle: arkret_models_collaboration::events_payloads::call::CallLifecycleState,
+    pub focus: Option<arkret_models_collaboration::events_payloads::call::CallFocus>,
+    pub participants: Vec<(
+        arkret_models_collaboration::events_payloads::call::CallParticipant,
+        arkret_wire::RealmCommit,
+    )>,
+    pub roster_revision: Option<arkret_wire::CurrentRevision>,
+    pub moderation_revision: Option<arkret_wire::CurrentRevision>,
+    pub moderation_history:
+        Option<arkret_models_collaboration::events_payloads::call::CallModerationCurrentValue>,
+    pub moderation: Vec<arkret_models_collaboration::events_payloads::call::CallParticipantRemoval>,
+}
+
 /// One atomic read cut for a member's MLS Genesis material request. A member
 /// Station may authorize from its verified replica without holding Genesis
 /// FullView; the governing Station must return the exact accepted Genesis.
@@ -1605,6 +1627,50 @@ pub struct NativeMessageReplyPreparation<'a> {
 
 #[async_trait]
 pub trait AuthorityCommitStore: Send + Sync {
+    async fn call_current_cut(
+        &self,
+        _realm: &arkret_wire::RealmId,
+        _call: &arkret_wire::CallId,
+        _actor: &arkret_wire::ActorId,
+    ) -> PersistenceResult<Option<CallCurrentCut>> {
+        Err(PersistenceError::Conflict(
+            "temporarily_unavailable: Call current cut is not available".to_owned(),
+        ))
+    }
+    async fn check_call_media_release(
+        &self,
+        _request: &arkret_models_collaboration::objects::media::CallMediaTokenExchangeRequestBody,
+        _issuer: &arkret_wire::DidCoreId,
+        _candidate: &arkret_models_collaboration::call_invitation::CallMediaRosterIdentity,
+        _participant: &str,
+    ) -> PersistenceResult<bool> {
+        Err(PersistenceError::Conflict(
+            "temporarily_unavailable: media release cut is unavailable".to_owned(),
+        ))
+    }
+    async fn call_media_identity_candidate(
+        &self,
+        _request: &arkret_models_collaboration::objects::media::CallMediaTokenExchangeRequestBody,
+        _candidate: &arkret_models_collaboration::call_invitation::CallMediaRosterIdentity,
+        _participant: &str,
+    ) -> PersistenceResult<(
+        arkret_models_collaboration::call_invitation::CallMediaRosterIdentity,
+        String,
+    )> {
+        Err(PersistenceError::Conflict(
+            "temporarily_unavailable: private media identity store is unavailable".to_owned(),
+        ))
+    }
+    async fn realm_media_service_current(
+        &self,
+        _realm: &arkret_wire::RealmId,
+    ) -> PersistenceResult<
+        Option<arkret_models_collaboration::events_payloads::RealmMediaServiceValue>,
+    > {
+        Err(PersistenceError::Conflict(
+            "temporarily_unavailable: media service current is not available".to_owned(),
+        ))
+    }
     /// Governing capability/management preflight for self or the exact verified
     /// controller of an owned Agent. This does not issue a runtime/session grant.
     async fn owned_agent_authorization_check(
@@ -2933,6 +2999,34 @@ pub trait AuthorityCommitStore: Send + Sync {
         account: &arkret_wire::AccountId,
         issuer: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<MediaServiceAnchorRead>;
+
+    /// Native PCR planned change: original device/root verification and freeze
+    /// preparation belong to one authority transaction, without ordinary facts.
+    async fn admit_pcr_governance_change(
+        &self,
+        _transaction: &AuthorityCommitTransaction,
+    ) -> PersistenceResult<AuthorityCommitWriteOutcome> {
+        Err(PersistenceError::Conflict(
+            "temporarily_unavailable: native PCR planned change is unavailable".into(),
+        ))
+    }
+
+    async fn install_handoff_with_private_state(
+        &self,
+        handoff: &RealmAuthorityHandoff,
+        final_stream_heads: &[CommitStreamHead],
+        snapshot: &RealmStateSnapshot,
+        manifest: Option<&arkret_models_collaboration::authority_commit::PcrPrivateHandoffManifest>,
+    ) -> PersistenceResult<()> {
+        if manifest.is_some() || handoff.pcr_private_state_digest.is_some() {
+            return Err(PersistenceError::Conflict(
+                "temporarily_unavailable: durable PCR private import verification is unavailable"
+                    .into(),
+            ));
+        }
+        self.install_handoff(handoff, final_stream_heads, snapshot)
+            .await
+    }
 
     async fn install_handoff(
         &self,

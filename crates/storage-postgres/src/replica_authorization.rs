@@ -391,6 +391,41 @@ pub(crate) async fn exact_current_evidence(
     Ok(Some((head, entries)))
 }
 
+/// Complete authorization inputs at the latest verified held Realm cut.
+/// Unknown coverage is unavailable, never an empty grant set.
+pub(crate) async fn authorization_evidence(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+) -> PersistenceResult<Option<Vec<TypedCurrentRow>>> {
+    let rows = diesel::sql_query(
+        "SELECT selector,value FROM replica_authorization_rows WHERE realm_id=$1 \
+         AND selector->>'kind' IN ('realm_authority_root','realm_policy_bundle','capability_grant') \
+         ORDER BY selector::text",
+    )
+    .bind::<Text, _>(realm.as_str())
+    .load::<StoredRow>(&mut *conn)
+    .await
+    .map_err(PersistenceError::database)?;
+    let selectors = rows
+        .into_iter()
+        .map(|row| serde_json::from_value::<CurrentSelector>(row.selector).map_err(invalid))
+        .collect::<PersistenceResult<Vec<_>>>()?;
+    if !selectors.contains(&CurrentSelector::RealmAuthorityRoot)
+        || !selectors.contains(&CurrentSelector::RealmPolicyBundle)
+    {
+        return Ok(None);
+    }
+    Ok(exact_current_evidence(
+        conn,
+        &arkret_wire::CommitStreamRef::Realm {
+            realm_id: realm.clone(),
+        },
+        &selectors,
+    )
+    .await?
+    .map(|(_, rows)| rows))
+}
+
 /// Point reads from the verified native prefix; unrelated object and message
 /// rows are neither loaded nor included in the resolver's change fence.
 pub(crate) async fn direct_current_evidence(

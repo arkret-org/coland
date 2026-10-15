@@ -64,6 +64,11 @@ mod capability_grant_current_results;
 mod capability_quota;
 mod committed_disclosure;
 mod consent_current;
+mod consent_private_commands;
+mod consent_private_cuts;
+mod consent_private_effects;
+mod consent_private_effects_projection;
+mod consent_private_invites;
 mod consent_request_quarantine;
 pub use consent_current::PgConsentCurrentStore;
 mod contacts;
@@ -137,6 +142,8 @@ mod pcr_device_status_reader;
 #[path = "../../test-support/src/pcr_genesis.rs"]
 #[allow(dead_code)]
 mod pcr_genesis;
+mod pcr_private_archive;
+mod pcr_private_authority;
 mod pcr_recovery_policy_unit;
 mod pin_current_results;
 mod policy;

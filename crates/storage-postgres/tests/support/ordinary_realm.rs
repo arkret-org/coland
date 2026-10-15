@@ -544,6 +544,7 @@ pub fn request_for_event(
         received_at: at,
     };
     EventCommitRequest {
+        verified_media_participant: None,
         authority_commit: AuthorityCommitTransaction {
             expected_authority: previous.expected_authority.clone(),
             event,

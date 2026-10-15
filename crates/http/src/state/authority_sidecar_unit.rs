@@ -71,6 +71,7 @@ pub(crate) async fn commit_sidecar_ensure_unit(
             received_at: committed_at,
         };
         commands.push(coland_services::events::CommitAcceptedEventCommand {
+            verified_media_participant: None,
             authority_commit: transaction,
             self_producer_guard: Some(producer),
             applet_producer_guard: None,

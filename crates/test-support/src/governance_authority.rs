@@ -274,6 +274,7 @@ impl GovernanceChain {
         );
         let handoff = seal_handoff(
             RealmAuthorityHandoff {
+                pcr_private_state_digest: None,
                 handoff_id: handoff_id.clone(),
                 realm_id: realm_id.clone(),
                 from_generation: 0,

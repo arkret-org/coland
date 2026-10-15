@@ -51,6 +51,8 @@ const MEMBER_STATION_FAMILIES: &[&str] = &[
     "circle_member_state_current_results",
     "circle_current_results",
     "call_state_current_results",
+    "call_component_current_results",
+    "realm_media_service_current_results",
     "moderation_report_current_results",
     "moderation_state_current_results",
     "moderation_franking_proof_current_results",
@@ -256,6 +258,39 @@ async fn guard_snapshot_revisions(
                 )
                 .await?;
             }
+            S::CallFocus { call_id }
+            | S::CallRoster { call_id }
+            | S::CallModeration { call_id } => {
+                let old=diesel::sql_query("SELECT current_commit_id,current_stream_position,source_stream_ref,value FROM call_component_current_results WHERE realm_id=$1 AND call_id=$2 AND selector=$3 FOR UPDATE")
+                    .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(call_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(selector).map_err(malformed)?)
+                    .get_result::<ExistingFrankingProofCurrent>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+                if let Some(old) = old {
+                    let retained = match selector {
+                        S::CallFocus { .. } => true,
+                        _ => old
+                            .value
+                            .get("assertions")
+                            .and_then(Value::as_array)
+                            .is_some_and(|a| {
+                                value
+                                    .get("assertions")
+                                    .and_then(Value::as_array)
+                                    .is_some_and(|new| a.iter().all(|item| new.contains(item)))
+                            }),
+                    };
+                    if old.source_stream_ref != source
+                        || old.current_stream_position > incoming_position
+                        || !retained
+                        || (old.current_stream_position == incoming_position
+                            && (old.current_commit_id != revision.commit_id.as_str()
+                                || old.value != *value))
+                    {
+                        return Err(malformed(
+                            "Call snapshot regresses its source, revision or retained assertions",
+                        ));
+                    }
+                }
+            }
             S::AgentSidecarExchangeControls {
                 sidecar_id,
                 source_context_ref,
@@ -419,8 +454,7 @@ async fn upsert_call_genesis(
     let current: CallStateCurrentValue =
         serde_json::from_value(value.clone()).map_err(malformed)?;
     current.validate().map_err(malformed)?;
-    if current.from.is_some()
-        || source.realm_id() != realm
+    if source.realm_id() != realm
         || !matches!(
             source,
             arkret_wire::CommitStreamRef::Realm { .. }
@@ -449,28 +483,53 @@ async fn upsert_call_genesis(
             serde_json::from_value(record.envelope).map_err(malformed)?;
         let commit: arkret_wire::RealmCommit =
             serde_json::from_value(record.commit_json).map_err(malformed)?;
-        let payload: CallCreatePayload =
-            serde_json::from_value(serde_json::json!(&event.payload)).map_err(malformed)?;
-        payload.validate().map_err(malformed)?;
-        if event.kind != arkret_wire::EventKind::CallCreate
-            || event.event_id != create
-            || event.realm_id != *realm
+        let expected = match event.kind {
+            arkret_wire::EventKind::CallCreate => {
+                let payload: CallCreatePayload =
+                    serde_json::from_value(serde_json::json!(&event.payload)).map_err(malformed)?;
+                payload.validate().map_err(malformed)?;
+                if event.event_id != create {
+                    return Err(malformed("Call genesis identity differs"));
+                }
+                serde_json::to_value(CallStateCurrentValue {
+                    from: None,
+                    to: payload.initial_state,
+                    failure_reason_code: None,
+                })
+                .map_err(malformed)?
+            }
+            arkret_wire::EventKind::CallState => {
+                let payload: arkret_models_collaboration::events_payloads::call::CallStatePayload =
+                    serde_json::from_value(serde_json::json!(&event.payload)).map_err(malformed)?;
+                if payload.call_id != *call {
+                    return Err(malformed("Call transition identity differs"));
+                }
+                serde_json::to_value(
+                    payload
+                        .state_transition
+                        .ok_or_else(|| malformed("Call lifecycle transition absent"))?,
+                )
+                .map_err(malformed)?
+            }
+            _ => return Err(malformed("Call lifecycle source kind differs")),
+        };
+        if event.realm_id != *realm
             || arkret_wire::CommitStreamRef::from_scope(&event.scope_ref, None)
                 .map_err(malformed)?
                 != *source
-            || commit.event_ref != create
+            || commit.event_ref != event.event_id
             || commit.realm_id != *realm
             || commit.stream_ref != *source
             || commit.commit_id.as_str() != revision.commit_id
             || position(commit.stream_position)? != revision.stream_position
-            || current.to != payload.initial_state
+            || *value != expected
         {
             return Err(malformed(
-                "Call current differs from its accepted genesis Event and Commit",
+                "Call current differs from accepted lifecycle Event and Commit",
             ));
         }
     }
-    let changed = diesel::sql_query("INSERT INTO call_state_current_results (realm_id,call_id,create_event_id,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(realm_id,call_id) DO UPDATE SET current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at WHERE call_state_current_results.create_event_id=EXCLUDED.create_event_id AND call_state_current_results.source_stream_ref=EXCLUDED.source_stream_ref AND call_state_current_results.value=EXCLUDED.value AND (call_state_current_results.current_stream_position<EXCLUDED.current_stream_position OR (call_state_current_results.current_stream_position=EXCLUDED.current_stream_position AND call_state_current_results.current_commit_id=EXCLUDED.current_commit_id))")
+    let changed = diesel::sql_query("INSERT INTO call_state_current_results (realm_id,call_id,create_event_id,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(realm_id,call_id) DO UPDATE SET current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at WHERE call_state_current_results.create_event_id=EXCLUDED.create_event_id AND call_state_current_results.source_stream_ref=EXCLUDED.source_stream_ref AND (call_state_current_results.current_stream_position<EXCLUDED.current_stream_position OR (call_state_current_results.current_stream_position=EXCLUDED.current_stream_position AND call_state_current_results.current_commit_id=EXCLUDED.current_commit_id AND call_state_current_results.value=EXCLUDED.value))")
         .bind::<Text,_>(realm.as_str()).bind::<Text,_>(call.as_str()).bind::<Text,_>(create.as_str())
         .bind::<Jsonb,_>(serde_json::to_value(source).map_err(malformed)?).bind::<Text,_>(revision.commit_id)
         .bind::<BigInt,_>(revision.stream_position).bind::<Jsonb,_>(value).bind::<Timestamptz,_>(revision.updated_at)
@@ -858,6 +917,23 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
                 upsert_call_genesis(conn, realm_id, call_id, source_stream_ref, &row, value)
                     .await?;
             }
+            S::CallFocus{call_id} | S::CallRoster{call_id} | S::CallModeration{call_id} => {
+                match selector {
+                    S::CallRoster{..}=>serde_json::from_value::<arkret_models_collaboration::events_payloads::call::CallRosterCurrentValue>(value.clone()).map_err(malformed)?.validate_sources(source_stream_ref,revision).map_err(malformed)?,
+                    S::CallModeration{..}=>serde_json::from_value::<arkret_models_collaboration::events_payloads::call::CallModerationCurrentValue>(value.clone()).map_err(malformed)?.validate_sources(source_stream_ref,revision).map_err(malformed)?,
+                    _=>{let _:arkret_models_collaboration::events_payloads::call::CallFocus=serde_json::from_value(value.clone()).map_err(malformed)?;},
+                }
+                let changed=diesel::sql_query("INSERT INTO call_component_current_results(realm_id,call_id,selector,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(realm_id,call_id,selector) DO UPDATE SET current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at WHERE call_component_current_results.source_stream_ref=EXCLUDED.source_stream_ref AND (call_component_current_results.current_stream_position<EXCLUDED.current_stream_position OR (call_component_current_results.current_stream_position=EXCLUDED.current_stream_position AND call_component_current_results.current_commit_id=EXCLUDED.current_commit_id AND call_component_current_results.value=EXCLUDED.value))")
+                    .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(call_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(selector).map_err(malformed)?)
+                    .bind::<Jsonb,_>(serde_json::to_value(source_stream_ref).map_err(malformed)?).bind::<Text,_>(row.commit_id).bind::<BigInt,_>(row.stream_position).bind::<Jsonb,_>(value).bind::<Timestamptz,_>(row.updated_at).execute(&mut *conn).await.map_err(PersistenceError::database)?;
+                require_one_current_write(changed)?;
+            }
+            S::RealmMediaService => {
+                let _:arkret_models_collaboration::events_payloads::RealmMediaServiceValue=serde_json::from_value(value.clone()).map_err(malformed)?;
+                let changed=diesel::sql_query("INSERT INTO realm_media_service_current_results(realm_id,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(realm_id) DO UPDATE SET current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at WHERE realm_media_service_current_results.source_stream_ref=EXCLUDED.source_stream_ref AND (realm_media_service_current_results.current_stream_position<EXCLUDED.current_stream_position OR (realm_media_service_current_results.current_stream_position=EXCLUDED.current_stream_position AND realm_media_service_current_results.current_commit_id=EXCLUDED.current_commit_id AND realm_media_service_current_results.value=EXCLUDED.value))")
+                    .bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(source_stream_ref).map_err(malformed)?).bind::<Text,_>(row.commit_id).bind::<BigInt,_>(row.stream_position).bind::<Jsonb,_>(value).bind::<Timestamptz,_>(row.updated_at).execute(&mut *conn).await.map_err(PersistenceError::database)?;
+                require_one_current_write(changed)?;
+            }
             S::Circle { circle_id } => {
                 let create_id = arkret_wire::EventId::new(circle_id.as_str().replacen(
                     "ak:circle:",
@@ -1217,6 +1293,60 @@ pub(crate) async fn advance_in_connection(
         | arkret_wire::EventKind::RealmUnfreeze => {
             crate::realm_lifecycle_current_results::commit_in_connection(conn, event, commit)
                 .await?;
+        }
+        arkret_wire::EventKind::CallState => {
+            let body: arkret_models_collaboration::events_payloads::call::CallStatePayload =
+                serde_json::from_value(payload()?).map_err(malformed)?;
+            body.validate().map_err(malformed)?;
+            if event.realm_id != commit.realm_id
+                || event.event_id != commit.event_ref
+                || arkret_wire::CommitStreamRef::from_scope(&event.scope_ref, None)
+                    .map_err(malformed)?
+                    != commit.stream_ref
+            {
+                return Err(malformed("Call state replica source differs"));
+            }
+            if let Some(transition) = &body.state_transition {
+                upsert_call_genesis(
+                    conn,
+                    &event.realm_id,
+                    &body.call_id,
+                    &commit.stream_ref,
+                    &row,
+                    &serde_json::to_value(transition).map_err(malformed)?,
+                )
+                .await?;
+            }
+            for (kind, value) in [
+                ("call_focus", body.focus.as_ref().map(serde_json::to_value)),
+                (
+                    "call_roster",
+                    body.roster_delta.as_ref().map(serde_json::to_value),
+                ),
+                (
+                    "call_moderation",
+                    body.moderation_delta.as_ref().map(serde_json::to_value),
+                ),
+            ] {
+                if let Some(value) = value {
+                    crate::call_state_current_results::write_axis(
+                        conn,
+                        event,
+                        commit,
+                        &body.call_id,
+                        kind,
+                        value.map_err(malformed)?,
+                    )
+                    .await?;
+                }
+            }
+        }
+        arkret_wire::EventKind::RealmMediaService => {
+            let body: arkret_models_collaboration::events_payloads::RealmMediaServicePayload =
+                serde_json::from_value(payload()?).map_err(malformed)?;
+            body.value.validate().map_err(malformed)?;
+            diesel::sql_query("INSERT INTO realm_media_service_current_results(realm_id,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(realm_id) DO UPDATE SET current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at WHERE realm_media_service_current_results.source_stream_ref=EXCLUDED.source_stream_ref AND (realm_media_service_current_results.current_stream_position<EXCLUDED.current_stream_position OR (realm_media_service_current_results.current_stream_position=EXCLUDED.current_stream_position AND realm_media_service_current_results.current_commit_id=EXCLUDED.current_commit_id AND realm_media_service_current_results.value=EXCLUDED.value))")
+            .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(&commit.stream_ref).map_err(malformed)?).bind::<Text,_>(commit.commit_id.as_str()).bind::<BigInt,_>(position(commit.stream_position)?).bind::<Jsonb,_>(serde_json::to_value(body.value).map_err(malformed)?).bind::<Timestamptz,_>(commit.committed_at).execute(&mut *conn).await.map_err(PersistenceError::database)?;
         }
         arkret_wire::EventKind::CallCreate => {
             use arkret_models_collaboration::events_payloads::call::{

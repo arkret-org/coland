@@ -181,7 +181,7 @@ fn remote_recipient_services(
         .collect()
 }
 
-async fn admit_signal(
+pub(crate) async fn admit_signal(
     state: &AppState,
     session: &SessionIdentityState,
     envelope: &SignalEnvelope,
@@ -235,7 +235,7 @@ async fn admit_signal(
 }
 
 /// Resolve both declared and current accepted governance cuts in one read transaction.
-async fn verify_signal_scope_authority(
+pub(crate) async fn verify_signal_scope_authority(
     state: &AppState,
     envelope: &SignalEnvelope,
     actor: &arkret_wire::ActorId,
@@ -423,7 +423,7 @@ async fn resolve_local_signal_device_key(
 /// Recipient admission resolves remote exact-account authority through the
 /// registered peer keys surface, with the same verified attestation gate as
 /// self signer lookup. Peer relay itself never enters this device gate.
-async fn resolve_signal_delivery_device_key(
+pub(crate) async fn resolve_signal_delivery_device_key(
     state: &AppState,
     recipient: &arkret_wire::AccountId,
     envelope: &SignalEnvelope,
@@ -512,6 +512,30 @@ async fn verify_signal_agent_proof(
         Some((agent_key_authorization_ref, verification_method)),
     )
     .await
+}
+
+pub(crate) async fn invitation_agent_key(
+    state: &AppState,
+    envelope: &SignalEnvelope,
+) -> Result<arkret_signatures::PublicKeyMaterial, AppError> {
+    verify_signal_agent_current_authority(state, envelope, &envelope.sender_actor_id, None).await?;
+    let record = crate::routing::identity::agent_pcr::agent_record_for_actor(
+        state,
+        &envelope.sender_actor_id,
+    )
+    .await
+    .map_err(|_| signal_rail_unavailable("resolve accepted Agent invitation key"))?
+    .ok_or_else(|| signal_proof_invalid("Agent is unavailable"))?;
+    let runtime = record
+        .runtime_bindings()
+        .map_err(|_| signal_proof_invalid("Agent runtime binding is inconsistent"))?
+        .active_binding
+        .ok_or_else(|| signal_proof_invalid("Agent runtime binding is absent"))?;
+    let key = arkret_models_identity::agent_signer_evidence::AgentAuthorizedSigningKey::from_event(
+        &runtime.key_authorization_event,
+    )
+    .map_err(|_| signal_proof_invalid("Agent invitation key is invalid"))?;
+    agent_runtime_signal_public_key(&key.public_key, &runtime.public_key_digest)
 }
 
 async fn verify_signal_agent_current_authority(
@@ -695,7 +719,7 @@ fn require_local_signal_device_account(
 /// the HTTP handler deliberately converts it to the same opaque accepted
 /// outcome. Request authentication and request-shape failures are handled
 /// before this function is entered.
-pub(in crate::routing::events) async fn accept_peer_signal(
+pub(crate) async fn accept_peer_signal(
     state: &AppState,
     source_id: &str,
     envelope: &SignalEnvelope,
@@ -777,7 +801,7 @@ impl AppState {
 }
 
 /// Server-visible checks shared by source dispatch and destination admission.
-async fn admit_signal_outer(
+pub(crate) async fn admit_signal_outer(
     state: &AppState,
     source_id: &str,
     envelope: &SignalEnvelope,
@@ -928,8 +952,14 @@ pub(super) fn signal_response(
                         break;
                     }
                     for envelope in pending_signals_for_subscriber(&state, &session, &mut live_starts).await {
-                        if let Ok(frame) = admitted_signal_frame(&state, &session, envelope).await {
-                            yield Ok(ndjson_line(&frame));
+                        match admitted_signal_frame(&state, &session, envelope).await {
+                            Ok(frame) => yield Ok(ndjson_line(&frame)),
+                            Err(error) => {
+                                #[cfg(feature = "conformance-harness")]
+                                tracing::warn!(code=error.wire_code(), %error, "conformance Signal frame refused by the production emission gate");
+                                #[cfg(not(feature = "conformance-harness"))]
+                                let _ = error;
+                            }
                         }
                     }
                 }
@@ -1033,6 +1063,7 @@ pub(crate) async fn admitted_signal_frame(
     };
     let mut authority = arkret_models_collaboration::SignalDeliveryAuthority {
         product_authority: None,
+        call_invitation: None,
         recipient_account_id: recipient,
         key,
     };
@@ -1101,6 +1132,18 @@ pub(crate) async fn admitted_signal_frame(
             return Err(signal_invalid("Signal expired before emission"));
         }
         authority.product_authority = current.product_authority;
+        authority.call_invitation = if let Some(device) = session.human_device_id() {
+            crate::routing::call_admission::delivery_for_device(
+                state,
+                &envelope,
+                &authority.recipient_account_id,
+                &arkret_wire::DeviceId::new(device)
+                    .map_err(|e| AppError::param_invalid(e.to_string()))?,
+            )
+            .await?
+        } else {
+            None
+        };
         authority
             .validate_for_envelope(&envelope)
             .map_err(structural_error)?;
@@ -1108,7 +1151,12 @@ pub(crate) async fn admitted_signal_frame(
     }
     .await;
     #[cfg(feature = "conformance-harness")]
-    emission_probe::record(probe.as_deref(), &envelope, &decision)?;
+    emission_probe::record(
+        probe.as_deref(),
+        &envelope,
+        &decision,
+        authority.call_invitation.is_some(),
+    )?;
     decision?;
     Ok(SignalStreamFrame::signal(envelope, authority))
 }

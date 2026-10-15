@@ -1224,11 +1224,14 @@ pub(crate) async fn media_service_anchor_for_account(
             .get_result::<ExistsRow>(&mut *conn)
             .await?
             .present;
-        Ok(if anchored {
-            MediaServiceAnchorRead::Anchored
-        } else {
-            MediaServiceAnchorRead::NotFound
-        })
+        if !anchored {return Ok(MediaServiceAnchorRead::NotFound);}
+        #[derive(QueryableByName)] struct MediaAnchor {#[diesel(sql_type=Jsonb)] value:serde_json::Value,#[diesel(sql_type=Text)] commit_id:String,#[diesel(sql_type=BigInt)] stream_position:i64}
+        let row=sql_query("SELECT value,current_commit_id AS commit_id,current_stream_position AS stream_position FROM realm_media_service_current_results WHERE realm_id=$1")
+            .bind::<Text,_>(realm_id.as_str()).get_result::<MediaAnchor>(&mut *conn).await.optional()?.ok_or_else(||PersistenceError::Conflict("temporarily_unavailable: accepted media current is incomplete".into()))?;
+        let value:arkret_models_collaboration::events_payloads::realm::RealmMediaServiceValue=serde_json::from_value(row.value).map_err(PersistenceError::database)?;
+        value.validate().map_err(PersistenceError::database)?;
+        Ok(MediaServiceAnchorRead::Anchored{value,revision:arkret_wire::CurrentRevision{commit_id:row.commit_id.parse().map_err(PersistenceError::database)?,stream_position:u64::try_from(row.stream_position).map_err(PersistenceError::database)?}})
+
     })
     .await
     .map_err(PgTransactionError::into_persistence)

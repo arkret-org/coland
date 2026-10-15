@@ -1231,6 +1231,7 @@ impl CommittedRealm {
         };
         store
             .commit_event(coland_storage::EventCommitRequest {
+                verified_media_participant: None,
                 authority_commit: transaction.clone(),
                 self_producer_guard: None,
                 applet_producer_guard: None,

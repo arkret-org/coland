@@ -164,6 +164,8 @@ fn decided_at_commit_cut(kind: &arkret_wire::EventKind) -> bool {
             | arkret_wire::EventKind::MessageRevise
             | arkret_wire::EventKind::MemberIdentityUpdate
             | arkret_wire::EventKind::CallCreate
+            | arkret_wire::EventKind::CallState
+            | arkret_wire::EventKind::RealmMediaService
             | arkret_wire::EventKind::MessageCreate
             | arkret_wire::EventKind::MessageRedact
             | arkret_wire::EventKind::MlsGenesis
@@ -364,7 +366,7 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             coland_storage::DirectConversationAdmissionCut::Passed => true,
             coland_storage::DirectConversationAdmissionCut::NotDirectConversation => false,
         };
-        if !direct_conversation {
+        if !direct_conversation && event.kind != arkret_wire::EventKind::CallState {
             crate::routing::events::operations::validate_operation_semantics(
                 state,
                 std::slice::from_ref(&operation),
@@ -521,6 +523,9 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             ))
             .await?;
         let command = coland_services::events::CommitAcceptedEventCommand {
+            verified_media_participant:
+                crate::routing::interop::webrtc::prepare_verified_roster_participant(state, event)
+                    .await?,
             authority_commit: transaction.clone(),
             self_producer_guard,
             applet_producer_guard,

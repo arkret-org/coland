@@ -952,6 +952,7 @@ fn franking_event_request(
         arkret_canonical::canonical_json_bytes(&event.digest_payload().unwrap()).unwrap();
     let authority_commit = stream.order(settlement, &event, received_at);
     coland_storage::EventCommitRequest {
+        verified_media_participant: None,
         authority_commit,
         self_producer_guard: None,
         applet_producer_guard: None,

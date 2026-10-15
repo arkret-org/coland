@@ -87,6 +87,7 @@ fn persistence_event_commit_request(
     command: crate::events::CommitAcceptedEventCommand,
 ) -> coland_storage::EventCommitRequest {
     coland_storage::EventCommitRequest {
+        verified_media_participant: command.verified_media_participant,
         authority_commit: command.authority_commit,
         self_producer_guard: command.self_producer_guard,
         applet_producer_guard: command.applet_producer_guard,

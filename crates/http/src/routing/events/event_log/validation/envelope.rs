@@ -122,16 +122,12 @@ mod applet;
 #[cfg(test)]
 mod capability_grant;
 
-mod envelope_core;
 #[cfg(test)]
 mod features_schema;
 
 #[cfg(test)]
 mod proofs;
 
-pub(in crate::routing) use envelope_core::{
-    PrivateInviteEnvelope, validate_private_invite_envelope,
-};
 #[cfg(test)]
 pub(crate) use features_schema::validate_event_schema_and_payload;
 #[cfg(test)]

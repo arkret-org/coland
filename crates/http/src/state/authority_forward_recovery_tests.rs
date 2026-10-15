@@ -984,6 +984,7 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
         .unwrap();
     let boundary = route.method_history_evidence.boundary();
     let description = VerifiedServiceDescribeMetadata {
+        supported_profiles: Vec::new(),
         service_id: governor_state.service_core_id(),
         service_kind: "station".into(),
         service_resolution: ResolutionCommitment {
@@ -1547,6 +1548,7 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
         .unwrap();
     let boundary = route.method_history_evidence.boundary();
     let description = VerifiedServiceDescribeMetadata {
+        supported_profiles: Vec::new(),
         service_id: governor_state.service_core_id(),
         service_kind: "station".into(),
         service_resolution: ResolutionCommitment {
@@ -2269,6 +2271,7 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             .unwrap();
         let boundary = route.method_history_evidence.boundary();
         let description = VerifiedServiceDescribeMetadata {
+            supported_profiles: Vec::new(),
             service_id: governor_state.service_core_id(),
             service_kind: "station".into(),
             service_resolution: ResolutionCommitment {

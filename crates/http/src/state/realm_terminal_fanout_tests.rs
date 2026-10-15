@@ -95,6 +95,7 @@ async fn install_verified_route(sender: &AppState, recipient: &AppState) {
         .unwrap();
     let boundary = evidence.method_history_evidence.boundary();
     let description = VerifiedServiceDescribeMetadata {
+        supported_profiles: Vec::new(),
         service_id: recipient.service_core_id(),
         service_kind: "station".into(),
         service_resolution: ResolutionCommitment {

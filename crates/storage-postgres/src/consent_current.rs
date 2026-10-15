@@ -3,7 +3,7 @@
 use arkret_models_collaboration::consent_operations::{ConsentState, ConsentValue};
 use arkret_models_collaboration::events_payloads::consent::{ConsentGrantPayload, ConsentPeer};
 use arkret_models_collaboration::governance_payloads::ConsentRevokePayload;
-use arkret_wire::{AccountId, ActorId, CurrentRevision, EventKind};
+use arkret_wire::{AccountId, ActorId, CurrentRevision, Event, EventKind, RealmCommit};
 use coland_storage::{
     AuthorityCommitWriteOutcome, ConflictCode, ConsentAdmissionOutcome, ConsentAdmissionWrite,
     ConsentCurrentRecord, ConsentCurrentStore, PersistenceError, PersistenceResult,
@@ -54,6 +54,34 @@ async fn version(
     let row = sql_query("SELECT v.value,e.envelope,c.commit_json FROM consent_result_versions v JOIN realm_commits c ON c.commit_id=v.commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE v.commit_id=$1")
         .bind::<Text,_>(commit_id).get_result::<Row>(conn).await?;
     record(row).map_err(Into::into)
+}
+
+/// Read the complete accepted namespace while the caller holds the PCR lock.
+pub(crate) async fn records_in_connection(
+    conn: &mut AsyncPgConnection,
+    holder: &AccountId,
+    realm: &arkret_wire::RealmId,
+) -> Result<Vec<ConsentCurrentRecord>, PgTransactionError> {
+    #[derive(QueryableByName)]
+    struct Completeness {
+        #[diesel(sql_type=diesel::sql_types::Bool)]
+        complete: bool,
+    }
+    let complete=sql_query("SELECT NOT EXISTS(SELECT 1 FROM realm_commits c LEFT JOIN canonical_events e ON e.pk=c.event_pk WHERE c.realm_id=$1 AND c.stream_ref->>'kind'='realm' AND (e.pk IS NULL OR e.state<>'committed')) AND NOT EXISTS(SELECT 1 FROM (SELECT DISTINCT ON(e.envelope->'payload'->>'consent_id') e.envelope->'payload'->>'consent_id' AS consent_id,c.commit_id FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE c.realm_id=$1 AND e.envelope->>'kind' IN ('ak.consent.grant','ak.consent.revoke') ORDER BY e.envelope->'payload'->>'consent_id',c.stream_position DESC) latest LEFT JOIN consent_current_results r ON r.realm_id=$1 AND r.consent_id=latest.consent_id WHERE r.current_commit_id IS DISTINCT FROM latest.commit_id) AND NOT EXISTS(SELECT 1 FROM consent_current_results r LEFT JOIN realm_commits c ON c.commit_id=r.current_commit_id AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position LEFT JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND (c.commit_id IS NULL OR e.pk IS NULL OR e.state<>'committed')) AS complete")
+                .bind::<Text,_>(realm.as_str()).get_result::<Completeness>(&mut *conn).await?;
+    if !complete.complete {
+        return Err(rejected(
+            ConflictCode::TemporarilyUnavailable,
+            "holder Consent namespace is incomplete",
+        ));
+    }
+    let rows = sql_query("SELECT r.value,e.envelope,c.commit_json FROM consent_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk WHERE r.holder_account_id=$1 AND r.realm_id=$2 ORDER BY r.consent_id")
+                .bind::<Jsonb,_>(serde_json::to_value(holder).map_err(corrupt)?)
+                .bind::<Text,_>(realm.as_str()).get_results::<Row>(&mut *conn).await?;
+    rows.into_iter()
+        .map(record)
+        .collect::<PersistenceResult<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 async fn admit(
@@ -214,6 +242,9 @@ async fn admit(
     } else {
         None
     };
+    if quarantine_update.is_some() {
+        crate::consent_private_effects::mark_pending(conn, holder, &event.realm_id).await?;
+    }
     Ok(ConsentAdmissionOutcome::Committed(ConsentCurrentRecord {
         value: next,
         event: event.clone(),
@@ -300,6 +331,190 @@ async fn invalidate_quarantine(
 
 #[async_trait::async_trait]
 impl ConsentCurrentStore for PgConsentCurrentStore {
+    async fn historical_basis(
+        &self,
+        holder: &AccountId,
+        id: &arkret_wire::ConsentId,
+        revision: &arkret_wire::CurrentRevision,
+    ) -> PersistenceResult<Option<coland_storage::CommittedEventRecord>> {
+        #[derive(diesel::QueryableByName)]
+        struct Basis {
+            #[diesel(sql_type=Jsonb)]
+            commit_json: Value,
+            #[diesel(sql_type=Jsonb)]
+            envelope: Value,
+        }
+        let mut conn = pg_conn(&self.pool).await?;
+        let rows=sql_query("SELECT c.commit_json,e.envelope FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE c.commit_id=$1 UNION ALL SELECT f.accepted_commit_json AS commit_json,e.envelope FROM authority_forward_attempts f JOIN canonical_events e ON e.pk=f.event_pk WHERE f.original_submission_json IS NOT NULL AND f.accepted_commit_json->>'commit_id'=$1")
+            .bind::<Text,_>(revision.commit_id.as_str()).get_results::<Basis>(&mut conn).await.map_err(PersistenceError::database)?;
+        let mut result: Option<coland_storage::CommittedEventRecord> = None;
+        for row in rows {
+            let commit: RealmCommit =
+                serde_json::from_value(row.commit_json).map_err(PersistenceError::database)?;
+            let event: Event =
+                serde_json::from_value(row.envelope).map_err(PersistenceError::database)?;
+            if commit.commit_id != revision.commit_id
+                || commit.stream_position != revision.stream_position
+                || commit.event_ref != event.event_id
+                || event.actor_id.as_account_id() != Some(holder)
+                || event.kind != EventKind::ConsentGrant
+            {
+                continue;
+            }
+            let payload: ConsentGrantPayload = serde_json::from_value(
+                serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
+            )
+            .map_err(PersistenceError::database)?;
+            if &payload.consent_id != id {
+                continue;
+            }
+            let pair = coland_storage::CommittedEventRecord { commit, event };
+            if result.as_ref().is_some_and(|old| old != &pair) {
+                return Err(PersistenceError::Conflict(
+                    "immutable Consent acceptance witness fork".into(),
+                ));
+            }
+            result = Some(pair);
+        }
+        Ok(result)
+    }
+    async fn pending_effect_holders(
+        &self,
+        issuer: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Vec<AccountId>> {
+        crate::consent_private_effects::pending(&self.pool, issuer).await
+    }
+    async fn prepare_effect_publication(
+        &self,
+        holder: &AccountId,
+        issuer: &arkret_wire::DidCoreId,
+        nonce: String,
+    ) -> PersistenceResult<Option<coland_storage::PrivateEffectsPublication>> {
+        crate::consent_private_effects::prepare(&self.pool, holder, issuer, nonce).await
+    }
+    async fn acknowledge_effect_publication(
+        &self,
+        holder: &AccountId,
+        issuer: &arkret_wire::DidCoreId,
+        sequence: u64,
+    ) -> PersistenceResult<()> {
+        crate::consent_private_effects::acknowledge(&self.pool, holder, issuer, sequence).await
+    }
+    async fn project_effect_publication(
+        &self,
+        request: &arkret_models_collaboration::consent_private::ConsentPrivateEffectsPublishRequest,
+        source: &arkret_wire::DidCoreId,
+        receiver: &arkret_wire::DidCoreId,
+        authority: &coland_storage::CurrentRealmAuthority,
+        known_head: &arkret_wire::CommitStreamHead,
+    ) -> PersistenceResult<coland_storage::PrivateEffectsProjection> {
+        crate::consent_private_effects_projection::project(
+            &self.pool, request, source, receiver, authority, known_head,
+        )
+        .await
+    }
+    async fn observe_private_cut(
+        &self,
+        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,
+        outcome: &arkret_models_collaboration::consent_private::ConsentPrivateProxyOutcome,
+    ) -> PersistenceResult<()> {
+        crate::consent_private_cuts::observe(self, request, outcome).await
+    }
+    async fn private_command_prepared(
+        &self,
+        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,
+        source: &arkret_wire::DidCoreId,
+        acceptor: &arkret_wire::DidCoreId,
+        quota: &arkret_wire::NewSourceQuotaConstraints,
+        prepared: Option<&coland_storage::PreparedPrivateInviteDelivery>,
+    ) -> PersistenceResult<arkret_models_collaboration::consent_private::ConsentPrivateProxyOutcome>
+    {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::consent_private_commands::execute(
+                conn, request, source, acceptor, quota, prepared,
+            )
+            .await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+    async fn private_command(
+        &self,
+        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,
+        source_service: &arkret_wire::DidCoreId,
+        acceptor_service: &arkret_wire::DidCoreId,
+        quota_constraints: &arkret_wire::NewSourceQuotaConstraints,
+    ) -> PersistenceResult<arkret_models_collaboration::consent_private::ConsentPrivateProxyOutcome>
+    {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::consent_private_commands::execute(
+                conn,
+                request,
+                source_service,
+                acceptor_service,
+                quota_constraints,
+                None,
+            )
+            .await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+    async fn read_cut(
+        &self,
+        holder: &AccountId,
+        peer: &ConsentPeer,
+        scope: arkret_wire::ConsentScope,
+        device: Option<&arkret_wire::DeviceId>,
+    ) -> PersistenceResult<coland_storage::ConsentCurrentCut> {
+        let holder = holder.clone();
+        let peer = peer.clone();
+        let device = device.cloned();
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            let authority = crate::pcr_private_authority::lock_holder(conn, &holder, None).await?;
+            let evaluated_at =
+                arkret_canonical::canonical::normalize_timestamp_canonical(chrono::Utc::now());
+            let device_admitted = if let Some(device) = &device {
+                crate::pcr_device_status_reader::confirmed_pcr_device_status_cut_in_connection(
+                    conn,
+                    &holder,
+                    device,
+                    evaluated_at,
+                )
+                .await?
+                .is_some_and(|status| {
+                    status.lifecycle == crate::pcr_device_status_fold::PcrDeviceLifecycle::Active
+                })
+            } else {
+                true
+            };
+            let records = records_in_connection(conn, &holder, &authority.realm_id)
+                .await?
+                .into_iter()
+                .filter(|r| {
+                    r.value.peer == peer
+                        && (r.value.consent_scope == scope
+                            || r.value.consent_scope == arkret_wire::ConsentScope::Any)
+                })
+                .collect();
+            Ok(coland_storage::ConsentCurrentCut {
+                realm_id: authority.realm_id,
+                generation: authority.generation,
+                service_id: authority.service_id,
+                head: authority.head,
+                records,
+                evaluated_at,
+                device_admitted,
+            })
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
     async fn admit(
         &self,
         write: ConsentAdmissionWrite,
@@ -336,18 +551,13 @@ impl ConsentCurrentStore for PgConsentCurrentStore {
             .await
             .map_err(PersistenceError::database)?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            #[derive(QueryableByName)]
-            struct LockRow { #[diesel(sql_type=Text)] realm_id: String }
+            let authority = crate::pcr_private_authority::lock_holder(conn, &write.holder, Some(&write.acceptor_service_id)).await?;
             let holder = serde_json::to_value(&write.holder).map_err(corrupt)?;
             // Match the canonical proof, then serialize with Grant/Revoke on
             // the same PCR lock. Re-read current AFTER acquiring that lock.
-            let lock = sql_query("SELECT a.realm_id FROM realm_authorities a JOIN consent_current_results r ON r.realm_id=a.realm_id JOIN realm_commits c ON c.commit_id=r.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE r.holder_account_id=$1 AND e.envelope->>'event_id'=$2 FOR UPDATE OF a")
-                .bind::<Jsonb,_>(&holder).bind::<Text,_>(write.consent_grant_ref.as_str())
-                .get_result::<LockRow>(&mut *conn).await.optional()?;
-            let Some(lock) = lock else { return Ok(None) };
             let current = sql_query("SELECT r.value,e.envelope,c.commit_json FROM consent_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk JOIN realm_authorities a ON a.realm_id=r.realm_id JOIN realm_authority_root_current_results root ON root.realm_id=r.realm_id WHERE r.holder_account_id=$1 AND r.realm_id=$2 AND e.envelope->>'event_id'=$3 AND a.service_id=$4 AND root.controller_actor_id=$5")
-                .bind::<Jsonb,_>(&holder).bind::<Text,_>(&lock.realm_id).bind::<Text,_>(write.consent_grant_ref.as_str())
-                .bind::<Text,_>(write.holder.station_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(ActorId::account(write.holder.clone())).map_err(corrupt)?)
+                .bind::<Jsonb,_>(&holder).bind::<Text,_>(authority.realm_id.as_str()).bind::<Text,_>(write.consent_grant_ref.as_str())
+                .bind::<Text,_>(write.acceptor_service_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(ActorId::account(write.holder.clone())).map_err(corrupt)?)
                 .get_result::<Row>(&mut *conn).await.optional()?;
             let Some(current) = current else { return Ok(None) };
             let current = record(current)?;
@@ -365,8 +575,14 @@ impl ConsentCurrentStore for PgConsentCurrentStore {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
-        let rows=sql_query("SELECT r.value,e.envelope,c.commit_json FROM consent_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk JOIN realm_authorities a ON a.realm_id=r.realm_id JOIN realm_authority_root_current_results root ON root.realm_id=r.realm_id WHERE r.holder_account_id=$1 AND a.service_id=$2 AND root.controller_actor_id=$3 ORDER BY r.consent_id")
-            .bind::<Jsonb,_>(serde_json::to_value(holder).map_err(PersistenceError::database)?).bind::<Text,_>(holder.station_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(ActorId::account(holder.clone())).map_err(PersistenceError::database)?).get_results::<Row>(&mut conn).await.map_err(PersistenceError::database)?;
-        rows.into_iter().map(record).collect()
+        let holder = holder.clone();
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            let authority =
+                crate::pcr_private_authority::lock_holder(conn, &holder, Some(&holder.station_id))
+                    .await?;
+            records_in_connection(conn, &holder, &authority.realm_id).await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
     }
 }

@@ -130,6 +130,8 @@ const AUDITED_FAMILIES: &[&str] = &[
     "circle_current_results",
     "circle_member_state_current_results",
     "call_state_current_results",
+    "call_component_current_results",
+    "realm_media_service_current_results",
     "sidecar_current_results",
     "sidecar_context_current_results",
     "sidecar_exchange_controls_current_results",
@@ -1048,7 +1050,11 @@ async fn disclosure_facts_in_connection(
     let mut call_creations = std::collections::BTreeMap::new();
     for entry in &material.current_state_entries {
         if let TypedCurrentRow::Value {
-            selector: CurrentSelector::CallState { call_id },
+            selector:
+                CurrentSelector::CallState { call_id }
+                | CurrentSelector::CallFocus { call_id }
+                | CurrentSelector::CallRoster { call_id }
+                | CurrentSelector::CallModeration { call_id },
             ..
         } = entry
         {
@@ -1626,7 +1632,10 @@ pub(crate) fn disclose_to_account(
                     .ok_or_else(|| rejected("reaction target has no accepted creation scope"))?
                     .clone(),
             ),
-            CurrentSelector::CallState { call_id } => Some(
+            CurrentSelector::CallState { call_id }
+            | CurrentSelector::CallFocus { call_id }
+            | CurrentSelector::CallRoster { call_id }
+            | CurrentSelector::CallModeration { call_id } => Some(
                 facts
                     .call_creations
                     .get(call_id)
@@ -1803,9 +1812,32 @@ pub(crate) fn disclose_to_account(
                     .call_creations
                     .get(call_id)
                     .ok_or_else(|| rejected("Call current has no accepted creation"))?;
-                if current.from.is_some() || current.to != creation.initial_state {
+                if current.from.is_none() && current.to != creation.initial_state {
                     return Err(rejected("Call current differs from its accepted creation"));
                 }
+            }
+            CurrentSelector::CallFocus { .. } => {
+                let _: arkret_models_collaboration::events_payloads::call::CallFocus =
+                    serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
+            }
+            CurrentSelector::CallRoster { .. } => {
+                let roster: arkret_models_collaboration::events_payloads::call::CallRosterCurrentValue =
+                    serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
+                roster
+                    .validate_sources(source_stream_ref, revision)
+                    .map_err(PersistenceError::database)?;
+            }
+            CurrentSelector::CallModeration { .. } => {
+                let moderation: arkret_models_collaboration::events_payloads::call::CallModerationCurrentValue =
+                    serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
+                moderation
+                    .validate_sources(source_stream_ref, revision)
+                    .map_err(PersistenceError::database)?;
+            }
+            CurrentSelector::RealmMediaService => {
+                let descriptor: arkret_models_collaboration::events_payloads::RealmMediaServiceValue =
+                    serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
+                descriptor.validate().map_err(PersistenceError::database)?;
             }
             CurrentSelector::DirectConversationBinding { pair_key } => {
                 let binding: arkret_models_collaboration::events_payloads::direct_conversation::DirectConversationBindingCurrentValue =

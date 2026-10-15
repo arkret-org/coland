@@ -492,9 +492,19 @@ pub(super) async fn mimi_consent_update(
     // it never re-signs, rebuilds or synthesizes the Event.
     match session {
         Some(session) => {
-            crate::state::authority_consent::submit(state, &session, &body.consent_event).await
+            crate::state::authority_pcr::submit_self(state, &session, &body.consent_event)
+                .await
+                .and_then(|outcome| {
+                    outcome.map(|_| ()).ok_or_else(|| {
+                        coland_services::ServiceError::SchemaViolation(
+                            "MIMI Consent is outside the accepted holder PCR".into(),
+                        )
+                    })
+                })
         }
-        None => crate::state::authority_consent::submit_mimi(state, &body.consent_event).await,
+        None => {
+            crate::state::authority_consent::submit_mimi_forward(state, &body.consent_event).await
+        }
     }
     .map_err(|error| mimi_consent_admission_error(body.decision, error))?;
     json_ok(MimiUpdateConsentOutcome {
@@ -1001,31 +1011,32 @@ async fn verify_mimi_consent_correlation(
         }
         arkret_models_collaboration::mimi_operations::MimiConsentDecision::Deny
         | arkret_models_collaboration::mimi_operations::MimiConsentDecision::Revoke => {
-            use arkret_models_collaboration::consent_operations::ConsentState;
             let revoke: arkret_models_collaboration::governance_payloads::ConsentRevokePayload =
                 serde_json::from_value(
                     serde_json::to_value(&body.consent_event.event.payload)
                         .map_err(|_| mimi_consent_correlation_unavailable())?,
                 )
                 .map_err(|_| mimi_consent_correlation_unavailable())?;
-            let records = state
+            // Correlate the exact signed historical CAS basis. Only the actual
+            // accepting authority decides whether it is still current.
+            let basis = state
                 .persistence()
-                .consent_current(body_holder_account_id)
+                .consent_historical_basis(
+                    body_holder_account_id,
+                    &body.consent_id,
+                    &revoke.expected_revision,
+                )
                 .await
+                .map_err(|_| mimi_consent_correlation_unavailable())?
+                .ok_or_else(mimi_consent_correlation_unavailable)?;
+            let grant: arkret_models_collaboration::events_payloads::consent::ConsentGrantPayload =
+                serde_json::from_value(
+                    serde_json::to_value(&basis.event.payload)
+                        .map_err(|_| mimi_consent_correlation_unavailable())?,
+                )
                 .map_err(|_| mimi_consent_correlation_unavailable())?;
-            let matches = records.iter().any(|record| {
-                let active_at_expected_cut = record.value.status == ConsentState::Active
-                    && record.view().revision == revoke.expected_revision;
-                // An exact accepted retry keeps its original outcome;
-                // it does not authorize a second revocation. The PCR
-                // writer still verifies bytes and current authority.
-                let exact_accepted_retry = record.value.status == ConsentState::Revoked
-                    && record.event == body.consent_event.event;
-                record.value.consent_id == body.consent_id
-                    && correlation_peer.as_ref() == Some(&record.value.peer)
-                    && record.value.consent_scope.as_str() == correlation.purpose
-                    && (active_at_expected_cut || exact_accepted_retry)
-            });
+            let matches = correlation_peer.as_ref() == Some(&grant.peer)
+                && grant.consent_scope.as_str() == correlation.purpose;
             if !matches {
                 return Err(mimi_consent_correlation_unavailable());
             }
@@ -1812,10 +1823,13 @@ mod consent_proof_tests {
                     "consent_id": body.consent_id, "expected_revision": granted.view().revision, "reason": "another_event"
                 }),
             ));
-            let refused = verify_mimi_consent_correlation(&state, &another_revoke, None)
+            // Correlation authenticates the immutable original Grant basis;
+            // only the native authority's final CAS decides current permission.
+            verify_mimi_consent_correlation(&state, &another_revoke, None)
                 .await
-                .unwrap_err();
-            assert_eq!(refused.code, ErrorCode::NotFound);
+                .unwrap();
+            assert_eq!(footprint(&pool).await, after);
+            let refused = mimi_consent_correlation_unavailable();
             let error =
                 crate::state::authority_consent::submit_mimi(&state, &another_revoke.consent_event)
                     .await

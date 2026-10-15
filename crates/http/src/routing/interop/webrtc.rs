@@ -13,9 +13,9 @@
 //! operator-configurable via `AppConfig::ice`.
 
 use arkret_identifiers::{CallId, DeviceId, RealmId};
-use arkret_models_collaboration::events_payloads::{
-    RealmMediaServicePayload, RealmMediaServiceValue,
-};
+#[cfg(test)]
+use arkret_models_collaboration::events_payloads::RealmMediaServicePayload;
+use arkret_models_collaboration::events_payloads::RealmMediaServiceValue;
 use arkret_models_collaboration::objects::media::{
     ArkretNativeMediaBackendToken, ArkretNativeMediaPermissions,
     ArkretNativeMediaSignatureAlgorithm, ArkretNativeMediaTokenPayload, MediaBackendKind,
@@ -26,7 +26,6 @@ use arkret_wire::{CapabilityActionId, DidUrl, XExtensionMap};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Duration, Utc};
-use coland_domain::reducer::{FacetRef, facet};
 use coland_http::error::AppError;
 use coland_http::result::{JsonResult, json_ok};
 use coland_services::identity::SessionIdentityState as SessionRecord;
@@ -37,7 +36,7 @@ use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
 use serde_json::{Value, json};
 
-use super::{hmac_sha256, now, realm_has_member, sha256_hex, validate_device_id};
+use super::{hmac_sha256, now, sha256_hex, validate_device_id};
 use crate::routing::system::extract::AuthArgs;
 use crate::state::AppState;
 use crate::wire::{
@@ -135,7 +134,17 @@ async fn issue_ice_config(
     // is still ringing), so call existence MUST NOT be enforced here. The only
     // authorization gate is realm membership; the per-call ban gate lives on
     // the media token issuer, not on ICE discovery.
-    if !realm_has_member(state, realm_id, actor_id).await {
+    if !state
+        .authority_commits()
+        .accepted_current_member_joined(&body.realm_id, &body.actor_id)
+        .await
+        .map_err(|error| {
+            crate::app_error!(
+                TemporarilyUnavailable,
+                format!("membership cut unavailable: {error}")
+            )
+        })?
+    {
         return Err(AppError::capability_denied(
             "actor is not a joined member of the realm",
         ));
@@ -404,8 +413,8 @@ struct MediaProviderConfig {
 }
 
 #[derive(Clone, Debug)]
-struct MediaServiceEpoch {
-    service_id: String,
+pub(crate) struct MediaServiceEpoch {
+    pub(crate) service_id: String,
     foci: Vec<MediaProviderConfig>,
 }
 
@@ -492,10 +501,11 @@ impl MediaTokenIssuer for LiveKitMediaIssuer {
     }
 }
 
-async fn handle_rtc_token(
+async fn handle_rtc_token_with_original(
     state: &AppState,
     session: &SessionRecord,
     body: CallMediaTokenExchangeRequestBody,
+    original: Option<Value>,
 ) -> JsonResult<CallMediaTokenExchangeOutcome> {
     // The request body is the SDK typed shape: `realm_id`/`call_id`/`actor_id`/
     // `device_id` arrive already validated as the corresponding scalar id types,
@@ -515,7 +525,7 @@ async fn handle_rtc_token(
         ));
     }
     let actor_id = body.actor_id.clone();
-    if body.device_id.as_str() != session.require_human_device_id() {
+    if session.human_device_id().map(String::as_str) != Some(body.device_id.as_str()) {
         return Err(AppError::param_invalid(
             "device_id must match the authenticated device",
         ));
@@ -533,34 +543,42 @@ async fn handle_rtc_token(
     // of: (1) realm membership, (2) the `ak.call.join` capability, (3) not under
     // an actor-wide ban in the durable call moderation OR-Set.
     //
-    // (1) realm member.
-    if !realm_has_member(state, body.realm_id.as_str(), &body.actor_id.to_string()).await {
-        return Err(AppError::capability_denied(
-            "actor is not a joined member of the realm",
-        ));
-    }
-    // (2) `media-service-binding.md` §6 — token exchange is gated on the
-    // `ak.call.join` capability, not merely realm membership. §6 defines no
-    // dedicated error code, so we surface the generic `capability_denied` (403).
-    if !actor_has_call_capability(
+    // Membership and permission resources come from the accepted exact Call
+    // scope. The final release rechecks this durable cut in its transaction.
+    let call_cells = CallMediaCells::load(
+        state,
+        body.realm_id.as_str(),
+        body.call_id.as_str(),
+        &body.actor_id,
+    )
+    .await?;
+
+    let call_scope = &call_cells
+        .accepted
+        .as_ref()
+        .ok_or_else(|| {
+            crate::app_error!(TemporarilyUnavailable, "accepted Call scope is unavailable")
+        })?
+        .scope_ref;
+    let resource = match call_scope {
+        arkret_wire::ScopeRef::Circle { circle_id, .. } => circle_id.as_str(),
+        _ => body.realm_id.as_str(),
+    };
+    if !crate::authz::authorize(
         state,
         body.realm_id.as_str(),
         &body.actor_id,
-        CapabilityActionId::CALL_JOIN,
+        &[CapabilityActionId::CALL_JOIN],
+        resource,
+        now(),
     )
     .await?
+    .allowed()
     {
         return Err(AppError::capability_denied(
-            "actor does not hold the ak.call.join capability for this realm",
+            "actor lacks current Call join capability in the accepted scope",
         ));
     }
-
-    // Read the independent durable media-policy cells once. They MAY all be
-    // absent when a brand-new call initiator redeems a token before writing its
-    // first `ak.call.state` event. Absent cells mean no committed focus or ban.
-    let call_cells =
-        CallMediaCells::load(state, body.realm_id.as_str(), body.call_id.as_str()).await?;
-
     // (3) `webrtc-signaling.md` §3a — a banned actor MUST NOT re-issue a join
     // token for this call's lifetime. The ban set is the durable
     // call moderation effective OR-Set; an absent cell carries
@@ -572,7 +590,7 @@ async fn handle_rtc_token(
         )
         .with_reason_code(arkret_wire::ReasonCode::CALL_PARTICIPANT_REMOVED));
     }
-    let media_epoch = media_service_epoch_for_realm(state, body.realm_id.as_str())?;
+    let media_epoch = media_service_epoch_for_realm(state, body.realm_id.as_str()).await?;
 
     // MEDIA-2 — focus selection. A committed
     // `ak.component.call.focus.v1` value wins when present and `focus_id`
@@ -628,7 +646,34 @@ async fn handle_rtc_token(
     // exchange so the SFU cannot be linked back to (realm, call, actor, device)
     // by recomputing the id, and the wire form matches the schema pattern
     // `^ak:rtc_participant:<uuidv7>$`.
-    let participant_id = arkret_identifiers::new_prefixed_uuid7("ak:rtc_participant:");
+    let refresh =
+        validate_token_join_context(state, session, &body, &call_cells, original.as_ref()).await?;
+    let participant_id = refresh
+        .as_ref()
+        .map(|(identity, id)| {
+            let _ = identity;
+            id.clone()
+        })
+        .unwrap_or_else(|| arkret_identifiers::new_prefixed_uuid7("ak:rtc_participant:"));
+    let roster_identity = refresh.map(|(identity, _)| identity).unwrap_or_else(|| {
+        let key = ed25519_dalek::SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+        arkret_models_collaboration::call_invitation::CallMediaRosterIdentity {
+            actor_id: arkret_wire::DidCoreId::new(format!(
+                "ak:did_core:key:{}",
+                arkret_canonical::ed25519_pubkey_to_did_key_multibase(
+                    key.verifying_key().as_bytes()
+                )
+            ))
+            .expect("random DID key is a core identifier"),
+            device_id: DeviceId::new(arkret_identifiers::new_prefixed_uuid7("ak:device:"))
+                .expect("UUID7 device alias"),
+        }
+    });
+    let (roster_identity, participant_id) = state
+        .authority_commits()
+        .call_media_identity_candidate(&body, &roster_identity, &participant_id)
+        .await
+        .map_err(|e| crate::app_error!(TemporarilyUnavailable, e.to_string()))?;
     let signing_key = state.notary_signing_key();
     // `bindings/livekit.md` §2/§5 — publish grants are derived from the
     // caller's `desired_media`. Absent the field we default to audio+video
@@ -649,13 +694,21 @@ async fn handle_rtc_token(
     // a real `ak.call.screen_share` capability, not merely the presence of any
     // `capability_refs`. Resolve it against the projected grants so an actor
     // without the capability never receives a screen-share publish grant.
-    let allow_screen_share = actor_has_call_capability(
+    let allow_screen_share = crate::authz::authorize(
         state,
         body.realm_id.as_str(),
         &body.actor_id,
-        CapabilityActionId::CALL_SCREEN_SHARE,
+        &[CapabilityActionId::CALL_SCREEN_SHARE],
+        resource,
+        now(),
     )
-    .await?;
+    .await?
+    .allowed();
+    if desired_media.2 && !allow_screen_share {
+        return Err(AppError::capability_denied(
+            "screen publish requires its current capability",
+        ));
+    }
     let issue_request = MediaTokenIssueRequestBody {
         focus,
         issuer_kid: &issuer_kid,
@@ -680,29 +733,377 @@ async fn handle_rtc_token(
         ))
     })?;
     let mut outcome = CallMediaTokenExchangeOutcome {
-        focus_id: body.focus_id,
+        focus_id: body.focus_id.clone(),
         backend_kind: focus.provider.backend_kind(),
         connect_url: issued_token.connect_url,
         backend_token: issued_token.backend_token,
-        participant_id,
+        participant_id: participant_id.clone(),
         participant_binding: CallMediaParticipantBinding {
             expires_at,
             issuer_kid,
+            subject_binding_digest: String::new(),
             sig: String::new(),
         },
         expires_at,
         realm_id,
         call_id,
-        actor_id,
-        device_id,
+        actor_id: actor_id.clone(),
+        device_id: device_id.clone(),
+        roster_identity: roster_identity.clone(),
+        subject_binding: arkret_models_collaboration::call_invitation::CallMediaSubjectBinding {
+            realm_id: body.realm_id.clone(),
+            call_id: body.call_id.clone(),
+            subject_actor_id: actor_id,
+            subject_device_id: device_id,
+            roster_identity,
+            focus_id: body.focus_id.clone(),
+            participant_id: participant_id.clone(),
+            media: arkret_models_collaboration::call_invitation::CallInvitationMedia {
+                audio: desired_media.0,
+                video: desired_media.1,
+                screen: desired_media.2,
+            },
+            expires_at,
+            nonce: crate::routing::call_admission::nonce(),
+            issuer_kid: DidUrl::new(configured_media_issuer_kid(state))
+                .map_err(|e| AppError::internal(e.to_string()))?,
+            sig: String::new(),
+        },
     };
+    outcome.subject_binding.sig = URL_SAFE_NO_PAD.encode(
+        signing_key
+            .sign(
+                &outcome
+                    .subject_binding
+                    .signature_input()
+                    .map_err(|e| AppError::internal(e.to_string()))?,
+            )
+            .to_bytes(),
+    );
+    outcome.participant_binding.subject_binding_digest =
+        arkret_models_collaboration::call_invitation::canonical_request_digest(
+            &outcome.subject_binding,
+        )
+        .map_err(|e| AppError::internal(e.to_string()))?;
     let signing_input = arkret_signatures::media::participant_binding_signing_input(
         &arkret_signatures::media::ParticipantBindingContext::from_outcome(&outcome),
     )
-    .map_err(|error| AppError::internal(format!("participant binding signing input: {error}")))?;
+    .map_err(|e| AppError::internal(e.to_string()))?;
     outcome.participant_binding.sig =
         URL_SAFE_NO_PAD.encode(signing_key.sign(&signing_input).to_bytes());
+    // The token is prepared privately. This is its final, outstanding release cut.
+    final_invitation_token_cut(state, &body, &call_cells, desired_media).await?;
+    let facet =
+        crate::routing::identity::device_signing::try_resolve_device_signing_directory_facet(
+            state,
+            body.actor_id.signing_principal_id().as_str(),
+            body.device_id.as_str(),
+        )
+        .await
+        .map_err(|e| crate::app_error!(TemporarilyUnavailable, e.to_string()))?;
+    crate::routing::identity::device_signing::current_device_authorization(
+        state,
+        &body.actor_id,
+        &body.device_id,
+        &facet,
+    )
+    .await
+    .map_err(|e| crate::app_error!(TemporarilyUnavailable, e.to_string()))?
+    .ok_or_else(|| {
+        crate::app_error!(
+            FailedPrecondition,
+            "device authority changed before token release"
+        )
+    })?;
+    if !state
+        .authority_commits()
+        .check_call_media_release(
+            &body,
+            &state.service_core_id(),
+            &outcome.roster_identity,
+            &outcome.participant_id,
+        )
+        .await
+        .map_err(|e| crate::app_error!(TemporarilyUnavailable, e.to_string()))?
+    {
+        return Err(crate::app_error!(
+            FailedPrecondition,
+            "media permission or accepted leg changed before token release"
+        ));
+    }
     json_ok(outcome)
+}
+
+async fn validate_token_join_context(
+    state: &AppState,
+    _session: &SessionRecord,
+    body: &CallMediaTokenExchangeRequestBody,
+    cells: &CallMediaCells,
+    original: Option<&Value>,
+) -> Result<
+    Option<(
+        arkret_models_collaboration::call_invitation::CallMediaRosterIdentity,
+        String,
+    )>,
+    AppError,
+> {
+    use arkret_models_collaboration::call_invitation::*;
+    let invalid = |message: &str| crate::app_error!(FailedPrecondition, message.to_owned());
+    let current = cells
+        .accepted
+        .as_ref()
+        .ok_or_else(|| invalid("accepted Call cut is unavailable"))?;
+    let media = body
+        .desired_media
+        .as_ref()
+        .map(|m| CallInvitationMedia {
+            audio: m.audio.unwrap_or(true),
+            video: m.video.unwrap_or(true),
+            screen: m.screen.unwrap_or(false),
+        })
+        .unwrap_or(CallInvitationMedia {
+            audio: true,
+            video: true,
+            screen: false,
+        });
+    match &body.join_context {
+        CallMediaJoinContext::Invitation(context) => {
+            context
+                .invitation
+                .validate_for_envelope(&context.envelope)
+                .map_err(|e| AppError::param_invalid(e.to_string()))?;
+            if context.invitation.holder_account_id
+                != *body
+                    .actor_id
+                    .as_account_id()
+                    .ok_or_else(|| invalid("invited subject is not an Account"))?
+                || context.invitation.call_id != body.call_id
+                || context.invitation.scope_ref != current.scope_ref
+                || !media.is_subset_of(&context.invitation.media)
+                || context.invitation.expires_at <= Utc::now()
+            {
+                return Err(invalid(
+                    "invitation is not this exact first-contact request",
+                ));
+            }
+            Ok(None)
+        }
+        CallMediaJoinContext::Voluntary(intent) => {
+            let now = Utc::now();
+            if intent.created_at > now
+                || intent.expires_at <= now
+                || intent.expires_at > intent.created_at + Duration::seconds(60)
+                || !valid_nonce(&intent.nonce)
+            {
+                return Err(invalid("voluntary join intent is stale"));
+            }
+            let method = DidUrl::new(intent.proof.verification_method.clone())
+                .map_err(|e| AppError::param_invalid(e.to_string()))?;
+            let did = arkret_identity::verification_method_did(method.as_str())
+                .map_err(|e| AppError::param_invalid(e.to_string()))?;
+            if arkret_wire::project_did_to_core_id(&did).ok().as_ref()
+                != Some(body.actor_id.signing_principal_id())
+                || method
+                    .as_str()
+                    .rsplit_once('#')
+                    .map(|(_, fragment)| fragment)
+                    != Some(body.device_id.as_str())
+            {
+                return Err(invalid("voluntary signer is not exact request device"));
+            }
+            let facet=crate::routing::identity::device_signing::try_resolve_device_signing_directory_facet(state,body.actor_id.signing_principal_id().as_str(),body.device_id.as_str()).await.map_err(|e| crate::app_error!(TemporarilyUnavailable,e.to_string()))?;
+            if crate::routing::identity::device_signing::current_device_authorization(
+                state,
+                &body.actor_id,
+                &body.device_id,
+                &facet,
+            )
+            .await
+            .map_err(|e| crate::app_error!(TemporarilyUnavailable, e.to_string()))?
+            .is_none()
+            {
+                return Err(invalid("voluntary device is not currently authorized"));
+            }
+            let key = arkret_signatures::PublicKeyMaterial::Ed25519Multibase {
+                value: facet
+                    .signing_key_did
+                    .as_deref()
+                    .and_then(|v| v.strip_prefix("did:key:"))
+                    .ok_or_else(|| invalid("current device key is unavailable"))?
+                    .to_owned(),
+            };
+            let value = original.cloned().unwrap_or(
+                serde_json::to_value(body).map_err(|e| AppError::internal(e.to_string()))?,
+            );
+            let bytes = voluntary_join_signing_input_from_value(&value)
+                .map_err(|e| AppError::param_invalid(e.to_string()))?;
+            arkret_signatures::proof::Ed25519DetachedJwsVerifier::new()
+                .verify_detached_jws(&intent.proof.jws, &bytes, &key)
+                .map_err(|_| invalid("voluntary intent signature is invalid"))?;
+            Ok(None)
+        }
+        CallMediaJoinContext::Refresh(context) => {
+            let receipt = &context.subject_binding;
+            if receipt.subject_actor_id != body.actor_id
+                || receipt.subject_device_id != body.device_id
+                || receipt.realm_id != body.realm_id
+                || receipt.call_id != body.call_id
+                || receipt.focus_id != body.focus_id
+                || context.participant_id != receipt.participant_id
+                || !media.is_subset_of(&receipt.media)
+            {
+                return Err(invalid(
+                    "refresh receipt is not the exact authenticated leg",
+                ));
+            }
+            let (participant, commit) = current
+                .participants
+                .iter()
+                .find(|(p, _)| {
+                    p.actor_id == receipt.roster_identity.actor_id
+                        && p.device_id == receipt.roster_identity.device_id.as_str()
+                        && p.participant_id.as_deref() == Some(context.participant_id.as_str())
+                        && p.focus_id.as_deref() == Some(body.focus_id.as_str())
+                })
+                .ok_or_else(|| invalid("refresh has no active accepted participant"))?;
+            let binding = participant
+                .participant_binding
+                .as_ref()
+                .ok_or_else(|| invalid("accepted leg has no compact binding"))?;
+            if binding.issuer_kid != receipt.issuer_kid
+                || binding.expires_at != receipt.expires_at
+                || binding.subject_binding_digest
+                    != canonical_request_digest(receipt)
+                        .map_err(|e| AppError::internal(e.to_string()))?
+                || participant.media.as_ref().is_none_or(|m| {
+                    !media.is_subset_of(&CallInvitationMedia {
+                        audio: m.audio.unwrap_or(false),
+                        video: m.video.unwrap_or(false),
+                        screen: m.screen.unwrap_or(false),
+                    })
+                })
+            {
+                return Err(invalid(
+                    "refresh differs from accepted alias, binding or media",
+                ));
+            }
+            let did = arkret_identity::verification_method_did(receipt.issuer_kid.as_str())
+                .map_err(|e| AppError::param_invalid(e.to_string()))?;
+            let key = if did.method() == "key" {
+                let doc = state
+                    .dids()
+                    .resolve_did(&did)
+                    .await
+                    .map_err(|e| crate::app_error!(TemporarilyUnavailable, e.to_string()))?;
+                let value = doc
+                    .verification_methods
+                    .get(receipt.issuer_kid.as_str())
+                    .ok_or_else(|| invalid("historical issuer method is unavailable"))?;
+                arkret_signatures::PublicKeyMaterial::Ed25519Multibase {
+                    value: value.clone(),
+                }
+            } else {
+                let point = state
+                    .dids()
+                    .resolve_webvh_state_at(&did, commit.committed_at)
+                    .await
+                    .map_err(|e| crate::app_error!(TemporarilyUnavailable, e.to_string()))?;
+                let doc: arkret_models_identity::service_identity::ServiceDidDocument =
+                    serde_json::from_value(point.document)
+                        .map_err(|e| AppError::internal(e.to_string()))?;
+                let method = doc
+                    .verification_method
+                    .iter()
+                    .find(|m| {
+                        m.id == receipt.issuer_kid.as_str()
+                            && m.controller == did
+                            && doc.assertion_method.contains(&m.id)
+                    })
+                    .ok_or_else(|| {
+                        invalid("issuer was not an assertion method at accepted join")
+                    })?;
+                arkret_signatures::PublicKeyMaterial::Ed25519Multibase {
+                    value: method.public_key_multibase.clone(),
+                }
+            };
+            if !arkret_signatures::proof::verify_detached_ed25519_signature(
+                &key,
+                &receipt
+                    .signature_input()
+                    .map_err(|e| AppError::internal(e.to_string()))?,
+                &receipt.sig,
+            ) {
+                return Err(invalid("refresh subject receipt signature is invalid"));
+            }
+            let public = arkret_signatures::media::ParticipantBindingContext {
+                actor_id: &participant.actor_id,
+                call_id: &body.call_id,
+                device_id: &receipt.roster_identity.device_id,
+                expires_at: binding.expires_at,
+                focus_id: &body.focus_id,
+                participant_id: &receipt.participant_id,
+                realm_id: &body.realm_id,
+                issuer_kid: binding.issuer_kid.as_str(),
+                subject_binding_digest: &binding.subject_binding_digest,
+                media: participant
+                    .signed_media()
+                    .map_err(|e| AppError::param_invalid(e.to_string()))?,
+            };
+            if !arkret_signatures::proof::verify_detached_ed25519_signature(
+                &key,
+                &arkret_signatures::media::participant_binding_signing_input(&public)
+                    .map_err(|e| AppError::internal(e.to_string()))?,
+                &binding.sig,
+            ) {
+                return Err(invalid("accepted anonymous binding is invalid"));
+            }
+            Ok(Some((
+                receipt.roster_identity.clone(),
+                receipt.participant_id.clone(),
+            )))
+        }
+    }
+}
+
+async fn final_invitation_token_cut(
+    state: &AppState,
+    body: &CallMediaTokenExchangeRequestBody,
+    cells: &CallMediaCells,
+    media: (bool, bool, bool),
+) -> Result<(), AppError> {
+    use arkret_models_collaboration::call_invitation::*;
+    if let CallMediaJoinContext::Invitation(context) = &body.join_context {
+        let scope = &cells
+            .accepted
+            .as_ref()
+            .ok_or_else(|| AppError::internal("accepted Call cut is unavailable"))?
+            .scope_ref;
+        if &context.invitation.scope_ref != scope {
+            return Err(AppError::capability_denied("invitation scope changed"));
+        }
+        let request = CallInvitationAdmissionRequestBody {
+            invitation: context.invitation.clone(),
+            envelope: context.envelope.clone(),
+            admission_phase: CallInvitationAdmissionPhase::MediaToken,
+            audience_actor_id: arkret_wire::ActorId::service(state.service_core_id()),
+            subject_actor_id: body.actor_id.clone(),
+            subject_device_id: body.device_id.clone(),
+            nonce: crate::routing::call_admission::nonce(),
+            focus_id: Some(body.focus_id.clone()),
+            desired_media: Some(CallInvitationMedia {
+                audio: media.0,
+                video: media.1,
+                screen: media.2,
+            }),
+        };
+        let outcome = crate::routing::call_admission::fresh_admission(state, &request).await?;
+        if !outcome.admitted {
+            return Err(AppError::capability_denied(
+                "first-contact media admission was refused",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// MEDIA-2 focus selection against `ak.component.call.focus.v1`.
@@ -751,18 +1152,53 @@ fn session_focus_for_call(
 struct CallMediaCells {
     focus: Option<Value>,
     moderation: Option<Value>,
+    accepted: Option<coland_storage::CallCurrentCut>,
 }
 
 impl CallMediaCells {
-    async fn load(state: &AppState, realm_id: &str, call_id: &str) -> Result<Self, AppError> {
-        let projection = state.projections().snapshot();
+    async fn load(
+        state: &AppState,
+        realm_id: &str,
+        call_id: &str,
+        actor: &arkret_wire::ActorId,
+    ) -> Result<Self, AppError> {
+        let accepted = state
+            .authority_commits()
+            .call_current_cut(
+                &RealmId::new(realm_id.to_owned())
+                    .map_err(|e| AppError::param_invalid(e.to_string()))?,
+                &CallId::new(call_id.to_owned())
+                    .map_err(|e| AppError::param_invalid(e.to_string()))?,
+                actor,
+            )
+            .await
+            .map_err(|e| crate::app_error!(TemporarilyUnavailable, e.to_string()))?
+            .ok_or_else(|| AppError::capability_denied("Call has no visible accepted source"))?;
+        if matches!(
+            accepted.lifecycle,
+            arkret_models_collaboration::events_payloads::call::CallLifecycleState::Ended
+                | arkret_models_collaboration::events_payloads::call::CallLifecycleState::Failed
+                | arkret_models_collaboration::events_payloads::call::CallLifecycleState::Missed
+                | arkret_models_collaboration::events_payloads::call::CallLifecycleState::Cancelled
+        ) {
+            return Err(crate::app_error!(FailedPrecondition, "Call is terminal")
+                .with_reason_code(arkret_wire::ReasonCode::CALL_STATE_TERMINAL));
+        }
         Ok(Self {
-            focus: projection
-                .facet_value(realm_id, &FacetRef::new(facet::CALL_FOCUS, call_id))
-                .cloned(),
-            moderation: projection
-                .facet_value(realm_id, &FacetRef::new(facet::CALL_MODERATION, call_id))
-                .cloned(),
+            focus: accepted
+                .focus
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(|e| AppError::internal(e.to_string()))?,
+            moderation: Some(Value::Array(
+                accepted
+                    .moderation
+                    .iter()
+                    .map(|value| json!({"value":value}))
+                    .collect(),
+            )),
+            accepted: Some(accepted),
         })
     }
 
@@ -800,25 +1236,76 @@ impl CallMediaCells {
     }
 }
 
-fn media_service_epoch_for_realm(
+pub(crate) async fn media_service_epoch_for_realm(
     state: &AppState,
     realm_id: &str,
 ) -> Result<MediaServiceEpoch, AppError> {
-    let value = {
-        let projection = state.projections().snapshot();
-        projection
-            .realm_facet_value(realm_id, coland_domain::reducer::facet::REALM_MEDIA_SERVICE)
-            .cloned()
-    }
-    .ok_or_else(|| {
-        token_issuer_unauthorised(format!(
-            "realm `{realm_id}` has no projected ak.realm.media_service epoch"
-        ))
-    })?;
-    let descriptor = decode_media_service_descriptor(value)?;
+    let descriptor = state
+        .authority_commits()
+        .realm_media_service_current(
+            &RealmId::new(realm_id.to_owned())
+                .map_err(|e| AppError::param_invalid(e.to_string()))?,
+        )
+        .await
+        .map_err(|e| crate::app_error!(TemporarilyUnavailable, e.to_string()))?
+        .ok_or_else(|| {
+            token_issuer_unauthorised(format!(
+                "realm `{realm_id}` has no projected ak.realm.media_service epoch"
+            ))
+        })?;
     media_service_epoch_from_descriptor(descriptor)
 }
 
+pub(crate) async fn prepare_verified_roster_participant(
+    state: &AppState,
+    event: &arkret_wire::Event,
+) -> coland_services::ServiceResult<Option<arkret_signatures::media::VerifiedCallParticipant>> {
+    if event.kind != arkret_wire::EventKind::CallState {
+        return Ok(None);
+    }
+    let payload: arkret_models_collaboration::events_payloads::call::CallStatePayload =
+        serde_json::from_value(
+            serde_json::to_value(&event.payload)
+                .map_err(|e| coland_services::ServiceError::SchemaViolation(e.to_string()))?,
+        )
+        .map_err(|e| coland_services::ServiceError::SchemaViolation(e.to_string()))?;
+    let Some(arkret_models_collaboration::events_payloads::call::CallRosterDelta::Join {
+        participant,
+    }) = payload.roster_delta
+    else {
+        return Ok(None);
+    };
+    let Some(binding) = participant.participant_binding else {
+        return Ok(None);
+    };
+    let descriptor = state
+        .authority_commits()
+        .realm_media_service_current(&event.realm_id)
+        .await?
+        .ok_or_else(|| {
+            coland_services::ServiceError::Conflict(
+                "media service current is unavailable".to_owned(),
+            )
+        })?;
+    let (_, keys) =
+        crate::routing::media_service_binding::resolve_issuer(state, &descriptor).await?;
+    let key = keys
+        .iter()
+        .find(|key| key.verification_method == binding.issuer_kid)
+        .ok_or_else(|| {
+            coland_services::ServiceError::Conflict(
+                "current anchored media issuer key is unavailable".to_owned(),
+            )
+        })?;
+    let key = arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+        bytes: arkret_canonical::base64url_decode(&key.public_key_b64u)
+            .map_err(|e| coland_services::ServiceError::SchemaViolation(e.to_string()))?,
+    };
+    arkret_signatures::media::VerifiedCallParticipant::verify(event, &descriptor.service_id, &key)
+        .map_err(|e| coland_services::ServiceError::Conflict(e.to_string()))
+}
+
+#[cfg(test)]
 fn decode_media_service_descriptor(value: Value) -> Result<RealmMediaServiceValue, AppError> {
     let payload = serde_json::from_value::<RealmMediaServicePayload>(value).map_err(|error| {
         focus_unavailable_error(format!(
@@ -874,7 +1361,7 @@ fn configured_media_issuer_kid(state: &AppState) -> String {
     if !configured.is_empty() {
         return configured.to_owned();
     }
-    format!("{}#media-1", state.service_did())
+    format!("{}#notary-key", state.service_did())
 }
 
 fn token_endpoint_is_local(token_endpoint: &str, state: &AppState) -> bool {
@@ -1081,7 +1568,13 @@ async fn arkret_rtc_token(
 ) -> JsonResult<CallMediaTokenExchangeOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
-    handle_rtc_token(state, &session, body.into_inner()).await
+    let original: Value = serde_json::from_slice(
+        req.payload()
+            .await
+            .map_err(|e| AppError::json_invalid(e.to_string()))?,
+    )
+    .map_err(|e| AppError::json_invalid(e.to_string()))?;
+    handle_rtc_token_with_original(state, &session, body.into_inner(), Some(original)).await
 }
 
 #[cfg(test)]
@@ -1184,6 +1677,7 @@ mod tests {
     #[test]
     fn removed_moderation_dot_does_not_remain_an_effective_ban() {
         let cell = CallMediaCells {
+            accepted: None,
             focus: None,
             moderation: Some(json!([
                 {
@@ -1337,24 +1831,6 @@ mod tests {
 // `webrtc-signaling.md` §3 — canonical capability actions. The registry is
 // the truth source; the spec body and this server MUST use the `ak.`-prefixed
 // forms and MUST NOT accept the bare `call.*` names.
-
-/// Whether `actor` holds `action` over `realm_id` in the durable
-/// authorization cut: a covering Capability Grant, or the effective
-/// `ak.realm.owner` aggregate where it covers the action. The Realm itself is
-/// the capability resource scope (call capabilities are Realm-scoped in §3; a
-/// call is not a separate grant resource in v1).
-pub(crate) async fn actor_has_call_capability(
-    state: &AppState,
-    realm_id: &str,
-    actor: &arkret_wire::ActorId,
-    action: &str,
-) -> Result<bool, AppError> {
-    Ok(
-        crate::authz::authorize(state, realm_id, actor, &[action], realm_id, now())
-            .await?
-            .allowed(),
-    )
-}
 
 fn is_valid_webrtc_session_id(value: &str) -> bool {
     // Call IDs are derived from Event identity and share the SDK's canonical

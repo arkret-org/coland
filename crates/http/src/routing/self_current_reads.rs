@@ -51,20 +51,6 @@ fn app_state<'a>(depot: &'a Depot, res: &mut Response) -> Option<&'a AppState> {
     }
 }
 
-/// Authenticate the session, bind any Agent session to `operation`, and
-/// return its Account. Every exact current read is decided for an Account
-/// member; any other actor has no visible selector.
-async fn authenticated_account(
-    state: &AppState,
-    req: &mut Request,
-    res: &mut Response,
-    operation: &'static str,
-) -> Option<AccountId> {
-    authenticated_reader(state, req, res, operation)
-        .await
-        .map(|(_, account)| account)
-}
-
 async fn authenticated_reader(
     state: &AppState,
     req: &mut Request,
@@ -437,7 +423,7 @@ async fn media_service_binding(req: &mut Request, depot: &Depot, res: &mut Respo
     let Some(state) = app_state(depot, res) else {
         return;
     };
-    let Some(account) = authenticated_account(
+    let Some((session, account)) = authenticated_reader(
         state,
         req,
         res,
@@ -457,21 +443,28 @@ async fn media_service_binding(req: &mut Request, depot: &Depot, res: &mut Respo
             &format!("invalid media service binding request: {error}"),
         );
     }
-    if request.account_id != account || account.station_id != state.service_core_id() {
+    if account.station_id != state.service_core_id() {
         return not_found(res);
     }
-    let result = state
-        .authority_commits()
-        .media_service_anchor_for_account(&request.realm_id, &account, &state.service_core_id())
-        .await;
-    match result {
-        Ok(MediaServiceAnchorRead::NotFound) => not_found(res),
-        Ok(MediaServiceAnchorRead::Anchored) => render_unresolved(
-            res,
-            ErrorCode::TemporarilyUnavailable,
-            ServiceOperationId::SELF_MEDIA_SERVICE_BINDING_READ_RESOLVE_V1,
-            "the accepted media service route and method state are not resolved",
-        ),
+    match resolve_media_binding(state, &account, &request).await {
+        Ok(Some(outcome)) => {
+            let input = coland_storage::AccountContentDeliveryInput {
+                realms: vec![request.realm_id.clone()],
+                ..Default::default()
+            };
+            let guard =
+                match crate::routing::events::sync::content_delivery_guard(state, &session, &input)
+                    .await
+                {
+                    Ok(guard) => guard,
+                    Err(_) => return not_found(res),
+                };
+            no_store(res);
+            if let Ok(response) = coland_http::result::guarded_json_ok(outcome, guard) {
+                salvo::Scribe::render(response, res);
+            }
+        }
+        Ok(None) => not_found(res),
         Err(error) => render_service_error(res, error),
     }
 }
@@ -710,4 +703,48 @@ pub(super) async fn peer_strand_watch_audit_read(
     if let Ok(response) = coland_http::result::guarded_json_ok(outcome, Some(guard)) {
         salvo::Scribe::render(response, res);
     }
+}
+
+async fn resolve_media_binding(
+    state: &AppState,
+    account: &AccountId,
+    request: &MediaServiceBindingRequestBody,
+) -> coland_services::ServiceResult<Option<arkret_models_identity::MediaServiceBindingOutcome>> {
+    use arkret_models_identity::MediaServiceBindingOutcome;
+    use coland_services::ServiceError;
+    let unavailable =
+        |detail: &str| ServiceError::Conflict(format!("temporarily_unavailable: {detail}"));
+    let anchor = state
+        .authority_commits()
+        .media_service_anchor_for_account(&request.realm_id, account, &state.service_core_id())
+        .await?;
+    let MediaServiceAnchorRead::Anchored { value, .. } = &anchor else {
+        return Ok(None);
+    };
+    let (route, signing_keys) = super::media_service_binding::resolve_issuer(state, value).await?;
+    let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let outcome = MediaServiceBindingOutcome {
+        request_id: request.request_id.clone(),
+        realm_id: request.realm_id.clone(),
+        route,
+        signing_keys,
+        observed_at: now,
+        expires_at: now + chrono::Duration::seconds(300),
+    };
+    outcome
+        .validate_for_request(request, &value.service_id)
+        .map_err(|e| unavailable(&e.to_string()))?;
+    let current = state
+        .authority_commits()
+        .media_service_anchor_for_account(&request.realm_id, account, &state.service_core_id())
+        .await?;
+    if matches!(current, MediaServiceAnchorRead::NotFound) {
+        return Ok(None);
+    }
+    if current != anchor {
+        return Err(unavailable(
+            "accepted media assignment changed during resolution",
+        ));
+    }
+    Ok(Some(outcome))
 }

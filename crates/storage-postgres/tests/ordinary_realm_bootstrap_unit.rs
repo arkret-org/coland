@@ -1241,6 +1241,7 @@ fn strand_create_request(unit: &OrdinaryRealmBootstrapCommitUnit) -> EventCommit
         received_at: at,
     };
     let request = EventCommitRequest {
+        verified_media_participant: None,
         authority_commit: AuthorityCommitTransaction {
             expected_authority: previous.expected_authority.clone(),
             event,

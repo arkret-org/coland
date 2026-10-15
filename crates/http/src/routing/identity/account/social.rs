@@ -300,9 +300,26 @@ pub(crate) async fn get_invite_receive_policy(
             "invite receive policy is owned by another Station",
         ));
     }
-    let policy = state
-        .contacts()
-        .invite_policy(&account_id)
+    use arkret_models_collaboration::consent_private::*;
+    let ConsentPrivateCommandOutcome::Effects(outcome) =
+        crate::routing::consent_private::holder_command(
+            state,
+            &session,
+            ConsentPrivateCommand::Effects(ConsentPrivateEffectsCommand {
+                kind: ConsentPrivateEffectsCommandKind::Effects,
+                body: ConsentPrivateEmptyBody {},
+            }),
+        )
+        .await?
+    else {
+        return Err(AppError::internal(
+            "private authority returned another command",
+        ));
+    };
+    let policy = outcome
+        .body
+        .invite_receive_policy
+        .map(|cell| cell.content)
         .unwrap_or_else(|| InviteReceivePolicy::spec_default(account_id));
     json_ok(policy)
 }
@@ -335,16 +352,23 @@ pub(crate) async fn set_invite_receive_policy(
             "invite_receive_policy.account_id must equal the authenticated Station account",
         ));
     }
-    // Write through to durable storage so the override survives restarts
-    // (hydrated back into the in-memory map by `AppState::hydrate`).
-    state
-        .contacts()
-        .save_invite_policy(&account_id, policy.clone())
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, actor = %session.actor, "failed to persist invite_receive_policy");
-            AppError::internal(format!("failed to persist invite_receive_policy: {error}"))
-        })?;
+    use arkret_models_collaboration::consent_private::*;
+    let ConsentPrivateCommandOutcome::InvitePolicy(outcome) =
+        crate::routing::consent_private::holder_command(
+            state,
+            &session,
+            ConsentPrivateCommand::InvitePolicy(ConsentPrivateInvitePolicyCommand {
+                kind: ConsentPrivateInvitePolicyCommandKind::InvitePolicy,
+                body: policy,
+            }),
+        )
+        .await?
+    else {
+        return Err(AppError::internal(
+            "private authority returned another command",
+        ));
+    };
+    let policy = outcome.body.content;
     json_ok(policy)
 }
 

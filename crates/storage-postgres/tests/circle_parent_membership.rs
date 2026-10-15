@@ -752,6 +752,7 @@ product_agent: None,
                     new_signature.context =
                         arkret_wire::DetachedSignatureContext::RealmAuthorityHandoffNewAcceptance;
                     let handoff = arkret_wire::RealmAuthorityHandoff {
+                        pcr_private_state_digest: None,
                         handoff_id: arkret_wire::RealmAuthorityHandoffId::from_digest([0x92; 32]),
                         realm_id: realm.clone(),
                         from_generation: 0,

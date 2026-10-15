@@ -369,6 +369,7 @@ fn arkret_protocol_router(
                 // self/realms/{realm_id}/streams, self/current-results/exact,
                 // self/strands/watch/current, self/media-service-bindings/query.
                 .push(self_current_reads::router())
+                .push(call_admission::self_router())
                 .push(management_review::router())
                 // self/authz/*. (Owner-scoped policy
                 // document CRUD lives on the product surface at
@@ -397,6 +398,8 @@ fn arkret_protocol_router(
                 .push(identity::peer_keys_router())
                 .push(federation::erasure_receipts::router())
                 .push(realm_join::peer_router())
+                .push(call_admission::peer_router())
+                .push(consent_private::peer_router())
                 .push(mls::peer_router())
                 // peer/streams/scan (ak.peer.committed_event.read.scan.v1).
                 .push(authority_commit::peer_router()),

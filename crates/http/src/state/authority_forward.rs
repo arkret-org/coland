@@ -103,6 +103,15 @@ pub(super) fn resolve_forwarded_producer(
     super::authority_self_event_unit::AdmittedProducer,
     arkret_signatures::PublicKeyMaterial,
 )> {
+    // Structural PCR candidates must never weaken ordinary producer admission.
+    arkret_models_collaboration::authority_commit::validate_producer_agent_evidence_presence(
+        event, agent,
+    )
+    .map_err(wire_refusal)?;
+    arkret_models_collaboration::authority_commit::validate_producer_device_evidence_presence(
+        event, device,
+    )
+    .map_err(wire_refusal)?;
     if let Some(device) = verify_forwarded_producer(state, peer, event, device, body_digest, now)? {
         let key = forwarded_producer_key(Some(&device.evidence))?;
         return Ok((
@@ -202,6 +211,15 @@ pub(crate) async fn admit_forwarded_event(
 ) -> ServiceResult<AuthoritySubmitOutcome> {
     let event = &request.event_submission.event;
     super::authority_port::refuse_actor_private_event(&event.kind)?;
+    if request.is_native_pcr_candidate()
+        && state
+            .persistence()
+            .principal_resolution_for_realm(&event.realm_id)
+            .await?
+            .is_some()
+    {
+        return super::authority_pcr::admit_forwarded(state, peer, &request).await;
+    }
     if let Some(outcome) = super::authority_self_event_unit::exact_replay(state, event).await? {
         return Ok(outcome);
     }
@@ -1260,7 +1278,7 @@ pub(super) fn relayed_refusal(status: u16, body: &[u8]) -> ServiceError {
 
 /// Relay the governance Station's answer to exactly this forward: a typed
 /// outcome bound to the forwarded Event, or its registered refusal code.
-fn relay_governance_response(
+pub(super) fn relay_governance_response(
     request: &PeerAuthoritySubmitRequest,
     response: crate::routing::federation::outbox::PeerSubmitResponse,
 ) -> ServiceResult<AuthoritySubmitOutcome> {

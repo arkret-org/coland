@@ -3,7 +3,7 @@
 use arkret_event_draft::ProjectedEventOperation as Operation;
 use arkret_models_collaboration::objects::media::CallMediaParticipantBinding;
 use arkret_signatures::media::{ParticipantBindingContext, participant_binding_signing_input};
-use arkret_wire::{ActorId, CallId, DeviceId, DidCoreId};
+use arkret_wire::{CallId, DeviceId, DidCoreId};
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde_json::Value;
 
@@ -55,7 +55,7 @@ pub(crate) fn verify_call_state_participant_bindings(
         )?;
     let call_id = CallId::new(required_string(payload, "call_id")?)
         .map_err(|_| "participant_binding_invalid: enclosing call_id is invalid")?;
-    let actor_id: ActorId = serde_json::from_value(
+    let actor_id: DidCoreId = serde_json::from_value(
         participant
             .get("actor_id")
             .cloned()
@@ -127,6 +127,15 @@ pub(crate) fn verify_call_state_participant_bindings(
         focus_id,
         participant_id,
         realm_id: &operation.realm_id,
+        issuer_kid: binding.issuer_kid.as_str(),
+        subject_binding_digest: &binding.subject_binding_digest,
+        media: serde_json::from_value(
+            participant
+                .get("media")
+                .cloned()
+                .ok_or("participant_binding_invalid: media range is absent")?,
+        )
+        .map_err(|_| "participant_binding_invalid: media range is not the closed issued range")?,
     };
     if !verify_binding_signature(&context, &binding.sig, &key) {
         return Err("participant_binding_invalid: signature does not cover the enclosing tuple");

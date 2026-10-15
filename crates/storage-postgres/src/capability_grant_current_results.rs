@@ -1690,9 +1690,10 @@ impl CapabilityGrantCurrentResultStore for PgCapabilityGrantCurrentResultStore {
             sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
                 .execute(&mut *conn)
                 .await?;
-            let cut =
-                crate::realm_authorization_cut::RealmAuthorizationCut::read(conn, realm_id, actor)
-                    .await?;
+            let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read_accepted(
+                conn, realm_id, actor,
+            )
+            .await?;
             Ok(cut
                 .bounded_actor_authorization_in_connection(conn, at)
                 .await?)

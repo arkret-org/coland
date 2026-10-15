@@ -22,6 +22,7 @@ mod authority_franking;
 mod authority_handoff;
 mod authority_key_backup_pointer;
 mod authority_mls_unit;
+pub(crate) mod authority_pcr;
 mod authority_port;
 mod authority_producer_validation;
 mod authority_self_event_unit;

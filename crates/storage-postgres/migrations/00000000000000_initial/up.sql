@@ -1620,6 +1620,7 @@ SELECT event.* FROM public.canonical_events event WHERE event.state = 'committed
 
 CREATE TABLE public.invite_receive_policies (
     account_pk bigint PRIMARY KEY REFERENCES public.accounts(pk) ON DELETE CASCADE,
+    revision bigint NOT NULL DEFAULT 1 CHECK(revision>=1),
     policy_payload jsonb NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
@@ -1629,6 +1630,59 @@ CREATE TABLE public.invite_new_source_ledgers (
     source_digest text NOT NULL,
     first_admitted_at timestamp with time zone NOT NULL,
     PRIMARY KEY (account_pk, source_digest)
+);
+
+-- Holder-private anti-abuse key, independent of every Station signing key.
+-- Created with the native account and migrated with its private PCR effects.
+CREATE TABLE public.invite_new_source_hmac_keys (
+    account_pk bigint PRIMARY KEY REFERENCES public.accounts(pk) ON DELETE CASCADE,
+    key_bytes bytea NOT NULL CHECK(octet_length(key_bytes)=32)
+);
+
+-- A native acceptance and its recoverable hosting publication intent are atomic.
+CREATE TABLE public.consent_private_effect_jobs (
+    holder_account_id jsonb PRIMARY KEY,
+    realm_id text NOT NULL,
+    sequence bigint NOT NULL CHECK(sequence>=1)
+);
+
+-- Hosting publication replay never repeats its Station-CAS notification.
+CREATE TABLE public.consent_private_effect_fences (
+    holder_account_id jsonb NOT NULL,
+    governance_generation bigint NOT NULL CHECK(governance_generation>=0),
+    nonce text NOT NULL,
+    expires_at timestamptz NOT NULL,
+    request_digest text NOT NULL CHECK(request_digest ~ '^sha256:[0-9a-f]{64}$'),
+    outcome jsonb NOT NULL,
+    PRIMARY KEY(holder_account_id,governance_generation,nonce)
+);
+
+-- Closed private-command replay fence at the actual PCR accepting authority.
+CREATE TABLE public.consent_private_proxy_fences (
+    holder_account_id jsonb NOT NULL,
+    realm_id text NOT NULL,
+    governance_generation bigint NOT NULL CHECK(governance_generation>=0),
+    nonce text NOT NULL,
+    expires_at timestamptz NOT NULL,
+    request_digest text NOT NULL CHECK(request_digest ~ '^sha256:[0-9a-f]{64}$'),
+    outcome jsonb NOT NULL,
+    PRIMARY KEY(holder_account_id,governance_generation,nonce)
+);
+
+CREATE TABLE public.pcr_private_handoff_imports (
+    handoff_id text PRIMARY KEY,
+    realm_id text NOT NULL,
+    manifest jsonb NOT NULL
+);
+
+-- Reject-only hosting projection. This never authorizes a private acceptance.
+CREATE TABLE public.consent_private_proxy_cuts (
+    holder_account_id jsonb PRIMARY KEY,
+    realm_id text NOT NULL,
+    governance_generation bigint NOT NULL CHECK(governance_generation>=0),
+    head_stream_position bigint NOT NULL CHECK(head_stream_position>=0),
+    head_commit_id text NOT NULL,
+    cell_revisions jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
 CREATE INDEX invite_new_source_ledgers_first_admitted_at_idx
@@ -3639,6 +3693,43 @@ CREATE TABLE call_state_current_results (
  CHECK(source_stream_ref->>'realm_id'=realm_id)
 );
 
+CREATE TABLE call_component_current_results (
+ realm_id TEXT NOT NULL,
+ call_id TEXT NOT NULL,
+ selector JSONB NOT NULL,
+ source_stream_ref JSONB NOT NULL,
+ current_commit_id TEXT NOT NULL,
+ current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
+ value JSONB NOT NULL,
+ updated_at TIMESTAMPTZ NOT NULL,
+ PRIMARY KEY(realm_id,call_id,selector),
+ CHECK(selector->>'call_id'=call_id),
+ CHECK(selector->>'kind' IN ('call_focus','call_roster','call_moderation','call_recording_state','call_recording_artifact','call_transcript_state','call_transcript_artifact')),
+ CHECK(source_stream_ref->>'kind' IN ('realm','circle')),
+ CHECK(source_stream_ref->>'realm_id'=realm_id)
+);
+
+CREATE TABLE call_voluntary_join_nonces (
+ subject_actor_id JSONB NOT NULL,
+ subject_device_id TEXT NOT NULL,
+ nonce TEXT NOT NULL,
+ expires_at TIMESTAMPTZ NOT NULL,
+ PRIMARY KEY(subject_actor_id,subject_device_id,nonce),
+ CHECK(jsonb_typeof(subject_actor_id)='object')
+);
+
+CREATE TABLE realm_media_service_current_results (
+ realm_id TEXT PRIMARY KEY,
+ source_stream_ref JSONB NOT NULL,
+ current_commit_id TEXT NOT NULL,
+ current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
+ value JSONB NOT NULL,
+ updated_at TIMESTAMPTZ NOT NULL,
+ CHECK(jsonb_typeof(value)='object'),
+ CHECK(source_stream_ref->>'kind'='realm'),
+ CHECK(source_stream_ref->>'realm_id'=realm_id)
+);
+
 CREATE TABLE circle_current_results (
  realm_id TEXT NOT NULL,
  circle_id TEXT NOT NULL PRIMARY KEY,
@@ -4806,3 +4897,19 @@ CREATE TABLE management_review_requests (
 CREATE UNIQUE INDEX management_review_one_nonterminal_target ON management_review_requests
  (requester_actor_key,effective_scope,management_operation,target_digest)
  WHERE status IN ('pending','approved');
+
+-- Private identity mapping only; never an authorization or Consent ledger.
+CREATE TABLE public.call_media_subject_identities (
+    realm_id text NOT NULL,
+    call_id text NOT NULL,
+    subject_actor_id jsonb NOT NULL,
+    subject_device_id text NOT NULL,
+    roster_identity jsonb NOT NULL,
+    participant_id text NOT NULL,
+    PRIMARY KEY(realm_id,call_id,subject_actor_id,subject_device_id),
+    UNIQUE(realm_id,call_id,roster_identity),
+    UNIQUE(realm_id,call_id,participant_id)
+);
+
+-- Publication progress is distinct from reject-only response high water.
+CREATE TABLE public.consent_private_effect_cuts (LIKE public.consent_private_proxy_cuts INCLUDING ALL);

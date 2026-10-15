@@ -44,9 +44,12 @@ diesel = { workspace = true, features = ["postgres", "serde_json", "chrono", "uu
 diesel-async = { workspace = true, features = ["postgres", "deadpool", "async-connection-wrapper"] }
 diesel_migrations = { workspace = true, features = ["postgres"] }
 parking_lot = { workspace = true }
+hmac.workspace = true
+rand.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2.workspace = true
+coland-domain = { workspace = true }
 coland-storage = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
 tokio-postgres = { workspace = true }
@@ -58,7 +61,6 @@ bytes.workspace = true
 futures-util.workspace = true
 rustls.workspace = true
 tokio-tungstenite.workspace = true
-rand.workspace = true
 arkret-test-kit.workspace = true
 salvo = { workspace = true, features = ["test"] }
 url.workspace = true

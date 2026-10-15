@@ -112,6 +112,14 @@ pub struct AppState {
     account_data: AccountDataService,
     key_material: KeyMaterialService,
     consents: ConsentService,
+    pub(crate) call_invitations: Arc<
+        Mutex<
+            BTreeMap<
+                String,
+                arkret_models_collaboration::call_invitation::CallInvitationSendRequestBody,
+            >,
+        >,
+    >,
     contacts: ContactService,
     agent_pairings: AgentPairingService,
     account_authority_device_pairing: Arc<dyn AccountAuthorityDevicePairingPort>,
@@ -1209,6 +1217,7 @@ impl AppState {
             jobs,
             projections,
             device_history_cache: Default::default(),
+            call_invitations: Default::default(),
             realm_directory,
             account_registration_policy: Arc::new(Mutex::new(AccountRegistrationPolicy::default())),
             runtime_guards: RuntimeGuardService::default(),

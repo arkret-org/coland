@@ -200,6 +200,7 @@ async fn commit(
         let agent_grant_scope_evidence =
             super::authority_agent_grant::prepare_agent_grant_scope(state, event, at).await?;
         commands.push(coland_services::events::CommitAcceptedEventCommand {
+            verified_media_participant: None,
             authority_commit: transaction,
             self_producer_guard,
             forwarded_producer_evidence,

@@ -136,6 +136,7 @@ pub(crate) async fn commit_contact_event_unit(
         .event_digest_with_digest_suite(arkret_canonical::DigestSuite::Sha256)
         .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
     let command = coland_services::events::CommitAcceptedEventCommand {
+        verified_media_participant: None,
         authority_commit: transaction.clone(),
         self_producer_guard: Some(guard),
         applet_producer_guard: None,

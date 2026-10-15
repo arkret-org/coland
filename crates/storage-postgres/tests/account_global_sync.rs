@@ -647,6 +647,7 @@ async fn racing_realm_commit_accepts_only_one_event_and_rolls_back_the_loser() {
             received_at: now,
         };
         coland_storage::EventCommitRequest {
+            verified_media_participant: None,
             authority_commit: coland_storage::AuthorityCommitTransaction {
                 expected_authority: authority.clone(),
                 commit: arkret_wire::RealmCommit {

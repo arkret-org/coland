@@ -650,6 +650,67 @@ pub(crate) struct RealmAuthorizationCut {
 }
 
 impl RealmAuthorizationCut {
+    /// Read-only consumers may use a complete verified member-Station cut.
+    /// Event admission continues to use the local authority's native rows.
+    pub(crate) async fn read_accepted(
+        conn: &mut AsyncPgConnection,
+        realm_id: &RealmId,
+        actor: &ActorId,
+    ) -> PersistenceResult<Self> {
+        let mut cut = Self::read(conn, realm_id, actor).await?;
+        if cut.root.is_some() {
+            return Ok(cut);
+        }
+        let rows = crate::replica_authorization::authorization_evidence(conn, realm_id)
+            .await?
+            .ok_or_else(|| {
+                PersistenceError::Conflict(
+                    "temporarily_unavailable: complete accepted authorization cut unavailable"
+                        .into(),
+                )
+            })?;
+        cut.grants.clear();
+        cut.revisions.clear();
+        for row in rows {
+            let arkret_wire::TypedCurrentRow::Value {
+                selector,
+                revision,
+                value,
+                ..
+            } = row;
+            match selector {
+                arkret_wire::CurrentSelector::RealmAuthorityRoot => {
+                    let root: arkret_wire::RealmAuthorityRootValue =
+                        serde_json::from_value(value).map_err(PersistenceError::database)?;
+                    cut.root = Some(RealmAuthorityRootCurrent {
+                        realm_id: realm_id.clone(),
+                        controller_actor_id: root.controller_actor_id,
+                        controller_epoch: root.controller_epoch,
+                        authority_generation: root.authority_generation,
+                        authority_event_ref: root.authority_event_ref,
+                    });
+                }
+                arkret_wire::CurrentSelector::RealmPolicyBundle => {
+                    cut.policy_bundle =
+                        Some(serde_json::from_value(value).map_err(PersistenceError::database)?);
+                }
+                arkret_wire::CurrentSelector::CapabilityGrant { grant_id } => {
+                    let grant: CapabilityGrant =
+                        serde_json::from_value(value).map_err(PersistenceError::database)?;
+                    if grant.id != grant_id || grant.realm_id.as_ref() != Some(realm_id) {
+                        return Err(PersistenceError::SchemaViolation(
+                            "accepted grant identity mismatch".into(),
+                        ));
+                    }
+                    cut.revisions.insert(grant_id.clone(), revision);
+                    cut.grants.insert(grant_id, grant);
+                }
+                _ => unreachable!("authorization evidence is selector-restricted"),
+            }
+        }
+        Ok(cut)
+    }
+
     pub(crate) fn time_sources_unchanged(
         &self,
         checked_at: chrono::DateTime<chrono::Utc>,
@@ -1888,7 +1949,11 @@ impl RealmAuthorizationCut {
             return Ok(authorization);
         };
         self.require_governed_member(&EventKind::CapabilityGrant)?;
-        let controller_cut = Self::read(conn, &self.realm_id, &controller).await?;
+        let controller_cut = if lock {
+            Self::read(conn, &self.realm_id, &controller).await?
+        } else {
+            Self::read_accepted(conn, &self.realm_id, &controller).await?
+        };
         controller_cut.require_governed_member(&EventKind::CapabilityGrant)?;
         let policies = if lock {
             crate::policy_current_results::read_scoped_agent_management_policies_in_connection(
@@ -3147,6 +3212,54 @@ impl RealmAuthorizationCut {
             facts.registration_epoch = Some(registration.registration_epoch.to_string());
         }
         Ok(())
+    }
+
+    pub(crate) async fn require_call_actions(
+        &self,
+        conn: &mut AsyncPgConnection,
+        event: &arkret_wire::Event,
+        commit: &arkret_wire::RealmCommit,
+        prepared: Option<&coland_storage::EventApprovalCommit>,
+        actions: &[&str],
+    ) -> PersistenceResult<()> {
+        self.require_open_lifecycle(event)?;
+        self.require_governed_member(&event.kind)?;
+        let (target, mut facts) = self.event_operation(event);
+        self.complete_event_facts_in_connection(conn, event, &mut facts)
+            .await?;
+        let target = self.current_event_target(event, target, &facts)?;
+        let mut approved = Vec::new();
+        for action in actions {
+            let registered = CapabilityActionId::from_wire(action)
+                .ok_or_else(|| capability_denied("Call axis action is unregistered"))?;
+            let mut alternatives = vec![*action];
+            if matches!(event.scope_ref, arkret_wire::ScopeRef::Realm { .. }) {
+                alternatives.push(CapabilityActionId::REALM_OWNER);
+            }
+            approved.extend(
+                crate::boxed_future(|| {
+                    self.require_selected_action_with_approvals(
+                        conn,
+                        event,
+                        commit,
+                        prepared,
+                        registered,
+                        &target,
+                        &facts,
+                        &alternatives,
+                    )
+                })
+                .await?,
+            );
+        }
+        crate::approval_admission::consume_and_audit(
+            conn,
+            event,
+            commit,
+            &approved,
+            &serde_json::json!({"call_axes":actions,"scope_ref":event.scope_ref}),
+        )
+        .await
     }
 
     /// A managed actor entering itself is not already a joined member. Its

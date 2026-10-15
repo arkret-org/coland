@@ -302,6 +302,16 @@ pub(crate) async fn resolve_verified_authority_of_service(
         realm_id: realm_id.clone(),
         nonce,
     };
+    if service_id == &state.service_core_id() {
+        let bundle = local_authority_bundle(state, realm_id, &request.nonce).await?;
+        let located = verify_served_bundle(state, bundle, &request.nonce).await?;
+        if located.authority.current_service_id() != service_id {
+            return Err(unavailable(
+                "this Station no longer governs the requested Realm",
+            ));
+        }
+        return Ok(located);
+    }
     let endpoint = crate::routing::federation::resolved_peer_route(
         state,
         service_id.as_str(),

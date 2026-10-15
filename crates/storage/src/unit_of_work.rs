@@ -78,6 +78,7 @@ pub struct AppletEventProducerGuard {
 
 #[derive(Clone, Debug)]
 pub struct EventCommitRequest {
+    pub verified_media_participant: Option<arkret_signatures::media::VerifiedCallParticipant>,
     /// Current-authority transaction that orders the producer Event on its
     /// Realm, Circle, or Sidecar stream.
     pub authority_commit: crate::AuthorityCommitTransaction,

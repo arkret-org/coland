@@ -1538,6 +1538,7 @@ pub async fn assert_applet_formal_commit_transaction_contract(
         )
         .unwrap();
         batch.push(EventCommitRequest {
+            verified_media_participant: None,
             event: CanonicalEventRecord { event_id: event.event_id.to_string(), actor_id: event.actor_id.to_string(),
                 realm_id: Some(event.realm_id.to_string()), kind: event.kind.as_str().to_owned(),
                 schema_id: event.kind.descriptor().and_then(|descriptor| descriptor.payload_schema_ref).unwrap_or(arkret_wire::SchemaId::EVENT_PAYLOAD_V1).to_owned(),
@@ -2239,6 +2240,7 @@ pub async fn assert_event_commit_unit_of_work_contract(
         updated_at: now,
     };
     let contact_commit = EventCommitRequest {
+        verified_media_participant: None,
         authority_commit: stream.accept(&contact_event),
         self_producer_guard: None,
         applet_producer_guard: None,
@@ -2340,6 +2342,7 @@ pub async fn assert_event_commit_unit_of_work_contract(
     let failed_contact_commit = stores
         .unit_of_work
         .commit_event(EventCommitRequest {
+            verified_media_participant: None,
             authority_commit: stream.accept(&failed_contact_event),
             self_producer_guard: None,
             applet_producer_guard: None,

@@ -8,10 +8,9 @@ use crate::{AccountDataRecord, PersistenceResult, async_trait};
 
 pub struct ConsentRequestQuarantineInput {
     pub holder: AccountId,
+    pub acceptor_service_id: arkret_wire::DidCoreId,
     pub requester: AccountId,
     pub consent_scope: ConsentRequestScope,
-    /// The Station's existing keyed digest of the complete requester source.
-    pub source_digest: String,
     pub received_at: DateTime<Utc>,
     pub quota_constraints: NewSourceQuotaConstraints,
 }

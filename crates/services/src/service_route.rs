@@ -27,13 +27,16 @@ pub struct VerifiedServiceDescribeMetadata {
     pub trust_domain: TrustDomainId,
     pub protocol_version: String,
     pub supported_operation_bundles: Vec<String>,
+    pub supported_profiles: Vec<String>,
 }
 #[derive(Clone, Debug)]
 pub struct ResolvedServiceRoute {
+    pub authenticated_resolution: Option<AuthenticatedServiceResolution>,
     pub route: VerifiedServiceRoute,
     pub trust_domain: TrustDomainId,
     pub protocol_version: String,
     pub supported_operation_bundles: Vec<String>,
+    pub supported_profiles: Vec<String>,
     pub describe_verified_at: DateTime<Utc>,
     pub describe_cache_expires_at: DateTime<Utc>,
 }
@@ -275,6 +278,8 @@ impl ServiceRouteResolver {
         self.resolved_routes.lock().insert(
             (service_id.to_string(), service_kind.to_owned()),
             ResolvedServiceRoute {
+                authenticated_resolution: Some(candidate.evidence.clone()),
+                supported_profiles: d.supported_profiles,
                 route: entry.clone(),
                 trust_domain: d.trust_domain,
                 protocol_version: d.protocol_version,
@@ -433,6 +438,7 @@ mod tests {
             VerifiedRouteCandidate {
                 evidence,
                 description: VerifiedServiceDescribeMetadata {
+                    supported_profiles: Vec::new(),
                     service_id,
                     service_kind: "station".to_owned(),
                     service_resolution: arkret_models_identity::ResolutionCommitment {
@@ -489,6 +495,8 @@ mod tests {
         let now = Utc::now();
         let route = VerifiedServiceRoute::new(projection, now);
         ResolvedServiceRoute {
+            authenticated_resolution: None,
+            supported_profiles: Vec::new(),
             describe_cache_expires_at: route.cache_expires_at,
             route,
             trust_domain: candidate.description.trust_domain,

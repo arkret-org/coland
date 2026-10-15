@@ -23,7 +23,7 @@ struct ValueRow {
 
 async fn footprint(pool: &PgPool) -> Value {
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("SELECT jsonb_build_object('events',(SELECT count(*) FROM canonical_events),'commits',(SELECT count(*) FROM realm_commits),'calls',(SELECT count(*) FROM call_state_current_results),'axes',(SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY realm_id,call_id,family),'[]') FROM call_axis_current_results t)) AS value")
+    diesel::sql_query("SELECT jsonb_build_object('events',(SELECT count(*) FROM canonical_events),'commits',(SELECT count(*) FROM realm_commits),'calls',(SELECT count(*) FROM call_state_current_results),'axes',(SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY realm_id,call_id,selector),'[]') FROM call_component_current_results t)) AS value")
         .get_result::<ValueRow>(&mut *conn).await.unwrap().value
 }
 
@@ -346,7 +346,7 @@ async fn moderation_assertions_retain_bans_kicks_and_guard_the_whole_axis() {
     let restored = restore(&kick.authority_commit.commit);
     uow.commit_event(restored.clone()).await.unwrap();
     let mut conn = pool.get().await.unwrap();
-    let value = diesel::sql_query("SELECT value FROM call_axis_current_results WHERE realm_id=$1 AND call_id=$2 AND family='call_moderation'")
+    let value = diesel::sql_query("SELECT value FROM call_component_current_results WHERE realm_id=$1 AND call_id=$2 AND selector->>'kind'='call_moderation'")
         .bind::<Text,_>(discussion.realm_id().as_str()).bind::<Text,_>(call_id.as_str())
         .get_result::<ValueRow>(&mut *conn).await.unwrap().value;
     let current: arkret_models_collaboration::events_payloads::call::CallModerationCurrentValue =

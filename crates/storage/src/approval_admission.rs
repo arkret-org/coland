@@ -52,3 +52,12 @@ impl ApprovalCarrierBinding {
         }
     }
 }
+
+/// Historical votes for a real operation target, with no synthetic Event.
+#[derive(Clone, Debug)]
+pub struct ManagementOperationApprovalCommit {
+    pub target_digest: arkret_wire::Hash,
+    pub operation: arkret_wire::ServiceOperationId,
+    pub methods: Vec<ApprovalHistoricalMethod>,
+    pub current: crate::ManagementReviewCurrent,
+}

@@ -1996,6 +1996,16 @@ impl RealmAuthorizationCut {
     /// Events are admitted, and an archived or frozen Realm admits only the
     /// closed exemption set. The terminal refusal code is reserved, so it is
     /// a bare `failed_precondition`.
+    /// Operation-native creations have no fabricated Event for lifecycle checks.
+    pub(crate) fn require_open_business_mutation(&self) -> PersistenceResult<()> {
+        if self.lifecycle.terminal || self.lifecycle.archived || self.lifecycle.frozen {
+            return Err(PersistenceError::Conflict(
+                "failed_precondition: Realm lifecycle refuses new business mutations".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn require_open_lifecycle(
         &self,
         event: &arkret_wire::Event,

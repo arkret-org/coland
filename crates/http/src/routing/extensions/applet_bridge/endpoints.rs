@@ -1818,11 +1818,7 @@ async fn provision_ghost_actor_endpoint(
         .managed_actor_bundle
         .as_ref()
         .expect("creation branch");
-    if !provision.approval_signatures.is_empty() {
-        return Err(AppError::conflict(
-            "management review consumption is not established",
-        ));
-    }
+
     let authoring_basis = provision
         .authoring_basis()
         .ok_or_else(|| AppError::param_invalid("Ghost authoring basis is missing"))?
@@ -2050,40 +2046,45 @@ async fn provision_ghost_actor_endpoint(
     let identity_value = encode_applet_identity(&record.identity)?;
     record.ghosts.push(ghost);
     let applet_record_value = encode_applet_record(&record)?;
-    let input = coland_storage::AppletAuthoringUnitWrite {
-        request: coland_storage::AppletAdmissionRequest::Managed(
-            arkret_models_integration::AppletManagedActorCommittedRequest::Ghost(Box::new(
-                provision.clone(),
-            )),
-        ),
-        package: record.package.clone(),
-        recomputed_install_plan: None,
-        service_did_document,
-        controller_did_document: super::install::package_controller_document(
-            state,
-            &record.package,
-        )?,
-        station_verification_method: state
-            .service_verification_method("notary-key")
-            .map_err(AppError::internal)?,
-        station_public_key: *state.notary_verifying_key().as_bytes(),
-        admin_actor_id: arkret_wire::ActorId::service(service_id.clone()),
-        admin_producer_guards: Vec::new(),
+    let mut input = coland_storage::AppletAuthoringUnitWrite {
+        candidate: coland_storage::AppletAuthoringCandidate {
+            request: coland_storage::AppletAdmissionRequest::Managed(
+                arkret_models_integration::AppletManagedActorCommittedRequest::Ghost(Box::new(
+                    provision.clone(),
+                )),
+            ),
+            package: record.package.clone(),
+            recomputed_install_plan: None,
+            service_did_document,
+            controller_did_document: super::install::package_controller_document(
+                state,
+                &record.package,
+            )?,
+            station_verification_method: state
+                .service_verification_method("notary-key")
+                .map_err(AppError::internal)?,
+            station_public_key: *state.notary_verifying_key().as_bytes(),
+            admin_actor_id: arkret_wire::ActorId::service(service_id.clone()),
+            admin_producer_guards: Vec::new(),
+            request_digest: provision
+                .authoring_request
+                .canonical_digest()
+                .map_err(|error| AppError::param_invalid(error.to_string()))?,
+            canonical_request_hash: Hash::new(request_digest.clone())
+                .map_err(|error| AppError::param_invalid(error.to_string()))?,
+            prior_managed_refs: Vec::new(),
+            prior_service_signer_evidence: None,
+            accepted_at: now,
+        },
         expected_identity: Some(identity_value.clone()),
         expected_installation: Some(expected_applet_record.clone()),
         preview_subject_key: applet_authoring_preview_subject_key(&provision.authoring_request)?,
-        request_digest: provision
-            .authoring_request
-            .canonical_digest()
-            .map_err(|error| AppError::param_invalid(error.to_string()))?,
-        canonical_request_hash: Hash::new(request_digest.clone())
-            .map_err(|error| AppError::param_invalid(error.to_string()))?,
         operation_id: "ak.self.applet.ghost.command.provision".to_owned(),
         idempotency_key: idempotency_key.clone(),
-        prior_managed_refs: Vec::new(),
-        prior_service_signer_evidence: None,
-        accepted_at: now,
+        management_approval: None,
     };
+    input.management_approval =
+        super::management_review::prepare_creation_approvals(state, &input.candidate).await?;
     let target_station_id = record.target_station_id.clone();
     let outcome_actor = ghost_actor_id.clone();
     let outcome_service = service_id.clone();

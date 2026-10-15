@@ -13,6 +13,9 @@ use diesel::{OptionalExtension, QueryableByName, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::{Value, json};
 
+#[path = "applet_management_review.rs"]
+pub(crate) mod applet;
+
 fn refused(code: &str, detail: &str) -> PersistenceError {
     PersistenceError::Conflict(format!("{code}: {detail}"))
 }
@@ -29,7 +32,7 @@ struct JsonRow {
     value: Value,
 }
 #[derive(QueryableByName)]
-struct ReviewRow {
+struct ReviewRowData {
     #[diesel(sql_type=Jsonb)]
     request_body: Value,
     #[diesel(sql_type=Jsonb)]
@@ -51,13 +54,31 @@ struct ReviewRow {
     #[diesel(sql_type=Timestamptz)]
     expires_at: DateTime<Utc>,
 }
+/// One decode of immutable private intent per SQL read. Current qualification
+/// remains independently rechecked; this typed material is never an allow cache.
+struct ReviewRow {
+    data: ReviewRowData,
+    request: std::sync::Arc<ManagementReviewRequestBody>,
+}
+impl std::ops::Deref for ReviewRow {
+    type Target = ReviewRowData;
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+impl std::ops::DerefMut for ReviewRow {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.data
+    }
+}
+
 impl ReviewRow {
-    fn request(&self) -> PersistenceResult<ManagementReviewRequestBody> {
-        serde_json::from_value(self.request_body.clone()).map_err(invalid)
+    fn request(&self) -> std::sync::Arc<ManagementReviewRequestBody> {
+        self.request.clone()
     }
     fn outcome(&self) -> PersistenceResult<ManagementReviewOutcome> {
         Ok(ManagementReviewOutcome {
-            request_id: self.request()?.request_id,
+            request_id: self.request.request_id.clone(),
             target_digest: self.target_digest.parse().map_err(invalid)?,
             status: serde_json::from_value(json!(self.status)).map_err(invalid)?,
             expires_at: self.expires_at,
@@ -72,12 +93,27 @@ async fn read(
     id: &str,
     lock: bool,
 ) -> PersistenceResult<Option<ReviewRow>> {
-    sql_query(format!("SELECT request_body,immutable_pins,requirements,request_digest,target_digest,status,approval_signatures,approval_basis,created_at,expires_at FROM management_review_requests WHERE request_id=$1{}", if lock { " FOR UPDATE" } else { "" }))
-        .bind::<Text,_>(id).get_result(conn).await.optional().map_err(PersistenceError::database)
+    let data=sql_query(format!("SELECT request_body,immutable_pins,requirements,request_digest,target_digest,status,approval_signatures,approval_basis,created_at,expires_at FROM management_review_requests WHERE request_id=$1{}", if lock { " FOR UPDATE" } else { "" }))
+        .bind::<Text,_>(id).get_result::<ReviewRowData>(conn).await.optional().map_err(PersistenceError::database)?;
+    let Some(data) = data else {
+        return Ok(None);
+    };
+    let original = data.request_body.clone();
+    let request = tokio::task::spawn_blocking(move || {
+        serde_json::from_value::<Box<ManagementReviewRequestBody>>(original).map_err(invalid)
+    })
+    .await
+    .map_err(|error| {
+        PersistenceError::Internal(format!("management intent decode task failed: {error}"))
+    })??;
+    Ok(Some(ReviewRow {
+        data,
+        request: request.into(),
+    }))
 }
 
-/// Only original controller-authored Realm join/public-mode Events are supported.
-/// Applet creation and Profile publication retain their existing fail-closed gates.
+/// The Agent Event branch retains its original controller and ownership rules.
+/// Applet creation uses its actual operation candidate in the sibling module.
 fn target(
     request: &ManagementReviewRequestBody,
 ) -> PersistenceResult<(&Event, AccountId, AccountId)> {
@@ -153,6 +189,26 @@ fn target(
         ));
     }
     Ok((event, controller, agent))
+}
+
+fn realm(request: &ManagementReviewRequestBody) -> PersistenceResult<&arkret_wire::RealmId> {
+    request.validate().map_err(invalid)?;
+    Ok(request.effective_scope.realm_id())
+}
+fn beneficiary(request: &ManagementReviewRequestBody) -> PersistenceResult<ActorId> {
+    if applet::creation(request) {
+        applet::beneficiary(request)
+    } else {
+        Ok(ActorId::account(target(request)?.2))
+    }
+}
+fn operation_name(operation: ManagementOperation) -> &'static str {
+    match operation {
+        ManagementOperation::Join => "join",
+        ManagementOperation::Publish => "publish",
+        ManagementOperation::CreateBot => "create_bot",
+        ManagementOperation::MapGhost => "map_ghost",
+    }
 }
 
 /// The SDK evaluator remains the effect authority. This narrow supported
@@ -302,7 +358,11 @@ async fn pins(
     conn: &mut AsyncPgConnection,
     request: &ManagementReviewRequestBody,
     at: DateTime<Utc>,
+    current: &coland_storage::ManagementReviewCurrent,
 ) -> PersistenceResult<(Value, Vec<ManagementReviewRequirement>)> {
+    if applet::creation(request) {
+        return Box::pin(applet::pins(conn, request, at, current)).await;
+    }
     let (event, controller, agent) = target(request)?;
     crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &event.realm_id).await?;
     let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
@@ -392,18 +452,34 @@ async fn pins(
     ))
 }
 
+fn management_resource(scope: &ScopeRef) -> PersistenceResult<arkret_wire::WireResourceSelector> {
+    match scope {
+        ScopeRef::Realm { realm_id } => {
+            Ok(arkret_wire::WireResourceSelector::realm(realm_id.clone()))
+        }
+        ScopeRef::Circle {
+            realm_id,
+            circle_id,
+        } => Ok(arkret_wire::WireResourceSelector::circle(
+            realm_id.clone(),
+            circle_id.clone(),
+        )),
+        _ => Err(hidden()),
+    }
+}
+
 async fn visible(
     conn: &mut AsyncPgConnection,
     row: &ReviewRow,
     caller: &ActorId,
     at: DateTime<Utc>,
 ) -> PersistenceResult<bool> {
-    let request = row.request()?;
+    let request = row.request();
     if request.requester_actor_id == *caller {
         return Ok(true);
     }
-    let (_, _, agent) = target(&request)?;
-    if caller.signing_principal_id() == &agent.principal_id {
+    let beneficiary = beneficiary(&request)?;
+    if caller.signing_principal_id() == beneficiary.signing_principal_id() {
         return Ok(false);
     }
     let requirements: Vec<ManagementReviewRequirement> =
@@ -414,15 +490,14 @@ async fn visible(
     {
         return Ok(false);
     }
-    let (event, ..) = target(&request)?;
+    let realm = realm(&request)?;
     let cut =
-        crate::realm_authorization_cut::RealmAuthorizationCut::read(conn, &event.realm_id, caller)
-            .await?;
+        crate::realm_authorization_cut::RealmAuthorizationCut::read(conn, realm, caller).await?;
     Ok(cut.actor_is_joined()
         && (cut.actor_is_root_controller()
             || cut.permits_unreserved_current_actions(
                 &[arkret_wire::CapabilityActionId::REALM_ADMIN],
-                &arkret_wire::WireResourceSelector::realm(event.realm_id.clone()),
+                &management_resource(&request.effective_scope)?,
                 at,
             )))
 }
@@ -473,6 +548,14 @@ async fn lock_current_account_realms(
         realms.insert(pcr.clone());
         pcrs.insert(account.clone(), pcr);
     }
+    if let Some(input) = current.and_then(|current| current.applet_candidate.as_deref())
+        && let coland_storage::AppletAdmissionRequest::Managed(
+            arkret_models_integration::AppletManagedActorCommittedRequest::Ghost(body),
+        ) = &input.request
+        && let Some(existing) = &body.existing_managed_actor
+    {
+        realms.insert(existing.principal_control_realm_id.clone());
+    }
     for held in realms {
         crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &held).await?;
     }
@@ -520,7 +603,7 @@ async fn require_current_accounts(
         if status == arkret_models_collaboration::objects::account_status::AccountStatus::Active {
             // Preserve the original additional product-projection checks when
             // those mirrors exist; they never replace the native AA/PCR gate.
-            crate::morph_projection_reads::require_accepted_human_identity(
+            crate::morph_projection_reads::require_current_human_account(
                 conn,
                 &account,
                 &pcr,
@@ -561,7 +644,10 @@ fn require_active_caller(
     caller: &ActorId,
     current: &coland_storage::ManagementReviewCurrent,
 ) -> PersistenceResult<()> {
-    if !current_account_is_active(caller.as_account_id().ok_or_else(hidden)?, current)? {
+    let Some(account) = caller.as_account_id() else {
+        return Ok(());
+    };
+    if !current_account_is_active(account, current)? {
         return Err(refused(
             "capability_denied",
             "management caller Account is not current active",
@@ -605,7 +691,7 @@ fn selected_approval_actor(
 /// retain the verified historical key and signature without reinterpreting it.
 async fn current_administrator(
     conn: &mut AsyncPgConnection,
-    event: &Event,
+    scope: &ScopeRef,
     actor: &ActorId,
     at: DateTime<Utc>,
     current: &coland_storage::ManagementReviewCurrent,
@@ -614,17 +700,8 @@ async fn current_administrator(
     if !current_account_is_active(account, current)? {
         return Ok(None);
     }
-    let Some(basis) = crate::approval_admission::qualify_actor(
-        conn,
-        event,
-        actor,
-        arkret_wire::CapabilityActionId::RealmAdmin,
-        &arkret_wire::WireResourceSelector::realm(event.realm_id.clone()),
-        &coland_storage::OperationFacts::default(),
-        at,
-        true,
-    )
-    .await?
+    let Some(basis) =
+        crate::approval_admission::qualify_management_administrator(conn, scope, actor, at).await?
     else {
         return Ok(None);
     };
@@ -650,8 +727,7 @@ async fn approvals_still_qualified(
     at: DateTime<Utc>,
     current: &coland_storage::ManagementReviewCurrent,
 ) -> PersistenceResult<bool> {
-    let request = row.request()?;
-    let (event, ..) = target(&request)?;
+    let request = row.request();
     let signatures: Vec<arkret_wire::ApprovalSignature> =
         serde_json::from_value(row.approval_signatures.clone()).map_err(invalid)?;
     let bases = row
@@ -673,7 +749,8 @@ async fn approvals_still_qualified(
         if actor.signing_principal_id() != &principal {
             return Err(invalid("retained approval Account differs from its signer"));
         }
-        let qualified = current_administrator(conn, event, &actor, at, current).await?;
+        let qualified =
+            current_administrator(conn, &request.effective_scope, &actor, at, current).await?;
         if qualified.map(stable_qualification).as_ref() != Some(&basis["administrator_current"]) {
             return Ok(false);
         }
@@ -690,17 +767,14 @@ async fn refresh(
     if !matches!(row.status.as_str(), "pending" | "approved") {
         return Ok(());
     }
-    let request = row.request()?;
-    let controller = request
-        .requester_actor_id
-        .as_account_id()
-        .ok_or_else(hidden)?;
+    let request = row.request();
+    let controller = request.requester_actor_id.as_account_id();
     let next = if at >= row.expires_at {
         Some("expired")
-    } else if !current_account_is_active(controller, current)? {
+    } else if controller.is_some() && !current_account_is_active(controller.unwrap(), current)? {
         Some("superseded")
     } else {
-        match pins(conn, &request, at).await {
+        match Box::pin(pins(conn, &request, at, current)).await {
             Ok((current_pins, required))
                 if current_pins == row.immutable_pins && json!(required) == row.requirements =>
             {
@@ -738,32 +812,29 @@ pub(crate) async fn request_in_connection(
     conn: &mut AsyncPgConnection,
     caller: &ActorId,
     request: &ManagementReviewRequestBody,
-    producer: &coland_storage::SelfProducerCommitGuard,
+    producer: Option<&coland_storage::SelfProducerCommitGuard>,
     current: &coland_storage::ManagementReviewCurrent,
 ) -> PersistenceResult<ManagementReviewOutcome> {
-    let (event, ..) = target(request)?;
+    let realm = realm(request)?;
+    applet::lock(conn, request, &current.station_id).await?;
     if caller != &request.requester_actor_id {
         return Err(hidden());
     }
     let initial = read(conn, &request.request_id, false).await?;
     let accounts = match initial.as_ref() {
         Some(row) => material_accounts(row, caller, &[])?,
-        None => vec![
-            caller.as_account_id().ok_or_else(hidden)?.clone(),
-            request
-                .requester_actor_id
-                .as_account_id()
-                .ok_or_else(hidden)?
-                .clone(),
-        ],
+        None => caller.as_account_id().cloned().into_iter().collect(),
     };
-    require_current_accounts(conn, &event.realm_id, &accounts, current).await?;
+    require_current_accounts(conn, realm, &accounts, current).await?;
     if !accounts.is_empty() {
         require_active_caller(caller, current)?;
     }
-    crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &event.realm_id).await?;
-    let at = Utc::now();
-    let digest = arkret_canonical::canonical_sha256(request).map_err(invalid)?;
+    crate::realm_authorization_cut::lock_realm_authorization_cut(conn, realm).await?;
+    let at = arkret_canonical::normalize_timestamp_canonical(Utc::now());
+    let digest = request
+        .canonical_intent_digest()
+        .map_err(invalid)?
+        .to_string();
     if let Some(mut row) = read(conn, &request.request_id, true).await? {
         if row.request_digest != digest {
             return Err(refused(
@@ -774,9 +845,18 @@ pub(crate) async fn request_in_connection(
         refresh(conn, &mut row, at, current).await?;
         return row.outcome();
     }
-    crate::authority_commit::check_self_producer_guard_in_connection(conn, event, producer, at)
+    if let ManagementReviewTarget::Event { event } = &request.target {
+        crate::authority_commit::check_self_producer_guard_in_connection(
+            conn,
+            event,
+            producer.ok_or_else(hidden)?,
+            at,
+        )
         .await?;
-    let (pins, requirements) = pins(conn, request, at).await?;
+    } else if producer.is_some() {
+        return Err(hidden());
+    }
+    let (pins, requirements) = Box::pin(pins(conn, request, at, current)).await?;
     if requirements.is_empty() {
         return Err(refused(
             "failed_precondition",
@@ -789,14 +869,16 @@ pub(crate) async fn request_in_connection(
         .min()
         .ok_or_else(hidden)?
         .min(86400);
-    let expires_at = at + chrono::Duration::seconds(i64::try_from(lifetime).map_err(invalid)?);
+    let expires_at = applet::deadline(request)
+        .unwrap_or(DateTime::<Utc>::MAX_UTC)
+        .min(at + chrono::Duration::seconds(i64::try_from(lifetime).map_err(invalid)?));
     let target_digest = request
         .target
         .canonical_target_digest()
         .map_err(invalid)?
         .to_string();
     let inserted = sql_query("INSERT INTO management_review_requests(request_id,realm_id,requester_actor_key,effective_scope,management_operation,request_digest,target_digest,request_body,immutable_pins,requirements,created_at,expires_at,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending') ON CONFLICT DO NOTHING")
-        .bind::<Text,_>(&request.request_id).bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(caller.to_string()).bind::<Jsonb,_>(json!(request.effective_scope)).bind::<Text,_>(if request.management_operation==ManagementOperation::Join {"join"} else {"publish"}).bind::<Text,_>(&digest).bind::<Text,_>(&target_digest).bind::<Jsonb,_>(json!(request)).bind::<Jsonb,_>(pins).bind::<Jsonb,_>(json!(requirements)).bind::<Timestamptz,_>(at).bind::<Timestamptz,_>(expires_at).execute(&mut *conn).await.map_err(PersistenceError::database)?;
+        .bind::<Text,_>(&request.request_id).bind::<Text,_>(realm.as_str()).bind::<Text,_>(caller.to_string()).bind::<Jsonb,_>(json!(request.effective_scope)).bind::<Text,_>(operation_name(request.management_operation)).bind::<Text,_>(&digest).bind::<Text,_>(&target_digest).bind::<Jsonb,_>(json!(request)).bind::<Jsonb,_>(pins).bind::<Jsonb,_>(json!(requirements)).bind::<Timestamptz,_>(at).bind::<Timestamptz,_>(expires_at).execute(&mut *conn).await.map_err(PersistenceError::database)?;
     if inserted != 1 {
         return Err(refused(
             "duplicate_conflict",
@@ -816,14 +898,15 @@ pub(crate) async fn status_in_connection(
     current: &coland_storage::ManagementReviewCurrent,
 ) -> PersistenceResult<ManagementReviewOutcome> {
     let row = read(conn, id, false).await?.ok_or_else(hidden)?;
-    let request = row.request()?;
-    let (event, ..) = target(&request)?;
+    let request = row.request();
+    let realm = realm(&request)?;
+    applet::lock(conn, &request, &current.station_id).await?;
     let accounts = material_accounts(&row, caller, &[])?;
-    require_current_accounts(conn, &event.realm_id, &accounts, current).await?;
+    require_current_accounts(conn, realm, &accounts, current).await?;
     if !accounts.is_empty() {
         require_active_caller(caller, current)?;
     }
-    crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &event.realm_id).await?;
+    crate::realm_authorization_cut::lock_realm_authorization_cut(conn, realm).await?;
     let mut row = read(conn, id, true).await?.ok_or_else(hidden)?;
     let at = Utc::now();
     if !visible(conn, &row, caller, at).await? {
@@ -856,9 +939,8 @@ async fn qualify(
     at: DateTime<Utc>,
     current: &coland_storage::ManagementReviewCurrent,
 ) -> PersistenceResult<Vec<crate::approval_admission::QualifiedApproval>> {
-    let request = row.request()?;
-    let (event, _, agent) = target(&request)?;
-    let beneficiary = ActorId::account(agent);
+    let request = row.request();
+    let beneficiary = beneficiary(&request)?;
     let binding = review_binding(row, &request, &beneficiary);
     let mut result = Vec::new();
     let mut principals = std::collections::BTreeSet::new();
@@ -888,35 +970,30 @@ async fn qualify(
                 "management approval history differs",
             ));
         }
-        arkret_identity::principal_control::verify_native_control_management_event_approval(
-            control,
-            vote,
-            event,
-            arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-            vote.input.action,
-            at,
-            &binding,
-        )
-        .map_err(|_| {
-            refused(
-                "signature_invalid",
-                "management approval does not bind original intent",
-            )
-        })?;
         let required_action = match request.management_operation {
             ManagementOperation::Join => arkret_wire::CapabilityActionId::AgentJoin,
             ManagementOperation::Publish => arkret_wire::CapabilityActionId::AgentPublish,
-            _ => return Err(hidden()),
+            ManagementOperation::CreateBot => arkret_wire::CapabilityActionId::AppletBotProvision,
+            ManagementOperation::MapGhost => arkret_wire::CapabilityActionId::AppletGhostProvision,
         };
+        match &request.target {
+            ManagementReviewTarget::Event {event} => arkret_identity::principal_control::verify_native_control_management_event_approval(
+                control,vote,event,arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,required_action,at,&binding),
+            _ => arkret_identity::principal_control::verify_native_control_management_operation_approval(
+                control,vote,&request.target.canonical_target_digest().map_err(invalid)?,
+                if request.management_operation==ManagementOperation::CreateBot {"ak.self.applet.bot.command.provision.v1"} else {"ak.self.applet.ghost.command.provision.v1"},
+                required_action,&request.requester_actor_id,at,&binding),
+        }.map_err(|_| refused("signature_invalid", "management approval does not bind original intent"))?;
         if vote.input.action != required_action {
-            return Err(refused(
-                "signature_invalid",
-                "management approval action differs from its original governance operation",
-            ));
+            return Err(refused("signature_invalid", "management action differs"));
         }
+        let initiating_actor = match &request.target {
+            ManagementReviewTarget::Event { event } => event.actual_signer(),
+            _ => &request.requester_actor_id,
+        };
         let principal = control.principal();
         if principal == request.requester_actor_id.signing_principal_id()
-            || principal == event.actual_signer().signing_principal_id()
+            || principal == initiating_actor.signing_principal_id()
             || principal == beneficiary.signing_principal_id()
         {
             return Err(refused(
@@ -931,14 +1008,15 @@ async fn qualify(
             ));
         }
         let selected_actor = selected_approval_actor(row, principal, current)?;
-        let basis = current_administrator(conn, event, &selected_actor, at, current)
-            .await?
-            .ok_or_else(|| {
-                refused(
-                    "capability_denied",
-                    "approver has no current scope administrator authority",
-                )
-            })?;
+        let basis =
+            current_administrator(conn, &request.effective_scope, &selected_actor, at, current)
+                .await?
+                .ok_or_else(|| {
+                    refused(
+                        "capability_denied",
+                        "approver has no current scope administrator authority",
+                    )
+                })?;
         let actor: ActorId = serde_json::from_value(basis["actor_id"].clone()).map_err(invalid)?;
         let requirements: Vec<ManagementReviewRequirement> =
             serde_json::from_value(row.requirements.clone()).map_err(invalid)?;
@@ -990,14 +1068,15 @@ pub(crate) async fn decide_in_connection(
     let initial = read(conn, &decision.request_id, false)
         .await?
         .ok_or_else(hidden)?;
-    let request = initial.request()?;
-    let (event, ..) = target(&request)?;
+    let request = initial.request();
+    let realm = realm(&request)?;
+    applet::lock(conn, &request, &current.station_id).await?;
     let accounts = material_accounts(&initial, caller, &decision.approval_signatures)?;
-    require_current_accounts(conn, &event.realm_id, &accounts, current).await?;
+    require_current_accounts(conn, realm, &accounts, current).await?;
     if !accounts.is_empty() {
         require_active_caller(caller, current)?;
     }
-    crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &event.realm_id).await?;
+    crate::realm_authorization_cut::lock_realm_authorization_cut(conn, realm).await?;
     let mut row = read(conn, &decision.request_id, true)
         .await?
         .ok_or_else(hidden)?;
@@ -1081,14 +1160,18 @@ fn material_accounts(
     if row.status == "consumed" {
         return Ok(Vec::new());
     }
-    let caller_account = caller.as_account_id().ok_or_else(hidden)?;
-    let mut accounts = std::collections::BTreeSet::from([caller_account.clone()]);
+    let mut accounts = caller
+        .as_account_id()
+        .cloned()
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
     if !matches!(row.status.as_str(), "pending" | "approved") || Utc::now() >= row.expires_at {
         return Ok(accounts.into_iter().collect());
     }
-    let request = row.request()?;
-    let (_, controller, _) = target(&request)?;
-    accounts.insert(controller);
+    let request = row.request();
+    if !applet::creation(&request) {
+        accounts.insert(target(&request)?.1);
+    }
     let retained: Vec<arkret_wire::ApprovalSignature> =
         serde_json::from_value(row.approval_signatures.clone()).map_err(invalid)?;
     let bases = row.approval_basis.as_array().ok_or_else(hidden)?;
@@ -1153,15 +1236,15 @@ pub(crate) async fn material_in_connection(
     new_signatures: &[arkret_wire::ApprovalSignature],
 ) -> PersistenceResult<coland_storage::ManagementReviewMaterial> {
     let row = read(conn, id, false).await?.ok_or_else(hidden)?;
-    let request = row.request()?;
-    let (event, ..) = target(&request)?;
-    crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &event.realm_id).await?;
+    let request = row.request();
+    let realm = realm(&request)?;
+    crate::realm_authorization_cut::lock_realm_authorization_cut(conn, realm).await?;
     let row = read(conn, id, true).await?.ok_or_else(hidden)?;
     if !visible(conn, &row, caller, Utc::now()).await? {
         return Err(hidden());
     }
     Ok(coland_storage::ManagementReviewMaterial {
-        request: row.request()?,
+        request: row.request.as_ref().clone(),
         outcome: row.outcome()?,
         accounts: material_accounts(&row, caller, new_signatures)?,
     })
@@ -1230,7 +1313,7 @@ pub(crate) async fn require_approved_in_connection(
     )
     .await?
     .ok_or_else(hidden)?;
-    let request = row.request()?;
+    let request = row.request();
     let (candidate, ..) = target(&request)?;
     if json!(candidate) != json!(event) {
         return Err(refused(
@@ -1363,7 +1446,7 @@ pub(crate) async fn lock_candidate_current_realms_in_connection(
     }
     let id = ids.into_iter().next().ok_or_else(hidden)?;
     let row = read(conn, &id, false).await?.ok_or_else(hidden)?;
-    let request = row.request()?;
+    let request = row.request();
     let (candidate, ..) = target(&request)?;
     if json!(candidate) != json!(event) {
         return Err(refused(

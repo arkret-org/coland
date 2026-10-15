@@ -1445,11 +1445,24 @@ pub(crate) async fn require_accepted_human_pcr_in_connection(
         .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str())
         .get_result::<HumanGenesisRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(||unavailable("ordinary Morph caller has no accepted human registration anchor"))?;
-    let request: PcrGenesisAdmissionInput =
-        serde_json::from_slice(&row.exact_request_body).map_err(unavailable)?;
-    let result: PcrGenesisAdmissionOutcome =
-        serde_json::from_value(row.result_json).map_err(unavailable)?;
-    result.validate_against(&request).map_err(unavailable)?;
+    let exact_request_body = row.exact_request_body;
+    let result_json = row.result_json;
+    // Decode and validate the original closed registration off the I/O poll
+    // stack. The complete typed material returns to this same locked cut.
+    let (request, result) = tokio::task::spawn_blocking(move || -> PersistenceResult<_> {
+        let request: Box<PcrGenesisAdmissionInput> =
+            serde_json::from_slice(&exact_request_body).map_err(unavailable)?;
+        let result: Box<PcrGenesisAdmissionOutcome> =
+            serde_json::from_value(result_json).map_err(unavailable)?;
+        result.validate_against(&request).map_err(unavailable)?;
+        Ok((request, result))
+    })
+    .await
+    .map_err(|error| {
+        unavailable(format!(
+            "accepted human registration verification task failed: {error}"
+        ))
+    })??;
     if request.principal_id != account.principal_id
         || request.account_authority_id != account.station_id
         || request.pcr_realm_id != *held_pcr
@@ -1624,7 +1637,7 @@ pub(crate) async fn require_observed_account_status_binding_in_connection(
     }
 }
 
-async fn require_current_human_account(
+pub(crate) async fn require_current_human_account(
     conn: &mut AsyncPgConnection,
     account: &arkret_wire::AccountId,
     pcr: &RealmId,

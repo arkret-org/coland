@@ -362,7 +362,8 @@ pub(crate) async fn qualify_principal(
 ) -> PersistenceResult<Option<serde_json::Value>> {
     qualify_principal_or_actor(
         conn,
-        event,
+        Some(event),
+        &event.realm_id,
         principal,
         action,
         target,
@@ -375,31 +376,31 @@ pub(crate) async fn qualify_principal(
     .await
 }
 
-/// Management reviews select the designated complete Actor, not the first
-/// SQL membership row sharing one signing principal across Stations.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Exact Actor qualification retains the original complete authority inputs."
-)]
-pub(crate) async fn qualify_actor(
+/// Exact scope administrator qualification for an operation with no Event.
+pub(crate) async fn qualify_management_administrator(
     conn: &mut AsyncPgConnection,
-    event: &Event,
+    scope: &arkret_wire::ScopeRef,
     actor: &ActorId,
-    action: CapabilityActionId,
-    target: &WireResourceSelector,
-    facts: &OperationFacts,
     at: chrono::DateTime<chrono::Utc>,
-    allow_owner: bool,
 ) -> PersistenceResult<Option<serde_json::Value>> {
+    let target = match scope {
+        arkret_wire::ScopeRef::Realm { realm_id } => WireResourceSelector::realm(realm_id.clone()),
+        arkret_wire::ScopeRef::Circle {
+            realm_id,
+            circle_id,
+        } => WireResourceSelector::circle(realm_id.clone(), circle_id.clone()),
+        _ => return Err(error("capability_denied", "unsupported management scope")),
+    };
     qualify_principal_or_actor(
         conn,
-        event,
+        None,
+        scope.realm_id(),
         actor.signing_principal_id(),
-        action,
-        target,
-        facts,
+        CapabilityActionId::RealmAdmin,
+        &target,
+        &OperationFacts::default(),
         at,
-        allow_owner,
+        true,
         Some(actor),
         false,
     )
@@ -412,7 +413,8 @@ pub(crate) async fn qualify_actor(
 )]
 async fn qualify_principal_or_actor(
     conn: &mut AsyncPgConnection,
-    event: &Event,
+    event: Option<&Event>,
+    realm: &arkret_wire::RealmId,
     principal: &arkret_wire::DidCoreId,
     action: CapabilityActionId,
     target: &WireResourceSelector,
@@ -422,11 +424,11 @@ async fn qualify_principal_or_actor(
     exact_actor: Option<&ActorId>,
     registered_pair: bool,
 ) -> PersistenceResult<Option<serde_json::Value>> {
-    if principal == event.actor_id.signing_principal_id() {
+    if event.is_some_and(|event| principal == event.actor_id.signing_principal_id()) {
         return Ok(None);
     }
     let members = sql_query("SELECT member_id,jsonb_build_object('commit_id',current_commit_id,'stream_position',current_stream_position) AS membership_revision FROM member_state_current_results WHERE realm_id=$1 AND membership='join'")
-        .bind::<Text,_>(event.realm_id.as_str()).load::<Member>(&mut *conn).await.map_err(PersistenceError::database)?;
+        .bind::<Text,_>(realm.as_str()).load::<Member>(&mut *conn).await.map_err(PersistenceError::database)?;
     for member in members {
         let actor: ActorId = serde_json::from_str(&member.member_id).map_err(|e| {
             PersistenceError::Database(format!("stored membership ActorId is invalid: {e}"))
@@ -439,17 +441,17 @@ async fn qualify_principal_or_actor(
         let checks = arkret_schema::capability_action_descriptor(action).required_evaluator_checks;
         if checks.iter().any(|check| match *check {
             "actor_eq_target_author" => facts.target_owner.as_ref() != Some(&actor),
-            "actor_ne_watcher_actor" => serde_json::to_value(&event.payload)
-                .ok()
+            "actor_ne_watcher_actor" => event
+                .and_then(|event| serde_json::to_value(&event.payload).ok())
                 .and_then(|p| p.get("watcher_actor_id").cloned())
                 .and_then(|v| serde_json::from_value::<ActorId>(v).ok())
-                .is_none_or(|watcher| watcher == event.actor_id),
+                .is_none_or(|watcher| event.is_none_or(|event| watcher == event.actor_id)),
             "audit_pair_required" => !registered_pair,
             _ => true,
         }) {
             continue;
         }
-        let cut = RealmAuthorizationCut::read(conn, &event.realm_id, &actor).await?;
+        let cut = RealmAuthorizationCut::read(conn, realm, &actor).await?;
         let authorization = cut
             .enforcing_actor_authorization_in_connection(conn, at)
             .await?;
@@ -476,7 +478,7 @@ async fn qualify_principal_or_actor(
                 value: serde_json::Value,
             }
             let root_basis=sql_query("SELECT to_jsonb(r) AS value FROM realm_authority_root_current_results r WHERE realm_id=$1")
-                .bind::<Text,_>(event.realm_id.as_str()).get_result::<RootBasis>(&mut *conn).await.map_err(PersistenceError::database)?;
+                .bind::<Text,_>(realm.as_str()).get_result::<RootBasis>(&mut *conn).await.map_err(PersistenceError::database)?;
             let grants = authorization
                 .grants
                 .iter()

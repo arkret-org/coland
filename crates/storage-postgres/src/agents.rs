@@ -282,7 +282,7 @@ impl AgentStore for PgAgentStore {
         &self,
         caller: &arkret_wire::ActorId,
         request: &arkret_models_integration::management_review::ManagementReviewRequestBody,
-        producer: &coland_storage::SelfProducerCommitGuard,
+        producer: Option<&coland_storage::SelfProducerCommitGuard>,
         current: &coland_storage::ManagementReviewCurrent,
         _at: chrono::DateTime<Utc>,
     ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>

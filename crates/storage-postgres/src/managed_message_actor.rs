@@ -606,8 +606,35 @@ pub(crate) async fn require_managed_actor_in_connection(
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
     let registration = registration(conn, event).await?;
-    let account = event
-        .actor_id
+    let service = ActorId::service(registration.service_id.clone());
+    if event.executed_by.as_ref() != Some(&service) || event.payload.contains_key("agent_context") {
+        return Err(denied(
+            "managed Message executor is not its accepted Service",
+        ));
+    }
+    require_managed_identity_in_connection(
+        conn,
+        &event.actor_id,
+        event
+            .applet_id
+            .as_ref()
+            .ok_or_else(|| denied("managed identity has no Applet"))?,
+        &registration,
+        at,
+    )
+    .await
+}
+
+/// Accepted native identity only. This does not authenticate an Event producer
+/// or confer membership, Device scopes, grant authority or public serving.
+pub(crate) async fn require_managed_identity_in_connection(
+    conn: &mut AsyncPgConnection,
+    actor_id: &ActorId,
+    applet_id: &arkret_wire::AppletId,
+    registration: &AppletRegistrationPayload,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<()> {
+    let account = actor_id
         .as_account_id()
         .ok_or_else(|| denied("managed Message actor is not an Account"))?;
     let inactive=sql_query("SELECT to_jsonb(EXISTS(SELECT 1 FROM account_lifecycle l JOIN accounts a ON a.pk=l.account_pk WHERE a.principal_id=$1 AND a.station_id=$2 AND l.state<>'active')) AS value")
@@ -616,13 +643,8 @@ pub(crate) async fn require_managed_actor_in_connection(
         return Err(denied("managed Account lifecycle is not active"));
     }
     let service = ActorId::service(registration.service_id.clone());
-    if event.executed_by.as_ref() != Some(&service) || event.payload.contains_key("agent_context") {
-        return Err(denied(
-            "managed Message executor is not its accepted Service",
-        ));
-    }
-    let profiles=sql_query("SELECT p.value FROM actor_profile_current_results p JOIN realm_commits c ON c.commit_id=p.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk JOIN realm_authorities a ON a.realm_id=p.realm_id WHERE p.value->>'principal_id'=$1 AND e.envelope->'actor_id'=$2 AND a.service_id=$3 AND c.realm_id=p.realm_id AND c.stream_position=p.current_stream_position AND e.state='committed' FOR SHARE OF p")
-        .bind::<Text,_>(account.principal_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(&event.actor_id).map_err(PersistenceError::database)?)
+    let profiles=sql_query("SELECT p.value FROM actor_profile_current_results p JOIN realm_commits c ON c.commit_id=p.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk JOIN realm_authorities a ON a.realm_id=p.realm_id WHERE p.value->>'principal_id'=$1 AND e.envelope->'actor_id'=$2 AND a.service_id=$3 AND p.realm_id=(SELECT pcr_realm_id FROM principal_resolutions WHERE principal_id=$1 AND station_id=$3) AND c.realm_id=p.realm_id AND c.stream_position=p.current_stream_position AND e.state='committed' FOR SHARE OF p")
+        .bind::<Text,_>(account.principal_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(actor_id).map_err(PersistenceError::database)?)
         .bind::<Text,_>(account.station_id.as_str()).load::<ValueRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     if profiles.len() != 1 {
         return Err(denied(
@@ -656,8 +678,8 @@ pub(crate) async fn require_managed_actor_in_connection(
     .await?;
     let accountability = accepted_event(conn, &exact_ref(&created, "accountability")?).await?;
     if created.kind != EventKind::ProfileCreate
-        || created.actor_id != event.actor_id
-        || created.applet_id != event.applet_id
+        || created.actor_id != *actor_id
+        || created.applet_id != Some(applet_id.clone())
         || accountability.kind != EventKind::IdentityAccountabilityGrant
     {
         return Err(denied("managed Profile accountability anchors differ"));
@@ -694,7 +716,7 @@ pub(crate) async fn require_managed_actor_in_connection(
         AppletManagedActorRole::Ghost => profile.actor_kind == arkret_wire::ActorKind::Integration,
     };
     if provision_event.kind != EventKind::AppletManagedActorProvision
-        || provision.actor_id != event.actor_id
+        || provision.actor_id != *actor_id
         || provision.applet_id != registration.applet_id
         || provision.service_id != registration.service_id
         || !profile_kind_matches_role
@@ -704,8 +726,8 @@ pub(crate) async fn require_managed_actor_in_connection(
         ));
     }
     if provision.actor_role == AppletManagedActorRole::Ghost {
-        let fields: arkret_models_integration::GhostActorProfileFields = serde_json::from_value(
-            serde_json::to_value(&profile.profile_fields).map_err(PersistenceError::database)?,
+        let fields = arkret_models_integration::GhostActorProfileFields::from_profile_fields(
+            &profile.profile_fields,
         )
         .map_err(denied)?;
         if provision.external_ref.as_ref() != Some(&fields.external_ref)
@@ -722,8 +744,8 @@ pub(crate) async fn require_managed_actor_in_connection(
     let genesis: Event =
         serde_json::from_value(genesis.envelope).map_err(PersistenceError::database)?;
     if genesis.kind != EventKind::RealmCreate
-        || genesis.actor_id != event.actor_id
-        || genesis.applet_id != event.applet_id
+        || genesis.actor_id != *actor_id
+        || genesis.applet_id != Some(applet_id.clone())
         || genesis.executed_by.as_ref() != Some(&service)
         || exact_ref(&genesis, "applet_managed_actor_provision")? != provision_event.event_id
     {

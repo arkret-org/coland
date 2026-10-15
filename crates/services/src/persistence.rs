@@ -51,7 +51,7 @@ impl PersistenceHandle {
         &self,
         caller: &arkret_wire::ActorId,
         request: &arkret_models_integration::management_review::ManagementReviewRequestBody,
-        producer: &coland_storage::SelfProducerCommitGuard,
+        producer: Option<&coland_storage::SelfProducerCommitGuard>,
         current: &coland_storage::ManagementReviewCurrent,
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>

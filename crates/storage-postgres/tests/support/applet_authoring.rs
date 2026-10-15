@@ -1222,34 +1222,37 @@ impl AppletAuthoringFactory {
         };
         let digest = Hash::new(arkret_canonical::canonical_sha256(&request).unwrap()).unwrap();
         coland_storage::AppletAuthoringUnitWrite {
-            request,
-            package: package.clone(),
-            recomputed_install_plan: plan,
-            service_did_document: applet_service_id_document(package),
-            controller_did_document: Self::controller_document(package),
-            station_verification_method: self
-                .fixture
-                .state
-                .service_verification_method("notary-key")
-                .unwrap(),
-            station_public_key: *self
-                .fixture
-                .state
-                .notary_signing_key()
-                .verifying_key()
-                .as_bytes(),
-            admin_actor_id: actor,
-            admin_producer_guards: guards,
+            candidate: coland_storage::AppletAuthoringCandidate {
+                request,
+                package: package.clone(),
+                recomputed_install_plan: plan,
+                service_did_document: applet_service_id_document(package),
+                controller_did_document: Self::controller_document(package),
+                station_verification_method: self
+                    .fixture
+                    .state
+                    .service_verification_method("notary-key")
+                    .unwrap(),
+                station_public_key: *self
+                    .fixture
+                    .state
+                    .notary_signing_key()
+                    .verifying_key()
+                    .as_bytes(),
+                admin_actor_id: actor,
+                admin_producer_guards: guards,
+                request_digest,
+                canonical_request_hash: digest,
+                prior_managed_refs: vec![],
+                prior_service_signer_evidence: None,
+                accepted_at: arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()),
+            },
             expected_identity: identity,
             expected_installation: installation,
             preview_subject_key: preview,
-            request_digest,
-            canonical_request_hash: digest,
             operation_id: operation.to_owned(),
             idempotency_key: format!("contract-{}", uuid::Uuid::now_v7()),
-            prior_managed_refs: vec![],
-            prior_service_signer_evidence: None,
-            accepted_at: arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()),
+            management_approval: None,
         }
     }
 }

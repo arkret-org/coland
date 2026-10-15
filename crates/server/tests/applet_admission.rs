@@ -2597,6 +2597,8 @@ async fn authority_snapshot(pool: &PgPool) -> Value {
     diesel::sql_query("SELECT jsonb_build_object( \
         'events',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM canonical_events r), \
         'commits',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM realm_commits r), \
+        'reviews',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM management_review_requests r), \
+        'approval_audit',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM event_approval_private_audit r), \
         'profiles',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM actor_profile_current_results r), \
         'device_generations',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM pcr_device_generation_current_results r), \
         'device_authorizations',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM pcr_device_authorization_current_results r), \
@@ -3834,7 +3836,16 @@ fn safe_did_token(value: &str) -> String {
         .collect()
 }
 
-async fn spawn_introspection_mock(slot: Arc<Mutex<Value>>) -> String {
+#[derive(Clone)]
+struct ManagementAuthorityFixture {
+    record: arkret_models_collaboration::account_status::AccountStatusRecord,
+    public_key: [u8; 32],
+}
+
+async fn spawn_introspection_mock(
+    slot: Arc<Mutex<Value>>,
+    authority: Arc<Mutex<Option<ManagementAuthorityFixture>>>,
+) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("introspection mock binds");
@@ -3845,9 +3856,72 @@ async fn spawn_introspection_mock(slot: Arc<Mutex<Value>>) -> String {
                 return;
             };
             let slot = slot.clone();
+            let authority = authority.clone();
             tokio::spawn(async move {
-                read_http_request(&mut stream).await;
-                let body = serde_json::to_vec(&*slot.lock().unwrap()).expect("serialize outcome");
+                let request = read_http_request(&mut stream).await;
+                let end = request
+                    .windows(4)
+                    .position(|bytes| bytes == b"\r\n\r\n")
+                    .unwrap()
+                    + 4;
+                let headers = String::from_utf8_lossy(&request[..end]);
+                let body = if headers.lines().next()
+                    == Some("POST /_arkret/peer/account-status/resolve HTTP/1.1")
+                {
+                    use arkret_models_collaboration::account_lifecycle::{
+                        AccountStatusResolveOutcome, AccountStatusResolveRequestBody,
+                    };
+                    let query: AccountStatusResolveRequestBody =
+                        serde_json::from_slice(&request[end..]).unwrap();
+                    query.validate().unwrap();
+                    let source = authority
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .expect("explicit signed AA fixture prerequisite");
+                    assert_eq!(query.account_id, source.record.account_id);
+                    assert_eq!(
+                        query.account_authority_id,
+                        source.record.account_authority_id
+                    );
+                    let pairs = headers
+                        .lines()
+                        .skip(1)
+                        .filter_map(|line| line.split_once(':'))
+                        .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_owned()))
+                        .collect::<Vec<_>>();
+                    let policy=arkret_signatures::http_signature::SignatureVerificationPolicy::for_scenario(HttpSignatureScenario::ServiceToServiceV1,&["content-digest","source-trust-domain","destination-trust-domain"]).unwrap();
+                    arkret_signatures::http_signature::verify_signed_canonical_json_message(
+                        "POST",
+                        &format!("http://{address}/_arkret/peer/account-status/resolve"),
+                        &address.to_string(),
+                        "/_arkret/peer/account-status/resolve",
+                        pairs
+                            .iter()
+                            .map(|(name, value)| (name.as_str(), value.as_str())),
+                        false,
+                        &request[end..],
+                        &ed25519_dalek::VerifyingKey::from_bytes(&source.public_key).unwrap(),
+                        &policy,
+                        chrono::Utc::now().timestamp(),
+                    )
+                    .unwrap();
+                    let answer = AccountStatusResolveOutcome {
+                        account_authority_id: query.account_authority_id.clone(),
+                        account_id: query.account_id.clone(),
+                        records: if query.from_status_seq <= source.record.status_seq {
+                            vec![source.record]
+                        } else {
+                            vec![]
+                        },
+                        next_status_seq: None,
+                        has_more: false,
+                    };
+                    answer.validate_for_request(&query).unwrap();
+                    arkret_canonical::canonical_json_bytes(&answer).unwrap()
+                } else {
+                    serde_json::to_vec(&*slot.lock().unwrap()).expect("serialize outcome")
+                };
                 let headers = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                     body.len()
@@ -3860,7 +3934,7 @@ async fn spawn_introspection_mock(slot: Arc<Mutex<Value>>) -> String {
     format!("http://{address}")
 }
 
-async fn read_http_request(stream: &mut tokio::net::TcpStream) {
+async fn read_http_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
     let mut request = Vec::new();
     let mut expected = None;
     loop {
@@ -3883,7 +3957,7 @@ async fn read_http_request(stream: &mut tokio::net::TcpStream) {
             expected = Some(index + 4 + length);
         }
         if expected.is_some_and(|total| request.len() >= total) {
-            return;
+            return request;
         }
     }
 }
@@ -3897,6 +3971,7 @@ pub(crate) struct Fixture {
     token: String,
     holder_key: SigningKey,
     other_device: Option<coland_test_support::pcr_genesis::AcceptedDevice>,
+    management_authority: Arc<Mutex<Option<ManagementAuthorityFixture>>>,
 }
 
 impl Fixture {
@@ -4006,7 +4081,8 @@ impl Fixture {
             .with_test_writer()
             .try_init();
         let slot = Arc::new(Mutex::new(Value::Null));
-        let origin = spawn_introspection_mock(slot.clone()).await;
+        let management_authority = Arc::new(Mutex::new(None));
+        let origin = spawn_introspection_mock(slot.clone(), management_authority.clone()).await;
         let mut config = AppConfig {
             development_mode: true,
             embedded_webvh_registration_bearer: Some("applet-fixture-registration".to_owned()),
@@ -4024,6 +4100,7 @@ impl Fixture {
             ],
             ..coland_test_support::app_config()
         };
+        config.account_authority_trust_domain = Some(config.trust_domain.clone());
         config.register_test_internal_authority_channel("applet-http-standard-grant".to_owned());
         let (state, pool) = coland_test_support::app_state_with_pool(config);
         let mut pcr = PcrGenesisFixture::new(state.service_did());
@@ -4082,6 +4159,9 @@ impl Fixture {
                 arkret_wire::ServiceOperationId::SELF_APPLET_REVOKE_COMMAND_PREVIEW_V1,
                 arkret_wire::ServiceOperationId::SELF_APPLET_COMMAND_REVOKE_V1,
                 arkret_wire::ServiceOperationId::SELF_SIGNER_KEYS_READ_RESOLVE_V1,
+                arkret_wire::ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_REQUEST_V1,
+                arkret_wire::ServiceOperationId::SELF_MANAGEMENT_REVIEW_READ_STATUS_V1,
+                arkret_wire::ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_DECIDE_V1,
             ]
             .into_iter()
             .map(str::to_owned)
@@ -4134,6 +4214,7 @@ impl Fixture {
             token,
             holder_key,
             other_device,
+            management_authority,
         });
         let profile = fixture.admin_event(EventKind::ProfileCreate,ScopeRef::Realm {realm_id:fixture.pcr.unit.transactions[0].event.realm_id.clone()},
             json!({"object":{"principal_id":fixture.pcr.history.account.principal_id,"actor_kind":"user","display_name":"Applet admin"}}));
@@ -4324,6 +4405,12 @@ impl Fixture {
             &signed_request,
             if operation == arkret_wire::ServiceOperationId::SELF_APPLET_AUTHORITY_READ_MATERIAL_V1
                 || operation == arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1
+                || operation
+                    == arkret_wire::ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_REQUEST_V1
+                || operation
+                    == arkret_wire::ServiceOperationId::SELF_MANAGEMENT_REVIEW_READ_STATUS_V1
+                || operation
+                    == arkret_wire::ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_DECIDE_V1
             {
                 HttpSignatureScenario::ServiceToServiceV1
             } else {
@@ -4331,6 +4418,12 @@ impl Fixture {
             },
             if operation == arkret_wire::ServiceOperationId::SELF_APPLET_AUTHORITY_READ_MATERIAL_V1
                 || operation == arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1
+                || operation
+                    == arkret_wire::ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_REQUEST_V1
+                || operation
+                    == arkret_wire::ServiceOperationId::SELF_MANAGEMENT_REVIEW_READ_STATUS_V1
+                || operation
+                    == arkret_wire::ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_DECIDE_V1
             {
                 &["content-digest", "idempotency-key"]
             } else {
@@ -4626,13 +4719,13 @@ impl Fixture {
         )
         .await
     }
-    async fn provision_bot_in_scope(
+    async fn bot_body_in_scope(
         &self,
         package: &AppletPackage,
         namespace: &str,
         registration_ref: EventId,
         scope: ScopeRef,
-    ) -> (AppletBotProvisionOutcome, Value) {
+    ) -> Value {
         let path = format!(
             "/_arkret/self/applets/{}/bots/provision/preview",
             package.applet_id
@@ -4655,6 +4748,19 @@ impl Fixture {
             approval_signatures: vec![],
         })
         .unwrap();
+        bot_body
+    }
+
+    async fn provision_bot_in_scope(
+        &self,
+        package: &AppletPackage,
+        namespace: &str,
+        registration_ref: EventId,
+        scope: ScopeRef,
+    ) -> (AppletBotProvisionOutcome, Value) {
+        let bot_body = self
+            .bot_body_in_scope(package, namespace, registration_ref, scope)
+            .await;
         let path = format!("/_arkret/self/applets/{}/bots/provision", package.applet_id);
         let (status, bot_outcome) = self
             .service_post(
@@ -4985,48 +5091,51 @@ async fn replace_installation_closed_unit(
     let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let idempotency_key = format!("closed-replacement-{}", uuid::Uuid::now_v7());
     let input = coland_storage::AppletAuthoringUnitWrite {
-        request: coland_storage::AppletAdmissionRequest::Install(Box::new(body.clone())),
-        package: package.clone(),
-        recomputed_install_plan: Some(plan),
-        service_did_document: applet_service_id_document(&package),
-        controller_did_document: arkret_identity::DidResolver::resolve_did(
-            &arkret_identity::DidKeyResolver::new(),
-            &Did::new(
-                package
-                    .proof
-                    .as_ref()
-                    .unwrap()
-                    .verification_method
-                    .as_str()
-                    .split('#')
-                    .next()
-                    .unwrap(),
+        candidate: coland_storage::AppletAuthoringCandidate {
+            request: coland_storage::AppletAdmissionRequest::Install(Box::new(body.clone())),
+            package: package.clone(),
+            recomputed_install_plan: Some(plan),
+            service_did_document: applet_service_id_document(&package),
+            controller_did_document: arkret_identity::DidResolver::resolve_did(
+                &arkret_identity::DidKeyResolver::new(),
+                &Did::new(
+                    package
+                        .proof
+                        .as_ref()
+                        .unwrap()
+                        .verification_method
+                        .as_str()
+                        .split('#')
+                        .next()
+                        .unwrap(),
+                )
+                .unwrap(),
             )
-            .unwrap(),
-        )
-        .unwrap()
-        .document,
-        station_verification_method: fixture
-            .state
-            .service_verification_method("notary-key")
-            .unwrap(),
-        station_public_key: *fixture
-            .state
-            .notary_signing_key()
-            .verifying_key()
-            .as_bytes(),
-        admin_actor_id: actor.clone(),
-        admin_producer_guards: guards,
+            .unwrap()
+            .document,
+            station_verification_method: fixture
+                .state
+                .service_verification_method("notary-key")
+                .unwrap(),
+            station_public_key: *fixture
+                .state
+                .notary_signing_key()
+                .verifying_key()
+                .as_bytes(),
+            admin_actor_id: actor.clone(),
+            admin_producer_guards: guards,
+            request_digest: Hash::new(digest.clone()).unwrap(),
+            canonical_request_hash: Hash::new(digest.clone()).unwrap(),
+            prior_managed_refs: vec![],
+            prior_service_signer_evidence: None,
+            accepted_at: at,
+        },
         expected_identity: Some(identity.clone()),
         expected_installation: Some(old.clone()),
         preview_subject_key: String::new(),
-        request_digest: Hash::new(digest.clone()).unwrap(),
-        canonical_request_hash: Hash::new(digest.clone()).unwrap(),
         operation_id: "ak.self.applet.command.install".to_owned(),
         idempotency_key: idempotency_key.clone(),
-        prior_managed_refs: vec![],
-        prior_service_signer_evidence: None,
-        accepted_at: at,
+        management_approval: None,
     };
     let mut outcome = prior.outcome.clone();
     outcome.install_id = coland_storage::ids::generate("install");
@@ -5857,3 +5966,772 @@ async fn service_cannot_accept_invites_as_managed_bot_or_ghost() {
 
 #[path = "applet_widget_inventory/cases.rs"]
 mod widget_inventory_cases;
+
+fn creation_review_vote(
+    fixture: &Fixture,
+    request: &arkret_models_integration::management_review::ManagementReviewRequestBody,
+) -> arkret_wire::ApprovalSignature {
+    use arkret_wire::*;
+    let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let arkret_models_identity::principal_registration_anchor::PrincipalRegistrationAnchor::WebvhRegistration {log_entries,..}=&fixture.pcr.history.registration_anchor;
+    let entries = log_entries
+        .iter()
+        .map(|entry| serde_json::to_value(entry).unwrap())
+        .collect::<Vec<_>>();
+    let history =
+        arkret_identity::verify_did_webvh_v1_chain(&fixture.pcr.history.did, &entries).unwrap();
+    let selected = coland_services::identity::select_did_webvh_state_at(
+        &fixture.pcr.history.did,
+        &history,
+        at,
+    )
+    .unwrap();
+    let multibase = selected.update_keys.as_slice().first().unwrap();
+    let key = SigningKey::from_bytes(&[70; 32]);
+    assert_eq!(
+        &arkret_canonical::ed25519_pubkey_to_did_key_multibase(key.verifying_key().as_bytes()),
+        multibase
+    );
+    let method = DidUrl::new(format!("did:key:{multibase}#{multibase}")).unwrap();
+    let mut signature = ApprovalSignature {
+        input: ApprovalSignatureInput {
+            approval_context: ApprovalContext::Management {
+                request_id: request.request_id.clone(),
+                management_operation: request.management_operation,
+                effective_scope: request.effective_scope.clone(),
+            },
+            approval_target: ApprovalTarget::Operation,
+            request_canonical_digest: request.target.canonical_target_digest().unwrap(),
+            operation: if request.management_operation == ManagementOperation::CreateBot {
+                ServiceOperationId::SELF_APPLET_BOT_COMMAND_PROVISION_V1
+            } else {
+                ServiceOperationId::SELF_APPLET_GHOST_COMMAND_PROVISION_V1
+            }
+            .into(),
+            action: if request.management_operation == ManagementOperation::CreateBot {
+                CapabilityActionId::AppletBotProvision
+            } else {
+                CapabilityActionId::AppletGhostProvision
+            },
+            realm_id: request.effective_scope.realm_id().clone(),
+            initiating_actor_id: request.requester_actor_id.clone(),
+            approver_did: fixture.pcr.history.did.clone(),
+            approved_at: at,
+            nonce: format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            ),
+        },
+        proof: ApprovalSignatureProof {
+            kind: ApprovalSignatureProofKind::DetachedJws,
+            verification_method: method.clone(),
+            jws: String::new(),
+        },
+    };
+    signature.proof.jws =
+        arkret_signatures::Ed25519DetachedJwsSigner::from_seed([70; 32], method.as_str())
+            .sign_detached_jws(
+                &arkret_signatures::approval_signature::approval_signature_signing_bytes(
+                    &signature,
+                )
+                .unwrap(),
+            );
+    signature
+}
+
+impl Fixture {
+    fn enable_management_authority(&self) {
+        let record = arkret_signatures::account_status::sign_account_status_record(
+            arkret_models_collaboration::account_status::UnsignedAccountStatusRecord {
+                schema: arkret_wire::SchemaId::ACCOUNT_STATUS_RECORD_V1.into(),
+                account_authority_id: self.state.service_core_id(),
+                account_id: self.pcr.history.account.clone(),
+                principal_control_realm_id: self.pcr.unit.transactions[0].event.realm_id.clone(),
+                binding_version: 1,
+                status_seq: 1,
+                previous_account_status_record_id: None,
+                status: arkret_models_collaboration::objects::account_status::AccountStatus::Active,
+                reason_code: None,
+                reason: None,
+                issued_at: arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()),
+                expires_at: None,
+            },
+            self.state
+                .service_verification_method("notary-key")
+                .unwrap(),
+            self.state.notary_signing_key().as_ref(),
+        )
+        .unwrap();
+        arkret_signatures::account_status::verify_account_status_record(
+            &record,
+            &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+                bytes: self.state.notary_verifying_key().as_bytes().to_vec(),
+            },
+        )
+        .unwrap();
+        *self.management_authority.lock().unwrap() = Some(ManagementAuthorityFixture {
+            record,
+            public_key: *self.state.notary_verifying_key().as_bytes(),
+        });
+    }
+}
+
+fn business_without_reviews(mut snapshot: Value) -> Value {
+    snapshot.as_object_mut().unwrap().remove("reviews");
+    snapshot.as_object_mut().unwrap().remove("approval_audit");
+    snapshot
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn creation_reviews_use_original_targets_and_consume_with_real_bot_ghost_and_mapping_outcomes()
+ {
+    tokio::spawn(Box::pin(creation_review_atomic_scenario()))
+        .await
+        .unwrap();
+}
+
+async fn creation_review_atomic_scenario() {
+    use arkret_models_integration::management_review::*;
+    use arkret_wire::{ManagementOperation, ServiceOperationId};
+    let fixture = Box::pin(Fixture::new()).await;
+    fixture.enable_management_authority();
+    let namespace = format!("bridge.{}", uuid::Uuid::now_v7().simple());
+    let native = NativeAppletService::new(
+        &format!("ak:applet:{}", uuid::Uuid::now_v7()),
+        &namespace,
+        &fixture.state.service_core_id(),
+    );
+    let first = Box::pin(fixture.install_package(true, native.package.clone(), &namespace)).await;
+    let circle = fixture.new_circle_scope().await;
+    let second = Box::pin(fixture.install_package_in_scope(
+        true,
+        native.package.clone(),
+        &namespace,
+        circle.clone(),
+    ))
+    .await;
+    let original_ghost = fixture.ghost_body(&first, &namespace, "review-reuse").await;
+    assert_eq!(
+        fixture
+            .ghost_commit(&first, &original_ghost, "before-review-original")
+            .await
+            .0,
+        StatusCode::CREATED
+    );
+    let administrator = ActorId::account(fixture.pcr.history.account.clone());
+    let policy_id = format!("ak:policy:{}", uuid::Uuid::now_v7());
+    let policy=fixture.admin_event(EventKind::PolicySet,ScopeRef::Realm {realm_id:fixture.realm.clone()},json!({"policy_id":policy_id,"expected_revision":null,
+        "value":{"schema":"ak.schema.policy.v1","id":policy_id,"realm_id":fixture.realm,"policy_kind":"applet","default_effect":"allow",
+        "created_by":administrator,"created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now()),
+        "rules":[{"rule_id":"original_creation","kind":"applet","effect":"require_review","applet_target":{"kind":"all"},"applet_operations":["create_bot","map_ghost"],
+        "review_requirement":{"approver_actor_ids":[administrator],"threshold":1,"max_age_seconds":3600}}]}}));
+    Box::pin(accepted_admin_domain_event(&fixture, policy.clone())).await;
+    let bot = fixture
+        .bot_body_in_scope(
+            &first.package,
+            &namespace,
+            first.outcome.registration_event_ref.clone(),
+            ScopeRef::Realm {
+                realm_id: fixture.realm.clone(),
+            },
+        )
+        .await;
+    let fresh_ghost = fixture.ghost_body(&first, &namespace, "review-fresh").await;
+    let reused = fixture
+        .ghost_body(&second, &namespace, "review-reuse")
+        .await;
+    assert!(reused.get("managed_actor_bundle").is_none());
+    for (index, (install, mut body, scope, is_bot)) in [
+        (
+            &first,
+            bot,
+            ScopeRef::Realm {
+                realm_id: fixture.realm.clone(),
+            },
+            true,
+        ),
+        (
+            &first,
+            fresh_ghost,
+            ScopeRef::Realm {
+                realm_id: fixture.realm.clone(),
+            },
+            false,
+        ),
+        (&second, reused, circle, false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = format!(
+            "/_arkret/self/applets/{}/{}s/provision",
+            install.package.applet_id,
+            if is_bot { "bot" } else { "ghost" }
+        );
+        let operation = if is_bot {
+            ServiceOperationId::SELF_APPLET_BOT_COMMAND_PROVISION_V1
+        } else {
+            ServiceOperationId::SELF_APPLET_GHOST_COMMAND_PROVISION_V1
+        };
+        let before = authority_snapshot(&fixture.pool).await;
+        let (status, error) = fixture
+            .service_post(
+                &install.package,
+                &path,
+                operation,
+                &body,
+                &format!("unapproved-{index}"),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "unapproved creation {error}");
+        assert!(error.to_string().contains("approval_required"), "{error}");
+        assert_eq!(before, authority_snapshot(&fixture.pool).await);
+        let target = if is_bot {
+            ManagementReviewTarget::BotCreation {
+                applet_id: install.package.applet_id.clone(),
+                request_body: Box::new(serde_json::from_value(body.clone()).unwrap()),
+            }
+        } else {
+            ManagementReviewTarget::GhostCreation {
+                applet_id: install.package.applet_id.clone(),
+                request_body: Box::new(serde_json::from_value(body.clone()).unwrap()),
+            }
+        };
+        let request = ManagementReviewRequestBody {
+            request_id: format!("creation-review-{index}-{}", uuid::Uuid::now_v7()),
+            effective_scope: scope,
+            management_operation: if is_bot {
+                ManagementOperation::CreateBot
+            } else {
+                ManagementOperation::MapGhost
+            },
+            requester_actor_id: ActorId::service(install.package.service_id.clone()),
+            target,
+        };
+        let (status, pending) = fixture
+            .service_post(
+                &install.package,
+                "/_arkret/self/management-reviews/requests",
+                ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_REQUEST_V1,
+                &json!(request),
+                &format!("review-{index}"),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "pending creation {pending}");
+        assert_eq!(pending["status"], "pending");
+        assert_eq!(
+            pending["target_digest"],
+            json!(request.target.canonical_target_digest().unwrap())
+        );
+        let deadline: chrono::DateTime<chrono::Utc> =
+            serde_json::from_value(pending["expires_at"].clone()).unwrap();
+        let original_deadline: chrono::DateTime<chrono::Utc> =
+            serde_json::from_value(body["authoring_request"]["expires_at"].clone()).unwrap();
+        assert!(deadline <= original_deadline);
+        assert_eq!(
+            business_without_reviews(before),
+            business_without_reviews(authority_snapshot(&fixture.pool).await)
+        );
+        let stable = authority_snapshot(&fixture.pool).await;
+        let created: chrono::DateTime<chrono::Utc> = serde_json::from_value(
+            stable["reviews"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["request_id"] == request.request_id)
+                .unwrap()["created_at"]
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            created,
+            arkret_canonical::normalize_timestamp_canonical(created)
+        );
+        let (status, retry) = fixture
+            .service_post(
+                &install.package,
+                "/_arkret/self/management-reviews/requests",
+                ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_REQUEST_V1,
+                &json!(request),
+                "same-private-intent",
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        assert_eq!(pending, retry);
+        assert_eq!(stable, authority_snapshot(&fixture.pool).await);
+        if index == 0 {
+            #[derive(diesel::QueryableByName)]
+            struct PolicyRow {
+                #[diesel(sql_type=diesel::sql_types::Jsonb)]
+                value: Value,
+            }
+            let original = {
+                let mut conn = fixture.pool.get().await.unwrap();
+                diesel::sql_query("DELETE FROM policy_current_results p WHERE policy_id=$1 RETURNING to_jsonb(p) AS value")
+                .bind::<diesel::sql_types::Text,_>(&policy_id).get_result::<PolicyRow>(&mut conn).await.unwrap().value
+            };
+            let incomplete = authority_snapshot(&fixture.pool).await;
+            let (status, error) = fixture
+                .service_post(
+                    &install.package,
+                    "/_arkret/self/management-reviews/status",
+                    ServiceOperationId::SELF_MANAGEMENT_REVIEW_READ_STATUS_V1,
+                    &json!({"request_id":request.request_id}),
+                    "missing-policy-current",
+                )
+                .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{error}");
+            assert!(
+                error.to_string().contains("revision_unavailable"),
+                "incomplete current is unavailable: {error}"
+            );
+            assert_eq!(
+                incomplete,
+                authority_snapshot(&fixture.pool).await,
+                "unknown must not terminalize the original pending ledger"
+            );
+            {
+                let mut conn = fixture.pool.get().await.unwrap();
+                diesel::sql_query("INSERT INTO policy_current_results SELECT (jsonb_populate_record(NULL::policy_current_results,$1)).*")
+                .bind::<diesel::sql_types::Jsonb,_>(original).execute(&mut conn).await.unwrap();
+            }
+            assert_eq!(stable, authority_snapshot(&fixture.pool).await);
+        }
+        let mut collision = request.clone();
+        collision.request_id.push_str("-other");
+        let (status, error) = fixture
+            .service_post(
+                &install.package,
+                "/_arkret/self/management-reviews/requests",
+                ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_REQUEST_V1,
+                &json!(collision),
+                "same-candidate-new-id",
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{error}");
+        assert_eq!(stable, authority_snapshot(&fixture.pool).await);
+        let mut changed = json!(request);
+        let original = changed["target"]["request_body"]["authoring_request"]["proof"]["jws"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut changed_proof = original[..original.len() - 1].to_owned();
+        changed_proof.push(if original.ends_with('A') { 'Q' } else { 'A' });
+        changed["target"]["request_body"]["authoring_request"]["proof"]["jws"] =
+            json!(changed_proof);
+        let (status, error) = fixture
+            .service_post(
+                &install.package,
+                "/_arkret/self/management-reviews/requests",
+                ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_REQUEST_V1,
+                &changed,
+                "same-id-new-candidate",
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{error}");
+        assert_eq!(stable, authority_snapshot(&fixture.pool).await);
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let vote = creation_review_vote(&fixture, &request);
+        let decision = json!({"request_id":request.request_id,"expected_status":"pending","decision":"approve","approval_signatures":[vote]});
+        let (status, error) = fixture
+            .service_post(
+                &install.package,
+                "/_arkret/self/management-reviews/decisions",
+                ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_DECIDE_V1,
+                &decision,
+                "service-may-not-approve",
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
+        assert_eq!(stable, authority_snapshot(&fixture.pool).await);
+        let (status, approved) = fixture
+            .admin_post(
+                "/_arkret/self/management-reviews/decisions",
+                ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_DECIDE_V1,
+                &decision,
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "approved creation {approved}");
+        assert_eq!(approved["status"], "approved");
+        let approved_snapshot = authority_snapshot(&fixture.pool).await;
+        assert_eq!(
+            business_without_reviews(stable),
+            business_without_reviews(approved_snapshot.clone())
+        );
+        body["approval_signatures"] = json!([vote]);
+        let fail_key = format!("review-fail-{index}-{}", uuid::Uuid::now_v7());
+        let constraint = format!("review_failure_{}", uuid::Uuid::now_v7().simple());
+        {
+            use std::io::Write as _;
+            writeln!(
+                std::io::stderr(),
+                "creation review fault injection: constraint={constraint} key={fail_key}"
+            )
+            .unwrap();
+        }
+        {
+            let mut conn = fixture.pool.get().await.unwrap();
+            diesel::sql_query(format!("ALTER TABLE applet_authoring_units ADD CONSTRAINT {constraint} CHECK (idempotency_key <> '{fail_key}') NOT VALID")).execute(&mut conn).await.unwrap();
+        }
+        let (status, error) = fixture
+            .service_post(&install.package, &path, operation, &body, &fail_key)
+            .await;
+        {
+            let mut conn = fixture.pool.get().await.unwrap();
+            diesel::sql_query(format!(
+                "ALTER TABLE applet_authoring_units DROP CONSTRAINT {constraint}"
+            ))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        }
+        assert!(
+            status.is_server_error(),
+            "injected final durable-outcome failure: {status} {error}"
+        );
+        assert_eq!(
+            approved_snapshot,
+            authority_snapshot(&fixture.pool).await,
+            "failed aggregate must roll back creation, ledger, nonce and quota"
+        );
+        let (status, accepted) = fixture
+            .service_post(&install.package, &path, operation, &body, &fail_key)
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "accepted reviewed creation {accepted}"
+        );
+        let after = authority_snapshot(&fixture.pool).await;
+        let row = after["reviews"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["request_id"] == request.request_id)
+            .unwrap();
+        assert_eq!(row["status"], "consumed");
+        assert!(row["accepted_commit_id"].is_null());
+        assert_eq!(row["accepted_operation_outcome"]["response_body"], accepted);
+        assert_eq!(
+            row["accepted_operation_outcome"]["committed_event_refs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
+        let audit = after["approval_audit"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["nonce"] == vote.input.nonce)
+            .unwrap();
+        assert!(audit["event_id"].is_null());
+        assert!(audit["accepted_commit_id"].is_null());
+        assert_eq!(
+            audit["operation_outcome"],
+            row["accepted_operation_outcome"]
+        );
+        if index == 2 {
+            for key in ["events", "commits", "completions", "outbox"] {
+                assert_eq!(
+                    approved_snapshot[key], after[key],
+                    "mapping must not manufacture {key}"
+                );
+            }
+        }
+        let (status, retry) = fixture
+            .service_post(&install.package, &path, operation, &body, &fail_key)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        assert_eq!(retry, accepted);
+        assert_eq!(after, authority_snapshot(&fixture.pool).await);
+        let (status, consumed) = fixture
+            .service_post(
+                &install.package,
+                "/_arkret/self/management-reviews/status",
+                ServiceOperationId::SELF_MANAGEMENT_REVIEW_READ_STATUS_V1,
+                &json!({"request_id":request.request_id}),
+                "consumed-status",
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{consumed}");
+        assert_eq!(consumed["status"], "consumed");
+        assert_eq!(after, authority_snapshot(&fixture.pool).await);
+    }
+    let body = fixture
+        .bot_body_in_scope(
+            &first.package,
+            &namespace,
+            first.outcome.registration_event_ref.clone(),
+            ScopeRef::Realm {
+                realm_id: fixture.realm.clone(),
+            },
+        )
+        .await;
+    let mut request = ManagementReviewRequestBody {
+        request_id: format!("superseded-{}", uuid::Uuid::now_v7()),
+        effective_scope: ScopeRef::Realm {
+            realm_id: fixture.realm.clone(),
+        },
+        management_operation: ManagementOperation::CreateBot,
+        requester_actor_id: ActorId::service(first.package.service_id.clone()),
+        target: ManagementReviewTarget::BotCreation {
+            applet_id: first.package.applet_id.clone(),
+            request_body: Box::new(serde_json::from_value(body.clone()).unwrap()),
+        },
+    };
+    let (status, pending) = fixture
+        .service_post(
+            &first.package,
+            "/_arkret/self/management-reviews/requests",
+            ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_REQUEST_V1,
+            &json!(request),
+            "before-policy-update",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{pending}");
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    let vote = creation_review_vote(&fixture, &request);
+    let (status,approved)=fixture.admin_post("/_arkret/self/management-reviews/decisions",ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_DECIDE_V1,&json!({"request_id":request.request_id,"expected_status":"pending","decision":"approve","approval_signatures":[vote]}),None).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    let policy = change_creation_review_age(&fixture, &policy, 20).await;
+    let (status, superseded) = fixture
+        .service_post(
+            &first.package,
+            "/_arkret/self/management-reviews/status",
+            ServiceOperationId::SELF_MANAGEMENT_REVIEW_READ_STATUS_V1,
+            &json!({"request_id":request.request_id}),
+            "after-policy-update",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{superseded}");
+    assert_eq!(superseded["status"], "superseded");
+    let stable = authority_snapshot(&fixture.pool).await;
+    let mut attached = body.clone();
+    attached["approval_signatures"] = json!([vote]);
+    let path = format!(
+        "/_arkret/self/applets/{}/bots/provision",
+        first.package.applet_id
+    );
+    let (status, error) = fixture
+        .service_post(
+            &first.package,
+            &path,
+            ServiceOperationId::SELF_APPLET_BOT_COMMAND_PROVISION_V1,
+            &attached,
+            "old-approved-target",
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(stable, authority_snapshot(&fixture.pool).await);
+    request.request_id.push_str("-new");
+    let (status, pending) = fixture
+        .service_post(
+            &first.package,
+            "/_arkret/self/management-reviews/requests",
+            ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_REQUEST_V1,
+            &json!(request),
+            "replacement-private-request",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{pending}");
+    let stable = authority_snapshot(&fixture.pool).await;
+    let (status,error)=fixture.admin_post("/_arkret/self/management-reviews/decisions",ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_DECIDE_V1,&json!({"request_id":request.request_id,"expected_status":"pending","decision":"approve","approval_signatures":[vote]}),None).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "old request vote must not transfer: {error}"
+    );
+    assert_eq!(stable, authority_snapshot(&fixture.pool).await);
+    let (status,cancelled)=fixture.service_post(&first.package,"/_arkret/self/management-reviews/decisions",ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_DECIDE_V1,&json!({"request_id":request.request_id,"expected_status":"pending","decision":"cancel"}),"cancel-own").await;
+    assert_eq!(status, StatusCode::OK, "{cancelled}");
+    assert_eq!(cancelled["status"], "cancelled");
+    let _policy = change_creation_review_age(&fixture, &policy, 1).await;
+    request.request_id.push_str("-expiring");
+    let (status, pending) = fixture
+        .service_post(
+            &first.package,
+            "/_arkret/self/management-reviews/requests",
+            ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_REQUEST_V1,
+            &json!(request),
+            "short-policy-lifetime",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{pending}");
+    let before = business_without_reviews(authority_snapshot(&fixture.pool).await);
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    let (status, expired) = fixture
+        .service_post(
+            &first.package,
+            "/_arkret/self/management-reviews/status",
+            ServiceOperationId::SELF_MANAGEMENT_REVIEW_READ_STATUS_V1,
+            &json!({"request_id":request.request_id}),
+            "expired-status",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{expired}");
+    assert_eq!(expired["status"], "expired");
+    assert_eq!(
+        before,
+        business_without_reviews(authority_snapshot(&fixture.pool).await)
+    );
+}
+
+async fn change_creation_review_age(fixture: &Fixture, previous: &Event, max_age: u64) -> Event {
+    #[derive(diesel::QueryableByName)]
+    struct Current {
+        #[diesel(sql_type=diesel::sql_types::Jsonb)]
+        value: Value,
+    }
+    let policy_id = previous.payload.get("policy_id").unwrap().as_str().unwrap();
+    let current = {
+        let mut conn = fixture.pool.get().await.unwrap();
+        diesel::sql_query("SELECT jsonb_build_object('commit_id',current_commit_id,'stream_position',current_stream_position) AS value FROM policy_current_results WHERE policy_id=$1")
+        .bind::<diesel::sql_types::Text,_>(policy_id).get_result::<Current>(&mut conn).await.unwrap().value
+    };
+    let mut payload = json!(&previous.payload);
+    payload["expected_revision"] = current;
+    payload["value"]["rules"][0]["review_requirement"]["max_age_seconds"] = json!(max_age);
+    let event = fixture.admin_event(
+        EventKind::PolicySet,
+        ScopeRef::Realm {
+            realm_id: fixture.realm.clone(),
+        },
+        payload,
+    );
+    accepted_admin_domain_event(fixture, event.clone()).await;
+    event
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initial_bot_and_ghost_profiles_cannot_publish_even_with_valid_service_and_bundle_signatures()
+ {
+    use arkret_wire::PayloadSigner as _;
+    let fixture = Box::pin(Fixture::new()).await;
+    let namespace = format!("bridge.{}", uuid::Uuid::now_v7().simple());
+    let native = NativeAppletService::new(
+        &format!("ak:applet:{}", uuid::Uuid::now_v7()),
+        &namespace,
+        &fixture.state.service_core_id(),
+    );
+    let installed =
+        Box::pin(fixture.install_package(true, native.package.clone(), &namespace)).await;
+    let bot = fixture
+        .bot_body_in_scope(
+            &installed.package,
+            &namespace,
+            installed.outcome.registration_event_ref.clone(),
+            ScopeRef::Realm {
+                realm_id: fixture.realm.clone(),
+            },
+        )
+        .await;
+    let ghost = fixture
+        .ghost_body(&installed, &namespace, "initial-public")
+        .await;
+    for (is_bot, mut body) in [(true, bot), (false, ghost)] {
+        let mut bundle: AppletManagedActorAuthoringBundle =
+            serde_json::from_value(body["managed_actor_bundle"].clone()).unwrap();
+        bundle.profile_event.payload.get_mut("object").unwrap()["profile_fields"]["applet_interaction"] =
+            json!({"effective_scope":{"kind":"realm","realm_id":fixture.realm},"mode":"public"});
+        bundle.profile_event.producer_proof = None;
+        let signer = Ed25519PayloadSigner::new(
+            applet_service_signing_key(&installed.package.webhook_auth.key_ref),
+            applet_service_did(&installed.package),
+            installed.package.webhook_auth.key_ref.clone(),
+        );
+        let mut authored = arkret_wire::AuthoredEvent::finalize_with_digest_suite(
+            bundle.profile_event,
+            arkret_canonical::DigestSuite::Sha256,
+        )
+        .unwrap();
+        arkret_signatures::sign_event(
+            &mut authored,
+            &signer,
+            arkret_signatures::SignEventOptions::new(),
+        )
+        .unwrap();
+        bundle.profile_event = authored.into_event();
+        bundle.proof.payload_digest = bundle.payload_digest().unwrap();
+        bundle.proof.jws = signer
+            .sign_payload(&bundle.proof_binding_bytes().unwrap())
+            .unwrap()
+            .jws;
+        body["managed_actor_bundle"] = json!(bundle);
+        let before = authority_snapshot(&fixture.pool).await;
+        let path = format!(
+            "/_arkret/self/applets/{}/{}s/provision",
+            installed.package.applet_id,
+            if is_bot { "bot" } else { "ghost" }
+        );
+        let (status, error) = fixture
+            .service_post(
+                &installed.package,
+                &path,
+                if is_bot {
+                    arkret_wire::ServiceOperationId::SELF_APPLET_BOT_COMMAND_PROVISION_V1
+                } else {
+                    arkret_wire::ServiceOperationId::SELF_APPLET_GHOST_COMMAND_PROVISION_V1
+                },
+                &body,
+                "initial-public-refusal",
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("initial managed Profile cannot publish"),
+            "must reach the production initial Profile gate: {error}"
+        );
+        assert_eq!(before, authority_snapshot(&fixture.pool).await);
+        let mut private: AppletManagedActorAuthoringBundle =
+            serde_json::from_value(body["managed_actor_bundle"].clone()).unwrap();
+        let scope = private.profile_event.scope_ref.clone();
+        private.profile_event.payload.get_mut("object").unwrap()["profile_fields"]["applet_interaction"] =
+            json!({"effective_scope":scope,"mode":"private"});
+        private.profile_event.payload.get_mut("object").unwrap()["profile_fields"]["bio"] =
+            json!("Legitimate display fields coexist with reserved identity members");
+        private.profile_event.producer_proof = None;
+        let mut authored = arkret_wire::AuthoredEvent::finalize_with_digest_suite(
+            private.profile_event,
+            arkret_canonical::DigestSuite::Sha256,
+        )
+        .unwrap();
+        arkret_signatures::sign_event(
+            &mut authored,
+            &signer,
+            arkret_signatures::SignEventOptions::new(),
+        )
+        .unwrap();
+        private.profile_event = authored.into_event();
+        private.proof.payload_digest = private.payload_digest().unwrap();
+        private.proof.jws = signer
+            .sign_payload(&private.proof_binding_bytes().unwrap())
+            .unwrap()
+            .jws;
+        body["managed_actor_bundle"] = json!(private);
+        let (status, accepted) = fixture
+            .service_post(
+                &installed.package,
+                &path,
+                if is_bot {
+                    arkret_wire::ServiceOperationId::SELF_APPLET_BOT_COMMAND_PROVISION_V1
+                } else {
+                    arkret_wire::ServiceOperationId::SELF_APPLET_GHOST_COMMAND_PROVISION_V1
+                },
+                &body,
+                "initial-private-with-display",
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "valid private/display members: {accepted}"
+        );
+        assert_accepted_event(&fixture, &private.profile_event).await;
+        assert_profile_in_principal_control_realm(&fixture, &private).await;
+    }
+}

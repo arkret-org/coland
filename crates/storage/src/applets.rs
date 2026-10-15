@@ -212,8 +212,11 @@ pub enum AppletAdmissionRequest {
     Managed(arkret_models_integration::AppletManagedActorCommittedRequest),
 }
 
+/// Original candidate and receiver-derived verification material. Pure
+/// validation can inspect this without constructing a write or consuming any
+/// quota, approval, idempotency identity or business outcome.
 #[derive(Clone, Debug)]
-pub struct AppletAuthoringUnitWrite {
+pub struct AppletAuthoringCandidate {
     pub request: AppletAdmissionRequest,
     pub package: arkret_models_integration::AppletPackage,
     pub recomputed_install_plan: Option<arkret_models_integration::AppletInstallPlan>,
@@ -223,17 +226,36 @@ pub struct AppletAuthoringUnitWrite {
     pub station_public_key: [u8; 32],
     pub admin_actor_id: arkret_wire::ActorId,
     pub admin_producer_guards: Vec<super::SelfProducerCommitGuard>,
-    pub expected_identity: Option<Value>,
-    pub expected_installation: Option<Value>,
-    pub preview_subject_key: String,
     pub request_digest: arkret_wire::Hash,
     pub canonical_request_hash: arkret_wire::Hash,
-    pub operation_id: String,
-    pub idempotency_key: String,
     pub prior_managed_refs: Vec<arkret_wire::CommittedEventRef>,
     pub prior_service_signer_evidence:
         Option<arkret_models_integration::AppletServiceSignerEvidence>,
     pub accepted_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AppletAuthoringUnitWrite {
+    pub candidate: AppletAuthoringCandidate,
+    pub expected_identity: Option<Value>,
+    pub expected_installation: Option<Value>,
+    pub preview_subject_key: String,
+    pub operation_id: String,
+    pub idempotency_key: String,
+    pub management_approval: Option<crate::ManagementOperationApprovalCommit>,
+}
+
+impl std::ops::Deref for AppletAuthoringUnitWrite {
+    type Target = AppletAuthoringCandidate;
+    fn deref(&self) -> &Self::Target {
+        &self.candidate
+    }
+}
+
+impl std::ops::DerefMut for AppletAuthoringUnitWrite {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.candidate
+    }
 }
 
 pub type AppletCommitAuthor = std::sync::Arc<

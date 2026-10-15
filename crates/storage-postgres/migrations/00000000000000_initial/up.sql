@@ -3595,14 +3595,22 @@ CREATE TABLE event_approval_private_audit (
  approval_context TEXT NOT NULL,
  approver_did TEXT NOT NULL,
  nonce TEXT NOT NULL,
- event_id TEXT NOT NULL,
- event_digest TEXT NOT NULL,
+ event_id TEXT,
+ event_digest TEXT,
  realm_id TEXT NOT NULL,
- accepted_commit_id TEXT NOT NULL,
+ accepted_commit_id TEXT,
+ operation_id TEXT,
+ operation_target_digest TEXT,
+ operation_outcome JSONB,
  evidence JSONB NOT NULL,
  accepted_basis JSONB NOT NULL,
  accepted_at TIMESTAMPTZ NOT NULL,
  PRIMARY KEY(approval_context,approver_did,nonce),
+ CHECK((event_id IS NOT NULL AND event_digest IS NOT NULL AND accepted_commit_id IS NOT NULL
+        AND operation_id IS NULL AND operation_target_digest IS NULL AND operation_outcome IS NULL)
+       OR (event_id IS NULL AND event_digest IS NULL AND accepted_commit_id IS NULL
+        AND operation_id IS NOT NULL AND operation_target_digest IS NOT NULL AND operation_outcome IS NOT NULL
+        AND jsonb_typeof(operation_outcome)='object')),
  CHECK(jsonb_typeof(evidence)='object'),
  CHECK(jsonb_typeof(accepted_basis)='object')
 );
@@ -4893,7 +4901,7 @@ CREATE TABLE management_review_requests (
  realm_id TEXT NOT NULL,
  requester_actor_key TEXT NOT NULL,
  effective_scope JSONB NOT NULL,
- management_operation TEXT NOT NULL CHECK(management_operation IN ('join','publish')),
+ management_operation TEXT NOT NULL CHECK(management_operation IN ('join','publish','create_bot','map_ghost')),
  request_digest TEXT NOT NULL,
  target_digest TEXT NOT NULL,
  request_body JSONB NOT NULL,
@@ -4905,10 +4913,13 @@ CREATE TABLE management_review_requests (
  approval_signatures JSONB NOT NULL DEFAULT '[]'::jsonb,
  approval_basis JSONB NOT NULL DEFAULT '[]'::jsonb,
  accepted_commit_id TEXT,
+ accepted_operation_outcome JSONB,
  CHECK(expires_at>created_at AND expires_at<=created_at+INTERVAL '24 hours'),
  CHECK(jsonb_typeof(request_body)='object' AND jsonb_typeof(immutable_pins)='object'),
  CHECK(jsonb_typeof(requirements)='array' AND jsonb_typeof(approval_signatures)='array' AND jsonb_typeof(approval_basis)='array'),
- CHECK((status='consumed')=(accepted_commit_id IS NOT NULL))
+ CHECK((status='consumed')=(num_nonnulls(accepted_commit_id,accepted_operation_outcome)=1)),
+ CHECK(num_nonnulls(accepted_commit_id,accepted_operation_outcome)<=1),
+ CHECK(accepted_operation_outcome IS NULL OR jsonb_typeof(accepted_operation_outcome)='object')
 );
 CREATE UNIQUE INDEX management_review_one_nonterminal_target ON management_review_requests
  (requester_actor_key,effective_scope,management_operation,target_digest)

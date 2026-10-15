@@ -73,11 +73,7 @@ pub(super) async fn provision(
             "Ghost mapping Service or scope differs",
         ));
     }
-    if !body.approval_signatures.is_empty() {
-        return Err(AppError::conflict(
-            "management review consumption is not established",
-        ));
-    }
+
     let path = applet_id_param(req)?;
     let mut record = applet_record(state, &path, &basis.effective_scope)
         .await?
@@ -127,40 +123,45 @@ pub(super) async fn provision(
     let replacement = encode_applet_record(&record)?;
     let epoch = super::install::registration_epoch_evidence_from_event(&record.registration_event)?;
     let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-    let input = coland_storage::AppletAuthoringUnitWrite {
-        request: coland_storage::AppletAdmissionRequest::Managed(
-            AppletManagedActorCommittedRequest::Ghost(Box::new(body.clone())),
-        ),
-        package: record.package.clone(),
-        recomputed_install_plan: None,
-        service_did_document: crate::jws_verify::resolve_did_document(state, &epoch.did)
-            .map_err(AppError::param_invalid)?,
-        controller_did_document: super::install::package_controller_document(
-            state,
-            &record.package,
-        )?,
-        station_verification_method: state
-            .service_verification_method("notary-key")
-            .map_err(AppError::internal)?,
-        station_public_key: *state.notary_verifying_key().as_bytes(),
-        admin_actor_id: ActorId::service(basis.service_id.clone()),
-        admin_producer_guards: vec![],
+    let mut input = coland_storage::AppletAuthoringUnitWrite {
+        candidate: coland_storage::AppletAuthoringCandidate {
+            request: coland_storage::AppletAdmissionRequest::Managed(
+                AppletManagedActorCommittedRequest::Ghost(Box::new(body.clone())),
+            ),
+            package: record.package.clone(),
+            recomputed_install_plan: None,
+            service_did_document: crate::jws_verify::resolve_did_document(state, &epoch.did)
+                .map_err(AppError::param_invalid)?,
+            controller_did_document: super::install::package_controller_document(
+                state,
+                &record.package,
+            )?,
+            station_verification_method: state
+                .service_verification_method("notary-key")
+                .map_err(AppError::internal)?,
+            station_public_key: *state.notary_verifying_key().as_bytes(),
+            admin_actor_id: ActorId::service(basis.service_id.clone()),
+            admin_producer_guards: vec![],
+            request_digest: body
+                .authoring_request
+                .canonical_digest()
+                .map_err(|e| AppError::param_invalid(e.to_string()))?,
+            canonical_request_hash: hash.clone(),
+            prior_managed_refs: prior,
+            prior_service_signer_evidence: None,
+            accepted_at: now,
+        },
         expected_identity: Some(identity.clone()),
         expected_installation: Some(expected.clone()),
         preview_subject_key: super::endpoints::applet_authoring_preview_subject_key(
             &body.authoring_request,
         )?,
-        request_digest: body
-            .authoring_request
-            .canonical_digest()
-            .map_err(|e| AppError::param_invalid(e.to_string()))?,
-        canonical_request_hash: hash.clone(),
         operation_id: "ak.self.applet.ghost.command.provision".to_owned(),
         idempotency_key: key.clone(),
-        prior_managed_refs: prior,
-        prior_service_signer_evidence: None,
-        accepted_at: now,
+        management_approval: None,
     };
+    input.management_approval =
+        super::management_review::prepare_creation_approvals(state, &input.candidate).await?;
     let finalizer: coland_storage::AppletUnitFinalizer = std::sync::Arc::new(move |refs| {
         // These are reopened accepted tuples, never freshly authored Events.
         for event in [

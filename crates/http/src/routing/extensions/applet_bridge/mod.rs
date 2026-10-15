@@ -11,6 +11,7 @@ mod endpoints;
 mod ghost;
 mod ghost_reuse;
 mod install;
+mod management_review;
 pub(crate) mod record;
 mod signature;
 mod transaction;
@@ -25,6 +26,7 @@ pub use delegated_device::{
     ManagedPrincipalAuthority, ensure_delegated_device_not_fenced, managed_principal_authority,
 };
 pub(in crate::routing::extensions) use endpoints::protocol_router;
+pub(crate) use management_review::prepare_management_candidate;
 pub(crate) use signature::verify_self_control_service;
 pub(crate) use types::registration_epoch_evidence_from_event;
 pub use types::{AppletRecord, AppletRevokeRecordOutcome, GhostActorRecord};

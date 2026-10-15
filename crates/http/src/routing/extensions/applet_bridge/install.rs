@@ -480,27 +480,30 @@ pub(super) async fn register_package_install(
         .service_verification_method("notary-key")
         .map_err(AppError::internal)?;
     let input = coland_storage::AppletAuthoringUnitWrite {
-        request: committed_request,
-        package: package.clone(),
-        recomputed_install_plan: Some(recomputed_install_plan),
-        service_did_document,
-        controller_did_document: package_controller_document(state, &package)?,
-        station_verification_method,
-        station_public_key: *state.notary_verifying_key().as_bytes(),
-        admin_actor_id: owner_actor.clone(),
-        admin_producer_guards,
+        candidate: coland_storage::AppletAuthoringCandidate {
+            request: committed_request,
+            package: package.clone(),
+            recomputed_install_plan: Some(recomputed_install_plan),
+            service_did_document,
+            controller_did_document: package_controller_document(state, &package)?,
+            station_verification_method,
+            station_public_key: *state.notary_verifying_key().as_bytes(),
+            admin_actor_id: owner_actor.clone(),
+            admin_producer_guards,
+            request_digest: Hash::new(body_digest.clone())
+                .map_err(|error| AppError::param_invalid(error.to_string()))?,
+            canonical_request_hash: Hash::new(body_digest.clone())
+                .map_err(|error| AppError::param_invalid(error.to_string()))?,
+            prior_managed_refs: Vec::new(),
+            prior_service_signer_evidence: None,
+            accepted_at: now,
+        },
         expected_identity: expected_identity.clone(),
         expected_installation: None,
         preview_subject_key: String::new(),
-        request_digest: Hash::new(body_digest.clone())
-            .map_err(|error| AppError::param_invalid(error.to_string()))?,
-        canonical_request_hash: Hash::new(body_digest.clone())
-            .map_err(|error| AppError::param_invalid(error.to_string()))?,
         operation_id: "ak.self.applet.command.install".to_owned(),
         idempotency_key: idempotency_key.clone(),
-        prior_managed_refs: Vec::new(),
-        prior_service_signer_evidence: None,
-        accepted_at: now,
+        management_approval: None,
     };
     let audit_package = package.clone();
     let admin_actor = owner_actor.clone();

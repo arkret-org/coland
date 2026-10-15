@@ -224,6 +224,7 @@ pub struct ManagementReviewMaterial {
 pub struct ManagementReviewCurrent {
     pub station_id: arkret_wire::DidCoreId,
     pub observations: Vec<crate::AccountStatusCurrentObservation>,
+    pub applet_candidate: Option<Box<crate::AppletAuthoringCandidate>>,
 }
 
 impl std::fmt::Debug for ManagementReviewCurrent {
@@ -251,7 +252,7 @@ pub trait AgentStore: Send + Sync {
         &self,
         caller: &arkret_wire::ActorId,
         request: &arkret_models_integration::management_review::ManagementReviewRequestBody,
-        producer: &crate::SelfProducerCommitGuard,
+        producer: Option<&crate::SelfProducerCommitGuard>,
         current: &ManagementReviewCurrent,
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>

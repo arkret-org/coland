@@ -24,6 +24,78 @@ pub(crate) async fn prepare_event_approvals_with_management_current(
     submission
         .validate()
         .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
+    let methods = prepare_approval_methods(state, signatures, at).await?;
+    let management_ids = signatures
+        .iter()
+        .filter_map(|signature| {
+            if let arkret_wire::ApprovalContext::Management { request_id, .. } =
+                &signature.input.approval_context
+            {
+                Some(request_id.clone())
+            } else {
+                None
+            }
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let management_current = if management_ids.is_empty() {
+        None
+    } else if let Some(current) = prepared_current {
+        Some(current.clone())
+    } else {
+        let mut accounts = std::collections::BTreeSet::new();
+        for id in management_ids {
+            let material = state
+                .persistence()
+                .management_review_material(&submission.event.actor_id, &id, signatures)
+                .await
+                .map_err(ServiceError::from)?;
+            accounts.extend(material.accounts);
+        }
+        Some(observe_management_accounts(state, accounts).await?)
+    };
+    Ok(Some(EventApprovalCommit {
+        carrier_binding: None,
+        event_id: submission.event.event_id.clone(),
+        event_digest: arkret_canonical::canonical_sha256(&submission.event)
+            .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?,
+        committed_at: at,
+        methods,
+        management_current,
+    }))
+}
+
+/// Resolve only exact Accounts selected by authenticated private preparation;
+/// never a whole Policy administrator roster. No DB cut is held across RPC.
+pub(crate) async fn observe_management_accounts(
+    state: &AppState,
+    accounts: std::collections::BTreeSet<arkret_wire::AccountId>,
+) -> coland_services::ServiceResult<coland_storage::ManagementReviewCurrent> {
+    let mut observations = Vec::with_capacity(accounts.len());
+    for account in accounts {
+        observations.push(
+            crate::routing::events::peer::refresh_current_account_status(state, &account)
+                .await
+                .map_err(|_| {
+                    coland_services::ServiceError::protocol(
+                        arkret_wire::ErrorCode::TemporarilyUnavailable,
+                        "management Account Authority current observation is unavailable",
+                    )
+                })?,
+        );
+    }
+    Ok(coland_storage::ManagementReviewCurrent {
+        station_id: state.service_core_id(),
+        observations,
+        applet_candidate: None,
+    })
+}
+
+/// Resolve the same historical evidence for Event and operation approvals.
+pub(crate) async fn prepare_approval_methods(
+    state: &AppState,
+    signatures: &[arkret_wire::ApprovalSignature],
+    at: chrono::DateTime<chrono::Utc>,
+) -> ServiceResult<Vec<ApprovalHistoricalMethod>> {
     let mut methods = Vec::with_capacity(signatures.len());
     for signature in signatures {
         let crypt_code = if matches!(
@@ -97,66 +169,5 @@ pub(crate) async fn prepare_event_approvals_with_management_current(
             control_history,
         });
     }
-    let management_ids = signatures
-        .iter()
-        .filter_map(|signature| {
-            if let arkret_wire::ApprovalContext::Management { request_id, .. } =
-                &signature.input.approval_context
-            {
-                Some(request_id.clone())
-            } else {
-                None
-            }
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    let management_current = if management_ids.is_empty() {
-        None
-    } else if let Some(current) = prepared_current {
-        Some(current.clone())
-    } else {
-        let mut accounts = std::collections::BTreeSet::new();
-        for id in management_ids {
-            let material = state
-                .persistence()
-                .management_review_material(&submission.event.actor_id, &id, signatures)
-                .await
-                .map_err(ServiceError::from)?;
-            accounts.extend(material.accounts);
-        }
-        Some(observe_management_accounts(state, accounts).await?)
-    };
-    Ok(Some(EventApprovalCommit {
-        carrier_binding: None,
-        event_id: submission.event.event_id.clone(),
-        event_digest: arkret_canonical::canonical_sha256(&submission.event)
-            .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?,
-        committed_at: at,
-        methods,
-        management_current,
-    }))
-}
-
-/// Resolve only exact Accounts selected by authenticated private preparation;
-/// never a whole Policy administrator roster. No DB cut is held across RPC.
-pub(crate) async fn observe_management_accounts(
-    state: &AppState,
-    accounts: std::collections::BTreeSet<arkret_wire::AccountId>,
-) -> coland_services::ServiceResult<coland_storage::ManagementReviewCurrent> {
-    let mut observations = Vec::with_capacity(accounts.len());
-    for account in accounts {
-        observations.push(
-            crate::routing::events::peer::refresh_current_account_status(state, &account)
-                .await
-                .map_err(|_| {
-                    coland_services::ServiceError::protocol(
-                        arkret_wire::ErrorCode::TemporarilyUnavailable,
-                        "management Account Authority current observation is unavailable",
-                    )
-                })?,
-        );
-    }
-    Ok(coland_storage::ManagementReviewCurrent {
-        station_id: state.service_core_id(),
-        observations,
-    })
+    Ok(methods)
 }

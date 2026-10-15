@@ -6395,6 +6395,7 @@ async fn management_current_for_accounts(
     coland_storage::ManagementReviewCurrent {
         station_id: station.core.clone(),
         observations,
+        applet_candidate: None,
     }
 }
 
@@ -6426,6 +6427,7 @@ async fn management_current_from_receiver(
     coland_storage::ManagementReviewCurrent {
         station_id: station.core.clone(),
         observations,
+        applet_candidate: None,
     }
 }
 
@@ -6726,7 +6728,7 @@ async fn management_review_atomic_join_scenario(
             let error = Box::pin(reviews.management_review_request(
                 &body.requester_actor_id,
                 &body,
-                &producer,
+                Some(&producer),
                 &attempted,
                 chrono::Utc::now(),
             ))
@@ -6781,7 +6783,7 @@ async fn management_review_atomic_join_scenario(
             .management_review_request(
                 &body.requester_actor_id,
                 &body,
-                &producer,
+                Some(&producer),
                 &current,
                 chrono::Utc::now(),
             )
@@ -6839,7 +6841,7 @@ async fn management_review_atomic_join_scenario(
         .management_review_request(
             &body.requester_actor_id,
             &body,
-            &producer,
+            Some(&producer),
             &current,
             chrono::Utc::now(),
         )
@@ -6855,7 +6857,7 @@ async fn management_review_atomic_join_scenario(
         .management_review_request(
             &body.requester_actor_id,
             &duplicate,
-            &producer,
+            Some(&producer),
             &current,
             chrono::Utc::now(),
         )
@@ -7322,7 +7324,7 @@ async fn management_review_atomic_join_scenario(
             Box::pin(reviews.management_review_request(
                 &body.requester_actor_id,
                 &body,
-                &producer,
+                Some(&producer),
                 &terminal,
                 chrono::Utc::now()
             ))
@@ -7366,7 +7368,7 @@ async fn management_review_atomic_join_scenario(
         .management_review_request(
             &body.requester_actor_id,
             &body,
-            &producer,
+            Some(&producer),
             &current,
             chrono::Utc::now(),
         )
@@ -7399,7 +7401,7 @@ async fn management_review_atomic_join_scenario(
         .management_review_request(
             &body.requester_actor_id,
             &public_body,
-            &producer,
+            Some(&producer),
             &current,
             chrono::Utc::now(),
         )
@@ -7428,7 +7430,7 @@ async fn management_review_atomic_join_scenario(
             .management_review_request(
                 &body.requester_actor_id,
                 &public_body,
-                &producer,
+                Some(&producer),
                 &current,
                 chrono::Utc::now()
             )
@@ -7467,7 +7469,7 @@ async fn management_review_atomic_join_scenario(
             .management_review_request(
                 &body.requester_actor_id,
                 &public_body,
-                &producer,
+                Some(&producer),
                 &current,
                 chrono::Utc::now()
             )
@@ -7976,6 +7978,7 @@ async fn management_unstored_current_for_accounts(
     coland_storage::ManagementReviewCurrent {
         station_id: station.core.clone(),
         observations,
+        applet_candidate: None,
     }
 }
 

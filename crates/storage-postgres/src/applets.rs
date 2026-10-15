@@ -277,8 +277,18 @@ impl AppletStore for PgAppletStore {
         attester: coland_storage::AppletResolutionAttester,
         finalize: coland_storage::AppletUnitFinalizer,
     ) -> PersistenceResult<coland_storage::AppletAuthoringUnitOutcome> {
-        crate::applet_admission::admit_authoring_unit(&self.pool, input, author, attester, finalize)
-            .await
+        // Own the aggregate independently of the HTTP middleware poll stack.
+        // A disconnected caller can recover its committed outcome by exact
+        // retry; all checks and writes still share the one SQL transaction.
+        let pool = self.pool.clone();
+        tokio::spawn(async move {
+            crate::applet_admission::admit_authoring_unit(&pool, input, author, attester, finalize)
+                .await
+        })
+        .await
+        .map_err(|error| {
+            PersistenceError::Internal(format!("Applet admission task failed: {error}"))
+        })?
     }
 
     async fn get_identity(

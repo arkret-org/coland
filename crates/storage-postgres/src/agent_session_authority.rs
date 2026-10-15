@@ -112,9 +112,12 @@ async fn content_target(
             )
         }
         _ => {
-            return Err(unavailable(
-                "request needs one exact Realm or Strand selector",
-            ));
+            // A known request shape cannot be represented safely by this
+            // flat ceiling. Narrow to no content authority, not a dependency fault.
+            return Err(PersistenceError::Conflict(format!(
+                "{}: content ceiling requires one exact Realm or Strand selector",
+                coland_storage::ConflictCode::CapabilityDenied.as_str(),
+            )));
         }
     };
     let governed = sql_query("SELECT EXISTS(SELECT 1 FROM realm_authorities WHERE realm_id=$1 AND service_id=$2) AS present")

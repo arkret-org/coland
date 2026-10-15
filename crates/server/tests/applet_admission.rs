@@ -481,6 +481,113 @@ async fn managed_devices_require_independent_principal_and_possession_on_service
             installed.package.service_id
         );
         assert_eq!(accepted_authority.current_device_generation_ref, 1);
+        let mut native_draft = arkret_wire::test_support::raw_event_for_actor_at(
+            EventKind::MemberState.as_str(),
+            ScopeRef::Realm {
+                realm_id: fixture.realm.clone(),
+            },
+            actor.clone(),
+            json!({"member_id": actor, "membership":"join"}),
+            now,
+        )
+        .unwrap();
+        native_draft.applet_id = Some(installed.package.applet_id.clone());
+        native_draft.authorization_ref =
+            Some(installed.bot_outcome.authorization_ref.clone().into());
+        let native_event =
+            sign_managed_device_event(native_draft.clone(), &accepted_authority, &device, now);
+        let producer_before = authority_snapshot(&fixture.pool).await;
+        let producer_authority = device_authority
+            .applet_managed_event_producer(&native_event, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(producer_authority, accepted_authority);
+        assert!(
+            !producer_authority.scopes.permits(
+                &native_event.scope_ref,
+                &[arkret_wire::CapabilityActionId::AppletJoin]
+            ),
+            "a verified producer is not a business action authorization"
+        );
+        for wrong in [
+            sign_managed_device_event(native_draft.clone(), &accepted_authority, &controller, now),
+            sign_managed_device_event(
+                native_draft.clone(),
+                &accepted_authority,
+                &applet_service_signing_key(&installed.package.webhook_auth.key_ref),
+                now,
+            ),
+            {
+                let mut draft = native_draft.clone();
+                draft.applet_id = Some(
+                    arkret_wire::AppletId::new(format!("ak:applet:{}", uuid::Uuid::now_v7()))
+                        .unwrap(),
+                );
+                sign_managed_device_event(draft, &accepted_authority, &device, now)
+            },
+            {
+                let mut draft = native_draft.clone();
+                draft.actor_id = ActorId::service(installed.package.service_id.clone());
+                draft.executed_by = Some(actor.clone());
+                sign_managed_device_event(draft, &accepted_authority, &device, now)
+            },
+            {
+                let mut draft = native_draft.clone();
+                draft.created_at =
+                    accepted_authority.not_before - chrono::Duration::milliseconds(1);
+                sign_managed_device_event(draft, &accepted_authority, &device, now)
+            },
+            sign_managed_device_event(
+                native_draft.clone(),
+                &accepted_authority,
+                &device,
+                accepted_authority.expires_at,
+            ),
+            {
+                let mut wrong = native_event.clone();
+                wrong
+                    .payload
+                    .insert("membership".to_owned(), json!("leave"));
+                wrong
+            },
+            {
+                let mut wrong = native_event.clone();
+                wrong.producer_proof = None;
+                wrong
+            },
+        ] {
+            assert!(
+                device_authority
+                    .applet_managed_event_producer(&wrong, now)
+                    .await
+                    .is_err(),
+                "neither carrier nor controller nor rewritten original is a Device producer"
+            );
+            assert_eq!(producer_before, authority_snapshot(&fixture.pool).await);
+        }
+        let mut non_device_method = native_event.clone();
+        non_device_method
+            .producer_proof
+            .as_mut()
+            .unwrap()
+            .verification_method =
+            arkret_wire::DidUrl::new(format!("{did}#managed-controller")).unwrap();
+        assert!(
+            device_authority
+                .applet_managed_event_producer(&non_device_method, now)
+                .await
+                .unwrap()
+                .is_none(),
+            "another signer branch must never be mistaken for a successful managed Device proof"
+        );
+        assert!(
+            device_authority
+                .applet_managed_event_producer(&native_event, accepted_authority.expires_at)
+                .await
+                .is_err()
+        );
+        assert_eq!(producer_before, authority_snapshot(&fixture.pool).await);
         let account = actor.as_account_id().unwrap();
         let mut conn = fixture.pool.get().await.unwrap();
         #[derive(diesel::QueryableByName)]
@@ -685,6 +792,25 @@ async fn managed_devices_require_independent_principal_and_possession_on_service
         };
         assert_eq!(&replaced_authority.scopes, expected_scopes);
         let after_replacement = authority_snapshot(&fixture.pool).await;
+        assert!(
+            device_authority
+                .applet_managed_event_producer(&native_event, now)
+                .await
+                .is_err(),
+            "old Event signature cannot use a replacement's current key"
+        );
+        let replacement_producer =
+            sign_managed_device_event(native_draft, &replaced_authority, &replacement_key, now);
+        assert_eq!(replacement_producer.event_id, native_event.event_id);
+        assert_eq!(
+            device_authority
+                .applet_managed_event_producer(&replacement_producer, now)
+                .await
+                .unwrap()
+                .unwrap(),
+            replaced_authority
+        );
+        assert_eq!(after_replacement, authority_snapshot(&fixture.pool).await);
         let stale_metadata = managed_device_metadata(&accepted_authority);
         assert!(
             device_authority
@@ -2186,6 +2312,30 @@ struct ManagedActorFixture {
     initial_resolution: arkret_models_identity::ResolutionCommitment,
     method_history_evidence: arkret_models_identity::ResolutionMethodHistoryEvidence,
     inception_log_entry: Value,
+}
+
+fn sign_managed_device_event(
+    mut event: Event,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    key: &SigningKey,
+    proof_at: chrono::DateTime<chrono::Utc>,
+) -> Event {
+    event.producer_proof = None;
+    let suite = event.realm_id.digest_suite_code().digest_suite();
+    let mut event = arkret_wire::AuthoredEvent::finalize_with_digest_suite(event, suite).unwrap();
+    let signer = Ed25519PayloadSigner::new(
+        key.clone(),
+        authority.native_did.clone(),
+        arkret_wire::DidUrl::new(format!("{}#{}", authority.native_did, authority.device_id))
+            .unwrap(),
+    );
+    arkret_signatures::sign_event(
+        &mut event,
+        &signer,
+        arkret_signatures::SignEventOptions::new().with_created_at(proof_at),
+    )
+    .unwrap();
+    event.into_event()
 }
 
 fn managed_device_metadata(

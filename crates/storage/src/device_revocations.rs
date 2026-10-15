@@ -166,6 +166,19 @@ pub struct AppletManagedDeviceAuthority {
 
 #[async_trait]
 pub trait DeviceRevocationStore: Send + Sync {
+    /// Verify the original Event against one accepted managed Device cut.
+    /// `None` identifies a different producer branch, never a successful proof.
+    /// This selects signer identity only; it grants no business permission.
+    async fn applet_managed_event_producer(
+        &self,
+        _event: &arkret_wire::Event,
+        _now: DateTime<Utc>,
+    ) -> PersistenceResult<Option<AppletManagedDeviceAuthority>> {
+        Err(PersistenceError::SchemaViolation(
+            "managed Device Event producer provider is unavailable".to_owned(),
+        ))
+    }
+
     /// After cryptographic verification, re-read the exact Device instance
     /// under its PCR writer lock and durably consume the HTTP nonce. This does
     /// not consume business approvals or grant permission to a resource.

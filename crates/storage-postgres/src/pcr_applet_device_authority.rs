@@ -28,6 +28,92 @@ fn denied(message: &str) -> PgTransactionError {
     PersistenceError::Conflict(format!("unauthenticated: {message}")).into()
 }
 
+fn invalid_signature(error: impl std::fmt::Display) -> PgTransactionError {
+    PersistenceError::Conflict(format!("signature_invalid: {error}")).into()
+}
+
+pub(crate) async fn for_event(
+    pool: &PgPool,
+    event: &Event,
+    now: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<Option<AppletManagedDeviceAuthority>> {
+    let mut conn = pg_conn(pool).await?;
+    conn.transaction::<_, PgTransactionError, _>(async |conn| {
+        sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *conn)
+            .await?;
+        for_event_in_connection(conn, event, now).await
+    })
+    .await
+    .map_err(PgTransactionError::into_persistence)
+}
+
+/// Identity/proof verification only. Management and business consumers must
+/// re-read this under their ordered PCR locks, then qualify the actual scope.
+pub(crate) async fn for_event_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<AppletManagedDeviceAuthority>, PgTransactionError> {
+    event.validate_for_submit_structural().map_err(invalid)?;
+    let suite = event.realm_id.digest_suite_code().digest_suite();
+    event
+        .verify_event_id_matches_content_with_digest_suite(suite)
+        .map_err(invalid_signature)?;
+    let Some(producer) = event
+        .verify_producer_proof_self_consistency(suite)
+        .map_err(invalid_signature)?
+    else {
+        return Ok(None);
+    };
+    let Some(authority) =
+        current_in_connection(conn, &producer.account_id, &producer.device_id, now).await?
+    else {
+        return Ok(None);
+    };
+    if event.executed_by.is_some()
+        || event.actor_id.as_account_id() != Some(&authority.account_id)
+        || event
+            .applet_id
+            .as_ref()
+            .is_some_and(|applet| applet != &authority.applet_id)
+    {
+        return Err(invalid_signature(
+            "managed Device cannot sign for another actor",
+        ));
+    }
+    let proof = event
+        .producer_proof
+        .as_ref()
+        .ok_or_else(|| invalid_signature("Event producer proof is absent"))?;
+    if proof.verification_method.as_str()
+        != format!("{}#{}", authority.native_did, authority.device_id)
+        || event.created_at < authority.not_before
+        || event.created_at >= authority.expires_at
+        || proof.created_at < authority.not_before
+        || proof.created_at >= authority.expires_at
+    {
+        return Err(invalid_signature(
+            "managed producer method or original signing window differs",
+        ));
+    }
+    let bytes = arkret_signatures::EventProofBuilder::new()
+        .envelope_bytes(event)
+        .map_err(invalid_signature)?;
+    let key = arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+        bytes: authority.public_key.to_vec(),
+    };
+    arkret_signatures::verify_ed25519_detached_jws_proof_with_digest_suite(
+        proof,
+        &bytes,
+        &event.actor_id,
+        &key,
+        suite,
+    )
+    .map_err(invalid_signature)?;
+    Ok(Some(authority))
+}
+
 pub(crate) async fn consume_nonce(
     pool: &PgPool,
     expected: &AppletManagedDeviceAuthority,

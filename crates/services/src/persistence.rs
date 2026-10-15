@@ -944,6 +944,17 @@ impl PersistenceHandle {
             .await?)
     }
 
+    pub async fn applet_managed_event_producer(
+        &self,
+        event: &arkret_wire::Event,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<Option<coland_storage::AppletManagedDeviceAuthority>> {
+        self.persistence
+            .device_revocations()
+            .applet_managed_event_producer(event, now)
+            .await
+    }
+
     pub async fn consume_applet_managed_device_nonce(
         &self,
         expected: &coland_storage::AppletManagedDeviceAuthority,
@@ -1710,6 +1721,17 @@ impl PersistenceHandle {
 
 #[async_trait::async_trait]
 impl coland_storage::DeviceRevocationStore for PersistenceHandle {
+    async fn applet_managed_event_producer(
+        &self,
+        event: &arkret_wire::Event,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<Option<coland_storage::AppletManagedDeviceAuthority>> {
+        self.persistence
+            .device_revocations()
+            .applet_managed_event_producer(event, now)
+            .await
+    }
+
     async fn consume_applet_managed_device_nonce(
         &self,
         expected: &coland_storage::AppletManagedDeviceAuthority,

@@ -88,6 +88,14 @@ fn target(row: TargetRow) -> PersistenceResult<DeviceRevocationTargetRecord> {
 
 #[async_trait]
 impl DeviceRevocationStore for PgDeviceRevocationStore {
+    async fn applet_managed_event_producer(
+        &self,
+        event: &arkret_wire::Event,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<Option<coland_storage::AppletManagedDeviceAuthority>> {
+        crate::pcr_applet_device_authority::for_event(&self.pool, event, now).await
+    }
+
     async fn consume_applet_managed_device_nonce(
         &self,
         expected: &coland_storage::AppletManagedDeviceAuthority,

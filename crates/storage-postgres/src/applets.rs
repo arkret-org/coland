@@ -84,6 +84,36 @@ pub struct PgAppletStore {
 }
 #[async_trait]
 impl AppletStore for PgAppletStore {
+    async fn managed_pcr_creation_context(
+        &self,
+        genesis: &arkret_wire::EventId,
+    ) -> PersistenceResult<Option<arkret_models_integration::AppletManagedActorAuthoringContext>>
+    {
+        let mut conn = pg_conn(&self.pool).await?;
+        let rows = sql_query(
+            "SELECT context AS record FROM applet_authoring_completions \
+             WHERE context#>>'{committed_request,managed_actor_bundle,pcr_genesis_event,event_id}'=$1 \
+             LIMIT 2",
+        )
+        .bind::<Text, _>(genesis.as_str())
+        .load::<AppletRegistrationRow>(&mut *conn)
+        .await
+        .map_err(PersistenceError::database)?;
+        if rows.len() > 1 {
+            return Err(PersistenceError::SchemaViolation(
+                "managed PCR creation evidence is ambiguous".into(),
+            ));
+        }
+        rows.into_iter()
+            .next()
+            .map(|row| {
+                let context: arkret_models_integration::AppletManagedActorAuthoringContext =
+                    serde_json::from_value(row.record).map_err(PersistenceError::database)?;
+                context.validate().map_err(PersistenceError::database)?;
+                Ok(context)
+            })
+            .transpose()
+    }
     async fn authority_material(
         &self,
         applet: &arkret_wire::AppletId,

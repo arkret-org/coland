@@ -37,6 +37,16 @@ pub struct PersistenceHandle {
 }
 
 impl PersistenceHandle {
+    pub async fn managed_pcr_creation_context(
+        &self,
+        genesis: &arkret_wire::EventId,
+    ) -> PersistenceResult<Option<arkret_models_integration::AppletManagedActorAuthoringContext>>
+    {
+        self.persistence
+            .applets()
+            .managed_pcr_creation_context(genesis)
+            .await
+    }
     pub async fn management_review_request(
         &self,
         caller: &arkret_wire::ActorId,

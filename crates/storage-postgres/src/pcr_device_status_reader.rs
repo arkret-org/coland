@@ -217,17 +217,21 @@ pub(crate) async fn confirmed_pcr_device_status_cut_in_connection(
 struct GenerationCutRow {
     #[diesel(sql_type = diesel::sql_types::Nullable<Text>)]
     generation_commit_id: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<BigInt>)]
+    generation_stream_position: Option<i64>,
     #[diesel(sql_type = diesel::sql_types::Nullable<Jsonb>)]
     generation_value: Option<Value>,
     #[diesel(sql_type = diesel::sql_types::Nullable<Text>)]
     latest_generation_commit_id: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<BigInt>)]
+    latest_generation_stream_position: Option<i64>,
     #[diesel(sql_type = diesel::sql_types::Nullable<Jsonb>)]
     expected_generation_value: Option<Value>,
 }
 
 /// The PCR `device_generation` typed current from one REPEATABLE READ
 /// snapshot of an accepted PCR head. The projection must equal what its latest
-/// accepted writer (the registration anchor or a reanchor) derives, or the
+/// accepted writer (a registration anchor, managed PCR genesis or reanchor) derives, or the
 /// read fails closed.
 pub(crate) async fn confirmed_pcr_generation(
     pool: &PgPool,
@@ -240,22 +244,39 @@ pub(crate) async fn confirmed_pcr_generation(
             .await?;
         let row = sql_query(
             "SELECT \
-               g.current_commit_id AS generation_commit_id, g.value AS generation_value, \
+               g.current_commit_id AS generation_commit_id, \
+               g.current_stream_position AS generation_stream_position, g.value AS generation_value, \
                (SELECT c.commit_id FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
                 WHERE c.realm_id=p.pcr_realm_id AND \
                   (e.kind='ak.device.reanchor' OR \
                    (e.kind='ak.device.authorize' AND \
-                    e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor')) \
+                    e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor') OR \
+                   (e.kind='ak.realm.create' AND c.stream_position=0 AND \
+                    e.envelope->>'event_id'=p.genesis_event_id AND \
+                    e.envelope#>>'{payload,object,purpose}'='applet_managed_control')) \
                 ORDER BY c.stream_position DESC LIMIT 1) AS latest_generation_commit_id, \
+               (SELECT c.stream_position FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
+                WHERE c.realm_id=p.pcr_realm_id AND \
+                  (e.kind='ak.device.reanchor' OR \
+                   (e.kind='ak.device.authorize' AND \
+                    e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor') OR \
+                   (e.kind='ak.realm.create' AND c.stream_position=0 AND \
+                    e.envelope->>'event_id'=p.genesis_event_id AND \
+                    e.envelope#>>'{payload,object,purpose}'='applet_managed_control')) \
+                ORDER BY c.stream_position DESC LIMIT 1) AS latest_generation_stream_position, \
                (SELECT jsonb_build_object('current_device_generation_ref', \
                         CASE WHEN e.kind='ak.device.reanchor' \
                           THEN e.envelope->'payload'->'new_device_generation' \
+                          WHEN e.kind='ak.realm.create' THEN '1'::jsonb \
                           ELSE e.envelope->'payload'->'authorized_generation_ref' END) \
                 FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
                 WHERE c.realm_id=p.pcr_realm_id AND \
                   (e.kind='ak.device.reanchor' OR \
                    (e.kind='ak.device.authorize' AND \
-                    e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor')) \
+                    e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor') OR \
+                   (e.kind='ak.realm.create' AND c.stream_position=0 AND \
+                    e.envelope->>'event_id'=p.genesis_event_id AND \
+                    e.envelope#>>'{payload,object,purpose}'='applet_managed_control')) \
                 ORDER BY c.stream_position DESC LIMIT 1) AS expected_generation_value \
              FROM principal_resolutions p \
              JOIN LATERAL (SELECT commit_id FROM realm_commits \
@@ -273,6 +294,7 @@ pub(crate) async fn confirmed_pcr_generation(
         let Some(row) = row else { return Ok(None) };
         if row.generation_commit_id.is_none()
             || row.generation_commit_id != row.latest_generation_commit_id
+            || row.generation_stream_position != row.latest_generation_stream_position
             || row.generation_value != row.expected_generation_value
         {
             return Err(incomplete("PCR device generation projection is behind accepted Commit").into());

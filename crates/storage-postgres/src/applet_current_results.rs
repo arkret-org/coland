@@ -118,5 +118,9 @@ pub(crate) async fn project_applet_event_in_connection(
             "failed_precondition: managed account already has a Principal Control Realm".to_owned(),
         ));
     }
+    crate::pcr_device_current_results::initialize_managed_pcr_generation_in_connection(
+        conn, event, commit,
+    )
+    .await?;
     Ok(())
 }

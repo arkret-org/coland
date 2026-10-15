@@ -23,7 +23,7 @@ struct ValueRow {
 
 async fn footprint(pool: &PgPool) -> Value {
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("SELECT jsonb_build_object('events',(SELECT count(*) FROM canonical_events),'commits',(SELECT count(*) FROM realm_commits),'calls',(SELECT count(*) FROM call_state_current_results)) AS value")
+    diesel::sql_query("SELECT jsonb_build_object('events',(SELECT count(*) FROM canonical_events),'commits',(SELECT count(*) FROM realm_commits),'calls',(SELECT count(*) FROM call_state_current_results),'axes',(SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY realm_id,call_id,family),'[]') FROM call_axis_current_results t)) AS value")
         .get_result::<ValueRow>(&mut *conn).await.unwrap().value
 }
 
@@ -245,6 +245,26 @@ async fn joined_account_needs_call_join_grant_and_other_station_cannot_borrow_it
         at,
     );
     uow.commit_event(call.clone()).await.unwrap();
+    let unauthorized_moderation = ordinary_realm::next_request_for_actor(
+        &call.authority_commit,
+        EventKind::CallState,
+        ActorId::account(member.clone()),
+        json!({"call_id":arkret_wire::CallId::from_event_id(&call.authority_commit.event.event_id),
+        "moderation_delta":{"op":"remove_participant","removal":{
+            "actor_id":ActorId::account(member.clone()),"action":"ban",
+            "removed_by":member.principal_id,"removed_at":arkret_canonical::format_timestamp_canonical(at)
+        }}}),
+        at,
+    );
+    let before = footprint(&pool).await;
+    assert_eq!(
+        uow.commit_event(unauthorized_moderation)
+            .await
+            .unwrap_err()
+            .conflict_code(),
+        Some(coland_storage::ConflictCode::CapabilityDenied)
+    );
+    assert_eq!(footprint(&pool).await, before);
     let other = arkret_wire::AccountId::new(
         member.principal_id,
         arkret_wire::DidCoreId::new("ak:did_core:web:other-call-station.example").unwrap(),
@@ -261,4 +281,112 @@ async fn joined_account_needs_call_join_grant_and_other_station_cannot_borrow_it
         ),
     )
     .await;
+}
+
+#[tokio::test]
+async fn moderation_assertions_retain_bans_kicks_and_guard_the_whole_axis() {
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let discussion = ordinary_realm::open_human_discussion(&pool, "call-moderation-current").await;
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let founder = discussion.head.authority_commit.event.actor_id.clone();
+    let at = discussion.head.authority_commit.commit.committed_at;
+    let call = ordinary_realm::next_request_for_actor(
+        &discussion.head.authority_commit,
+        EventKind::CallCreate,
+        founder.clone(),
+        json!({"initial_state":"ringing"}),
+        at,
+    );
+    uow.commit_event(call.clone()).await.unwrap();
+    let call_id = arkret_wire::CallId::from_event_id(&call.authority_commit.event.event_id);
+    let ban = ordinary_realm::next_request_for_actor(
+        &call.authority_commit,
+        EventKind::CallState,
+        founder.clone(),
+        json!({"call_id":call_id,"moderation_delta":{"op":"remove_participant","removal":{
+            "actor_id":founder,"action":"ban","removed_by":founder.signing_principal_id(),
+            "removed_at":arkret_canonical::format_timestamp_canonical(at)
+        }}}),
+        at,
+    );
+    uow.commit_event(ban.clone()).await.unwrap();
+    let kick = ordinary_realm::next_request_for_actor(
+        &ban.authority_commit,
+        EventKind::CallState,
+        founder.clone(),
+        json!({"call_id":call_id,"moderation_delta":{"op":"remove_participant","removal":{
+            "actor_id":founder,"device_id":"ak:device:01904100-0000-7000-8000-00000000000a",
+            "action":"kick","removed_by":founder.signing_principal_id(),
+            "removed_at":arkret_canonical::format_timestamp_canonical(at)
+        }}}),
+        at,
+    );
+    uow.commit_event(kick.clone()).await.unwrap();
+    let restore = |revision: &arkret_wire::RealmCommit| {
+        ordinary_realm::next_request_for_actor(
+            &kick.authority_commit,
+            EventKind::CallState,
+            founder.clone(),
+            json!({"call_id":call_id,"moderation_delta":{"op":"restore_participant",
+                "actor_id":founder,"restored_by":founder.signing_principal_id(),
+                "restored_at":arkret_canonical::format_timestamp_canonical(at),
+                "expected_revision":{"commit_id":revision.commit_id,"stream_position":revision.stream_position}
+            }}),
+            at,
+        )
+    };
+    let before = footprint(&pool).await;
+    assert!(
+        uow.commit_event(restore(&ban.authority_commit.commit))
+            .await
+            .is_err()
+    );
+    assert_eq!(footprint(&pool).await, before);
+    let restored = restore(&kick.authority_commit.commit);
+    uow.commit_event(restored.clone()).await.unwrap();
+    let mut conn = pool.get().await.unwrap();
+    let value = diesel::sql_query("SELECT value FROM call_axis_current_results WHERE realm_id=$1 AND call_id=$2 AND family='call_moderation'")
+        .bind::<Text,_>(discussion.realm_id().as_str()).bind::<Text,_>(call_id.as_str())
+        .get_result::<ValueRow>(&mut *conn).await.unwrap().value;
+    let current: arkret_models_collaboration::events_payloads::call::CallModerationCurrentValue =
+        serde_json::from_value(value).unwrap();
+    current
+        .validate_for_axis(
+            &restored.authority_commit.commit.stream_ref,
+            &arkret_wire::CurrentRevision {
+                commit_id: restored.authority_commit.commit.commit_id.clone(),
+                stream_position: restored.authority_commit.commit.stream_position,
+            },
+        )
+        .unwrap();
+    assert_eq!(current.assertions.len(), 3);
+    let effective = current.effective_removals().unwrap();
+    assert_eq!(effective.len(), 1);
+    assert_eq!(
+        effective[0].action,
+        arkret_models_collaboration::events_payloads::call::CallParticipantRemovalAction::Kick
+    );
+    for original in [&ban, &kick, &restored] {
+        assert!(
+            current
+                .assertions
+                .iter()
+                .any(|row| row.source_commit == original.authority_commit.commit)
+        );
+    }
+    drop(conn);
+    let snapshot = PgAuthorityCommitStore { pool: pool.clone() }
+        .realm_state_snapshot_material_for_account(
+            &discussion.realm_id(),
+            founder.as_account_id().unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("moderator receives the complete accepted current");
+    assert!(snapshot.current_state_entries.iter().any(|row| matches!(row,
+        arkret_wire::TypedCurrentRow::Value {
+            selector: arkret_wire::CurrentSelector::CallModeration { call_id: selected }, value, ..
+        } if selected == &call_id && value == &serde_json::to_value(&current).unwrap()
+    )));
 }

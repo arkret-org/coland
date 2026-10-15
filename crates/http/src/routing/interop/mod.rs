@@ -4,7 +4,6 @@ mod blob;
 mod blob_resumable;
 mod mimi;
 pub(crate) mod moderation;
-pub(crate) mod participant_binding;
 mod push;
 mod push_handoff;
 pub(crate) mod webrtc;

@@ -12,6 +12,9 @@
 //! URLs, credential TTLs, and the optional TURN shared secret are
 //! operator-configurable via `AppConfig::ice`.
 
+#[cfg(feature = "conformance-harness")]
+mod release_probe;
+
 use arkret_identifiers::{CallId, DeviceId, RealmId};
 #[cfg(test)]
 use arkret_models_collaboration::events_payloads::RealmMediaServicePayload;
@@ -792,6 +795,8 @@ async fn handle_rtc_token_with_original(
     outcome.participant_binding.sig =
         URL_SAFE_NO_PAD.encode(signing_key.sign(&signing_input).to_bytes());
     // The token is prepared privately. This is its final, outstanding release cut.
+    #[cfg(feature = "conformance-harness")]
+    release_probe::pause(state, &body).await?;
     final_invitation_token_cut(state, &body, &call_cells, desired_media).await?;
     let facet =
         crate::routing::identity::device_signing::try_resolve_device_signing_directory_facet(

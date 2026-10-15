@@ -3,6 +3,9 @@
 //! Implements the v1 private invite delivery endpoint and the body-only
 //! online locator resolver from `sync/invite-addressing.md`.
 
+#[cfg(feature = "conformance-harness")]
+mod delivery_probe;
+
 use arkret_canonical as canonical;
 use arkret_identifiers::{DidCoreId, Hash, InviteLocatorId};
 #[cfg(test)]
@@ -365,6 +368,13 @@ async fn receive_private_invite_delivery(
         ));
     }
     validate_invite_delivery_event_binding(body, delivery)?;
+    #[cfg(feature = "conformance-harness")]
+    delivery_probe::pause(
+        state,
+        &delivery.invite_address.account_id,
+        &arkret_wire::InviteId::from_event_id(&delivery.invite_event.event_id),
+    )
+    .await?;
     let source =
         DidCoreId::new(source_id.to_owned()).map_err(|e| AppError::param_invalid(e.to_string()))?;
     let command=arkret_models_collaboration::consent_private::ConsentPrivateCommand::InviteDelivery(arkret_models_collaboration::consent_private::ConsentPrivateInviteDeliveryCommand{

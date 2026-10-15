@@ -222,7 +222,9 @@ async fn read_before_in_connection(
                 value
                     .validate_sources(&stream, &revision)
                     .map_err(|e| invalid(&e.to_string()))?;
-                participants = value.active_participants();
+                participants = value
+                    .active_participants()
+                    .map_err(|e| invalid(&e.to_string()))?;
                 roster_revision = Some(revision);
             }
             Some("call_moderation") => {
@@ -231,7 +233,9 @@ async fn read_before_in_connection(
                 value
                     .validate_sources(&stream, &revision)
                     .map_err(|e| invalid(&e.to_string()))?;
-                moderation = value.active_removals();
+                moderation = value
+                    .effective_removals()
+                    .map_err(|e| invalid(&e.to_string()))?;
                 moderation_history = Some(value);
                 moderation_revision = Some(revision);
             }
@@ -335,7 +339,7 @@ pub(crate) async fn write_axis(
                 .ok_or_else(|| invalid("Call axis is not a complete assertion set"))?,
             None => Vec::new(),
         };
-        let index = if kind == "call_roster" { 8 } else { 7 };
+        let index = if kind == "call_roster" { 7 } else { 6 };
         let assertion = serde_json::json!({"tag_id":format!("{}:{}",event.event_id,index),"source_commit":commit,"value":value});
         if let Some(existing) = assertions
             .iter()

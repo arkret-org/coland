@@ -50,6 +50,16 @@ pub async fn verify_session_pop(
         .get_typed::<AppState>()
         .expect("state injected")
         .clone();
+    if req.headers().contains_key("arkret-managed-device") {
+        match super::applet_managed_device::verify(&state, req).await {
+            Ok(verified) => {
+                depot.insert_typed(verified);
+                ctrl.call_next(req, depot, res).await;
+            }
+            Err(error) => error.write(req, depot, res).await,
+        }
+        return;
+    }
     match enforce_session_pop(&state, req).await {
         Ok(()) => {
             ctrl.call_next(req, depot, res).await;
@@ -287,7 +297,10 @@ fn is_public_projection_request(req: &Request) -> bool {
         .any(|operation| request_matches_operation(req, operation))
 }
 
-fn request_matches_operation(req: &Request, operation: arkret_wire::ServiceOperationId) -> bool {
+pub(super) fn request_matches_operation(
+    req: &Request,
+    operation: arkret_wire::ServiceOperationId,
+) -> bool {
     let descriptor = operation.descriptor();
     descriptor.http_method == req.method().as_str()
         && path_template_matches(descriptor.http_path, req.uri().path())

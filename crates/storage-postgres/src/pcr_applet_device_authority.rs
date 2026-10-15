@@ -7,8 +7,8 @@ use arkret_wire::{AccountId, ActorId, CommittedEventRef, DeviceId, Event, RealmC
 use coland_storage::{
     AppletManagedDeviceAuthority, DeviceRevocationGateSelector, PersistenceError, PersistenceResult,
 };
-use diesel::sql_types::{Jsonb, Text};
-use diesel::{QueryableByName, sql_query};
+use diesel::sql_types::{Jsonb, Text, Timestamptz};
+use diesel::{OptionalExtension, QueryableByName, sql_query};
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use serde_json::Value;
 
@@ -22,6 +22,56 @@ struct JsonRow {
 
 fn invalid(message: impl std::fmt::Display) -> PgTransactionError {
     PersistenceError::SchemaViolation(message.to_string()).into()
+}
+
+fn denied(message: &str) -> PgTransactionError {
+    PersistenceError::Conflict(format!("unauthenticated: {message}")).into()
+}
+
+pub(crate) async fn consume_nonce(
+    pool: &PgPool,
+    expected: &AppletManagedDeviceAuthority,
+    metadata: &arkret_models_integration::AppletManagedDeviceMetadata,
+    retain_until: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<AppletManagedDeviceAuthority> {
+    metadata
+        .validate()
+        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+    let mut conn = pg_conn(pool).await?;
+    conn.transaction::<_, PgTransactionError, _>(async |conn| {
+        let locked = sql_query("SELECT to_jsonb(a) AS value FROM realm_authorities a WHERE realm_id=$1 FOR UPDATE")
+            .bind::<Text,_>(expected.pcr_realm_id.as_str()).get_result::<JsonRow>(&mut *conn).await.optional()?;
+        if locked.is_none() { return Err(denied("managed PCR authority is unavailable")); }
+        let now = chrono::Utc::now();
+        if retain_until <= now || retain_until > now + chrono::Duration::seconds(
+            arkret_signatures::http_signature::HTTP_SIGNATURE_MAX_LIFETIME_SECONDS
+                + arkret_signatures::http_signature::HTTP_SIGNATURE_CREATED_SKEW_SECONDS
+        ) {
+            return Err(denied("managed Device signature window is not current"));
+        }
+        let current = current_in_connection(conn, &expected.account_id, &expected.device_id, now)
+            .await?.ok_or_else(|| denied("managed Device authority is absent"))?;
+        if &current != expected
+            || metadata.account_id != current.account_id
+            || metadata.device_id != current.device_id
+            || metadata.authorization_event_id != current.selector.authorization_ref.event_id
+            || metadata.applet_id != current.applet_id
+            || !current.scopes.contains_scope(&metadata.effective_scope)
+        {
+            return Err(denied("managed Device instance changed or differs from signed metadata"));
+        }
+        sql_query("DELETE FROM applet_managed_device_nonces WHERE principal_id=$1 AND station_id=$2 AND device_id=$3 AND retain_until<=$4")
+            .bind::<Text,_>(current.account_id.principal_id.as_str()).bind::<Text,_>(current.account_id.station_id.as_str())
+            .bind::<Text,_>(current.device_id.as_str()).bind::<Timestamptz,_>(now).execute(&mut *conn).await?;
+        let inserted = sql_query("INSERT INTO applet_managed_device_nonces(principal_id,station_id,device_id,nonce,consumed_at,retain_until) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING")
+            .bind::<Text,_>(current.account_id.principal_id.as_str()).bind::<Text,_>(current.account_id.station_id.as_str())
+            .bind::<Text,_>(current.device_id.as_str()).bind::<Text,_>(&metadata.nonce)
+            .bind::<Timestamptz,_>(now).bind::<Timestamptz,_>(retain_until).execute(&mut *conn).await?;
+        if inserted != 1 {
+            return Err(denied("managed Device HTTP nonce was already consumed"));
+        }
+        Ok(current)
+    }).await.map_err(PgTransactionError::into_persistence)
 }
 
 pub(crate) async fn current(

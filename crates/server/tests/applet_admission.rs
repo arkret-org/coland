@@ -128,7 +128,7 @@ async fn managed_devices_require_independent_principal_and_possession_on_service
         let mut payload:DeviceAuthorizePayload=serde_json::from_value(json!({
             "device_id":device_id,"device_public_key_did":format!("did:key:{}",arkret_canonical::ed25519_pubkey_to_did_key_multibase(device.verifying_key().as_bytes())),
             "hpke_key":arkret_canonical::ed25519_pubkey_to_did_key_multibase(&[119;32]),"algorithms":["Ed25519"],"device_key_algorithm":"Ed25519",
-            "authorized_by":actor.signing_principal_id(),"scopes":[{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":["ak.event.read"]}],"not_before":now-chrono::Duration::seconds(1),"expires_at":now+chrono::Duration::hours(1),
+            "authorized_by":actor.signing_principal_id(),"scopes":[{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":["ak.event.read","ak.object.read_content","ak.self.blob.command.presign.v1","ak.self.blob.resource.get.v1","ak.self.blob.resource.head.v1","ak.self.blob.upload.create.v1"]}],"not_before":now-chrono::Duration::seconds(1),"expires_at":now+chrono::Duration::hours(1),
             "authorization_binding_kind":"applet_managed_delegation","authorized_generation_ref":1,"device_signature":"AA","applet_id":installed.package.applet_id
         })).unwrap();
         payload.device_signature =
@@ -545,6 +545,7 @@ async fn managed_devices_require_independent_principal_and_possession_on_service
                 .unwrap()
                 .is_none()
         );
+        exercise_managed_device_http_authentication(&fixture, &accepted_authority, &device).await;
         let committed = authority_snapshot(&fixture.pool).await;
         let mut conn = fixture.pool.get().await.unwrap();
         diesel::sql_query("UPDATE pcr_device_authorization_current_results SET current_stream_position=current_stream_position+1 WHERE realm_id=$1 AND device_id=$2")
@@ -684,6 +685,32 @@ async fn managed_devices_require_independent_principal_and_possession_on_service
         };
         assert_eq!(&replaced_authority.scopes, expected_scopes);
         let after_replacement = authority_snapshot(&fixture.pool).await;
+        let stale_metadata = managed_device_metadata(&accepted_authority);
+        assert!(
+            device_authority
+                .consume_applet_managed_device_nonce(
+                    &accepted_authority,
+                    &stale_metadata,
+                    chrono::Utc::now() + chrono::Duration::seconds(60),
+                )
+                .await
+                .is_err(),
+            "signature verification before replacement cannot consume a nonce afterwards"
+        );
+        let mut stale_response = managed_device_http_request(
+            &fixture.state,
+            &accepted_authority,
+            &stale_metadata,
+            arkret_wire::ServiceOperationId::SelfCurrentResultsReadExactV1,
+            &device,
+        )
+        .send(
+            &coland_http::test_applet_managed_device_authentication_service(fixture.state.clone()),
+        )
+        .await;
+        assert_eq!(stale_response.status_code, Some(StatusCode::UNAUTHORIZED));
+        let _: Value = stale_response.take_json().await.unwrap();
+        assert_eq!(after_replacement, authority_snapshot(&fixture.pool).await);
         let (status, replayed) = fixture
             .service_post(
                 &installed.package,
@@ -2161,6 +2188,255 @@ struct ManagedActorFixture {
     inception_log_entry: Value,
 }
 
+fn managed_device_metadata(
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+) -> AppletManagedDeviceMetadata {
+    AppletManagedDeviceMetadata {
+        account_id: authority.account_id.clone(),
+        device_id: authority.device_id.clone(),
+        authorization_event_id: authority.selector.authorization_ref.event_id.clone(),
+        applet_id: authority.applet_id.clone(),
+        effective_scope: authority.scopes.entries()[0].effective_scope.clone(),
+        nonce: format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        ),
+    }
+}
+
+fn managed_device_http_request(
+    state: &AppState,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    metadata: &AppletManagedDeviceMetadata,
+    operation: arkret_wire::ServiceOperationId,
+    signer: &SigningKey,
+) -> salvo::test::RequestBuilder {
+    let descriptor = operation.descriptor();
+    let path = descriptor
+        .http_path
+        .split('/')
+        .map(|part| {
+            if part.starts_with('{') {
+                authority.selector.authorization_ref.event_id.as_str()
+            } else {
+                part
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    let body = if descriptor.http_method == "GET" || descriptor.http_method == "HEAD" {
+        Vec::new()
+    } else if descriptor.body_class == Some("binary_stream") {
+        vec![0, 255, 1, 2]
+    } else {
+        b"{}".to_vec()
+    };
+    let scheme = state
+        .config()
+        .public_base_url
+        .split_once("://")
+        .map_or("http", |(scheme, _)| scheme);
+    let digest = content_digest_header(&body);
+    let metadata = metadata.to_header_value().unwrap();
+    let headers = vec![
+        ("arkret-operation".to_owned(), operation.as_str().to_owned()),
+        ("arkret-managed-device".to_owned(), metadata),
+        (
+            "destination-service-id".to_owned(),
+            state.service_id().to_owned(),
+        ),
+        ("content-digest".to_owned(), digest.clone()),
+        (
+            "idempotency-key".to_owned(),
+            "same-business-intent".to_owned(),
+        ),
+    ];
+    let parts = SignedRequestParts {
+        method: descriptor.http_method.to_owned(),
+        target_uri: format!("{scheme}://server{path}"),
+        authority: "server".to_owned(),
+        path: path.clone(),
+        headers: headers.clone(),
+        body_digest: Some(digest),
+    };
+    let fingerprint = arkret_canonical::ed25519_pubkey_to_did_key_multibase(&authority.public_key);
+    let kid = format!("did:key:{fingerprint}#{fingerprint}");
+    let signature = sign_http_message_for_scenario(
+        &parts,
+        HttpSignatureScenario::AppletManagedDeviceV1,
+        if body.is_empty() {
+            &["idempotency-key"]
+        } else {
+            &["content-digest", "idempotency-key"]
+        },
+        "sig1",
+        &kid,
+        chrono::Utc::now().timestamp(),
+        signer,
+    )
+    .unwrap();
+    let mut builder = salvo::test::RequestBuilder::new(
+        format!("http://server{path}"),
+        salvo::http::Method::from_bytes(descriptor.http_method.as_bytes()).unwrap(),
+    );
+    for (name, value) in headers {
+        builder = builder.add_header(
+            name.parse::<salvo::http::header::HeaderName>().unwrap(),
+            value,
+            true,
+        );
+    }
+    builder
+        .add_header("Signature-Input", signature.signature_input_header, true)
+        .add_header("Signature", signature.signature_header, true)
+        .body(body)
+}
+
+async fn exercise_managed_device_http_authentication(
+    fixture: &Fixture,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    signer: &SigningKey,
+) {
+    let echo =
+        coland_http::test_applet_managed_device_authentication_service(fixture.state.clone());
+    let baseline = authority_snapshot(&fixture.pool).await;
+    let operations = arkret_wire::ServiceOperationId::ALL
+        .iter()
+        .copied()
+        .filter(|operation| arkret_wire::applet_managed_device_scope_rule(*operation).is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(operations.len(), 21);
+    for operation in operations {
+        let metadata = managed_device_metadata(authority);
+        let response =
+            managed_device_http_request(&fixture.state, authority, &metadata, operation, signer)
+                .send(&echo)
+                .await;
+        assert_eq!(
+            response.status_code,
+            Some(StatusCode::OK),
+            "authentication component: {operation}"
+        );
+        let before_replay = authority_snapshot(&fixture.pool).await;
+        let response =
+            managed_device_http_request(&fixture.state, authority, &metadata, operation, signer)
+                .send(&echo)
+                .await;
+        assert_eq!(
+            response.status_code,
+            Some(StatusCode::UNAUTHORIZED),
+            "nonce replay: {operation}"
+        );
+        assert_eq!(before_replay, authority_snapshot(&fixture.pool).await);
+    }
+    let operation = arkret_wire::ServiceOperationId::SelfCurrentResultsReadExactV1;
+    let metadata = managed_device_metadata(authority);
+    let before = authority_snapshot(&fixture.pool).await;
+    let requests = [
+        managed_device_http_request(
+            &fixture.state,
+            authority,
+            &metadata,
+            operation,
+            &SigningKey::from_bytes(&[43; 32]),
+        ),
+        managed_device_http_request(&fixture.state, authority, &metadata, operation, signer)
+            .add_header("Authorization", "Bearer impossible-human-session", true),
+        managed_device_http_request(&fixture.state, authority, &metadata, operation, signer)
+            .add_header("DPoP", "not-a-credential", true),
+        managed_device_http_request(&fixture.state, authority, &metadata, operation, signer)
+            .add_header(
+                "Source-Service-ID",
+                authority.source_service_id.as_str(),
+                true,
+            ),
+        managed_device_http_request(&fixture.state, authority, &metadata, operation, signer)
+            .add_header("Content-Encoding", "identity", true),
+        managed_device_http_request(&fixture.state, authority, &metadata, operation, signer)
+            .add_header(
+                "Arkret-Managed-Device",
+                metadata.to_header_value().unwrap(),
+                false,
+            ),
+        managed_device_http_request(&fixture.state, authority, &metadata, operation, signer)
+            .body(b"{\"tampered\":true}".to_vec()),
+        managed_device_http_request(
+            &fixture.state,
+            authority,
+            &metadata,
+            arkret_wire::ServiceOperationId::SelfRealmReadStreamsV1,
+            signer,
+        ),
+        managed_device_http_request(&fixture.state, authority, &metadata, operation, signer)
+            .add_header(
+                "Arkret-Operation",
+                arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                true,
+            ),
+    ];
+    for request in requests {
+        let response = request.send(&echo).await;
+        assert_eq!(response.status_code, Some(StatusCode::UNAUTHORIZED));
+        assert_eq!(
+            before,
+            authority_snapshot(&fixture.pool).await,
+            "invalid transport cannot consume nonce or business state"
+        );
+    }
+    for metadata in [
+        {
+            let mut metadata = managed_device_metadata(authority);
+            metadata.applet_id =
+                arkret_wire::AppletId::new(format!("ak:applet:{}", uuid::Uuid::now_v7())).unwrap();
+            metadata
+        },
+        {
+            let mut metadata = managed_device_metadata(authority);
+            metadata.account_id.station_id = "ak:did_core:web:other.example".parse().unwrap();
+            metadata
+        },
+        {
+            let mut metadata = managed_device_metadata(authority);
+            metadata.authorization_event_id =
+                fixture.pcr.unit.transactions[1].event.event_id.clone();
+            metadata
+        },
+        {
+            let mut metadata = managed_device_metadata(authority);
+            metadata.effective_scope = ScopeRef::Realm {
+                realm_id: RealmId::from_event_id(&fixture.pcr.unit.transactions[1].event.event_id),
+            };
+            metadata
+        },
+    ] {
+        let response =
+            managed_device_http_request(&fixture.state, authority, &metadata, operation, signer)
+                .send(&echo)
+                .await;
+        assert_eq!(response.status_code, Some(StatusCode::UNAUTHORIZED));
+        assert_eq!(before, authority_snapshot(&fixture.pool).await);
+    }
+    let metadata = managed_device_metadata(authority);
+    let (first, second) = tokio::join!(
+        managed_device_http_request(&fixture.state, authority, &metadata, operation, signer)
+            .send(&echo),
+        managed_device_http_request(&fixture.state, authority, &metadata, operation, signer)
+            .send(&echo),
+    );
+    let mut statuses = [first.status_code.unwrap(), second.status_code.unwrap()];
+    statuses.sort();
+    assert_eq!(statuses, [StatusCode::OK, StatusCode::UNAUTHORIZED]);
+    let mut after = authority_snapshot(&fixture.pool).await;
+    let mut baseline = baseline;
+    after.as_object_mut().unwrap().remove("device_nonces");
+    baseline.as_object_mut().unwrap().remove("device_nonces");
+    assert_eq!(
+        baseline, after,
+        "authentication creates only private nonce state"
+    );
+}
+
 async fn authority_snapshot(pool: &PgPool) -> Value {
     #[derive(diesel::QueryableByName)]
     struct Snapshot {
@@ -2174,6 +2450,7 @@ async fn authority_snapshot(pool: &PgPool) -> Value {
         'profiles',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM actor_profile_current_results r), \
         'device_generations',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM pcr_device_generation_current_results r), \
         'device_authorizations',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM pcr_device_authorization_current_results r), \
+        'device_nonces',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM applet_managed_device_nonces r), \
         'grants',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM capability_grant_current_results r), \
         'quota_counters',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM capability_quota_counters r), \
         'quota_consumptions',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM capability_quota_consumptions r), \

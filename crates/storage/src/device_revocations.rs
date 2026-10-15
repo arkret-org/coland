@@ -148,7 +148,7 @@ pub struct PcrDeviceGeneration {
 /// Receiver-derived identity at one confirmed PCR cut. This is transport
 /// authority, not permission to act on any business resource. Consumers must
 /// still check the actual resource scope and all current business gates.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AppletManagedDeviceAuthority {
     pub account_id: arkret_wire::AccountId,
     pub device_id: arkret_wire::DeviceId,
@@ -166,6 +166,20 @@ pub struct AppletManagedDeviceAuthority {
 
 #[async_trait]
 pub trait DeviceRevocationStore: Send + Sync {
+    /// After cryptographic verification, re-read the exact Device instance
+    /// under its PCR writer lock and durably consume the HTTP nonce. This does
+    /// not consume business approvals or grant permission to a resource.
+    async fn consume_applet_managed_device_nonce(
+        &self,
+        _expected: &AppletManagedDeviceAuthority,
+        _metadata: &arkret_models_integration::AppletManagedDeviceMetadata,
+        _retain_until: DateTime<Utc>,
+    ) -> PersistenceResult<AppletManagedDeviceAuthority> {
+        Err(PersistenceError::SchemaViolation(
+            "managed Device nonce provider is unavailable".to_owned(),
+        ))
+    }
+
     /// Return only a currently active, accepted managed Device. Ordinary
     /// Devices and absent authorizations return `None`; incomplete authority
     /// and known inactive devices fail closed. No Human Account row is needed.

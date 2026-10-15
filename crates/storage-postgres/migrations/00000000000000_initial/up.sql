@@ -2772,6 +2772,18 @@ CREATE TABLE public.websocket_auth_replay_ledger (
 
 CREATE INDEX websocket_auth_replay_ledger_retain_until_idx ON public.websocket_auth_replay_ledger (retain_until);
 
+-- Private RFC 9421 replay state; not a session or business acceptance ledger.
+CREATE TABLE public.applet_managed_device_nonces (
+    principal_id text NOT NULL,
+    station_id text NOT NULL,
+    device_id text NOT NULL,
+    nonce text NOT NULL CHECK(nonce ~ '^[A-Za-z0-9_-]{22,128}$'),
+    consumed_at timestamptz NOT NULL,
+    retain_until timestamptz NOT NULL CHECK(retain_until > consumed_at),
+    PRIMARY KEY (principal_id,station_id,device_id,nonce)
+);
+CREATE INDEX applet_managed_device_nonces_expiry_idx ON public.applet_managed_device_nonces (retain_until);
+
 CREATE TABLE public.websocket_connection_leases (
     connection_id text PRIMARY KEY,
     session_binding text NOT NULL,

@@ -206,6 +206,13 @@ pub(crate) mod test_event {
     }
 }
 
+/// Exercise only the mounted managed Device authentication hoop with an echo.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn test_applet_managed_device_authentication_service(state: AppState) -> salvo::Service {
+    crate::routing::identity::applet_managed_device::test_service(state)
+}
+
 /// Rebuild the production accepted PCR history without creating a Device.
 #[cfg(feature = "test-support")]
 #[doc(hidden)]

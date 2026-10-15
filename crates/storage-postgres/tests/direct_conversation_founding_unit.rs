@@ -2272,6 +2272,7 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
     let realm_id = realm_of(&unit);
     use coland_storage::CapabilityGrantCurrentResultStore;
     let content_request = coland_storage::AgentSessionAuthorityRequest {
+        approval_evidence_refs: Vec::new(),
         agent_account_id: agent.clone(),
         controller_account_id: controller.clone(),
         agent_key_authorization_ref: key_event.event_id.clone(),

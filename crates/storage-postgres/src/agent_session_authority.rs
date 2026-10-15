@@ -69,6 +69,11 @@ async fn content_target(
             if current.id.as_ref() != Some(strand)
                 || current.state != Some(arkret_wire::ObjectState::Active)
                 || covering.realm_id != current.realm_id
+                || request
+                    .resource_scope
+                    .track_names
+                    .iter()
+                    .any(|track| !current.tracks.contains_key(track.as_str()))
             {
                 return Err(unavailable(
                     "Strand lifecycle or participation ceiling is unavailable",
@@ -446,6 +451,7 @@ pub(crate) async fn read(
                 strand_id: target.resource.strand_id.as_ref().map(ToString::to_string),
                 circle_id: circle.map(ToString::to_string),
                 track: track.clone(),
+                object_kind: (action == "ak.message.create").then(|| "message".to_owned()),
                 ..Default::default()
             };
             let operation = coland_storage::AuthorizationOperation {

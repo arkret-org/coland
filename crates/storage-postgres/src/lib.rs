@@ -264,22 +264,32 @@ struct DatabaseReadyRow {
 }
 
 pub async fn database_ready(pool: Option<&PgPool>) -> bool {
-    match pool {
-        Some(pool) => match pool.get().await {
-            Ok(mut conn) => sql_query("SELECT 1 AS ok")
-                .get_result::<DatabaseReadyRow>(&mut *conn)
-                .await
-                .is_ok_and(|row| row.ok == 1),
-            Err(_) => false,
-        },
-        None => true,
-    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        match pool {
+            Some(pool) => match pool.get().await {
+                Ok(mut conn) => sql_query("SELECT 1 AS ok")
+                    .get_result::<DatabaseReadyRow>(&mut *conn)
+                    .await
+                    .is_ok_and(|row| row.ok == 1),
+                Err(_) => false,
+            },
+            None => true,
+        }
+    })
+    .await
+    .unwrap_or(false)
 }
 
 pub(crate) async fn pg_conn(pool: &PgPool) -> PersistenceResult<Object<AsyncPgConnection>> {
-    pool.get()
-        .await
-        .map_err(|error| PersistenceError::Internal(format!("database pool error: {error}")))
+    tokio::time::timeout(
+        pool.timeouts()
+            .wait
+            .unwrap_or(std::time::Duration::from_secs(5)),
+        pool.get(),
+    )
+    .await
+    .map_err(|_| PersistenceError::Internal("database checkout timed out".into()))?
+    .map_err(|error| PersistenceError::Internal(format!("database pool error: {error}")))
 }
 
 pub(crate) fn json_string_array(value: Value) -> Vec<String> {

@@ -2736,6 +2736,25 @@ async fn sidecar_snapshot_lists_and_scans_keep_private_stream_coordinates() {
         .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
     };
     let now_ms = chrono::Utc::now().timestamp_millis();
+    let issued = store
+        .issue_realm_state_snapshot_for_account(&realm, controller, &station, &sign)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store
+            .issued_realm_state_snapshot(&realm, controller, &issued.snapshot_id, &station)
+            .await
+            .unwrap(),
+        Some(issued.clone())
+    );
+    assert!(
+        store
+            .issued_realm_state_snapshot(&realm, &foreign, &issued.snapshot_id, &station)
+            .await
+            .unwrap()
+            .is_none()
+    );
     let window_request = coland_storage::AccountRealmWindowRequest {
         realm_id: realm.clone(),
         account: controller.clone(),

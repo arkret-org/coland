@@ -751,6 +751,7 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
             "failed_precondition: snapshot cannot remove an accepted binding".into(),
         ));
     }
+    crate::replica_authorization::guard_current_rows(conn, realm_id, entries).await?;
     guard_snapshot_revisions(conn, realm_id, entries).await?;
     for source_head in visible_heads {
         if source_head.stream_ref.realm_id() != realm_id {
@@ -1851,6 +1852,10 @@ pub(crate) async fn advance_in_connection(
 #[cfg(test)]
 #[path = "replica_current/circle_revision_tests.rs"]
 mod circle_revision_tests;
+
+#[cfg(test)]
+#[path = "replica_current/current_integrity_tests.rs"]
+mod current_integrity_tests;
 
 #[cfg(test)]
 mod tests {

@@ -22,6 +22,41 @@ pub(crate) fn keeps(_selector: &CurrentSelector) -> bool {
     true
 }
 
+pub(crate) const CURRENT_REVISION_GUARD_SQL: &str = "SELECT EXISTS(SELECT 1 FROM jsonb_array_elements($2) incoming \
+     JOIN LATERAL (SELECT current_commit_id,current_stream_position,source_stream_ref,value \
+       FROM replica_authorization_rows WHERE realm_id=$1 AND selector=incoming->'selector' \
+       LIMIT 1) stored ON TRUE \
+     WHERE stored.current_commit_id=incoming->'revision'->>'commit_id' \
+       AND stored.current_stream_position::text=incoming->'revision'->>'stream_position' \
+       AND (stored.source_stream_ref IS DISTINCT FROM incoming->'source_stream_ref' \
+         OR stored.value IS DISTINCT FROM incoming->'value')) AS present";
+
+/// Compare the complete incoming cut before a snapshot retires old rows.
+/// A verified signature does not permit rewriting an already observed revision.
+pub(crate) async fn guard_current_rows(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+    entries: &[TypedCurrentRow],
+) -> PersistenceResult<()> {
+    #[derive(diesel::QueryableByName)]
+    struct Conflict {
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        present: bool,
+    }
+    let conflict = diesel::sql_query(CURRENT_REVISION_GUARD_SQL)
+        .bind::<Text, _>(realm.as_str())
+        .bind::<Jsonb, _>(serde_json::to_value(entries).map_err(invalid)?)
+        .get_result::<Conflict>(conn)
+        .await
+        .map_err(PersistenceError::database)?;
+    if conflict.present {
+        return Err(PersistenceError::Conflict(
+            "failed_precondition: current revision has conflicting canonical bytes".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Save only a verified snapshot or source-committed reducer result. The
 /// enclosing replica transaction installs the rows and its anchor together.
 pub(crate) async fn save_row(
@@ -44,13 +79,17 @@ pub(crate) async fn save_row(
     }
     let position = i64::try_from(revision.stream_position)
         .map_err(|_| invalid("source position exceeds PostgreSQL BIGINT"))?;
-    diesel::sql_query(
+    let changed = diesel::sql_query(
         "INSERT INTO replica_authorization_rows \
          (realm_id,selector,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) \
          VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(realm_id,selector) DO UPDATE SET \
          source_stream_ref=EXCLUDED.source_stream_ref,current_commit_id=EXCLUDED.current_commit_id, \
          current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value, \
-         updated_at=EXCLUDED.updated_at",
+         updated_at=EXCLUDED.updated_at \
+         WHERE replica_authorization_rows.current_commit_id<>EXCLUDED.current_commit_id \
+           OR replica_authorization_rows.current_stream_position<>EXCLUDED.current_stream_position \
+           OR (replica_authorization_rows.source_stream_ref=EXCLUDED.source_stream_ref \
+             AND replica_authorization_rows.value=EXCLUDED.value)",
     )
     .bind::<Text, _>(realm.as_str())
     .bind::<Jsonb, _>(serde_json::to_value(selector).map_err(invalid)?)
@@ -62,6 +101,11 @@ pub(crate) async fn save_row(
     .execute(conn)
     .await
     .map_err(PersistenceError::database)?;
+    if changed != 1 {
+        return Err(PersistenceError::Conflict(
+            "failed_precondition: current revision has conflicting canonical bytes".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -709,6 +753,10 @@ mod direct_evidence_tests {
             },
             serde_json::json!({"membership":"leave"}),
         );
+        // A real successor has its own revision, even when testing a bad roster.
+        let TypedCurrentRow::Value { revision, .. } = &mut bad;
+        revision.commit_id = head.commit_id.clone();
+        revision.stream_position = 1;
         save_row(&mut conn, &realm, &bad, at).await.unwrap();
         assert!(
             direct_current_evidence(&mut conn, &realm, &pair_key, &pair)

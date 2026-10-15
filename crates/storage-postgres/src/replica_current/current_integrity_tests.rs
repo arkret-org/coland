@@ -226,7 +226,7 @@ async fn revision_integrity_guard_stays_bounded_with_unrelated_realms_and_hot_cu
         .unwrap();
     #[derive(diesel::QueryableByName)]
     struct Plan {
-        #[diesel(column_name = "QUERY PLAN", sql_type = Jsonb)]
+        #[diesel(column_name = "QUERY PLAN", sql_type = diesel::sql_types::Json)]
         value: Value,
     }
     fn visited(node: &Value) -> f64 {

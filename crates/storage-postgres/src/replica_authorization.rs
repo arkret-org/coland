@@ -23,12 +23,13 @@ pub(crate) fn keeps(_selector: &CurrentSelector) -> bool {
 }
 
 pub(crate) const CURRENT_REVISION_GUARD_SQL: &str = "SELECT EXISTS(SELECT 1 FROM jsonb_array_elements($2) incoming \
-     JOIN replica_authorization_rows stored ON stored.realm_id=$1 \
-       AND stored.selector=incoming->'selector' \
-       AND stored.current_commit_id=incoming->'revision'->>'commit_id' \
+     JOIN LATERAL (SELECT current_commit_id,current_stream_position,source_stream_ref,value \
+       FROM replica_authorization_rows WHERE realm_id=$1 AND selector=incoming->'selector' \
+       LIMIT 1) stored ON TRUE \
+     WHERE stored.current_commit_id=incoming->'revision'->>'commit_id' \
        AND stored.current_stream_position::text=incoming->'revision'->>'stream_position' \
-     WHERE stored.source_stream_ref IS DISTINCT FROM incoming->'source_stream_ref' \
-       OR stored.value IS DISTINCT FROM incoming->'value') AS present";
+       AND (stored.source_stream_ref IS DISTINCT FROM incoming->'source_stream_ref' \
+         OR stored.value IS DISTINCT FROM incoming->'value')) AS present";
 
 /// Compare the complete incoming cut before a snapshot retires old rows.
 /// A verified signature does not permit rewriting an already observed revision.

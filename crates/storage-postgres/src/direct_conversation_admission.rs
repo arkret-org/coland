@@ -245,28 +245,57 @@ pub(crate) async fn direct_conversation_realm_in_connection(
 
 /// Whether the Event maps to an action of the closed participant allowlist
 /// (`ak.authority.direct_conversation_participant.v1` `event_action_allowlist`).
+fn unconditional_participant_kind(kind: &EventKind) -> bool {
+    arkret_models_collaboration::direct_conversation::direct_conversation_structure_action(kind)
+        || matches!(
+            kind,
+            EventKind::MessageCreate
+                | EventKind::MessageRedact
+                | EventKind::MessageRevise
+                | EventKind::MlsCommit
+                | EventKind::ReactionAdd
+                | EventKind::ReactionRemove
+                | EventKind::ReadCursorAdvance
+                | EventKind::StrandWatchSet
+        )
+}
+
+/// A session ceiling retains the registered action's own conditional semantics;
+/// the signed Event still passes the complete profile table at consumption.
+pub(crate) fn participant_session_action(action: &str) -> bool {
+    use arkret_wire::CapabilityActionId as Action;
+    matches!(
+        Action::from_wire(action),
+        Some(
+            Action::CallJoin
+                | Action::CallScreenShare
+                | Action::MemberLeaveOwn
+                | Action::MessageCreate
+                | Action::MessageRedactOwn
+                | Action::MessageReviseOwn
+                | Action::MlsCommit
+                | Action::ReactionAdd
+                | Action::ReactionRemove
+                | Action::ReadCursorAdvance
+                | Action::SpaceArchive
+                | Action::SpaceCreate
+                | Action::SpaceRestore
+                | Action::SpaceTombstone
+                | Action::SpaceUpdate
+                | Action::StrandArchive
+                | Action::StrandCreate
+                | Action::StrandRestore
+                | Action::StrandUpdate
+                | Action::StrandWatchSet
+        )
+    )
+}
+
 fn participant_action(event: &arkret_wire::Event) -> bool {
-    if arkret_models_collaboration::direct_conversation::direct_conversation_structure_action(
-        &event.kind,
-    ) {
-        return true;
-    }
-    match event.kind {
-        EventKind::MessageCreate
-        | EventKind::MessageRedact
-        | EventKind::MessageRevise
-        | EventKind::MlsCommit
-        | EventKind::ReactionAdd
-        | EventKind::ReactionRemove
-        | EventKind::ReadCursorAdvance
-        | EventKind::StrandWatchSet
-        | EventKind::StrandCreate => true,
-        EventKind::MemberState => {
-            membership_of(event).as_deref() == Some("leave")
-                && membership_target(event).as_ref() == Some(&event.actor_id)
-        }
-        _ => false,
-    }
+    unconditional_participant_kind(&event.kind)
+        || (event.kind == EventKind::MemberState
+            && membership_of(event).as_deref() == Some("leave")
+            && membership_target(event).as_ref() == Some(&event.actor_id))
 }
 
 /// The repair source is deliberately disjoint from the ordinary participant

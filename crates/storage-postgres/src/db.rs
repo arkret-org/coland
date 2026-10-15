@@ -3,10 +3,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use deadpool::Runtime;
-use diesel_async::AsyncPgConnection;
 use diesel_async::async_connection_wrapper::AsyncConnectionWrapper;
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
 use diesel_async::pooled_connection::deadpool::Pool;
+use diesel_async::{AsyncPgConnection, SimpleAsyncConnection};
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
@@ -22,8 +22,8 @@ pub struct Db {
 /// Connection-pool sizing, supplied by the caller.
 ///
 /// Operators match these to their Postgres `max_connections` and to how long a
-/// request may block before failing instead of waiting forever. `None` keeps
-/// the deadpool defaults (`max_size = cpu_count * 4`, no wait timeout). The
+/// request may block before failing. `None` keeps the default pool size and
+/// applies a five-second checkout budget. The
 /// values used to be read from `COLAND_DB_POOL_*` inside this crate, which
 /// meant a storage library knew the name of the application hosting it.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -50,17 +50,7 @@ impl Db {
         let pool = match database_url {
             Some(url) if !url.trim().is_empty() => {
                 migrations_applied_flag().store(false, Ordering::Release);
-                let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new(url);
-                let mut builder = Pool::builder(manager);
-                if let Some(max) = tuning.max_size.filter(|n| *n > 0) {
-                    builder = builder.max_size(max);
-                }
-                if let Some(secs) = tuning.acquire_timeout_seconds.filter(|n| *n > 0) {
-                    builder = builder
-                        .wait_timeout(Some(Duration::from_secs(secs)))
-                        .runtime(Runtime::Tokio1);
-                }
-                let pool = builder.build()?;
+                let pool = build_pool(url, tuning)?;
                 run_migrations(url).await?;
                 migrations_applied_flag().store(true, Ordering::Release);
                 Some(pool)
@@ -146,4 +136,82 @@ fn verify_schema_contract(
         row.contract_version
     );
     Ok(())
+}
+
+pub(crate) fn build_pool(url: &str, tuning: PoolTuning) -> anyhow::Result<PgPool> {
+    let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new(url);
+    let budget = Duration::from_secs(
+        tuning
+            .acquire_timeout_seconds
+            .filter(|n| *n > 0)
+            .unwrap_or(5),
+    );
+    let mut builder = Pool::builder(manager)
+                    .wait_timeout(Some(budget))
+                    .create_timeout(Some(budget))
+                    .recycle_timeout(Some(budget))
+                    .runtime(Runtime::Tokio1)
+                    .post_create(diesel_async::pooled_connection::deadpool::Hook::async_fn(|conn: &mut AsyncPgConnection, _| Box::pin(async move {
+                        tokio::time::timeout(Duration::from_secs(5), conn.batch_execute("SET statement_timeout = '30s'; SET lock_timeout = '5s'; SET idle_in_transaction_session_timeout = '60s';"))
+                            .await.map_err(|_| diesel_async::pooled_connection::deadpool::HookError::Message("database session setup timed out".into()))?
+                            .map_err(|error| diesel_async::pooled_connection::deadpool::HookError::Backend(diesel_async::pooled_connection::PoolError::QueryError(error)))?;
+                        Ok(())
+                    })));
+    if let Some(max) = tuning.max_size.filter(|n| *n > 0) {
+        builder = builder.max_size(max);
+    }
+    builder.build().map_err(Into::into)
+}
+
+#[cfg(test)]
+mod wait_bound_tests {
+    use diesel_async::RunQueryDsl;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn checkout_deadline_covers_exhaustion_and_handshake() {
+        let url =
+            std::env::var("COLAND_TEST_DATABASE_URL").expect("isolated test database required");
+        let tuning = PoolTuning {
+            max_size: Some(1),
+            acquire_timeout_seconds: Some(1),
+        };
+        let pool = build_pool(&url, tuning).unwrap();
+        let mut conn = crate::pg_conn(&pool).await.unwrap();
+        #[derive(diesel::QueryableByName)]
+        struct Settings {
+            #[diesel(sql_type = diesel::sql_types::Bool)]
+            bounded: bool,
+        }
+        let settings: Settings = diesel::sql_query("SELECT current_setting('statement_timeout')::interval = interval '30 seconds' AND current_setting('lock_timeout')::interval = interval '5 seconds' AS bounded").get_result(&mut *conn).await.unwrap();
+        assert!(settings.bounded);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), crate::pg_conn(&pool))
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert!(!crate::database_ready(Some(&pool)).await);
+        drop(conn);
+        assert!(crate::database_ready(Some(&pool)).await);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let blackhole = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let pool = build_pool(
+            &format!("postgres://postgres@{address}/test?sslmode=disable"),
+            tuning,
+        )
+        .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), crate::pg_conn(&pool))
+                .await
+                .unwrap()
+                .is_err()
+        );
+        blackhole.abort();
+    }
 }

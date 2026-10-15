@@ -88,10 +88,14 @@ struct SnapshotRow {
     expected_generation_value: Option<Value>,
     #[diesel(sql_type = Nullable<Text>)]
     authorization_commit_id: Option<String>,
+    #[diesel(sql_type = Nullable<BigInt>)]
+    authorization_stream_position: Option<i64>,
     #[diesel(sql_type = Nullable<Jsonb>)]
     authorization_value: Option<Value>,
     #[diesel(sql_type = Nullable<Text>)]
     latest_authorization_commit_id: Option<String>,
+    #[diesel(sql_type = Nullable<BigInt>)]
+    latest_authorization_stream_position: Option<i64>,
     #[diesel(sql_type = Nullable<Jsonb>)]
     expected_authorization_value: Option<Value>,
     #[diesel(sql_type = BigInt)]
@@ -233,11 +237,15 @@ pub(crate) async fn confirmed_pcr_device_cut_in_connection(
                     e.envelope->>'event_id'=p.genesis_event_id AND \
                     e.envelope#>>'{payload,object,purpose}'='applet_managed_control')) \
             ORDER BY c.stream_position DESC LIMIT 1) AS expected_generation_value, \
-           a.current_commit_id AS authorization_commit_id, a.value AS authorization_value, \
+           a.current_commit_id AS authorization_commit_id, a.current_stream_position AS authorization_stream_position, a.value AS authorization_value, \
            (SELECT c.commit_id FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
             WHERE c.realm_id=p.pcr_realm_id AND e.kind='ak.device.authorize' \
               AND e.envelope->'payload'->>'device_id'=$3 \
             ORDER BY c.stream_position DESC LIMIT 1) AS latest_authorization_commit_id, \
+           (SELECT c.stream_position FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
+            WHERE c.realm_id=p.pcr_realm_id AND e.kind='ak.device.authorize' \
+              AND e.envelope->'payload'->>'device_id'=$3 \
+            ORDER BY c.stream_position DESC LIMIT 1) AS latest_authorization_stream_position, \
            (SELECT ((e.envelope->'payload') - 'device_id'::text) || \
                     jsonb_build_object('device_authorize_event_id',e.envelope->>'event_id') \
             FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
@@ -280,6 +288,7 @@ pub(crate) async fn confirmed_pcr_device_cut_in_connection(
     let Some(row) = row else { return Ok(None) };
     if row.generation_commit_id != row.latest_generation_commit_id
         || row.authorization_commit_id != row.latest_authorization_commit_id
+        || row.authorization_stream_position != row.latest_authorization_stream_position
         || row.generation_stream_position != row.latest_generation_stream_position
         || row.generation_value != row.expected_generation_value
         || row.authorization_value != row.expected_authorization_value

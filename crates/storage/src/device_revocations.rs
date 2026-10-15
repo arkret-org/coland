@@ -145,8 +145,41 @@ pub struct PcrDeviceGeneration {
     pub current_device_generation_ref: u64,
 }
 
+/// Receiver-derived identity at one confirmed PCR cut. This is transport
+/// authority, not permission to act on any business resource. Consumers must
+/// still check the actual resource scope and all current business gates.
+#[derive(Clone, Debug)]
+pub struct AppletManagedDeviceAuthority {
+    pub account_id: arkret_wire::AccountId,
+    pub device_id: arkret_wire::DeviceId,
+    pub selector: DeviceRevocationGateSelector,
+    pub applet_id: arkret_wire::AppletId,
+    pub source_service_id: arkret_wire::DidCoreId,
+    pub native_did: arkret_wire::Did,
+    pub pcr_realm_id: arkret_wire::RealmId,
+    pub current_device_generation_ref: u64,
+    pub public_key: [u8; 32],
+    pub scopes: arkret_models_collaboration::events_payloads::AppletManagedDeviceScopes,
+    pub not_before: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
 #[async_trait]
 pub trait DeviceRevocationStore: Send + Sync {
+    /// Return only a currently active, accepted managed Device. Ordinary
+    /// Devices and absent authorizations return `None`; incomplete authority
+    /// and known inactive devices fail closed. No Human Account row is needed.
+    async fn applet_managed_device_authority(
+        &self,
+        _account: &arkret_wire::AccountId,
+        _device_id: &arkret_wire::DeviceId,
+        _now: DateTime<Utc>,
+    ) -> PersistenceResult<Option<AppletManagedDeviceAuthority>> {
+        Err(PersistenceError::SchemaViolation(
+            "managed Device authority provider is unavailable".to_owned(),
+        ))
+    }
+
     /// The accepted `device_generation` of the Account's PCR at one confirmed
     /// cut whose projection matches its latest writer Commit. `None` when this
     /// Station holds no PCR for the Account.

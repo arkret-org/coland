@@ -931,6 +931,19 @@ impl PersistenceHandle {
             .await?)
     }
 
+    pub async fn applet_managed_device_authority(
+        &self,
+        account: &arkret_wire::AccountId,
+        device_id: &arkret_wire::DeviceId,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> crate::ServiceResult<Option<coland_storage::AppletManagedDeviceAuthority>> {
+        Ok(self
+            .persistence
+            .device_revocations()
+            .applet_managed_device_authority(account, device_id, now)
+            .await?)
+    }
+
     pub async fn pcr_device_generation(
         &self,
         account: &arkret_wire::AccountId,
@@ -1685,6 +1698,18 @@ impl PersistenceHandle {
 
 #[async_trait::async_trait]
 impl coland_storage::DeviceRevocationStore for PersistenceHandle {
+    async fn applet_managed_device_authority(
+        &self,
+        account: &arkret_wire::AccountId,
+        device_id: &arkret_wire::DeviceId,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<Option<coland_storage::AppletManagedDeviceAuthority>> {
+        self.persistence
+            .device_revocations()
+            .applet_managed_device_authority(account, device_id, now)
+            .await
+    }
+
     async fn pcr_device_generation(
         &self,
         account: &arkret_wire::AccountId,

@@ -135,6 +135,7 @@ mod organization_moderation_gate;
 mod organization_registration;
 mod pcr_accepted_device_unit;
 mod pcr_applet_device;
+mod pcr_applet_device_authority;
 mod pcr_device_current_results;
 mod pcr_device_revocation_proposals;
 mod pcr_device_status_fold;

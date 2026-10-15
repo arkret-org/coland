@@ -143,12 +143,12 @@ pub(crate) async fn admit(
             ));
         }
         // HTTP identity still has to be the original Service on exact replay.
-        require_provenance(conn, event, source, applet).await?;
+        require_provenance(conn, &event.actor_id, source, applet).await?;
         return Ok(AcceptedDeviceAuthorizationOutcome::Duplicate(decode(
             known.value["commit"].clone(),
         )?));
     }
-    let provision = require_provenance(conn, event, source, applet).await?;
+    let provision = require_provenance(conn, &event.actor_id, source, applet).await?;
     if payload
         .expires_at
         .flatten()
@@ -192,46 +192,10 @@ pub(crate) async fn admit(
             ));
         }
     }
-    let resolution = sql_query("SELECT p.pcr_realm_id,p.projection,g.envelope AS genesis,c.envelope AS current FROM principal_resolutions p JOIN canonical_events g ON g.envelope->>'event_id'=p.genesis_event_id JOIN realm_commits gc ON gc.event_pk=g.pk AND gc.stream_position=0 JOIN canonical_events c ON c.envelope->>'event_id'=p.current_event_id JOIN realm_commits cc ON cc.event_pk=c.pk AND cc.realm_id=p.pcr_realm_id WHERE p.principal_id=$1 AND p.station_id=$2 FOR SHARE OF p")
-        .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str())
-        .get_result::<ResolutionRow>(&mut *conn).await.optional()?.ok_or_else(|| corrupt("accepted current resolution missing"))?;
-    let projection: PrincipalResolutionProjection = decode(resolution.projection)?;
-    let genesis: Event = decode(resolution.genesis)?;
-    let current: Event = decode(resolution.current)?;
-    let record = coland_storage::PrincipalResolutionRecord {
-        account_id: account.clone(),
-        pcr_realm_id: event.realm_id.clone(),
-        genesis_event: genesis.clone(),
-        current_event: current,
-        projection: projection.clone(),
-    };
-    coland_storage::validate_principal_resolution_record(&record)?;
-    let latest = sql_query("SELECT e.envelope AS value FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE c.realm_id=$1 AND e.state='committed' AND e.kind IN ('ak.realm.create','ak.identity.resolution.update') ORDER BY c.stream_position DESC LIMIT 1")
-        .bind::<Text,_>(event.realm_id.as_str()).get_result::<JsonRow>(&mut *conn).await?;
-    let latest: Event = decode(latest.value)?;
-    let accepted_resolution: arkret_models_identity::ResolutionCommitment =
-        if latest.kind == EventKind::RealmCreate {
-            let create: arkret_models_collaboration::events_payloads::RealmCreatePayload =
-                decode(serde_json::to_value(&latest.payload).map_err(corrupt)?)?;
-            create
-                .object
-                .initial_resolution
-                .ok_or_else(|| corrupt("managed genesis has no initial resolution"))?
-        } else {
-            let update: arkret_models_identity::PrincipalResolutionUpdatePayload =
-                decode(serde_json::to_value(&latest.payload).map_err(corrupt)?)?;
-            update.next
-        };
-    if latest != record.current_event
-        || accepted_resolution.did != projection.did
-        || accepted_resolution.method_history_head != projection.method_history_head
-        || accepted_resolution.version_id != projection.version_id
-    {
-        return Err(corrupt(
-            "current resolution differs from latest accepted writer",
-        ));
-    }
-    if resolution.pcr_realm_id != event.realm_id.as_str()
+    let record = current_resolution_in_connection(conn, account).await?;
+    let projection = &record.projection;
+    let genesis = &record.genesis_event;
+    if record.pcr_realm_id != event.realm_id
         || genesis
             .payload
             .get("object")
@@ -419,14 +383,62 @@ pub(crate) async fn admit(
     ))
 }
 
-async fn require_provenance(
+/// Validate the projected resolution against its latest accepted writer at
+/// the caller's snapshot. Write callers must already serialize the PCR head.
+pub(crate) async fn current_resolution_in_connection(
     conn: &mut AsyncPgConnection,
-    event: &Event,
+    account: &arkret_wire::AccountId,
+) -> Result<coland_storage::PrincipalResolutionRecord, PgTransactionError> {
+    let resolution = sql_query("SELECT p.pcr_realm_id,p.projection,g.envelope AS genesis,c.envelope AS current FROM principal_resolutions p JOIN canonical_events g ON g.envelope->>'event_id'=p.genesis_event_id JOIN realm_commits gc ON gc.event_pk=g.pk AND gc.stream_position=0 AND gc.realm_id=p.pcr_realm_id AND g.state='committed' JOIN canonical_events c ON c.envelope->>'event_id'=p.current_event_id JOIN realm_commits cc ON cc.event_pk=c.pk AND cc.realm_id=p.pcr_realm_id AND c.state='committed' WHERE p.principal_id=$1 AND p.station_id=$2")
+        .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str())
+        .get_result::<ResolutionRow>(&mut *conn).await.optional()?.ok_or_else(|| corrupt("accepted current resolution missing"))?;
+    let projection: PrincipalResolutionProjection = decode(resolution.projection)?;
+    let genesis: Event = decode(resolution.genesis)?;
+    let current: Event = decode(resolution.current)?;
+    let record = coland_storage::PrincipalResolutionRecord {
+        account_id: account.clone(),
+        pcr_realm_id: arkret_wire::RealmId::new(resolution.pcr_realm_id).map_err(corrupt)?,
+        genesis_event: genesis.clone(),
+        current_event: current,
+        projection: projection.clone(),
+    };
+    coland_storage::validate_principal_resolution_record(&record)?;
+    let latest = sql_query("SELECT e.envelope AS value FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE c.realm_id=$1 AND e.state='committed' AND e.kind IN ('ak.realm.create','ak.identity.resolution.update') ORDER BY c.stream_position DESC LIMIT 1")
+        .bind::<Text,_>(record.pcr_realm_id.as_str()).get_result::<JsonRow>(&mut *conn).await?;
+    let latest: Event = decode(latest.value)?;
+    let accepted_resolution: arkret_models_identity::ResolutionCommitment =
+        if latest.kind == EventKind::RealmCreate {
+            let create: arkret_models_collaboration::events_payloads::RealmCreatePayload =
+                decode(serde_json::to_value(&latest.payload).map_err(corrupt)?)?;
+            create
+                .object
+                .initial_resolution
+                .ok_or_else(|| corrupt("managed genesis has no initial resolution"))?
+        } else {
+            let update: arkret_models_identity::PrincipalResolutionUpdatePayload =
+                decode(serde_json::to_value(&latest.payload).map_err(corrupt)?)?;
+            update.next
+        };
+    if latest != record.current_event
+        || accepted_resolution.did != projection.did
+        || accepted_resolution.method_history_head != projection.method_history_head
+        || accepted_resolution.version_id != projection.version_id
+    {
+        return Err(corrupt(
+            "current resolution differs from latest accepted writer",
+        ));
+    }
+    Ok(record)
+}
+
+pub(crate) async fn require_provenance(
+    conn: &mut AsyncPgConnection,
+    actor: &arkret_wire::ActorId,
     source: &DidCoreId,
     applet: &arkret_wire::AppletId,
 ) -> Result<AppletManagedActorProvisionPayload, PgTransactionError> {
     let rows = sql_query("SELECT e.envelope AS value FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.kind='ak.applet.managed_actor.provision' AND e.state='committed' AND e.envelope#>'{payload,actor_id}'=$1")
-        .bind::<Jsonb,_>(serde_json::to_value(&event.actor_id).map_err(corrupt)?).load::<JsonRow>(&mut *conn).await?;
+        .bind::<Jsonb,_>(serde_json::to_value(actor).map_err(corrupt)?).load::<JsonRow>(&mut *conn).await?;
     if rows.len() != 1 {
         return Err(refuse(
             ConflictCode::FailedPrecondition,
@@ -437,10 +449,7 @@ async fn require_provenance(
     let payload: AppletManagedActorProvisionPayload =
         decode(serde_json::to_value(&original.payload).map_err(corrupt)?)?;
     payload.validate().map_err(corrupt)?;
-    if &payload.service_id != source
-        || &payload.applet_id != applet
-        || payload.actor_id != event.actor_id
-    {
+    if &payload.service_id != source || &payload.applet_id != applet || &payload.actor_id != actor {
         return Err(refuse(
             ConflictCode::FailedPrecondition,
             "Service differs from accepted managed provenance",

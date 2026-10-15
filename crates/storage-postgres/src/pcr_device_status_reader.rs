@@ -87,6 +87,20 @@ pub(crate) async fn confirmed_pcr_device_status_cut_in_connection(
     else {
         return Ok(None);
     };
+    confirmed_pcr_device_status_from_authority(conn, account, device_id, authority, now)
+        .await
+        .map(Some)
+}
+
+/// Fold a cut already read on this connection, without querying a second
+/// authorization. The caller must preserve the same snapshot or writer lock.
+pub(crate) async fn confirmed_pcr_device_status_from_authority(
+    conn: &mut AsyncPgConnection,
+    account: &AccountId,
+    device_id: &DeviceId,
+    authority: ConfirmedPcrDeviceCut,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<ConfirmedPcrDeviceStatusCut, PgTransactionError> {
     let row = sql_query(
             "SELECT \
                (SELECT count(*) FROM pcr_device_revocation_proposals r WHERE r.realm_id=$1 AND r.device_id=$2) AS proposal_count, \
@@ -207,10 +221,10 @@ pub(crate) async fn confirmed_pcr_device_status_cut_in_connection(
         .ok_or_else(|| incomplete("PCR device has no current generation"))?;
     let lifecycle =
         fold_confirmed_device_status(&authorization.payload, generation, &decisions, now);
-    Ok(Some(ConfirmedPcrDeviceStatusCut {
+    Ok(ConfirmedPcrDeviceStatusCut {
         authority,
         lifecycle,
-    }))
+    })
 }
 
 #[derive(QueryableByName)]

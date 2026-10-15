@@ -145,6 +145,16 @@ async fn managed_devices_require_independent_principal_and_possession_on_service
         let realm: arkret_wire::RealmId = arkret_wire::RealmId::from_event_id(
             &serde_json::from_value(bundle["pcr_genesis_event"]["event_id"].clone()).unwrap(),
         );
+        let device_authority = coland_storage_postgres::PgDeviceRevocationStore {
+            pool: fixture.pool.clone(),
+        };
+        assert!(
+            device_authority
+                .applet_managed_device_authority(actor.as_account_id().unwrap(), &device_id, now)
+                .await
+                .unwrap()
+                .is_none()
+        );
         let sign = |payload: &DeviceAuthorizePayload, key: SigningKey, method: String| {
             let mut event = arkret_wire::test_support::raw_event_for_actor_at(
                 EventKind::DeviceAuthorize.as_str(),
@@ -378,6 +388,13 @@ async fn managed_devices_require_independent_principal_and_possession_on_service
         assert_eq!(deleted, 1);
         drop(conn);
         let missing = authority_snapshot(&fixture.pool).await;
+        assert!(
+            device_authority
+                .applet_managed_device_authority(actor.as_account_id().unwrap(), &device_id, now)
+                .await
+                .is_err(),
+            "missing PCR generation is not an absent managed Device"
+        );
         let (status, refused) = fixture
             .service_post(
                 &installed.package,
@@ -439,7 +456,156 @@ async fn managed_devices_require_independent_principal_and_possession_on_service
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{result}");
+        let accepted_authority = device_authority
+            .applet_managed_device_authority(actor.as_account_id().unwrap(), &device_id, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            accepted_authority.account_id,
+            *actor.as_account_id().unwrap()
+        );
+        assert_eq!(
+            accepted_authority.selector.authorization_ref.event_id,
+            valid.event_id
+        );
+        assert_eq!(
+            accepted_authority.public_key,
+            device.verifying_key().to_bytes()
+        );
+        assert_eq!(accepted_authority.native_did.as_str(), did);
+        assert_eq!(accepted_authority.pcr_realm_id, realm);
+        assert_eq!(accepted_authority.applet_id, installed.package.applet_id);
+        assert_eq!(
+            accepted_authority.source_service_id,
+            installed.package.service_id
+        );
+        assert_eq!(accepted_authority.current_device_generation_ref, 1);
+        let account = actor.as_account_id().unwrap();
+        let mut conn = fixture.pool.get().await.unwrap();
+        #[derive(diesel::QueryableByName)]
+        struct CountRow {
+            #[diesel(sql_type = diesel::sql_types::BigInt)]
+            count: i64,
+        }
+        let human_rows = diesel::sql_query(
+            "SELECT count(*) AS count FROM accounts WHERE principal_id=$1 AND station_id=$2",
+        )
+        .bind::<diesel::sql_types::Text, _>(account.principal_id.as_str())
+        .bind::<diesel::sql_types::Text, _>(account.station_id.as_str())
+        .get_result::<CountRow>(&mut *conn)
+        .await
+        .unwrap();
+        assert_eq!(
+            human_rows.count, 0,
+            "native managed identity must not create a Human Account"
+        );
+        // The legacy device mirror is never transport authority.
+        diesel::sql_query("UPDATE devices SET device_key='untrusted-mirror',verification_state='unverified' WHERE actor_id=$1 AND device_id=$2")
+            .bind::<diesel::sql_types::Text,_>(account.principal_id.as_str()).bind::<diesel::sql_types::Text,_>(device_id.as_str())
+            .execute(&mut *conn).await.unwrap();
+        drop(conn);
+        assert_eq!(
+            device_authority
+                .applet_managed_device_authority(account, &device_id, now)
+                .await
+                .unwrap()
+                .unwrap()
+                .public_key,
+            device.verifying_key().to_bytes()
+        );
+        assert!(
+            device_authority
+                .applet_managed_device_authority(
+                    account,
+                    &device_id,
+                    payload.not_before - chrono::Duration::milliseconds(1)
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            device_authority
+                .applet_managed_device_authority(
+                    account,
+                    &device_id,
+                    payload.expires_at.flatten().unwrap()
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            device_authority
+                .applet_managed_device_authority(
+                    account,
+                    &DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap(),
+                    now
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
         let committed = authority_snapshot(&fixture.pool).await;
+        let mut conn = fixture.pool.get().await.unwrap();
+        diesel::sql_query("UPDATE pcr_device_authorization_current_results SET current_stream_position=current_stream_position+1 WHERE realm_id=$1 AND device_id=$2")
+            .bind::<diesel::sql_types::Text,_>(realm.as_str()).bind::<diesel::sql_types::Text,_>(device_id.as_str())
+            .execute(&mut *conn).await.unwrap();
+        drop(conn);
+        let corrupt_position = authority_snapshot(&fixture.pool).await;
+        assert!(
+            device_authority
+                .applet_managed_device_authority(account, &device_id, now)
+                .await
+                .is_err(),
+            "authorization payload and Commit ID cannot excuse a false source position"
+        );
+        assert!(
+            device_authority
+                .pcr_device_admission(account, &device_id, now)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            corrupt_position,
+            authority_snapshot(&fixture.pool).await,
+            "an unavailable current must not repair itself while authenticating"
+        );
+        let mut conn = fixture.pool.get().await.unwrap();
+        diesel::sql_query("UPDATE pcr_device_authorization_current_results SET current_stream_position=current_stream_position-1 WHERE realm_id=$1 AND device_id=$2")
+            .bind::<diesel::sql_types::Text,_>(realm.as_str()).bind::<diesel::sql_types::Text,_>(device_id.as_str())
+            .execute(&mut *conn).await.unwrap();
+        #[derive(diesel::QueryableByName)]
+        struct ProjectionRow {
+            #[diesel(sql_type = diesel::sql_types::Jsonb)]
+            value: Value,
+        }
+        let original_projection = diesel::sql_query(
+            "SELECT projection AS value FROM principal_resolutions WHERE pcr_realm_id=$1",
+        )
+        .bind::<diesel::sql_types::Text, _>(realm.as_str())
+        .get_result::<ProjectionRow>(&mut *conn)
+        .await
+        .unwrap()
+        .value;
+        diesel::sql_query("UPDATE principal_resolutions SET projection=jsonb_set(projection,'{version_id}',to_jsonb('corrupt-version'::text)) WHERE pcr_realm_id=$1")
+            .bind::<diesel::sql_types::Text,_>(realm.as_str()).execute(&mut *conn).await.unwrap();
+        drop(conn);
+        assert!(
+            device_authority
+                .applet_managed_device_authority(account, &device_id, now)
+                .await
+                .is_err(),
+            "resolution projection must match the actual latest accepted writer"
+        );
+        let mut conn = fixture.pool.get().await.unwrap();
+        diesel::sql_query("UPDATE principal_resolutions SET projection=$2 WHERE pcr_realm_id=$1")
+            .bind::<diesel::sql_types::Text, _>(realm.as_str())
+            .bind::<diesel::sql_types::Jsonb, _>(&original_projection)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        drop(conn);
+        assert_eq!(committed, authority_snapshot(&fixture.pool).await);
         let (status, retry) = fixture
             .service_post(
                 &installed.package,
@@ -452,6 +618,14 @@ async fn managed_devices_require_independent_principal_and_possession_on_service
         assert_eq!(status, StatusCode::OK, "{retry}");
         assert_eq!(committed, authority_snapshot(&fixture.pool).await);
         let mut replacement = payload.clone();
+        let replacement_key = SigningKey::from_bytes(&[118; 32]);
+        replacement.device_public_key_did = arkret_wire::NonEmptyString::new(format!(
+            "did:key:{}",
+            arkret_canonical::ed25519_pubkey_to_did_key_multibase(
+                replacement_key.verifying_key().as_bytes()
+            )
+        ))
+        .unwrap();
         replacement.scopes = Some(
             serde_json::from_value(json!([{
                 "effective_scope":{"kind":"realm","realm_id":fixture.realm},
@@ -461,7 +635,7 @@ async fn managed_devices_require_independent_principal_and_possession_on_service
         );
         replacement.device_signature =
             serde_json::from_value(json!(arkret_canonical::base64url_encode(
-                device
+                replacement_key
                     .sign(
                         &replacement
                             .device_possession_signature_input(actor.as_account_id().unwrap())
@@ -480,11 +654,35 @@ async fn managed_devices_require_independent_principal_and_possession_on_service
                 &installed.package,
                 "/_arkret/self/events",
                 arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-                &request(event),
+                &request(event.clone()),
                 "device-replacement",
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{replaced}");
+        let replaced_authority = device_authority
+            .applet_managed_device_authority(account, &device_id, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            replaced_authority.selector.authorization_ref.event_id,
+            event.event_id
+        );
+        assert_ne!(replaced_authority.selector, accepted_authority.selector);
+        assert_eq!(
+            replaced_authority.public_key,
+            replacement_key.verifying_key().to_bytes()
+        );
+        assert_eq!(replaced_authority.current_device_generation_ref, 1);
+        let Some(
+            arkret_models_collaboration::events_payloads::DeviceAuthorizationScopes::AppletManaged(
+                expected_scopes,
+            ),
+        ) = &replacement.scopes
+        else {
+            panic!("managed scopes");
+        };
+        assert_eq!(&replaced_authority.scopes, expected_scopes);
         let after_replacement = authority_snapshot(&fixture.pool).await;
         let (status, replayed) = fixture
             .service_post(

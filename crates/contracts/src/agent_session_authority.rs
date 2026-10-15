@@ -21,6 +21,7 @@ pub struct AgentSessionAuthorityRequest {
     pub intent_digest: Hash,
     pub requested_scope: Vec<String>,
     pub resource_scope: SessionGrantAgentScopeRequest,
+    pub approval_evidence_refs: Vec<EventId>,
 }
 
 /// A bounded projection from one current source snapshot. It cannot authorize
@@ -30,6 +31,7 @@ pub struct AgentSessionAuthorityRequest {
 pub struct AgentSessionAuthorityOutcome {
     pub binding: AgentSessionAuthorityRequest,
     pub granted_scope: Vec<String>,
+    pub approval_required: bool,
     pub realm_ids: Vec<RealmId>,
     pub strand_ids: Vec<StrandId>,
     pub allowed_tracks: Vec<String>,

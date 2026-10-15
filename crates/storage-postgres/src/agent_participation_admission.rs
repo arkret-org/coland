@@ -44,6 +44,46 @@ pub(crate) async fn lock_selection(
     Ok(())
 }
 
+/// Read the most specific private selection at the caller's authority cut.
+pub(crate) async fn selection_snapshot(
+    conn: &mut AsyncPgConnection,
+    agent: &str,
+    scopes: &[String],
+) -> PersistenceResult<Option<ParticipationBits>> {
+    selection_at_cut(conn, agent, scopes, false).await
+}
+
+async fn selection_at_cut(
+    conn: &mut AsyncPgConnection,
+    agent: &str,
+    scopes: &[String],
+    locked: bool,
+) -> PersistenceResult<Option<ParticipationBits>> {
+    let mut query = "SELECT jsonb_build_object('target_scope',scope,'selection',jsonb_build_object('reply_message',reply_message,'reaction_add',reaction_add,'reaction_remove',reaction_remove,'accept_third_party_mention',accept_third_party_mention,'act_on_behalf',act_on_behalf),'version',version,'next_replace_input',jsonb_build_object('expected_version',version)) AS value FROM agent_participation WHERE agent_id=$1 AND scope_key=ANY($2)".to_owned();
+    if locked {
+        query.push_str(" FOR SHARE");
+    }
+    let rows = sql_query(query)
+        .bind::<Text, _>(agent)
+        .bind::<Array<Text>, _>(scopes)
+        .load::<ValueRow>(&mut *conn)
+        .await
+        .map_err(PersistenceError::database)?
+        .into_iter()
+        .map(|row| {
+            let entry: AgentParticipationEntry =
+                serde_json::from_value(row.value).map_err(|_| unresolved())?;
+            entry.validate().map_err(|_| unresolved())?;
+            Ok(entry)
+        })
+        .collect::<PersistenceResult<Vec<_>>>()?;
+    Ok(scopes
+        .iter()
+        .rev()
+        .find_map(|key| rows.iter().find(|entry| entry.scope.scope_key() == *key))
+        .map(|entry| entry.selection))
+}
+
 pub(crate) async fn require_current(
     conn: &mut AsyncPgConnection,
     event: &Event,
@@ -154,21 +194,10 @@ pub(crate) async fn require_current(
         }
         scopes.push(format!("strand:{}:{strand}", event.realm_id));
     }
-    let selections = sql_query("SELECT jsonb_build_object('target_scope',scope,'selection',jsonb_build_object('reply_message',reply_message,'reaction_add',reaction_add,'reaction_remove',reaction_remove,'accept_third_party_mention',accept_third_party_mention,'act_on_behalf',act_on_behalf),'version',version,'next_replace_input',jsonb_build_object('expected_version',version)) AS value FROM agent_participation WHERE agent_id=$1 AND scope_key=ANY($2) FOR SHARE")
-        .bind::<Text,_>(agent.principal_id.as_str()).bind::<Array<Text>,_>(&scopes)
-        .load::<ValueRow>(&mut *conn).await.map_err(PersistenceError::database)?
-        .into_iter().map(|row| serde_json::from_value::<AgentParticipationEntry>(row.value).map_err(|_| unresolved()))
-        .collect::<PersistenceResult<Vec<_>>>()?;
-    let selected = scopes
-        .iter()
-        .rev()
-        .find_map(|key| {
-            selections
-                .iter()
-                .find(|entry| entry.scope.scope_key() == *key)
-        })
+    let selected = selection_at_cut(conn, agent.principal_id.as_str(), &scopes, true)
+        .await?
         .ok_or_else(unresolved)?;
-    let mut effective = deployment.intersect(selected.selection);
+    let mut effective = deployment.intersect(selected);
     for scope in &scopes {
         if let Some(ceiling) = governance_component(conn, event.realm_id.as_str(), scope).await? {
             effective = effective.intersect(ceiling);
@@ -219,17 +248,10 @@ pub(crate) async fn require_native_reply_current(
         _ => return Err(unresolved()),
     }
     scopes.push(format!("strand:{realm}:{strand}"));
-    let rows = sql_query("SELECT jsonb_build_object('target_scope',scope,'selection',jsonb_build_object('reply_message',reply_message,'reaction_add',reaction_add,'reaction_remove',reaction_remove,'accept_third_party_mention',accept_third_party_mention,'act_on_behalf',act_on_behalf),'version',version,'next_replace_input',jsonb_build_object('expected_version',version)) AS value FROM agent_participation WHERE agent_id=$1 AND scope_key=ANY($2) FOR SHARE")
-        .bind::<Text,_>(agent.principal_id.as_str()).bind::<Array<Text>,_>(&scopes)
-        .load::<ValueRow>(&mut *conn).await.map_err(PersistenceError::database)?
-        .into_iter().map(|row| serde_json::from_value::<AgentParticipationEntry>(row.value).map_err(|_| unresolved()))
-        .collect::<PersistenceResult<Vec<_>>>()?;
-    let selected = scopes
-        .iter()
-        .rev()
-        .find_map(|key| rows.iter().find(|entry| entry.scope.scope_key() == *key))
+    let selected = selection_at_cut(conn, agent.principal_id.as_str(), &scopes, true)
+        .await?
         .ok_or_else(unresolved)?;
-    let mut effective = deployment.intersect(selected.selection);
+    let mut effective = deployment.intersect(selected);
     for scope in &scopes {
         if let Some(ceiling) = governance_component(conn, realm.as_str(), scope).await? {
             effective = effective.intersect(ceiling);

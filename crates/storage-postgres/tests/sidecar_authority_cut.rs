@@ -13166,6 +13166,7 @@ fn content_session_request(
 ) -> coland_storage::AgentSessionAuthorityRequest {
     let agent = &fixture.agents[0];
     coland_storage::AgentSessionAuthorityRequest {
+        approval_evidence_refs: Vec::new(),
         agent_account_id: agent.account.clone(),
         controller_account_id: fixture.controller.history.account.clone(),
         agent_key_authorization_ref: agent.endpoint.authorization_ref.event_id.clone(),

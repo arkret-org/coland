@@ -333,6 +333,38 @@ pub(crate) async fn read(
     let authorization = cut
         .bounded_actor_authorization_in_connection(conn, at)
         .await?;
+    let evidence_grants = request
+        .approval_evidence_refs
+        .iter()
+        .map(arkret_wire::GrantId::from_event_id)
+        .collect::<BTreeSet<_>>();
+    if request.approval_evidence_refs.len() > 32
+        || request
+            .approval_evidence_refs
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+    {
+        return Ok(empty(request));
+    }
+    for reference in &request.approval_evidence_refs {
+        let Some(accepted) =
+            crate::committed_disclosure::accepted_full_event_in_connection(conn, reference).await?
+        else {
+            return Ok(empty(request));
+        };
+        if accepted.event.kind != arkret_wire::EventKind::CapabilityGrant
+            || accepted.event.actor_id != ActorId::account(request.controller_account_id.clone())
+            || accepted.event.executed_by.is_some()
+            || accepted.event.realm_id != target.realm
+            || !authorization.grants.iter().any(|row| {
+                row.grant.id == arkret_wire::GrantId::from_event_id(reference)
+                    && row.grant.issuer_id == accepted.event.actor_id
+                    && matches!(&row.grant.subject, arkret_models_collaboration::governance::grant_constraint::CapabilitySubject::Actor(subject) if subject == &actor)
+            })
+        {
+            return Ok(empty(request));
+        }
+    }
     if !direct
         && authorization.agent_ceiling.as_ref().is_none_or(|ceiling| {
             ceiling.controller.actor != ActorId::account(request.controller_account_id.clone())
@@ -371,14 +403,24 @@ pub(crate) async fn read(
         crate::agent_management_admission::selector_content_resources(realm, &target.resource)?;
     let mut participation =
         arkret_models_collaboration::governance::agent_participation::ParticipationBits::ALL;
+    let mut scopes = vec![format!("realm:{realm}")];
+    if let Some(circle) = circle {
+        scopes.push(format!("circle:{realm}:{circle}"));
+    }
+    if let Some(strand) = &target.resource.strand_id {
+        scopes.push(format!("strand:{realm}:{strand}"));
+    }
+    let private_selection = if !direct {
+        crate::agent_participation_admission::selection_snapshot(
+            conn,
+            request.agent_account_id.principal_id.as_str(),
+            &scopes,
+        )
+        .await?
+    } else {
+        None
+    };
     if !direct {
-        let mut scopes = vec![format!("realm:{realm}")];
-        if let Some(circle) = circle {
-            scopes.push(format!("circle:{realm}:{circle}"));
-        }
-        if let Some(strand) = &target.resource.strand_id {
-            scopes.push(format!("strand:{realm}:{strand}"));
-        }
         for scope in scopes {
             if let Some(component) =
                 crate::agent_participation_admission::governance_component_snapshot(
@@ -405,6 +447,7 @@ pub(crate) async fn read(
             .collect()
     };
     let mut granted_scope = Vec::new();
+    let mut approvable_scope = BTreeSet::new();
     'action: for action in &request.requested_scope {
         if arkret_wire::ServiceOperationId::from_wire(action).is_some() {
             if key.agent_key_scope.actions.contains(action) && provision.actions.contains(action) {
@@ -444,6 +487,7 @@ pub(crate) async fn read(
             }
         }
         let mut action_refs = BTreeSet::new();
+        let mut action_requires_approval = false;
         let profile_write = direct_write
             && crate::direct_conversation_admission::participant_session_action(action);
         for track in &tracks {
@@ -497,17 +541,68 @@ pub(crate) async fn read(
                 continue;
             }
             // A profile read does not manufacture any write authority.
-            if direct
-                || matches!(target.scope, ScopeRef::Sidecar { .. })
-                || !matches!(
-                    authorization.evaluate(&actions, &target.resource, &facts),
-                    coland_storage::GrantEvaluation::Allowed(_)
-                )
-            {
+            if direct || matches!(target.scope, ScopeRef::Sidecar { .. }) {
                 continue 'action;
             }
+            match authorization.evaluate(&actions, &target.resource, &facts) {
+                coland_storage::GrantEvaluation::Allowed(_) => {}
+                coland_storage::GrantEvaluation::Unnamed
+                    if evidence_grants.is_empty()
+                        && matches!(
+                            action_id,
+                            CapabilityActionId::MessageCreate
+                                | CapabilityActionId::MessageRedactOwn
+                                | CapabilityActionId::MessageReviseOwn
+                                | CapabilityActionId::ReactionAdd
+                                | CapabilityActionId::ReactionRemove
+                        )
+                        && can_read
+                        && private_selection
+                            .as_ref()
+                            .is_some_and(|selected| match action_id {
+                                CapabilityActionId::MessageCreate => selected.reply_message,
+                                CapabilityActionId::ReactionAdd => selected.reaction_add,
+                                CapabilityActionId::ReactionRemove => selected.reaction_remove,
+                                _ => false,
+                            }) =>
+                {
+                    let Some(ceiling) = authorization.agent_ceiling.as_ref() else {
+                        continue 'action;
+                    };
+                    let controller = &ceiling.controller;
+                    let controller_verdict =
+                        controller.evaluate(&actions, &target.resource, &facts);
+                    let owner_covers = controller.root_controller
+                        && arkret_policy::owner_may_author_action(action).unwrap_or(false)
+                        && !controller_verdict.is_refusal();
+                    let management = arkret_policy::agent_management::evaluate_agent_management(
+                        Some(&policies), &arkret_policy::agent_management::AgentManagementContext {
+                            realm_id: realm, ownership: Some((&request.controller_account_id, &request.agent_account_id)),
+                            operation: arkret_models_collaboration::governance::operation_wire::AgentPolicyOperation::Authorize,
+                            content_action: Some(action_id), resources: Some(&resources), at,
+                        }).map_err(unavailable)?;
+                    if management != arkret_wire::PolicyEffect::Allow
+                        || !(owner_covers
+                            || matches!(
+                                controller_verdict,
+                                coland_storage::GrantEvaluation::Allowed(_)
+                            ))
+                        || matches!(
+                            action_id,
+                            CapabilityActionId::MessageRedactOwn
+                                | CapabilityActionId::MessageReviseOwn
+                        ) && facts.target_owner.is_none()
+                    {
+                        continue 'action;
+                    }
+                    action_requires_approval = true;
+                    continue;
+                }
+                _ => continue 'action,
+            }
             let Some(chosen) = authorization.grants.iter().find(|row| {
-                coland_storage::grant_names_target(&row.grant, &actions, &target.resource)
+                (evidence_grants.is_empty() || evidence_grants.contains(&row.grant.id))
+                    && coland_storage::grant_names_target(&row.grant, &actions, &target.resource)
                     && matches!(
                         coland_storage::evaluate_grants(&operation, std::iter::once(&row.grant)),
                         coland_storage::GrantEvaluation::Allowed(_)
@@ -516,6 +611,10 @@ pub(crate) async fn read(
                 continue 'action;
             };
             action_refs.insert(chosen.grant.id.clone());
+        }
+        if action_requires_approval {
+            approvable_scope.insert(action.clone());
+            continue 'action;
         }
         grant_refs.extend(action_refs);
         granted_scope.push(action.clone());
@@ -528,6 +627,16 @@ pub(crate) async fn read(
             .iter()
             .all(|action| arkret_wire::ServiceOperationId::from_wire(action).is_some())
     {
+        let mut outcome = empty(request);
+        outcome.approval_required = !approvable_scope.is_empty()
+            && request
+                .requested_scope
+                .iter()
+                .filter(|action| arkret_wire::ServiceOperationId::from_wire(action).is_none())
+                .all(|action| approvable_scope.contains(action));
+        return Ok(outcome);
+    }
+    if !evidence_grants.is_subset(&grant_refs) {
         return Ok(empty(request));
     }
     let mut selected: AgentKeyScope = serde_json::from_value(serde_json::json!({
@@ -554,6 +663,7 @@ pub(crate) async fn read(
     Ok(AgentSessionAuthorityOutcome {
         binding: request.clone(),
         granted_scope,
+        approval_required: false,
         realm_ids: request.resource_scope.realm_ids.clone(),
         strand_ids: request.resource_scope.strand_ids.clone(),
         allowed_tracks: request
@@ -576,6 +686,7 @@ fn empty(request: &AgentSessionAuthorityRequest) -> AgentSessionAuthorityOutcome
     AgentSessionAuthorityOutcome {
         binding: request.clone(),
         granted_scope: Vec::new(),
+        approval_required: false,
         realm_ids: Vec::new(),
         strand_ids: Vec::new(),
         allowed_tracks: Vec::new(),

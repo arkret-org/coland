@@ -231,6 +231,23 @@ pub(crate) async fn read(
     request: &AgentSessionAuthorityRequest,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<AgentSessionAuthorityOutcome> {
+    match read_at_cut(conn, request, at).await {
+        Err(error)
+            if error.conflict_code() == Some(coland_storage::ConflictCode::CapabilityDenied) =>
+        {
+            // A verified current refusal is a bound empty ceiling. Missing or
+            // corrupt source dependencies remain errors for the issuer.
+            Ok(empty(request))
+        }
+        outcome => outcome,
+    }
+}
+
+async fn read_at_cut(
+    conn: &mut AsyncPgConnection,
+    request: &AgentSessionAuthorityRequest,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<AgentSessionAuthorityOutcome> {
     let source = sql_query("SELECT e.envelope,c.commit_json,a.requested_scope,EXISTS(SELECT 1 FROM agent_key_current_results k CROSS JOIN LATERAL jsonb_array_elements(k.value->'authorizations') d WHERE k.realm_id=a.principal_control_realm_id AND d->>'tag_id'=$3||':1' AND d->'value'=e.envelope->'payload') AS active FROM agent_principals a JOIN agent_status_current_results s ON s.realm_id=a.principal_control_realm_id AND s.agent_id=a.id JOIN canonical_events e ON e.envelope->>'event_id'=$3 AND e.state='committed' JOIN realm_commits c ON c.event_pk=e.pk AND c.realm_id=a.principal_control_realm_id WHERE a.id=$1 AND a.controller_principal_id=$2 AND s.value='\"active\"'::jsonb")
         .bind::<Text,_>(request.agent_account_id.principal_id.as_str())
         .bind::<Text,_>(request.controller_account_id.principal_id.as_str())

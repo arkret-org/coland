@@ -13190,6 +13190,17 @@ async fn content_session_source(
         .await
 }
 
+async fn expect_content_session_current_denial(
+    pool: &coland_storage_postgres::PgPool,
+    request: &coland_storage::AgentSessionAuthorityRequest,
+) {
+    let denied = content_session_source(pool, request).await.unwrap();
+    assert!(denied.matches_request(request));
+    assert!(denied.granted_scope.is_empty());
+    assert!(!denied.approval_required);
+    assert!(denied.capability_grant_refs.is_empty());
+}
+
 #[tokio::test]
 async fn agent_content_session_membership_needs_no_literal_grant_and_rechecks_withdrawal() {
     fixture_step(async {
@@ -13254,7 +13265,7 @@ async fn agent_content_session_membership_needs_no_literal_grant_and_rechecks_wi
             at + chrono::TimeDelta::milliseconds(1));
         let leave = Box::pin(ordinary_realm::source_request(pool, leave)).await;
         fixture_commit_step(pool, leave).await.unwrap();
-        assert!(content_session_source(pool, &request).await.is_err(), "old scope cannot survive current controller withdrawal");
+        expect_content_session_current_denial(pool, &request).await;
     }).await;
 }
 
@@ -13474,12 +13485,12 @@ async fn agent_content_session_owned_grant_requires_current_source_and_never_rev
             serde_json::json!({"member_id":controller,"membership":"leave"}), at);
         let leave = Box::pin(ordinary_realm::source_request(pool, leave)).await;
         fixture_commit_step(pool, leave.clone()).await.unwrap();
-        assert!(content_session_source(pool, &request).await.is_err());
+        expect_content_session_current_denial(pool, &request).await;
         at += chrono::TimeDelta::milliseconds(1);
         let rejoin = ordinary_realm::next_request_for_actor(&leave.authority_commit, EventKind::MemberState, controller.clone(),
             serde_json::json!({"member_id":controller,"membership":"join"}), at);
         let rejoin = Box::pin(ordinary_realm::source_request(pool, rejoin)).await;
         fixture_commit_step(pool, rejoin).await.unwrap();
-        assert!(content_session_source(pool, &request).await.is_err(), "a new controller join cannot revive the old exact Agent/grant binding");
+        expect_content_session_current_denial(pool, &request).await;
     }).await;
 }

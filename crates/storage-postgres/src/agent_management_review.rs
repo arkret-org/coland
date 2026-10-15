@@ -790,7 +790,11 @@ pub(crate) async fn request_in_connection(
         .ok_or_else(hidden)?
         .min(86400);
     let expires_at = at + chrono::Duration::seconds(i64::try_from(lifetime).map_err(invalid)?);
-    let target_digest = arkret_canonical::canonical_sha256(event).map_err(invalid)?;
+    let target_digest = request
+        .target
+        .canonical_target_digest()
+        .map_err(invalid)?
+        .to_string();
     let inserted = sql_query("INSERT INTO management_review_requests(request_id,realm_id,requester_actor_key,effective_scope,management_operation,request_digest,target_digest,request_body,immutable_pins,requirements,created_at,expires_at,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending') ON CONFLICT DO NOTHING")
         .bind::<Text,_>(&request.request_id).bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(caller.to_string()).bind::<Jsonb,_>(json!(request.effective_scope)).bind::<Text,_>(if request.management_operation==ManagementOperation::Join {"join"} else {"publish"}).bind::<Text,_>(&digest).bind::<Text,_>(&target_digest).bind::<Jsonb,_>(json!(request)).bind::<Jsonb,_>(pins).bind::<Jsonb,_>(json!(requirements)).bind::<Timestamptz,_>(at).bind::<Timestamptz,_>(expires_at).execute(&mut *conn).await.map_err(PersistenceError::database)?;
     if inserted != 1 {

@@ -35,6 +35,7 @@ pub(crate) const DISCLOSED_EVENT_KINDS: &[EventKind] = &[
     EventKind::RealmJoinRule,
     EventKind::RealmHistoryAccess,
     EventKind::RealmReadReceiptPolicy,
+    EventKind::RealmMediaService,
     EventKind::RealmPreviewPolicy,
     EventKind::RealmDiscovery,
     EventKind::RealmAlias,
@@ -83,6 +84,7 @@ pub(crate) const DISCLOSED_EVENT_KINDS: &[EventKind] = &[
     EventKind::ModerationFrankingProof,
     EventKind::RealmOrganization,
     EventKind::CallCreate,
+    EventKind::CallState,
 ];
 
 /// Registered shared durable kinds are admitted by their canonical contract,
@@ -130,6 +132,7 @@ const AUDITED_FAMILIES: &[&str] = &[
     "circle_current_results",
     "circle_member_state_current_results",
     "call_state_current_results",
+    "call_axis_current_results",
     "sidecar_current_results",
     "sidecar_context_current_results",
     "sidecar_exchange_controls_current_results",
@@ -1019,7 +1022,11 @@ async fn disclosure_facts_in_connection(
     let mut call_creations = std::collections::BTreeMap::new();
     for entry in &material.current_state_entries {
         if let TypedCurrentRow::Value {
-            selector: CurrentSelector::CallState { call_id },
+            selector:
+                CurrentSelector::CallState { call_id }
+                | CurrentSelector::CallFocus { call_id }
+                | CurrentSelector::CallRoster { call_id }
+                | CurrentSelector::CallModeration { call_id },
             ..
         } = entry
         {
@@ -1597,7 +1604,10 @@ pub(crate) fn disclose_to_account(
                     .ok_or_else(|| rejected("reaction target has no accepted creation scope"))?
                     .clone(),
             ),
-            CurrentSelector::CallState { call_id } => Some(
+            CurrentSelector::CallState { call_id }
+            | CurrentSelector::CallFocus { call_id }
+            | CurrentSelector::CallRoster { call_id }
+            | CurrentSelector::CallModeration { call_id } => Some(
                 facts
                     .call_creations
                     .get(call_id)
@@ -1766,6 +1776,24 @@ pub(crate) fn disclose_to_account(
                     ));
                 }
             }
+            CurrentSelector::CallFocus { .. } => {
+                let _: arkret_models_collaboration::events_payloads::call::CallFocus =
+                    serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
+            }
+            CurrentSelector::CallRoster { .. } => {
+                let current: arkret_models_collaboration::events_payloads::call::CallRosterCurrentValue =
+                    serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
+                current
+                    .validate_for_axis(source_stream_ref, revision)
+                    .map_err(PersistenceError::database)?;
+            }
+            CurrentSelector::CallModeration { .. } => {
+                let current: arkret_models_collaboration::events_payloads::call::CallModerationCurrentValue =
+                    serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
+                current
+                    .validate_for_axis(source_stream_ref, revision)
+                    .map_err(PersistenceError::database)?;
+            }
             CurrentSelector::CallState { call_id } => {
                 let current: arkret_models_collaboration::events_payloads::call::CallStateCurrentValue =
                     serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
@@ -1774,7 +1802,7 @@ pub(crate) fn disclose_to_account(
                     .call_creations
                     .get(call_id)
                     .ok_or_else(|| rejected("Call current has no accepted creation"))?;
-                if current.from.is_some() || current.to != creation.initial_state {
+                if current.from.is_none() && current.to != creation.initial_state {
                     return Err(rejected("Call current differs from its accepted creation"));
                 }
             }
@@ -1914,6 +1942,11 @@ pub(crate) fn disclose_to_account(
                     serde_json::from_value::<arkret_wire::HistoryAccess>(value.clone())
                         .map_err(PersistenceError::database)?,
                 );
+            }
+            CurrentSelector::RealmMediaService => {
+                let media: arkret_models_collaboration::events_payloads::RealmMediaServiceValue =
+                    serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
+                media.validate().map_err(PersistenceError::database)?;
             }
             CurrentSelector::RealmReadReceiptPolicy => {
                 let policy: arkret_models_collaboration::events_payloads::ReadReceiptPolicyPayload =

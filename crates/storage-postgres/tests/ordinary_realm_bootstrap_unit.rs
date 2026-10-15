@@ -1254,6 +1254,7 @@ fn strand_create_request(unit: &OrdinaryRealmBootstrapCommitUnit) -> EventCommit
         applet_producer_guard: None,
         widget_token_gate: None,
         agent_grant_scope_evidence: None,
+        call_media_binding_key: None,
         forwarded_producer_evidence: None,
         forwarded_agent_producer: None,
         agent_deployment_ceiling:

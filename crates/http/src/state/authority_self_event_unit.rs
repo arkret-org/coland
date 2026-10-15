@@ -133,6 +133,7 @@ fn decided_at_commit_cut(kind: &arkret_wire::EventKind) -> bool {
             | arkret_wire::EventKind::StrandCreate
             | arkret_wire::EventKind::RealmProfile
             | arkret_wire::EventKind::RealmReadReceiptPolicy
+            | arkret_wire::EventKind::RealmMediaService
             | arkret_wire::EventKind::RealmPlaintextVisibleServices
             | arkret_wire::EventKind::RealmPreviewPolicy
             | arkret_wire::EventKind::RealmTombstone
@@ -164,6 +165,7 @@ fn decided_at_commit_cut(kind: &arkret_wire::EventKind) -> bool {
             | arkret_wire::EventKind::MessageRevise
             | arkret_wire::EventKind::MemberIdentityUpdate
             | arkret_wire::EventKind::CallCreate
+            | arkret_wire::EventKind::CallState
             | arkret_wire::EventKind::MessageCreate
             | arkret_wire::EventKind::MessageRedact
             | arkret_wire::EventKind::MlsGenesis
@@ -526,6 +528,7 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             applet_producer_guard,
             widget_token_gate: None,
             agent_grant_scope_evidence,
+            call_media_binding_key: prepare_call_media_binding_key(state, event)?,
             forwarded_producer_evidence,
             forwarded_agent_producer,
             agent_deployment_ceiling: state.config().agent_participation_ceiling,
@@ -937,4 +940,44 @@ mod claim_privacy_tests {
         let database = private_claim_refusal(ServiceError::Database("unavailable".to_owned()));
         assert!(matches!(database, ServiceError::Database(_)));
     }
+}
+
+fn prepare_call_media_binding_key(
+    state: &AppState,
+    event: &arkret_wire::Event,
+) -> ServiceResult<Option<coland_storage::CallMediaBindingKey>> {
+    if event.kind != arkret_wire::EventKind::CallState {
+        return Ok(None);
+    }
+    let payload: arkret_models_collaboration::events_payloads::call::CallStatePayload =
+        serde_json::from_value(
+            serde_json::to_value(&event.payload)
+                .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?,
+        )
+        .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
+    let Some(arkret_models_collaboration::events_payloads::call::CallRosterDelta::Join {
+        participant,
+    }) = payload.roster_delta
+    else {
+        return Ok(None);
+    };
+    let Some(binding) = participant.participant_binding else {
+        return Ok(None);
+    };
+    let did = arkret_identity::verification_method_did(binding.issuer_kid.as_str())
+        .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
+    let key = if crate::jws_verify::is_local_service_notary_method(
+        state,
+        &did,
+        binding.issuer_kid.as_str(),
+    ) {
+        state.notary_verifying_key()
+    } else {
+        crate::jws_verify::resolve_ed25519_pubkey(state, binding.issuer_kid.as_str())
+            .map_err(|e| ServiceError::Conflict(e.to_string()))?
+    };
+    Ok(Some(coland_storage::CallMediaBindingKey {
+        issuer_kid: binding.issuer_kid,
+        public_key: key.to_bytes(),
+    }))
 }

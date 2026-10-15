@@ -695,6 +695,7 @@ async fn independent_handoff_preserves_unit_fences_and_frozen_reads_and_rejects_
     });
     let heads = material.visible_stream_heads;
     let mut handoff = arkret_wire::RealmAuthorityHandoff {
+        pcr_private_state_digest: None,
         handoff_id: arkret_wire::RealmAuthorityHandoffId::from_digest([63; 32]),
         realm_id: realm.clone(),
         from_generation: 0,

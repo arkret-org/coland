@@ -21,12 +21,13 @@ pub(crate) use outbound::{
 };
 #[cfg(test)]
 use salvo::http::StatusCode;
+pub(crate) use signature::verifying_key_for_service_id;
 // SPEC-CR-001 — `signature_authority` / `signature_target_uri` are reused by
 // `identity::session_pop` so self-PoP and the federation rail reconstruct the
 // signed `@target-uri` / `@authority` identically.
 pub(in crate::routing) use signature::{
     VerifiedPeerKeyDigest, signature_authority, signature_target_uri,
-    verify_inbound_peer_http_signature, verifying_key_for_service_id,
+    verify_inbound_peer_http_signature,
 };
 #[cfg(test)]
 use signature::{validate_federation_headers, validate_signature_input};

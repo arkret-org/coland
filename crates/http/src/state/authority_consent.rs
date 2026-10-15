@@ -8,6 +8,155 @@ use coland_storage::{ConsentAdmissionOutcome, ConsentAdmissionWrite};
 
 use super::AppState;
 
+pub(crate) async fn holder_authority(
+    state: &AppState,
+    holder: &arkret_wire::AccountId,
+) -> Result<coland_storage::CurrentRealmAuthority, crate::error::AppError> {
+    let realm = state
+        .persistence()
+        .consent_holder_realm(holder)
+        .await
+        .map_err(|e| crate::routing::identity::consent::consent_error(e.into()))?
+        .ok_or_else(|| {
+            crate::app_error!(
+                TemporarilyUnavailable,
+                "holder PCR authority is unavailable"
+            )
+        })?;
+    state
+        .authority_commits()
+        .current_authority(&realm)
+        .await
+        .map_err(|e| crate::routing::identity::consent::consent_error(e.into()))?
+        .ok_or_else(|| {
+            crate::app_error!(
+                TemporarilyUnavailable,
+                "holder PCR authority is unavailable"
+            )
+        })
+}
+
+pub(crate) async fn read_current(
+    state: &AppState,
+    request: &arkret_models_collaboration::consent_operations::ConsentCurrentReadRequestBody,
+) -> Result<
+    arkret_models_collaboration::consent_operations::ConsentCurrentReadOutcome,
+    crate::error::AppError,
+> {
+    use arkret_models_collaboration::consent_operations::*;
+    request
+        .validate()
+        .map_err(|e| crate::error::AppError::param_invalid(e.to_string()))?;
+    let authority = holder_authority(state, &request.holder_account_id).await?;
+    if authority.service_id != state.service_core_id() {
+        let body = arkret_canonical::canonical_json_bytes(request)
+            .map_err(|e| crate::error::AppError::internal(e.to_string()))?;
+        let response = crate::routing::federation::outbox::signed_peer_request(
+            state,
+            authority.service_id.as_str(),
+            "/_arkret/peer/consent/current",
+            &body,
+            16 * 1024 * 1024,
+        )
+        .await
+        .map_err(|e| crate::app_error!(TemporarilyUnavailable, e))?;
+        if !(200..300).contains(&response.status) {
+            return Err(crate::app_error!(
+                TemporarilyUnavailable,
+                "current authority refused the holder read"
+            ));
+        }
+        let outcome: ConsentCurrentReadOutcome = serde_json::from_slice(&response.body)
+            .map_err(|e| crate::error::AppError::internal(e.to_string()))?;
+        let key = crate::routing::federation::verifying_key_for_service_id(
+            state,
+            authority.service_id.as_str(),
+            outcome.proof.verification_method.as_str(),
+            true,
+        )
+        .await?;
+        arkret_signatures::call_invitation::verify_consent_current_read(
+            &outcome,
+            request,
+            &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+                bytes: key.to_bytes().to_vec(),
+            },
+            Utc::now(),
+        )
+        .map_err(|e| crate::error::AppError::capability_denied(e.to_string()))?;
+        let after = holder_authority(state, &request.holder_account_id).await?;
+        if after != authority
+            || outcome.governance_generation != authority.generation
+            || outcome.realm_id != authority.realm_id
+        {
+            return Err(crate::app_error!(
+                TemporarilyUnavailable,
+                "holder authority changed during read"
+            ));
+        }
+        return Ok(outcome);
+    }
+    let cut = state
+        .persistence()
+        .read_consent_current(request, &state.service_core_id())
+        .await
+        .map_err(|e| crate::routing::identity::consent::consent_error(e.into()))?
+        .ok_or_else(|| {
+            crate::app_error!(TemporarilyUnavailable, "holder current cut is unavailable")
+        })?;
+    let mut outcome = ConsentCurrentReadOutcome {
+        request_digest: request
+            .digest()
+            .map_err(|e| crate::error::AppError::internal(e.to_string()))?,
+        realm_id: cut.realm_id,
+        governance_generation: cut.governance_generation,
+        effective_stream_head: cut.effective_stream_head,
+        consents: cut
+            .records
+            .into_iter()
+            .map(|r| ConsentCurrentRow {
+                selector: ConsentCurrentSelector {
+                    kind: ConsentCurrentKind::Consent,
+                    consent_id: r.value.consent_id.clone(),
+                },
+                source_stream_ref: r.commit.stream_ref.clone(),
+                revision: r.view().revision,
+                value: r.value,
+            })
+            .collect(),
+        evaluated_at: cut.evaluated_at,
+        expires_at: cut.evaluated_at + chrono::Duration::seconds(30),
+        proof: ConsentCurrentReadProof {
+            verification_method: arkret_wire::DidUrl::new(
+                crate::routing::federation::federation_service_signature_key_id(
+                    state.service_did().as_str(),
+                ),
+            )
+            .map_err(|e| crate::error::AppError::internal(format!("{e}")))?,
+            jws: String::new(),
+        },
+    };
+    arkret_signatures::call_invitation::sign_consent_current_read(
+        &mut outcome,
+        state.notary_signing_key().as_ref(),
+    )
+    .map_err(|e| crate::error::AppError::internal(e.to_string()))?;
+    let after = holder_authority(state, &request.holder_account_id).await?;
+    if after != authority
+        || outcome.realm_id != authority.realm_id
+        || outcome.governance_generation != authority.generation
+    {
+        return Err(crate::app_error!(
+            TemporarilyUnavailable,
+            "holder authority changed during read"
+        ));
+    }
+    outcome
+        .validate_for_request(request, Utc::now())
+        .map_err(|e| crate::error::AppError::capability_denied(e.to_string()))?;
+    Ok(outcome)
+}
+
 pub(crate) async fn submit(
     state: &AppState,
     session: &SessionIdentityState,

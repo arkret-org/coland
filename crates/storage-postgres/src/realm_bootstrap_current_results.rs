@@ -958,3 +958,59 @@ mod tests {
         );
     }
 }
+
+/// The declared service and foci are one commit-ordered Realm current value.
+pub(crate) async fn commit_media_service_authority_current_result_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
+) -> PersistenceResult<()> {
+    if event.kind != arkret_wire::EventKind::RealmMediaService {
+        return Ok(());
+    }
+    crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+        conn, event, commit, prepared,
+    )
+    .await?;
+    commit_media_service_current_result_in_connection(conn, event, commit).await
+}
+
+pub(crate) async fn commit_media_service_current_result_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    commit: &arkret_wire::RealmCommit,
+) -> PersistenceResult<()> {
+    if event.kind != arkret_wire::EventKind::RealmMediaService {
+        return Ok(());
+    }
+    arkret_schema::validate_event_for_submit(event)
+        .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
+    if event.scope_ref
+        != (arkret_wire::ScopeRef::Realm {
+            realm_id: event.realm_id.clone(),
+        })
+        || commit.stream_ref
+            != (arkret_wire::CommitStreamRef::Realm {
+                realm_id: event.realm_id.clone(),
+            })
+        || commit.realm_id != event.realm_id
+        || commit.event_ref != event.event_id
+    {
+        return Err(PersistenceError::Conflict(
+            "failed_precondition: media binding requires its exact Realm Event and Commit".into(),
+        ));
+    }
+    let payload = typed_payload(event, EventPayloadExt::as_realm_media_service)?;
+    payload
+        .validate()
+        .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
+    advance_singleton(
+        conn,
+        event,
+        commit,
+        "realm_media_service",
+        &result_value(&payload.value)?,
+    )
+    .await
+}

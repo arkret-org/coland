@@ -1548,6 +1548,7 @@ pub async fn assert_applet_formal_commit_transaction_contract(
             authority_commit: AuthorityCommitTransaction { expected_authority: current.clone(), event: event.clone(), commit,
                 producer_signer_fact: fact, mls_state: None, welcomes: vec![], recipient_queue_capacity: 0 },
             self_producer_guard: None, applet_producer_guard: None, widget_token_gate: None, agent_grant_scope_evidence: None,
+        call_media_binding_key: None,
             forwarded_producer_evidence: None, forwarded_agent_producer: None,
             agent_deployment_ceiling: arkret_models_collaboration::governance::agent_participation::ParticipationBits::ALL,
             parent_membership_admission: None, contact_projection: None, device_revocation_transition: None,
@@ -2244,6 +2245,7 @@ pub async fn assert_event_commit_unit_of_work_contract(
         applet_producer_guard: None,
         widget_token_gate: None,
         agent_grant_scope_evidence: None,
+        call_media_binding_key: None,
         forwarded_producer_evidence: None,
         forwarded_agent_producer: None,
         agent_deployment_ceiling:
@@ -2345,6 +2347,7 @@ pub async fn assert_event_commit_unit_of_work_contract(
             applet_producer_guard: None,
             widget_token_gate: None,
             agent_grant_scope_evidence: None,
+        call_media_binding_key: None,
             forwarded_producer_evidence: None,
             forwarded_agent_producer: None,
             agent_deployment_ceiling: arkret_models_collaboration::governance::agent_participation::ParticipationBits::ALL,

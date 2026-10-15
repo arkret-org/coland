@@ -1212,11 +1212,58 @@ pub(crate) async fn media_service_anchor_for_account(
     let mut conn = pg_conn(pool).await?;
     conn.transaction::<_, PgTransactionError, _>(async move |conn| {
         begin_read_cut(conn).await?;
-        if matches!(
-            member_cut(conn, realm_id, &caller, issuer).await?,
-            MemberCut::NotVisible
-        ) {
-            return Ok(MediaServiceAnchorRead::NotFound);
+        let stream = CommitStreamRef::Realm { realm_id: realm_id.clone() };
+        let (generation, head, replica) = match member_cut(conn, realm_id, &caller, issuer).await? {
+            MemberCut::NotVisible => return Ok(MediaServiceAnchorRead::NotFound),
+            MemberCut::Member { generation, realm_head: Some(head), .. } => (generation, head, false),
+            MemberCut::Member { realm_head: None, .. } => return Ok(MediaServiceAnchorRead::Unresolved("the accepted Realm head is unavailable")),
+            MemberCut::ForeignTenure => {
+                if let Err(reason) = crate::account_stream_scan::replica_realm_floor_in_connection(conn, realm_id, &caller).await? {
+                    return Ok(MediaServiceAnchorRead::Unresolved(reason));
+                }
+                let Some(head) = crate::replica_authorization::verified_head(conn, &stream).await? else {
+                    return Ok(MediaServiceAnchorRead::Unresolved("the verified replica head is unavailable"));
+                };
+                let tenure = sql_query("SELECT generation,service_id FROM realm_authorities WHERE realm_id=$1")
+                    .bind::<Text,_>(realm_id.as_str()).get_result::<TenureRow>(&mut *conn).await?;
+                (to_u64(tenure.generation, "governance generation")?, head, true)
+            }
+        };
+        let row = sql_query("SELECT r.current_commit_id,r.current_stream_position,r.value,jsonb_build_object('kind','realm','realm_id',r.realm_id) AS stream_ref \
+            FROM realm_bootstrap_current_results r WHERE r.realm_id=$1 AND r.result_family='realm_media_service'")
+            .bind::<Text,_>(realm_id.as_str()).get_result::<CurrentRow>(&mut *conn).await.optional()?;
+        if let Some(row) = row {
+            let revision = CurrentRevision {
+                commit_id: row.current_commit_id.parse().map_err(PersistenceError::database)?,
+                stream_position: to_u64(row.current_stream_position, "media assignment position")?,
+            };
+            if revision.stream_position > head.stream_position || (revision.stream_position == head.stream_position && revision.commit_id != head.commit_id) {
+                return Ok(MediaServiceAnchorRead::Unresolved("the media assignment is outside the accepted head"));
+            }
+            let covered = if replica {
+                let evidence = crate::replica_authorization::exact_current_evidence(
+                    conn, &stream, &[arkret_wire::CurrentSelector::RealmMediaService],
+                ).await?;
+                if evidence.as_ref().is_none_or(|(current_head, _)| current_head != &head) {
+                    return Ok(MediaServiceAnchorRead::Unresolved("the replica current head cannot cover this media assignment"));
+                }
+                sql_query("SELECT EXISTS(SELECT 1 FROM replica_authorization_rows WHERE realm_id=$1 AND selector=jsonb_build_object('kind','realm_media_service') AND source_stream_ref=$2 AND current_commit_id=$3 AND current_stream_position=$4 AND value=$5) AS present")
+                    .bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(&stream).map_err(PersistenceError::database)?)
+                    .bind::<Text,_>(revision.commit_id.as_str()).bind::<BigInt,_>(row.current_stream_position).bind::<Jsonb,_>(&row.value)
+                    .get_result::<ExistsRow>(&mut *conn).await?.present
+            } else {
+                sql_query("SELECT EXISTS(SELECT 1 FROM realm_commits WHERE realm_id=$1 AND stream_ref=$2 AND commit_id=$3 AND stream_position=$4) AS present")
+                    .bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(&stream).map_err(PersistenceError::database)?)
+                    .bind::<Text,_>(revision.commit_id.as_str()).bind::<BigInt,_>(row.current_stream_position)
+                    .get_result::<ExistsRow>(&mut *conn).await?.present
+            };
+            if !covered { return Ok(MediaServiceAnchorRead::Unresolved("the media assignment has no accepted provenance")); }
+            let value: arkret_models_collaboration::events_payloads::RealmMediaServiceValue = serde_json::from_value(row.value).map_err(PersistenceError::database)?;
+            value.validate().map_err(PersistenceError::database)?;
+            return Ok(MediaServiceAnchorRead::Anchored { generation, head, value });
+        }
+        if replica {
+            return Ok(MediaServiceAnchorRead::Unresolved("media assignment absence is not proved by the held replica material"));
         }
         let anchored = sql_query(MEDIA_ANCHOR_SQL)
             .bind::<Text, _>(realm_id.as_str())
@@ -1225,7 +1272,7 @@ pub(crate) async fn media_service_anchor_for_account(
             .await?
             .present;
         Ok(if anchored {
-            MediaServiceAnchorRead::Anchored
+            MediaServiceAnchorRead::Unresolved("an accepted media assignment has no current material")
         } else {
             MediaServiceAnchorRead::NotFound
         })

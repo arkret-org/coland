@@ -15,12 +15,12 @@ conformance-harness = []
 # Leased test databases (`test_database`). Coland has one storage
 # implementation, so every test that needs storage takes a real database from
 # this module instead of a second in-memory adapter.
-test-support = ["coland-storage/test-support", "arkret-wire/test-support", "arkret-signatures/signer", "dep:arkret-bootstrap", "dep:ed25519-dalek"]
+test-support = ["coland-storage/test-support", "arkret-wire/test-support", "arkret-signatures/signer", "dep:arkret-bootstrap"]
 
 [dependencies]
 arkret.workspace = true
 arkret-bootstrap = { workspace = true, optional = true }
-ed25519-dalek = { workspace = true, optional = true }
+ed25519-dalek.workspace = true
 anyhow = { workspace = true }
 arkret-canonical.workspace = true
 arkret-event-draft.workspace = true

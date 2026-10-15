@@ -3,6 +3,9 @@
 //! Implements the v1 private invite delivery endpoint and the body-only
 //! online locator resolver from `sync/invite-addressing.md`.
 
+#[cfg(feature = "conformance-harness")]
+mod delivery_probe;
+
 use arkret_canonical as canonical;
 use arkret_identifiers::{DidCoreId, Hash, InviteLocatorId};
 use arkret_models_collaboration::governance::invite_addressing::{
@@ -1069,6 +1072,8 @@ async fn deliver_invite_credential(
             consent_id,
         }) = consent_evidence
         {
+            #[cfg(feature = "conformance-harness")]
+            delivery_probe::pause(state, account_id, &new_entry.invite_id).await?;
             let outcome = state
                 .persistence()
                 .admit_consented_invite_delivery(coland_storage::ConsentDeliveryWrite {

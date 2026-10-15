@@ -101,13 +101,18 @@ pub enum SelfExactCurrentRead<T> {
 
 /// Anchor state behind `ak.self.media_service_binding.read.resolve.v1` for one
 /// authenticated Account at one governing read cut.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MediaServiceAnchorRead {
     /// Invisible Realm, non-member caller, or no accepted media service
     /// assignment in the Realm.
     NotFound,
-    /// A media service assignment was accepted in the visible Realm.
-    Anchored,
+    /// Current assignment and authorization are covered by this accepted cut.
+    Anchored {
+        generation: u64,
+        head: CommitStreamHead,
+        value: arkret_models_collaboration::events_payloads::RealmMediaServiceValue,
+    },
+    Unresolved(&'static str),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

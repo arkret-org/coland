@@ -647,6 +647,7 @@ fn signal_record(
         sent_at: envelope.sent_at,
         expires_at: envelope.expires_at,
         envelope,
+        call_invitation: None,
         position,
     }
 }
@@ -1236,6 +1237,7 @@ impl CommittedRealm {
                 applet_producer_guard: None,
                 widget_token_gate: None,
                 agent_grant_scope_evidence: None,
+        call_media_binding_key: None,
                 forwarded_producer_evidence: None,
                 forwarded_agent_producer: None,
                 agent_deployment_ceiling: arkret_models_collaboration::governance::agent_participation::ParticipationBits::ALL,

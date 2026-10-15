@@ -282,6 +282,90 @@ struct MemberEvidenceRow {
     value: serde_json::Value,
 }
 
+/// Capability evaluation remains read-only and uses only source-verified
+/// public rows. Human device, membership and account status are separate gates.
+pub(crate) async fn human_authorization(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+    actor: &ActorId,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<Option<coland_storage::ActorRealmAuthorization>> {
+    if actor.as_account_id().is_none() {
+        return Ok(None);
+    }
+    let stream = arkret_wire::CommitStreamRef::Realm {
+        realm_id: realm.clone(),
+    };
+    let selectors = diesel::sql_query("SELECT selector,value FROM replica_authorization_rows WHERE realm_id=$1 AND source_stream_ref=$2 AND selector->>'kind' IN ('realm_authority_root','realm_policy_bundle','capability_grant') ORDER BY selector::text")
+        .bind::<Text,_>(realm.as_str()).bind::<Jsonb,_>(serde_json::to_value(&stream).map_err(invalid)?)
+        .load::<StoredRow>(conn).await.map_err(PersistenceError::database)?
+        .into_iter().map(|row| serde_json::from_value::<CurrentSelector>(row.selector).map_err(invalid))
+        .collect::<PersistenceResult<Vec<_>>>()?;
+    let Some((_, rows)) = exact_current_evidence(conn, &stream, &selectors).await? else {
+        return Ok(None);
+    };
+    let mut root = None;
+    let mut policy_present = false;
+    let mut grants = BTreeMap::new();
+    let mut revisions = BTreeMap::new();
+    for row in rows {
+        let TypedCurrentRow::Value {
+            selector,
+            revision,
+            value,
+            ..
+        } = row;
+        match selector {
+            CurrentSelector::RealmAuthorityRoot => root = Some(value),
+            CurrentSelector::RealmPolicyBundle => {
+                let _: arkret_models_collaboration::events_payloads::realm::RealmPolicyBundlePayload = serde_json::from_value(value).map_err(invalid)?;
+                policy_present = true;
+            }
+            CurrentSelector::CapabilityGrant { grant_id } => {
+                let grant: CapabilityGrant = serde_json::from_value(value).map_err(invalid)?;
+                if grant.id != grant_id || grant.realm_id.as_ref() != Some(realm) {
+                    return Err(invalid("grant differs from its selector"));
+                }
+                revisions.insert(grant_id.clone(), revision);
+                grants.insert(grant_id, grant);
+            }
+            _ => return Err(invalid("unrelated replica capability selector")),
+        }
+    }
+    let Some(root) = root.filter(|_| policy_present) else {
+        return Ok(None);
+    };
+    let controller: ActorId = serde_json::from_value(
+        root.get("controller_actor_id")
+            .cloned()
+            .ok_or_else(|| invalid("root controller is absent"))?,
+    )
+    .map_err(invalid)?;
+    let generation = root
+        .get("authority_generation")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| invalid("root generation is absent"))?;
+    let effective = grants
+        .iter()
+        .filter_map(|(id, grant)| {
+            (matches!(&grant.subject, CapabilitySubject::Actor(subject) if subject == actor)
+                && intact_chain(id, &grants, realm, generation, at, &mut BTreeSet::new(), 0))
+            .then(|| coland_storage::EffectiveActorGrant {
+                grant: grant.clone(),
+                revision: revisions[id].clone(),
+            })
+        })
+        .collect();
+    Ok(Some(coland_storage::ActorRealmAuthorization {
+        realm_id: realm.clone(),
+        actor: actor.clone(),
+        evaluated_at: at,
+        root_controller: controller == *actor,
+        agent_ceiling: None,
+        grants: effective,
+    }))
+}
+
 /// Exact selector evidence at the verified held replica cut. Point probes
 /// exclude unrelated Realm rows and stale bootstrap receipts.
 pub(crate) async fn exact_current_evidence(

@@ -282,6 +282,7 @@ diesel::table! {
         signal_class -> Text,
         envelope_digest -> Text,
         envelope -> Jsonb,
+        call_invitation -> Nullable<Jsonb>,
         sent_at -> Timestamptz,
         expires_at -> Timestamptz,
     }

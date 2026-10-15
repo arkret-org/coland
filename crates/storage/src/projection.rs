@@ -460,6 +460,15 @@ pub trait CapabilityGrantCurrentResultStore: Send + Sync {
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<ActorRealmAuthorization>;
 
+    /// Read-only public capability inputs for an already authenticated human
+    /// device from an exact verified replica cut. This cannot admit Events.
+    async fn replica_human_authorization(
+        &self,
+        realm_id: &arkret_wire::RealmId,
+        actor: &arkret_wire::ActorId,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<Option<ActorRealmAuthorization>>;
+
     /// Fixture-only: make `controller` the Realm's current authority root
     /// controller, keeping an existing root's generation and Event ref.
     #[cfg(any(test, feature = "test-support"))]

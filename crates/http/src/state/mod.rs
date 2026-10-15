@@ -26,6 +26,7 @@ mod authority_port;
 mod authority_producer_validation;
 mod authority_self_event_unit;
 mod authority_sidecar_unit;
+pub(crate) mod call_admission;
 pub(crate) use authority_sidecar_unit::commit_sidecar_ensure_unit;
 mod committed_replication;
 pub(crate) mod foreign_direct_mls;

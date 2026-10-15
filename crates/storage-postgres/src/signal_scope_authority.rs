@@ -855,10 +855,11 @@ async fn declared_commit(
         .then_some(commit))
 }
 
-const PRODUCT_ACTIONS: [&str; 3] = [
+const PRODUCT_ACTIONS: [&str; 4] = [
     arkret_wire::CapabilityActionId::MESSAGE_STREAM_SEND,
     arkret_wire::CapabilityActionId::MESSAGE_CREATE,
     arkret_wire::CapabilityActionId::TYPING_BROADCAST,
+    arkret_wire::CapabilityActionId::CALL_SIGNAL_SEND,
 ];
 
 fn qualified_chain(

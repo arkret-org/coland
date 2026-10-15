@@ -769,6 +769,7 @@ CREATE TABLE public.signal_relay (
     signal_class text NOT NULL,
     envelope_digest text NOT NULL,
     envelope jsonb NOT NULL,
+    call_invitation jsonb,
     sent_at timestamp with time zone NOT NULL,
     expires_at timestamp with time zone NOT NULL,
     CONSTRAINT signal_relay_class_check CHECK ((signal_class = ANY (ARRAY['setup'::text, 'moderation'::text, 'session'::text])))
@@ -781,7 +782,10 @@ CREATE INDEX signal_relay_realm_position_idx ON public.signal_relay USING btree 
 
 CREATE INDEX signal_relay_expires_idx ON public.signal_relay USING btree (expires_at);
 
-CREATE UNIQUE INDEX signal_relay_realm_digest_idx ON public.signal_relay USING btree (realm_id, envelope_digest);
+-- A call direction is retained independently for each complete holder. The
+-- generic rail retains its single digest replay key when no relation exists.
+CREATE UNIQUE INDEX signal_relay_realm_digest_idx ON public.signal_relay USING btree
+    (realm_id, envelope_digest, (COALESCE(call_invitation->'holder_account_id', 'null'::jsonb)));
 
 -- Per-Realm monotonic position counter for `signal_relay`. Held in a dedicated
 -- table (not `MAX(position)` of live rows) so positions keep increasing even
@@ -4806,3 +4810,42 @@ CREATE TABLE management_review_requests (
 CREATE UNIQUE INDEX management_review_one_nonterminal_target ON management_review_requests
  (requester_actor_key,effective_scope,management_operation,target_digest)
  WHERE status IN ('pending','approved');
+
+-- Private issuer identity mapping. This is not a current authorization family.
+CREATE TABLE call_media_subjects (
+ realm_id TEXT NOT NULL,
+ call_id TEXT NOT NULL,
+ subject_actor_id JSONB NOT NULL,
+ subject_device_id TEXT NOT NULL,
+ roster_identity JSONB NOT NULL,
+ PRIMARY KEY(realm_id,call_id,subject_actor_id,subject_device_id),
+ UNIQUE(realm_id,call_id,roster_identity),
+ CHECK(jsonb_typeof(subject_actor_id)='object'),
+ CHECK(jsonb_typeof(roster_identity)='object')
+);
+
+CREATE TABLE call_axis_current_results (
+ realm_id TEXT NOT NULL,
+ call_id TEXT NOT NULL,
+ family TEXT NOT NULL CHECK(family IN ('call_focus','call_roster','call_moderation')),
+ source_stream_ref JSONB NOT NULL,
+ current_commit_id TEXT NOT NULL,
+ current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
+ value JSONB NOT NULL,
+ updated_at TIMESTAMPTZ NOT NULL,
+ PRIMARY KEY(realm_id,call_id,family),
+ CHECK(jsonb_typeof(value)='object'),
+ CHECK(source_stream_ref->>'kind' IN ('realm','circle')),
+ CHECK(source_stream_ref->>'realm_id'=realm_id)
+);
+
+-- Verification evidence attached to an actual accepted public binding.
+CREATE TABLE call_media_binding_keys (
+ realm_id TEXT NOT NULL,
+ call_id TEXT NOT NULL,
+ binding_digest TEXT NOT NULL,
+ issuer_kid TEXT NOT NULL,
+ public_key BYTEA NOT NULL CHECK(octet_length(public_key)=32),
+ accepted_commit_id TEXT NOT NULL REFERENCES realm_commits(commit_id) ON DELETE RESTRICT,
+ PRIMARY KEY(realm_id,call_id,binding_digest,issuer_kid)
+);

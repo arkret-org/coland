@@ -599,6 +599,15 @@ pub fn describe(
             // handler. coland mounts the handler unconditionally, and also
             // claims the required `ak.profile.webrtc_media.v1` dependency above.
             profiles.push(arkret_wire::ProfileId::MEDIA_SERVICE_BINDING_V1.to_owned());
+            // The native adapter is reference-only and cannot be claimed as
+            // a production media backend. LiveKit issuance needs real keys.
+            if config.development_mode {
+                profiles.push("ak.profile.media_service_binding.arkret_native.v1".to_owned());
+            }
+            if config.livekit.api_key.as_ref().is_some_and(|key| !key.is_empty())
+                && config.livekit.api_secret.as_ref().is_some_and(|key| !key.is_empty()) {
+                profiles.push("ak.profile.media_service_binding.livekit.v1".to_owned());
+            }
             if websocket_binding.is_some() {
                 profiles.push(arkret_wire::ProfileId::BINDING_WEBSOCKET_V1.to_owned());
             }

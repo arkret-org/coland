@@ -826,6 +826,9 @@ pub(crate) const SNAPSHOT_CURRENT_SQL: &str = "SELECT result.*, covering.stream_
                 current_commit_id, current_stream_position, value \
            FROM call_state_current_results WHERE realm_id = $1 \
          UNION ALL \
+         SELECT family AS selector_kind,to_jsonb(call_id) AS selector_subject, \
+                current_commit_id,current_stream_position,value FROM call_axis_current_results WHERE realm_id=$1 \
+         UNION ALL \
          SELECT 'strand'::text AS selector_kind, to_jsonb(strand_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
            FROM strand_current_results WHERE realm_id = $1 \
@@ -1015,6 +1018,7 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
                 ("realm_join_rule", None) => arkret_wire::CurrentSelector::RealmJoinRule,
                 ("realm_history_access", None) => arkret_wire::CurrentSelector::RealmHistoryAccess,
                 ("realm_read_receipt_policy", None) => arkret_wire::CurrentSelector::RealmReadReceiptPolicy,
+                ("realm_media_service", None) => arkret_wire::CurrentSelector::RealmMediaService,
                 ("realm_discovery", None) => arkret_wire::CurrentSelector::RealmDiscovery,
                 ("realm_alias", None) => arkret_wire::CurrentSelector::RealmAlias,
                 ("realm_plaintext_visible_services", None) => {
@@ -1049,6 +1053,15 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
                 },
                 ("circle_member_state", Some(selector)) => serde_json::from_value::<arkret_wire::CurrentSelector>(selector)
                     .map_err(|error| PersistenceError::Internal(format!("stored Circle member selector is invalid: {error}")))?,
+                ("call_focus", Some(call_id)) => arkret_wire::CurrentSelector::CallFocus {
+                    call_id: serde_json::from_value(call_id).map_err(PersistenceError::database)?,
+                },
+                ("call_moderation", Some(call_id)) => arkret_wire::CurrentSelector::CallModeration {
+                    call_id: serde_json::from_value(call_id).map_err(PersistenceError::database)?,
+                },
+                ("call_roster", Some(call_id)) => arkret_wire::CurrentSelector::CallRoster {
+                    call_id: serde_json::from_value(call_id).map_err(PersistenceError::database)?,
+                },
                 ("call_state", Some(call_id)) => arkret_wire::CurrentSelector::CallState {
                     call_id: serde_json::from_value(call_id).map_err(PersistenceError::database)?,
                 },

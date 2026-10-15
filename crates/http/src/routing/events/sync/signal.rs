@@ -47,6 +47,239 @@ const SIGNAL_SUBSCRIBE_RECONNECT_AFTER_MS: u64 = 250;
 /// not carried on the durable event broadcast, so the live rail polls.
 const SIGNAL_SUBSCRIBE_POLL_MS: u64 = 250;
 
+#[endpoint(operation_id = "ak.self.call.invitation.command.send")]
+pub(super) async fn submit_call_invitation(
+    aa: crate::routing::system::extract::AuthArgs,
+    depot: &mut Depot,
+    req: &mut Request,
+) -> coland_http::result::JsonResult<
+    arkret_models_collaboration::call_invitation::CallInvitationSendOutcome,
+> {
+    use arkret_models_collaboration::call_invitation::*;
+    let state = depot.get_typed::<AppState>().expect("state injected");
+    let session = aa.authenticated_session(state, req).await?;
+    super::super::require_agent_session_scope(
+        &session,
+        arkret_wire::ServiceOperationId::SELF_CALL_INVITATION_COMMAND_SEND_V1,
+    )?;
+    let body: CallInvitationSendRequestBody = req
+        .parse_json()
+        .await
+        .map_err(|e| AppError::json_invalid(e.to_string()))?;
+    admit_signal(state, &session, &body.envelope).await?;
+    validate_call_invitation(state, &body).await?;
+    let state = state.clone();
+    tokio::spawn(async move {
+        let result = if body.invitation.holder_account_id.station_id == state.service_core_id() {
+            append_call_invitation(&state, &body).await
+        } else {
+            async {
+                admit_outbound_signal(
+                    &state,
+                    body.invitation.holder_account_id.station_id.as_str(),
+                    &body.envelope,
+                )
+                .await?;
+                let bytes = arkret_canonical::canonical_json_bytes(&body)
+                    .map_err(|e| AppError::internal(e.to_string()))?;
+                crate::routing::federation::outbox::signed_peer_request(
+                    &state,
+                    body.invitation.holder_account_id.station_id.as_str(),
+                    "/_arkret/peer/rtc/invitation",
+                    &bytes,
+                    65536,
+                )
+                .await
+                .map_err(|e| crate::app_error!(TemporarilyUnavailable, e))?;
+                Ok(())
+            }
+            .await
+        };
+        if let Err(error) = result {
+            tracing::debug!(%error, "single-attempt call invitation deferred");
+        }
+    });
+    coland_http::result::json_ok(CallInvitationSendOutcome {
+        status: CallInvitationSendStatus::Deferred,
+    })
+}
+
+pub(crate) async fn invitation_signing_key(
+    state: &AppState,
+    body: &arkret_models_collaboration::call_invitation::CallInvitationSendRequestBody,
+) -> Result<arkret_signatures::PublicKeyMaterial, AppError> {
+    let key = invitation_signer(state, body).await?;
+    Ok(arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+        bytes: arkret_canonical::base64url_decode(key.public_key_b64u.as_str())
+            .map_err(|e| signal_proof_invalid(e.to_string()))?,
+    })
+}
+
+async fn invitation_signer(
+    state: &AppState,
+    body: &arkret_models_collaboration::call_invitation::CallInvitationSendRequestBody,
+) -> Result<arkret_wire::StationSigningKey, AppError> {
+    let envelope = &body.envelope;
+    if envelope.sender_device_id.is_some() {
+        return resolve_signal_delivery_device_key(
+            state,
+            &body.invitation.holder_account_id,
+            envelope,
+        )
+        .await;
+    }
+    verify_signal_agent_current_authority(state, envelope, &envelope.sender_actor_id, None).await?;
+    let record = crate::routing::identity::agent_pcr::agent_record_for_actor(
+        state,
+        &envelope.sender_actor_id,
+    )
+    .await
+    .map_err(|_| signal_proof_invalid("Agent provisioning is unavailable"))?
+    .ok_or_else(|| signal_proof_invalid("Agent provisioning is unavailable"))?;
+    let runtime = record
+        .runtime_bindings()
+        .map_err(|e| signal_proof_invalid(e.to_string()))?
+        .active_binding
+        .ok_or_else(|| signal_proof_invalid("Agent runtime key is unavailable"))?;
+    let key = arkret_models_identity::agent_signer_evidence::AgentAuthorizedSigningKey::from_event(
+        &runtime.key_authorization_event,
+    )
+    .map_err(|e| signal_proof_invalid(e.to_string()))?;
+    let scope = runtime
+        .key_authorization_event
+        .as_agent_key_authorize()
+        .map_err(|e| signal_proof_invalid(e.to_string()))?
+        .agent_key_scope;
+    let target = match &envelope.scope_ref {
+        arkret_wire::ScopeRef::Realm { realm_id } => {
+            arkret_wire::WireResourceSelector::realm(realm_id.clone())
+        }
+        arkret_wire::ScopeRef::Circle {
+            realm_id,
+            circle_id,
+        } => arkret_wire::WireResourceSelector::circle(realm_id.clone(), circle_id.clone()),
+        _ => return Err(signal_invalid("call scope is unavailable")),
+    };
+    let facts = arkret_policy::grant_evaluation::OperationFacts::default();
+    let action = [arkret_wire::CapabilityActionId::CALL_SIGNAL_SEND];
+    let operation = arkret_policy::grant_evaluation::AuthorizationOperation {
+        actor: &envelope.sender_actor_id,
+        actions: &action,
+        target: &target,
+        at: chrono::Utc::now(),
+        facts: &facts,
+    };
+    arkret_policy::agent_content_ceiling::require_key_scope_content_ceiling(&scope, &operation)
+        .map_err(|e| signal_proof_invalid(e.to_string()))?;
+    let public = agent_runtime_signal_public_key(&key.public_key, &runtime.public_key_digest)?;
+    let bytes = public
+        .ed25519_bytes()
+        .map_err(|e| signal_proof_invalid(e.to_string()))?;
+    Ok(arkret_wire::StationSigningKey {
+        actor: envelope.sender_actor_id.clone(),
+        verification_method: runtime.verification_method.clone(),
+        authorization_ref: runtime.authorized_event_ref.clone(),
+        public_key_b64u: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
+            bytes,
+        ))
+        .map_err(|e| signal_proof_invalid(e.to_string()))?,
+    })
+}
+
+pub(crate) async fn validate_call_invitation(
+    state: &AppState,
+    body: &arkret_models_collaboration::call_invitation::CallInvitationSendRequestBody,
+) -> Result<(), AppError> {
+    body.invitation
+        .validate_for_envelope(&body.envelope, chrono::Utc::now())
+        .map_err(structural_error)?;
+    if body.envelope.signal_class != arkret_wire::SignalClass::Setup {
+        return Err(signal_invalid(
+            "call invitation requires the setup Signal class",
+        ));
+    }
+    crate::state::call_admission::accepted_call(
+        state,
+        &body.invitation.call_id,
+        &body.invitation.scope_ref,
+    )
+    .await?;
+    let signer = invitation_signer(state, body).await?;
+    let agent = signal_product_agent(state, &body.envelope, &signer).await?;
+    let authority = verify_signal_scope_authority_with_product(
+        state,
+        &body.envelope,
+        &body.invitation.inviter_actor_id,
+        true,
+        agent
+            .as_ref()
+            .map(|(controller, scope)| (controller, scope)),
+    )
+    .await?;
+    if !authority
+        .product_authority
+        .as_deref()
+        .is_some_and(|material| {
+            arkret_policy::signal_authorization::call_invitation_allowed(
+                material,
+                &body.invitation.inviter_actor_id,
+                &body.invitation.scope_ref,
+                chrono::Utc::now(),
+            )
+        })
+    {
+        return Err(AppError::capability_denied(
+            "invitation producer lacks current call signalling authority",
+        ));
+    }
+    let key = arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+        bytes: arkret_canonical::base64url_decode(signer.public_key_b64u.as_str())
+            .map_err(|e| signal_proof_invalid(e.to_string()))?,
+    };
+    arkret_signatures::call_invitation::verify_call_invitation(
+        &body.invitation,
+        &body.envelope,
+        &key,
+        chrono::Utc::now(),
+    )
+    .map_err(|e| signal_proof_invalid(e.to_string()))
+}
+
+pub(crate) async fn append_call_invitation(
+    state: &AppState,
+    body: &arkret_models_collaboration::call_invitation::CallInvitationSendRequestBody,
+) -> Result<(), AppError> {
+    let envelope = &body.envelope;
+    let record = coland_storage::SignalRelayRecord {
+        realm_id: envelope.realm_id.to_string(),
+        scope_ref: envelope.scope_ref.clone(),
+        sender_actor_id: envelope.sender_actor_id.to_string(),
+        sender_device_id: envelope.sender_device_id.as_ref().map(ToString::to_string),
+        signal_class: envelope.signal_class,
+        envelope_digest: envelope
+            .envelope_digest()
+            .map_err(structural_error)?
+            .to_string(),
+        envelope: envelope.clone(),
+        call_invitation: Some(body.invitation.clone()),
+        sent_at: envelope.sent_at,
+        expires_at: envelope.expires_at,
+        position: 0,
+    };
+    if state
+        .deliveries()
+        .append_signal(record)
+        .await
+        .map_err(|_| signal_rail_unavailable("append invitation"))?
+    {
+        let _ = state.publish_event_notification(EventNotification::signal(
+            envelope.realm_id.to_string(),
+            envelope.signal_class,
+        ));
+    }
+    Ok(())
+}
+
 /// `ak.self.signal.command.send.v1`.
 ///
 /// The body is an `ak.schema.signal_envelope.v1` [`SignalEnvelope`].
@@ -98,6 +331,7 @@ pub(super) async fn submit_signal(
         sent_at: envelope.sent_at,
         expires_at: envelope.expires_at,
         envelope: envelope.clone(),
+        call_invitation: None,
         position: 0,
     };
     let appended = state
@@ -731,6 +965,7 @@ pub(in crate::routing::events) async fn accept_peer_signal(
             sent_at: envelope.sent_at,
             expires_at: envelope.expires_at,
             envelope: envelope.clone(),
+            call_invitation: None,
             position: 0,
         })
         .await
@@ -927,8 +1162,8 @@ pub(super) fn signal_response(
                         yield Ok::<bytes::Bytes,std::io::Error>(ndjson_line(&SignalStreamFrame::Unauthorized { reason:None }));
                         break;
                     }
-                    for envelope in pending_signals_for_subscriber(&state, &session, &mut live_starts).await {
-                        if let Ok(frame) = admitted_signal_frame(&state, &session, envelope).await {
+                    for record in pending_signal_records_for_subscriber(&state, &session, &mut live_starts).await {
+                        if let Ok(frame) = admitted_signal_frame_with_invitation(&state, &session, record.envelope, record.call_invitation).await {
                             yield Ok(ndjson_line(&frame));
                         }
                     }
@@ -946,10 +1181,11 @@ pub(super) fn signal_response(
 
 /// Fresh current admission belongs to the recipient authenticated self boundary,
 /// separately from peer relay. Never return a frame if current authority is unknown.
-pub(crate) async fn admitted_signal_frame(
+pub(super) async fn admitted_signal_frame_with_invitation(
     state: &AppState,
     session: &SessionIdentityState,
     envelope: SignalEnvelope,
+    invitation: Option<arkret_models_collaboration::call_invitation::CallInvitationEnvelope>,
 ) -> Result<SignalStreamFrame, AppError> {
     use arkret_models_identity::{
         CurrentSignerKeyQuerySender, SignerKeyQueryOutcome, SignerKeyQuerySelector,
@@ -961,6 +1197,14 @@ pub(crate) async fn admitted_signal_frame(
         .as_account_id()
         .cloned()
         .ok_or_else(|| signal_invalid("recipient is not an account"))?;
+    if invitation
+        .as_ref()
+        .is_some_and(|value| value.holder_account_id != recipient)
+    {
+        return Err(AppError::capability_denied(
+            "call invitation belongs to another holder",
+        ));
+    }
     admit_signal_outer(
         state,
         envelope.sender_actor_id.route_service_id().as_str(),
@@ -1032,6 +1276,7 @@ pub(crate) async fn admitted_signal_frame(
         None => resolve_signal_delivery_device_key(state, &recipient, &envelope).await?,
     };
     let mut authority = arkret_models_collaboration::SignalDeliveryAuthority {
+        call_invitation: None,
         product_authority: None,
         recipient_account_id: recipient,
         key,
@@ -1101,6 +1346,85 @@ pub(crate) async fn admitted_signal_frame(
             return Err(signal_invalid("Signal expired before emission"));
         }
         authority.product_authority = current.product_authority;
+        if let Some(invitation) = &invitation {
+            use arkret_models_collaboration::call_invitation::*;
+            let body = CallInvitationSendRequestBody {
+                invitation: invitation.clone(),
+                envelope: envelope.clone(),
+            };
+            validate_call_invitation(state, &body).await?;
+            let request = crate::state::call_admission::product_request(
+                state,
+                invitation.clone(),
+                envelope.clone(),
+                arkret_wire::DeviceId::new(session.require_human_device_id())
+                    .map_err(|e| AppError::param_invalid(e.to_string()))?,
+            )?;
+            let outcome = crate::state::call_admission::current_cut(state, &request).await?;
+            if !outcome.admitted {
+                return Err(AppError::capability_denied("call product admission denied"));
+            }
+            crate::routing::identity::session_actor::validated_session_actor(state, session)
+                .await?;
+            // The holder-PCR round trip cannot preserve sender or scope authority.
+            validate_call_invitation(state, &body).await?;
+            let current_key = invitation_signing_key(state, &body).await?;
+            let same_key = matches!(&current_key,
+                arkret_signatures::PublicKeyMaterial::Ed25519Raw { bytes }
+                    if arkret_canonical::base64url_encode(bytes)
+                        == authority.key.public_key_b64u.as_str());
+            if !same_key {
+                return Err(signal_proof_invalid(
+                    "Call invitation signer changed during holder admission",
+                ));
+            }
+            if envelope.sender_device_id.is_some() {
+                let final_key = resolve_signal_delivery_device_key(
+                    state,
+                    &authority.recipient_account_id,
+                    &envelope,
+                )
+                .await?;
+                if final_key != authority.key {
+                    return Err(signal_proof_invalid(
+                        "Call invitation device authorization changed during holder admission",
+                    ));
+                }
+            } else {
+                verify_signal_agent_current_authority(
+                    state,
+                    &envelope,
+                    &envelope.sender_actor_id,
+                    Some((
+                        &authority.key.authorization_ref,
+                        &authority.key.verification_method,
+                    )),
+                )
+                .await?;
+            }
+            let product_agent = signal_product_agent(state, &envelope, &authority.key).await?;
+            let final_scope = verify_signal_scope_authority_with_product(
+                state,
+                &envelope,
+                &envelope.sender_actor_id,
+                true,
+                product_agent
+                    .as_ref()
+                    .map(|(controller, scope)| (controller, scope)),
+            )
+            .await?;
+            if !final_scope.recipient_actors.contains(&current_actor) {
+                return Err(AppError::capability_denied(
+                    "Call invitation recipient changed during holder admission",
+                ));
+            }
+            authority.product_authority = final_scope.product_authority;
+            authority.call_invitation = Some(Box::new(CallInvitationDeliveryView {
+                invitation: invitation.clone(),
+                request,
+                outcome,
+            }));
+        }
         authority
             .validate_for_envelope(&envelope)
             .map_err(structural_error)?;
@@ -1161,6 +1485,7 @@ async fn signal_product_agent(
             arkret_wire::CapabilityActionId::MESSAGE_STREAM_SEND
                 | arkret_wire::CapabilityActionId::MESSAGE_CREATE
                 | arkret_wire::CapabilityActionId::TYPING_BROADCAST
+                | arkret_wire::CapabilityActionId::CALL_SIGNAL_SEND
         )
     });
     let mut projected = Vec::new();
@@ -1181,7 +1506,9 @@ async fn signal_product_agent(
         }
         if !matches!(
             selector.kind,
-            arkret_wire::ResourceSelectorKind::Realm | arkret_wire::ResourceSelectorKind::Strand
+            arkret_wire::ResourceSelectorKind::Realm
+                | arkret_wire::ResourceSelectorKind::Circle
+                | arkret_wire::ResourceSelectorKind::Strand
         ) {
             continue;
         }
@@ -1252,11 +1579,11 @@ async fn signal_subscription_start(
 /// handed, ascending by relay position. The watermark is advanced as the batch
 /// is taken, so the same envelope is not re-emitted on the next poll or on a
 /// reconnect inside the TTL window.
-pub(crate) async fn pending_signals_for_subscriber(
+async fn pending_signal_records_for_subscriber(
     state: &AppState,
     session: &SessionIdentityState,
     live_starts: &mut BTreeMap<String, u64>,
-) -> Vec<SignalEnvelope> {
+) -> Vec<coland_storage::SignalRelayRecord> {
     let now = chrono::Utc::now();
     let mut delivered = Vec::new();
     let Ok(actor) =
@@ -1305,7 +1632,12 @@ pub(crate) async fn pending_signals_for_subscriber(
             if !signal_visible_to_subscriber(state, &record, &actor).await {
                 continue;
             }
-            delivered.push(record.envelope);
+            if record.call_invitation.as_ref().is_some_and(|invitation| {
+                actor.as_account_id() != Some(&invitation.holder_account_id)
+            }) {
+                continue;
+            }
+            delivered.push(record);
         }
         if highest > watermark {
             let _ = state

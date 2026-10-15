@@ -419,6 +419,7 @@ pub(super) fn protocol_router() -> Router {
         .push(Router::with_path("account/subscribe").get(subscribe::account_subscribe))
         .push(Router::with_path("account/cursor/revoke").post(cursor::account_cursor_revoke))
         .push(Router::with_path("signal").post(signal::submit_signal))
+        .push(Router::with_path("rtc/invitation").post(signal::submit_call_invitation))
         .push(Router::with_path("signal/subscribe").get(signal::signal_subscribe))
         .push(
             Router::with_path("realm-state-snapshot/head")

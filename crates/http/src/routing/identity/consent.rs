@@ -29,6 +29,30 @@ pub(super) fn router() -> Router {
         .push(Router::with_path("results/grant").post(grant_consent))
         .push(Router::with_path("results/revoke").post(revoke_consent))
         .push(Router::with_path("request").post(request_consent))
+        .push(Router::with_path("current").post(read_full_current))
+}
+
+#[salvo::handler]
+async fn read_full_current(
+    aa: AuthArgs,
+    depot: &mut Depot,
+    req: &mut Request,
+    body: JsonBody<arkret_models_collaboration::consent_operations::ConsentCurrentReadRequestBody>,
+) -> JsonResult<arkret_models_collaboration::consent_operations::ConsentCurrentReadOutcome> {
+    let state = depot.get_typed::<AppState>().expect("state injected");
+    let session = aa.authenticated_session(state, req).await?;
+    crate::routing::events::require_agent_session_scope(
+        &session,
+        arkret_wire::ServiceOperationId::SELF_CONSENT_READ_CURRENT_V1,
+    )?;
+    let holder = super::auth_grant_dpop::authenticated_session_account_id(state, &session).await?;
+    let body = body.into_inner();
+    if body.holder_account_id != holder {
+        return Err(AppError::capability_denied(
+            "Consent current read belongs to another holder",
+        ));
+    }
+    json_ok(crate::state::authority_consent::read_current(state, &body).await?)
 }
 
 #[salvo::handler]

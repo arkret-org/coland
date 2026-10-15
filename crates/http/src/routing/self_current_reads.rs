@@ -22,6 +22,7 @@ use salvo::prelude::*;
 use super::authority_commit::{no_store, parse_closed_body, render_service_error};
 use crate::state::AppState;
 
+mod media_binding;
 mod stream_listing;
 
 pub(super) fn router() -> Router {
@@ -427,8 +428,8 @@ async fn strand_watch_current(req: &mut Request, depot: &Depot, res: &mut Respon
     }
 }
 
-/// `ak.self.media_service_binding.read.resolve.v1`. The request's Account
-/// must be the session's own Account on this Station. A visible Realm with an
+/// `ak.self.media_service_binding.read.resolve.v1`. The Account is taken
+/// from the authenticated session on this Station. A visible Realm with an
 /// accepted assignment is answered only from a resolved route and method
 /// state; until that resolution is available it is unresolved, never a
 /// guessed route.
@@ -457,7 +458,7 @@ async fn media_service_binding(req: &mut Request, depot: &Depot, res: &mut Respo
             &format!("invalid media service binding request: {error}"),
         );
     }
-    if request.account_id != account || account.station_id != state.service_core_id() {
+    if account.station_id != state.service_core_id() {
         return not_found(res);
     }
     let result = state
@@ -466,11 +467,25 @@ async fn media_service_binding(req: &mut Request, depot: &Depot, res: &mut Respo
         .await;
     match result {
         Ok(MediaServiceAnchorRead::NotFound) => not_found(res),
-        Ok(MediaServiceAnchorRead::Anchored) => render_unresolved(
+        Ok(cut @ MediaServiceAnchorRead::Anchored { .. }) => {
+            match media_binding::resolve(state, &account, &request, &cut).await {
+                Ok(outcome) => {
+                    no_store(res);
+                    res.render(Json(outcome));
+                }
+                Err(reason) => render_unresolved(
+                    res,
+                    ErrorCode::TemporarilyUnavailable,
+                    ServiceOperationId::SELF_MEDIA_SERVICE_BINDING_READ_RESOLVE_V1,
+                    &reason,
+                ),
+            }
+        }
+        Ok(MediaServiceAnchorRead::Unresolved(reason)) => render_unresolved(
             res,
             ErrorCode::TemporarilyUnavailable,
             ServiceOperationId::SELF_MEDIA_SERVICE_BINDING_READ_RESOLVE_V1,
-            "the accepted media service route and method state are not resolved",
+            reason,
         ),
         Err(error) => render_service_error(res, error),
     }

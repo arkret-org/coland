@@ -103,6 +103,8 @@ pub use authority_commit::*;
 pub use backup_series_erase::*;
 pub use blobs::*;
 pub use consent_current::*;
+mod call_media_subjects;
+pub use call_media_subjects::*;
 pub use consent_request_quarantine::*;
 pub use contacts::*;
 pub use device_revocations::*;
@@ -673,6 +675,7 @@ pub trait IdentityStoreRegistry: Send + Sync {
     fn invite_new_source_ledger(&self) -> &dyn InviteNewSourceLedgerStore;
     fn consent_request_quarantine(&self) -> &dyn ConsentRequestQuarantineStore;
     fn consent_current(&self) -> &dyn ConsentCurrentStore;
+    fn call_media_subjects(&self) -> &dyn CallMediaSubjectStore;
     fn mimi_consent_correlations(&self) -> &dyn MimiConsentCorrelationStore;
     fn realm_meta(&self) -> &dyn RealmMetaStore;
     fn messages(&self) -> &dyn MessageStore;

@@ -402,6 +402,10 @@ impl coland_storage::IdentityStoreRegistry for FaultInjectingStore {
         self.inner.consent_request_quarantine()
     }
 
+    fn call_media_subjects(&self) -> &dyn coland_storage::CallMediaSubjectStore {
+        self.inner.call_media_subjects()
+    }
+
     fn consent_current(&self) -> &dyn coland_storage::ConsentCurrentStore {
         self.inner.consent_current()
     }

@@ -1716,6 +1716,22 @@ impl CapabilityGrantCurrentResultStore for PgCapabilityGrantCurrentResultStore {
         .await
         .map_err(PgTransactionError::into_persistence)
     }
+    async fn replica_human_authorization(
+        &self,
+        realm: &RealmId,
+        actor: &ActorId,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<Option<ActorRealmAuthorization>> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                .execute(&mut *conn)
+                .await?;
+            Ok(crate::replica_authorization::human_authorization(conn, realm, actor, at).await?)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
 
     #[cfg(any(test, feature = "test-support"))]
     async fn seed_test_realm_root(

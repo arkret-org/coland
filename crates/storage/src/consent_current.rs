@@ -74,6 +74,22 @@ pub struct ConsentDeliveryWrite {
     pub expected_revision: u64,
 }
 
+/// A single serialized holder-PCR read cut; never a cached authorization.
+#[derive(Clone, Debug)]
+pub struct ConsentCallAdmissionCut {
+    pub admitted: bool,
+    pub authority_generation: u64,
+    pub evaluated_at: chrono::DateTime<chrono::Utc>,
+}
+#[derive(Clone, Debug)]
+pub struct ConsentCurrentReadCut {
+    pub realm_id: arkret_wire::RealmId,
+    pub governance_generation: u64,
+    pub effective_stream_head: arkret_wire::CommitStreamHead,
+    pub records: Vec<ConsentCurrentRecord>,
+    pub evaluated_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[async_trait]
 pub trait ConsentCurrentStore: Send + Sync {
     async fn admit(
@@ -86,4 +102,18 @@ pub trait ConsentCurrentStore: Send + Sync {
         write: ConsentDeliveryWrite,
     ) -> PersistenceResult<Option<crate::AccountDataCasResult>>;
     async fn list(&self, holder: &AccountId) -> PersistenceResult<Vec<ConsentCurrentRecord>>;
+    async fn holder_realm(
+        &self,
+        holder: &AccountId,
+    ) -> PersistenceResult<Option<arkret_wire::RealmId>>;
+    async fn read_current(
+        &self,
+        request: &arkret_models_collaboration::consent_operations::ConsentCurrentReadRequestBody,
+        authority_id: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Option<ConsentCurrentReadCut>>;
+    async fn admit_call(
+        &self,
+        request: &arkret_models_collaboration::call_invitation::CallInvitationAdmissionRequestBody,
+        authority_id: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Option<ConsentCallAdmissionCut>>;
 }

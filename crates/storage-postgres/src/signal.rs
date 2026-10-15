@@ -40,6 +40,8 @@ struct SignalRelayRow {
     envelope_digest: String,
     #[diesel(sql_type = Jsonb)]
     envelope: Value,
+    #[diesel(sql_type = sql_types::Nullable<Jsonb>)]
+    call_invitation: Option<Value>,
     #[diesel(sql_type = Timestamptz)]
     sent_at: chrono::DateTime<chrono::Utc>,
     #[diesel(sql_type = Timestamptz)]
@@ -74,6 +76,11 @@ impl TryFrom<SignalRelayRow> for SignalRelayRecord {
                     "stored signal envelope is invalid: {error}"
                 ))
             })?,
+            call_invitation: row
+                .call_invitation
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(PersistenceError::database)?,
             position: row.position.max(0) as u64,
         })
     }
@@ -95,7 +102,7 @@ struct SignalRelayExistsRow {
 }
 
 const SIGNAL_RELAY_COLUMNS: &str = "realm_id, position, scope_ref, sender_actor_id, \
-     sender_device_id, signal_class, envelope_digest, envelope, sent_at, expires_at";
+     sender_device_id, signal_class, envelope_digest, envelope, call_invitation, sent_at, expires_at";
 
 #[async_trait]
 impl SignalRelayStore for PgSignalRelayStore {
@@ -123,8 +130,9 @@ impl SignalRelayStore for PgSignalRelayStore {
             .bind::<Text,_>(&record.realm_id).execute(&mut *conn).await?;
         sql_query("SELECT next_position FROM signal_relay_position WHERE realm_id=$1 FOR UPDATE")
             .bind::<Text,_>(&record.realm_id).get_result::<SignalRelayPositionRow>(&mut *conn).await?;
-        let seen=sql_query("SELECT 1::bigint AS present FROM signal_relay WHERE realm_id=$1 AND envelope_digest=$2 LIMIT 1")
+        let seen=sql_query("SELECT 1::bigint AS present FROM signal_relay WHERE realm_id=$1 AND envelope_digest=$2 AND COALESCE(call_invitation->'holder_account_id','null'::jsonb)=COALESCE($3::jsonb->'holder_account_id','null'::jsonb) LIMIT 1")
             .bind::<Text,_>(&record.realm_id).bind::<Text,_>(&record.envelope_digest)
+            .bind::<sql_types::Nullable<Jsonb>,_>(record.call_invitation.as_ref().map(serde_json::to_value).transpose().map_err(PersistenceError::database)?)
             .get_result::<SignalRelayExistsRow>(&mut *conn).await.optional()?;
         if seen.is_some_and(|row|row.present==1) {return Ok(false);}
         let position_row = sql_query(
@@ -140,8 +148,8 @@ impl SignalRelayStore for PgSignalRelayStore {
         sql_query(
             "INSERT INTO signal_relay \
              (id, realm_id, position, scope_ref, sender_actor_id, sender_device_id, \
-              signal_class, envelope_digest, envelope, sent_at, expires_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+              signal_class, envelope_digest, envelope, call_invitation, sent_at, expires_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         )
         .bind::<sql_types::Uuid, _>(Uuid::now_v7())
         .bind::<Text, _>(&record.realm_id)
@@ -152,6 +160,7 @@ impl SignalRelayStore for PgSignalRelayStore {
         .bind::<Text, _>(&signal_class)
         .bind::<Text, _>(&record.envelope_digest)
         .bind::<Jsonb, _>(&envelope)
+        .bind::<sql_types::Nullable<Jsonb>, _>(record.call_invitation.as_ref().map(serde_json::to_value).transpose().map_err(PersistenceError::database)?)
         .bind::<Timestamptz, _>(record.sent_at)
         .bind::<Timestamptz, _>(record.expires_at)
         .execute(&mut *conn)

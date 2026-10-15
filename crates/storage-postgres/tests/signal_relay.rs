@@ -65,6 +65,7 @@ fn record() -> SignalRelayRecord {
         sent_at: at,
         expires_at: envelope.expires_at,
         envelope,
+        call_invitation: None,
         position: 0,
     }
 }
@@ -111,4 +112,53 @@ async fn eight_process_equivalent_racers_allocate_and_insert_exactly_once() {
             .await
             .unwrap();
     assert_eq!(progress.next_position, 1);
+}
+
+#[tokio::test]
+async fn one_exact_envelope_retains_each_complete_holder_direction_independently() {
+    use arkret_models_collaboration::call_invitation::*;
+    let database = TestDatabase::lease().await;
+    let relay = PgSignalRelayStore {
+        pool: database.pool(),
+    };
+    let mut first = record();
+    let holder = AccountId::new(
+        "ak:did_core:web:bob.example".parse().unwrap(),
+        "ak:did_core:web:station.example".parse().unwrap(),
+    );
+    first.call_invitation = Some(CallInvitationEnvelope {
+        inviter_actor_id: first.envelope.sender_actor_id.clone(),
+        holder_account_id: holder.clone(),
+        scope_ref: first.scope_ref.clone(),
+        call_id: "ak:call:ARzVic5s2NUShp82C8GPo-shbkm7isUWyvILLThc3aNL"
+            .parse()
+            .unwrap(),
+        media: CallInvitationMedia {
+            audio: true,
+            video: false,
+            screen: false,
+        },
+        envelope_digest: call_invitation_envelope_digest(&first.envelope).unwrap(),
+        expires_at: first.expires_at,
+        proof: CallInvitationProof {
+            verification_method: first.envelope.proof.verification_method.clone(),
+            jws: "a..b".into(),
+        },
+    });
+    let mut second = first.clone();
+    second
+        .call_invitation
+        .as_mut()
+        .unwrap()
+        .holder_account_id
+        .station_id = "ak:did_core:web:other-station.example".parse().unwrap();
+    assert!(relay.append(first.clone()).await.unwrap());
+    assert!(!relay.append(first.clone()).await.unwrap());
+    assert!(relay.append(second.clone()).await.unwrap());
+    assert!(!relay.append(second.clone()).await.unwrap());
+    let rows = relay.list_for_realm(&first.realm_id).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].call_invitation, first.call_invitation);
+    assert_eq!(rows[1].call_invitation, second.call_invitation);
+    assert_eq!(rows[0].envelope, rows[1].envelope);
 }

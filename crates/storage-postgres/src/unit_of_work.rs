@@ -3286,6 +3286,7 @@ async fn commit_scope_current_results_inner(
 
     Box::pin(crate::realm_bootstrap_current_results::commit_read_receipt_policy_authority_current_result_in_connection(conn, event, commit, prepared)).await?;
     Box::pin(crate::realm_bootstrap_current_results::commit_preview_policy_authority_current_result_in_connection(conn, event, commit, prepared)).await?;
+    Box::pin(crate::realm_bootstrap_current_results::commit_media_service_authority_current_result_in_connection(conn, event, commit, prepared)).await?;
 
     Box::pin(
         crate::organization_moderation_gate::commit_realm_organization_current_result_in_connection(
@@ -3296,6 +3297,15 @@ async fn commit_scope_current_results_inner(
             prepared,
         ),
     )
+    .await?;
+
+    Box::pin(crate::call_state_admission::commit_in_connection(
+        conn,
+        event,
+        commit,
+        request.call_media_binding_key.as_ref(),
+        prepared,
+    ))
     .await?;
 
     Box::pin(crate::call_state_current_results::commit_in_connection(

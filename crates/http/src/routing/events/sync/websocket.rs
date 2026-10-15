@@ -466,13 +466,25 @@ async fn current_delivery(
             payload: WebSocketDataPayload::Signal(signal),
             ..
         } => {
-            let SignalStreamFrame::Signal { envelope, .. } = signal.as_ref() else {
+            let SignalStreamFrame::Signal {
+                envelope,
+                delivery_authority,
+            } = signal.as_ref()
+            else {
                 return Err(ErrorCode::SchemaViolation);
             };
-            **signal =
-                super::signal::admitted_signal_frame(state, &credential.session, envelope.clone())
-                    .await
-                    .map_err(|_| ErrorCode::CapabilityDenied)?;
+            let invitation = delivery_authority
+                .call_invitation
+                .as_ref()
+                .map(|view| view.invitation.clone());
+            **signal = super::signal::admitted_signal_frame_with_invitation(
+                state,
+                &credential.session,
+                envelope.clone(),
+                invitation,
+            )
+            .await
+            .map_err(|_| ErrorCode::CapabilityDenied)?;
         }
         WebSocketServerFrame::Data {
             payload: WebSocketDataPayload::Events(events),

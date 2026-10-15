@@ -3587,8 +3587,40 @@ pub(crate) fn authorize_capability_gated_event_with_approvals<'a>(
     Box::pin(async move {
         lock_realm_authorization_cut(conn, &event.realm_id).await?;
         let cut = RealmAuthorizationCut::read_for_event(conn, event).await?;
-        let approved =
-            Box::pin(cut.require_event_with_approvals(conn, event, commit, prepared)).await?;
+        let approved = if event.kind == EventKind::CallState
+            && (event.payload.contains_key("moderation_delta")
+                || event
+                    .payload
+                    .get("state_transition")
+                    .and_then(|value| value.get("to"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("ended"))
+        {
+            cut.require_open_lifecycle(event)?;
+            cut.require_governed_member(&event.kind)?;
+            let (target, mut facts) = cut.event_operation(event);
+            cut.complete_event_facts_in_connection(conn, event, &mut facts)
+                .await?;
+            let mut actions = vec![CapabilityActionId::CALL_MODERATE];
+            if arkret_policy::owner_may_author_action(CapabilityActionId::CALL_MODERATE)
+                .map_err(PersistenceError::database)?
+            {
+                actions.push(CapabilityActionId::REALM_OWNER);
+            }
+            Box::pin(cut.require_selected_action_with_approvals(
+                conn,
+                event,
+                commit,
+                prepared,
+                CapabilityActionId::CallModerate,
+                &target,
+                &facts,
+                &actions,
+            ))
+            .await?
+        } else {
+            Box::pin(cut.require_event_with_approvals(conn, event, commit, prepared)).await?
+        };
         crate::approval_admission::consume_and_audit(
             conn,
             event,

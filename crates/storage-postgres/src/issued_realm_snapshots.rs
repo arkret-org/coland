@@ -722,6 +722,7 @@ async fn recheck_disclosure_in_connection(
             | CurrentSelector::RealmJoinRule
             | CurrentSelector::RealmHistoryAccess
             | CurrentSelector::RealmReadReceiptPolicy
+            | CurrentSelector::RealmMediaService
             | CurrentSelector::RealmDiscovery
             | CurrentSelector::RealmAlias
             | CurrentSelector::RealmPlaintextVisibleServices

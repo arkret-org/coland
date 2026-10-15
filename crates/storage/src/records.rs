@@ -1048,6 +1048,9 @@ pub struct SignalRelayRecord {
     /// The verbatim admitted envelope handed to subscribers, so a receiver
     /// verifies `proof` over the exact canonical bytes the sender signed.
     pub envelope: arkret_wire::SignalEnvelope,
+    /// Producer-signed transient relation; never a stored Consent verdict.
+    pub call_invitation:
+        Option<arkret_models_collaboration::call_invitation::CallInvitationEnvelope>,
     /// Monotonic per-Realm position assigned by `SignalRelayStore::append`.
     /// Drives per-subscriber-device deliver-once: a subscriber's watermark
     /// records the highest `position` already delivered to that device, so an

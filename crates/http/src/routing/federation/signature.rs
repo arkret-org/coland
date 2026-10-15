@@ -361,7 +361,7 @@ fn federation_verification_error(
     }
 }
 
-pub(in crate::routing) async fn verifying_key_for_service_id(
+pub(crate) async fn verifying_key_for_service_id(
     state: &AppState,
     service_id: &str,
     verification_method: &str,

@@ -283,6 +283,7 @@ impl GovernanceChain {
                 final_stream_heads_digest: hash('a'),
                 snapshot_ref: RealmSnapshotId::from_digest([0x44; 32]),
                 historical_signer_facts_digest: None,
+                pcr_private_state_digest: None,
                 change_event_ref: change_event.event_id.clone(),
                 change_commit_id: change_commit.commit_id.clone(),
                 old_authority_signature: placeholder_signature(

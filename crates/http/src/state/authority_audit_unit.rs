@@ -207,6 +207,7 @@ async fn commit(
             applet_producer_guard,
             widget_token_gate: None,
             agent_grant_scope_evidence,
+            call_media_binding_key: None,
             agent_deployment_ceiling: state.config().agent_participation_ceiling,
             event: coland_storage::CanonicalEventRecord {
                 event_id: event.event_id.to_string(),

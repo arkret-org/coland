@@ -37,6 +37,34 @@ pub struct PersistenceHandle {
 }
 
 impl PersistenceHandle {
+    pub async fn call_media_roster_identity(
+        &self,
+        realm: &arkret_wire::RealmId,
+        call: &arkret_wire::CallId,
+        actor: &arkret_wire::ActorId,
+        device: &arkret_wire::DeviceId,
+        candidate: &arkret_models_collaboration::call_invitation::CallMediaRosterIdentity,
+    ) -> PersistenceResult<arkret_models_collaboration::call_invitation::CallMediaRosterIdentity>
+    {
+        self.persistence
+            .call_media_subjects()
+            .establish_identity(realm, call, actor, device, candidate)
+            .await
+    }
+
+    pub async fn accepted_call_media_binding_key(
+        &self,
+        realm: &arkret_wire::RealmId,
+        call: &arkret_wire::CallId,
+        digest: &arkret_wire::Hash,
+        issuer: &arkret_wire::DidUrl,
+    ) -> PersistenceResult<Option<[u8; 32]>> {
+        self.persistence
+            .call_media_subjects()
+            .accepted_binding_key(realm, call, digest, issuer)
+            .await
+    }
+
     pub async fn management_review_request(
         &self,
         caller: &arkret_wire::ActorId,
@@ -225,6 +253,35 @@ impl PersistenceHandle {
         holder: &arkret_wire::AccountId,
     ) -> PersistenceResult<Vec<coland_storage::ConsentCurrentRecord>> {
         self.persistence.consent_current().list(holder).await
+    }
+    pub async fn admit_consented_call(
+        &self,
+        request: &arkret_models_collaboration::call_invitation::CallInvitationAdmissionRequestBody,
+        authority_id: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Option<coland_storage::ConsentCallAdmissionCut>> {
+        self.persistence
+            .consent_current()
+            .admit_call(request, authority_id)
+            .await
+    }
+    pub async fn consent_holder_realm(
+        &self,
+        holder: &arkret_wire::AccountId,
+    ) -> PersistenceResult<Option<arkret_wire::RealmId>> {
+        self.persistence
+            .consent_current()
+            .holder_realm(holder)
+            .await
+    }
+    pub async fn read_consent_current(
+        &self,
+        request: &arkret_models_collaboration::consent_operations::ConsentCurrentReadRequestBody,
+        authority_id: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Option<coland_storage::ConsentCurrentReadCut>> {
+        self.persistence
+            .consent_current()
+            .read_current(request, authority_id)
+            .await
     }
     pub async fn retain_forward_current_signer_evidence(
         &self,
@@ -552,6 +609,18 @@ impl PersistenceHandle {
         self.persistence
             .capability_grant_current_results()
             .actor_authorization(realm_id, actor, at)
+            .await
+    }
+
+    pub async fn replica_human_authorization(
+        &self,
+        realm: &arkret_wire::RealmId,
+        actor: &arkret_wire::ActorId,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<Option<coland_storage::ActorRealmAuthorization>> {
+        self.persistence
+            .capability_grant_current_results()
+            .replica_human_authorization(realm, actor, at)
             .await
     }
 

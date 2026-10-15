@@ -88,6 +88,7 @@ pub struct EventCommitRequest {
     pub widget_token_gate: Option<crate::AppletWidgetTokenGateSelector>,
     /// Verifier-private subject evidence, rechecked inside the grant transaction.
     pub agent_grant_scope_evidence: Option<crate::VerifiedAgentScopeEvidence>,
+    pub call_media_binding_key: Option<crate::CallMediaBindingKey>,
     /// Cross-Station human-device producer evidence verified from an
     /// `authority_forward`; retained only with the Event's first Commit.
     pub forwarded_producer_evidence: Option<crate::ForwardedProducerDeviceEvidence>,
@@ -516,4 +517,11 @@ pub trait EventCommitUnitOfWork: Send + Sync {
         &self,
         request: EventBatchCommitRequest,
     ) -> PersistenceResult<EventCommitOutcome>;
+}
+
+/// Exact issuer key resolved before admission; policy role is rechecked at Commit.
+#[derive(Clone, Debug)]
+pub struct CallMediaBindingKey {
+    pub issuer_kid: arkret_wire::DidUrl,
+    pub public_key: [u8; 32],
 }

@@ -45,6 +45,134 @@ pub(super) fn router() -> Router {
         .push(Router::with_path("account-status").post(peer_account_status_submit))
         .push(Router::with_path("account-status/resolve").post(peer_account_status_resolve))
         .push(Router::with_path("signal").post(peer_signal_relay))
+        .push(Router::with_path("consent/current").post(peer_consent_current))
+        .push(Router::with_path("rtc/invitation").post(peer_call_invitation))
+        .push(Router::with_path("rtc/invitation-admission").post(peer_call_invitation_admission))
+}
+
+#[handler]
+async fn peer_call_invitation(
+    depot: &mut Depot,
+    req: &mut Request,
+) -> JsonResult<arkret_models_collaboration::call_invitation::CallInvitationSendOutcome> {
+    use arkret_models_collaboration::call_invitation::*;
+    let state = depot.get_typed::<AppState>().expect("state injected");
+    validate_peer_request(state, req, true).await?;
+    let body =
+        parse_json_body::<CallInvitationSendRequestBody>(req, "invalid call invitation").await?;
+    let source = source_id_from_request(req)?;
+    if source != body.invitation.inviter_actor_id.route_service_id().as_str() {
+        return Err(AppError::capability_denied(
+            "invitation source differs from producer hosting Station",
+        ));
+    }
+    body.invitation
+        .validate_for_envelope(&body.envelope, Utc::now())
+        .map_err(|e| AppError::param_invalid(e.to_string()))?;
+    // Holder eligibility and delivery failures remain opaque to the inviter.
+    if body.invitation.holder_account_id.station_id == state.service_core_id() {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let result = async {
+                super::sync::signal::validate_call_invitation(&state, &body).await?;
+                super::sync::signal::append_call_invitation(&state, &body).await
+            }
+            .await;
+            if let Err(error) = result {
+                tracing::debug!(%error, "peer call invitation deferred");
+            }
+        });
+    }
+    json_ok(CallInvitationSendOutcome {
+        status: CallInvitationSendStatus::Deferred,
+    })
+}
+
+#[handler]
+async fn peer_call_invitation_admission(
+    depot: &mut Depot,
+    req: &mut Request,
+) -> JsonResult<arkret_models_collaboration::call_invitation::CallInvitationAdmissionOutcome> {
+    use arkret_models_collaboration::call_invitation::*;
+    let state = depot.get_typed::<AppState>().expect("state injected");
+    validate_peer_request(state, req, true).await?;
+    let body = parse_json_body::<CallInvitationAdmissionRequestBody>(
+        req,
+        "invalid call admission request",
+    )
+    .await?;
+    let source = source_id_from_request(req)?;
+    body.validate(Utc::now())
+        .map_err(|e| AppError::param_invalid(e.to_string()))?;
+    let host = body.invitation.holder_account_id.station_id.as_str();
+    if source == host {
+        if body.admission_phase == CallInvitationAdmissionStage::ProductDelivery
+            && body.audience_actor_id
+                != arkret_wire::ActorId::service(
+                    body.invitation.holder_account_id.station_id.clone(),
+                )
+        {
+            return Err(AppError::capability_denied(
+                "product consumer differs from hosting Station",
+            ));
+        }
+        let authority = crate::state::authority_consent::holder_authority(
+            state,
+            &body.invitation.holder_account_id,
+        )
+        .await?;
+        if authority.service_id != state.service_core_id() {
+            return Err(crate::app_error!(
+                TemporarilyUnavailable,
+                "holder PCR authority changed"
+            ));
+        }
+    } else {
+        if host != state.service_core_id().as_str()
+            || body.admission_phase != CallInvitationAdmissionStage::MediaToken
+            || body.audience_actor_id
+                != arkret_wire::ActorId::service(
+                    source
+                        .parse()
+                        .map_err(|e| AppError::param_invalid(format!("{e}")))?,
+                )
+        {
+            return Err(AppError::capability_denied(
+                "call admission consumer is unauthorized",
+            ));
+        }
+        crate::routing::interop::webrtc::validate_call_media_consumer(state, &body, &source)
+            .await?;
+    }
+    json_ok(crate::state::call_admission::current_cut(state, &body).await?)
+}
+
+#[handler]
+async fn peer_consent_current(
+    depot: &mut Depot,
+    req: &mut Request,
+) -> JsonResult<arkret_models_collaboration::consent_operations::ConsentCurrentReadOutcome> {
+    let state = depot.get_typed::<AppState>().expect("state injected");
+    validate_peer_request(state, req, true).await?;
+    let body = parse_json_body::<
+        arkret_models_collaboration::consent_operations::ConsentCurrentReadRequestBody,
+    >(req, "invalid holder current read")
+    .await?;
+    let source = source_id_from_request(req)?;
+    if source != body.holder_account_id.station_id.as_str() {
+        return Err(AppError::capability_denied(
+            "only the holder hosting Station may proxy full current",
+        ));
+    }
+    let authority =
+        crate::state::authority_consent::holder_authority(state, &body.holder_account_id).await?;
+    if authority.service_id != state.service_core_id() {
+        return Err(crate::app_error!(
+            TemporarilyUnavailable,
+            "holder current authority changed"
+        ));
+    }
+    json_ok(crate::state::authority_consent::read_current(state, &body).await?)
 }
 
 #[handler]

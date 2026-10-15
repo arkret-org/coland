@@ -13,9 +13,7 @@
 //! operator-configurable via `AppConfig::ice`.
 
 use arkret_identifiers::{CallId, DeviceId, RealmId};
-use arkret_models_collaboration::events_payloads::{
-    RealmMediaServicePayload, RealmMediaServiceValue,
-};
+use arkret_models_collaboration::events_payloads::RealmMediaServiceValue;
 use arkret_models_collaboration::objects::media::{
     ArkretNativeMediaBackendToken, ArkretNativeMediaPermissions,
     ArkretNativeMediaSignatureAlgorithm, ArkretNativeMediaTokenPayload, MediaBackendKind,
@@ -26,7 +24,6 @@ use arkret_wire::{CapabilityActionId, DidUrl, XExtensionMap};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Duration, Utc};
-use coland_domain::reducer::{FacetRef, facet};
 use coland_http::error::AppError;
 use coland_http::result::{JsonResult, json_ok};
 use coland_services::identity::SessionIdentityState as SessionRecord;
@@ -43,6 +40,70 @@ use crate::state::AppState;
 use crate::wire::{
     CallMediaParticipantBinding, CallMediaTokenExchangeOutcome, CallMediaTokenExchangeRequestBody,
 };
+
+mod admission;
+#[cfg(feature = "conformance-harness")]
+mod release_probe;
+
+pub(crate) async fn validate_call_media_consumer(
+    state: &AppState,
+    request: &arkret_models_collaboration::call_invitation::CallInvitationAdmissionRequestBody,
+    source: &str,
+) -> Result<(), AppError> {
+    let epoch = admission::current_media_epoch(state, &request.envelope.realm_id).await?;
+    if epoch.service_id != source
+        || request
+            .focus_id
+            .as_ref()
+            .and_then(|id| epoch.focus(id))
+            .is_none()
+    {
+        return Err(AppError::capability_denied(
+            "media consumer is outside the current Realm media service binding",
+        ));
+    }
+    crate::routing::events::sync::signal::validate_call_invitation(
+        state,
+        &arkret_models_collaboration::call_invitation::CallInvitationSendRequestBody {
+            invitation: request.invitation.clone(),
+            envelope: request.envelope.clone(),
+        },
+    )
+    .await?;
+    if !realm_has_member(
+        state,
+        request.envelope.realm_id.as_str(),
+        &request.subject_actor_id.to_string(),
+    )
+    .await
+        || !actor_has_call_capability(
+            state,
+            request.envelope.realm_id.as_str(),
+            &request.subject_actor_id,
+            CapabilityActionId::CALL_JOIN,
+        )
+        .await?
+    {
+        return Err(AppError::capability_denied(
+            "media subject is not currently eligible",
+        ));
+    }
+    let decision = state
+        .persistence()
+        .pcr_device_admission(
+            &request.invitation.holder_account_id,
+            &request.subject_device_id,
+            Utc::now(),
+        )
+        .await
+        .map_err(crate::routing::identity::consent::consent_error)?;
+    if decision != arkret_wire::DeviceRevocationAdmissionDecision::Allow {
+        return Err(AppError::capability_denied(
+            "media subject device is not currently authorized",
+        ));
+    }
+    Ok(())
+}
 
 /// Spec-canonical RTC media surface. Mounted under the `self` trust segment by
 /// `interop::router()` so the only spec-registered media paths resolve at
@@ -395,7 +456,7 @@ impl TryFrom<MediaBackendKind> for MediaProviderKind {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct MediaProviderConfig {
     provider: MediaProviderKind,
     focus_id: String,
@@ -403,7 +464,7 @@ struct MediaProviderConfig {
     connect_url: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct MediaServiceEpoch {
     service_id: String,
     foci: Vec<MediaProviderConfig>,
@@ -521,6 +582,7 @@ async fn handle_rtc_token(
         ));
     }
     let device_id = body.device_id.clone();
+    let established_participant = admission::validate_join(state, session, &body).await?;
     if body.focus_id.trim().is_empty() {
         return Err(AppError::param_invalid("focus_id is required"));
     }
@@ -534,7 +596,12 @@ async fn handle_rtc_token(
     // an actor-wide ban in the durable call moderation OR-Set.
     //
     // (1) realm member.
-    if !realm_has_member(state, body.realm_id.as_str(), &body.actor_id.to_string()).await {
+    if !state
+        .authority_commits()
+        .accepted_current_member_joined(&body.realm_id, &body.actor_id)
+        .await
+        .map_err(|e| crate::routing::identity::consent::consent_error(e.into()))?
+    {
         return Err(AppError::capability_denied(
             "actor is not a joined member of the realm",
         ));
@@ -558,8 +625,7 @@ async fn handle_rtc_token(
     // Read the independent durable media-policy cells once. They MAY all be
     // absent when a brand-new call initiator redeems a token before writing its
     // first `ak.call.state` event. Absent cells mean no committed focus or ban.
-    let call_cells =
-        CallMediaCells::load(state, body.realm_id.as_str(), body.call_id.as_str()).await?;
+    let call_cells = CallMediaCells::load(state, &body).await?;
 
     // (3) `webrtc-signaling.md` §3a — a banned actor MUST NOT re-issue a join
     // token for this call's lifetime. The ban set is the durable
@@ -572,7 +638,7 @@ async fn handle_rtc_token(
         )
         .with_reason_code(arkret_wire::ReasonCode::CALL_PARTICIPANT_REMOVED));
     }
-    let media_epoch = media_service_epoch_for_realm(state, body.realm_id.as_str())?;
+    let media_epoch = admission::current_media_epoch(state, &body.realm_id).await?;
 
     // MEDIA-2 — focus selection. A committed
     // `ak.component.call.focus.v1` value wins when present and `focus_id`
@@ -599,7 +665,7 @@ async fn handle_rtc_token(
     // a focus whose declared `token_endpoint` is this service. The endpoint is
     // the §2.1 trust root a client anchors on, so issuing for a focus that
     // names somebody else would hand out a binding no client should accept.
-    let issuer_kid = configured_media_issuer_kid(state);
+    let issuer_kid = configured_media_issuer_kid(state)?;
     if !issuer_kid_belongs_to_service(&issuer_kid, &media_epoch.service_id) {
         return Err(token_issuer_unauthorised(format!(
             "configured media issuer_kid `{issuer_kid}` is not a key of media_service service_id `{}`",
@@ -628,7 +694,8 @@ async fn handle_rtc_token(
     // exchange so the SFU cannot be linked back to (realm, call, actor, device)
     // by recomputing the id, and the wire form matches the schema pattern
     // `^ak:rtc_participant:<uuidv7>$`.
-    let participant_id = arkret_identifiers::new_prefixed_uuid7("ak:rtc_participant:");
+    let participant_id = established_participant
+        .unwrap_or_else(|| arkret_identifiers::new_prefixed_uuid7("ak:rtc_participant:"));
     let signing_key = state.notary_signing_key();
     // `bindings/livekit.md` §2/§5 — publish grants are derived from the
     // caller's `desired_media`. Absent the field we default to audio+video
@@ -679,29 +746,61 @@ async fn handle_rtc_token(
             "configured media issuer_kid is not a verification-method DID URL: {error}"
         ))
     })?;
+    let roster_identity = admission::roster_identity_for_token(state, &body).await?;
+    let participant_binding = CallMediaParticipantBinding {
+        subject_binding_digest: arkret_wire::Hash::new(format!("sha256:{}", "0".repeat(64)))
+            .unwrap(),
+        expires_at,
+        issuer_kid,
+        sig: String::new(),
+    };
+    let subject_binding =
+        arkret_models_collaboration::call_invitation::CallMediaSubjectBinding::unsigned_for_token(
+            &body,
+            roster_identity.clone(),
+            participant_id.clone(),
+            &participant_binding,
+            arkret_canonical::base64url_encode(rand::random::<[u8; 32]>()),
+        )
+        .map_err(|e| AppError::internal(e.to_string()))?;
     let mut outcome = CallMediaTokenExchangeOutcome {
-        focus_id: body.focus_id,
+        focus_id: body.focus_id.clone(),
         backend_kind: focus.provider.backend_kind(),
         connect_url: issued_token.connect_url,
         backend_token: issued_token.backend_token,
         participant_id,
-        participant_binding: CallMediaParticipantBinding {
-            expires_at,
-            issuer_kid,
-            sig: String::new(),
-        },
+        participant_binding,
+        roster_identity,
+        subject_binding,
         expires_at,
         realm_id,
         call_id,
         actor_id,
         device_id,
     };
+    outcome.subject_binding.sig = URL_SAFE_NO_PAD.encode(
+        signing_key
+            .sign(
+                &outcome
+                    .subject_binding
+                    .signing_bytes()
+                    .map_err(|e| AppError::internal(e.to_string()))?,
+            )
+            .to_bytes(),
+    );
+    outcome.participant_binding.subject_binding_digest = outcome
+        .subject_binding
+        .signed_digest()
+        .map_err(|e| AppError::internal(e.to_string()))?;
     let signing_input = arkret_signatures::media::participant_binding_signing_input(
         &arkret_signatures::media::ParticipantBindingContext::from_outcome(&outcome),
     )
-    .map_err(|error| AppError::internal(format!("participant binding signing input: {error}")))?;
+    .map_err(|e| AppError::internal(e.to_string()))?;
     outcome.participant_binding.sig =
         URL_SAFE_NO_PAD.encode(signing_key.sign(&signing_input).to_bytes());
+    #[cfg(feature = "conformance-harness")]
+    release_probe::pause(state, &body).await?;
+    admission::final_cut(state, session, &body, &media_epoch).await?;
     json_ok(outcome)
 }
 
@@ -754,15 +853,137 @@ struct CallMediaCells {
 }
 
 impl CallMediaCells {
-    async fn load(state: &AppState, realm_id: &str, call_id: &str) -> Result<Self, AppError> {
-        let projection = state.projections().snapshot();
+    async fn load(
+        state: &AppState,
+        body: &CallMediaTokenExchangeRequestBody,
+    ) -> Result<Self, AppError> {
+        let realm = body.realm_id.clone();
+        let call = body.call_id.clone();
+        let material = state
+            .authority_commits()
+            .realm_state_snapshot_material(&realm)
+            .await
+            .map_err(|e| crate::routing::identity::consent::consent_error(e.into()))?
+            .ok_or_else(|| AppError::capability_denied("accepted Call current is unavailable"))?;
+        let mut focus = None;
+        for row in &material.current_state_entries {
+            if let arkret_wire::TypedCurrentRow::Value {
+                selector: arkret_wire::CurrentSelector::CallState { call_id },
+                value,
+                ..
+            } = row
+            {
+                if call_id == &call {
+                    let current: arkret_models_collaboration::events_payloads::call::CallStateCurrentValue =
+                        serde_json::from_value(value.clone()).map_err(|e| AppError::capability_denied(e.to_string()))?;
+                    use arkret_models_collaboration::events_payloads::call::CallLifecycleState;
+                    if matches!(
+                        current.to,
+                        CallLifecycleState::Ended
+                            | CallLifecycleState::Failed
+                            | CallLifecycleState::Missed
+                            | CallLifecycleState::Cancelled
+                    ) {
+                        return Err(AppError::capability_denied(
+                            "terminal Call cannot issue media credentials",
+                        ));
+                    }
+                }
+            }
+            if let arkret_wire::TypedCurrentRow::Value {
+                selector: arkret_wire::CurrentSelector::CallFocus { call_id },
+                source_stream_ref,
+                revision,
+                value,
+            } = row
+            {
+                if call_id != &call {
+                    continue;
+                }
+                let head = material
+                    .visible_stream_heads
+                    .iter()
+                    .find(|head| &head.stream_ref == source_stream_ref)
+                    .ok_or_else(|| {
+                        AppError::capability_denied("Call focus current has no accepted head")
+                    })?;
+                if revision.stream_position > head.stream_position
+                    || (revision.stream_position == head.stream_position
+                        && revision.commit_id != head.commit_id)
+                {
+                    return Err(AppError::capability_denied(
+                        "Call focus current exceeds its accepted head",
+                    ));
+                }
+                let after = state
+                    .authority_commits()
+                    .stream_head(source_stream_ref)
+                    .await
+                    .map_err(|e| crate::routing::identity::consent::consent_error(e.into()))?;
+                if after.as_ref() != Some(head) {
+                    return Err(crate::app_error!(
+                        TemporarilyUnavailable,
+                        "Call focus changed during media admission"
+                    ));
+                }
+                focus = Some(value.clone());
+            }
+        }
+        let mut entries = Vec::new();
+        for row in &material.current_state_entries {
+            let arkret_wire::TypedCurrentRow::Value {
+                selector: arkret_wire::CurrentSelector::CallModeration { call_id },
+                source_stream_ref,
+                revision,
+                value,
+            } = row
+            else {
+                continue;
+            };
+            if call_id != &call {
+                continue;
+            }
+            let head = material
+                .visible_stream_heads
+                .iter()
+                .find(|head| &head.stream_ref == source_stream_ref)
+                .ok_or_else(|| {
+                    AppError::capability_denied("Call moderation current has no accepted head")
+                })?;
+            if revision.stream_position > head.stream_position
+                || (revision.stream_position == head.stream_position
+                    && revision.commit_id != head.commit_id)
+            {
+                return Err(AppError::capability_denied(
+                    "Call moderation current exceeds its accepted head",
+                ));
+            }
+            let current: arkret_models_collaboration::events_payloads::call::CallModerationCurrentValue =
+                serde_json::from_value(value.clone()).map_err(|e| AppError::capability_denied(e.to_string()))?;
+            current
+                .validate_for_axis(source_stream_ref, revision)
+                .map_err(|e| AppError::capability_denied(e.to_string()))?;
+            entries = current
+                .effective_removals()
+                .map_err(|e| AppError::capability_denied(e.to_string()))?;
+            if state
+                .authority_commits()
+                .stream_head(source_stream_ref)
+                .await
+                .map_err(|e| crate::routing::identity::consent::consent_error(e.into()))?
+                .as_ref()
+                != Some(head)
+            {
+                return Err(crate::app_error!(
+                    TemporarilyUnavailable,
+                    "Call moderation changed during admission"
+                ));
+            }
+        }
+        let moderation = Value::Array(entries.iter().map(|entry| json!({"value":entry})).collect());
         Ok(Self {
-            focus: projection
-                .facet_value(realm_id, &FacetRef::new(facet::CALL_FOCUS, call_id))
-                .cloned(),
-            moderation: projection
-                .facet_value(realm_id, &FacetRef::new(facet::CALL_MODERATION, call_id))
-                .cloned(),
+            focus,
+            moderation: Some(moderation),
         })
     }
 
@@ -800,27 +1021,12 @@ impl CallMediaCells {
     }
 }
 
-fn media_service_epoch_for_realm(
-    state: &AppState,
-    realm_id: &str,
-) -> Result<MediaServiceEpoch, AppError> {
-    let value = {
-        let projection = state.projections().snapshot();
-        projection
-            .realm_facet_value(realm_id, coland_domain::reducer::facet::REALM_MEDIA_SERVICE)
-            .cloned()
-    }
-    .ok_or_else(|| {
-        token_issuer_unauthorised(format!(
-            "realm `{realm_id}` has no projected ak.realm.media_service epoch"
-        ))
-    })?;
-    let descriptor = decode_media_service_descriptor(value)?;
-    media_service_epoch_from_descriptor(descriptor)
-}
-
+#[cfg(test)]
 fn decode_media_service_descriptor(value: Value) -> Result<RealmMediaServiceValue, AppError> {
-    let payload = serde_json::from_value::<RealmMediaServicePayload>(value).map_err(|error| {
+    let payload = serde_json::from_value::<
+        arkret_models_collaboration::events_payloads::RealmMediaServicePayload,
+    >(value)
+    .map_err(|error| {
         focus_unavailable_error(format!(
             "projected realm media_service epoch is malformed: {error}"
         ))
@@ -869,12 +1075,30 @@ fn media_service_epoch_from_descriptor(
 /// extra environment variable; the anchoring check against the current-epoch
 /// `service_id` runs either way, so a misconfigured value fails closed rather
 /// than minting a token nobody will accept.
-fn configured_media_issuer_kid(state: &AppState) -> String {
+fn configured_media_issuer_kid(state: &AppState) -> Result<String, AppError> {
     let configured = state.config().media.issuer_kid.trim();
-    if !configured.is_empty() {
-        return configured.to_owned();
+    let method = if configured.is_empty() {
+        state
+            .service_verification_method("notary-key")
+            .map_err(token_issuer_unauthorised)?
+            .to_string()
+    } else {
+        configured.to_owned()
+    };
+    let did = arkret_identity::verification_method_did(&method)
+        .map_err(|e| token_issuer_unauthorised(e.to_string()))?;
+    let public = if crate::jws_verify::is_local_service_notary_method(state, &did, &method) {
+        state.notary_verifying_key()
+    } else {
+        crate::jws_verify::resolve_ed25519_pubkey(state, &method)
+            .map_err(token_issuer_unauthorised)?
+    };
+    if public != state.notary_verifying_key() {
+        return Err(token_issuer_unauthorised(
+            "configured media method does not identify the actual signing key",
+        ));
     }
-    format!("{}#media-1", state.service_did())
+    Ok(method)
 }
 
 fn token_endpoint_is_local(token_endpoint: &str, state: &AppState) -> bool {
@@ -1349,11 +1573,38 @@ pub(crate) async fn actor_has_call_capability(
     actor: &arkret_wire::ActorId,
     action: &str,
 ) -> Result<bool, AppError> {
-    Ok(
-        crate::authz::authorize(state, realm_id, actor, &[action], realm_id, now())
-            .await?
-            .allowed(),
+    let realm: RealmId = realm_id
+        .parse()
+        .map_err(|e| AppError::param_invalid(format!("{e}")))?;
+    let authority = state
+        .authority_commits()
+        .current_authority(&realm)
+        .await
+        .map_err(|e| crate::routing::identity::consent::consent_error(e.into()))?
+        .ok_or_else(|| token_issuer_unauthorised("Realm authority is unavailable"))?;
+    if authority.service_id == state.service_core_id() {
+        return Ok(
+            crate::authz::authorize(state, realm_id, actor, &[action], realm_id, now())
+                .await?
+                .allowed(),
+        );
+    }
+    let at = now();
+    let Some(authorization) = state
+        .persistence()
+        .replica_human_authorization(&realm, actor, at)
+        .await
+        .map_err(|e| crate::routing::identity::consent::consent_error(e.into()))?
+    else {
+        return Ok(false);
+    };
+    Ok(coland_services::authorization::evaluate(
+        &authorization,
+        &[action],
+        &arkret_wire::WireResourceSelector::realm(realm),
+        &coland_storage::OperationFacts::default(),
     )
+    .allowed())
 }
 
 fn is_valid_webrtc_session_id(value: &str) -> bool {

@@ -334,9 +334,10 @@ mod applet_managed_delegation_tests {
             ],
             device_key_algorithm: arkret_wire::NonEmptyString::new("Ed25519").unwrap(),
             authorized_by: DeviceOrPrincipalRef::Principal(authorized_by.clone()),
-            scopes: Some(vec![
-                arkret_wire::NonEmptyString::new("ak.realm:ak:realm:portal").unwrap(),
-            ]),
+            scopes: Some(serde_json::from_value(serde_json::json!([{
+                "effective_scope":{"kind":"realm","realm_id":"ak:realm:AUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFB"},
+                "actions":["ak.event.read"]
+            }])).unwrap()),
             not_before: "2026-09-15T00:00:00.000Z".parse().unwrap(),
             expires_at: Some(Some("2026-12-15T00:00:00.000Z".parse().unwrap())),
             authorization_binding_kind: DeviceAuthorizationBindingKind::AppletManagedDelegation,

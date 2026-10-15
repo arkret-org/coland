@@ -128,7 +128,7 @@ async fn managed_devices_require_independent_principal_and_possession_on_service
         let mut payload:DeviceAuthorizePayload=serde_json::from_value(json!({
             "device_id":device_id,"device_public_key_did":format!("did:key:{}",arkret_canonical::ed25519_pubkey_to_did_key_multibase(device.verifying_key().as_bytes())),
             "hpke_key":arkret_canonical::ed25519_pubkey_to_did_key_multibase(&[119;32]),"algorithms":["Ed25519"],"device_key_algorithm":"Ed25519",
-            "authorized_by":actor.signing_principal_id(),"scopes":[fixture.realm.as_str(),"ak.event.read"],"not_before":now-chrono::Duration::seconds(1),"expires_at":now+chrono::Duration::hours(1),
+            "authorized_by":actor.signing_principal_id(),"scopes":[{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":["ak.event.read"]}],"not_before":now-chrono::Duration::seconds(1),"expires_at":now+chrono::Duration::hours(1),
             "authorization_binding_kind":"applet_managed_delegation","authorized_generation_ref":1,"device_signature":"AA","applet_id":installed.package.applet_id
         })).unwrap();
         payload.device_signature =
@@ -291,6 +291,38 @@ async fn managed_devices_require_independent_principal_and_possession_on_service
                 "refused managed authorize must write nothing"
             );
         }
+        let mut uninstalled = payload.clone();
+        uninstalled.scopes = Some(serde_json::from_value(json!([{
+            "effective_scope":{"kind":"realm","realm_id":"ak:realm:AVpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpa"},
+            "actions":["ak.event.read"]
+        }])).unwrap());
+        uninstalled.device_signature =
+            serde_json::from_value(json!(arkret_canonical::base64url_encode(
+                device
+                    .sign(
+                        &uninstalled
+                            .device_possession_signature_input(actor.as_account_id().unwrap())
+                            .unwrap()
+                    )
+                    .to_bytes()
+            )))
+            .unwrap();
+        let event = sign(
+            &uninstalled,
+            controller.clone(),
+            format!("{did}#managed-controller"),
+        );
+        let (status, result) = fixture
+            .service_post(
+                &installed.package,
+                "/_arkret/self/events",
+                arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                &request(event),
+                "device-uninstalled-scope",
+            )
+            .await;
+        assert!(!status.is_success(), "{result}");
+        assert_eq!(before, authority_snapshot(&fixture.pool).await);
         for reused in [
             controller.clone(),
             applet_service_signing_key(&installed.package.webhook_auth.key_ref),
@@ -420,11 +452,13 @@ async fn managed_devices_require_independent_principal_and_possession_on_service
         assert_eq!(status, StatusCode::OK, "{retry}");
         assert_eq!(committed, authority_snapshot(&fixture.pool).await);
         let mut replacement = payload.clone();
-        replacement
-            .scopes
-            .as_mut()
-            .unwrap()
-            .push(arkret_wire::NonEmptyString::new("ak.object.read_content").unwrap());
+        replacement.scopes = Some(
+            serde_json::from_value(json!([{
+                "effective_scope":{"kind":"realm","realm_id":fixture.realm},
+                "actions":["ak.event.read", "ak.object.read_content"]
+            }]))
+            .unwrap(),
+        );
         replacement.device_signature =
             serde_json::from_value(json!(arkret_canonical::base64url_encode(
                 device
@@ -513,6 +547,7 @@ async fn managed_devices_require_independent_principal_and_possession_on_service
                 device_id.clone(),
             );
         upward.applet_id = None;
+        upward.scopes = None;
         upward.device_id = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
         upward.pairing_challenge_transcript_digest = Some(
             Hash::new(

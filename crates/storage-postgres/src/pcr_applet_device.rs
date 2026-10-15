@@ -1,7 +1,7 @@
 //! Ordinary Principal-signed managed Device authorization. No candidate overlay.
 
 use arkret_models_collaboration::events_payloads::{
-    DeviceAuthorizationBindingKind, DeviceAuthorizePayload,
+    DeviceAuthorizationBindingKind, DeviceAuthorizationScopes, DeviceAuthorizePayload,
 };
 use arkret_models_identity::{PrincipalResolutionProjection, ResolutionMethodHistoryEvidence};
 use arkret_models_integration::AppletManagedActorProvisionPayload;
@@ -170,19 +170,27 @@ pub(crate) async fn admit(
     }
     let installs = sql_query("SELECT record AS value FROM applet_installations WHERE applet_id=$1 AND record->>'target_station_id'=$2 ORDER BY effective_scope_key FOR SHARE")
         .bind::<Text,_>(applet.as_str()).bind::<Text,_>(account.station_id.as_str()).load::<JsonRow>(&mut *conn).await?;
-    let active = installs.iter().any(|row| {
-        row.value["package"]["service_id"].as_str() == Some(source.as_str())
-            && row.value["revoked_at"].is_null()
-            && matches!(
-                row.value["status"].as_str(),
-                Some("installed" | "partially_installed")
-            )
-    });
-    if !active {
-        return Err(refuse(
-            ConflictCode::AppletRevoked,
-            "no current active Applet installation",
+    let Some(DeviceAuthorizationScopes::AppletManaged(scopes)) = &payload.scopes else {
+        return Err(corrupt(
+            "managed Device authorization requires paired scopes",
         ));
+    };
+    for entry in scopes.entries() {
+        let expected = serde_json::to_value(&entry.effective_scope).map_err(corrupt)?;
+        if !installs.iter().any(|row| {
+            row.value["effective_scope"] == expected
+                && row.value["package"]["service_id"].as_str() == Some(source.as_str())
+                && row.value["revoked_at"].is_null()
+                && matches!(
+                    row.value["status"].as_str(),
+                    Some("installed" | "partially_installed")
+                )
+        }) {
+            return Err(refuse(
+                ConflictCode::AppletRevoked,
+                "managed Device scope has no exact active owning Applet installation",
+            ));
+        }
     }
     let resolution = sql_query("SELECT p.pcr_realm_id,p.projection,g.envelope AS genesis,c.envelope AS current FROM principal_resolutions p JOIN canonical_events g ON g.envelope->>'event_id'=p.genesis_event_id JOIN realm_commits gc ON gc.event_pk=g.pk AND gc.stream_position=0 JOIN canonical_events c ON c.envelope->>'event_id'=p.current_event_id JOIN realm_commits cc ON cc.event_pk=c.pk AND cc.realm_id=p.pcr_realm_id WHERE p.principal_id=$1 AND p.station_id=$2 FOR SHARE OF p")
         .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str())

@@ -219,6 +219,29 @@ async fn check_circle_reads(history: &str) {
         head.commit.stream_position,
         "Circle join must not replace the parent Realm's floor"
     );
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+    let method = arkret_wire::DidUrl::new(format!("{did}#authority")).unwrap();
+    let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
+        coland_services::authority_commit::build_signed_realm_state_snapshot(
+            material,
+            method.clone(),
+            &key,
+            chrono::Utc::now(),
+        )
+        .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
+    };
+    let issued = store
+        .issue_realm_state_snapshot_for_account(&realm, account, &issuer, &sign)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store
+            .issued_realm_state_snapshot(&realm, account, &issued.snapshot_id, &issuer)
+            .await
+            .unwrap(),
+        Some(issued.clone())
+    );
     let leave = membership(
         &join.authority_commit,
         &circle,
@@ -275,6 +298,13 @@ async fn check_circle_reads(history: &str) {
             .unwrap()
             .is_some()
     );
+    assert!(
+        store
+            .issued_realm_state_snapshot(&realm, account, &issued.snapshot_id, &issuer)
+            .await
+            .is_err(),
+        "leaving the Circle must withdraw its old heads and state"
+    );
     let rejoin = membership(
         &leave.authority_commit,
         &circle,
@@ -313,6 +343,15 @@ async fn check_circle_reads(history: &str) {
     } else {
         assert!(matches!(prior_read, MemberCommittedEventRead::Read(_)));
     }
+    // State families remain disclosable below the new content floor. The
+    // archived membership row does not replace current authority at recheck.
+    assert_eq!(
+        store
+            .issued_realm_state_snapshot(&realm, account, &issued.snapshot_id, &issuer)
+            .await
+            .unwrap(),
+        Some(issued)
+    );
     let peer = page(peer_interval_decision(
         store
             .scan_stream_for_peer(&request, &issuer, &issuer)

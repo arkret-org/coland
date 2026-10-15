@@ -421,16 +421,6 @@ struct ReadTenureRow {
 }
 
 #[derive(QueryableByName)]
-struct MemberRevisionRow {
-    #[diesel(sql_type = Text)]
-    membership: String,
-    #[diesel(sql_type = Text)]
-    current_commit_id: String,
-    #[diesel(sql_type = super::BigInt)]
-    current_stream_position: i64,
-}
-
-#[derive(QueryableByName)]
 struct CountRow {
     #[diesel(sql_type = super::BigInt)]
     present: i64,
@@ -575,22 +565,16 @@ pub(crate) async fn served_current_snapshot(
     Ok(None)
 }
 
-/// Re-prove, per row, head, and floor, that the issued object may still be
-/// returned. Only the joined-member Realm-stream shape admitted by the
-/// issuance gate is re-provable: the Account's `join` row in the object must
-/// still be its unchanged current membership revision, the object's floor
-/// must still be the Account's readable floor, no Message row may lie below
-/// it, every head must still be the accepted Commit it names, and this
-/// Station must still hold the object's governing term. Anything else is
-/// unavailable, never substituted.
+/// Re-prove each original row under current membership, scope, content floors,
+/// retention, and redaction. Ordinary state changes do not replace or invalidate
+/// an otherwise disclosable signed object; its original heads and tenure stay
+/// bound by its signature and accepted Commit coordinates.
 async fn recheck_disclosure_in_connection(
     conn: &mut AsyncPgConnection,
     account: &arkret_wire::AccountId,
     issuer: &arkret_wire::DidCoreId,
     snapshot: &arkret_wire::RealmStateSnapshot,
 ) -> PersistenceResult<()> {
-    use arkret_wire::{CommitStreamRef, CurrentSelector, TypedCurrentRow};
-
     let tenure =
         sql_query("SELECT service_id, generation FROM realm_authorities WHERE realm_id=$1")
             .bind::<Text, _>(snapshot.realm_id.as_str())
@@ -615,9 +599,6 @@ async fn recheck_disclosure_in_connection(
             .get_result::<ReadTenureRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
             .ok_or_else(|| undisclosable("the historical Snapshot tenure is not in the installed handoff chain"))?
             .service_id
-    };
-    let realm_stream = CommitStreamRef::Realm {
-        realm_id: snapshot.realm_id.clone(),
     };
     // Recompute the Account's complete disclosure at this read cut. A signed
     // historical object is still readable only while every one of its streams
@@ -655,176 +636,56 @@ async fn recheck_disclosure_in_connection(
         }) {
             return Err(undisclosable("a signed stream is no longer disclosed"));
         }
-        let old_floor = snapshot
-            .retention_and_history_floor
-            .stream_floors
-            .iter()
-            .find(|floor| floor.stream_ref == head.stream_ref)
-            .ok_or_else(|| undisclosable("a signed stream has no floor"))?;
-        let current_floor = current_material
-            .retention_and_history_floor
-            .stream_floors
-            .iter()
-            .find(|floor| floor.stream_ref == head.stream_ref)
-            .ok_or_else(|| undisclosable("a signed stream has no current floor"))?;
-        if old_floor.oldest_position < current_floor.oldest_position {
-            return Err(undisclosable("a signed stream's readable floor advanced"));
-        }
     }
-    let actor = arkret_wire::ActorId::account(account.clone());
-    let current_floor = crate::account_stream_scan::snapshot_realm_floor_in_connection(
+    let original = coland_storage::RealmStateSnapshotMaterial {
+        realm_id: snapshot.realm_id.clone(),
+        governance_generation: snapshot.governance_generation,
+        visible_stream_heads: snapshot.visible_stream_heads.clone(),
+        current_state_entries: snapshot.current_state_entries.clone(),
+        retention_and_history_floor: snapshot.retention_and_history_floor.clone(),
+    };
+    let disclosed = crate::snapshot_disclosure_gate::account_snapshot_candidate_in_connection(
         conn,
         &snapshot.realm_id,
-        &actor,
+        account,
+        Some(original),
     )
     .await?
-    .ok_or_else(|| undisclosable("the Account's readable floor is not provable"))?;
-    if snapshot
-        .retention_and_history_floor
-        .stream_floors
-        .iter()
-        .find(|floor| floor.stream_ref == realm_stream)
-        .is_none_or(|floor| floor.oldest_position != current_floor.oldest_position)
-    {
-        return Err(undisclosable(
-            "the object's floor is not the Account's current readable floor",
-        ));
+    .ok_or_else(|| undisclosable("the Account has no current disclosure"))?;
+    if disclosed.current_state_entries != snapshot.current_state_entries {
+        return Err(undisclosable("a signed row is no longer disclosed"));
     }
-    let mut own_membership = None;
-    let mut content_commits = Vec::new();
     for row in &snapshot.current_state_entries {
-        let TypedCurrentRow::Value {
-            selector,
+        // An old publication flag cannot outlive the watcher's current opt-in.
+        // The watcher still reads its own historical state after changing it.
+        if let arkret_wire::TypedCurrentRow::Value {
+            selector: selector @ arkret_wire::CurrentSelector::StrandWatch { watcher_actor_id, .. },
             source_stream_ref,
-            revision,
-            value,
-        } = row;
-        if !current_material.current_state_entries.contains(row) {
+            ..
+        } = row
+            && watcher_actor_id != &arkret_wire::ActorId::account(account.clone())
+            && !current_material.current_state_entries.iter().any(|current| matches!(
+                current,
+                arkret_wire::TypedCurrentRow::Value { selector: actual, source_stream_ref: source, .. }
+                    if actual == selector && source == source_stream_ref
+            ))
+        {
             return Err(undisclosable("a signed row is no longer disclosed"));
         }
-        if source_stream_ref != &realm_stream {
-            // The current disclosure gate proved this exact row and stream;
-            // the historical snapshot's own signature binds its old cut.
-            if !current_material
-                .visible_stream_heads
-                .iter()
-                .any(|head| &head.stream_ref == source_stream_ref)
-            {
-                return Err(undisclosable("a row source is no longer visible"));
-            }
-            continue;
-        }
-        match selector {
-            CurrentSelector::RealmGenesis
-            | CurrentSelector::RealmAuthorityRoot
-            | CurrentSelector::RealmProfile
-            | CurrentSelector::RealmPolicyBundle
-            | CurrentSelector::RealmJoinRule
-            | CurrentSelector::RealmHistoryAccess
-            | CurrentSelector::RealmReadReceiptPolicy
-            | CurrentSelector::RealmDiscovery
-            | CurrentSelector::RealmAlias
-            | CurrentSelector::RealmPlaintextVisibleServices
-            | CurrentSelector::Circle { .. }
-            | CurrentSelector::Sidecar { .. }
-            | CurrentSelector::Strand { .. }
-            | CurrentSelector::StrandWatch { .. }
-            | CurrentSelector::CalendarScheduleSource { .. }
-            | CurrentSelector::Space { .. }
-            | CurrentSelector::SpaceParent { .. }
-            | CurrentSelector::SpaceChildScopePolicy { .. }
-            | CurrentSelector::DirectConversationBinding { .. }
-            | CurrentSelector::MlsGroup { .. }
-            | CurrentSelector::RealmSetDefaultStrand
-            | CurrentSelector::InviteLifecycle { .. }
-            | CurrentSelector::InviteLiveTarget { .. }
-            | CurrentSelector::InviteDirectedInvitee { .. }
-            | CurrentSelector::CapabilityGrant { .. }
-            | CurrentSelector::ObjectRedaction { .. } => {}
-            CurrentSelector::Relation {
-                primary_conflict_domain,
-            } => {
-                let relation: arkret_wire::relation::Relation =
-                    serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
-                relation
-                    .validate_current_for_domain(&snapshot.realm_id, primary_conflict_domain)
-                    .map_err(PersistenceError::database)?;
-                if !crate::relation_disclosure::relation_visible_in_connection(
-                    conn, &relation, &actor,
-                )
-                .await?
-                {
-                    return Err(undisclosable("Relation references are no longer disclosed"));
-                }
-            }
-            CurrentSelector::MessageRevision { .. }
-                if revision.stream_position < current_floor.oldest_position =>
-            {
-                return Err(undisclosable("a Message row lies below the readable floor"));
-            }
-            CurrentSelector::MessageRevision { .. } => {
-                content_commits.push(revision.commit_id.as_str().to_owned());
-            }
-            CurrentSelector::MemberState { actor_id }
-                if actor_id == &actor
-                    && own_membership.is_none()
-                    && serde_json::from_value::<arkret_wire::MemberStateCurrent>(value.clone())
-                        .is_ok_and(|member| {
-                            member.membership == arkret_wire::MembershipState::Join
-                        }) =>
-            {
-                own_membership = Some(revision.clone());
-            }
-            CurrentSelector::MemberState { actor_id } if actor_id != &actor => {}
-            _ => {
-                return Err(undisclosable(
-                    "a row selector is outside the re-provable subset",
-                ));
-            }
-        }
-    }
-    let own_membership =
-        own_membership.ok_or_else(|| undisclosable("the object has no Account join row"))?;
-    let current = sql_query(
-        "SELECT membership, current_commit_id, current_stream_position \
-         FROM member_state_current_results WHERE realm_id=$1 AND member_id=$2",
-    )
-    .bind::<Text, _>(snapshot.realm_id.as_str())
-    .bind::<Text, _>(actor.to_string())
-    .get_result::<MemberRevisionRow>(&mut *conn)
-    .await
-    .optional()
-    .map_err(PersistenceError::database)?
-    .ok_or_else(|| undisclosable("the Account has no current membership"))?;
-    if current.membership != "join"
-        || current.current_commit_id != own_membership.commit_id.as_str()
-        || u64::try_from(current.current_stream_position).ok()
-            != Some(own_membership.stream_position)
-    {
-        return Err(undisclosable(
-            "the Account membership changed after this object was issued",
-        ));
-    }
-    // A content carrier follows the same exact Commit withdrawal decision as
-    // scan. Expiry elsewhere does not invalidate a still-disclosable object.
-    if !crate::committed_disclosure::withheld_commit_ids_in_connection(conn, &content_commits)
-        .await?
-        .is_empty()
-    {
-        return Err(undisclosable(
-            "retention or a redaction withdrew a disclosed row",
-        ));
     }
     for head in &snapshot.visible_stream_heads {
         let present = sql_query(
             "SELECT count(*) AS present FROM realm_commits \
-             WHERE realm_id=$1 AND commit_id=$2 AND stream_position=$3",
+             WHERE realm_id=$1 AND commit_id=$2 AND stream_position=$3 AND stream_ref=$4",
         )
         .bind::<Text, _>(snapshot.realm_id.as_str())
         .bind::<Text, _>(head.commit_id.as_str())
         .bind::<super::BigInt, _>(i64::try_from(head.stream_position).map_err(|_| {
             PersistenceError::SchemaViolation("snapshot head position exceeds storage".to_owned())
         })?)
+        .bind::<Jsonb, _>(
+            serde_json::to_value(&head.stream_ref).map_err(PersistenceError::database)?,
+        )
         .get_result::<CountRow>(&mut *conn)
         .await
         .map_err(PersistenceError::database)?;

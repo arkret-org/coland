@@ -806,6 +806,18 @@ pub(crate) async fn account_snapshot_material_in_connection(
     realm_id: &RealmId,
     account: &AccountId,
 ) -> PersistenceResult<Option<coland_storage::RealmStateSnapshotMaterial>> {
+    account_snapshot_candidate_in_connection(conn, realm_id, account, None).await
+}
+
+/// Reapply current authority to original rows without replacing their values.
+/// Candidate heads are used only for validation against the current accepted
+/// prefix; an archived signed object is never rewritten with this projection.
+pub(crate) async fn account_snapshot_candidate_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm_id: &RealmId,
+    account: &AccountId,
+    mut candidate: Option<coland_storage::RealmStateSnapshotMaterial>,
+) -> PersistenceResult<Option<coland_storage::RealmStateSnapshotMaterial>> {
     crate::agent_management_admission::read_controller_in_connection(
         conn,
         realm_id,
@@ -813,7 +825,7 @@ pub(crate) async fn account_snapshot_material_in_connection(
         &ActorId::account(account.clone()),
     )
     .await?;
-    let Some(material) =
+    let Some(authority_material) =
         crate::authority_commit::realm_state_snapshot_material_in_connection(conn, realm_id)
             .await?
     else {
@@ -832,7 +844,16 @@ pub(crate) async fn account_snapshot_material_in_connection(
     {
         return Err(rejected("an unaudited typed-current family is installed"));
     }
-    let mut facts = disclosure_facts_in_connection(conn, realm_id, account, &material).await?;
+    if let Some(candidate) = &mut candidate {
+        if candidate.realm_id != *realm_id {
+            return Err(rejected("candidate rows belong to another Realm"));
+        }
+        candidate.visible_stream_heads = authority_material.visible_stream_heads.clone();
+    }
+    let material = candidate.as_ref().unwrap_or(&authority_material);
+    let mut facts =
+        disclosure_facts_in_connection(conn, realm_id, account, &authority_material, material)
+            .await?;
     let caller = ActorId::account(account.clone());
     if crate::committed_disclosure::ordinary_agent_read_ceiling(
         crate::account_stream_scan::realm_purpose(conn, realm_id).await?,
@@ -848,8 +869,14 @@ pub(crate) async fn account_snapshot_material_in_connection(
         let controller_account = controller
             .as_account_id()
             .ok_or_else(|| rejected("the Agent controller is not an Account"))?;
-        let owner_facts =
-            disclosure_facts_in_connection(conn, realm_id, controller_account, &material).await?;
+        let owner_facts = disclosure_facts_in_connection(
+            conn,
+            realm_id,
+            controller_account,
+            &authority_material,
+            material,
+        )
+        .await?;
         let owner_material =
             disclose_to_account(material.clone(), controller_account, &owner_facts)?;
         let Some(owner_floor) = owner_facts.caller_floor.as_ref() else {
@@ -892,7 +919,8 @@ pub(crate) async fn account_snapshot_material_in_connection(
                 true
             });
         }
-        let mut agent_material = disclose_to_account(material, account, &facts)?;
+        let mut agent_material =
+            disclose_to_account(candidate.unwrap_or(authority_material), account, &facts)?;
         agent_material
             .visible_stream_heads
             .retain(|head| owner_material.visible_stream_heads.contains(head));
@@ -925,13 +953,14 @@ pub(crate) async fn account_snapshot_material_in_connection(
         // complete bytes. A missing pair/anchor is unavailable, never fabricated.
         return disclose_to_account(agent_material, account, &facts).map(Some);
     }
-    disclose_to_account(material, account, &facts).map(Some)
+    disclose_to_account(candidate.unwrap_or(authority_material), account, &facts).map(Some)
 }
 
 async fn disclosure_facts_in_connection(
     conn: &mut AsyncPgConnection,
     realm_id: &RealmId,
     account: &AccountId,
+    authority_material: &coland_storage::RealmStateSnapshotMaterial,
     material: &coland_storage::RealmStateSnapshotMaterial,
 ) -> PersistenceResult<DisclosureFacts> {
     let undisclosed_family_row = sql_query(
@@ -1033,7 +1062,7 @@ async fn disclosure_facts_in_connection(
     // circle.md section 9.1: effective Circle membership compares the two
     // typed currents of this one cut -- the caller's parent Realm
     // member_state and each Circle join's bound parent revision.
-    let parent = material
+    let parent = authority_material
         .current_state_entries
         .iter()
         .find_map(|entry| match entry {
@@ -1052,7 +1081,7 @@ async fn disclosure_facts_in_connection(
         .transpose()
         .map_err(PersistenceError::database)?;
     let mut circle_floors = std::collections::BTreeMap::new();
-    for entry in &material.current_state_entries {
+    for entry in &authority_material.current_state_entries {
         let TypedCurrentRow::Value {
             selector:
                 CurrentSelector::CircleMemberState {
@@ -1090,7 +1119,7 @@ async fn disclosure_facts_in_connection(
                 "Circle member current has a different source stream",
             ));
         }
-        let object = material
+        let object = authority_material
             .current_state_entries
             .iter()
             .find_map(|entry| match entry {
@@ -1217,7 +1246,7 @@ async fn disclosure_facts_in_connection(
     let mut sidecar_public_floors = std::collections::BTreeMap::new();
     let mut owned_sidecars = std::collections::BTreeSet::new();
     if caller_floor.is_some() {
-        for row in &material.current_state_entries {
+        for row in &authority_material.current_state_entries {
             if let TypedCurrentRow::Value {
                 selector: CurrentSelector::Sidecar { sidecar_id },
                 value,

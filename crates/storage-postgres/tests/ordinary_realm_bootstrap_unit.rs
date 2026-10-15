@@ -7819,6 +7819,262 @@ async fn message_revise_replaces_exact_revision_and_rejects_foreign_editor() {
     assert_message_revision_window_and_redaction(&pool, &fixture, &moderated).await;
 }
 
+/// Historical originals survive legitimate state/content updates, but current
+/// redaction must withdraw the entire signed object without substituting a head.
+#[tokio::test]
+async fn historical_snapshot_rechecks_original_rows_after_updates_and_withdrawal() {
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let fixture = message_revision_fixture(&pool).await;
+    let realm = &fixture.unit.transactions[0].event.realm_id;
+    let creator = creator_account(&fixture.unit);
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let issuer = store
+        .current_authority(realm)
+        .await
+        .unwrap()
+        .unwrap()
+        .service_id;
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+    let method = snapshot_signer_for_issuer(&fixture.unit, &issuer);
+    let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
+        coland_services::authority_commit::build_signed_realm_state_snapshot(
+            material,
+            method.clone(),
+            &key,
+            chrono::Utc::now(),
+        )
+        .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
+    };
+    let before = store
+        .issue_realm_state_snapshot_for_account(realm, &creator, &issuer, &sign)
+        .await
+        .unwrap()
+        .unwrap();
+    let before_bytes = arkret_canonical::canonical_json_bytes(&before).unwrap();
+    let message_id =
+        arkret_wire::MessageId::from_event_id(&fixture.created.authority_commit.event.event_id);
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let profile = realm_event_request_as(
+        &fixture.created,
+        &creator,
+        arkret_wire::EventKind::RealmProfile,
+        serde_json::json!({"schema":"ak.schema.realm_profile.v1","title":"Updated Realm"}),
+    );
+    let profile = source_if_human(&pool, profile).await;
+    uow.commit_event(profile.clone()).await.unwrap();
+    let revised = realm_event_request_as(
+        &profile,
+        &creator,
+        arkret_wire::EventKind::MessageRevise,
+        plain_revision(&message_id, "updated content"),
+    );
+    let revised = source_if_human(&pool, revised).await;
+    uow.commit_event(revised.clone()).await.unwrap();
+    let current = store
+        .issue_realm_state_snapshot_for_account(realm, &creator, &issuer, &sign)
+        .await
+        .unwrap()
+        .unwrap();
+    for selector in [
+        arkret_wire::CurrentSelector::RealmProfile,
+        arkret_wire::CurrentSelector::MessageRevision {
+            message_id: message_id.clone(),
+        },
+    ] {
+        let row = |snapshot: &arkret_wire::RealmStateSnapshot| {
+            snapshot.current_state_entries.iter()
+            .find(|row| matches!(row, arkret_wire::TypedCurrentRow::Value { selector: actual, .. } if actual == &selector))
+            .cloned().unwrap()
+        };
+        assert_ne!(row(&before), row(&current));
+    }
+    let exact = store
+        .issued_realm_state_snapshot(realm, &creator, &before.snapshot_id, &issuer)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        arkret_canonical::canonical_json_bytes(&exact).unwrap(),
+        before_bytes
+    );
+    assert_ne!(exact.visible_stream_heads, current.visible_stream_heads);
+
+    // Expiring the superseded create withdraws only the snapshot containing
+    // that carrier. The current revision remains readable at the same cut.
+    use coland_storage::RetentionTombstoneStore as _;
+    coland_storage_postgres::PgRetentionTombstoneStore { pool: pool.clone() }
+        .put(&coland_storage::RetentionTombstoneRecord {
+            event_id: fixture.created.authority_commit.event.event_id.to_string(),
+            realm_id: realm.to_string(),
+            reason: "retention_policy.ttl".into(),
+            policy_ttl_seconds: 60,
+            expired_at: chrono::Utc::now(),
+            tombstoned_at: chrono::Utc::now(),
+            sealed: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        store
+            .issued_realm_state_snapshot(realm, &creator, &before.snapshot_id, &issuer)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .issued_realm_state_snapshot(realm, &creator, &current.snapshot_id, &issuer)
+            .await
+            .unwrap(),
+        Some(current.clone())
+    );
+
+    let redaction = realm_event_request_as(
+        &revised,
+        &creator,
+        arkret_wire::EventKind::MessageRedact,
+        serde_json::json!({"message_id":message_id,"reason":"withdraw historical content"}),
+    );
+    let redaction = source_if_human(&pool, redaction).await;
+    uow.commit_event(redaction).await.unwrap();
+    for snapshot in [&before, &current] {
+        assert!(
+            store
+                .issued_realm_state_snapshot(realm, &creator, &snapshot.snapshot_id, &issuer)
+                .await
+                .is_err(),
+            "redaction must withdraw every old content carrier"
+        );
+    }
+    let after = store
+        .issue_realm_state_snapshot_for_account(realm, &creator, &issuer, &sign)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!after.current_state_entries.iter().any(|row| matches!(row,
+        arkret_wire::TypedCurrentRow::Value {
+            selector: arkret_wire::CurrentSelector::MessageRevision { message_id: id }, ..
+        } if id == &message_id)));
+    assert!(after.current_state_entries.iter().any(|row| matches!(row,
+        arkret_wire::TypedCurrentRow::Value {
+            selector: arkret_wire::CurrentSelector::ObjectRedaction { target_ref }, ..
+        } if target_ref == message_id.as_str())));
+    assert_eq!(
+        store
+            .issued_realm_state_snapshot(realm, &creator, &after.snapshot_id, &issuer)
+            .await
+            .unwrap(),
+        Some(after)
+    );
+}
+
+#[tokio::test]
+async fn historical_snapshot_watch_publication_is_rechecked_for_other_members() {
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let fixture = message_revision_fixture(&pool).await;
+    let realm = &fixture.unit.transactions[0].event.realm_id;
+    let creator = creator_account(&fixture.unit);
+    let actor = arkret_wire::ActorId::account(creator.clone());
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let (reader, joined) = admit_joined_human(
+        &pool,
+        &uow,
+        &fixture.created,
+        &fixture.unit,
+        "snapshot-watch-reader",
+        'e',
+    )
+    .await;
+    let issuer = store
+        .current_authority(realm)
+        .await
+        .unwrap()
+        .unwrap()
+        .service_id;
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+    let method = snapshot_signer_for_issuer(&fixture.unit, &issuer);
+    let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
+        coland_services::authority_commit::build_signed_realm_state_snapshot(
+            material,
+            method.clone(),
+            &key,
+            chrono::Utc::now(),
+        )
+        .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
+    };
+    let public = realm_event_request_as(
+        &joined,
+        &creator,
+        arkret_wire::EventKind::StrandWatchSet,
+        serde_json::json!({"strand_id":fixture.strand_id,"watcher_actor_id":actor,
+            "level":"all","level_public":true}),
+    );
+    let public = source_if_human(&pool, public).await;
+    uow.commit_event(public.clone()).await.unwrap();
+    let observed = store
+        .issue_realm_state_snapshot_for_account(realm, &reader, &issuer, &sign)
+        .await
+        .unwrap()
+        .unwrap();
+    let own = store
+        .issue_realm_state_snapshot_for_account(realm, &creator, &issuer, &sign)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        observed
+            .current_state_entries
+            .iter()
+            .any(|row| matches!(row,
+        arkret_wire::TypedCurrentRow::Value {
+            selector: arkret_wire::CurrentSelector::StrandWatch { watcher_actor_id, .. }, ..
+        } if watcher_actor_id == &actor))
+    );
+    let update = realm_event_request_as(
+        &public,
+        &creator,
+        arkret_wire::EventKind::StrandWatchSet,
+        serde_json::json!({"strand_id":fixture.strand_id,"watcher_actor_id":actor,
+            "level":"participating","level_public":true,
+            "expected_value":{"level":"all","level_public":true}}),
+    );
+    let update = source_if_human(&pool, update).await;
+    uow.commit_event(update.clone()).await.unwrap();
+    assert_eq!(
+        store
+            .issued_realm_state_snapshot(realm, &reader, &observed.snapshot_id, &issuer)
+            .await
+            .unwrap(),
+        Some(observed.clone())
+    );
+    let private = realm_event_request_as(
+        &update,
+        &creator,
+        arkret_wire::EventKind::StrandWatchSet,
+        serde_json::json!({"strand_id":fixture.strand_id,"watcher_actor_id":actor,
+            "level":"participating","level_public":false,
+            "expected_value":{"level":"participating","level_public":true}}),
+    );
+    let private = source_if_human(&pool, private).await;
+    uow.commit_event(private).await.unwrap();
+    assert!(
+        store
+            .issued_realm_state_snapshot(realm, &reader, &observed.snapshot_id, &issuer)
+            .await
+            .is_err(),
+        "the old public flag cannot restore revoked publication"
+    );
+    assert_eq!(
+        store
+            .issued_realm_state_snapshot(realm, &creator, &own.snapshot_id, &issuer)
+            .await
+            .unwrap(),
+        Some(own)
+    );
+}
+
 struct MessageRevisionFixture {
     unit: OrdinaryRealmBootstrapCommitUnit,
     strand_id: arkret_wire::StrandId,

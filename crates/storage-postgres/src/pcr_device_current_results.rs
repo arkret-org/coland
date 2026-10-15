@@ -156,6 +156,39 @@ async fn write_generation(
     Ok(())
 }
 
+/// The admitted managed PCR create is its generation writer. This is called
+/// only by the closed Applet creation unit, with its position-zero Commit;
+/// it does not create a device or authorize a later Event.
+pub(crate) async fn initialize_managed_pcr_generation_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    commit: &RealmCommit,
+) -> PersistenceResult<()> {
+    let payload: arkret_models_collaboration::events_payloads::RealmCreatePayload =
+        serde_json::from_value(
+            serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
+        )
+        .map_err(|error| invalid(format!("managed PCR genesis is invalid: {error}")))?;
+    if event.kind != EventKind::RealmCreate
+        || payload.object.purpose
+            != arkret_models_collaboration::events_payloads::RealmPurpose::AppletManagedControl
+        || payload.object.founding_device_descriptor.is_some()
+        || commit.event_ref != event.event_id
+        || commit.realm_id != event.realm_id
+        || commit.stream_ref
+            != (CommitStreamRef::Realm {
+                realm_id: event.realm_id.clone(),
+            })
+        || commit.stream_position != 0
+        || commit.previous_commit_ref.is_some()
+    {
+        return Err(invalid(
+            "managed PCR generation requires its admitted genesis",
+        ));
+    }
+    write_generation(conn, commit, None, 1).await
+}
+
 /// Materialize a device Event only after its producer proof and PCR admission
 /// have been verified by a registered atomic UoW. Generic Event admission
 /// must not call this function without a typed authorization guard.

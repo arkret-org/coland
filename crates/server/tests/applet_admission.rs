@@ -86,6 +86,183 @@ async fn controller_cannot_directly_grant_business_authority_to_managed_bot() {
 }
 
 #[tokio::test]
+async fn managed_pcr_genesis_initializes_generation_without_a_device_and_rejects_corrupt_current() {
+    use coland_storage::DeviceRevocationStore as _;
+    use diesel::sql_types::Text;
+
+    let fixture = Box::pin(Fixture::new()).await;
+    let installed = Box::pin(fixture.install(true)).await;
+    let body = fixture
+        .ghost_body(&installed, install_namespace(&installed), "generation")
+        .await;
+    let before = authority_snapshot(&fixture.pool).await;
+    let mut conn = fixture.pool.get().await.unwrap();
+    diesel::sql_query("CREATE FUNCTION fail_managed_generation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'managed generation fault'; END $$")
+        .execute(&mut *conn).await.unwrap();
+    diesel::sql_query("CREATE TRIGGER fail_managed_generation BEFORE INSERT ON pcr_device_generation_current_results FOR EACH ROW EXECUTE FUNCTION fail_managed_generation()")
+        .execute(&mut *conn).await.unwrap();
+    drop(conn);
+    let (status, failed) = fixture
+        .ghost_commit(&installed, &body, "generation-fault")
+        .await;
+    let after_failure = authority_snapshot(&fixture.pool).await;
+    let mut conn = fixture.pool.get().await.unwrap();
+    diesel::sql_query(
+        "DROP TRIGGER fail_managed_generation ON pcr_device_generation_current_results",
+    )
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    diesel::sql_query("DROP FUNCTION fail_managed_generation()")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    assert!(!status.is_success(), "{failed}");
+    assert_eq!(
+        before, after_failure,
+        "generation failure must roll back the whole creation"
+    );
+    let (status, outcome) = fixture
+        .ghost_commit(&installed, &body, "generation-fault")
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{outcome}");
+    let ghost: GhostActorProvisionOutcome = serde_json::from_value(outcome.clone()).unwrap();
+    let devices = coland_storage_postgres::PgDeviceRevocationStore {
+        pool: fixture.pool.clone(),
+    };
+    let candidate =
+        arkret_wire::DeviceId::new("ak:device:01964137-0000-7000-8000-000000000001").unwrap();
+    for actor in [&installed.bot_outcome.bot_actor_id, &ghost.ghost_actor_id] {
+        let account = actor.as_account_id().unwrap();
+        assert_eq!(
+            devices
+                .pcr_device_generation(account)
+                .await
+                .unwrap()
+                .unwrap()
+                .current_device_generation_ref,
+            1
+        );
+        assert!(
+            devices
+                .pcr_device_authorization_key(account, &candidate)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let realm = if actor == &ghost.ghost_actor_id {
+            &ghost.principal_control_realm_id
+        } else {
+            &installed.bot_outcome.principal_control_realm_id
+        };
+        let head = coland_http::test_accepted_device_generation_commit_head(
+            &fixture.state,
+            account.principal_id.as_str(),
+            realm,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(head.stream_ref.realm_id(), realm);
+        assert_eq!(
+            head.stream_position, 1,
+            "the accepted Profile follows the device-free genesis"
+        );
+    }
+    let accepted = authority_snapshot(&fixture.pool).await;
+    let (status, replay) = fixture
+        .ghost_commit(&installed, &body, "generation-another-key")
+        .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay, outcome);
+    assert_eq!(accepted, authority_snapshot(&fixture.pool).await);
+    let realm = ghost.principal_control_realm_id.as_str();
+    let account = ghost.ghost_actor_id.as_account_id().unwrap();
+    for mutation in [
+        "UPDATE pcr_device_generation_current_results SET value='{\"current_device_generation_ref\":2}' WHERE realm_id=$1",
+        "UPDATE pcr_device_generation_current_results SET current_stream_position=1 WHERE realm_id=$1",
+        "UPDATE pcr_device_generation_current_results SET current_commit_id=(SELECT commit_id FROM realm_commits WHERE realm_id=$1 ORDER BY stream_position DESC LIMIT 1) WHERE realm_id=$1",
+        "DELETE FROM pcr_device_generation_current_results WHERE realm_id=$1",
+    ] {
+        let mut conn = fixture.pool.get().await.unwrap();
+        diesel::sql_query(mutation)
+            .bind::<Text, _>(realm)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        drop(conn);
+        let damaged = authority_snapshot(&fixture.pool).await;
+        assert!(
+            devices.pcr_device_generation(account).await.is_err(),
+            "{mutation}"
+        );
+        assert!(
+            devices
+                .pcr_device_authorization_key(account, &candidate)
+                .await
+                .is_err(),
+            "{mutation}"
+        );
+        assert_eq!(
+            damaged,
+            authority_snapshot(&fixture.pool).await,
+            "a read must not repair authority"
+        );
+        let (status, replay) = fixture
+            .ghost_commit(&installed, &body, "generation-another-key")
+            .await;
+        assert_eq!(status, StatusCode::OK, "{replay}");
+        assert_eq!(replay, outcome);
+        assert_eq!(damaged, authority_snapshot(&fixture.pool).await);
+        let mut conn = fixture.pool.get().await.unwrap();
+        diesel::sql_query("DELETE FROM pcr_device_generation_current_results WHERE realm_id=$1")
+            .bind::<Text, _>(realm)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        diesel::sql_query("INSERT INTO pcr_device_generation_current_results SELECT r.* FROM jsonb_populate_recordset(NULL::pcr_device_generation_current_results,$1) r WHERE realm_id=$2")
+            .bind::<diesel::sql_types::Jsonb,_>(&accepted["device_generations"])
+            .bind::<Text,_>(realm).execute(&mut *conn).await.unwrap();
+    }
+    assert_eq!(accepted, authority_snapshot(&fixture.pool).await);
+    let genesis_id = body["managed_actor_bundle"]["pcr_genesis_event"]["event_id"]
+        .as_str()
+        .unwrap();
+    let mut conn = fixture.pool.get().await.unwrap();
+    let delivered = diesel::sql_query("UPDATE applet_authoring_completions SET delivered_at=accepted_at WHERE context#>>'{committed_request,managed_actor_bundle,pcr_genesis_event,event_id}'=$1")
+        .bind::<Text,_>(genesis_id).execute(&mut *conn).await.unwrap();
+    assert_eq!(delivered, 1);
+    drop(conn);
+    assert!(
+        coland_http::test_accepted_device_generation_commit_head(
+            &fixture.state,
+            account.principal_id.as_str(),
+            &ghost.principal_control_realm_id,
+        )
+        .await
+        .unwrap()
+        .is_some(),
+        "delivered completion evidence remains a historical root"
+    );
+    let mut conn = fixture.pool.get().await.unwrap();
+    let removed = diesel::sql_query("DELETE FROM applet_authoring_completions WHERE context#>>'{committed_request,managed_actor_bundle,pcr_genesis_event,event_id}'=$1")
+        .bind::<Text,_>(genesis_id).execute(&mut *conn).await.unwrap();
+    assert_eq!(removed, 1);
+    drop(conn);
+    assert!(
+        coland_http::test_accepted_device_generation_commit_head(
+            &fixture.state,
+            account.principal_id.as_str(),
+            &ghost.principal_control_realm_id,
+        )
+        .await
+        .is_err(),
+        "a cached head cannot replace missing original Service evidence"
+    );
+}
+
+#[tokio::test]
 async fn one_installation_creates_multiple_independent_bots() {
     let fixture = Fixture::new().await;
     let installed = fixture.install(false).await;
@@ -1273,6 +1450,8 @@ async fn authority_snapshot(pool: &PgPool) -> Value {
         'events',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM canonical_events r), \
         'commits',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM realm_commits r), \
         'profiles',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM actor_profile_current_results r), \
+        'device_generations',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM pcr_device_generation_current_results r), \
+        'device_authorizations',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM pcr_device_authorization_current_results r), \
         'grants',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM capability_grant_current_results r), \
         'quota_counters',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM capability_quota_counters r), \
         'quota_consumptions',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM capability_quota_consumptions r), \
@@ -2145,6 +2324,7 @@ impl NativeAppletService {
         let server_stop = stop.clone();
         let served = history.clone();
         let thread = std::thread::spawn(move || {
+            let mut connections = Vec::new();
             while !server_stop
                 .as_ref()
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -2157,9 +2337,17 @@ impl NativeAppletService {
                     }
                     Err(e) => panic!("native DID provider: {e}"),
                 };
+                let tls = tls.clone();
+                let served = served.clone();
+                // Fresh current resolution may open multiple TLS connections.
+                // An idle connection must not block another request's proof.
+                connections.push(std::thread::spawn(move || {
                 stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(std::time::Duration::from_secs(5)))
                     .unwrap();
                 let mut stream = rustls::StreamOwned::new(
                     rustls::ServerConnection::new(tls.clone()).unwrap(),
@@ -2188,6 +2376,7 @@ impl NativeAppletService {
                 } else {
                     serde_json::to_string(&entries.last().unwrap()["state"]).unwrap()
                 };
+                drop(entries);
                 let head = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
@@ -2195,6 +2384,10 @@ impl NativeAppletService {
                 let _ = stream.write_all(head.as_bytes());
                 let _ = stream.write_all(body.as_bytes());
                 let _ = stream.flush();
+                }));
+            }
+            for connection in connections {
+                connection.join().unwrap();
             }
         });
         Self {
@@ -3217,7 +3410,13 @@ impl Fixture {
         assert_eq!(status, StatusCode::CREATED, "install commit: {outcome}");
         let install_outcome: AppletInstallOutcome = serde_json::from_value(outcome).unwrap();
         let service_after = authority_snapshot(&self.pool).await;
-        for key in ["profiles", "completions", "outbox"] {
+        for key in [
+            "profiles",
+            "device_generations",
+            "device_authorizations",
+            "completions",
+            "outbox",
+        ] {
             assert_eq!(
                 service_before[key], service_after[key],
                 "Service-only install changed {key}"

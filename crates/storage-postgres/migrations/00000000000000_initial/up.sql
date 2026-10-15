@@ -623,6 +623,10 @@ CREATE INDEX applet_authoring_completions_pending_idx
     ON public.applet_authoring_completions (accepted_at)
     WHERE delivered_at IS NULL;
 
+CREATE INDEX applet_authoring_completions_genesis_idx
+    ON public.applet_authoring_completions
+    ((context#>>'{committed_request,managed_actor_bundle,pcr_genesis_event,event_id}'));
+
 CREATE TABLE public.applet_authoring_previews (
     subject_key text NOT NULL,
     basis_digest text NOT NULL,

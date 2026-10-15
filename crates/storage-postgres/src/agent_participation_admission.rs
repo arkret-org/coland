@@ -277,22 +277,42 @@ pub(crate) async fn governance_component(
     realm: &str,
     scope: &str,
 ) -> PersistenceResult<Option<ParticipationBits>> {
+    governance_component_at_cut(conn, realm, scope, true).await
+}
+
+pub(crate) async fn governance_component_snapshot(
+    conn: &mut AsyncPgConnection,
+    realm: &str,
+    scope: &str,
+) -> PersistenceResult<Option<ParticipationBits>> {
+    governance_component_at_cut(conn, realm, scope, false).await
+}
+
+async fn governance_component_at_cut(
+    conn: &mut AsyncPgConnection,
+    realm: &str,
+    scope: &str,
+    lock: bool,
+) -> PersistenceResult<Option<ParticipationBits>> {
     let query = if scope.starts_with("realm:") {
-        "SELECT s.value FROM realm_policy_bundle_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND 'realm:'||s.realm_id=$2 FOR SHARE OF s"
+        "SELECT s.value FROM realm_policy_bundle_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND 'realm:'||s.realm_id=$2"
     } else if scope.starts_with("circle:") {
-        "SELECT s.value FROM circle_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND 'circle:'||s.realm_id||':'||s.circle_id=$2 FOR SHARE OF s"
+        "SELECT s.value FROM circle_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND 'circle:'||s.realm_id||':'||s.circle_id=$2"
     } else if scope.starts_with("strand:") {
-        "SELECT s.value FROM strand_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND 'strand:'||s.realm_id||':'||s.strand_id=$2 FOR SHARE OF s"
+        "SELECT s.value FROM strand_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND 'strand:'||s.realm_id||':'||s.strand_id=$2"
     } else {
         return Err(unresolved());
     };
-    let row = sql_query(query)
-        .bind::<Text, _>(realm)
-        .bind::<Text, _>(scope)
-        .get_result::<ValueRow>(&mut *conn)
-        .await
-        .optional()
-        .map_err(PersistenceError::database)?;
+    let row = sql_query(format!(
+        "{query}{}",
+        if lock { " FOR SHARE OF s" } else { "" }
+    ))
+    .bind::<Text, _>(realm)
+    .bind::<Text, _>(scope)
+    .get_result::<ValueRow>(&mut *conn)
+    .await
+    .optional()
+    .map_err(PersistenceError::database)?;
     if let Some(row) = row {
         return component(&row.value);
     }
@@ -302,7 +322,7 @@ pub(crate) async fn governance_component(
     // The source is the accepted profile-fixed genesis, not a guessed default
     // for a missing ordinary policy bundle. Require the exact four-Commit unit
     // and the genesis current's covering Commit before interpreting omission.
-    let row = sql_query(
+    let row = sql_query(format!(
         "SELECT s.value FROM realm_bootstrap_current_results s \
          JOIN realm_commits c ON c.commit_id=s.current_commit_id \
            AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position \
@@ -315,8 +335,9 @@ pub(crate) async fn governance_component(
              WHERE NOT EXISTS (SELECT 1 FROM realm_commits u \
                WHERE u.realm_id=s.realm_id AND u.stream_position=e.position-1 \
                  AND u.commit_json->>'event_ref'=e.id)) \
-         FOR SHARE OF s,c,f",
-    )
+         {}",
+        if lock { " FOR SHARE OF s,c,f" } else { "" },
+    ))
     .bind::<Text, _>(realm)
     .get_result::<ValueRow>(&mut *conn)
     .await

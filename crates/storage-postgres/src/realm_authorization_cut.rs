@@ -1886,8 +1886,16 @@ impl RealmAuthorizationCut {
         &self,
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<ActorRealmAuthorization> {
+        self.actor_authorization_with_owned_source(at, None)
+    }
+
+    fn actor_authorization_with_owned_source(
+        &self,
+        at: chrono::DateTime<chrono::Utc>,
+        owned_source: Option<IssuerAuthorityRef>,
+    ) -> PersistenceResult<ActorRealmAuthorization> {
         let grants = self
-            .effective_grants(at)
+            .effective_grants_with_owned_source(at, owned_source)
             .map(|(grant_id, grant)| {
                 let revision = self.revisions.get(grant_id).cloned().ok_or_else(|| {
                     PersistenceError::Database(
@@ -1955,6 +1963,9 @@ impl RealmAuthorizationCut {
             Self::read_accepted(conn, &self.realm_id, &controller).await?
         };
         controller_cut.require_governed_member(&EventKind::CapabilityGrant)?;
+        let owned_source =
+            owned_source_in_connection(conn, &self.realm_id, &self.actor, at, lock).await?;
+        authorization = self.actor_authorization_with_owned_source(at, owned_source)?;
         let policies = if lock {
             crate::policy_current_results::read_scoped_agent_management_policies_in_connection(
                 conn,

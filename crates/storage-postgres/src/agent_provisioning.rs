@@ -276,6 +276,35 @@ pub(crate) async fn declared_agent_provision_in_connection(
     )>,
     PgTransactionError,
 > {
+    read_declared_agent_provision(conn, agent_pcr_id, true).await
+}
+
+pub(crate) async fn declared_agent_provision_snapshot_in_connection(
+    conn: &mut AsyncPgConnection,
+    agent_pcr_id: &arkret_wire::RealmId,
+) -> Result<
+    Option<(
+        arkret_wire::RealmId,
+        AgentProvisionPayload,
+        arkret_wire::CommittedEventRef,
+    )>,
+    PgTransactionError,
+> {
+    read_declared_agent_provision(conn, agent_pcr_id, false).await
+}
+
+async fn read_declared_agent_provision(
+    conn: &mut AsyncPgConnection,
+    agent_pcr_id: &arkret_wire::RealmId,
+    lock: bool,
+) -> Result<
+    Option<(
+        arkret_wire::RealmId,
+        AgentProvisionPayload,
+        arkret_wire::CommittedEventRef,
+    )>,
+    PgTransactionError,
+> {
     #[derive(QueryableByName)]
     struct ProvisionRow {
         #[diesel(sql_type = Text)]
@@ -289,13 +318,14 @@ pub(crate) async fn declared_agent_provision_in_connection(
         #[diesel(sql_type = BigInt)]
         stream_position: i64,
     }
-    let row = sql_query(
+    let row = sql_query(format!(
         "SELECT d.realm_id,e.envelope,c.commit_json,c.commit_id,c.stream_position \
          FROM agent_pcr_genesis_declaration_current_results d \
          JOIN realm_commits c ON c.commit_id=d.current_commit_id \
          JOIN canonical_events e ON e.pk=c.event_pk \
-         WHERE d.principal_control_realm_id=$1 AND c.realm_id=d.realm_id AND c.stream_position=d.current_stream_position AND e.state='committed' FOR SHARE OF d",
-    )
+         WHERE d.principal_control_realm_id=$1 AND c.realm_id=d.realm_id AND c.stream_position=d.current_stream_position AND e.state='committed'{}",
+        if lock { " FOR SHARE OF d" } else { "" },
+    ))
     .bind::<Text, _>(agent_pcr_id.as_str())
     .get_result::<ProvisionRow>(&mut *conn)
     .await

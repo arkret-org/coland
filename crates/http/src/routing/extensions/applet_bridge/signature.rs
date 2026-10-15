@@ -76,6 +76,74 @@ pub(super) async fn require_authority_material_signature(
     }
 }
 
+pub(crate) async fn verify_self_control_service(
+    state: &AppState,
+    req: &mut Request,
+) -> Result<coland_storage::AppletControlCarrier, AppError> {
+    if req.headers().contains_key("authorization")
+        || req.headers().contains_key("dpop")
+        || req.headers().contains_key("arkret-managed-device")
+    {
+        return Err(AppError::unauthenticated(
+            "Service control authentication cannot mix credentials",
+        ));
+    }
+    http_signature::reject_content_encoding(req, || {
+        applet_signature_error_invalid("signed JSON cannot use Content-Encoding")
+    })?;
+    let source = applet_required_header(req, "source-service-id")?;
+    let source = arkret_wire::DidCoreId::new(source)
+        .map_err(|e| applet_signature_error_invalid(e.to_string()))?;
+    if applet_required_header(req, "destination-service-id")? != *state.service_id() {
+        return Err(applet_signature_error_invalid(
+            "destination does not identify this Station",
+        ));
+    }
+    let input =
+        http_signature::parse_signature_input_header(req).map_err(applet_verification_error)?;
+    let did = arkret_identity::verification_method_did(&input.key_id)
+        .map_err(|e| applet_signature_error_invalid(e.to_string()))?;
+    if input.label != "sig1"
+        || arkret_wire::project_did_to_core_id(&did)
+            .map_err(|e| applet_signature_error_invalid(e.to_string()))?
+            != source
+    {
+        return Err(applet_signature_error_invalid(
+            "keyid does not identify the exact source Service",
+        ));
+    }
+    let bytes = req
+        .payload()
+        .await
+        .map_err(|e| AppError::json_invalid(e.to_string()))?
+        .to_vec();
+    let mut conditional = vec!["content-digest"];
+    if req.headers().contains_key("idempotency-key") {
+        conditional.push("idempotency-key");
+    }
+    let policy = SignatureVerificationPolicy::for_scenario(
+        HttpSignatureScenario::ServiceToServiceV1,
+        &conditional,
+    )
+    .map_err(|e| applet_verification_error(HttpMessageVerificationError::Policy(e)))?;
+    let key = authority_material_current_service_key(state, source.as_str(), &input.key_id).await?;
+    http_signature::verify_signed_canonical_json_request(
+        req,
+        &crate::routing::federation::signature_target_uri(req, state),
+        &crate::routing::federation::signature_authority(req, state),
+        &bytes,
+        &key,
+        &policy,
+    )
+    .map_err(applet_verification_error)?;
+    Ok(coland_storage::AppletControlCarrier {
+        service_id: source,
+        verification_method: arkret_wire::DidUrl::new(input.key_id)
+            .map_err(|e| applet_signature_error_invalid(e.to_string()))?,
+        public_key: key.to_bytes(),
+    })
+}
+
 async fn authority_material_current_service_key(
     state: &AppState,
     source: &str,

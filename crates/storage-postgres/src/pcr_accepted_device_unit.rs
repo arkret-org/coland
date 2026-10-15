@@ -243,6 +243,14 @@ pub(crate) async fn admit_accepted_device_unit_in_connection(
             "approving device has no authorization",
         )
     })?;
+    if approver_authorization.payload.authorization_binding_kind
+        == DeviceAuthorizationBindingKind::AppletManagedDelegation
+    {
+        return Err(rejected(
+            ConflictCode::DeviceUnauthorized,
+            "a managed delegated Device cannot authorize another Device",
+        ));
+    }
     // §5.5.2: the accepted_device generation equals the PCR's current
     // generation at admission; never corrected to the current value.
     if status.authority.current_generation != Some(payload.authorized_generation_ref) {

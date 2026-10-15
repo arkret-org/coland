@@ -85,7 +85,496 @@ async fn controller_cannot_directly_grant_business_authority_to_managed_bot() {
     assert_eq!(before, authority_snapshot(&fixture.pool).await);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn managed_devices_require_independent_principal_and_possession_on_service_ingress() {
+    use arkret_models_collaboration::events_payloads::DeviceAuthorizePayload;
+    use arkret_wire::DeviceId;
+    use coland_storage::DeviceRevocationStore as _;
+    use ed25519_dalek::Signer as _;
+    let fixture = Box::pin(Fixture::new()).await;
+    let namespace = format!("bridge.{}", uuid::Uuid::now_v7().simple());
+    let native = NativeAppletService::new(
+        &format!("ak:applet:{}", uuid::Uuid::now_v7()),
+        &namespace,
+        &fixture.state.service_core_id(),
+    );
+    let installed =
+        Box::pin(fixture.install_package(true, native.package.clone(), &namespace)).await;
+    let body = fixture
+        .ghost_body(&installed, &namespace, "device-first")
+        .await;
+    let (status, ghost) = fixture
+        .ghost_commit(&installed, &body, "device-ghost")
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{ghost}");
+    for bundle in [
+        installed.bot_body["managed_actor_bundle"].clone(),
+        body["managed_actor_bundle"].clone(),
+    ] {
+        let provision = &bundle["managed_actor_provision_event"]["payload"];
+        let actor: ActorId = serde_json::from_value(provision["actor_id"].clone()).unwrap();
+        let did = provision["initial_resolution"]["did"].as_str().unwrap();
+        let local = did.rsplit(':').next().unwrap();
+        let controller_seed = deterministic_managed_actor_seed(&format!(
+            "{}:{local}:controller:{}",
+            safe_did_token(&namespace),
+            installed.package.service_id
+        ));
+        let controller = SigningKey::from_bytes(&controller_seed);
+        let device = SigningKey::from_bytes(&[117; 32]);
+        let device_id = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
+        let now =
+            chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis()).unwrap();
+        let mut payload:DeviceAuthorizePayload=serde_json::from_value(json!({
+            "device_id":device_id,"device_public_key_did":format!("did:key:{}",arkret_canonical::ed25519_pubkey_to_did_key_multibase(device.verifying_key().as_bytes())),
+            "hpke_key":arkret_canonical::ed25519_pubkey_to_did_key_multibase(&[119;32]),"algorithms":["Ed25519"],"device_key_algorithm":"Ed25519",
+            "authorized_by":actor.signing_principal_id(),"scopes":[fixture.realm.as_str(),"ak.event.read"],"not_before":now-chrono::Duration::seconds(1),"expires_at":now+chrono::Duration::hours(1),
+            "authorization_binding_kind":"applet_managed_delegation","authorized_generation_ref":1,"device_signature":"AA","applet_id":installed.package.applet_id
+        })).unwrap();
+        payload.device_signature =
+            serde_json::from_value(json!(arkret_canonical::base64url_encode(
+                device
+                    .sign(
+                        &payload
+                            .device_possession_signature_input(actor.as_account_id().unwrap())
+                            .unwrap()
+                    )
+                    .to_bytes()
+            )))
+            .unwrap();
+        let realm: arkret_wire::RealmId = arkret_wire::RealmId::from_event_id(
+            &serde_json::from_value(bundle["pcr_genesis_event"]["event_id"].clone()).unwrap(),
+        );
+        let sign = |payload: &DeviceAuthorizePayload, key: SigningKey, method: String| {
+            let mut event = arkret_wire::test_support::raw_event_for_actor_at(
+                EventKind::DeviceAuthorize.as_str(),
+                ScopeRef::Realm {
+                    realm_id: realm.clone(),
+                },
+                actor.clone(),
+                serde_json::to_value(payload).unwrap(),
+                now,
+            )
+            .unwrap();
+            event.producer_proof = None;
+            let mut authored = arkret_wire::AuthoredEvent::finalize_with_digest_suite(
+                event,
+                arkret_canonical::DigestSuite::Sha256,
+            )
+            .unwrap();
+            let signer = Ed25519PayloadSigner::new(
+                key,
+                Did::new(did).unwrap(),
+                arkret_wire::DidUrl::new(method).unwrap(),
+            );
+            arkret_signatures::sign_event(
+                &mut authored,
+                &signer,
+                arkret_signatures::SignEventOptions::new(),
+            )
+            .unwrap();
+            authored.into_event()
+        };
+        let request = |event: Event| {
+            serde_json::to_value(
+                arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
+                    arkret_wire::EventAdmissionSubmission::new(event),
+                ),
+            )
+            .unwrap()
+        };
+        let valid = sign(
+            &payload,
+            controller.clone(),
+            format!("{did}#managed-controller"),
+        );
+        let application = coland_services::authority_commit::AuthorityCommitApplication::new(
+            coland_services::persistence::PersistenceHandle::from_shared(
+                fixture.state.test_persistence(),
+            ),
+            0,
+        );
+        let carrier = coland_storage::AppletControlCarrier {
+            service_id: installed.package.service_id.clone(),
+            verification_method: installed.package.webhook_auth.key_ref.clone(),
+            public_key: applet_service_signing_key(&installed.package.webhook_auth.key_ref)
+                .verifying_key()
+                .to_bytes(),
+        };
+        let station_method = fixture
+            .state
+            .service_verification_method("notary-key")
+            .unwrap();
+        let mut competing = payload.clone();
+        competing.device_id = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
+        competing.device_signature =
+            serde_json::from_value(json!(arkret_canonical::base64url_encode(
+                device
+                    .sign(
+                        &competing
+                            .device_possession_signature_input(actor.as_account_id().unwrap())
+                            .unwrap()
+                    )
+                    .to_bytes()
+            )))
+            .unwrap();
+        let competing = sign(
+            &competing,
+            controller.clone(),
+            format!("{did}#managed-controller"),
+        );
+        let stale_cut = application
+            .prepare_self_event_transaction(
+                &competing,
+                &fixture.state.service_core_id(),
+                station_method.clone(),
+                fixture.state.notary_signing_key().as_ref(),
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        let before = authority_snapshot(&fixture.pool).await;
+        for event in [
+            sign(
+                &payload,
+                applet_service_signing_key(&installed.package.webhook_auth.key_ref),
+                format!("{did}#managed-controller"),
+            ),
+            sign(&payload, controller.clone(), format!("{did}#{device_id}")),
+            {
+                let mut wrong = payload.clone();
+                wrong.authorized_generation_ref = 2;
+                wrong.device_signature =
+                    serde_json::from_value(json!(arkret_canonical::base64url_encode(
+                        device
+                            .sign(
+                                &wrong
+                                    .device_possession_signature_input(
+                                        actor.as_account_id().unwrap()
+                                    )
+                                    .unwrap()
+                            )
+                            .to_bytes()
+                    )))
+                    .unwrap();
+                sign(
+                    &wrong,
+                    controller.clone(),
+                    format!("{did}#managed-controller"),
+                )
+            },
+            {
+                let mut wrong = payload.clone();
+                wrong.device_signature =
+                    serde_json::from_value(json!(arkret_canonical::base64url_encode([7; 64])))
+                        .unwrap();
+                sign(
+                    &wrong,
+                    controller.clone(),
+                    format!("{did}#managed-controller"),
+                )
+            },
+        ] {
+            let (status, result) = fixture
+                .service_post(
+                    &installed.package,
+                    "/_arkret/self/events",
+                    arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                    &request(event),
+                    "device-invalid",
+                )
+                .await;
+            assert!(!status.is_success(), "{result}");
+            assert_eq!(
+                before,
+                authority_snapshot(&fixture.pool).await,
+                "refused managed authorize must write nothing"
+            );
+        }
+        for reused in [
+            controller.clone(),
+            applet_service_signing_key(&installed.package.webhook_auth.key_ref),
+        ] {
+            let mut wrong = payload.clone();
+            wrong.device_public_key_did = arkret_wire::NonEmptyString::new(format!(
+                "did:key:{}",
+                arkret_canonical::ed25519_pubkey_to_did_key_multibase(
+                    reused.verifying_key().as_bytes()
+                )
+            ))
+            .unwrap();
+            wrong.device_signature =
+                serde_json::from_value(json!(arkret_canonical::base64url_encode(
+                    reused
+                        .sign(
+                            &wrong
+                                .device_possession_signature_input(actor.as_account_id().unwrap())
+                                .unwrap()
+                        )
+                        .to_bytes()
+                )))
+                .unwrap();
+            let event = sign(
+                &wrong,
+                controller.clone(),
+                format!("{did}#managed-controller"),
+            );
+            let (status, result) = fixture
+                .service_post(
+                    &installed.package,
+                    "/_arkret/self/events",
+                    arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                    &request(event),
+                    "device-key-reuse",
+                )
+                .await;
+            assert!(!status.is_success(), "{result}");
+            assert_eq!(
+                before,
+                authority_snapshot(&fixture.pool).await,
+                "carrier and controller keys cannot become Device keys"
+            );
+        }
+        let mut conn = fixture.pool.get().await.unwrap();
+        let deleted = diesel::sql_query(
+            "DELETE FROM pcr_device_generation_current_results WHERE realm_id=$1",
+        )
+        .bind::<diesel::sql_types::Text, _>(realm.as_str())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        assert_eq!(deleted, 1);
+        drop(conn);
+        let missing = authority_snapshot(&fixture.pool).await;
+        let (status, refused) = fixture
+            .service_post(
+                &installed.package,
+                "/_arkret/self/events",
+                arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                &request(valid.clone()),
+                "device-missing-generation",
+            )
+            .await;
+        assert!(!status.is_success(), "{refused}");
+        assert_eq!(
+            missing,
+            authority_snapshot(&fixture.pool).await,
+            "authorize cannot initialize missing generation"
+        );
+        let mut conn = fixture.pool.get().await.unwrap();
+        diesel::sql_query("INSERT INTO pcr_device_generation_current_results SELECT r.* FROM jsonb_populate_recordset(NULL::pcr_device_generation_current_results,$1) r WHERE realm_id=$2")
+            .bind::<diesel::sql_types::Jsonb,_>(&before["device_generations"]).bind::<diesel::sql_types::Text,_>(realm.as_str()).execute(&mut *conn).await.unwrap();
+        drop(conn);
+        assert_eq!(before, authority_snapshot(&fixture.pool).await);
+        let mut conn = fixture.pool.get().await.unwrap();
+        diesel::sql_query("CREATE FUNCTION fail_managed_device() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'managed device fault'; END $$").execute(&mut *conn).await.unwrap();
+        diesel::sql_query("CREATE TRIGGER fail_managed_device BEFORE INSERT ON pcr_device_authorization_current_results FOR EACH ROW EXECUTE FUNCTION fail_managed_device()").execute(&mut *conn).await.unwrap();
+        drop(conn);
+        let (status, fault) = fixture
+            .service_post(
+                &installed.package,
+                "/_arkret/self/events",
+                arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                &request(valid.clone()),
+                "device-rollback",
+            )
+            .await;
+        let after_fault = authority_snapshot(&fixture.pool).await;
+        let mut conn = fixture.pool.get().await.unwrap();
+        diesel::sql_query(
+            "DROP TRIGGER fail_managed_device ON pcr_device_authorization_current_results",
+        )
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        diesel::sql_query("DROP FUNCTION fail_managed_device()")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        drop(conn);
+        assert!(!status.is_success(), "{fault}");
+        assert_eq!(
+            before, after_fault,
+            "device current failure must roll back Event and Commit"
+        );
+        let (status, result) = fixture
+            .service_post(
+                &installed.package,
+                "/_arkret/self/events",
+                arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                &request(valid.clone()),
+                "device-first",
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        let committed = authority_snapshot(&fixture.pool).await;
+        let (status, retry) = fixture
+            .service_post(
+                &installed.package,
+                "/_arkret/self/events",
+                arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                &request(valid.clone()),
+                "device-retry",
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        assert_eq!(committed, authority_snapshot(&fixture.pool).await);
+        let mut replacement = payload.clone();
+        replacement
+            .scopes
+            .as_mut()
+            .unwrap()
+            .push(arkret_wire::NonEmptyString::new("ak.object.read_content").unwrap());
+        replacement.device_signature =
+            serde_json::from_value(json!(arkret_canonical::base64url_encode(
+                device
+                    .sign(
+                        &replacement
+                            .device_possession_signature_input(actor.as_account_id().unwrap())
+                            .unwrap()
+                    )
+                    .to_bytes()
+            )))
+            .unwrap();
+        let event = sign(
+            &replacement,
+            controller.clone(),
+            format!("{did}#managed-controller"),
+        );
+        let (status, replaced) = fixture
+            .service_post(
+                &installed.package,
+                "/_arkret/self/events",
+                arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                &request(event),
+                "device-replacement",
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{replaced}");
+        let after_replacement = authority_snapshot(&fixture.pool).await;
+        let (status, replayed) = fixture
+            .service_post(
+                &installed.package,
+                "/_arkret/self/events",
+                arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                &request(valid.clone()),
+                "device-replay-original",
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{replayed}");
+        assert_eq!(
+            after_replacement,
+            authority_snapshot(&fixture.pool).await,
+            "original replay must not overwrite replacement current"
+        );
+        assert_eq!(
+            before["device_generations"], after_replacement["device_generations"],
+            "authorize must preserve the generation writer and revision"
+        );
+        let store = PgAuthorityCommitStore {
+            pool: fixture.pool.clone(),
+        };
+        let stale = store
+            .admit_applet_managed_device_authorization(&stale_cut, &carrier)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            stale.conflict_code(),
+            Some(coland_storage::ConflictCode::CasConflict)
+        );
+        let expired = application
+            .prepare_self_event_transaction(
+                &valid,
+                &fixture.state.service_core_id(),
+                station_method.clone(),
+                fixture.state.notary_signing_key().as_ref(),
+                payload.expires_at.flatten().unwrap() + chrono::Duration::seconds(1),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .admit_applet_managed_device_authorization(&expired, &carrier)
+                .await
+                .unwrap(),
+            coland_storage::AcceptedDeviceAuthorizationOutcome::Duplicate(_)
+        ));
+        assert_eq!(
+            after_replacement,
+            authority_snapshot(&fixture.pool).await,
+            "stale cut and expired replay must leave current untouched"
+        );
+        // The accepted Device remains a restricted Device, including on the
+        // existing Account Authority relay unit for ordinary pairing.
+        let mut upward = payload.clone();
+        upward.authorization_binding_kind=arkret_models_collaboration::events_payloads::DeviceAuthorizationBindingKind::AcceptedDevice;
+        upward.authorized_by =
+            arkret_models_collaboration::events_payloads::DeviceOrPrincipalRef::DeviceId(
+                device_id.clone(),
+            );
+        upward.applet_id = None;
+        upward.device_id = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
+        upward.pairing_challenge_transcript_digest = Some(
+            Hash::new(
+                arkret_canonical::canonical_sha256(&json!("real pairing target challenge"))
+                    .unwrap(),
+            )
+            .unwrap(),
+        );
+        upward.device_signature =
+            serde_json::from_value(json!(arkret_canonical::base64url_encode(
+                device
+                    .sign(
+                        &upward
+                            .device_possession_signature_input(actor.as_account_id().unwrap())
+                            .unwrap()
+                    )
+                    .to_bytes()
+            )))
+            .unwrap();
+        let upward = sign(&upward, device.clone(), format!("{did}#{device_id}"));
+        let denied = application
+            .admit_accepted_device_authorization(
+                &upward,
+                &fixture.state.service_core_id(),
+                station_method,
+                fixture.state.notary_signing_key().as_ref(),
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            denied.conflict_code(),
+            Some(coland_storage::ConflictCode::DeviceUnauthorized)
+        );
+        assert_eq!(
+            after_replacement,
+            authority_snapshot(&fixture.pool).await,
+            "managed Device cannot gain upward delegation"
+        );
+        let store = coland_storage_postgres::PgDeviceRevocationStore {
+            pool: fixture.pool.clone(),
+        };
+        assert_eq!(
+            store
+                .pcr_device_generation(actor.as_account_id().unwrap())
+                .await
+                .unwrap()
+                .unwrap()
+                .current_device_generation_ref,
+            1
+        );
+        assert!(
+            store
+                .pcr_device_authorization_key(actor.as_account_id().unwrap(), &device_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn managed_pcr_genesis_initializes_generation_without_a_device_and_rejects_corrupt_current() {
     use coland_storage::DeviceRevocationStore as _;
     use diesel::sql_types::Text;
@@ -2095,11 +2584,17 @@ fn managed_actor_fixture(
     let version_time = chrono::DateTime::parse_from_rfc3339("2026-08-24T00:00:00.000Z")
         .unwrap()
         .with_timezone(&chrono::Utc);
-    let inception = arkret_signatures::webvh::prepare_agent_inception(
-        &arkret_signatures::webvh::AgentInceptionInput {
+    let controller_seed = deterministic_managed_actor_seed(&format!(
+        "{}:{local_id}:controller:{controller_principal_id}",
+        safe_did_token(namespace)
+    ));
+    let inception = arkret_signatures::webvh::prepare_applet_managed_inception(
+        &arkret_signatures::webvh::AppletManagedInceptionInput {
             principal_endpoint: &endpoint,
             local_id: &local_id,
-            controller_principal_id,
+            controller_public_key: &SigningKey::from_bytes(&controller_seed)
+                .verifying_key()
+                .to_bytes(),
             version_time,
             root_seed: &root_seed,
             next_root_public_key_multibase: &next_key,
@@ -2323,8 +2818,10 @@ impl NativeAppletService {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let server_stop = stop.clone();
         let served = history.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let thread = std::thread::spawn(move || {
             let mut connections = Vec::new();
+            ready_tx.send(()).unwrap();
             while !server_stop
                 .as_ref()
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -2363,6 +2860,7 @@ impl NativeAppletService {
                     bytes.extend_from_slice(&buffer[..n]);
                 }
                 let request = String::from_utf8_lossy(&bytes);
+                if bytes.is_empty() { return; }
                 let entries = served.lock().unwrap();
                 let body = if request
                     .lines()
@@ -2390,6 +2888,9 @@ impl NativeAppletService {
                 connection.join().unwrap();
             }
         });
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("native DID provider must be serving before installation");
         Self {
             package,
             history,
@@ -3162,12 +3663,14 @@ impl Fixture {
         let signature = sign_http_message_for_scenario(
             &signed_request,
             if operation == arkret_wire::ServiceOperationId::SELF_APPLET_AUTHORITY_READ_MATERIAL_V1
+                || operation == arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1
             {
                 HttpSignatureScenario::ServiceToServiceV1
             } else {
                 HttpSignatureScenario::AppletTransactionV1
             },
             if operation == arkret_wire::ServiceOperationId::SELF_APPLET_AUTHORITY_READ_MATERIAL_V1
+                || operation == arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1
             {
                 &["content-digest", "idempotency-key"]
             } else {

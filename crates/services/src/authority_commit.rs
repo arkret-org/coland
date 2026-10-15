@@ -1571,6 +1571,44 @@ impl AuthorityCommitApplication {
     /// An exact retry of an accepted Event returns its stored Commit before
     /// any authority read; the unit itself rechecks the approving device,
     /// generation, target history and every signature at the locked PCR cut.
+    pub async fn admit_applet_managed_device_authorization(
+        &self,
+        event: &Event,
+        carrier: &coland_storage::AppletControlCarrier,
+        local_service_id: &DidCoreId,
+        verification_method: DidUrl,
+        signing_key: &SigningKey,
+    ) -> ServiceResult<AuthorityEventAdmissionOutcome> {
+        event
+            .validate_for_submit_structural()
+            .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
+        // Prepare does not consult a Device for this Principal-signed branch.
+        // The accepting unit proves the original Service even on replay.
+        let transaction = self
+            .prepare_self_event_transaction(
+                event,
+                local_service_id,
+                verification_method,
+                signing_key,
+                Utc::now(),
+            )
+            .await?;
+        Ok(
+            match self
+                .store()
+                .admit_applet_managed_device_authorization(&transaction, carrier)
+                .await?
+            {
+                coland_storage::AcceptedDeviceAuthorizationOutcome::Committed(commit) => {
+                    AuthorityEventAdmissionOutcome::Committed(commit)
+                }
+                coland_storage::AcceptedDeviceAuthorizationOutcome::Duplicate(commit) => {
+                    AuthorityEventAdmissionOutcome::Duplicate(commit)
+                }
+            },
+        )
+    }
+
     pub async fn admit_accepted_device_authorization(
         &self,
         event: &Event,

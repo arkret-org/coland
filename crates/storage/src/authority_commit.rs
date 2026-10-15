@@ -356,6 +356,15 @@ pub struct AuthorityCommitTransaction {
     pub recipient_queue_capacity: usize,
 }
 
+/// Actual RFC 9421 carrier key authenticated by the HTTP boundary. It is
+/// transport identity material, never Principal or Device signing authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppletControlCarrier {
+    pub service_id: arkret_wire::DidCoreId,
+    pub verification_method: arkret_wire::DidUrl,
+    pub public_key: [u8; 32],
+}
+
 /// Current producer authorization pinned by the self submit preflight and
 /// rechecked inside the same transaction that commits the Event. This is an
 /// internal persistence guard, never a caller-supplied protocol claim.
@@ -2480,6 +2489,20 @@ pub trait AuthorityCommitStore: Send + Sync {
         transaction: &AuthorityCommitTransaction,
         queued_at: DateTime<Utc>,
     ) -> PersistenceResult<AcceptedDeviceAuthorizationOutcome>;
+
+    /// One ordinary managed PCR successor, relayed by its exact Service.
+    /// Rechecks accepted provenance, resolution, generation, scope installs,
+    /// possession and producer proof under the PCR and installation locks.
+    async fn admit_applet_managed_device_authorization(
+        &self,
+        transaction: &AuthorityCommitTransaction,
+        carrier: &AppletControlCarrier,
+    ) -> PersistenceResult<AcceptedDeviceAuthorizationOutcome> {
+        let _ = (transaction, carrier);
+        Err(PersistenceError::Conflict(
+            "temporarily_unavailable: managed device admission unavailable".into(),
+        ))
+    }
 
     /// Read the first durable PCR genesis receipt before freshness checks on an
     /// exact retry. Reusing either the Realm or idempotency key with different

@@ -3166,6 +3166,20 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         crate::mls_group_state_material_read::read(&self.pool, request, issuer, source_peer).await
     }
 
+    async fn admit_applet_managed_device_authorization(
+        &self,
+        transaction: &AuthorityCommitTransaction,
+        carrier: &coland_storage::AppletControlCarrier,
+    ) -> PersistenceResult<AcceptedDeviceAuthorizationOutcome> {
+        transaction.validate().map_err(invalid)?;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            crate::pcr_applet_device::admit(conn, transaction, carrier).await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
     async fn admit_accepted_device_authorization(
         &self,
         transaction: &AuthorityCommitTransaction,

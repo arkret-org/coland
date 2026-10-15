@@ -86,6 +86,18 @@ pub(crate) async fn enforce_native_reply_session_pop(
 }
 
 async fn enforce_session_pop(state: &AppState, req: &mut Request) -> Result<(), AppError> {
+    // This registered Service branch is authenticated in the handler with
+    // its own current assertion key, never with a session or a Device key.
+    if req.headers().contains_key("source-service-id")
+        && req.method() == salvo::http::Method::POST
+        && req.uri().path() == "/_arkret/self/events"
+        && request_matches_operation(
+            req,
+            arkret_wire::ServiceOperationId::SelfEventsCommandSubmitV1,
+        )
+    {
+        return Ok(());
+    }
     let presented = req.headers().contains_key("signature-input");
     if !presented {
         if pop_required(state, req) {

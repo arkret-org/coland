@@ -491,6 +491,9 @@ pub(crate) async fn submit_self(req: &mut Request, depot: &Depot, res: &mut Resp
             return crate::error::render_error_code(ErrorCode::InternalError, res, &error);
         }
     };
+    if req.headers().contains_key("source-service-id") {
+        return submit_applet_control(app_state, req, res).await;
+    }
     let Some(session) = crate::routing::auth_or_render(app_state, req, res).await else {
         #[cfg(feature = "conformance-harness")]
         trace_submission_refusal("authentication", "unparsed", "unresolved", None);
@@ -619,6 +622,94 @@ pub(crate) async fn submit_self(req: &mut Request, depot: &Depot, res: &mut Resp
     }
     if let Err(error @ (ServiceError::Database(_) | ServiceError::Internal(_))) = &result {
         tracing::error!(error = %error, "self authority submission failed internally");
+    }
+    render_result(res, result);
+}
+
+async fn submit_applet_control(app_state: &AppState, req: &mut Request, res: &mut Response) {
+    let source = match crate::routing::extensions::applet_bridge::verify_self_control_service(
+        app_state, req,
+    )
+    .await
+    {
+        Ok(source) => source,
+        Err(error) => {
+            return crate::error::render_error(
+                res,
+                error.http_status(),
+                error.wire_code(),
+                &error.message,
+            );
+        }
+    };
+    let Some((request, _)) = parse_exact_closed_body::<SelfAuthoritySubmitRequest>(req, res).await
+    else {
+        return;
+    };
+    let result = async {
+        request
+            .validate()
+            .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
+        let SelfAuthoritySubmitRequest::Event(submission) = &request else {
+            return Err(ServiceError::SchemaViolation(
+                "Service control ingress requires one original Event submission".into(),
+            ));
+        };
+        if submission.approval_signatures.is_some()
+            || submission.event.kind != arkret_wire::EventKind::DeviceAuthorize
+        {
+            return Err(ServiceError::SchemaViolation(
+                "this Service control branch only admits managed device authorization".into(),
+            ));
+        }
+        let method = arkret_wire::DidUrl::new(
+            crate::routing::federation::federation_service_signature_key_id(
+                app_state.service_did().as_str(),
+            ),
+        )
+        .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
+        let outcome = app_state
+            .authority_commits()
+            .admit_applet_managed_device_authorization(
+                &submission.event,
+                &source,
+                &app_state.service_core_id(),
+                method,
+                app_state.notary_signing_key().as_ref(),
+            )
+            .await?;
+        use coland_services::authority_commit::AuthorityEventAdmissionOutcome;
+        let outcome = match outcome {
+            AuthorityEventAdmissionOutcome::Committed(commit) => {
+                arkret_wire::AuthoritySubmitOutcome::Accepted {
+                    status: arkret_wire::AuthorityCommitStatus::Committed,
+                    commit,
+                }
+            }
+            AuthorityEventAdmissionOutcome::Duplicate(commit) => {
+                arkret_wire::AuthoritySubmitOutcome::Accepted {
+                    status: arkret_wire::AuthorityCommitStatus::Duplicate,
+                    commit,
+                }
+            }
+            AuthorityEventAdmissionOutcome::NotCurrentAuthority => {
+                return Err(ServiceError::Conflict(
+                    "stale_realm_authority: managed PCR is not governed here".into(),
+                ));
+            }
+        };
+        let outcome =
+            arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::Ordinary(
+                outcome,
+            );
+        outcome
+            .validate_for_request(&request)
+            .map_err(invalid_application_output)?;
+        Ok(outcome)
+    }
+    .await;
+    if let Err(error @ (ServiceError::Database(_) | ServiceError::Internal(_))) = &result {
+        tracing::error!(error = %error, "managed PCR control submission failed internally");
     }
     render_result(res, result);
 }

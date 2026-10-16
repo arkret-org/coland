@@ -6,7 +6,7 @@ use arkret_models_integration::AppletManagedDeviceMetadata;
 use arkret_wire::{ActorId, EventKind};
 use coland_services::{ServiceError, ServiceResult};
 use coland_storage::{
-    AppletManagedDeviceAuthority, AppletManagedDeviceEventGuard, SelfProducerCommitGuard,
+    AppletManagedDeviceAuthority, AppletManagedDeviceScopeGuard, SelfProducerCommitGuard,
 };
 
 use super::{AppState, authority_self_event_unit as unit};
@@ -109,7 +109,7 @@ pub(super) async fn submit(
             )
         })?;
     let guard =
-        SelfProducerCommitGuard::AppletManagedDevice(Box::new(AppletManagedDeviceEventGuard {
+        SelfProducerCommitGuard::AppletManagedDevice(Box::new(AppletManagedDeviceScopeGuard {
             authority: current,
             effective_scope: metadata.effective_scope.clone(),
             service_did_document,

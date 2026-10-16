@@ -57,7 +57,7 @@ async fn authorize_scopes(
         "device_id":device_id,"device_public_key_did":format!("did:key:{}",arkret_canonical::ed25519_pubkey_to_did_key_multibase(key.verifying_key().as_bytes())),
         "hpke_key":arkret_canonical::ed25519_pubkey_to_did_key_multibase(&[119;32]),"algorithms":["Ed25519"],"device_key_algorithm":"Ed25519",
         "authorized_by":actor.signing_principal_id(),"scopes":scopes,
-        "not_before":now-chrono::Duration::seconds(1),"expires_at":now+chrono::Duration::hours(1),"authorization_binding_kind":"applet_managed_delegation","authorized_generation_ref":1,"device_signature":"AA","applet_id":install.package.applet_id
+        "not_before":arkret_canonical::format_timestamp_canonical(now-chrono::Duration::seconds(1)),"expires_at":arkret_canonical::format_timestamp_canonical(now+chrono::Duration::hours(1)),"authorization_binding_kind":"applet_managed_delegation","authorized_generation_ref":1,"device_signature":"AA","applet_id":install.package.applet_id
     })).unwrap();
     payload.device_signature = serde_json::from_value(json!(arkret_canonical::base64url_encode(
         key.sign(
@@ -733,6 +733,9 @@ fn native_phase<F: std::future::Future>(make: impl FnOnce() -> F) -> std::pin::P
     Box::pin(make())
 }
 struct NativeSourcesContext {
+    native: NativeAppletService,
+    namespace: String,
+    ghost_bundle: Value,
     fixture: Box<Fixture>,
     install: Box<Installed>,
     ghost_actor: ActorId,
@@ -884,6 +887,9 @@ async fn native_sources_setup() -> Box<NativeSourcesContext> {
     }
 
     Box::new(NativeSourcesContext {
+        native,
+        namespace,
+        ghost_bundle: ghost["managed_actor_bundle"].clone(),
         fixture,
         install,
         ghost_actor,
@@ -900,6 +906,9 @@ async fn native_sources_exercise(context: Box<NativeSourcesContext>) {
         GrantConstraintEffect, GrantConstraintKind,
     };
     let NativeSourcesContext {
+        native: _native,
+        namespace: _,
+        ghost_bundle: _,
         fixture,
         install,
         ghost_actor,
@@ -925,12 +934,43 @@ async fn native_sources_exercise(context: Box<NativeSourcesContext>) {
         GrantConstraintEffect::Deny,
     );
     deny.denied_strand_ids = vec![strand.to_string()];
-    let global_service = native_message_parent(&fixture, &install, vec![deny.clone()]).await;
+    let independent_ancestor = native_unmetered_ancestor(&fixture).await;
+    let global_service = native_business_parent(
+        &fixture,
+        &install,
+        vec![deny.clone()],
+        vec!["ak.message.create".into()],
+        Some(independent_ancestor.clone()),
+    )
+    .await;
     let before = business(&fixture).await;
     let (status, error) = post(&fixture, authority, key, &first, vec![]).await;
     assert!(!status.is_success(), "{error}");
     assert!(error.to_string().contains("capability_denied"), "{error}");
     assert_eq!(before, business(&fixture).await);
+    #[derive(diesel::QueryableByName)]
+    struct SavedCurrent {
+        #[diesel(sql_type=diesel::sql_types::Jsonb)]
+        value: Value,
+    }
+    let saved = {
+        let mut conn = fixture.pool.get().await.unwrap();
+        diesel::sql_query("DELETE FROM capability_grant_current_results WHERE realm_id=$1 AND grant_id=$2 RETURNING to_jsonb(capability_grant_current_results) AS value")
+        .bind::<diesel::sql_types::Text,_>(fixture.realm.as_str()).bind::<diesel::sql_types::Text,_>(independent_ancestor.as_str()).get_result::<SavedCurrent>(&mut conn).await.unwrap()
+    };
+    let damaged = business(&fixture).await;
+    let (status, error) = post(&fixture, authority, key, &first, vec![]).await;
+    let unchanged = business(&fixture).await;
+    {
+        let mut conn = fixture.pool.get().await.unwrap();
+        diesel::sql_query("INSERT INTO capability_grant_current_results SELECT * FROM jsonb_populate_record(NULL::capability_grant_current_results,$1)")
+        .bind::<diesel::sql_types::Jsonb,_>(saved.value).execute(&mut conn).await.unwrap();
+    }
+    assert!(
+        !status.is_success(),
+        "missing global-refusal source cannot disappear: {error}"
+    );
+    assert_eq!(damaged, unchanged);
     let rows = fixture
         .state
         .test_persistence()
@@ -1085,4 +1125,231 @@ async fn native_ghost_multi_parent_messages_keep_action_local_sources_and_shared
     }))
     .await
     .unwrap();
+}
+
+async fn native_get(
+    fixture: &Fixture,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    key: &SigningKey,
+    event: &EventId,
+) -> salvo::Response {
+    let path = format!("/_arkret/self/committed-events/{event}");
+    managed_device_http_request_at(
+        &fixture.state,
+        authority,
+        &managed_device_metadata(authority),
+        ServiceOperationId::SelfCommittedEventResourceGetV1,
+        key,
+        None,
+        Some(&path),
+    )
+    .send(&service(fixture.state.clone()))
+    .await
+}
+async fn native_current_revoke(fixture: &Fixture, grant: &arkret_wire::GrantId) {
+    let rows = fixture
+        .state
+        .test_persistence()
+        .capability_grant_current_results()
+        .snapshot_for_realm(&fixture.realm)
+        .await
+        .unwrap();
+    let row = rows.iter().find(|r| &r.grant_id == grant).unwrap();
+    let event=fixture.admin_event(EventKind::CapabilityRevoke,ScopeRef::Realm{realm_id:fixture.realm.clone()},json!({"grant_id":grant,"expected_revision":row.revision,"reason":"native read source closed"}));
+    accepted_admin_domain_event(fixture, event).await;
+}
+async fn native_read_exercise(context: Box<NativeSourcesContext>) {
+    let NativeSourcesContext {
+        native: _native,
+        fixture,
+        install,
+        namespace,
+        ghost_bundle,
+        strand,
+        reading,
+        messages,
+        sibling,
+        mut actors,
+        ..
+    } = *context;
+    native_phase(|| native_current_revoke(&fixture, &reading)).await;
+    for (index, (_, _, child)) in actors.iter().enumerate() {
+        let rows = fixture
+            .state
+            .test_persistence()
+            .capability_grant_current_results()
+            .snapshot_for_realm(&fixture.realm)
+            .await
+            .unwrap();
+        let current = rows.iter().find(|r| &r.grant_id == child).unwrap();
+        let parent = if index == 0 { &messages } else { &sibling };
+        let close = managed_service_event(
+            &fixture,
+            &install,
+            &ActorId::service(install.package.service_id.clone()),
+            parent,
+            EventKind::CapabilityRevoke,
+            json!({"grant_id":child,"expected_revision":current.revision,"reason":"member reads need no terminal read child"}),
+        );
+        native_phase(|| assert_managed_accepted(&fixture, &install, &close)).await;
+    }
+    let event=fixture.admin_event(EventKind::MessageCreate,ScopeRef::Realm{realm_id:fixture.realm.clone()},json!({"strand_id":strand,"track_name":"discussion","content":{"kind":"ak.content.text","format":"plain","body":"actual member content for independent native readers"}}));
+    native_phase(|| accepted_admin_domain_event(&fixture, event.clone())).await;
+    let read_parent = native_business_parent(
+        &fixture,
+        &install,
+        vec![],
+        vec!["ak.event.read".into()],
+        None,
+    )
+    .await;
+    let before = business(&fixture).await;
+    for (authority, key, _) in &actors {
+        let mut response =
+            native_phase(|| native_get(&fixture, authority, key, &event.event_id)).await;
+        assert_eq!(response.status_code, Some(StatusCode::NOT_FOUND));
+        let problem = response.take_json::<Value>().await.unwrap();
+        assert!(problem.get("event").is_none());
+    }
+    assert_eq!(before, business(&fixture).await);
+    for (index, (authority, key, _)) in actors.iter_mut().enumerate() {
+        let old = authority.clone();
+        let bundle = if index == 0 {
+            &ghost_bundle
+        } else {
+            &install.bot_body["managed_actor_bundle"]
+        };
+        *authority=native_phase(||authorize_scopes(&fixture,&install,bundle,&namespace,key,old.device_id.clone(),json!([{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":["ak.applet.join","ak.event.read","ak.message.create","ak.object.read_content"]}]))).await;
+        let before = business(&fixture).await;
+        let mut expired = native_phase(|| native_get(&fixture, &old, key, &event.event_id)).await;
+        assert_eq!(expired.status_code, Some(StatusCode::UNAUTHORIZED));
+        let _: Value = expired.take_json().await.unwrap();
+        assert_eq!(before, business(&fixture).await);
+        let mut response =
+            native_phase(|| native_get(&fixture, authority, key, &event.event_id)).await;
+        assert_eq!(response.status_code, Some(StatusCode::NOT_FOUND));
+        let _: Value = response.take_json().await.unwrap();
+    }
+    let content_parent = native_business_parent(
+        &fixture,
+        &install,
+        vec![],
+        vec!["ak.object.read_content".into()],
+        None,
+    )
+    .await;
+    let before = business(&fixture).await;
+    for (authority, key, _) in &actors {
+        let mut response =
+            native_phase(|| native_get(&fixture, authority, key, &event.event_id)).await;
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        let row: arkret_wire::CommittedEventView = response.take_json().await.unwrap();
+        assert_eq!(row.reducer_input().unwrap(), &event);
+        let unknown = EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [0xfa; 32]);
+        let private = authority.selector.authorization_ref.event_id.clone();
+        let mut hidden = Vec::new();
+        for id in [unknown, private] {
+            let mut response = native_phase(|| native_get(&fixture, authority, key, &id)).await;
+            assert_eq!(response.status_code, Some(StatusCode::NOT_FOUND));
+            let p: Value = response.take_json().await.unwrap();
+            hidden.push((p["type"].clone(), p["title"].clone(), p["detail"].clone()));
+        }
+        assert_eq!(hidden[0], hidden[1]);
+    }
+    assert_eq!(before, business(&fixture).await);
+    let (authority, key, _) = &actors[0];
+    let mut response = native_phase(|| native_get(&fixture, authority, key, &event.event_id)).await;
+    assert_eq!(response.status_code, Some(StatusCode::OK));
+    let mut close = native_phase(|| native_current_revoke(&fixture, &read_parent));
+    tokio::select! { _=&mut close=>panic!("source revoke crossed an unconsumed native delivery cut"), _=tokio::time::sleep(std::time::Duration::from_millis(30))=>{} }
+    let row: arkret_wire::CommittedEventView = response.take_json().await.unwrap();
+    assert_eq!(row.reducer_input().unwrap(), &event);
+    close.await;
+    let before = business(&fixture).await;
+    for (authority, key, _) in &actors {
+        let mut response =
+            native_phase(|| native_get(&fixture, authority, key, &event.event_id)).await;
+        assert_eq!(response.status_code, Some(StatusCode::NOT_FOUND));
+        let _: Value = response.take_json().await.unwrap();
+    }
+    assert_eq!(before, business(&fixture).await);
+    use arkret_models_collaboration::governance::grant_constraint::{
+        GrantConstraintEffect, GrantConstraintKind,
+    };
+    let mut temporal =
+        GrantConstraint::new(GrantConstraintKind::Temporal, GrantConstraintEffect::Allow);
+    temporal.expires_at = Some(arkret_canonical::normalize_timestamp_canonical(
+        chrono::Utc::now() + chrono::Duration::seconds(3),
+    ));
+    let _short = native_business_parent(
+        &fixture,
+        &install,
+        vec![temporal],
+        vec!["ak.event.read".into()],
+        None,
+    )
+    .await;
+    let mut response = native_phase(|| native_get(&fixture, authority, key, &event.event_id)).await;
+    assert_eq!(response.status_code, Some(StatusCode::OK));
+    let before = business(&fixture).await;
+    tokio::time::sleep(std::time::Duration::from_millis(3200)).await;
+    assert!(
+        response.take_json::<Value>().await.is_err(),
+        "expired source cannot hand off prepared bytes"
+    );
+    assert_eq!(before, business(&fixture).await);
+    assert_ne!(content_parent, read_parent);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_member_reads_require_actual_scope_device_and_service_content_sources_through_handoff()
+ {
+    tokio::spawn(native_phase(|| async {
+        let context = native_phase(native_sources_setup).await;
+        native_phase(|| native_read_exercise(context)).await;
+    }))
+    .await
+    .unwrap();
+}
+
+async fn native_unmetered_ancestor(fixture: &Fixture) -> arkret_wire::GrantId {
+    use arkret_models_collaboration::governance::grant_constraint::{
+        GrantConstraintEffect, GrantConstraintKind, ManagedActorRole,
+    };
+    let actor = ActorId::account(fixture.pcr.history.account.clone());
+    let mut control = GrantConstraint::new(
+        GrantConstraintKind::AuthorityControl,
+        GrantConstraintEffect::Allow,
+    );
+    control.authority_regrant_allowed = Some(true);
+    control.max_authority_depth = Some(3);
+    control.allowed_managed_actor_roles = vec![ManagedActorRole::Bot, ManagedActorRole::Ghost];
+    let event = fixture.admin_event(
+        EventKind::CapabilityGrant,
+        ScopeRef::Realm {
+            realm_id: fixture.realm.clone(),
+        },
+        json!(CapabilityGrantPayload {
+            grant: CapabilityGrantCreateBody {
+                schema: arkret_wire::SchemaId::CAPABILITY_V1.into(),
+                realm_id: Some(fixture.realm.clone()),
+                issuer_id: actor.clone(),
+                subject: CapabilitySubject::Actor(actor),
+                actions: vec!["ak.message.create".into()],
+                resources: vec![arkret_wire::WireResourceSelector::realm(
+                    fixture.realm.clone()
+                )],
+                constraints: vec![control],
+                issuer_authority_refs: vec![IssuerAuthorityRef::RealmRoot {
+                    realm_id: fixture.realm.clone(),
+                    authority_event_ref: fixture.authority_event_ref.clone().unwrap(),
+                    authority_generation: 0
+                }],
+                issued_at: chrono::Utc::now()
+            }
+        }),
+    );
+    let id = arkret_wire::GrantId::from_event_id(&event.event_id);
+    accepted_admin_domain_event(fixture, event).await;
+    id
 }

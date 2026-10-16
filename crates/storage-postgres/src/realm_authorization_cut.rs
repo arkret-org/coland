@@ -2034,10 +2034,16 @@ impl RealmAuthorizationCut {
             .collect()
     }
 
-    /// `realm-and-space.md` §2.6.0/§2.6.1: after a terminal Event only audit
-    /// Events are admitted, and an archived or frozen Realm admits only the
-    /// closed exemption set. The terminal refusal code is reserved, so it is
-    /// a bare `failed_precondition`.
+    /// Current content reads retain their own membership and disclosure gates.
+    pub(crate) fn require_open_content_read(&self) -> PersistenceResult<()> {
+        if self.lifecycle.terminal {
+            return Err(capability_denied(
+                "terminal Realm refuses current content reads",
+            ));
+        }
+        Ok(())
+    }
+
     /// Operation-native creations have no fabricated Event for lifecycle checks.
     pub(crate) fn require_open_business_mutation(&self) -> PersistenceResult<()> {
         if self.lifecycle.terminal || self.lifecycle.archived || self.lifecycle.frozen {
@@ -2048,6 +2054,10 @@ impl RealmAuthorizationCut {
         Ok(())
     }
 
+    /// `realm-and-space.md` §2.6.0/§2.6.1: after a terminal Event only audit
+    /// Events are admitted, and an archived or frozen Realm admits only the
+    /// closed exemption set. The terminal refusal code is reserved, so it is
+    /// a bare `failed_precondition`.
     pub(crate) fn require_open_lifecycle(
         &self,
         event: &arkret_wire::Event,

@@ -9,7 +9,7 @@ use arkret_models_collaboration::governance::operation_wire::{
     AppletPolicyOperation, PolicyResourceKind, PolicyResourceSelector,
 };
 use arkret_wire::{ActorId, CapabilityActionId, Event, EventKind, GrantId, PolicyEffect, ScopeRef};
-use coland_storage::{AppletManagedDeviceEventGuard, PersistenceError, PersistenceResult};
+use coland_storage::{AppletManagedDeviceScopeGuard, PersistenceError, PersistenceResult};
 use diesel::sql_types::{Jsonb, Text};
 use diesel::{OptionalExtension, QueryableByName, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
@@ -66,7 +66,7 @@ pub(crate) fn action(event: &Event) -> PersistenceResult<CapabilityActionId> {
 pub(crate) async fn installation(
     conn: &mut AsyncPgConnection,
     event: &Event,
-    guard: &AppletManagedDeviceEventGuard,
+    guard: &AppletManagedDeviceScopeGuard,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<(arkret_models_integration::AppletRegistrationPayload, Value)> {
     let authority = &guard.authority;
@@ -80,11 +80,43 @@ pub(crate) async fn installation(
     if event.actor_id != ActorId::account(authority.account_id.clone())
         || event.applet_id.as_ref() != Some(&authority.applet_id)
         || event.scope_ref != guard.effective_scope
-        || !authority.scopes.permits(&event.scope_ref, &[actual_action])
     {
-        return Err(denied("native Event exceeds its signed Device pair"));
+        return Err(denied("native Event differs from its authenticated scope"));
     }
-    let registration = crate::managed_message_actor::registration(conn, event).await?;
+    installation_for_device(
+        conn,
+        authority,
+        &guard.effective_scope,
+        &guard.service_did_document,
+        &[actual_action],
+        at,
+        true,
+    )
+    .await
+}
+
+/// Current exact installation and accepted native identity, independent of an
+/// Event carrier. Read callers must derive `scope` from the real target bytes.
+pub(crate) async fn installation_for_device(
+    conn: &mut AsyncPgConnection,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    scope: &ScopeRef,
+    service_did_document: &arkret_identity::DidDocument,
+    actions: &[CapabilityActionId],
+    at: chrono::DateTime<chrono::Utc>,
+    writer: bool,
+) -> PersistenceResult<(arkret_models_integration::AppletRegistrationPayload, Value)> {
+    if !matches!(scope, ScopeRef::Realm { .. } | ScopeRef::Circle { .. })
+        || !authority.scopes.permits(scope, actions)
+    {
+        return Err(denied("native resource exceeds its original Device pair"));
+    }
+    let registration = crate::managed_message_actor::registration_for_scope(
+        conn,
+        scope.realm_id(),
+        &authority.applet_id,
+    )
+    .await?;
     if registration.service_id != authority.source_service_id {
         return Err(denied(
             "native provision Service differs from current registration",
@@ -93,17 +125,30 @@ pub(crate) async fn installation(
     registration
         .manifest
         .registration_epoch_evidence
-        .validate_against_did_document(&guard.service_did_document)
+        .validate_against_did_document(service_did_document)
         .map_err(|_| {
             denied("current Service document does not bind the accepted registration epoch")
         })?;
-    let key = coland_storage::applet_effective_scope_key(&event.scope_ref)?;
-    let row = sql_query("SELECT i.record AS value FROM applet_installations i JOIN applet_registration_current_results r ON r.realm_id=$3 AND r.applet_id=i.applet_id JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref AND a.registration_event_ref=i.record#>>'{registration_event,event_id}' JOIN applet_managed_identities m ON m.applet_id=i.applet_id AND m.target_station_id=$4 WHERE i.applet_id=$1 AND i.effective_scope_key=$2 AND m.record->>'globally_fenced_at' IS NULL FOR UPDATE OF i,m")
-        .bind::<Text,_>(authority.applet_id.as_str()).bind::<Text,_>(key)
-        .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(authority.account_id.station_id.as_str())
-        .get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+    let key = coland_storage::applet_effective_scope_key(scope)?;
+    let locking = if writer {
+        "FOR UPDATE OF i,m"
+    } else {
+        "FOR SHARE OF i,m NOWAIT"
+    };
+    let query = format!(
+        "SELECT i.record AS value FROM applet_installations i JOIN applet_registration_current_results r ON r.realm_id=$3 AND r.applet_id=i.applet_id JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref AND a.registration_event_ref=i.record#>>'{{registration_event,event_id}}' JOIN applet_managed_identities m ON m.applet_id=i.applet_id AND m.target_station_id=$4 WHERE i.applet_id=$1 AND i.effective_scope_key=$2 AND m.record->>'globally_fenced_at' IS NULL {locking}"
+    );
+    let row = sql_query(query)
+        .bind::<Text, _>(authority.applet_id.as_str())
+        .bind::<Text, _>(key)
+        .bind::<Text, _>(scope.realm_id().as_str())
+        .bind::<Text, _>(authority.account_id.station_id.as_str())
+        .get_result::<JsonRow>(&mut *conn)
+        .await
+        .optional()
+        .map_err(PersistenceError::database)?
         .ok_or_else(|| denied("native Applet exact installation is absent or fenced"))?;
-    if row.value["effective_scope"] != json!(event.scope_ref)
+    if row.value["effective_scope"] != json!(scope)
         || row.value["package"]["registration_epoch"] != json!(registration.registration_epoch)
         || row.value.get("revoked_at").is_some_and(|v| !v.is_null())
         || !matches!(
@@ -115,7 +160,7 @@ pub(crate) async fn installation(
     }
     crate::managed_message_actor::require_managed_identity_in_connection(
         conn,
-        &event.actor_id,
+        &ActorId::account(authority.account_id.clone()),
         &authority.applet_id,
         &registration,
         at,
@@ -129,7 +174,7 @@ pub(crate) async fn installation(
 pub(crate) async fn require_installation_binding(
     conn: &mut AsyncPgConnection,
     event: &Event,
-    guard: &AppletManagedDeviceEventGuard,
+    guard: &AppletManagedDeviceScopeGuard,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
     let (registration, installation) = installation(conn, event, guard, at).await?;
@@ -277,7 +322,7 @@ pub(crate) async fn select_management(
 pub(crate) async fn require_business_in_connection(
     conn: &mut AsyncPgConnection,
     event: &Event,
-    guard: &AppletManagedDeviceEventGuard,
+    guard: &AppletManagedDeviceScopeGuard,
     commit: &arkret_wire::RealmCommit,
     prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<Vec<crate::approval_admission::QualifiedApproval>> {
@@ -387,14 +432,12 @@ pub(crate) async fn require_business_in_connection(
         }
     }
     for actor in actors {
-        let matching=grants.values().filter(|grant|
-            matches!(&grant.subject, CapabilitySubject::Actor(subject) if subject==&actor)
-            && arkret_policy::grant_authority::contributes(grant,actions[0],&target)
-            && arkret_policy::grant_authority::current_sources(grant,actions[0],&target,&grants,at,
-                |source| matches!(source,IssuerAuthorityRef::RealmRoot{realm_id,authority_event_ref,authority_generation}
-                    if realm_id==&event.realm_id && authority_event_ref==&root.authority_event_ref
-                        && authority_generation==&root.authority_generation)).is_ok()
-        ).collect::<Vec<_>>();
+        let matching=arkret_policy::grant_authority::current_subject_grants(
+            &actor,actions[0],&target,&grants,at,
+            |source|matches!(source,IssuerAuthorityRef::RealmRoot{realm_id,authority_event_ref,authority_generation}
+                if realm_id==&event.realm_id && authority_event_ref==&root.authority_event_ref
+                    && authority_generation==&root.authority_generation),
+        ).map_err(|error|PersistenceError::Conflict(error.to_string()))?;
         let mut source_facts = facts.clone();
         source_facts.executed_by = Some(actor.clone());
         accepted.extend(

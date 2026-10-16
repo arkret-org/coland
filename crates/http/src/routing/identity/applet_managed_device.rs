@@ -17,6 +17,7 @@ pub(crate) struct VerifiedAppletManagedDevice {
     pub metadata: AppletManagedDeviceMetadata,
     pub authority: coland_storage::AppletManagedDeviceAuthority,
     pub operation: ServiceOperationId,
+    pub transport_expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 fn refused(detail: impl std::fmt::Display) -> AppError {
@@ -156,6 +157,7 @@ pub(crate) async fn verify(
         metadata,
         authority,
         operation,
+        transport_expires_at: retain_until,
     })
 }
 

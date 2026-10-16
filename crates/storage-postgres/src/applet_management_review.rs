@@ -64,7 +64,7 @@ pub(super) async fn event_pins(
             "native management source or Service requester differs",
         ));
     }
-    let guard = coland_storage::AppletManagedDeviceEventGuard {
+    let guard = coland_storage::AppletManagedDeviceScopeGuard {
         authority: authority.clone(),
         effective_scope: event.scope_ref.clone(),
         service_did_document: material.service_did_document.clone(),

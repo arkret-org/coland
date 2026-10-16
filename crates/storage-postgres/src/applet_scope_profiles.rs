@@ -1,7 +1,7 @@
 //! Subject-original Applet interaction profiles, distinct from private PCR identity.
 use arkret_models_identity::{ActorProfile, AppletInteractionIntent, AppletInteractionMode};
 use arkret_wire::{ActorId, Event, EventKind, RealmCommit, ScopeRef};
-use coland_storage::{AppletManagedDeviceEventGuard, PersistenceError, PersistenceResult};
+use coland_storage::{AppletManagedDeviceScopeGuard, PersistenceError, PersistenceResult};
 use diesel::sql_types::{Jsonb, Text};
 use diesel::{OptionalExtension, QueryableByName, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
@@ -66,7 +66,7 @@ pub(crate) fn is_profile(event: &Event) -> bool {
 pub(crate) async fn prepare(
     conn: &mut AsyncPgConnection,
     event: &Event,
-    guard: &AppletManagedDeviceEventGuard,
+    guard: &AppletManagedDeviceScopeGuard,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<Admission> {
     use arkret_models_collaboration::events_payloads::realm::RealmPurpose;

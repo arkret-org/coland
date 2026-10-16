@@ -2463,6 +2463,26 @@ fn managed_device_http_request_body(
     signer: &SigningKey,
     provided_body: Option<Vec<u8>>,
 ) -> salvo::test::RequestBuilder {
+    managed_device_http_request_at(
+        state,
+        authority,
+        metadata,
+        operation,
+        signer,
+        provided_body,
+        None,
+    )
+}
+
+fn managed_device_http_request_at(
+    state: &AppState,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    metadata: &AppletManagedDeviceMetadata,
+    operation: arkret_wire::ServiceOperationId,
+    signer: &SigningKey,
+    provided_body: Option<Vec<u8>>,
+    provided_path: Option<&str>,
+) -> salvo::test::RequestBuilder {
     let descriptor = operation.descriptor();
     let path = descriptor
         .http_path
@@ -2476,6 +2496,7 @@ fn managed_device_http_request_body(
         })
         .collect::<Vec<_>>()
         .join("/");
+    let path = provided_path.map(str::to_owned).unwrap_or(path);
     let body = provided_body.unwrap_or_else(|| {
         if descriptor.http_method == "GET" || descriptor.http_method == "HEAD" {
             Vec::new()

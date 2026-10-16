@@ -91,7 +91,7 @@ async fn request_review(
                     return Err(coland_services::ServiceError::Conflict("capability_denied: management requester is not the native Account's Service".into()));
                 }
                 let material=current.applet_event.as_ref().ok_or_else(||coland_services::ServiceError::Conflict("revision_unavailable: native management resolver material is absent".into()))?;
-                Some(coland_storage::SelfProducerCommitGuard::AppletManagedDevice(Box::new(coland_storage::AppletManagedDeviceEventGuard {
+                Some(coland_storage::SelfProducerCommitGuard::AppletManagedDevice(Box::new(coland_storage::AppletManagedDeviceScopeGuard {
                     authority,effective_scope:event.scope_ref.clone(),service_did_document:material.service_did_document.clone(),
                 })))
             }

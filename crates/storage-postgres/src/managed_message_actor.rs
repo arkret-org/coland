@@ -43,8 +43,16 @@ pub(crate) async fn registration(
         .applet_id
         .as_ref()
         .ok_or_else(|| denied("Applet producer has no applet_id"))?;
+    registration_for_scope(conn, &event.realm_id, applet).await
+}
+
+pub(crate) async fn registration_for_scope(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    applet: &arkret_wire::AppletId,
+) -> PersistenceResult<AppletRegistrationPayload> {
     let row=sql_query("SELECT r.value FROM applet_registration_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND r.applet_id=$2 AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position AND e.kind='ak.applet.registration' AND e.state='committed' FOR SHARE OF r")
-        .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(applet.as_str()).get_result::<ValueRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(applet.as_str()).get_result::<ValueRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(||denied("Applet has no accepted current registration"))?;
     serde_json::from_value(row.value).map_err(PersistenceError::database)
 }

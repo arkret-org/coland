@@ -386,7 +386,7 @@ pub enum SelfProducerCommitGuard {
     },
     /// Native managed Device identity and exact signed business scope. Current
     /// permission and source provenance are rechecked in the accepting unit.
-    AppletManagedDevice(Box<AppletManagedDeviceEventGuard>),
+    AppletManagedDevice(Box<AppletManagedDeviceScopeGuard>),
     HumanDevice(crate::DeviceRevocationGateSelector),
     /// Original native regular root frozen with the accepting Event Commit.
     HumanDeviceEvidence {
@@ -404,7 +404,7 @@ pub enum SelfProducerCommitGuard {
 /// Process-local evidence prepared from authenticated transport and a fresh
 /// Service resolver. This is never a wire credential or an allow verdict.
 #[derive(Clone, Debug, PartialEq)]
-pub struct AppletManagedDeviceEventGuard {
+pub struct AppletManagedDeviceScopeGuard {
     pub authority: crate::AppletManagedDeviceAuthority,
     pub effective_scope: arkret_wire::ScopeRef,
     pub service_did_document: arkret_identity::DidDocument,
@@ -1554,6 +1554,7 @@ pub struct AccountContentDeliveryInput {
     pub credential_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub agent_session_scope: Option<(Vec<String>, serde_json::Map<String, serde_json::Value>)>,
     pub agent_endpoint: Option<crate::AgentEndpointGuard>,
+    pub applet_endpoint: Option<AppletManagedDeviceScopeGuard>,
     pub qualified_agent_scope_evidence: Option<crate::VerifiedAgentScopeEvidence>,
     pub unresolved_content_realms: Vec<arkret_wire::RealmId>,
 }

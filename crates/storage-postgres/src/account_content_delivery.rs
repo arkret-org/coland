@@ -414,7 +414,7 @@ async fn export_floor_in_connection(
     Ok(floor.map(|floor| floor.oldest_position))
 }
 
-struct DeliveryGuard {
+pub(crate) struct DeliveryGuard {
     connection: Option<Connection>,
     runtime: tokio::runtime::Handle,
     clock: Option<DeliveryClockProof>,
@@ -694,7 +694,19 @@ impl DeliveryClockProof {
     }
 }
 impl DeliveryGuard {
-    fn connection(&mut self) -> &mut AsyncPgConnection {
+    pub(crate) async fn begin(pool: &crate::PgPool) -> PersistenceResult<Box<Self>> {
+        let mut guard = Box::new(Self {
+            connection: Some(crate::pg_conn(pool).await?),
+            runtime: tokio::runtime::Handle::current(),
+            clock: None,
+        });
+        sql_query("BEGIN")
+            .execute(guard.connection())
+            .await
+            .map_err(PersistenceError::database)?;
+        Ok(guard)
+    }
+    pub(crate) fn connection(&mut self) -> &mut AsyncPgConnection {
         self.connection.as_mut().expect("content cut is held")
     }
 }
@@ -1427,6 +1439,12 @@ pub(crate) async fn acquire(
     station: &DidCoreId,
     input: &coland_storage::AccountContentDeliveryInput,
 ) -> PersistenceResult<Option<Box<dyn AccountContentDeliveryGuard>>> {
+    if let Some(endpoint) = &input.applet_endpoint {
+        return crate::boxed_future(|| {
+            crate::applet_content_delivery::acquire(pool, account, station, endpoint, input)
+        })
+        .await;
+    }
     if input.remote_watch_read.is_some() || input.audited_watch_read.is_some() {
         return Box::pin(acquire_remote_watch_delivery(pool, account, station, input)).await;
     }

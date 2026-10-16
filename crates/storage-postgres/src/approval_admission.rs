@@ -409,20 +409,22 @@ pub(crate) async fn qualify_principal(
     allow_owner: bool,
     registered_pair: bool,
 ) -> PersistenceResult<Option<serde_json::Value>> {
-    qualify_principal_or_actor(
-        conn,
-        Some(event),
-        &event.realm_id,
-        principal,
-        action,
-        target,
-        facts,
-        at,
-        allow_owner,
-        None,
-        registered_pair,
-        None,
-    )
+    crate::boxed_future(|| {
+        qualify_principal_or_actor(
+            conn,
+            Some(event),
+            &event.realm_id,
+            principal,
+            action,
+            target,
+            facts,
+            at,
+            allow_owner,
+            None,
+            registered_pair,
+            None,
+        )
+    })
     .await
 }
 
@@ -584,9 +586,9 @@ async fn qualify_principal_or_actor(
             continue;
         }
         let cut = RealmAuthorizationCut::read(conn, realm, &actor).await?;
-        let authorization = cut
-            .enforcing_actor_authorization_in_connection(conn, at)
-            .await?;
+        let authorization =
+            crate::boxed_future(|| cut.enforcing_actor_authorization_in_connection(conn, at))
+                .await?;
         let actions = [action.as_str()];
         let owner_covers = allow_owner
             && authorization.agent_ceiling.is_none()

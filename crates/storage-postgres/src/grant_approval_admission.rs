@@ -270,9 +270,9 @@ async fn require_with_source(
             if &principal == source.initiator().signing_principal_id() {
                 continue;
             }
-            if let Some(basis) = source
-                .qualify(conn, &principal, action, target, facts)
-                .await?
+            if let Some(basis) =
+                crate::boxed_future(|| source.qualify(conn, &principal, action, target, facts))
+                    .await?
             {
                 qualified.insert(principal, basis);
             }

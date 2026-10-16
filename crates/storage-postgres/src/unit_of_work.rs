@@ -2698,13 +2698,26 @@ async fn commit_one_inner(
     } else if let Some(coland_storage::SelfProducerCommitGuard::AppletManagedDevice(guard)) =
         request.self_producer_guard.as_ref()
     {
-        crate::applet_device_admission::require_installation_binding(
-            conn,
-            event,
-            guard,
-            request.authority_commit.commit.committed_at,
-        )
-        .await?;
+        if event.kind == arkret_wire::EventKind::MessageCreate {
+            service_approvals = crate::boxed_future(|| {
+                crate::applet_device_admission::require_business_in_connection(
+                    conn,
+                    event,
+                    guard,
+                    &request.authority_commit.commit,
+                    event_approvals,
+                )
+            })
+            .await?;
+        } else {
+            crate::applet_device_admission::require_installation_binding(
+                conn,
+                event,
+                guard,
+                request.authority_commit.commit.committed_at,
+            )
+            .await?;
+        }
     } else if event.applet_id.is_some() {
         return Err(PersistenceError::Conflict(
             "failed_precondition: Applet Event requires its exact accepted producer guard"

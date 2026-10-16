@@ -517,7 +517,7 @@ async fn require_applet_producer_inner(
     clippy::too_many_arguments,
     reason = "The exact producer grant is evaluated on the accepting Event cut."
 )]
-async fn require_producer_grant(
+pub(crate) async fn require_producer_grant(
     conn: &mut AsyncPgConnection,
     event: &Event,
     commit: &arkret_wire::RealmCommit,
@@ -572,12 +572,28 @@ async fn require_producer_grant(
             "approval_required: Applet producer grant approval is not satisfied".into(),
         ));
     }
-    if evaluation.unreserved().is_empty() {
-        return Err(denied(
-            "Applet producer grant constraints are not satisfied without unresolved quota",
+    if let coland_storage::GrantEvaluation::Allowed(satisfied) = evaluation {
+        for grant in satisfied {
+            if !grant.reservations.is_empty() && grant.grant.issuer_authority_refs.iter().any(|source|!matches!(source,arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::RealmRoot{..})) {
+                return Err(denied("source quota needs its complete ancestor authority consumer"));
+            }
+            if crate::capability_quota::try_reserve_in_connection(
+                conn,
+                &grant.reservations,
+                event.event_id.as_str(),
+            )
+            .await?
+            {
+                return Ok(accepted);
+            }
+        }
+        return Err(PersistenceError::Conflict(
+            "rate_limited: Applet source quota is exhausted".into(),
         ));
     }
-    Ok(accepted)
+    Err(denied(
+        "Applet producer grant constraints do not permit this action",
+    ))
 }
 
 async fn accepted_event(conn: &mut AsyncPgConnection, id: &EventId) -> PersistenceResult<Event> {
@@ -628,16 +644,13 @@ pub(crate) async fn require_managed_actor_in_connection(
             "managed Message executor is not its accepted Service",
         ));
     }
-    require_managed_identity_in_connection(
-        conn,
-        &event.actor_id,
-        event
-            .applet_id
-            .as_ref()
-            .ok_or_else(|| denied("managed identity has no Applet"))?,
-        &registration,
-        at,
-    )
+    let applet = event
+        .applet_id
+        .as_ref()
+        .ok_or_else(|| denied("managed identity has no Applet"))?;
+    crate::boxed_future(|| {
+        require_managed_identity_in_connection(conn, &event.actor_id, applet, &registration, at)
+    })
     .await
 }
 

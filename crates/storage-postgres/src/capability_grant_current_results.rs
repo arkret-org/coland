@@ -733,8 +733,10 @@ pub(crate) async fn managed_subject_role(
     let mut qualification = event.clone();
     qualification.actor_id = subject.clone();
     qualification.executed_by = Some(issuer.clone());
-    crate::managed_message_actor::require_managed_actor_in_connection(conn, &qualification, at)
-        .await?;
+    crate::boxed_future(|| {
+        crate::managed_message_actor::require_managed_actor_in_connection(conn, &qualification, at)
+    })
+    .await?;
     Ok(Some(match provision.actor_role {
         arkret_models_integration::AppletManagedActorRole::Bot => {
             arkret_models_collaboration::governance::grant_constraint::ManagedActorRole::Bot
@@ -794,11 +796,11 @@ fn managed_runtime_grant(
     })
 }
 
-fn validate_managed_parent(
+pub(crate) fn validate_managed_parent(
     parent: &CapabilityGrant,
     child: &arkret_models_collaboration::events_payloads::CapabilityGrantCreateBody,
     role: arkret_models_collaboration::governance::grant_constraint::ManagedActorRole,
-    at: chrono::DateTime<chrono::Utc>,
+    _at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
     for constraints in [&parent.constraints, &child.constraints] {
         let bindings=constraints.iter().filter(|c| c.constraint_subkind==Some(
@@ -854,31 +856,8 @@ fn validate_managed_parent(
     ) {
         return Err(conflict("managed Service child exceeds its parent"));
     }
-    let binding=child.constraints.iter().find(|c|c.constraint_subkind==Some(arkret_models_collaboration::governance::grant_constraint::GrantConstraintSubkind::AppletAuthority)).ok_or_else(||conflict("managed child Applet authority absent"))?;
-    let facts = coland_storage::OperationFacts {
-        applet_id: binding.applet_id.as_ref().map(ToString::to_string),
-        executed_by: Some(child.issuer_id.clone()),
-        registration_epoch: binding.registration_epoch.as_ref().map(ToString::to_string),
-        ..Default::default()
-    };
-    let actions = child.actions.iter().map(String::as_str).collect::<Vec<_>>();
-    for target in &child.resources {
-        if coland_storage::evaluate_grants(
-            &coland_storage::AuthorizationOperation {
-                actor: &child.issuer_id,
-                actions: &actions,
-                target,
-                at,
-                facts: &facts,
-            },
-            std::iter::once(parent),
-        )
-        .unreserved()
-        .is_empty()
-        {
-            return Err(conflict("managed child parent constraints unavailable"));
-        }
-    }
+    // Issuance preserves the source constraints; it neither exercises the
+    // delegated business action nor consumes its quota or detached approvals.
     // Preserve the full typed constraint, including members not represented
     // by the runtime projection. Only the formal terminal-control narrowing,
     // Applet executor rebinding, and a shorter temporal window may differ.
@@ -1116,13 +1095,15 @@ async fn materialize_capability_grant_inner(
     }
     body.validate_owned_agent_shape()
         .map_err(|error| schema_violation(error.to_string()))?;
-    let managed_role = managed_subject_role(
-        conn,
-        event,
-        &body.subject,
-        &body.issuer_id,
-        commit.committed_at,
-    )
+    let managed_role = crate::boxed_future(|| {
+        managed_subject_role(
+            conn,
+            event,
+            &body.subject,
+            &body.issuer_id,
+            commit.committed_at,
+        )
+    })
     .await?;
     if managed_role.is_some()
         && (!matches!(body.issuer_id, ActorId::Service { .. })
@@ -1443,13 +1424,15 @@ async fn commit_capability_grant_current_result_inner(
         && event.executed_by.is_none();
     let managed_management = if native_service {
         match (&mutation, current.as_ref()) {
-            (CapabilityGrantCurrentMutation::Create { body, .. }, _) => managed_subject_role(
-                conn,
-                event,
-                &body.subject,
-                &body.issuer_id,
-                commit.committed_at,
-            )
+            (CapabilityGrantCurrentMutation::Create { body, .. }, _) => crate::boxed_future(|| {
+                managed_subject_role(
+                    conn,
+                    event,
+                    &body.subject,
+                    &body.issuer_id,
+                    commit.committed_at,
+                )
+            })
             .await?
             .is_some(),
             (
@@ -1458,13 +1441,15 @@ async fn commit_capability_grant_current_result_inner(
                     ..
                 },
                 Some(target),
-            ) if target.value.issuer_id == event.actor_id => managed_subject_role(
-                conn,
-                event,
-                &target.value.subject,
-                &target.value.issuer_id,
-                commit.committed_at,
-            )
+            ) if target.value.issuer_id == event.actor_id => crate::boxed_future(|| {
+                managed_subject_role(
+                    conn,
+                    event,
+                    &target.value.subject,
+                    &target.value.issuer_id,
+                    commit.committed_at,
+                )
+            })
             .await?
             .is_some(),
             _ => false,

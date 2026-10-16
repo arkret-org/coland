@@ -1935,8 +1935,8 @@ async fn commit_transaction_with_device_guard_inner(
         )
         .into());
     }
-    // Profile and accountability results are PCR typed current written only
-    // by their units, which decide the signer and the accountability cut.
+    // Only the owning PCR or native scope Profile unit may write these
+    // results after deciding the original signer and accountability cut.
     if matches!(
         transaction.event.kind,
         arkret_wire::EventKind::ProfileCreate

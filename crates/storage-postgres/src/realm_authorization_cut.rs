@@ -822,6 +822,23 @@ impl RealmAuthorizationCut {
         cut.direct_conversation =
             crate::direct_conversation_admission::profile_authority_in_connection(conn, event)
                 .await?;
+        if event.kind == EventKind::MessageCreate
+            && event.applet_id.is_some()
+            && event.actor_id.as_account_id().is_some()
+            && event.executed_by.is_none()
+        {
+            cut.selected_grant = Some(
+                event
+                    .authorization_ref
+                    .as_ref()
+                    .ok_or_else(|| {
+                        capability_denied("native Applet business has no selected terminal grant")
+                    })?
+                    .as_str()
+                    .parse()
+                    .map_err(PersistenceError::database)?,
+            );
+        }
         Ok(cut)
     }
 

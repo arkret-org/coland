@@ -62,7 +62,10 @@ pub(super) async fn submit(
     }
     if !matches!(
         event.kind,
-        EventKind::MemberState | EventKind::ProfileCreate | EventKind::ProfileUpdate
+        EventKind::MemberState
+            | EventKind::ProfileCreate
+            | EventKind::ProfileUpdate
+            | EventKind::MessageCreate
     ) {
         return Err(ServiceError::UnsupportedEventKind(
             "native Event kind has no accepting domain unit".into(),

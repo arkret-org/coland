@@ -6150,6 +6150,8 @@ fn creation_operation_vote_at(
                 EventKind::ProfileCreate | EventKind::ProfileUpdate
             ) {
                 CapabilityActionId::AppletPublish
+            } else if event.kind == EventKind::MessageCreate {
+                CapabilityActionId::MessageCreate
             } else {
                 CapabilityActionId::AppletJoin
             },

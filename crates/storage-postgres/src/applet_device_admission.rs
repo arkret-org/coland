@@ -28,6 +28,9 @@ struct JsonRow {
 
 /// The actual domain action, never a union of alternative membership actions.
 pub(crate) fn action(event: &Event) -> PersistenceResult<CapabilityActionId> {
+    if event.executed_by.is_none() && event.kind == EventKind::MessageCreate {
+        return Ok(CapabilityActionId::MessageCreate);
+    }
     if event.executed_by.is_none()
         && matches!(
             event.kind,
@@ -215,10 +218,10 @@ pub(crate) async fn select_management(
     Vec<arkret_models_collaboration::governance::operation_wire::Policy>,
     arkret_policy::applet_management::AppletManagementDecision,
 )> {
-    let operation = if event.kind == EventKind::MemberState {
-        AppletPolicyOperation::Join
-    } else {
-        AppletPolicyOperation::Publish
+    let operation = match event.kind {
+        EventKind::MemberState => AppletPolicyOperation::Join,
+        EventKind::MessageCreate => AppletPolicyOperation::Execute,
+        _ => AppletPolicyOperation::Publish,
     };
     let circle = match &event.scope_ref {
         ScopeRef::Circle { circle_id, .. } => Some(circle_id),
@@ -250,7 +253,8 @@ pub(crate) async fn select_management(
             effective_scope: &event.scope_ref,
             managed_actor_id: Some(&event.actor_id),
             operation,
-            content_action: None,
+            content_action: (operation == AppletPolicyOperation::Execute)
+                .then_some(CapabilityActionId::MessageCreate),
             resources: Some(&resources),
             at,
         },
@@ -265,4 +269,144 @@ pub(crate) async fn select_management(
         ));
     }
     Ok((policies, decision))
+}
+
+/// A native Device spends its own terminal business grant. Its Service parent
+/// is evaluated separately as that Service, including the original quota key.
+/// The ordinary Message unit still admits the child, governance and content.
+pub(crate) async fn require_business_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    guard: &AppletManagedDeviceEventGuard,
+    commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
+) -> PersistenceResult<Vec<crate::approval_admission::QualifiedApproval>> {
+    use arkret_models_collaboration::events_payloads::CapabilityGrantCreateBody;
+    use arkret_models_collaboration::governance::grant_constraint::{
+        IssuerAuthorityRef, ManagedActorRole,
+    };
+    if event.kind != EventKind::MessageCreate {
+        return Err(denied("native business action has no domain consumer"));
+    }
+    let at = commit.committed_at;
+    let (registration, _) = installation(conn, event, guard, at).await?;
+    let service = ActorId::service(registration.service_id.clone());
+    let cut = crate::boxed_future(|| {
+        crate::realm_authorization_cut::RealmAuthorizationCut::read_for_event(conn, event)
+    })
+    .await?;
+    cut.require_open_lifecycle(event)?;
+    cut.require_governed_member(&event.kind)?;
+    let (target, mut facts) = cut.event_operation(event);
+    facts.applet_id = Some(registration.applet_id.to_string());
+    facts.executed_by = Some(service.clone());
+    facts.registration_epoch = Some(registration.registration_epoch.to_string());
+    let id: GrantId = event
+        .authorization_ref
+        .as_ref()
+        .ok_or_else(|| denied("native business has no terminal grant"))?
+        .as_str()
+        .parse()
+        .map_err(PersistenceError::database)?;
+    let rows=sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_results WHERE realm_id=$1 ORDER BY grant_id FOR SHARE")
+        .bind::<Text,_>(event.realm_id.as_str()).load::<CapabilityGrantCurrentResultReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    let mut grants = std::collections::BTreeMap::new();
+    for row in rows {
+        let row = decode_row(row)?;
+        grants.insert(row.grant_id, row.value);
+    }
+    let child = grants
+        .get(&id)
+        .ok_or_else(|| denied("native terminal grant has no current"))?;
+    if child.issuer_id != service
+        || !matches!(&child.subject,CapabilitySubject::Actor(actor) if actor==&event.actor_id)
+        || !crate::capability_grant_current_results::grant_is_active_at(child, at)
+    {
+        return Err(denied(
+            "native terminal grant differs from its real subject or Service source",
+        ));
+    }
+    let [
+        IssuerAuthorityRef::Grant {
+            grant_id: parent_id,
+        },
+    ] = child.issuer_authority_refs.as_slice()
+    else {
+        return Err(denied(
+            "native business requires an implemented exact Service parent",
+        ));
+    };
+    let parent = grants
+        .get(parent_id)
+        .ok_or_else(|| denied("native Service parent has no current"))?;
+    if !matches!(&parent.subject,CapabilitySubject::Actor(actor) if actor==&service)
+        || !crate::capability_grant_current_results::grant_is_active_at(parent, at)
+    {
+        return Err(denied(
+            "native Service parent is inactive or names another complete Service",
+        ));
+    }
+    if parent
+        .issuer_authority_refs
+        .iter()
+        .any(|source| !matches!(source, IssuerAuthorityRef::RealmRoot { .. }))
+    {
+        return Err(denied(
+            "native business ancestor contribution and quota consumer is unavailable",
+        ));
+    }
+    let sources=sql_query("SELECT e.envelope->'payload' AS value FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.applet.managed_actor.provision' AND e.envelope#>'{payload,actor_id}'=$1")
+        .bind::<Jsonb,_>(json!(event.actor_id)).load::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    if sources.len() != 1 {
+        return Err(denied("native business has no unique accepted provision"));
+    }
+    let provision: arkret_models_integration::AppletManagedActorProvisionPayload =
+        serde_json::from_value(sources.into_iter().next().unwrap().value)
+            .map_err(PersistenceError::database)?;
+    if provision.actor_id != event.actor_id
+        || provision.applet_id != registration.applet_id
+        || provision.service_id != registration.service_id
+    {
+        return Err(denied("native business role source differs"));
+    }
+    let role = match provision.actor_role {
+        arkret_models_integration::AppletManagedActorRole::Bot => ManagedActorRole::Bot,
+        arkret_models_integration::AppletManagedActorRole::Ghost => ManagedActorRole::Ghost,
+    };
+    let definition = CapabilityGrantCreateBody {
+        schema: child.schema.clone(),
+        realm_id: child.realm_id.clone(),
+        issuer_id: child.issuer_id.clone(),
+        subject: child.subject.clone(),
+        actions: child.actions.clone(),
+        resources: child.resources.clone(),
+        constraints: child.constraints.clone(),
+        issuer_authority_refs: child.issuer_authority_refs.clone(),
+        issued_at: child.issued_at,
+    };
+    crate::capability_grant_current_results::validate_managed_parent(
+        parent,
+        &definition,
+        role,
+        at,
+    )?;
+    let root=sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1")
+        .bind::<Text,_>(event.realm_id.as_str()).get_result::<crate::capability_grant_current_results::RealmAuthorityRootReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    crate::capability_grant_current_results::validate_ancestor_graph(
+        &GrantId::from_event_id(&event.event_id),
+        &id,
+        &grants,
+        &crate::capability_grant_current_results::decode_authority_root(root)?,
+        &event.realm_id,
+        at,
+        &mut std::collections::BTreeSet::new(),
+        0,
+    )?;
+    let actions = [CapabilityActionId::MessageCreate.as_str()];
+    crate::boxed_future(|| {
+        crate::managed_message_actor::require_producer_grant(
+            conn, event, commit, prepared, parent, &service, &actions, &target, &facts,
+        )
+    })
+    .await
 }

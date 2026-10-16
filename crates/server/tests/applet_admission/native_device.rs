@@ -176,10 +176,15 @@ async fn post(
     )
 }
 
-async fn business(fixture: &Fixture) -> Value {
-    let mut snapshot = authority_snapshot(&fixture.pool).await;
-    snapshot.as_object_mut().unwrap().remove("device_nonces");
-    snapshot
+#[inline(never)]
+fn business(
+    fixture: &Fixture,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send + '_>> {
+    Box::pin(async move {
+        let mut snapshot = Box::pin(managed_domain_snapshot(&fixture.pool)).await;
+        snapshot.as_object_mut().unwrap().remove("device_nonces");
+        snapshot
+    })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -469,5 +474,200 @@ async fn native_public_profile_review_consumes_exact_postimage_and_rolls_back() 
         let before=business(&fixture).await;let (status,error)=post(&fixture,&authority,&key,&pending,vec![vote]).await;assert!(!status.is_success(),"stale Profile revision: {error}");assert_eq!(business_without_reviews(before),business_without_reviews(business(&fixture).await));
         let (status,out)=fixture.service_post(&install.package,"/_arkret/self/management-reviews/status",ServiceOperationId::SELF_MANAGEMENT_REVIEW_READ_STATUS_V1,&json!({"request_id":stale.request_id}),"stale-publish-status").await;assert_eq!(status,StatusCode::OK,"{out}");assert_eq!(out["status"],"superseded");
         let reopening=profile_update(&original,&authority,&key,json!({"profile_fields.applet_interaction.mode":"public"}));let (_,vote)=approved_profile(&fixture,&install,&reopening).await;let (status,out)=post(&fixture,&authority,&key,&reopening,vec![vote]).await;assert_eq!(status,StatusCode::OK,"reviewed reopen: {out}");
+    })).await.unwrap();
+}
+
+async fn native_message_parent(
+    fixture: &Fixture,
+    install: &Installed,
+    extra: Vec<GrantConstraint>,
+) -> arkret_wire::GrantId {
+    use arkret_models_collaboration::governance::grant_constraint::{
+        GrantConstraintEffect, GrantConstraintKind, ManagedActorRole,
+    };
+    let service = ActorId::service(install.package.service_id.clone());
+    let mut control = GrantConstraint::new(
+        GrantConstraintKind::AuthorityControl,
+        GrantConstraintEffect::Allow,
+    );
+    control.authority_regrant_allowed = Some(false);
+    control.max_authority_depth = Some(0);
+    control.allowed_managed_actor_roles = vec![ManagedActorRole::Bot, ManagedActorRole::Ghost];
+    let mut constraints = vec![
+        GrantConstraint::applet_authority(
+            install.package.applet_id.clone(),
+            service.clone(),
+            install.package.registration_epoch.clone(),
+        ),
+        control,
+    ];
+    constraints.extend(extra);
+    let event = fixture.admin_event(
+        EventKind::CapabilityGrant,
+        ScopeRef::Realm {
+            realm_id: fixture.realm.clone(),
+        },
+        json!(CapabilityGrantPayload {
+            grant: CapabilityGrantCreateBody {
+                schema: arkret_wire::SchemaId::CAPABILITY_V1.to_owned(),
+                realm_id: Some(fixture.realm.clone()),
+                issuer_id: ActorId::account(fixture.pcr.history.account.clone()),
+                subject: CapabilitySubject::Actor(service),
+                actions: vec!["ak.message.create".into()],
+                resources: vec![arkret_wire::WireResourceSelector::realm(
+                    fixture.realm.clone()
+                )],
+                constraints,
+                issuer_authority_refs: vec![IssuerAuthorityRef::RealmRoot {
+                    realm_id: fixture.realm.clone(),
+                    authority_event_ref: fixture.authority_event_ref.clone().unwrap(),
+                    authority_generation: 0
+                }],
+                issued_at: chrono::Utc::now()
+            }
+        }),
+    );
+    let id = arkret_wire::GrantId::from_event_id(&event.event_id);
+    accepted_admin_domain_event(fixture, event).await;
+    id
+}
+async fn native_message_child(
+    fixture: &Fixture,
+    install: &Installed,
+    actor: &ActorId,
+    parent_id: &arkret_wire::GrantId,
+) -> arkret_wire::GrantId {
+    use arkret_models_collaboration::governance::grant_constraint::{
+        GrantConstraintKind, GrantConstraintSubkind,
+    };
+    let rows = fixture
+        .state
+        .test_persistence()
+        .capability_grant_current_results()
+        .snapshot_for_realm(&fixture.realm)
+        .await
+        .unwrap();
+    let parent = &rows
+        .iter()
+        .find(|r| &r.grant_id == parent_id)
+        .unwrap()
+        .value;
+    let mut constraints = parent.constraints.clone();
+    for constraint in &mut constraints {
+        if constraint.constraint_kind == GrantConstraintKind::AuthorityControl {
+            if constraint.constraint_subkind == Some(GrantConstraintSubkind::AppletAuthority) {
+                constraint.executed_by = Some(actor.clone());
+            } else if constraint.constraint_subkind.is_none() {
+                constraint.authority_regrant_allowed = Some(false);
+                constraint.max_authority_depth = Some(0);
+                constraint.allowed_managed_actor_roles.clear();
+            }
+        }
+    }
+    let service = ActorId::service(install.package.service_id.clone());
+    let event = managed_service_event(
+        fixture,
+        install,
+        &service,
+        parent_id,
+        EventKind::CapabilityGrant,
+        json!(CapabilityGrantPayload {
+            grant: CapabilityGrantCreateBody {
+                schema: parent.schema.clone(),
+                realm_id: parent.realm_id.clone(),
+                issuer_id: service.clone(),
+                subject: CapabilitySubject::Actor(actor.clone()),
+                actions: parent.actions.clone(),
+                resources: parent.resources.clone(),
+                constraints,
+                issuer_authority_refs: vec![IssuerAuthorityRef::Grant {
+                    grant_id: parent_id.clone()
+                }],
+                issued_at: chrono::Utc::now()
+            }
+        }),
+    );
+    let id = arkret_wire::GrantId::from_event_id(&event.event_id);
+    assert_managed_accepted(fixture, install, &event).await;
+    id
+}
+fn native_message(
+    fixture: &Fixture,
+    install: &Installed,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    key: &SigningKey,
+    grant: &arkret_wire::GrantId,
+    strand: &arkret_wire::StrandId,
+    body: &str,
+) -> Event {
+    let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let mut event=arkret_wire::test_support::raw_event_for_actor_at(EventKind::MessageCreate.as_str(),ScopeRef::Realm{realm_id:fixture.realm.clone()},ActorId::account(authority.account_id.clone()),json!({"strand_id":strand,"track_name":"discussion","content":{"kind":"ak.content.text","format":"plain","body":body}}),now).unwrap();
+    event.applet_id = Some(install.package.applet_id.clone());
+    event.authorization_ref = Some(grant.clone().into());
+    sign_managed_device_event(event, authority, key, now)
+}
+async fn native_strand(fixture: &Fixture) -> arkret_wire::StrandId {
+    let event=fixture.admin_event(EventKind::StrandCreate,ScopeRef::Realm{realm_id:fixture.realm.clone()},json!({"object":{"schema":"ak.schema.strand.v1","realm_id":fixture.realm,"tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},"metadata":{"title":"Native Device messages"},"state":"active","created_by":ActorId::account(fixture.pcr.history.account.clone()),"created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())}}));
+    let id = arkret_wire::StrandId::from_event_id(&event.event_id);
+    accepted_admin_domain_event(fixture, event).await;
+    id
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_messages_use_actual_device_and_share_service_parent_quota_atomically() {
+    tokio::spawn(Box::pin(async {
+        let fixture=Box::pin(Fixture::new()).await;let namespace=format!("bridge.{}",uuid::Uuid::now_v7().simple());let native=NativeAppletService::new(&format!("ak:applet:{}",uuid::Uuid::now_v7()),&namespace,&fixture.state.service_core_id());
+        let install=Box::pin(fixture.install_package(true,native.package.clone(),&namespace)).await;let ghost=fixture.ghost_body(&install,&namespace,"native-message").await;assert_eq!(fixture.ghost_commit(&install,&ghost,"native-message-ghost").await.0,StatusCode::CREATED);
+        let strand=native_strand(&fixture).await;
+        let quota:GrantConstraint=serde_json::from_value(json!({"constraint_kind":"quota","constraint_subkind":"rate","effect":"allow","max_operations":1,"period":"P1D","constraint_scope":"per_realm"})).unwrap();
+        let parent=native_message_parent(&fixture,&install,vec![quota]).await;
+        let mut actors=Vec::new();
+        for bundle in [install.bot_body["managed_actor_bundle"].clone(),ghost["managed_actor_bundle"].clone()] {
+            let actor:ActorId=serde_json::from_value(bundle["managed_actor_provision_event"]["payload"]["actor_id"].clone()).unwrap();let before=business(&fixture).await;
+            let child=native_message_child(&fixture,&install,&actor,&parent).await;let after=business(&fixture).await;
+            for table in ["quota_counters","quota_buckets","quota_consumptions"] {assert_eq!(before[table],after[table],"issuing a terminal child cannot spend business quota");}
+            let key=SigningKey::from_bytes(&[127;32]);let device=DeviceId::new(format!("ak:device:{}",uuid::Uuid::now_v7())).unwrap();
+            let authority=authorize_scopes(&fixture,&install,&bundle,&namespace,&key,device,json!([{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":["ak.applet.join","ak.event.read","ak.message.create"]}])).await;
+            let unjoined=native_message(&fixture,&install,&authority,&key,&child,&strand,"not yet joined");let before=business(&fixture).await;let (status,error)=post(&fixture,&authority,&key,&unjoined,vec![]).await;assert!(!status.is_success(),"{error}");assert_eq!(before,business(&fixture).await);
+            let join=join_event(&fixture,&install,&authority,&key,&install.bot_outcome.authorization_ref);let (status,out)=post(&fixture,&authority,&key,&join,vec![]).await;assert_eq!(status,StatusCode::OK,"{out}");actors.push((authority,key,child));
+        }
+        let (authority,key,child)=&actors[0];
+        for grant in [&parent,&actors[1].2,&install.bot_outcome.authorization_ref] {
+            let wrong=native_message(&fixture,&install,authority,key,grant,&strand,"wrong authority source");let before=business(&fixture).await;let (status,error)=post(&fixture,authority,key,&wrong,vec![]).await;assert!(!status.is_success(),"{error}");assert_eq!(before,business(&fixture).await);
+        }
+        let unknown=arkret_wire::StrandId::from_event_id(&arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256,[0x78;32]));let wrong=native_message(&fixture,&install,authority,key,child,&unknown,"missing actual Strand");let before=business(&fixture).await;assert!(!post(&fixture,authority,key,&wrong,vec![]).await.0.is_success());assert_eq!(before,business(&fixture).await);
+        let event=native_message(&fixture,&install,authority,key,child,&strand,"actual native Bot message");
+        {let mut conn=fixture.pool.get().await.unwrap();diesel::sql_query("CREATE FUNCTION fail_native_message() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'native message current fault'; END $$").execute(&mut conn).await.unwrap();diesel::sql_query("CREATE TRIGGER fail_native_message BEFORE INSERT ON message_revision_current_results FOR EACH ROW EXECUTE FUNCTION fail_native_message()").execute(&mut conn).await.unwrap();}
+        let (status,error)=post(&fixture,authority,key,&event,vec![]).await;
+        {let mut conn=fixture.pool.get().await.unwrap();diesel::sql_query("DROP TRIGGER fail_native_message ON message_revision_current_results").execute(&mut conn).await.unwrap();diesel::sql_query("DROP FUNCTION fail_native_message()").execute(&mut conn).await.unwrap();}
+        assert!(status.is_server_error(),"{error}");assert_eq!(before,business(&fixture).await);
+        let (status,out)=post(&fixture,authority,key,&event,vec![]).await;assert_eq!(status,StatusCode::OK,"native Message: {out}");assert_accepted_event(&fixture,&event).await;
+        let after=business(&fixture).await;let source=after["quota_counters"].as_array().unwrap().iter().find(|r|r["grant_id"]==parent.as_str()).unwrap();assert_eq!(source["consumed"],1);assert_eq!(after["domain_current"]["messages"].as_array().unwrap().len(),1);
+        let record=fixture.state.test_persistence().authority_commits().committed_event(&event.event_id).await.unwrap().unwrap();let fact=fixture.state.test_persistence().authority_commits().account_device_signer_fact(&event,&record.commit).await.unwrap().unwrap();assert_eq!(fact.actor,ActorId::account(authority.account_id.clone()));arkret_identity::account_device_signer_evidence::verify_historical_account_device_event_signature(&event,&fact,fixture.realm.digest_suite_code().digest_suite()).unwrap();
+        let (status,out)=post(&fixture,authority,key,&event,vec![]).await;assert_eq!(status,StatusCode::OK,"{out}");assert_eq!(after,business(&fixture).await);
+        let (ghost_authority,ghost_key,ghost_child)=&actors[1];let second=native_message(&fixture,&install,ghost_authority,ghost_key,ghost_child,&strand,"same parent shared quota");let (status,error)=post(&fixture,ghost_authority,ghost_key,&second,vec![]).await;assert_eq!(status,StatusCode::TOO_MANY_REQUESTS,"{error}");assert!(error.to_string().contains("rate_limited"),"{error}");assert_eq!(after,business(&fixture).await);
+        let rows=fixture.state.test_persistence().capability_grant_current_results().snapshot_for_realm(&fixture.realm).await.unwrap();let current=rows.iter().find(|r|r.grant_id==parent).unwrap();let revoke=fixture.admin_event(EventKind::CapabilityRevoke,event.scope_ref.clone(),json!({"grant_id":parent,"expected_revision":current.revision,"reason":"native source closed"}));accepted_admin_domain_event(&fixture,revoke).await;
+        let before=business(&fixture).await;let fresh=native_message(&fixture,&install,authority,key,child,&strand,"closed parent");assert!(!post(&fixture,authority,key,&fresh,vec![]).await.0.is_success());assert_eq!(before,business(&fixture).await);assert_eq!(post(&fixture,authority,key,&event,vec![]).await.0,StatusCode::OK);assert_eq!(before,business(&fixture).await);
+    })).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_message_service_and_terminal_grant_reviews_remain_independent() {
+    tokio::spawn(Box::pin(async {
+        let fixture=Box::pin(Fixture::new()).await;fixture.enable_management_authority();let namespace=format!("bridge.{}",uuid::Uuid::now_v7().simple());let native=NativeAppletService::new(&format!("ak:applet:{}",uuid::Uuid::now_v7()),&namespace,&fixture.state.service_core_id());
+        let install=Box::pin(fixture.install_package(true,native.package.clone(),&namespace)).await;let strand=native_strand(&fixture).await;
+        let voter=ActorId::account(fixture.pcr.history.account.clone());
+        let permission=fixture.admin_event(EventKind::CapabilityGrant,ScopeRef::Realm{realm_id:fixture.realm.clone()},json!(CapabilityGrantPayload{grant:CapabilityGrantCreateBody{schema:arkret_wire::SchemaId::CAPABILITY_V1.to_owned(),realm_id:Some(fixture.realm.clone()),issuer_id:voter.clone(),subject:CapabilitySubject::Actor(voter),actions:vec!["ak.message.create".into()],resources:vec![arkret_wire::WireResourceSelector::realm(fixture.realm.clone())],constraints:vec![],issuer_authority_refs:vec![IssuerAuthorityRef::RealmRoot{realm_id:fixture.realm.clone(),authority_event_ref:fixture.authority_event_ref.clone().unwrap(),authority_generation:0}],issued_at:chrono::Utc::now()}}));
+        accepted_admin_domain_event(&fixture,permission).await;
+        let required:GrantConstraint=serde_json::from_value(json!({"constraint_kind":"claim_based","constraint_subkind":"approval","effect":"require_review","approval_required":true,"approval_mode":"before_commit","approval_actor_ids":[fixture.pcr.history.account.principal_id],"approval_threshold":1,"timeout":"PT5M"})).unwrap();
+        let parent=native_message_parent(&fixture,&install,vec![required]).await;let child=native_message_child(&fixture,&install,&install.bot_outcome.bot_actor_id,&parent).await;
+        let key=SigningKey::from_bytes(&[128;32]);let device=DeviceId::new(format!("ak:device:{}",uuid::Uuid::now_v7())).unwrap();let authority=authorize_scopes(&fixture,&install,&install.bot_body["managed_actor_bundle"],&namespace,&key,device,json!([{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":["ak.applet.join","ak.event.read","ak.message.create"]}])).await;
+        let join=join_event(&fixture,&install,&authority,&key,&install.bot_outcome.authorization_ref);let (status,out)=post(&fixture,&authority,&key,&join,vec![]).await;assert_eq!(status,StatusCode::OK,"{out}");
+        let event=native_message(&fixture,&install,&authority,&key,&child,&strand,"two real grant reviews");let target=ManagementReviewTarget::Event{event:Box::new(event.clone())};
+        let parent_vote=creation_operation_vote(&fixture,&target,arkret_wire::ApprovalContext::Grant{grant_id:parent});let child_vote=creation_operation_vote(&fixture,&target,arkret_wire::ApprovalContext::Grant{grant_id:child});
+        for votes in [vec![],vec![parent_vote.clone()],vec![child_vote.clone()]] {
+            let before=business(&fixture).await;let (status,error)=post(&fixture,&authority,&key,&event,votes).await;assert!(!status.is_success(),"{error}");assert!(error.to_string().contains("approval_required"),"{error}");assert_eq!(before,business(&fixture).await);
+        }
+        let votes=vec![parent_vote,child_vote];let (status,out)=post(&fixture,&authority,&key,&event,votes.clone()).await;assert_eq!(status,StatusCode::OK,"independent source and terminal approvals: {out}");let after=business(&fixture).await;assert_eq!(post(&fixture,&authority,&key,&event,votes).await.0,StatusCode::OK);assert_eq!(after,business(&fixture).await);
     })).await.unwrap();
 }

@@ -384,8 +384,11 @@ fn commit_event_unit_with_idempotency_impl<'a>(
                     .and_then(serde_json::Value::as_str),
                 Some("ak.content.poll" | "ak.content.poll.response")
             );
-        let decided_at_cut =
-            direct_conversation || decided_at_commit_cut(&event.kind) || poll_at_cut;
+        let decided_at_cut = direct_conversation
+            || decided_at_commit_cut(&event.kind)
+            || poll_at_cut
+            || (event.kind == arkret_wire::EventKind::MessageCreate
+                && matches!(&producer,AdmittedProducer::Local(guard) if matches!(guard.as_ref(),coland_storage::SelfProducerCommitGuard::AppletManagedDevice(_))));
         if !decided_at_cut {
             Box::pin(
                 crate::routing::events::operations::validate_operation_policy(

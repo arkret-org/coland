@@ -751,11 +751,18 @@ struct NativeSourcesContext {
     )>,
 }
 async fn native_sources_setup() -> Box<NativeSourcesContext> {
+    native_sources_setup_for_history(None).await
+}
+
+async fn native_sources_setup_for_history(history: Option<&str>) -> Box<NativeSourcesContext> {
     use arkret_models_collaboration::governance::grant_constraint::{
         GrantConstraintEffect, GrantConstraintKind,
     };
 
-    let fixture = Box::new(native_phase(Fixture::new).await);
+    let mut fixture = Box::new(native_phase(Fixture::new).await);
+    if let Some(history) = history {
+        native_phase(|| fixture.new_realm_with_history(history)).await;
+    }
     let namespace = format!("bridge.{}", uuid::Uuid::now_v7().simple());
     let native = NativeAppletService::new(
         &format!("ak:applet:{}", uuid::Uuid::now_v7()),
@@ -1505,7 +1512,7 @@ async fn native_read_exercise(context: Box<NativeSourcesContext>) {
         native_phase(|| native_signer_query(&fixture, authority, key, &selectors)).await;
     assert_eq!(response.status_code, Some(StatusCode::OK));
     let mut close = native_phase(|| native_current_revoke(&fixture, &read_parent));
-    tokio::select! { _=&mut close=>panic!("source revoke crossed an unconsumed native delivery cut"), _=tokio::time::sleep(std::time::Duration::from_millis(30))=>{} }
+    native_wait_for_blocked_revoke(&fixture, &mut close).await;
     let result: arkret_models_identity::SignerKeysQueryOutcome =
         response.take_json().await.unwrap();
     assert_eq!(result.results.len(), selectors.len());
@@ -1627,4 +1634,450 @@ async fn native_unmetered_ancestor(fixture: &Fixture) -> arkret_wire::GrantId {
     let id = arkret_wire::GrantId::from_event_id(&event.event_id);
     accepted_admin_domain_event(fixture, event).await;
     id
+}
+
+async fn native_wait_for_blocked_revoke<F: std::future::Future<Output = ()> + Send>(
+    fixture: &Fixture,
+    closing: &mut std::pin::Pin<Box<F>>,
+) {
+    #[derive(diesel::QueryableByName)]
+    struct Waiting {
+        #[diesel(sql_type=diesel::sql_types::Bool)]
+        present: bool,
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        tokio::select! {_=&mut *closing=>panic!("source revoke committed before held content handoff"),_=tokio::time::sleep(std::time::Duration::from_millis(10))=>{}}
+        let waiting = {
+            let mut conn = fixture.pool.get().await.unwrap();
+            diesel::sql_query("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%realm_authorities%' AND cardinality(pg_blocking_pids(pid))>0) AS present")
+                .get_result::<Waiting>(&mut conn).await.unwrap().present
+        };
+        if waiting {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the actual source writer did not reach its held authority lock"
+        );
+    }
+}
+
+async fn native_scan(
+    fixture: &Fixture,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    key: &SigningKey,
+    request: &arkret_wire::StreamScanRequest,
+) -> salvo::Response {
+    managed_device_http_request_body(
+        &fixture.state,
+        authority,
+        &managed_device_metadata(authority),
+        ServiceOperationId::SelfCommittedEventReadScanV1,
+        key,
+        Some(arkret_canonical::canonical_json_bytes(request).unwrap()),
+    )
+    .add_header("content-type", "application/json", true)
+    .send(&service(fixture.state.clone()))
+    .await
+}
+
+async fn native_scan_exercise(context: Box<NativeSourcesContext>) {
+    let NativeSourcesContext {
+        native: _native,
+        namespace,
+        ghost_bundle,
+        fixture,
+        install,
+        strand,
+        mut actors,
+        ..
+    } = *context;
+    let original = fixture.admin_event(EventKind::MessageCreate,
+        ScopeRef::Realm {realm_id: fixture.realm.clone()},
+        json!({"strand_id":strand,"track_name":"discussion","content":{"kind":"ak.content.text","format":"plain","body":"native scan content, not an Applet Service delivery"}}));
+    native_phase(|| accepted_admin_domain_event(&fixture, original.clone())).await;
+    let read_parent = native_business_parent(
+        &fixture,
+        &install,
+        vec![],
+        vec!["ak.event.read".into()],
+        None,
+    )
+    .await;
+    let request = arkret_wire::StreamScanRequest {
+        realm_id: fixture.realm.clone(),
+        stream_ref: arkret_wire::CommitStreamRef::Realm {
+            realm_id: fixture.realm.clone(),
+        },
+        direction: arkret_wire::StreamScanDirection::After(None),
+        limit: 1000,
+    };
+    let before = business(&fixture).await;
+    for (authority, key, _) in &actors {
+        let mut response = native_phase(|| native_scan(&fixture, authority, key, &request)).await;
+        assert_eq!(response.status_code, Some(StatusCode::FORBIDDEN));
+        let _: Value = response.take_json().await.unwrap();
+    }
+    assert_eq!(before, business(&fixture).await);
+    // Preserve the actual accepted signed Commit. Temporarily remove only
+    // its original-pair projection; this is not a new or seeded anchor.
+    #[derive(diesel::QueryableByName)]
+    struct OriginalPair {
+        #[diesel(sql_type=diesel::sql_types::BigInt)]
+        event_pk: i64,
+    }
+    let opaque_selector = native_historical_selector(&fixture, &original).await;
+    let opaque_selectors = [opaque_selector];
+    let original_pair = {
+        let mut conn = fixture.pool.get().await.unwrap();
+        diesel::sql_query("WITH prior AS (SELECT event_pk FROM realm_commits WHERE realm_id=$1 AND commit_json->>'event_ref'=$2 FOR UPDATE) UPDATE realm_commits c SET event_pk=NULL FROM prior WHERE c.realm_id=$1 AND c.commit_json->>'event_ref'=$2 RETURNING prior.event_pk")
+            .bind::<diesel::sql_types::Text,_>(fixture.realm.as_str()).bind::<diesel::sql_types::Text,_>(original.event_id.as_str()).get_result::<OriginalPair>(&mut conn).await.unwrap()
+    };
+    let before_opaque = business(&fixture).await;
+    let mut opaque_results = Vec::new();
+    let mut signer_results = Vec::new();
+    for (authority, key, _) in &actors {
+        let mut response = native_phase(|| native_scan(&fixture, authority, key, &request)).await;
+        opaque_results.push((
+            response.status_code,
+            response
+                .take_json::<Value>()
+                .await
+                .map_err(|error| error.to_string()),
+        ));
+        let mut response =
+            native_phase(|| native_signer_query(&fixture, authority, key, &opaque_selectors)).await;
+        signer_results.push((
+            response.status_code,
+            response
+                .take_json::<Value>()
+                .await
+                .map_err(|error| error.to_string()),
+        ));
+    }
+    let after_opaque = business(&fixture).await;
+    {
+        let mut conn = fixture.pool.get().await.unwrap();
+        let restored=diesel::sql_query("UPDATE realm_commits SET event_pk=$1 WHERE realm_id=$2 AND commit_json->>'event_ref'=$3 AND event_pk IS NULL")
+            .bind::<diesel::sql_types::BigInt,_>(original_pair.event_pk).bind::<diesel::sql_types::Text,_>(fixture.realm.as_str()).bind::<diesel::sql_types::Text,_>(original.event_id.as_str()).execute(&mut conn).await.unwrap();
+        assert_eq!(restored, 1);
+    }
+    assert_eq!(before_opaque, after_opaque);
+    for (status, body) in opaque_results {
+        assert_eq!(
+            status,
+            Some(StatusCode::FORBIDDEN),
+            "unproved current Policy cannot become an empty or opaque allow: {body:?}"
+        );
+        assert!(body.unwrap().get("committed_events").is_none());
+    }
+    for (status, body) in signer_results {
+        assert_eq!(status, Some(StatusCode::OK), "opaque signer: {body:?}");
+        let result: arkret_models_identity::SignerKeysQueryOutcome =
+            serde_json::from_value(body.unwrap()).unwrap();
+        assert!(matches!(
+            &result.results[0],
+            arkret_models_identity::SignerKeyQueryOutcome::Unavailable { .. }
+        ));
+    }
+    for (index, (authority, key, _)) in actors.iter_mut().enumerate() {
+        let bundle = if index == 0 {
+            &ghost_bundle
+        } else {
+            &install.bot_body["managed_actor_bundle"]
+        };
+        *authority=native_phase(||authorize_scopes(&fixture,&install,bundle,&namespace,key,authority.device_id.clone(),json!([{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":["ak.applet.join","ak.event.read","ak.message.create","ak.object.read_content"]}]))).await;
+        let before = business(&fixture).await;
+        let mut response = native_phase(|| native_scan(&fixture, authority, key, &request)).await;
+        assert_eq!(response.status_code, Some(StatusCode::FORBIDDEN));
+        let _: Value = response.take_json().await.unwrap();
+        assert_eq!(before, business(&fixture).await);
+    }
+    let _content_parent = native_business_parent(
+        &fixture,
+        &install,
+        vec![],
+        vec!["ak.object.read_content".into()],
+        None,
+    )
+    .await;
+    let private_scope = native_phase(|| fixture.new_circle_scope()).await;
+    let private_head = fixture
+        .state
+        .test_persistence()
+        .authority_commits()
+        .stream_head(&request.stream_ref)
+        .await
+        .unwrap()
+        .unwrap();
+    let private = fixture
+        .state
+        .test_persistence()
+        .authority_commits()
+        .committed_event_by_commit_id(&private_head.commit_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(private.event.kind, EventKind::CircleCreate);
+    assert_eq!(
+        private_scope.circle_id(),
+        Some(&arkret_wire::CircleId::from_event_id(
+            &private.event.event_id
+        ))
+    );
+    let full_private = arkret_wire::CommittedEventView::Full(arkret_wire::CommittedEventFullView {
+        commit: private.commit.clone(),
+        event: private.event.clone(),
+    });
+    let realm_scope = ScopeRef::Realm {
+        realm_id: fixture.realm.clone(),
+    };
+    let realm_private = full_private
+        .clone()
+        .into_effective_scope(&realm_scope)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        realm_private,
+        arkret_wire::CommittedEventView::Withheld(_)
+    ));
+    assert_eq!(realm_private.commit(), &private.commit);
+    assert!(
+        serde_json::to_value(&realm_private)
+            .unwrap()
+            .get("event")
+            .is_none()
+    );
+    assert_eq!(
+        full_private
+            .clone()
+            .into_effective_scope(&private_scope)
+            .unwrap()
+            .unwrap(),
+        full_private
+    );
+    assert!(
+        realm_private
+            .into_effective_scope(&private_scope)
+            .unwrap()
+            .is_none(),
+        "scope narrowing must never promote a withheld original"
+    );
+    let private_selector = native_historical_selector(&fixture, &private.event).await;
+    let private_selectors = [private_selector];
+    let before = business(&fixture).await;
+    let mut last_position = None;
+    for (authority, key, _) in &actors {
+        let mut response = native_phase(|| native_scan(&fixture, authority, key, &request)).await;
+        let status = response.status_code;
+        if status != Some(StatusCode::OK) {
+            panic!(
+                "native scan {status:?}: {}",
+                response.take_string().await.unwrap()
+            );
+        }
+        assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+        let whole: arkret_wire::StreamScanOutcome = response.take_json().await.unwrap();
+        whole.validate_for_request(&request).unwrap();
+        assert!(!whole.truncated && !whole.committed_events.is_empty());
+        assert!(
+            whole
+                .committed_events
+                .iter()
+                .any(|v| v.reducer_input() == Some(&original))
+        );
+        let withheld = whole
+            .committed_events
+            .iter()
+            .find(|v| v.commit().event_ref == private.event.event_id)
+            .unwrap();
+        assert!(matches!(
+            withheld,
+            arkret_wire::CommittedEventView::Withheld(_)
+        ));
+        assert!(
+            serde_json::to_value(withheld)
+                .unwrap()
+                .get("event")
+                .is_none()
+        );
+        let mut private_response =
+            native_phase(|| native_signer_query(&fixture, authority, key, &private_selectors))
+                .await;
+        assert_eq!(private_response.status_code, Some(StatusCode::OK));
+        let private_result: arkret_models_identity::SignerKeysQueryOutcome =
+            private_response.take_json().await.unwrap();
+        assert!(matches!(
+            &private_result.results[0],
+            arkret_models_identity::SignerKeyQueryOutcome::Unavailable { .. }
+        ));
+        let genesis = whole
+            .committed_events
+            .iter()
+            .find_map(|v| {
+                v.reducer_input()
+                    .filter(|event| event.kind == EventKind::RealmCreate)
+            })
+            .unwrap();
+        assert_eq!(genesis.scope_ref, ScopeRef::RealmGenesis);
+        assert_eq!(whole.readable_floor.as_ref().unwrap().oldest_position, 0);
+        let mut genesis_response =
+            native_phase(|| native_get(&fixture, authority, key, &genesis.event_id)).await;
+        assert_eq!(genesis_response.status_code, Some(StatusCode::OK));
+        let genesis_view: arkret_wire::CommittedEventView =
+            genesis_response.take_json().await.unwrap();
+        assert_eq!(genesis_view.reducer_input(), Some(genesis));
+        let genesis_selector = native_historical_selector(&fixture, genesis).await;
+        let genesis_selectors = [genesis_selector];
+        let mut signer_response =
+            native_phase(|| native_signer_query(&fixture, authority, key, &genesis_selectors))
+                .await;
+        assert_eq!(signer_response.status_code, Some(StatusCode::OK));
+        let signer_result: arkret_models_identity::SignerKeysQueryOutcome =
+            signer_response.take_json().await.unwrap();
+        assert!(signer_result.results[0].key().is_some());
+        let mut after = None;
+        let mut paged = Vec::new();
+        loop {
+            let small = arkret_wire::StreamScanRequest {
+                direction: arkret_wire::StreamScanDirection::After(after),
+                limit: 2,
+                ..request.clone()
+            };
+            let mut response = native_phase(|| native_scan(&fixture, authority, key, &small)).await;
+            assert_eq!(response.status_code, Some(StatusCode::OK));
+            let page: arkret_wire::StreamScanOutcome = response.take_json().await.unwrap();
+            page.validate_for_request(&small).unwrap();
+            after = page
+                .committed_events
+                .last()
+                .map(|v| v.commit().stream_position)
+                .or(after);
+            paged.extend(page.committed_events);
+            if !page.truncated {
+                break;
+            }
+            assert!(
+                paged.len() <= 1000,
+                "the actual stream must make bounded progress"
+            );
+        }
+        assert_eq!(
+            paged, whole.committed_events,
+            "native pagination cannot skip, duplicate or merge positions"
+        );
+        last_position = after;
+        let empty = arkret_wire::StreamScanRequest {
+            direction: arkret_wire::StreamScanDirection::After(after),
+            ..request.clone()
+        };
+        let mut response = native_phase(|| native_scan(&fixture, authority, key, &empty)).await;
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        let empty_page: arkret_wire::StreamScanOutcome = response.take_json().await.unwrap();
+        assert!(empty_page.committed_events.is_empty() && !empty_page.truncated);
+        assert_eq!(empty_page.readable_floor, whole.readable_floor);
+        let backward = arkret_wire::StreamScanRequest {
+            direction: arkret_wire::StreamScanDirection::Before(None),
+            ..request.clone()
+        };
+        let mut response = native_phase(|| native_scan(&fixture, authority, key, &backward)).await;
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        let backward_page: arkret_wire::StreamScanOutcome = response.take_json().await.unwrap();
+        backward_page.validate_for_request(&backward).unwrap();
+        assert_eq!(
+            backward_page.committed_events,
+            whole.committed_events.into_iter().rev().collect::<Vec<_>>()
+        );
+        let probes = [
+            arkret_wire::StreamScanRequest {
+                realm_id: authority.pcr_realm_id.clone(),
+                stream_ref: arkret_wire::CommitStreamRef::Realm {
+                    realm_id: authority.pcr_realm_id.clone(),
+                },
+                ..request.clone()
+            },
+            arkret_wire::StreamScanRequest {
+                stream_ref: arkret_wire::CommitStreamRef::Circle {
+                    realm_id: fixture.realm.clone(),
+                    circle_id: arkret_wire::CircleId::from_event_id(&original.event_id),
+                },
+                ..request.clone()
+            },
+        ];
+        for probe in probes {
+            let mut response = native_phase(|| native_scan(&fixture, authority, key, &probe)).await;
+            assert_eq!(response.status_code, Some(StatusCode::FORBIDDEN));
+            let problem: Value = response.take_json().await.unwrap();
+            assert!(problem.get("committed_events").is_none());
+        }
+    }
+    assert_eq!(before, business(&fixture).await);
+    let (authority, key, _) = &actors[0];
+    let empty = arkret_wire::StreamScanRequest {
+        direction: arkret_wire::StreamScanDirection::After(last_position),
+        ..request.clone()
+    };
+    let mut held = native_phase(|| native_scan(&fixture, authority, key, &empty)).await;
+    assert_eq!(held.status_code, Some(StatusCode::OK));
+    let mut close = native_phase(|| native_current_revoke(&fixture, &read_parent));
+    native_wait_for_blocked_revoke(&fixture, &mut close).await;
+    let page: arkret_wire::StreamScanOutcome = held.take_json().await.unwrap();
+    assert!(page.committed_events.is_empty());
+    close.await;
+    let before = business(&fixture).await;
+    let mut response = native_phase(|| native_scan(&fixture, authority, key, &empty)).await;
+    assert_eq!(response.status_code, Some(StatusCode::FORBIDDEN));
+    let _: Value = response.take_json().await.unwrap();
+    assert_eq!(before, business(&fixture).await);
+    use arkret_models_collaboration::governance::grant_constraint::{
+        GrantConstraintEffect, GrantConstraintKind,
+    };
+    let mut temporal =
+        GrantConstraint::new(GrantConstraintKind::Temporal, GrantConstraintEffect::Allow);
+    temporal.expires_at = Some(arkret_canonical::normalize_timestamp_canonical(
+        chrono::Utc::now() + chrono::Duration::seconds(3),
+    ));
+    let _short = native_business_parent(
+        &fixture,
+        &install,
+        vec![temporal],
+        vec!["ak.event.read".into()],
+        None,
+    )
+    .await;
+    let head = fixture
+        .state
+        .test_persistence()
+        .authority_commits()
+        .stream_head(&request.stream_ref)
+        .await
+        .unwrap()
+        .unwrap();
+    let empty = arkret_wire::StreamScanRequest {
+        direction: arkret_wire::StreamScanDirection::After(Some(head.stream_position)),
+        ..empty
+    };
+    let mut response = native_phase(|| native_scan(&fixture, authority, key, &empty)).await;
+    assert_eq!(response.status_code, Some(StatusCode::OK));
+    let before = business(&fixture).await;
+    tokio::time::sleep(std::time::Duration::from_millis(3200)).await;
+    assert!(
+        response.take_json::<Value>().await.is_err(),
+        "expired read sources cannot deliver an empty page or its floor"
+    );
+    assert_eq!(before, business(&fixture).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_stream_scans_keep_actual_scope_pages_floors_and_final_delivery_current() {
+    tokio::spawn(native_phase(|| async {
+        let context = native_phase(|| {
+            native_sources_setup_for_history(Some("all_history_for_current_members"))
+        })
+        .await;
+        native_phase(|| native_scan_exercise(context)).await;
+    }))
+    .await
+    .unwrap();
 }

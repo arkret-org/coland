@@ -190,6 +190,19 @@ pub(crate) async fn content_delivery_guard(
     device: &VerifiedAppletManagedDevice,
     views: &[arkret_wire::CommittedEventView],
 ) -> Result<Box<dyn coland_storage::AccountContentDeliveryGuard>, AppError> {
+    content_delivery_guard_for_input(
+        state,
+        device,
+        coland_storage::AccountContentDeliveryInput::committed(views),
+    )
+    .await
+}
+
+pub(crate) async fn content_delivery_guard_for_input(
+    state: &AppState,
+    device: &VerifiedAppletManagedDevice,
+    mut input: coland_storage::AccountContentDeliveryInput,
+) -> Result<Box<dyn coland_storage::AccountContentDeliveryGuard>, AppError> {
     let unavailable = || AppError::not_found("native content is unavailable");
     let record = crate::routing::extensions::applet_bridge::record::applet_record(
         state,
@@ -211,7 +224,6 @@ pub(crate) async fn content_delivery_guard(
                 "current Applet Service identity is unavailable"
             )
         })?;
-    let mut input = coland_storage::AccountContentDeliveryInput::committed(views);
     input.applet_endpoint = Some(coland_storage::AppletManagedDeviceScopeGuard {
         authority: device.authority.clone(),
         effective_scope: device.metadata.effective_scope.clone(),
@@ -226,6 +238,9 @@ pub(crate) async fn content_delivery_guard(
             &input,
         )
         .await
-        .map_err(|_| unavailable())?
+        .map_err(|error| {
+            tracing::debug!(stage="native_delivery_cut", error=%error, "native content preparation refused");
+            unavailable()
+        })?
         .ok_or_else(unavailable)
 }

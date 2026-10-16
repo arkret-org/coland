@@ -105,6 +105,10 @@ async fn native_committed_event(
         }
         _ => return Err(AppError::not_found("committed event not found")),
     };
+    let view = view
+        .into_effective_scope(&device.metadata.effective_scope)
+        .map_err(|_| AppError::not_found("committed event not found"))?
+        .ok_or_else(|| AppError::not_found("committed event not found"))?;
     view.validate_shape()
         .map_err(|_| AppError::not_found("committed event not found"))?;
     let guard = crate::routing::identity::applet_managed_device::content_delivery_guard(

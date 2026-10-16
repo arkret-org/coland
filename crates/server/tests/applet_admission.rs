@@ -4201,7 +4201,7 @@ impl Fixture {
     }
     async fn new_inner(with_second_device: bool) -> Self {
         let _ = tracing_subscriber::fmt()
-            .with_env_filter("warn")
+            .with_env_filter("warn,coland_storage_postgres::applet_content_delivery=debug,coland_http::routing::identity::applet_managed_device=debug")
             .with_test_writer()
             .try_init();
         let slot = Arc::new(Mutex::new(Value::Null));
@@ -4369,8 +4369,14 @@ impl Fixture {
     }
 
     async fn new_realm(&mut self) {
-        let mut unit = Box::new(ordinary_realm::bootstrap_unit_for_account(
+        self.new_realm_with_history("since_join").await;
+    }
+
+    async fn new_realm_with_history(&mut self, history_access: &str) {
+        let mut unit = Box::new(ordinary_realm::bootstrap_unit_with_history_for_account(
             &uuid::Uuid::now_v7().to_string(),
+            "public",
+            history_access,
             &self.pcr.history.account,
             &self.state.service_did(),
         ));

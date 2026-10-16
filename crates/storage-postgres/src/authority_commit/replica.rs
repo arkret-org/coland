@@ -1587,7 +1587,7 @@ async fn accepted_own_circle_cleanup_in_connection(
         || replica
             .producer_signer_fact
             .as_ref()
-            .and_then(|fact| fact.as_human())
+            .and_then(|fact| fact.as_account_device())
             .is_none()
     {
         return Ok(false);

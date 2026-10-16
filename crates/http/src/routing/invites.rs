@@ -483,7 +483,7 @@ async fn self_invites_dispatch(
     let (invite_commit, governance) = governance_invite_commit(state, &invite_event).await?;
     let producer_signer_fact = state
         .authority_commits()
-        .human_signer_fact(&invite_event, &invite_commit)
+        .account_device_signer_fact(&invite_event, &invite_commit)
         .await
         .map_err(receipt_refusal)?;
     if invite_event
@@ -1140,7 +1140,7 @@ async fn verify_invite_commit(
     state: &AppState,
     delivery: &InviteDeliveryRequestBody,
 ) -> Result<
-    arkret_identity::account_device_signer_evidence::VerifiedHumanHistoricalSignerFact,
+    arkret_identity::account_device_signer_evidence::VerifiedAccountDeviceHistoricalSignerFact,
     AppError,
 > {
     // Reject malformed or cryptographically impossible source material before
@@ -1174,7 +1174,7 @@ async fn verify_invite_commit(
         })?;
     }
     match delivery.producer_signer_fact.as_ref() {
-        Some(fact) => arkret_identity::account_device_signer_evidence::verify_historical_human_event_signature(
+        Some(fact) => arkret_identity::account_device_signer_evidence::verify_historical_account_device_event_signature(
             &delivery.invite_event,fact,state.projections().realm_digest_suite(delivery.invite_event.realm_id.as_str())
         ).map_err(|e| AppError::from_rejection(coland_http::error::ErrorCode::SignatureInvalid,e.to_string()))?,
         None if delivery.invite_event.human_device_producer().map_err(|e| AppError::param_invalid(e.to_string()))?.is_some() =>
@@ -1228,7 +1228,7 @@ async fn verify_invite_commit(
         coland_services::committed_receipt::ReceivedProducer::GovernanceCommittedHumanDevice
         | coland_services::committed_receipt::ReceivedProducer::HostedHumanDevice(_) => {
             let fact=delivery.producer_signer_fact.as_ref().ok_or_else(||unavailable("Invite original human source is missing".to_owned()))?;
-            arkret_identity::account_device_signer_evidence::verify_historical_human_committed_event(
+            arkret_identity::account_device_signer_evidence::verify_historical_account_device_committed_event(
                 &arkret_wire::CommittedEventFullView{event:delivery.invite_event.clone(),commit:delivery.invite_commit.clone()},fact,&located.authority,&located.keys,delivery.invite_event.realm_id.digest_suite_code().digest_suite()
             ).map_err(|e|AppError::from_rejection(coland_http::error::ErrorCode::SignatureInvalid,e.to_string()))
         },
@@ -1692,7 +1692,7 @@ mod invite_locator_security_tests {
         let fact = sender
             .test_persistence()
             .authority_commits()
-            .human_signer_fact(&accepted.event, &accepted.commit)
+            .account_device_signer_fact(&accepted.event, &accepted.commit)
             .await
             .unwrap()
             .unwrap();

@@ -1724,7 +1724,7 @@ fn agent_message_send_gate_scenario() -> std::pin::Pin<Box<impl std::future::Fut
             .authority_commit
             .producer_signer_fact
             .as_ref()
-            .and_then(|fact| fact.as_human())
+            .and_then(|fact| fact.as_account_device())
             .expect("discussion founder has accepted Human signer provenance");
         assert_eq!(
             creator_leaf_authority.endpoint,

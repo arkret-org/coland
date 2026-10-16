@@ -100,7 +100,7 @@ async fn contact_request(
         at,
     );
     let fact = PgAuthorityCommitStore { pool: pool.clone() }
-        .prepare_human_signer_fact(&request.authority_commit.event, at)
+        .prepare_account_device_signer_fact(&request.authority_commit.event, at)
         .await
         .unwrap();
     assert!(

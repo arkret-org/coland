@@ -594,7 +594,7 @@ async fn signed_read_cursor_round_trip_replays_without_entering_the_realm_log() 
         );
         transaction.producer_signer_fact = persistence
             .authority_commits()
-            .prepare_human_signer_fact(&transaction.event, transaction.commit.committed_at)
+            .prepare_account_device_signer_fact(&transaction.event, transaction.commit.committed_at)
             .await
             .unwrap()
             .map(Into::into);

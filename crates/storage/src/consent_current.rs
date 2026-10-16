@@ -203,7 +203,7 @@ pub struct PreparedPrivateInviteDelivery {
 impl PreparedPrivateInviteDelivery {
     pub fn from_verified_receipt(
         request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,
-        fact: &arkret_identity::account_device_signer_evidence::VerifiedHumanHistoricalSignerFact,
+        fact: &arkret_identity::account_device_signer_evidence::VerifiedAccountDeviceHistoricalSignerFact,
         locator_verified: bool,
         constraints: Option<arkret_wire::ReceivePolicyConstraints>,
     ) -> PersistenceResult<Self> {

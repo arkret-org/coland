@@ -417,7 +417,7 @@ pub(crate) async fn fresh_producer_device_evidence(
     let core = directory.device_projection_attestation.attestation;
     let fact = state
         .authority_commits()
-        .prepare_human_signer_fact(event, core.attested_at)
+        .prepare_account_device_signer_fact(event, core.attested_at)
         .await?
         .ok_or_else(|| temporarily_unavailable("forward origin immutable source is unavailable"))?;
     let forward_core = arkret_models_crypto::ForwardDeviceProjectionAttestationCore {

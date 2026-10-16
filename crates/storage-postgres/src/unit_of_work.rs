@@ -2607,7 +2607,7 @@ async fn commit_one_inner(
                 .authority_commit
                 .producer_signer_fact
                 .as_ref()
-                .and_then(|fact| fact.as_human())
+                .and_then(|fact| fact.as_account_device())
                 != Some(&fact)
                 || retained.producer_signer_fact != fact
             {
@@ -2616,7 +2616,7 @@ async fn commit_one_inner(
                 )
                 .into());
             }
-            crate::agent_producer_signer_keys::validate_human_fact_binding(
+            crate::agent_producer_signer_keys::validate_account_device_fact_binding(
                 event,
                 &request.authority_commit.commit,
                 Some(&fact),
@@ -2625,7 +2625,7 @@ async fn commit_one_inner(
         }
     } else {
         Box::pin(
-            crate::agent_producer_signer_keys::validate_prepared_local_human_in_connection(
+            crate::agent_producer_signer_keys::validate_prepared_local_account_device_in_connection(
                 conn,
                 &request.authority_commit,
             ),
@@ -2751,7 +2751,7 @@ fn commit_prepared_event<'a>(
     event_approvals: Option<&'a coland_storage::EventApprovalCommit>,
     outcome: &'a mut EventCommitOutcome,
     prepared_human: Option<
-        arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact,
+        arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact,
     >,
     prepared_service: Option<
         arkret_models_collaboration::authority_commit::ServiceHistoricalSignerFact,
@@ -2788,7 +2788,7 @@ async fn commit_prepared_event_inner(
     event_approvals: Option<&coland_storage::EventApprovalCommit>,
     outcome: &mut EventCommitOutcome,
     prepared_human: Option<
-        arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact,
+        arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact,
     >,
     prepared_service: Option<
         arkret_models_collaboration::authority_commit::ServiceHistoricalSignerFact,
@@ -3039,7 +3039,7 @@ async fn commit_prepared_event_inner(
             )
             .await?;
         } else if let Some(fact) = prepared_human.as_ref() {
-            crate::agent_producer_signer_keys::retain_prepared_human_in_connection(
+            crate::agent_producer_signer_keys::retain_prepared_account_device_in_connection(
                 conn, event, commit, fact,
             )
             .await?;

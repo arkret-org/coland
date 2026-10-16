@@ -112,7 +112,7 @@ pub(super) async fn install(
             verify_uninventoried_producer(state, full, &originals).await?;
         }
     }
-    arkret_identity::account_device_signer_evidence::verify_handoff_human_signer_inventory(
+    arkret_identity::account_device_signer_evidence::verify_handoff_account_device_signer_inventory(
         &request, &originals, &authority, &keys,
     )
     .map_err(signature_refused)?;

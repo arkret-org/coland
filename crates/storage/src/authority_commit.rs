@@ -1774,20 +1774,20 @@ pub trait AuthorityCommitStore: Send + Sync {
     }
 
     /// Exact retained source; never read current authority to fill a missing historical row.
-    async fn human_signer_fact(
+    async fn account_device_signer_fact(
         &self,
         event: &Event,
         commit: &RealmCommit,
     ) -> PersistenceResult<
-        Option<arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact>,
+        Option<arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact>,
     >;
     /// Read an immutable source-only candidate. Admission repeats this at the locked cut.
-    async fn prepare_human_signer_fact(
+    async fn prepare_account_device_signer_fact(
         &self,
         event: &Event,
         admitted_at: DateTime<Utc>,
     ) -> PersistenceResult<
-        Option<arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact>,
+        Option<arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact>,
     >;
 
     async fn producer_signer_fact(
@@ -1797,7 +1797,10 @@ pub trait AuthorityCommitStore: Send + Sync {
     ) -> PersistenceResult<
         Option<arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact>,
     > {
-        Ok(self.human_signer_fact(event, commit).await?.map(Into::into))
+        Ok(self
+            .account_device_signer_fact(event, commit)
+            .await?
+            .map(Into::into))
     }
     async fn prepare_service_signer_fact(
         &self,

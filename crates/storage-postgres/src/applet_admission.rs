@@ -965,7 +965,7 @@ async fn admit_in_connection(
         // the original signer-fact contract. Freeze under this same locked cut,
         // bind it before Commit ID/signature, and archive only with acceptance.
         let producer_signer_fact = Box::pin(
-            crate::agent_producer_signer_keys::prepare_local_human_source_in_connection(
+            crate::agent_producer_signer_keys::prepare_local_account_device_source_in_connection(
                 conn,
                 event,
                 input.accepted_at,
@@ -1001,7 +1001,7 @@ async fn admit_in_connection(
             producer_signer_fact.as_ref(),
             device_evidence.as_ref(),
         )?;
-        crate::agent_producer_signer_keys::validate_human_fact_binding(
+        crate::agent_producer_signer_keys::validate_account_device_fact_binding(
             event,
             &commit,
             producer_signer_fact.as_ref(),
@@ -1045,7 +1045,7 @@ async fn admit_in_connection(
             return Err(rejected("Applet Event was accepted outside this aggregate"));
         }
         if let Some(fact) = producer_signer_fact.as_ref() {
-            crate::agent_producer_signer_keys::retain_prepared_human_in_connection(
+            crate::agent_producer_signer_keys::retain_prepared_account_device_in_connection(
                 conn, event, &commit, fact,
             )
             .await?;

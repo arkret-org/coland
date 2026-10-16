@@ -226,7 +226,7 @@ impl Fixture {
             tx.event = self.sign_admin(tx.event.clone());
             tx.commit.event_ref = tx.event.event_id.clone();
             tx.producer_signer_fact = source
-                .prepare_human_signer_fact(&tx.event, tx.commit.committed_at)
+                .prepare_account_device_signer_fact(&tx.event, tx.commit.committed_at)
                 .await
                 .unwrap()
                 .map(Into::into);
@@ -1023,7 +1023,7 @@ async fn admin_domain_request(
         .authority_commit
         .producer_signer_fact
         .as_ref()
-        .and_then(|fact| fact.as_human())
+        .and_then(|fact| fact.as_account_device())
     {
         let selector = coland_storage::DeviceRevocationGateSelector {
             principal_id: producer.account_id.principal_id,

@@ -14,7 +14,7 @@ use crate::{PersistenceError, PersistenceResult};
 pub struct ForwardedProducerDeviceEvidence {
     pub evidence: arkret_models_identity::ForwardAccountDeviceSignerEvidence,
     pub producer_signer_fact:
-        arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact,
+        arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact,
     pub evidence_ref: SignerEvidenceRef,
 }
 
@@ -22,7 +22,7 @@ impl ForwardedProducerDeviceEvidence {
     /// Address the complete object exactly as the evidence ref rule requires.
     pub fn new(
         evidence: arkret_models_identity::ForwardAccountDeviceSignerEvidence,
-        producer_signer_fact: arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact,
+        producer_signer_fact: arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact,
     ) -> PersistenceResult<Self> {
         let evidence_ref = forwarded_producer_device_evidence_ref(&evidence)?;
         Ok(Self {
@@ -60,7 +60,7 @@ pub trait AccountDeviceSignerEvidenceStore: Send + Sync {
         commit: &arkret_wire::RealmCommit,
         governance: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<
-        Option<arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact>,
+        Option<arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact>,
     >;
 
     async fn get_forward(

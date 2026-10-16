@@ -70,7 +70,10 @@ impl HumanFixture {
                 "proof does not alter Event identity"
             );
             transaction.producer_signer_fact = store
-                .prepare_human_signer_fact(&transaction.event, transaction.commit.committed_at)
+                .prepare_account_device_signer_fact(
+                    &transaction.event,
+                    transaction.commit.committed_at,
+                )
                 .await
                 .unwrap()
                 .map(Into::into);
@@ -132,7 +135,7 @@ impl HumanFixture {
             .unwrap()
             .producer_signer_fact
             .as_ref()
-            .and_then(|fact| fact.as_human())
+            .and_then(|fact| fact.as_account_device())
             .cloned()
             .expect("real original PCR source");
         fact.event_id = request.authority_commit.event.event_id.clone();
@@ -204,7 +207,7 @@ pub fn request_for_event(
         .unwrap()
         .producer_signer_fact
         .as_ref()
-        .and_then(|fact| fact.as_human())
+        .and_then(|fact| fact.as_account_device())
         .cloned()
         .expect("actual accepted PCR original");
     fact.event_id = request.authority_commit.event.event_id.clone();

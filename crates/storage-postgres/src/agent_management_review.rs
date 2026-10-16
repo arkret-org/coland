@@ -341,7 +341,7 @@ async fn producer_pin(
     )
     .await?
     .ok_or_else(hidden)?;
-    let fact = crate::agent_producer_signer_keys::prepare_human_source_in_connection(
+    let fact = crate::agent_producer_signer_keys::prepare_account_device_source_in_connection(
         conn, event, at, &selector,
     )
     .await?;

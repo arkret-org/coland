@@ -5428,7 +5428,7 @@ fn source_request(
     Box::pin(async move {
         request.authority_commit.producer_signer_fact =
             PgAuthorityCommitStore { pool: pool.clone() }
-                .prepare_human_signer_fact(
+                .prepare_account_device_signer_fact(
                     &request.authority_commit.event,
                     request.authority_commit.commit.committed_at,
                 )
@@ -9350,7 +9350,7 @@ async fn source_unit(
     let mut previous = None;
     for (index, tx) in unit.transactions.iter_mut().enumerate() {
         tx.producer_signer_fact = store
-            .prepare_human_signer_fact(&tx.event, tx.commit.committed_at)
+            .prepare_account_device_signer_fact(&tx.event, tx.commit.committed_at)
             .await
             .unwrap()
             .map(Into::into);
@@ -9398,7 +9398,7 @@ fn seal_request_fact(mut request: EventCommitRequest) -> EventCommitRequest {
         .authority_commit
         .producer_signer_fact
         .as_mut()
-        .and_then(|fact| fact.as_human_mut())
+        .and_then(|fact| fact.as_account_device_mut())
     {
         if fact.actor == request.authority_commit.event.actor_id {
             fact.event_id = request.authority_commit.event.event_id.clone();

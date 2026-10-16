@@ -5374,7 +5374,7 @@ async fn agent_profile_accountability_follows_the_provision_projection() {
         .await
         .unwrap_err();
     assert!(
-        matches!(&error, PersistenceError::Conflict(reason) if reason == "Human historical producer is outside its accepted authorization window"),
+        matches!(&error, PersistenceError::Conflict(reason) if reason == "Account Device historical producer is outside its accepted authorization window"),
         "a later target Commit cannot authorize an earlier producer proof: {error}"
     );
     assert_eq!(

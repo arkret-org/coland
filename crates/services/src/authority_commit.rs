@@ -2,9 +2,9 @@
 
 mod mls_roster;
 use arkret_models_collaboration::authority_commit::{
-    AuthorityForwardBranch, AuthorityHandoffRequest, DirectConversationFoundingAcceptanceOutcome,
-    DirectConversationFoundingFederationSubmission, DirectConversationFoundingUnitSubmission,
-    HistoricalProducerSignerFact, HumanHistoricalSignerFact,
+    AccountDeviceHistoricalSignerFact, AuthorityForwardBranch, AuthorityHandoffRequest,
+    DirectConversationFoundingAcceptanceOutcome, DirectConversationFoundingFederationSubmission,
+    DirectConversationFoundingUnitSubmission, HistoricalProducerSignerFact,
     MembershipCompensationAcceptanceOutcome, MembershipCompensationFederationSubmission,
     MembershipCompensationUnitSubmission, OrdinaryRealmBootstrapAcceptanceOutcome,
     OrdinaryRealmBootstrapUnitSubmission, PeerAuthorityForwardEventRequest,
@@ -549,22 +549,25 @@ impl AuthorityCommitApplication {
         }
     }
 
-    pub async fn human_signer_fact(
+    pub async fn account_device_signer_fact(
         &self,
         event: &Event,
         commit: &RealmCommit,
-    ) -> ServiceResult<Option<HumanHistoricalSignerFact>> {
-        Ok(self.store().human_signer_fact(event, commit).await?)
+    ) -> ServiceResult<Option<AccountDeviceHistoricalSignerFact>> {
+        Ok(self
+            .store()
+            .account_device_signer_fact(event, commit)
+            .await?)
     }
 
-    pub async fn prepare_human_signer_fact(
+    pub async fn prepare_account_device_signer_fact(
         &self,
         event: &Event,
         admitted_at: DateTime<Utc>,
-    ) -> ServiceResult<Option<HumanHistoricalSignerFact>> {
+    ) -> ServiceResult<Option<AccountDeviceHistoricalSignerFact>> {
         Ok(self
             .store()
-            .prepare_human_signer_fact(event, admitted_at)
+            .prepare_account_device_signer_fact(event, admitted_at)
             .await?)
     }
 
@@ -887,7 +890,7 @@ impl AuthorityCommitApplication {
         for submitted in &submission.events {
             let producer_signer_fact = self
                 .store()
-                .prepare_human_signer_fact(&submitted.event, committed_at)
+                .prepare_account_device_signer_fact(&submitted.event, committed_at)
                 .await?
                 .map(Into::into);
             let commit = build_signed_event_commit(
@@ -1126,7 +1129,7 @@ impl AuthorityCommitApplication {
             }
             let producer_signer_fact = self
                 .store()
-                .prepare_human_signer_fact(event, committed_at)
+                .prepare_account_device_signer_fact(event, committed_at)
                 .await?
                 .map(Into::into);
             let commit = build_signed_event_commit(
@@ -1338,7 +1341,7 @@ impl AuthorityCommitApplication {
             Some(fact) => Some(fact.clone()),
             None => self
                 .store()
-                .prepare_human_signer_fact(event, committed_at)
+                .prepare_account_device_signer_fact(event, committed_at)
                 .await?
                 .map(Into::into),
         };
@@ -1537,7 +1540,7 @@ impl AuthorityCommitApplication {
             Some(fact) => Some(fact.clone()),
             None => self
                 .store()
-                .prepare_human_signer_fact(event, committed_at)
+                .prepare_account_device_signer_fact(event, committed_at)
                 .await?
                 .map(Into::into),
         };

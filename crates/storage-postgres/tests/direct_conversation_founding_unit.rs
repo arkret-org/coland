@@ -689,7 +689,7 @@ async fn founding_unit(
         // negative vectors remain wrong and are refused by the founding gate.
         let fact = if shape.author == pair.founder_actor() {
             pair.store()
-                .prepare_human_signer_fact(&event, at)
+                .prepare_account_device_signer_fact(&event, at)
                 .await
                 .unwrap()
         } else {
@@ -2833,7 +2833,7 @@ fn cited(
             if let Some(fact) = previous
                 .producer_signer_fact
                 .as_ref()
-                .and_then(|fact| fact.as_human())
+                .and_then(|fact| fact.as_account_device())
                 .filter(|fact| fact.actor == event.actor_id)
             {
                 event = device_authorization_history::sign_event(
@@ -2860,7 +2860,7 @@ fn cited(
     if let Some(fact) = previous
         .producer_signer_fact
         .as_ref()
-        .and_then(|fact| fact.as_human())
+        .and_then(|fact| fact.as_account_device())
         .filter(|fact| fact.actor == event.actor_id)
     {
         event = device_authorization_history::sign_event(
@@ -2914,7 +2914,7 @@ async fn sourced_cited_at(
     let mut request = ordinary_realm::request_for_event(previous, event, at);
     request.authority_commit.producer_signer_fact = pair
         .store()
-        .prepare_human_signer_fact(
+        .prepare_account_device_signer_fact(
             &request.authority_commit.event,
             request.authority_commit.commit.committed_at,
         )

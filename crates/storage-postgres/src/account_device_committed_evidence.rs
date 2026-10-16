@@ -1,5 +1,5 @@
 //! Original native Account Device roots, frozen with their acceptance Commit.
-use arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact;
+use arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact;
 use arkret_models_collaboration::events_payloads::DeviceAuthorizePayload;
 use arkret_models_crypto::{
     DeviceAuthorizationWindow, DeviceProjectionAttestationCore, DeviceStatus,
@@ -37,7 +37,7 @@ struct Archived {
 pub(crate) async fn prepare_core(
     conn: &mut AsyncPgConnection,
     event: &Event,
-    fact: &HumanHistoricalSignerFact,
+    fact: &AccountDeviceHistoricalSignerFact,
     at: chrono::DateTime<chrono::Utc>,
     station: &DidCoreId,
 ) -> PersistenceResult<DeviceProjectionAttestationCore> {
@@ -85,7 +85,7 @@ pub(crate) async fn prepare_core(
 pub(crate) fn validate(
     event: &Event,
     commit: &RealmCommit,
-    fact: Option<&HumanHistoricalSignerFact>,
+    fact: Option<&AccountDeviceHistoricalSignerFact>,
     evidence: Option<&AccountDeviceSignerEvidence>,
 ) -> PersistenceResult<()> {
     let producer = event.human_device_producer().map_err(rejected)?;
@@ -98,7 +98,11 @@ pub(crate) fn validate(
         }
         return Err(rejected("missing or surplus original regular root"));
     };
-    crate::agent_producer_signer_keys::validate_human_fact_binding(event, commit, Some(fact))?;
+    crate::agent_producer_signer_keys::validate_account_device_fact_binding(
+        event,
+        commit,
+        Some(fact),
+    )?;
     arkret_identity::account_device_signer_evidence::verify_historical_account_device_signer_evidence(evidence, &producer.account_id, &producer.device_id).map_err(rejected)?;
     let core = &evidence.device_projection_attestation.attestation;
     let key = core
@@ -140,7 +144,7 @@ pub(crate) fn validate(
 pub(crate) async fn retain(
     conn: &mut AsyncPgConnection,
     commit: &RealmCommit,
-    fact: &HumanHistoricalSignerFact,
+    fact: &AccountDeviceHistoricalSignerFact,
     evidence: &AccountDeviceSignerEvidence,
 ) -> PersistenceResult<()> {
     let core = &evidence.device_projection_attestation.attestation;
@@ -191,7 +195,7 @@ pub(crate) async fn read(
         Some(row) => {
             let evidence: AccountDeviceSignerEvidence =
                 serde_json::from_value(row.evidence_json).map_err(rejected)?;
-            let fact: HumanHistoricalSignerFact =
+            let fact: AccountDeviceHistoricalSignerFact =
                 serde_json::from_value(row.producer_source_fact).map_err(rejected)?;
             if evidence.signer_evidence_ref().map_err(rejected)?.as_ref() != row.evidence_ref
                 || fact.key.authorization_ref.commit_id.as_str() != row.authorization_commit_id
@@ -214,7 +218,7 @@ pub(crate) async fn retain_from_guard(
     conn: &mut AsyncPgConnection,
     event: &Event,
     commit: &RealmCommit,
-    fact: &HumanHistoricalSignerFact,
+    fact: &AccountDeviceHistoricalSignerFact,
     guard: Option<&coland_storage::SelfProducerCommitGuard>,
 ) -> PersistenceResult<()> {
     if let Some(coland_storage::SelfProducerCommitGuard::HumanDeviceEvidence {

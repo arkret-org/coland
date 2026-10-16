@@ -84,7 +84,7 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
         commit: &arkret_wire::RealmCommit,
         governance: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<
-        Option<arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact>,
+        Option<arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact>,
     > {
         let stream = arkret_wire::CommitStreamRef::from_scope(
             &event.scope_ref,
@@ -205,7 +205,7 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
         let body = serde_json::to_value(evidence).map_err(PersistenceError::database)?;
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            let prepared = crate::agent_producer_signer_keys::prepare_local_human_source_in_connection(conn, event, core.attested_at).await?;
+            let prepared = crate::agent_producer_signer_keys::prepare_local_account_device_source_in_connection(conn, event, core.attested_at).await?;
             if prepared.as_ref() != Some(&fact) {
                 return Err(PersistenceError::Conflict("forward origin source changed before issuance".into()).into());
             }

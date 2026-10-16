@@ -1524,7 +1524,7 @@ pub async fn assert_applet_formal_commit_transaction_contract(
     for event in events {
         let fact = stores
             .authority
-            .prepare_human_signer_fact(&event, install.input.accepted_at)
+            .prepare_account_device_signer_fact(&event, install.input.accepted_at)
             .await
             .unwrap()
             .map(Into::into);

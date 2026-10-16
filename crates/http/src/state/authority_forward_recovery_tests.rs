@@ -756,7 +756,7 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
     for (index, transaction) in governor.unit.transactions.iter_mut().enumerate() {
         transaction.commit.event_ref = transaction.event.event_id.clone();
         transaction.producer_signer_fact = source
-            .prepare_human_signer_fact(&transaction.event, transaction.commit.committed_at)
+            .prepare_account_device_signer_fact(&transaction.event, transaction.commit.committed_at)
             .await
             .unwrap()
             .map(Into::into);
@@ -863,7 +863,7 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
     let grant_fact = PgAuthorityCommitStore {
         pool: governor_pool.clone(),
     }
-    .prepare_human_signer_fact(&grant.authority_commit.event, grant_at)
+    .prepare_account_device_signer_fact(&grant.authority_commit.event, grant_at)
     .await
     .unwrap()
     .unwrap();
@@ -1150,7 +1150,7 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
         .find(|entry| entry.target.commit_id == commit.commit_id)
         .unwrap()
         .producer_signer_fact
-        .as_human_mut()
+        .as_account_device_mut()
         .unwrap()
         .key
         .governance_generation += 1;
@@ -1408,7 +1408,7 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
     for (index, transaction) in governor.unit.transactions.iter_mut().enumerate() {
         transaction.commit.event_ref = transaction.event.event_id.clone();
         transaction.producer_signer_fact = source
-            .prepare_human_signer_fact(&transaction.event, transaction.commit.committed_at)
+            .prepare_account_device_signer_fact(&transaction.event, transaction.commit.committed_at)
             .await
             .unwrap()
             .map(Into::into);
@@ -1516,7 +1516,7 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
     let grant_fact = PgAuthorityCommitStore {
         pool: governor_pool.clone(),
     }
-    .prepare_human_signer_fact(&grant.authority_commit.event, grant_at)
+    .prepare_account_device_signer_fact(&grant.authority_commit.event, grant_at)
     .await
     .unwrap()
     .unwrap();
@@ -2102,7 +2102,10 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
         for (index, transaction) in governor.unit.transactions.iter_mut().enumerate() {
             transaction.commit.event_ref = transaction.event.event_id.clone();
             transaction.producer_signer_fact = source
-                .prepare_human_signer_fact(&transaction.event, transaction.commit.committed_at)
+                .prepare_account_device_signer_fact(
+                    &transaction.event,
+                    transaction.commit.committed_at,
+                )
                 .await
                 .unwrap()
                 .map(Into::into);
@@ -2237,7 +2240,7 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
         let grant_fact = PgAuthorityCommitStore {
             pool: governor_pool.clone(),
         }
-        .prepare_human_signer_fact(&grant.authority_commit.event, grant_at)
+        .prepare_account_device_signer_fact(&grant.authority_commit.event, grant_at)
         .await
         .unwrap()
         .unwrap();
@@ -2717,7 +2720,7 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             future_at,
         );
         let future_fact = source
-            .prepare_human_signer_fact(&future.authority_commit.event, future_at)
+            .prepare_account_device_signer_fact(&future.authority_commit.event, future_at)
             .await
             .unwrap()
             .unwrap();
@@ -3431,7 +3434,7 @@ async fn circle_cleanup_install_refusals(
         .producer_signer_fact
         .as_mut()
         .unwrap()
-        .as_human_mut()
+        .as_account_device_mut()
         .unwrap()
         .event_id = human.unit.transactions[0].event.event_id.clone();
     assert!(store.install_committed_replica(&wrong_fact).await.is_err());

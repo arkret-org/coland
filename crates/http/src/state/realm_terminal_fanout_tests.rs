@@ -160,7 +160,7 @@ async fn admitted_owner(
     for (index, tx) in owner.unit.transactions.iter_mut().enumerate() {
         tx.commit.event_ref = tx.event.event_id.clone();
         tx.producer_signer_fact = store
-            .prepare_human_signer_fact(&tx.event, tx.commit.committed_at)
+            .prepare_account_device_signer_fact(&tx.event, tx.commit.committed_at)
             .await
             .unwrap()
             .map(Into::into);

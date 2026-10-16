@@ -835,7 +835,7 @@ pub(crate) async fn admit_self_direct_conversation_founding_unit(
                 transaction.commit.committed_at,
             )
             .await?;
-            let prepared_human = crate::agent_producer_signer_keys::validate_prepared_local_human_in_connection(conn, transaction).await?;
+            let prepared_human = crate::agent_producer_signer_keys::validate_prepared_local_account_device_in_connection(conn, transaction).await?;
             queue_event_in_connection(conn, &transaction.event, queued_at).await?;
             match commit_transaction_in_connection(conn, transaction).await? {
                 AuthorityCommitWriteOutcome::Committed => {}
@@ -854,7 +854,7 @@ pub(crate) async fn admit_self_direct_conversation_founding_unit(
                 }
             }
             if let Some(fact) = prepared_human.as_ref() {
-                crate::agent_producer_signer_keys::retain_prepared_human_in_connection(conn, &transaction.event, &transaction.commit, fact).await?;
+                crate::agent_producer_signer_keys::retain_prepared_account_device_in_connection(conn, &transaction.event, &transaction.commit, fact).await?;
             } else {
                 crate::agent_producer_signer_keys::retain_in_connection(conn, &transaction.event, &transaction.commit, Some(guard)).await?;
             }

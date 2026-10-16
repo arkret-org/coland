@@ -2509,7 +2509,7 @@ impl PgAuthorityCommitStore {
                     )
                     .await?;
                 }
-                let prepared_human = crate::agent_producer_signer_keys::validate_prepared_local_human_in_connection(conn, transaction).await?;
+                let prepared_human = crate::agent_producer_signer_keys::validate_prepared_local_account_device_in_connection(conn, transaction).await?;
                 queue_event_in_connection(conn, &transaction.event, queued_at).await?;
                 match commit_transaction_in_connection(conn, transaction).await? {
                     AuthorityCommitWriteOutcome::Committed => {}
@@ -2525,7 +2525,7 @@ impl PgAuthorityCommitStore {
                     }
                 }
                 if let Some(fact) = prepared_human.as_ref() {
-                    crate::agent_producer_signer_keys::retain_prepared_human_in_connection(conn, &transaction.event, &transaction.commit, fact).await?;
+                    crate::agent_producer_signer_keys::retain_prepared_account_device_in_connection(conn, &transaction.event, &transaction.commit, fact).await?;
                     crate::account_device_committed_evidence::retain_from_guard(conn, &transaction.event, &transaction.commit, fact, producer_guards.map(|guards| &guards[index])).await?;
                 } else if let Some(guards) = producer_guards {
                     crate::agent_producer_signer_keys::retain_in_connection(
@@ -3018,15 +3018,15 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .map_err(PgTransactionError::into_persistence)
     }
 
-    async fn human_signer_fact(
+    async fn account_device_signer_fact(
         &self,
         event: &arkret_wire::Event,
         commit: &arkret_wire::RealmCommit,
     ) -> PersistenceResult<
-        Option<arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact>,
+        Option<arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact>,
     > {
         let mut conn = pg_conn(&self.pool).await?;
-        crate::agent_producer_signer_keys::human_source_for_commit_in_connection(
+        crate::agent_producer_signer_keys::account_device_source_for_commit_in_connection(
             &mut conn, event, commit,
         )
         .await
@@ -3064,16 +3064,16 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .map_err(PgTransactionError::into_persistence)
     }
 
-    async fn prepare_human_signer_fact(
+    async fn prepare_account_device_signer_fact(
         &self,
         event: &arkret_wire::Event,
         admitted_at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<
-        Option<arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact>,
+        Option<arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact>,
     > {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            crate::agent_producer_signer_keys::prepare_local_human_source_in_connection(
+            crate::agent_producer_signer_keys::prepare_local_account_device_source_in_connection(
                 conn,
                 event,
                 admitted_at,
@@ -3841,7 +3841,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         local_service: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<bool> {
         use arkret_models_collaboration::authority_commit::{
-            HumanHistoricalSignerFact, SelfAuthoritySubmitRequest,
+            AccountDeviceHistoricalSignerFact, SelfAuthoritySubmitRequest,
         };
         use arkret_models_collaboration::events_payloads::CircleMemberStatePayload;
         use arkret_models_collaboration::governance::circle::CircleMembership;
@@ -3999,7 +3999,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             let held_commit: arkret_wire::RealmCommit = decode_json(row.commit_json, "bound leave Commit")?;
             let accepted: arkret_wire::RealmCommit = decode_json(row.accepted_json, "bound leave accepted witness")?;
             let submission: SelfAuthoritySubmitRequest = decode_json(row.submission_json, "bound leave original intent")?;
-            let fact: HumanHistoricalSignerFact = decode_json(row.fact_json, "bound leave original fact")?;
+            let fact: AccountDeviceHistoricalSignerFact = decode_json(row.fact_json, "bound leave original fact")?;
             let join_event: arkret_wire::Event = decode_json(row.join_envelope, "bound leave opening Event")?;
             let join_commit: arkret_wire::RealmCommit = decode_json(row.join_commit_json, "bound leave opening Commit")?;
             let SelfAuthoritySubmitRequest::Event(submitted) = submission else { return Ok(false); };
@@ -4877,7 +4877,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 return Ok(AuthorityCommitWriteOutcome::Duplicate);
             }
             let prepared_human =
-                crate::agent_producer_signer_keys::validate_prepared_local_human_in_connection(
+                crate::agent_producer_signer_keys::validate_prepared_local_account_device_in_connection(
                     conn,
                     transaction,
                 )
@@ -4895,7 +4895,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             )?;
             if matches!(outcome, AuthorityCommitWriteOutcome::Committed) {
                 if let Some(fact) = prepared_human.as_ref() {
-                    crate::agent_producer_signer_keys::retain_prepared_human_in_connection(
+                    crate::agent_producer_signer_keys::retain_prepared_account_device_in_connection(
                         conn,
                         &transaction.event,
                         &transaction.commit,

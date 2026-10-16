@@ -504,6 +504,57 @@ async fn managed_devices_require_independent_principal_and_possession_on_service
             .unwrap();
         assert_eq!(producer_authority, accepted_authority);
         assert!(
+            fixture
+                .state
+                .test_persistence()
+                .authority_commits()
+                .prepare_account_device_signer_fact(&native_event, now)
+                .await
+                .is_err(),
+            "a Device source cannot predate the actual authorization acceptance"
+        );
+        let historical_at = chrono::Utc::now();
+        let historical = fixture
+            .state
+            .test_persistence()
+            .authority_commits()
+            .prepare_account_device_signer_fact(&native_event, historical_at)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(historical.actor, actor);
+        assert_eq!(historical.device_id, device_id);
+        assert_eq!(
+            historical.key.authorization_ref,
+            accepted_authority.selector.authorization_ref
+        );
+        assert_eq!(
+            historical.key.public_key_b64u.as_str(),
+            arkret_canonical::base64url_encode(device.verifying_key().to_bytes())
+        );
+        let source = fixture
+            .state
+            .test_persistence()
+            .authority_commits()
+            .committed_event(&valid.event_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(historical.accepted_at, source.commit.committed_at);
+        assert_eq!(historical.key.revision.commit_id, source.commit.commit_id);
+        assert_eq!(
+            historical.key.revision.stream_position,
+            source.commit.stream_position
+        );
+        assert_eq!(
+            historical.key.governance_generation,
+            source.commit.governance_generation
+        );
+        arkret_identity::account_device_signer_evidence::verify_historical_account_device_event_signature(
+            &native_event, &historical, fixture.realm.digest_suite_code().digest_suite(),
+        ).unwrap();
+
+        assert!(
             !producer_authority.scopes.permits(
                 &native_event.scope_ref,
                 &[arkret_wire::CapabilityActionId::AppletJoin]
@@ -565,6 +616,16 @@ async fn managed_devices_require_independent_principal_and_possession_on_service
                 "neither carrier nor controller nor rewritten original is a Device producer"
             );
             assert_eq!(producer_before, authority_snapshot(&fixture.pool).await);
+            assert!(
+                fixture
+                    .state
+                    .test_persistence()
+                    .authority_commits()
+                    .prepare_account_device_signer_fact(&wrong, now)
+                    .await
+                    .is_err(),
+                "historical source must verify the actual managed Device original"
+            );
         }
         let mut non_device_method = native_event.clone();
         non_device_method
@@ -810,6 +871,35 @@ async fn managed_devices_require_independent_principal_and_possession_on_service
                 .unwrap(),
             replaced_authority
         );
+
+        assert!(
+            fixture
+                .state
+                .test_persistence()
+                .authority_commits()
+                .prepare_account_device_signer_fact(&native_event, now)
+                .await
+                .is_err()
+        );
+        let replacement_fact = fixture
+            .state
+            .test_persistence()
+            .authority_commits()
+            .prepare_account_device_signer_fact(&replacement_producer, chrono::Utc::now())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            replacement_fact.key.authorization_ref,
+            historical.key.authorization_ref
+        );
+        assert_ne!(
+            replacement_fact.key.public_key_b64u,
+            historical.key.public_key_b64u
+        );
+        arkret_identity::account_device_signer_evidence::verify_historical_account_device_event_signature(
+            &native_event, &historical, fixture.realm.digest_suite_code().digest_suite(),
+        ).unwrap();
         assert_eq!(after_replacement, authority_snapshot(&fixture.pool).await);
         let stale_metadata = managed_device_metadata(&accepted_authority);
         assert!(
@@ -2732,7 +2822,7 @@ async fn service_install_and_separate_bot_unit_have_exact_retry_without_new_writ
             "SELECT producer_source_fact AS payload FROM agent_producer_signer_keys WHERE commit_id=$1 AND producer_source_fact IS NOT NULL",
         ).bind::<diesel::sql_types::Text,_>(accepted.commit.commit_id.as_str())
             .get_result::<Source>(&mut *conn).await.unwrap();
-        let fact: arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact =
+        let fact: arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact =
             serde_json::from_value(source.payload).unwrap();
         let suite = event.realm_id.digest_suite_code().digest_suite();
         fact.validate_commit_binding(
@@ -2743,7 +2833,7 @@ async fn service_install_and_separate_bot_unit_have_exact_retry_without_new_writ
             suite,
         )
         .unwrap();
-        arkret_identity::account_device_signer_evidence::verify_historical_human_event_signature(
+        arkret_identity::account_device_signer_evidence::verify_historical_account_device_event_signature(
             event, &fact, suite,
         )
         .unwrap();
@@ -4259,7 +4349,7 @@ impl Fixture {
             tx.event = self.sign_admin(tx.event.clone());
             tx.commit.event_ref = tx.event.event_id.clone();
             tx.producer_signer_fact = source
-                .prepare_human_signer_fact(&tx.event, tx.commit.committed_at)
+                .prepare_account_device_signer_fact(&tx.event, tx.commit.committed_at)
                 .await
                 .unwrap()
                 .map(Into::into);
@@ -4946,7 +5036,7 @@ async fn admin_domain_request(
         .authority_commit
         .producer_signer_fact
         .as_ref()
-        .and_then(|fact| fact.as_human())
+        .and_then(|fact| fact.as_account_device())
     {
         let selector = coland_storage::DeviceRevocationGateSelector {
             principal_id: producer.account_id.principal_id,

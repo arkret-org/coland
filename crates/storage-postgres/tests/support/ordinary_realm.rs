@@ -437,7 +437,7 @@ pub fn next_request_for_actor(
     let event = if let Some(fact) = previous
         .producer_signer_fact
         .as_ref()
-        .and_then(|fact| fact.as_human())
+        .and_then(|fact| fact.as_account_device())
         .filter(|fact| fact.actor == event.actor_id)
     {
         human_profile::sign_original_device(event, fact.verification_method.clone())
@@ -493,12 +493,12 @@ pub fn request_for_event(
     let fact = previous
         .producer_signer_fact
         .as_ref()
-        .and_then(|fact| fact.as_human())
+        .and_then(|fact| fact.as_account_device())
         .filter(|fact| fact.actor == event.actor_id)
         .cloned()
         .map(|mut fact| {
             fact.event_id = event.event_id.clone();
-            arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact::Human(fact)
+            arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact::AccountDevice(fact)
         });
     commit.producer_signer_fact_digest = fact.as_ref().map(|f| f.digest().unwrap());
     if fact.is_some() {
@@ -660,7 +660,7 @@ pub async fn source_request(pool: &PgPool, mut request: EventCommitRequest) -> E
     }
     let tx = &mut request.authority_commit;
     tx.producer_signer_fact = PgAuthorityCommitStore { pool: pool.clone() }
-        .prepare_human_signer_fact(&tx.event, tx.commit.committed_at)
+        .prepare_account_device_signer_fact(&tx.event, tx.commit.committed_at)
         .await
         .unwrap()
         .map(Into::into);
@@ -705,7 +705,7 @@ pub async fn source_bootstrap(
             .expect("bootstrap author has an actual accepted PCR fixture device");
         tx.commit.event_ref = tx.event.event_id.clone();
         tx.producer_signer_fact = store
-            .prepare_human_signer_fact(&tx.event, tx.commit.committed_at)
+            .prepare_account_device_signer_fact(&tx.event, tx.commit.committed_at)
             .await
             .unwrap()
             .map(Into::into);

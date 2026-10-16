@@ -227,7 +227,7 @@ async fn source_candidate(
 ) {
     let tx = &mut request.authority_commit;
     tx.producer_signer_fact = PgAuthorityCommitStore { pool: pool.clone() }
-        .prepare_human_signer_fact(&tx.event, tx.commit.committed_at)
+        .prepare_account_device_signer_fact(&tx.event, tx.commit.committed_at)
         .await
         .unwrap()
         .map(Into::into);

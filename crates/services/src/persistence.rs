@@ -370,7 +370,7 @@ impl PersistenceHandle {
         commit: &arkret_wire::RealmCommit,
         governance: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<
-        Option<arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact>,
+        Option<arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact>,
     > {
         self.persistence
             .account_device_signer_evidence()

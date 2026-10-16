@@ -57,7 +57,7 @@ async fn receive(
     event: &Event,
     commit: &RealmCommit,
     continuity: CommitContinuity<'_>,
-    fact: Option<&arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact>,
+    fact: Option<&arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact>,
 ) -> Result<ReceivedProducer, ServiceError> {
     let store = receiver.test_persistence();
     let fact = fact.cloned().map(Into::into);
@@ -107,11 +107,11 @@ async fn assert_nothing_written(receiver: &AppState, event: &Event) {
 fn seal_fact(
     chain: &GovernanceChain,
     event: &Event,
-    source: &arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact,
+    source: &arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact,
     signer: GovernanceSigner,
 ) -> (
     RealmCommit,
-    arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact,
+    arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact,
 ) {
     let mut fact = source.clone();
     fact.event_id = event.event_id.clone();
@@ -318,7 +318,7 @@ fn non_governance_receiver_verifies_original_human_fact_and_legacy_is_unavailabl
         let source = origin
             .test_persistence()
             .authority_commits()
-            .prepare_human_signer_fact(&replica, Utc::now())
+            .prepare_account_device_signer_fact(&replica, Utc::now())
             .await
             .unwrap()
             .unwrap();
@@ -361,7 +361,7 @@ fn non_governance_receiver_verifies_original_human_fact_and_legacy_is_unavailabl
         let local_source = receiver
             .test_persistence()
             .authority_commits()
-            .prepare_human_signer_fact(&local, Utc::now())
+            .prepare_account_device_signer_fact(&local, Utc::now())
             .await
             .unwrap()
             .unwrap();

@@ -41,6 +41,15 @@ use coland_storage_postgres::{
     PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPersistenceStore,
 };
 
+// Construct boxed futures outside the caller's poll frame. Boxing an inline
+// async block still reserves its construction temporary on that caller's stack.
+#[inline(never)]
+fn fixture_future<'a, T: 'a, F: Future<Output = T> + Send + 'a>(
+    make: impl FnOnce() -> F,
+) -> Pin<Box<dyn Future<Output = T> + Send + 'a>> {
+    Box::pin(make())
+}
+
 fn fixture_step<T: Send + 'static>(
     future: impl Future<Output = T> + Send + 'static,
 ) -> Pin<Box<dyn Future<Output = T> + Send>> {
@@ -53,7 +62,7 @@ fn fixture_step<T: Send + 'static>(
     // Allocate before entering another async state machine or spawning it.
     // Otherwise large caller futures are copied through nested poll frames.
     let future: Pin<Box<dyn Future<Output = T> + Send>> = Box::pin(future);
-    Box::pin(async move {
+    fixture_future(|| async move {
         let task = tokio::spawn(future);
         // Cancelling a caller's timeout must also drop the original pending future.
         let _cancel = CancelOnDrop(task.abort_handle());
@@ -73,12 +82,12 @@ fn fixture_commit_step(
     >,
 > {
     let pool = pool.clone();
-    Box::pin(async move {
-        fixture_step(async move {
+    fixture_future(|| async move {
+        fixture_step(fixture_future(|| async move {
             PgEventCommitUnitOfWork::new(pool)
                 .commit_event(request)
                 .await
-        })
+        }))
         .await
     })
 }
@@ -93,12 +102,12 @@ fn fixture_commit_batch_step(
     >,
 > {
     let pool = pool.clone();
-    Box::pin(async move {
-        fixture_step(async move {
+    fixture_future(|| async move {
+        fixture_step(fixture_future(|| async move {
             PgEventCommitUnitOfWork::new(pool)
                 .commit_event_batch(request)
                 .await
-        })
+        }))
         .await
     })
 }
@@ -118,12 +127,12 @@ fn fixture_bootstrap_step(
 > {
     let pool = pool.clone();
     let unit = unit.clone();
-    Box::pin(async move {
-        fixture_step(async move {
+    fixture_future(|| async move {
+        fixture_step(fixture_future(|| async move {
             PgAuthorityCommitStore { pool }
                 .admit_ordinary_realm_bootstrap_unit(&unit, queued_at)
                 .await
-        })
+        }))
         .await
     })
 }
@@ -146,12 +155,12 @@ fn fixture_delivery_step(
     let account = account.clone();
     let station = station.clone();
     let input = input.clone();
-    Box::pin(async move {
-        fixture_step(async move {
+    fixture_future(|| async move {
+        fixture_step(fixture_future(|| async move {
             PgAuthorityCommitStore { pool }
                 .acquire_committed_content_delivery(&account, &station, &input)
                 .await
-        })
+        }))
         .await
     })
 }
@@ -179,12 +188,12 @@ fn fixture_realm_export_step(
     let realm_id = realm_id.clone();
     let actor = actor.clone();
     let station = station.clone();
-    Box::pin(async move {
-        fixture_step(async move {
+    fixture_future(|| async move {
+        fixture_step(fixture_future(|| async move {
             PgAuthorityCommitStore { pool }
                 .realm_export_for_actor(&realm_id, &actor, &station)
                 .await
-        })
+        }))
         .await
     })
 }
@@ -209,12 +218,12 @@ fn fixture_strand_watch_current_step(
     let request = request.clone();
     let account = account.clone();
     let issuer = issuer.clone();
-    Box::pin(async move {
-        fixture_step(async move {
+    fixture_future(|| async move {
+        fixture_step(fixture_future(|| async move {
             PgAuthorityCommitStore { pool }
                 .strand_watch_current_for_account(&request, &account, &issuer)
                 .await
-        })
+        }))
         .await
     })
 }
@@ -355,7 +364,7 @@ async fn pending_agent_handshake_reads(
             sidecar_id: sidecar.clone(),
         };
         let stream = CommitStreamRef::from_scope(&scope, None).unwrap();
-        let (group, tracker, genesis, commit, context, info, tree) = Box::pin(async {
+        let (group, tracker, genesis, commit, context, info, tree) = fixture_future(|| async {
             let cut = read(pool, realm, sidecar, controller)
                 .await
                 .unwrap()
@@ -559,7 +568,7 @@ async fn pending_agent_handshake_reads(
             (group, tracker, genesis, commit, context, info, tree)
         })
         .await;
-        Box::pin(async {
+        fixture_future(|| async {
             let blob = |bytes: &[u8]| {
                 arkret_wire::BlobRef::new(format!(
                     "ak:blob:{}",
@@ -707,6 +716,13 @@ async fn pending_agent_handshake_reads(
 
 #[tokio::test]
 async fn sidecar_cut_requires_exact_controller_and_current_parent_join() {
+    fixture_step(fixture_future(
+        case_sidecar_cut_requires_exact_controller_and_current_parent_join,
+    ))
+    .await
+}
+
+async fn case_sidecar_cut_requires_exact_controller_and_current_parent_join() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let historical_station = historical_control_source::HistoricalControlStation::new(
@@ -815,6 +831,13 @@ async fn sidecar_cut_requires_exact_controller_and_current_parent_join() {
 
 #[tokio::test]
 async fn desired_agents_require_owned_active_key_and_exact_realm_membership() {
+    fixture_step(fixture_future(
+        case_desired_agents_require_owned_active_key_and_exact_realm_membership,
+    ))
+    .await
+}
+
+async fn case_desired_agents_require_owned_active_key_and_exact_realm_membership() {
     use coland_storage::AgentControlAdmissionWrite;
     let database = TestDatabase::lease().await;
     let pool = database.pool();
@@ -1146,12 +1169,19 @@ async fn desired_agents_require_owned_active_key_and_exact_realm_membership() {
 
 #[tokio::test]
 async fn pending_sidecar_handshake_reads_keep_content_private_and_reject_stale_authority() {
+    fixture_step(fixture_future(
+        case_pending_sidecar_handshake_reads_keep_content_private_and_reject_stale_authority,
+    ))
+    .await
+}
+
+async fn case_pending_sidecar_handshake_reads_keep_content_private_and_reject_stale_authority() {
     boxed_pending_sidecar_handshake().await;
 }
 
 // Construct the large scenario outside the harness Future's poll frame.
 fn boxed_pending_sidecar_handshake() -> Pin<Box<dyn Future<Output = ()> + Send>> {
-    Box::pin(pending_sidecar_handshake_scenario())
+    fixture_future(|| pending_sidecar_handshake_scenario())
 }
 
 async fn pending_sidecar_handshake_scenario() {
@@ -1357,12 +1387,12 @@ async fn pending_sidecar_handshake_scenario() {
 /// The PG consume port takes serving-layer verified receipts as its input.
 #[tokio::test]
 async fn consumed_sidecar_agent_requires_exact_controller_owner_and_consume_digest() {
-    boxed_consumed_sidecar_agent().await;
+    fixture_step(boxed_consumed_sidecar_agent()).await;
 }
 
 // Construct the large scenario outside the harness Future's poll frame.
 fn boxed_consumed_sidecar_agent() -> Pin<Box<dyn Future<Output = ()> + Send>> {
-    Box::pin(consumed_sidecar_agent_scenario(None))
+    fixture_future(|| consumed_sidecar_agent_scenario(None))
 }
 
 #[derive(Clone, Copy)]
@@ -1728,27 +1758,28 @@ async fn owned_welcome_held_delivery_scenario(
 
 #[tokio::test]
 async fn owned_agent_welcome_delivery_requires_current_cut_and_exact_queued_bytes() {
-    boxed_owned_welcome(OwnedWelcomeCase::CurrentCutAndBytes).await;
+    fixture_step(boxed_owned_welcome(OwnedWelcomeCase::CurrentCutAndBytes)).await;
 }
 
 #[tokio::test]
 async fn owned_agent_welcome_delivery_holds_owner_cut_until_physical_handoff() {
-    boxed_owned_welcome(OwnedWelcomeCase::HeldOwnerWithdrawal).await;
+    fixture_step(boxed_owned_welcome(OwnedWelcomeCase::HeldOwnerWithdrawal)).await;
 }
 
 #[tokio::test]
 async fn owned_agent_welcome_delivery_rejects_accepted_runtime_key_revocation() {
-    boxed_owned_welcome(OwnedWelcomeCase::AcceptedKeyRevoke).await;
+    fixture_step(boxed_owned_welcome(OwnedWelcomeCase::AcceptedKeyRevoke)).await;
 }
 
 fn boxed_owned_welcome(case: OwnedWelcomeCase) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-    Box::pin(consumed_sidecar_agent_scenario(Some(case)))
+    fixture_future(move || consumed_sidecar_agent_scenario(Some(case)))
 }
 
 async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) {
     use coland_storage::AgentControlAdmissionWrite;
+    eprintln!("[2135-stage] consumed_scenario_poll_started=1");
     let (database, resolution, principal, create, agent_did, agent, genesis,
-        key_event, key_commit, join, delegation, station_did, historical_station, content_scope) = Box::pin(async {
+        key_event, key_commit, join, delegation, station_did, historical_station, content_scope) = fixture_step(fixture_future(move || async move {
         let database = TestDatabase::lease().await;
         let pool = database.pool();
         let notary_public = arkret_canonical::ed25519_pubkey_to_did_key_multibase(
@@ -1765,17 +1796,15 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
         };
         let resolution = historical_station.history.clone();
         let station_did = historical_station.did.clone();
-        let principal = std::sync::Arc::new(accepted_controller(&pool, station_did.clone()).await);
+        let principal = std::sync::Arc::new(fixture_future(|| accepted_controller(&pool, station_did.clone())).await);
         let controller = &principal.history.account;
         let realm = ordinary_realm::bootstrap_unit_for_account(
             "sidecar-agent-matrix",
             controller,
             &station_did,
         );
-        let realm = ordinary_realm::source_bootstrap(&pool, realm).await;
-        let store = PgAuthorityCommitStore { pool: pool.clone() };
-        store
-            .admit_ordinary_realm_bootstrap_unit(&realm, realm.transactions[0].commit.committed_at)
+        let realm = fixture_future(|| ordinary_realm::source_bootstrap(&pool, realm)).await;
+        fixture_bootstrap_step(&pool, &realm, realm.transactions[0].commit.committed_at)
             .await
             .unwrap();
         let parent = realm.transactions.last().unwrap();
@@ -1805,9 +1834,9 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
             &controller.principal_id,"owned-sidecar-agent",
             principal.unit.transactions[1].commit.committed_at,
         );
-        let (agent, genesis, provision_ref) = provision_owned_agent_with_did_and_scope(
+        let (agent, genesis, provision_ref) = fixture_future(|| provision_owned_agent_with_did_and_scope(
             &pool, &principal, agent_did.clone(), content_scope.as_ref(),
-        ).await;
+        )).await;
         let no_key = read(&pool, realm_id, &sidecar, controller)
             .await
             .unwrap()
@@ -1872,23 +1901,26 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
         fixture_commit_step(&pool, join.clone()).await.unwrap();
         (database, resolution, principal, create, agent_did, agent, genesis,
             key_event, key_commit, join, delegation, station_did, historical_station, content_scope)
-    })
+    }))
         .await;
+    eprintln!("[2135-stage] consumed_initial_setup_ready=1");
 
     let pool = database.pool();
     let controller = &principal.history.account;
     let realm_id = &create.authority_commit.event.realm_id;
     let sidecar = SidecarId::from_event_id(&create.authority_commit.event.event_id);
-    let (head, mut group, mut tracker) = Box::pin(pending_agent_handshake_reads(
-        &pool,
-        &principal,
-        &join.authority_commit,
-        &sidecar,
-        &create.authority_commit.event.event_id,
-        &agent,
-    ))
+    let (head, mut group, mut tracker) = fixture_future(|| {
+        pending_agent_handshake_reads(
+            &pool,
+            &principal,
+            &join.authority_commit,
+            &sidecar,
+            &create.authority_commit.event.event_id,
+            &agent,
+        )
+    })
     .await;
-    let completed = Box::pin(async {
+    let completed = fixture_future(|| async {
         let store = PgAuthorityCommitStore { pool: pool.clone() };
         use arkret_models_crypto::{
             KeyOperationSignature, KeyPackageConsumeReceipt, MlsGovernanceBindingPayload,
@@ -2382,7 +2414,7 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
                 verification_method: method.clone(),
             };
             let scope = content_scope.as_ref().unwrap();
-            let (vault, evidence) = Box::pin(retain_delivery_scope_for_runtime(
+            let (vault, evidence) = fixture_future(|| retain_delivery_scope_for_runtime(
                 &pool, &historical_station, &principal, &agent, &key_event, scope, &endpoint, true,
             )).await;
             if matches!(case, OwnedWelcomeCase::DeviceMessagesContinuationOwnerLeave | OwnedWelcomeCase::DeviceMessagesContinuationPolicyDeny | OwnedWelcomeCase::DeviceMessagesOwnerLeave | OwnedWelcomeCase::DeviceMessagesPolicyDeny) {
@@ -2398,7 +2430,7 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
                 });
                 // Keep the complete accepted fixture, but do not poll recipient
                 // HTTP/MLS work beneath the large original Welcome scenario.
-                fixture_step(Box::pin(owned_consumer_device_flow(input))).await;
+                fixture_step(fixture_future(|| owned_consumer_device_flow(input))).await;
                 return None;
             }
             let future_pool = pool.clone();
@@ -2413,7 +2445,7 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
             // Poll the delivery cut on its own ordinary Tokio task rather
             // than nesting it beneath the large real MLS preparation frame.
             tokio::spawn(async move {
-                Box::pin(owned_welcome_held_delivery_scenario(
+                fixture_future(|| owned_welcome_held_delivery_scenario(
                     &future_pool, &future_principal, &future_agent, &future_genesis,
                     &future_key_event, &future_key_commit, &future_parent,
                     &future_delivery, endpoint, evidence, &future_scope, case,
@@ -2568,7 +2600,7 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
     let Some((request, mut group, mut recipient_group)) = completed else {
         return;
     };
-    Box::pin(
+    fixture_future(|| {
         sidecar_post_tree_rejects_stale_endpoint_and_paused_self_update(
             &pool,
             &principal,
@@ -2581,13 +2613,20 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
             &sidecar,
             &mut group,
             &mut recipient_group,
-        ),
-    )
+        )
+    })
     .await;
 }
 
 #[tokio::test]
 async fn sidecar_snapshot_lists_and_scans_keep_private_stream_coordinates() {
+    fixture_step(fixture_future(
+        case_sidecar_snapshot_lists_and_scans_keep_private_stream_coordinates,
+    ))
+    .await
+}
+
+async fn case_sidecar_snapshot_lists_and_scans_keep_private_stream_coordinates() {
     use arkret_wire::{ActorId, CommitStreamRef, StreamScanDirection, StreamScanRequest};
     use coland_storage::{AccountRealmStreamList, AccountStreamScan};
     let database = TestDatabase::lease().await;
@@ -2883,7 +2922,7 @@ async fn sidecar_snapshot_lists_and_scans_keep_private_stream_coordinates() {
             coland_storage::PeerStreamScan::NotAuthorized
         ));
     }
-    Box::pin(async {
+    fixture_future(|| async {
         // A nonempty tail extends the issued private head, retaining exact
         // parent Realm authorization sources instead of an empty dependency list.
         let mut event = ordinary_realm::event_for_actor(
@@ -3166,13 +3205,13 @@ async fn provision_owned_agent_binding_phase_at_head(
         queued_at: provision_commit.committed_at,
     };
     let provision_pool = pool.clone();
-    fixture_step(async move {
+    fixture_step(fixture_future(|| async move {
         coland_storage_postgres::PgActorProfileStore {
             pool: provision_pool,
         }
         .admit_agent_provision(provision_write)
         .await
-    })
+    }))
     .await
     .unwrap();
     let genesis_commit = sidecar_agent::station_genesis_commit(
@@ -3196,7 +3235,7 @@ async fn provision_owned_agent_binding_phase_at_head(
         queued_at: genesis_commit.committed_at,
     };
     let genesis_pool = pool.clone();
-    fixture_step(async move {
+    fixture_step(fixture_future(|| async move {
         Box::pin(historical_control_source::admit_genesis(
             &coland_storage_postgres::PgActorProfileStore {
                 pool: genesis_pool.clone(),
@@ -3205,7 +3244,7 @@ async fn provision_owned_agent_binding_phase_at_head(
             genesis_write,
         ))
         .await
-    })
+    }))
     .await
     .unwrap();
 
@@ -3315,12 +3354,19 @@ async fn provision_owned_agent_binding_phase_at_head(
 /// verification and publication signatures are covered by HTTP/MLS suites.
 #[tokio::test]
 async fn ordinary_member_can_join_own_agent_without_permission_to_add_humans() {
+    fixture_step(fixture_future(
+        case_ordinary_member_can_join_own_agent_without_permission_to_add_humans,
+    ))
+    .await
+}
+
+async fn case_ordinary_member_can_join_own_agent_without_permission_to_add_humans() {
     boxed_ordinary_member_owned_agent_join().await;
 }
 
 // Keep the expanded real-transaction scenario outside the harness poll frame.
 fn boxed_ordinary_member_owned_agent_join() -> Pin<Box<dyn Future<Output = ()> + Send>> {
-    Box::pin(ordinary_member_owned_agent_join_scenario())
+    fixture_future(|| ordinary_member_owned_agent_join_scenario())
 }
 
 async fn ordinary_member_owned_agent_join_scenario() {
@@ -3333,7 +3379,7 @@ async fn ordinary_member_owned_agent_join_scenario() {
         "sidecar-native-control",
         [83; 32],
     );
-    let principal = accepted_controller(&pool, station.did.clone()).await;
+    let principal = fixture_future(|| accepted_controller(&pool, station.did.clone())).await;
     let controller = &principal.history.account;
     let founder = ordinary_realm::human_profile::admit_for_station_did(
         &pool,
@@ -3348,9 +3394,8 @@ async fn ordinary_member_owned_agent_join_scenario() {
         &founder,
         &station.did,
     );
-    let realm = ordinary_realm::source_bootstrap(&pool, realm).await;
-    PgAuthorityCommitStore { pool: pool.clone() }
-        .admit_ordinary_realm_bootstrap_unit(&realm, realm.transactions[0].commit.committed_at)
+    let realm = fixture_future(|| ordinary_realm::source_bootstrap(&pool, realm)).await;
+    fixture_bootstrap_step(&pool, &realm, realm.transactions[0].commit.committed_at)
         .await
         .unwrap();
     let parent = realm.transactions.last().unwrap();
@@ -3362,8 +3407,9 @@ async fn ordinary_member_owned_agent_join_scenario() {
         parent.commit.committed_at + chrono::TimeDelta::milliseconds(1),
     );
     let member_join = ordinary_realm::source_request(&pool, member_join).await;
-    let uow = PgEventCommitUnitOfWork::new(pool.clone());
-    uow.commit_event(member_join.clone()).await.unwrap();
+    fixture_commit_step(&pool, member_join.clone())
+        .await
+        .unwrap();
     let outsider = ordinary_realm::human_profile::admit_for_station_did(
         &pool,
         station.did.clone(),
@@ -3378,12 +3424,12 @@ async fn ordinary_member_owned_agent_join_scenario() {
         member_join.authority_commit.commit.committed_at + chrono::TimeDelta::milliseconds(1),
     );
     let human_add = ordinary_realm::source_request(&pool, human_add).await;
-    let error = uow.commit_event(human_add).await.unwrap_err();
+    let error = fixture_commit_step(&pool, human_add).await.unwrap_err();
     assert!(
         error.to_string().contains("only the target itself"),
         "{error}"
     );
-    let (agent, genesis, _) = provision_owned_agent(&pool, &principal).await;
+    let (agent, genesis, _) = fixture_future(|| provision_owned_agent(&pool, &principal)).await;
     let agent_join = ordinary_realm::next_request_for_actor(
         &member_join.authority_commit,
         EventKind::MemberState,
@@ -3398,7 +3444,9 @@ async fn ordinary_member_owned_agent_join_scenario() {
             + chrono::TimeDelta::milliseconds(1),
     );
     let agent_join = ordinary_realm::source_request(&pool, agent_join).await;
-    uow.commit_event(agent_join.clone()).await.unwrap();
+    fixture_commit_step(&pool, agent_join.clone())
+        .await
+        .unwrap();
 
     // Exercise admitted Policy writes, not imported management projections.
     // The all-target join rule is the default for new Agents only; an explicit
@@ -3437,7 +3485,7 @@ async fn ordinary_member_owned_agent_join_scenario() {
     )
     .await;
     let before_ban = agent_mode_footprint(&pool, realm_id).await;
-    uow.commit_event(ban.clone()).await.unwrap();
+    fixture_commit_step(&pool, ban.clone()).await.unwrap();
     let revision = arkret_wire::CurrentRevision {
         commit_id: ban.authority_commit.commit.commit_id.clone(),
         stream_position: ban.authority_commit.commit.stream_position,
@@ -3445,9 +3493,11 @@ async fn ordinary_member_owned_agent_join_scenario() {
     // Accepted retries retain their exact outcome rather than repeating CAS.
     let before_retry = agent_mode_footprint(&pool, realm_id).await;
     assert_eq!(before_retry["membership"], before_ban["membership"]);
-    uow.commit_event(ban.clone()).await.unwrap();
+    fixture_commit_step(&pool, ban.clone()).await.unwrap();
     assert_eq!(agent_mode_footprint(&pool, realm_id).await, before_retry);
-    uow.commit_event(agent_join.clone()).await.unwrap();
+    fixture_commit_step(&pool, agent_join.clone())
+        .await
+        .unwrap();
     assert_eq!(agent_mode_footprint(&pool, realm_id).await, before_retry);
     let removal = ordinary_realm::next_request_for_actor(
         &ban.authority_commit,
@@ -3457,7 +3507,7 @@ async fn ordinary_member_owned_agent_join_scenario() {
         ban.authority_commit.commit.committed_at + chrono::TimeDelta::milliseconds(1),
     );
     let removal = ordinary_realm::source_request(&pool, removal).await;
-    uow.commit_event(removal.clone()).await.unwrap();
+    fixture_commit_step(&pool, removal.clone()).await.unwrap();
     let make_rejoin = |previous: &coland_storage::AuthorityCommitTransaction| {
         ordinary_realm::next_request_for_actor(
             previous,
@@ -3472,7 +3522,7 @@ async fn ordinary_member_owned_agent_join_scenario() {
     let rejected =
         ordinary_realm::source_request(&pool, make_rejoin(&removal.authority_commit)).await;
     let before_rejection = agent_mode_footprint(&pool, realm_id).await;
-    let error = uow.commit_event(rejected).await.unwrap_err();
+    let error = fixture_commit_step(&pool, rejected).await.unwrap_err();
     assert!(error.to_string().contains("forbids joining"), "{error}");
     assert_eq!(
         agent_mode_footprint(&pool, realm_id).await,
@@ -3481,7 +3531,7 @@ async fn ordinary_member_owned_agent_join_scenario() {
     let stale =
         ordinary_realm::source_request(&pool, make_policy(&removal.authority_commit, None, true))
             .await;
-    assert!(uow.commit_event(stale).await.is_err());
+    assert!(fixture_commit_step(&pool, stale).await.is_err());
     assert_eq!(
         agent_mode_footprint(&pool, realm_id).await,
         before_rejection
@@ -3491,10 +3541,10 @@ async fn ordinary_member_owned_agent_join_scenario() {
         make_policy(&removal.authority_commit, Some(revision), true),
     )
     .await;
-    uow.commit_event(exception.clone()).await.unwrap();
+    fixture_commit_step(&pool, exception.clone()).await.unwrap();
     let rejoin =
         ordinary_realm::source_request(&pool, make_rejoin(&exception.authority_commit)).await;
-    uow.commit_event(rejoin).await.unwrap();
+    fixture_commit_step(&pool, rejoin).await.unwrap();
     #[derive(diesel::QueryableByName)]
     struct ResultRow {
         #[diesel(sql_type = Bool)]
@@ -3519,6 +3569,13 @@ async fn ordinary_member_owned_agent_join_scenario() {
 /// verification and publication signatures are covered by HTTP/MLS suites.
 #[tokio::test]
 async fn administrator_can_remove_agent_without_controller_join_binding() {
+    fixture_step(fixture_future(
+        case_administrator_can_remove_agent_without_controller_join_binding,
+    ))
+    .await
+}
+
+async fn case_administrator_can_remove_agent_without_controller_join_binding() {
     use diesel::sql_types::Text;
     use diesel_async::RunQueryDsl;
 
@@ -3609,6 +3666,13 @@ async fn administrator_can_remove_agent_without_controller_join_binding() {
 
 #[tokio::test]
 async fn encrypted_agent_join_rechecks_claimability_and_writes_nothing_on_refusal() {
+    fixture_step(fixture_future(
+        case_encrypted_agent_join_rechecks_claimability_and_writes_nothing_on_refusal,
+    ))
+    .await
+}
+
+async fn case_encrypted_agent_join_rechecks_claimability_and_writes_nothing_on_refusal() {
     use coland_storage::{AgentControlAdmissionWrite, MlsKeyPackageStore};
     use diesel::sql_types::{BigInt, Text};
     use diesel_async::RunQueryDsl;
@@ -3936,28 +4000,32 @@ fn agent_mode_request_at(
 
 #[tokio::test]
 async fn agent_mode_controller_cas_preserves_derived_sidecar_roster() {
+    eprintln!("[2135-stage] scenario_start=1");
     let (database, principal, agent, initial, revision, guard) =
-        boxed_agent_mode_controller_cas().await;
+        fixture_step(boxed_agent_mode_controller_cas()).await;
     let pool = database.pool();
-    let make_mode = |previous: &coland_storage::AuthorityCommitTransaction,
-                     mode: &str,
-                     expected: Option<arkret_wire::CurrentRevision>| {
-        agent_mode_request(previous, mode, expected, &principal, &agent, &guard)
-    };
-    Box::pin(agent_publish_policy_scenario(
-        &pool,
-        &principal.history.account,
-        &agent,
-        &initial,
-        revision,
-        &make_mode,
-    ))
+    fixture_step(fixture_future(|| async move {
+        let make_mode = |previous: &coland_storage::AuthorityCommitTransaction,
+                         mode: &str,
+                         expected: Option<arkret_wire::CurrentRevision>| {
+            agent_mode_request(previous, mode, expected, &principal, &agent, &guard)
+        };
+        Box::pin(agent_publish_policy_scenario(
+            &pool,
+            &principal.history.account,
+            &agent,
+            &initial,
+            revision,
+            &make_mode,
+        ))
+        .await;
+    }))
     .await;
 }
 
 // Construct the large scenario outside the harness Future's poll frame.
 fn boxed_agent_mode_controller_cas() -> Pin<Box<dyn Future<Output = AgentModeScenario> + Send>> {
-    Box::pin(agent_mode_controller_cas_scenario())
+    fixture_future(|| agent_mode_controller_cas_scenario())
 }
 
 async fn agent_mode_footprint(
@@ -3974,10 +4042,10 @@ async fn agent_mode_footprint(
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
         "SELECT jsonb_build_object( \
-         'events', (SELECT COUNT(*) FROM canonical_events WHERE realm_id=$1), \
-         'commits', (SELECT COUNT(*) FROM realm_commits WHERE realm_id=$1), \
-         'facts', (SELECT COUNT(*) FROM agent_producer_signer_keys f JOIN realm_commits c ON c.commit_id=f.commit_id WHERE c.realm_id=$1), \
-         'outbox', (SELECT COUNT(*) FROM event_federation_outbox o JOIN canonical_events e ON e.pk=o.event_pk WHERE e.realm_id=$1), \
+         'events', (SELECT COALESCE(jsonb_agg(to_jsonb(e) ORDER BY to_jsonb(e)::text),'[]'::jsonb) FROM canonical_events e WHERE realm_id=$1), \
+         'commits', (SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY to_jsonb(c)::text),'[]'::jsonb) FROM realm_commits c WHERE realm_id=$1), \
+         'facts', (SELECT COALESCE(jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text),'[]'::jsonb) FROM agent_producer_signer_keys f JOIN realm_commits c ON c.commit_id=f.commit_id WHERE c.realm_id=$1), \
+         'outbox', (SELECT COALESCE(jsonb_agg(to_jsonb(o) ORDER BY to_jsonb(o)::text),'[]'::jsonb) FROM event_federation_outbox o JOIN canonical_events e ON e.pk=o.event_pk WHERE e.realm_id=$1), \
          'authority', (SELECT to_jsonb(a) FROM realm_authorities a WHERE realm_id=$1), \
          'membership', (SELECT COALESCE(jsonb_agg(to_jsonb(m) ORDER BY to_jsonb(m)::text),'[]'::jsonb) FROM member_state_current_results m WHERE realm_id=$1), \
          'policy', (SELECT COALESCE(jsonb_agg(to_jsonb(p) ORDER BY to_jsonb(p)::text),'[]'::jsonb) FROM policy_current_results p WHERE realm_id=$1), \
@@ -3997,21 +4065,23 @@ async fn agent_mode_controller_cas_scenario() -> AgentModeScenario {
     use coland_storage::AgentControlAdmissionWrite;
     let database = TestDatabase::lease().await;
     let pool = database.pool();
+    eprintln!("[2135-stage] database_ready=1");
     let historical_station = historical_control_source::HistoricalControlStation::new(
         "sidecar-native-control",
         [83; 32],
     );
     let station_did = historical_station.did.clone();
     let principal = accepted_controller(&pool, station_did.clone()).await;
+    eprintln!("[2135-stage] controller_ready=1");
     let controller = &principal.history.account;
     let realm =
         ordinary_realm::bootstrap_unit_for_account("agent-mode-cas", controller, &station_did);
     let realm = ordinary_realm::source_bootstrap(&pool, realm).await;
     let store = PgAuthorityCommitStore { pool: pool.clone() };
-    store
-        .admit_ordinary_realm_bootstrap_unit(&realm, realm.transactions[0].commit.committed_at)
+    fixture_bootstrap_step(&pool, &realm, realm.transactions[0].commit.committed_at)
         .await
         .unwrap();
+    eprintln!("[2135-stage] realm_bootstrap_ready=1");
     let parent = realm.transactions.last().unwrap();
     let create = ordinary_realm::next_request(
         parent,
@@ -4020,9 +4090,8 @@ async fn agent_mode_controller_cas_scenario() -> AgentModeScenario {
         serde_json::json!({}),
         parent.commit.committed_at,
     );
-    let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let create = ordinary_realm::source_request(&pool, create).await;
-    uow.commit_event(create.clone()).await.unwrap();
+    fixture_commit_step(&pool, create.clone()).await.unwrap();
     let realm_id = &create.authority_commit.event.realm_id;
     let sidecar = SidecarId::from_event_id(&create.authority_commit.event.event_id);
     let endpoint = "https://sidecar-agent.example/".parse().unwrap();
@@ -4044,7 +4113,7 @@ async fn agent_mode_controller_cas_scenario() -> AgentModeScenario {
     )
     .unwrap();
     let agent_did = arkret_wire::Did::new(inception.did.clone()).unwrap();
-    let (agent, genesis, provision_ref) = provision_owned_agent_binding_phase(
+    let (agent, genesis, provision_ref) = Box::pin(provision_owned_agent_binding_phase(
         &pool,
         &principal,
         agent_did.clone(),
@@ -4052,8 +4121,9 @@ async fn agent_mode_controller_cas_scenario() -> AgentModeScenario {
         true,
         Some(&inception),
         &[0x72; 32],
-    )
+    ))
     .await;
+    eprintln!("[2135-stage] owned_binding_ready=1");
     let no_key = read(&pool, realm_id, &sidecar, controller)
         .await
         .unwrap()
@@ -4118,7 +4188,7 @@ async fn agent_mode_controller_cas_scenario() -> AgentModeScenario {
             + chrono::TimeDelta::milliseconds(1),
     );
     let join = ordinary_realm::source_request(&pool, join).await;
-    uow.commit_event(join.clone()).await.unwrap();
+    fixture_commit_step(&pool, join.clone()).await.unwrap();
     let joined = read(&pool, realm_id, &sidecar, controller)
         .await
         .unwrap()
@@ -4158,7 +4228,7 @@ async fn agent_mode_controller_cas_scenario() -> AgentModeScenario {
     let historical = ordinary_realm::source_request(&pool, historical).await;
     let before = agent_mode_footprint(&pool, realm_id).await;
     assert!(
-        uow.commit_event(historical)
+        fixture_commit_step(&pool, historical)
             .await
             .unwrap_err()
             .to_string()
@@ -4170,14 +4240,14 @@ async fn agent_mode_controller_cas_scenario() -> AgentModeScenario {
     let mut unguarded = public.clone();
     unguarded.self_producer_guard = None;
     assert!(
-        uow.commit_event(unguarded)
+        fixture_commit_step(&pool, unguarded)
             .await
             .unwrap_err()
             .to_string()
             .contains("capability_denied")
     );
     let public = ordinary_realm::source_request(&pool, public).await;
-    uow.commit_event(public.clone()).await.unwrap();
+    fixture_commit_step(&pool, public.clone()).await.unwrap();
     let selector = arkret_wire::CurrentSelector::AgentInteraction {
         agent_account_id: agent.clone(),
     };
@@ -4201,17 +4271,22 @@ async fn agent_mode_controller_cas_scenario() -> AgentModeScenario {
     );
     let mut stale = make_mode(&public.authority_commit, "private", None);
     source_candidate(&pool, &mut stale).await;
+    let before_missing_revision = agent_mode_footprint(&pool, realm_id).await;
     assert!(
-        uow.commit_event(stale)
+        fixture_commit_step(&pool, stale)
             .await
             .unwrap_err()
             .to_string()
             .contains("failed_precondition")
     );
+    assert_eq!(
+        agent_mode_footprint(&pool, realm_id).await,
+        before_missing_revision
+    );
     let mut private = make_mode(&public.authority_commit, "private", Some(revision));
     source_candidate(&pool, &mut private).await;
     let private = ordinary_realm::source_request(&pool, private).await;
-    uow.commit_event(private.clone()).await.unwrap();
+    fixture_commit_step(&pool, private.clone()).await.unwrap();
     let arkret_wire::TypedCurrentRow::Value { value, .. } = store
         .current_agent_result(realm_id, &selector)
         .await
@@ -4347,7 +4422,7 @@ async fn agent_mode_controller_cas_scenario() -> AgentModeScenario {
 
     let private_write_before = agent_mode_footprint(&pool, realm_id).await;
     assert!(
-        uow.commit_event(private_write)
+        fixture_commit_step(&pool, private_write)
             .await
             .unwrap_err()
             .to_string()
@@ -4372,7 +4447,9 @@ async fn agent_mode_controller_cas_scenario() -> AgentModeScenario {
     );
     source_candidate(&pool, &mut same_value).await;
     let same_value = ordinary_realm::source_request(&pool, same_value).await;
-    uow.commit_event(same_value.clone()).await.unwrap();
+    fixture_commit_step(&pool, same_value.clone())
+        .await
+        .unwrap();
     let arkret_wire::TypedCurrentRow::Value {
         revision: advanced, ..
     } = store
@@ -4387,6 +4464,46 @@ async fn agent_mode_controller_cas_scenario() -> AgentModeScenario {
     assert_eq!(
         advanced.commit_id,
         same_value.authority_commit.commit.commit_id
+    );
+    // A new same-value intent must still carry the current revision. An old
+    // revision is not an exact retry of the already accepted original Event.
+    let mut stale = make_mode(
+        &same_value.authority_commit,
+        "private",
+        Some(private_revision),
+    );
+    source_candidate(&pool, &mut stale).await;
+    let before_stale_cut = read(&pool, realm_id, &sidecar, controller)
+        .await
+        .unwrap()
+        .unwrap();
+    let before_stale = agent_mode_footprint(&pool, realm_id).await;
+    let error = fixture_commit_step(&pool, stale).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Agent mode expected_revision differs from current"),
+        "{error}"
+    );
+    assert_eq!(agent_mode_footprint(&pool, realm_id).await, before_stale);
+    let after_stale_cut = read(&pool, realm_id, &sidecar, controller)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after_stale_cut.desired_agent_ids,
+        before_stale_cut.desired_agent_ids
+    );
+    assert_eq!(
+        after_stale_cut.participant_authority_digest,
+        before_stale_cut.participant_authority_digest
+    );
+    assert_eq!(
+        after_stale_cut.authority_stream_head,
+        before_stale_cut.authority_stream_head
+    );
+    eprintln!(
+        "[2135-return] missing_expected_revision_rejected=1 stale_same_value_revision_rejected=1 full_persisted_row_groups_equal=11 derived_roster_and_source_head_equal=1"
     );
     let snapshot = store
         .realm_state_snapshot_material_for_account(realm_id, controller)
@@ -4421,7 +4538,6 @@ async fn agent_publish_policy_scenario<F>(
         + Sync,
 {
     let store = PgAuthorityCommitStore { pool: pool.clone() };
-    let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let realm_id = &initial.event.realm_id;
     let selector = arkret_wire::CurrentSelector::AgentInteraction {
         agent_account_id: agent.clone(),
@@ -4448,7 +4564,7 @@ async fn agent_publish_policy_scenario<F>(
         source_candidate(&pool, &mut opening).await;
         let before = agent_mode_footprint(&pool, realm_id).await;
         if effect != "allow" {
-            let error = uow.commit_event(opening).await.unwrap_err();
+            let error = fixture_commit_step(&pool, opening).await.unwrap_err();
             let expected = if effect == "deny" {
                 "forbids publishing"
             } else {
@@ -4466,7 +4582,7 @@ async fn agent_publish_policy_scenario<F>(
             assert_eq!(agent_mode_footprint(&pool, realm_id).await, before);
         } else {
             let opening = ordinary_realm::source_request(&pool, opening).await;
-            uow.commit_event(opening.clone()).await.unwrap();
+            fixture_commit_step(&pool, opening.clone()).await.unwrap();
             previous = opening.authority_commit.clone();
             mode_revision = arkret_wire::CurrentRevision {
                 commit_id: previous.commit.commit_id.clone(),
@@ -4482,12 +4598,12 @@ async fn agent_publish_policy_scenario<F>(
             )
             .await;
             let before_replay = agent_mode_footprint(&pool, realm_id).await;
-            uow.commit_event(opening).await.unwrap();
+            fixture_commit_step(&pool, opening).await.unwrap();
             assert_eq!(agent_mode_footprint(&pool, realm_id).await, before_replay);
             let mut unchanged = make_mode(&previous, "public", Some(mode_revision));
             source_candidate(&pool, &mut unchanged).await;
             let unchanged = ordinary_realm::source_request(&pool, unchanged).await;
-            uow.commit_event(unchanged.clone()).await.unwrap();
+            fixture_commit_step(&pool, unchanged.clone()).await.unwrap();
             previous = unchanged.authority_commit;
             mode_revision = arkret_wire::CurrentRevision {
                 commit_id: previous.commit.commit_id.clone(),
@@ -4499,7 +4615,7 @@ async fn agent_publish_policy_scenario<F>(
         let mut private = make_mode(&previous, "private", Some(mode_revision));
         source_candidate(&pool, &mut private).await;
         let private = ordinary_realm::source_request(&pool, private).await;
-        uow.commit_event(private.clone()).await.unwrap();
+        fixture_commit_step(&pool, private.clone()).await.unwrap();
         previous = private.authority_commit;
         mode_revision = arkret_wire::CurrentRevision {
             commit_id: previous.commit.commit_id.clone(),
@@ -4524,7 +4640,7 @@ async fn agent_publish_policy_scenario<F>(
     let mut opening = make_mode(&previous, "public", Some(mode_revision));
     source_candidate(&pool, &mut opening).await;
     let before = agent_mode_footprint(&pool, realm_id).await;
-    let error = uow.commit_event(opening).await.unwrap_err();
+    let error = fixture_commit_step(&pool, opening).await.unwrap_err();
     assert!(
         error.to_string().contains("revision_unavailable"),
         "{error}"
@@ -4983,6 +5099,13 @@ async fn sidecar_post_tree_rejects_stale_endpoint_and_paused_self_update(
 /// This storage test does not substitute for HTTP service/key scope checks.
 #[tokio::test]
 async fn owned_agent_delivery_holds_current_cut_until_finish_and_cancel() {
+    fixture_step(fixture_future(
+        case_owned_agent_delivery_holds_current_cut_until_finish_and_cancel,
+    ))
+    .await
+}
+
+async fn case_owned_agent_delivery_holds_current_cut_until_finish_and_cancel() {
     tokio::spawn(Box::pin(owned_agent_delivery_cut_scenario(
         DeliveryExpiryCase::NoExpiry,
     )))
@@ -4992,6 +5115,13 @@ async fn owned_agent_delivery_holds_current_cut_until_finish_and_cancel() {
 
 #[tokio::test]
 async fn owned_agent_delivery_rechecks_key_expiry_after_waiting_for_producer_lock() {
+    fixture_step(fixture_future(
+        case_owned_agent_delivery_rechecks_key_expiry_after_waiting_for_producer_lock,
+    ))
+    .await
+}
+
+async fn case_owned_agent_delivery_rechecks_key_expiry_after_waiting_for_producer_lock() {
     tokio::spawn(Box::pin(owned_agent_delivery_cut_scenario(
         DeliveryExpiryCase::LockWait,
     )))
@@ -5001,6 +5131,13 @@ async fn owned_agent_delivery_rechecks_key_expiry_after_waiting_for_producer_loc
 
 #[tokio::test]
 async fn owned_agent_delivery_rechecks_key_expiry_at_physical_handoff() {
+    fixture_step(fixture_future(
+        case_owned_agent_delivery_rechecks_key_expiry_at_physical_handoff,
+    ))
+    .await
+}
+
+async fn case_owned_agent_delivery_rechecks_key_expiry_at_physical_handoff() {
     tokio::spawn(Box::pin(owned_agent_delivery_cut_scenario(
         DeliveryExpiryCase::HeldLease,
     )))
@@ -5328,9 +5465,9 @@ async fn retain_delivery_scope_for_runtime(
     };
     let custody_state = state.clone();
     let custody_body = body.clone();
-    let reference = fixture_step(async move {
+    let reference = fixture_step(fixture_future(|| async move {
         Box::pin(custody_state.verify_and_retain_agent_scope_custody(&custody_body)).await
-    })
+    }))
     .await
     .unwrap();
     let request_digest =
@@ -5462,9 +5599,9 @@ async fn retain_delivery_scope_for_runtime(
     };
     let cold = vault.reopen();
     let query_endpoint = endpoint.clone();
-    let evidence = fixture_step(async move {
+    let evidence = fixture_step(fixture_future(|| async move {
         Box::pin(cold.qualified_agent_scope_evidence(&query_endpoint)).await
-    })
+    }))
     .await
     .unwrap();
     assert_eq!(evidence.custody_ref(), &reference);
@@ -5477,9 +5614,9 @@ async fn retain_delivery_scope_for_runtime(
     assert!(chrono::Utc::now() > evidence.command().requested_scope_disclosure.expires_at);
     let reopened_state = vault.reopen();
     let query_endpoint = endpoint.clone();
-    let reopened = fixture_step(async move {
+    let reopened = fixture_step(fixture_future(|| async move {
         Box::pin(reopened_state.qualified_agent_scope_evidence(&query_endpoint)).await
-    })
+    }))
     .await
     .unwrap();
     assert_eq!(reopened.custody_ref(), evidence.custody_ref());
@@ -6029,10 +6166,7 @@ async fn import_agent_management_policy(
     let request = ordinary_realm::source_request(pool, request).await;
     if operation == "publish" {
         let transaction = request.authority_commit.clone();
-        PgEventCommitUnitOfWork::new(pool.clone())
-            .commit_event(request)
-            .await
-            .unwrap();
+        fixture_commit_step(pool, request).await.unwrap();
         return transaction;
     }
     let tx = request.authority_commit;
@@ -6065,6 +6199,13 @@ async fn import_agent_management_policy(
 
 #[tokio::test]
 async fn owned_agent_join_requires_complete_binding_after_active_genesis() {
+    fixture_step(fixture_future(
+        case_owned_agent_join_requires_complete_binding_after_active_genesis,
+    ))
+    .await
+}
+
+async fn case_owned_agent_join_requires_complete_binding_after_active_genesis() {
     Box::pin(owned_agent_incomplete_binding_scenario()).await;
 }
 async fn owned_agent_incomplete_binding_scenario() {
@@ -6313,6 +6454,13 @@ fn management_native_vote(
 
 #[tokio::test]
 async fn management_review_approved_intent_consumes_atomically_and_exact_replays() {
+    fixture_step(fixture_future(
+        case_management_review_approved_intent_consumes_atomically_and_exact_replays,
+    ))
+    .await
+}
+
+async fn case_management_review_approved_intent_consumes_atomically_and_exact_replays() {
     // Keep the complete accepted-source fixture outside the test harness frame.
     tokio::spawn(Box::pin(management_review_atomic_join_scenario(
         false, false, None,
@@ -7911,6 +8059,13 @@ async fn management_review_http_post<T: serde::Serialize>(
 }
 #[tokio::test]
 async fn management_review_standard_http_operations_retain_signed_candidate() {
+    fixture_step(fixture_future(
+        case_management_review_standard_http_operations_retain_signed_candidate,
+    ))
+    .await
+}
+
+async fn case_management_review_standard_http_operations_retain_signed_candidate() {
     tokio::spawn(Box::pin(management_review_atomic_join_scenario(
         true, false, None,
     )))
@@ -7920,6 +8075,13 @@ async fn management_review_standard_http_operations_retain_signed_candidate() {
 
 #[tokio::test]
 async fn management_review_historical_rotation_is_preserved_but_admin_loss_is_terminal() {
+    fixture_step(fixture_future(
+        case_management_review_historical_rotation_is_preserved_but_admin_loss_is_terminal,
+    ))
+    .await
+}
+
+async fn case_management_review_historical_rotation_is_preserved_but_admin_loss_is_terminal() {
     tokio::spawn(Box::pin(management_review_atomic_join_scenario(
         false, true, None,
     )))
@@ -8130,6 +8292,13 @@ async fn management_review_writer_held_cut(
 
 #[tokio::test]
 async fn management_review_aa_missing_observation() {
+    fixture_step(fixture_future(
+        case_management_review_aa_missing_observation,
+    ))
+    .await
+}
+
+async fn case_management_review_aa_missing_observation() {
     tokio::spawn(Box::pin(management_review_atomic_join_scenario(
         false,
         false,
@@ -8141,6 +8310,13 @@ async fn management_review_aa_missing_observation() {
 
 #[tokio::test]
 async fn management_review_aa_authoritative_empty_requires_head_and_real_first_append() {
+    fixture_step(fixture_future(
+        case_management_review_aa_authoritative_empty_requires_head_and_real_first_append,
+    ))
+    .await
+}
+
+async fn case_management_review_aa_authoritative_empty_requires_head_and_real_first_append() {
     tokio::spawn(Box::pin(management_review_atomic_join_scenario(
         true,
         false,
@@ -8152,6 +8328,13 @@ async fn management_review_aa_authoritative_empty_requires_head_and_real_first_a
 
 #[tokio::test]
 async fn management_review_aa_stale_observation_refuses_before_private_request() {
+    fixture_step(fixture_future(
+        case_management_review_aa_stale_observation_refuses_before_private_request,
+    ))
+    .await
+}
+
+async fn case_management_review_aa_stale_observation_refuses_before_private_request() {
     tokio::spawn(Box::pin(management_review_atomic_join_scenario(
         false,
         false,
@@ -8163,6 +8346,13 @@ async fn management_review_aa_stale_observation_refuses_before_private_request()
 
 #[tokio::test]
 async fn management_review_aa_wrong_full_account_is_not_projected_to_a_signer() {
+    fixture_step(fixture_future(
+        case_management_review_aa_wrong_full_account_is_not_projected_to_a_signer,
+    ))
+    .await
+}
+
+async fn case_management_review_aa_wrong_full_account_is_not_projected_to_a_signer() {
     tokio::spawn(Box::pin(management_review_atomic_join_scenario(
         false,
         false,
@@ -8174,6 +8364,13 @@ async fn management_review_aa_wrong_full_account_is_not_projected_to_a_signer() 
 
 #[tokio::test]
 async fn management_review_aa_wrong_receiving_station_is_not_current_qualification() {
+    fixture_step(fixture_future(
+        case_management_review_aa_wrong_receiving_station_is_not_current_qualification,
+    ))
+    .await
+}
+
+async fn case_management_review_aa_wrong_receiving_station_is_not_current_qualification() {
     tokio::spawn(Box::pin(management_review_atomic_join_scenario(
         false,
         false,
@@ -8185,6 +8382,13 @@ async fn management_review_aa_wrong_receiving_station_is_not_current_qualificati
 
 #[tokio::test]
 async fn management_review_aa_terminal_caller_cannot_create_private_intent() {
+    fixture_step(fixture_future(
+        case_management_review_aa_terminal_caller_cannot_create_private_intent,
+    ))
+    .await
+}
+
+async fn case_management_review_aa_terminal_caller_cannot_create_private_intent() {
     tokio::spawn(Box::pin(management_review_atomic_join_scenario(
         false,
         false,
@@ -8196,6 +8400,13 @@ async fn management_review_aa_terminal_caller_cannot_create_private_intent() {
 
 #[tokio::test]
 async fn management_review_aa_terminal_controller_supersedes_and_consumes_nothing() {
+    fixture_step(fixture_future(
+        case_management_review_aa_terminal_controller_supersedes_and_consumes_nothing,
+    ))
+    .await
+}
+
+async fn case_management_review_aa_terminal_controller_supersedes_and_consumes_nothing() {
     tokio::spawn(Box::pin(management_review_atomic_join_scenario(
         false,
         false,
@@ -8207,6 +8418,13 @@ async fn management_review_aa_terminal_controller_supersedes_and_consumes_nothin
 
 #[tokio::test]
 async fn management_review_aa_terminal_retained_vote_supersedes_and_consumes_nothing() {
+    fixture_step(fixture_future(
+        case_management_review_aa_terminal_retained_vote_supersedes_and_consumes_nothing,
+    ))
+    .await
+}
+
+async fn case_management_review_aa_terminal_retained_vote_supersedes_and_consumes_nothing() {
     tokio::spawn(Box::pin(management_review_atomic_join_scenario(
         false,
         false,
@@ -8218,6 +8436,13 @@ async fn management_review_aa_terminal_retained_vote_supersedes_and_consumes_not
 
 #[tokio::test]
 async fn management_review_aa_unused_foreign_admin_is_never_resolved() {
+    fixture_step(fixture_future(
+        case_management_review_aa_unused_foreign_admin_is_never_resolved,
+    ))
+    .await
+}
+
+async fn case_management_review_aa_unused_foreign_admin_is_never_resolved() {
     tokio::spawn(Box::pin(management_review_atomic_join_scenario(
         true,
         false,
@@ -8229,6 +8454,13 @@ async fn management_review_aa_unused_foreign_admin_is_never_resolved() {
 
 #[tokio::test]
 async fn management_review_aa_signed_successor_waits_for_held_review_cut() {
+    fixture_step(fixture_future(
+        case_management_review_aa_signed_successor_waits_for_held_review_cut,
+    ))
+    .await
+}
+
+async fn case_management_review_aa_signed_successor_waits_for_held_review_cut() {
     tokio::spawn(Box::pin(management_review_atomic_join_scenario(
         false,
         false,
@@ -8240,6 +8472,13 @@ async fn management_review_aa_signed_successor_waits_for_held_review_cut() {
 
 #[tokio::test]
 async fn management_review_aa_real_expiry_consumes_nothing() {
+    fixture_step(fixture_future(
+        case_management_review_aa_real_expiry_consumes_nothing,
+    ))
+    .await
+}
+
+async fn case_management_review_aa_real_expiry_consumes_nothing() {
     tokio::spawn(Box::pin(management_review_atomic_join_scenario(
         false,
         false,
@@ -8251,6 +8490,13 @@ async fn management_review_aa_real_expiry_consumes_nothing() {
 
 #[tokio::test]
 async fn management_review_aa_consumed_exact_replay_survives_later_terminal_account() {
+    fixture_step(fixture_future(
+        case_management_review_aa_consumed_exact_replay_survives_later_terminal_account,
+    ))
+    .await
+}
+
+async fn case_management_review_aa_consumed_exact_replay_survives_later_terminal_account() {
     tokio::spawn(Box::pin(management_review_atomic_join_scenario(
         false,
         false,
@@ -8286,7 +8532,7 @@ struct OwnedConsumerFixture {
 fn boxed_owned_consumer_fixture(
     count: usize,
 ) -> Pin<Box<dyn Future<Output = OwnedConsumerFixture> + Send>> {
-    Box::pin(owned_consumer_fixture(count))
+    fixture_future(|| owned_consumer_fixture(count))
 }
 
 async fn owned_consumer_fixture(count: usize) -> OwnedConsumerFixture {
@@ -8599,11 +8845,11 @@ fn owned_consumer_grant_scope_step(
     state: coland_http::state::AppState,
     endpoint: coland_storage::AgentEndpointGuard,
 ) -> Pin<Box<dyn Future<Output = coland_storage::VerifiedAgentScopeEvidence> + Send>> {
-    fixture_step(async move {
+    fixture_step(fixture_future(|| async move {
         Box::pin(state.qualified_agent_scope_evidence(&endpoint))
             .await
             .unwrap()
-    })
+    }))
 }
 
 async fn owned_consumer_root_grant(
@@ -9385,10 +9631,10 @@ async fn owned_consumer_take_response_bytes(
 ) -> salvo::Result<bytes::Bytes> {
     use salvo::test::ResponseExt;
     let mut original = std::mem::take(response);
-    let (original, result) = fixture_step(async move {
+    let (original, result) = fixture_step(fixture_future(|| async move {
         let result = original.take_bytes(None).await;
         (original, result)
-    })
+    }))
     .await;
     *response = original;
     result
@@ -9400,10 +9646,10 @@ where
 {
     use salvo::test::ResponseExt;
     let mut original = std::mem::take(response);
-    let (original, result) = fixture_step(async move {
+    let (original, result) = fixture_step(fixture_future(|| async move {
         let result = original.take_json::<T>().await;
         (original, result)
-    })
+    }))
     .await;
     *response = original;
     result
@@ -9456,7 +9702,7 @@ async fn owned_consumer_http_get_at_receiver(
     // Keep the original production router and request, but poll its handler in
     // the same cancellation-safe ordinary task boundary as native fixture UOWs.
     // The large parent scenario frame must not stack beneath the HTTP poll.
-    fixture_step(async move {
+    fixture_step(fixture_future(|| async move {
         let dpop = arkret_signatures::dpop::build_dpop_proof(
             &arkret_signatures::dpop::DpopProofRequest::new("GET", format!("{base_url}{path}"))
                 .access_token(token.clone()),
@@ -9474,7 +9720,7 @@ async fn owned_consumer_http_get_at_receiver(
             .add_header("Arkret-Operation", operation, true)
             .send(service.as_ref())
             .await
-    })
+    }))
     .await
 }
 
@@ -9713,11 +9959,11 @@ async fn owned_consumer_http_read_scenario(policy_deny: bool) {
     let issuer = http.state.service_core_id();
     let event_id = fixture.head.event.event_id.clone();
     let caller = ActorId::account(agent.account.clone());
-    let refused_read = fixture_step(async move {
+    let refused_read = fixture_step(fixture_future(|| async move {
         store
             .committed_event_for_member(&event_id, &caller, &issuer)
             .await
-    })
+    }))
     .await;
     let Err(error) = refused_read else {
         panic!("owned consumer stage=current_read_refusal unexpected successful lookup");
@@ -9790,11 +10036,11 @@ async fn owned_consumer_poll_body_frame(
 ) -> Option<Result<salvo::http::body::Frame<bytes::Bytes>, std::io::Error>> {
     use salvo::http::body::Body;
     let mut original = std::mem::take(body);
-    let (original, frame) = fixture_step(async move {
+    let (original, frame) = fixture_step(fixture_future(|| async move {
         owned_consumer_phase("physical_body_poll");
         let frame = std::future::poll_fn(|cx| Pin::new(&mut original).poll_frame(cx)).await;
         (original, frame)
-    })
+    }))
     .await;
     *body = original;
     frame
@@ -10106,7 +10352,7 @@ async fn owned_consumer_http_blob_request(
     let base_url = http.base_url.clone();
     let path = path.to_owned();
     let range = range.map(str::to_owned);
-    fixture_step(async move {
+    fixture_step(fixture_future(|| async move {
         let (method, operation) = if head {
             (
                 "HEAD",
@@ -10137,7 +10383,7 @@ async fn owned_consumer_http_blob_request(
             request = request.add_header("Range", range, true);
         }
         request.send(service.as_ref()).await
-    })
+    }))
     .await
 }
 
@@ -10605,41 +10851,31 @@ async fn owned_consumer_device_messages_refusal(
 
 #[tokio::test]
 async fn owned_agent_device_messages_rechecks_owner_leave_before_signed_welcome_bytes() {
+    fixture_step(fixture_future(
+        case_owned_agent_device_messages_rechecks_owner_leave_before_signed_welcome_bytes,
+    ))
+    .await
+}
+
+async fn case_owned_agent_device_messages_rechecks_owner_leave_before_signed_welcome_bytes() {
     boxed_owned_welcome(OwnedWelcomeCase::DeviceMessagesOwnerLeave).await;
 }
 #[tokio::test]
 async fn owned_agent_device_messages_rechecks_policy_deny_before_signed_welcome_bytes() {
+    fixture_step(fixture_future(
+        case_owned_agent_device_messages_rechecks_policy_deny_before_signed_welcome_bytes,
+    ))
+    .await
+}
+
+async fn case_owned_agent_device_messages_rechecks_policy_deny_before_signed_welcome_bytes() {
     boxed_owned_welcome(OwnedWelcomeCase::DeviceMessagesPolicyDeny).await;
 }
 
-// Actual TLS upgrade and original WebSocket SDK frames. openssl is only the
-// test TLS transport, with an explicit temporary CA and exact hostname check;
-// tungstenite remains the original RFC 6455 handshake/frame implementation.
-struct OwnedOpenSslTransport {
-    child: std::process::Child,
-    read: std::process::ChildStdout,
-    write: std::process::ChildStdin,
-}
-impl std::io::Read for OwnedOpenSslTransport {
-    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-        std::io::Read::read(&mut self.read, bytes)
-    }
-}
-impl std::io::Write for OwnedOpenSslTransport {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        std::io::Write::write(&mut self.write, bytes)
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        std::io::Write::flush(&mut self.write)
-    }
-}
-impl Drop for OwnedOpenSslTransport {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-type OwnedTlsWebSocket = tokio_tungstenite::tungstenite::WebSocket<OwnedOpenSslTransport>;
+// Actual TLS upgrade with an explicitly trusted temporary certificate and
+// exact hostname validation. Async I/O remains cancellable at the scenario cut.
+type OwnedTlsWebSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 fn protect_owned_test_path(path: &std::path::Path, mode: u32) {
     #[cfg(unix)]
     {
@@ -10695,21 +10931,13 @@ struct OwnedWebSocketFixture {
     socket: Option<OwnedTlsWebSocket>,
     server: OwnedTlsServer,
     _directory: OwnedCertificateDirectory,
-    client_pid: u32,
+    deadline: tokio::time::Instant,
     // A shared control shape is decoded only through this actual Open/Opened
     // channel binding, never through serde's untagged variant order.
     channels: std::collections::BTreeMap<String, (arkret_wire::WebSocketOperationId, bool)>,
 }
 impl Drop for OwnedWebSocketFixture {
     fn drop(&mut self) {
-        // Also unblock an in-flight owned blocking read on caller cancellation.
-        if self.client_pid != 0 && self.socket.is_none() {
-            let _ = std::process::Command::new("kill")
-                .args(["-TERM", &self.client_pid.to_string()])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-        }
         self.socket.take();
         self.server.handle.stop_forceful();
         self.server.task.abort();
@@ -10743,7 +10971,7 @@ async fn owned_consumer_ws_connect(http: &OwnedConsumerHttpFixture) -> OwnedWebS
     let certificate = directory.0.join("certificate.pem");
     let private_key = directory.0.join("private-key.pem");
     let config = directory.0.join("certificate.cnf");
-    std::fs::write(&config,format!("[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=ext\n[dn]\nCN={host}\n[ext]\nsubjectAltName=DNS:{host}\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,digitalSignature,keyEncipherment,keyCertSign\nextendedKeyUsage=serverAuth\n")).unwrap();
+    std::fs::write(&config,format!("[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=ext\n[dn]\nCN={host}\n[ext]\nsubjectAltName=DNS:{host}\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment,keyCertSign\nextendedKeyUsage=serverAuth\n")).unwrap();
     protect_owned_test_path(&config, 0o600);
     let generated = std::process::Command::new("openssl")
         .args([
@@ -10758,7 +10986,10 @@ async fn owned_consumer_ws_connect(http: &OwnedConsumerHttpFixture) -> OwnedWebS
         .stderr(std::process::Stdio::null())
         .status()
         .unwrap();
-    assert!(generated.success(), "temporary pinned test CA creation");
+    assert!(
+        generated.success(),
+        "temporary pinned test certificate creation"
+    );
     for path in [&certificate, &private_key] {
         protect_owned_test_path(path, 0o600);
     }
@@ -10787,56 +11018,50 @@ async fn owned_consumer_ws_connect(http: &OwnedConsumerHttpFixture) -> OwnedWebS
         task: server_task,
         handle,
     };
-    let (socket, pid) = tokio::task::spawn_blocking(move || {
-        let mut child = std::process::Command::new("openssl")
-            .args([
-                "s_client",
-                "-connect",
-                &address.to_string(),
-                "-servername",
-                &host,
-                "-verify_hostname",
-                &host,
-                "-verify_return_error",
-                "-CAfile",
-            ])
-            .arg(&certificate)
-            .arg("-quiet")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        let pid = child.id();
-        let read = child.stdout.take().unwrap();
-        let write = child.stdin.take().unwrap();
-        let transport = OwnedOpenSslTransport { child, read, write };
-        let mut request = base.into_client_request().unwrap();
-        request
-            .headers_mut()
-            .insert("Origin", origin.parse().unwrap());
-        request.headers_mut().insert(
-            "Sec-WebSocket-Protocol",
-            arkret_wire::websocket_binding::WEBSOCKET_SUBPROTOCOL
-                .parse()
-                .unwrap(),
-        );
-        let (socket, response) =
-            tokio_tungstenite::tungstenite::client(request, transport).unwrap();
-        assert_eq!(response.status().as_u16(), 101);
-        assert_eq!(
-            response.headers().get("Sec-WebSocket-Protocol").unwrap(),
-            arkret_wire::websocket_binding::WEBSOCKET_SUBPROTOCOL
-        );
-        (socket, pid)
+    use rustls::pki_types::pem::PemObject;
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(rustls::pki_types::CertificateDer::from_pem_file(&certificate).unwrap())
+        .unwrap();
+    let tls = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let mut request = base.into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("Origin", origin.parse().unwrap());
+    request.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        arkret_wire::websocket_binding::WEBSOCKET_SUBPROTOCOL
+            .parse()
+            .unwrap(),
+    );
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(40);
+    let (socket, response) = tokio::time::timeout_at(deadline, async {
+        let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        tokio_tungstenite::client_async_tls_with_config(
+            request,
+            stream,
+            None,
+            Some(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(
+                tls,
+            ))),
+        )
+        .await
+        .unwrap()
     })
     .await
-    .unwrap();
+    .expect("actual TLS upgrade must finish within the scenario deadline");
+    assert_eq!(response.status().as_u16(), 101);
+    assert_eq!(
+        response.headers().get("Sec-WebSocket-Protocol").unwrap(),
+        arkret_wire::websocket_binding::WEBSOCKET_SUBPROTOCOL
+    );
     OwnedWebSocketFixture {
         socket: Some(socket),
         server,
         _directory: directory,
-        client_pid: pid,
+        deadline,
         channels: std::collections::BTreeMap::new(),
     }
 }
@@ -10858,18 +11083,18 @@ async fn owned_consumer_ws_send(
         }
         _ => None,
     };
-    let mut socket = ws.socket.take().unwrap();
+    use futures_util::SinkExt;
     let bytes = arkret_canonical::canonical_json_string(&frame).unwrap();
-    ws.socket = Some(
-        tokio::task::spawn_blocking(move || {
-            socket
-                .send(tokio_tungstenite::tungstenite::Message::Text(bytes.into()))
-                .unwrap();
-            socket
-        })
-        .await
-        .unwrap(),
-    );
+    tokio::time::timeout_at(
+        ws.deadline,
+        ws.socket
+            .as_mut()
+            .unwrap()
+            .send(tokio_tungstenite::tungstenite::Message::Text(bytes.into())),
+    )
+    .await
+    .expect("actual socket write must finish within the scenario deadline")
+    .unwrap();
     if let Some((channel_id, operation_id)) = opened {
         assert!(
             ws.channels
@@ -10881,32 +11106,27 @@ async fn owned_consumer_ws_send(
 async fn owned_consumer_ws_read(
     ws: &mut OwnedWebSocketFixture,
 ) -> arkret_models_collaboration::sync_frames::websocket::WebSocketServerFrame {
-    let mut socket = ws.socket.take().unwrap();
-    let channels = ws.channels.clone();
-    let (socket, frame) = tokio::task::spawn_blocking(move || {
+    use futures_util::{SinkExt, StreamExt};
+    let socket = ws.socket.as_mut().unwrap();
+    let frame = tokio::time::timeout_at(ws.deadline, async {
         loop {
-            match socket.read().unwrap() {
+            match socket.next().await.expect("actual socket remains open").unwrap() {
                 tokio_tungstenite::tungstenite::Message::Text(text) => {
                     let frame = arkret_models_collaboration::sync_frames::websocket::WebSocketFrameIngress::new(262_144, None)
                         .decode_server_frame_for_channels(text.as_bytes(), |channel_id| {
-                            channels.get(channel_id).and_then(|(operation, opened)| opened.then_some(*operation))
+                            ws.channels.get(channel_id).and_then(|(operation, opened)| opened.then_some(*operation))
                         })
                         .unwrap_or_else(|error| panic!("original socket typed channel schema close_code={:?}", error.close_code));
                     frame.validate().unwrap();
-                    break (socket, frame);
+                    break frame;
                 }
                 tokio_tungstenite::tungstenite::Message::Ping(bytes) => {
-                    socket
-                        .send(tokio_tungstenite::tungstenite::Message::Pong(bytes))
-                        .unwrap();
+                    socket.send(tokio_tungstenite::tungstenite::Message::Pong(bytes)).await.unwrap();
                 }
                 _ => panic!("only registered text frame or transport ping is expected"),
             }
         }
-    })
-    .await
-    .unwrap();
-    ws.socket = Some(socket);
+    }).await.expect("actual socket read must finish within the scenario deadline");
     use arkret_models_collaboration::sync_frames::websocket::WebSocketServerFrame;
     match &frame {
         WebSocketServerFrame::Opened {
@@ -11073,10 +11293,10 @@ async fn owned_consumer_websocket_scenario(policy_deny: bool) {
     fixture_commit_step(&fixture.pool, allow.clone())
         .await
         .unwrap();
-    let started = std::time::Instant::now();
+    ws.deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(40);
     let cursor = loop {
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(40),
+            tokio::time::Instant::now() < ws.deadline,
             "actual socket delivered accepted full Event"
         );
         match owned_consumer_ws_non_ping(&mut ws).await {
@@ -11134,11 +11354,11 @@ async fn owned_consumer_websocket_scenario(policy_deny: bool) {
     };
     fixture_commit_step(&fixture.pool, changed).await.unwrap();
     let before = owned_consumer_footprint(&fixture.pool, &fixture.head.event.realm_id).await;
-    let started = std::time::Instant::now();
+    ws.deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(40);
     let mut terminal = false;
     loop {
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(40),
+            tokio::time::Instant::now() < ws.deadline,
             "current change must terminate original socket channel"
         );
         match owned_consumer_ws_non_ping(&mut ws).await {
@@ -11179,28 +11399,34 @@ async fn owned_consumer_websocket_scenario(policy_deny: bool) {
         }
     }
     assert!(before == owned_consumer_footprint(&fixture.pool, &fixture.head.event.realm_id).await);
+    use futures_util::{SinkExt, StreamExt};
     let mut socket = ws.socket.take().unwrap();
-    tokio::task::spawn_blocking(move || {
-        socket.close(None).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(40), async {
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Close(None))
+            .await
+            .unwrap();
         loop {
-            match socket.read() {
-                Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => break,
-                Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed) => break,
-                Ok(_) => {}
-                Err(_) => panic!("original TLS socket close handshake"),
+            match socket.next().await {
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) | None => break,
+                Some(Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed)) => break,
+                Some(Ok(_)) => {}
+                Some(Err(_)) => panic!("original TLS socket close handshake"),
             }
         }
-        // Drop owned TLS process only after original WebSocket Close handoff.
-        drop(socket);
     })
     .await
-    .unwrap();
-    ws.client_pid = 0;
+    .expect("actual socket close must finish within the scenario deadline");
+    drop(socket);
     ws.server
         .handle
         .stop_graceful(Some(std::time::Duration::from_secs(5)));
-    (&mut ws.server.task).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(6), &mut ws.server.task)
+        .await
+        .expect("owned TLS server must stop after socket close")
+        .unwrap();
 }
+
 #[tokio::test]
 async fn owned_agent_websocket_rechecks_owner_leave_before_physical_data() {
     fixture_step(Box::pin(owned_consumer_websocket_scenario(false))).await;
@@ -11307,8 +11533,14 @@ async fn owned_consumer_remote_barrier_scenario() {
     let before_receiver =
         owned_consumer_footprint(&receiver_pool, &fixture.head.event.realm_id).await;
     assert!(
-        before_receiver["current"]["events"] == 0
-            && before_receiver["current"]["commits"] == 0
+        before_receiver["current"]["events"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+            && before_receiver["current"]["commits"]
+                .as_array()
+                .unwrap()
+                .is_empty()
             && before_receiver["current"]["authority"].is_null()
     );
     assert!(http.state.service_core_id() == fixture.station.core);
@@ -11990,10 +12222,24 @@ async fn owned_consumer_exact_welcome_cursor(
 
 #[tokio::test]
 async fn owned_agent_device_messages_continuation_owner_leave_allocates_no_new_cut() {
+    fixture_step(fixture_future(
+        case_owned_agent_device_messages_continuation_owner_leave_allocates_no_new_cut,
+    ))
+    .await
+}
+
+async fn case_owned_agent_device_messages_continuation_owner_leave_allocates_no_new_cut() {
     boxed_owned_welcome(OwnedWelcomeCase::DeviceMessagesContinuationOwnerLeave).await;
 }
 #[tokio::test]
 async fn owned_agent_device_messages_continuation_policy_deny_allocates_no_new_cut() {
+    fixture_step(fixture_future(
+        case_owned_agent_device_messages_continuation_policy_deny_allocates_no_new_cut,
+    ))
+    .await
+}
+
+async fn case_owned_agent_device_messages_continuation_policy_deny_allocates_no_new_cut() {
     boxed_owned_welcome(OwnedWelcomeCase::DeviceMessagesContinuationPolicyDeny).await;
 }
 
@@ -12412,14 +12658,14 @@ async fn fixture_agent_control_step(
     pool: coland_storage_postgres::PgPool,
     request: coland_storage::AgentControlAdmissionWrite,
 ) -> coland_storage::PersistenceResult<coland_storage::AgentControlAdmissionOutcome> {
-    fixture_step(async move {
+    fixture_step(fixture_future(|| async move {
         Box::pin(historical_control_source::admit_control(
             &coland_storage_postgres::PgActorProfileStore { pool: pool.clone() },
             &pool,
             request,
         ))
         .await
-    })
+    }))
     .await
 }
 
@@ -12474,7 +12720,7 @@ fn native_reply_preparation_fixture_with_body(
     in_circle: bool,
     grant_body: bool,
 ) -> Pin<Box<dyn Future<Output = NativeReplyPreparationFixture> + Send>> {
-    fixture_step(async move {
+    fixture_step(fixture_future(|| async move {
         Box::pin(build_native_reply_preparation_fixture(
             controller_constraints,
             grant_message,
@@ -12483,7 +12729,7 @@ fn native_reply_preparation_fixture_with_body(
             grant_body,
         ))
         .await
-    })
+    }))
 }
 
 async fn build_native_reply_preparation_fixture(
@@ -12812,8 +13058,8 @@ fn native_reply_preparation_step(
     let source = fixture.source.clone();
     let strand = fixture.strand.clone();
     let input = input.clone();
-    Box::pin(async move {
-        fixture_step(async move {
+    fixture_future(|| async move {
+        fixture_step(fixture_future(|| async move {
             PgAuthorityCommitStore { pool }
                 .acquire_native_message_reply_preparation(
                     coland_storage::NativeMessageReplyPreparation {
@@ -12828,7 +13074,7 @@ fn native_reply_preparation_step(
                     },
                 )
                 .await
-        })
+        }))
         .await
     })
 }
@@ -12872,7 +13118,7 @@ async fn native_reply_policy_deny(fixture: &NativeReplyPreparationFixture, opera
 #[tokio::test]
 async fn native_public_reply_unreserved_guard_uses_exact_accepted_source() {
     use arkret_models_collaboration::governance::agent_participation::ParticipationBits;
-    fixture_step(Box::pin(async {
+    fixture_step(fixture_future(|| async {
         let fixture = Box::pin(native_reply_preparation_fixture(
             None,
             true,
@@ -12944,7 +13190,7 @@ async fn native_public_reply_unreserved_guard_uses_exact_accepted_source() {
 #[tokio::test]
 async fn native_public_reply_quota_or_unknown_future_fields_never_consume() {
     use arkret_models_collaboration::governance::agent_participation::ParticipationBits;
-    fixture_step(Box::pin(async {
+    fixture_step(fixture_future(|| async {
         for constraints in [
             serde_json::json!([{"constraint_kind":"quota","constraint_subkind":"rate","effect":"allow",
                 "max_operations":1,"period":"P1D","constraint_scope":"per_realm"}]),
@@ -12973,7 +13219,7 @@ async fn native_public_reply_quota_or_unknown_future_fields_never_consume() {
 async fn native_public_reply_execute_serve_and_public_participation_are_independent() {
     use arkret_models_collaboration::governance::agent_participation::ParticipationBits;
     use coland_storage::AgentParticipationStore;
-    fixture_step(Box::pin(async {
+    fixture_step(fixture_future(|| async {
         for operation in ["execute", "serve"] {
             let fixture = Box::pin(native_reply_preparation_fixture(None, true, chrono::TimeDelta::hours(1))).await;
             let guard = native_reply_preparation_step(&fixture, &fixture.input, ParticipationBits::ALL).await.unwrap();
@@ -13016,7 +13262,7 @@ async fn native_public_reply_execute_serve_and_public_participation_are_independ
 #[tokio::test]
 async fn native_public_reply_caller_membership_and_controller_upper_bound_are_required() {
     use arkret_models_collaboration::governance::agent_participation::ParticipationBits;
-    fixture_step(Box::pin(async {
+    fixture_step(fixture_future(|| async {
         let no_body = Box::pin(native_reply_preparation_fixture_with_body(
             None, true, chrono::TimeDelta::hours(1), false, false,
         )).await;
@@ -13041,7 +13287,7 @@ async fn native_public_reply_caller_membership_and_controller_upper_bound_are_re
 #[tokio::test]
 async fn native_public_reply_real_session_expiry_and_accepted_key_revoke_close_handoff() {
     use arkret_models_collaboration::governance::agent_participation::ParticipationBits;
-    fixture_step(Box::pin(async {
+    fixture_step(fixture_future(|| async {
         let fixture = Box::pin(native_reply_preparation_fixture(
             None,
             true,
@@ -13092,7 +13338,7 @@ async fn native_public_reply_guard_holds_actual_writer_until_finish_or_cancel() 
         #[diesel(sql_type=BigInt)]
         number: i64,
     }
-    fixture_step(Box::pin(async {
+    fixture_step(fixture_future(|| async {
         // Original PCR lock contention must refuse without waiting while
         // the business cut is held. No caller/owner PCR proof is skipped.
         let contended = Box::pin(native_reply_preparation_fixture(None,true,chrono::TimeDelta::hours(1))).await;
@@ -13205,11 +13451,17 @@ async fn expect_content_session_current_denial(
     assert!(denied.granted_scope.is_empty());
     assert!(!denied.approval_required);
     assert!(denied.capability_grant_refs.is_empty());
+    assert!(denied.realm_ids.is_empty());
+    assert!(denied.strand_ids.is_empty());
+    assert!(denied.allowed_tracks.is_empty());
+    assert!(denied.allowed_data_labels.is_empty());
+    assert!(denied.allowed_endpoints.is_empty());
+    assert!(denied.policy_refs.is_empty());
 }
 
 #[tokio::test]
 async fn agent_content_session_membership_needs_no_literal_grant_and_rechecks_withdrawal() {
-    fixture_step(async {
+    fixture_step(fixture_future(|| async {
         let fixture = boxed_owned_consumer_fixture(1).await;
         let pool = &fixture.pool;
         let mut request = content_session_request(&fixture, None);
@@ -13260,10 +13512,12 @@ async fn agent_content_session_membership_needs_no_literal_grant_and_rechecks_wi
         assert!(content_session_source(pool, &wrong).await.is_err());
         wrong = request.clone();
         wrong.resource_scope.realm_ids = vec![fixture.head.event.realm_id.clone()];
-        assert!(content_session_source(pool, &wrong).await.is_err(), "mixed selectors need independent issuance");
+        // A known but unrepresentable selector is a bound empty ceiling,
+        // not an unavailable dependency and never unrestricted content access.
+        expect_content_session_current_denial(pool, &wrong).await;
         wrong.resource_scope.realm_ids.clear();
         wrong.resource_scope.strand_ids.clear();
-        assert!(content_session_source(pool, &wrong).await.is_err());
+        expect_content_session_current_denial(pool, &wrong).await;
         let leave = ordinary_realm::next_request_for_actor(
             &create.authority_commit, EventKind::MemberState,
             arkret_wire::ActorId::account(fixture.controller.history.account.clone()),
@@ -13272,12 +13526,12 @@ async fn agent_content_session_membership_needs_no_literal_grant_and_rechecks_wi
         let leave = Box::pin(ordinary_realm::source_request(pool, leave)).await;
         fixture_commit_step(pool, leave).await.unwrap();
         expect_content_session_current_denial(pool, &request).await;
-    }).await;
+    })).await;
 }
 
 #[tokio::test]
 async fn agent_content_session_current_management_deny_blocks_membership_source() {
-    fixture_step(async {
+    fixture_step(fixture_future(|| async {
         let fixture = boxed_owned_consumer_fixture(1).await;
         let request = content_session_request(&fixture, None);
         assert_eq!(
@@ -13297,13 +13551,13 @@ async fn agent_content_session_current_management_deny_blocks_membership_source(
         fixture_commit_step(&fixture.pool, policy).await.unwrap();
         let refused = content_session_source(&fixture.pool, &request).await;
         assert!(refused.is_err() || refused.unwrap().granted_scope.is_empty());
-    })
+    }))
     .await;
 }
 
 #[tokio::test]
 async fn agent_content_session_sidecar_desired_precedes_effective_payload_access() {
-    fixture_step(async {
+    fixture_step(fixture_future(|| async {
         use coland_storage::AgentStore;
         let fixture = boxed_owned_consumer_fixture(1).await;
         let request = content_session_request(&fixture, None);
@@ -13363,13 +13617,13 @@ async fn agent_content_session_sidecar_desired_precedes_effective_payload_access
                 .unwrap()
                 .is_some()
         );
-    })
+    }))
     .await;
 }
 
 #[tokio::test]
 async fn agent_content_session_circle_requires_both_exact_memberships() {
-    fixture_step(async {
+    fixture_step(fixture_future(|| async {
         use arkret_wire::{ActorId, ScopeRef};
         let fixture = boxed_owned_consumer_fixture(1).await;
         let pool = &fixture.pool;
@@ -13442,12 +13696,12 @@ async fn agent_content_session_circle_requires_both_exact_memberships() {
         fixture_commit_step(pool, leave).await.unwrap();
         let denied = content_session_source(pool, &source).await;
         assert!(denied.is_err() || denied.unwrap().granted_scope.is_empty());
-    }).await;
+    })).await;
 }
 
 #[tokio::test]
 async fn agent_content_session_owned_grant_requires_current_source_and_never_revives_on_rejoin() {
-    fixture_step(async {
+    fixture_step(fixture_future(|| async {
         use arkret_wire::ActorId;
         let fixture = boxed_owned_consumer_fixture(1).await;
         let pool = &fixture.pool;
@@ -13498,5 +13752,5 @@ async fn agent_content_session_owned_grant_requires_current_source_and_never_rev
         let rejoin = Box::pin(ordinary_realm::source_request(pool, rejoin)).await;
         fixture_commit_step(pool, rejoin).await.unwrap();
         expect_content_session_current_denial(pool, &request).await;
-    }).await;
+    })).await;
 }

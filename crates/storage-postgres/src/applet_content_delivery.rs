@@ -209,12 +209,13 @@ impl ReadProof {
 }
 struct NativeDeliveryGuard {
     held: Box<crate::account_content_delivery::DeliveryGuard>,
-    proof: ReadProof,
+    proofs: Vec<ReadProof>,
 }
 #[async_trait::async_trait]
 impl AccountContentDeliveryGuard for NativeDeliveryGuard {
     fn permits_handoff(&self) -> bool {
-        self.proof.permits_at(chrono::Utc::now())
+        let at = chrono::Utc::now();
+        self.proofs.iter().all(|proof| proof.permits_at(at))
     }
     async fn finish(self: Box<Self>) -> PersistenceResult<()> {
         self.held.finish().await
@@ -234,7 +235,8 @@ pub(crate) async fn acquire(
             endpoint.effective_scope,
             ScopeRef::Realm { .. } | ScopeRef::Circle { .. }
         )
-        || input.committed_events.len() != 1
+        || input.committed_events.is_empty()
+        || input.committed_events.len() > 64
         || !input.current_views.is_empty()
         || !input.projection_lists.is_empty()
         || !input.morph_lists.is_empty()
@@ -297,9 +299,38 @@ pub(crate) async fn acquire(
     if current != endpoint.authority {
         return Err(refused("native read Device instance changed"));
     }
-    let original = &input.committed_events[0];
+    let mut proofs = Vec::with_capacity(input.committed_events.len());
+    for original in &input.committed_events {
+        proofs.push(
+            crate::boxed_future(|| {
+                event_proof(
+                    held.connection(),
+                    station,
+                    endpoint,
+                    &current,
+                    original,
+                    at,
+                    credential_expiry,
+                )
+            })
+            .await?,
+        );
+    }
+    Ok(Some(Box::new(NativeDeliveryGuard { held, proofs })))
+}
+
+async fn event_proof(
+    conn: &mut diesel_async::AsyncPgConnection,
+    station: &DidCoreId,
+    endpoint: &AppletManagedDeviceScopeGuard,
+    current: &coland_storage::AppletManagedDeviceAuthority,
+    original: &CommittedEventView,
+    at: chrono::DateTime<chrono::Utc>,
+    credential_expiry: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<ReadProof> {
+    let account = &endpoint.authority.account_id;
     let full = crate::committed_disclosure::accepted_full_event_in_connection(
-        held.connection(),
+        conn,
         &original.commit().event_ref,
     )
     .await?
@@ -312,7 +343,7 @@ pub(crate) async fn acquire(
         ));
     }
     let encrypted=sql_query("SELECT to_jsonb(EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.mls.genesis' AND c.realm_id=$1 AND e.envelope->'scope_ref'=$2)) AS value")
-        .bind::<Text,_>(full.event.realm_id.as_str()).bind::<Jsonb,_>(serde_json::json!(full.event.scope_ref)).get_result::<JsonRow>(held.connection()).await.map_err(PersistenceError::database)?;
+        .bind::<Text,_>(full.event.realm_id.as_str()).bind::<Jsonb,_>(serde_json::json!(full.event.scope_ref)).get_result::<JsonRow>(conn).await.map_err(PersistenceError::database)?;
     if encrypted.value.as_bool() != Some(false) {
         return Err(PersistenceError::Conflict(
             "applet_e2ee_join_unauthorized: native MLS read consent is not established".into(),
@@ -321,7 +352,7 @@ pub(crate) async fn acquire(
     let actor = ActorId::account(account.clone());
     let reread = crate::boxed_future(|| {
         crate::account_stream_scan::committed_event_for_member_in_connection(
-            held.connection(),
+            conn,
             &full.event.event_id,
             &actor,
             station,
@@ -349,8 +380,8 @@ pub(crate) async fn acquire(
     }
     let (registration, _) = crate::boxed_future(|| {
         crate::applet_device_admission::installation_for_device(
-            held.connection(),
-            &current,
+            conn,
+            current,
             &full.event.scope_ref,
             &endpoint.service_did_document,
             &actions,
@@ -360,7 +391,7 @@ pub(crate) async fn acquire(
     })
     .await?;
     let sources=sql_query("SELECT e.envelope->'payload' AS value FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.applet.managed_actor.provision' AND e.envelope#>'{payload,actor_id}'=$1")
-        .bind::<Jsonb,_>(serde_json::json!(actor)).get_results::<JsonRow>(held.connection()).await.map_err(PersistenceError::database)?;
+        .bind::<Jsonb,_>(serde_json::json!(actor)).get_results::<JsonRow>(conn).await.map_err(PersistenceError::database)?;
     let [source] = sources.as_slice() else {
         return Err(refused("native read provision is not unique"));
     };
@@ -377,9 +408,9 @@ pub(crate) async fn acquire(
         arkret_models_integration::AppletManagedActorRole::Ghost => ManagedActorRole::Ghost,
     };
     let root=sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1 FOR SHARE")
-        .bind::<Text,_>(full.event.realm_id.as_str()).get_result::<RealmAuthorityRootReadRow>(held.connection()).await.map_err(PersistenceError::database)?;
+        .bind::<Text,_>(full.event.realm_id.as_str()).get_result::<RealmAuthorityRootReadRow>(conn).await.map_err(PersistenceError::database)?;
     let rows=sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_results WHERE realm_id=$1 ORDER BY grant_id FOR SHARE")
-        .bind::<Text,_>(full.event.realm_id.as_str()).get_results::<CapabilityGrantCurrentResultReadRow>(held.connection()).await.map_err(PersistenceError::database)?;
+        .bind::<Text,_>(full.event.realm_id.as_str()).get_results::<CapabilityGrantCurrentResultReadRow>(conn).await.map_err(PersistenceError::database)?;
     let mut grants = BTreeMap::new();
     for row in rows {
         let row = decode_row(row)?;
@@ -387,7 +418,7 @@ pub(crate) async fn acquire(
     }
     let cut = crate::boxed_future(|| {
         crate::realm_authorization_cut::RealmAuthorizationCut::read(
-            held.connection(),
+            conn,
             &full.event.realm_id,
             &actor,
         )
@@ -433,13 +464,13 @@ pub(crate) async fn acquire(
     }
     let policies =
         crate::policy_current_results::read_scoped_applet_management_policies_in_connection(
-            held.connection(),
+            conn,
             &full.event.realm_id,
             full.event.scope_ref.circle_id(),
         )
         .await?;
     let accountability=sql_query("SELECT value FROM identity_accountability_current_results WHERE subject_id=$1 AND issuer_id=$2 ORDER BY realm_id,scope_set_digest FOR SHARE")
-        .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(registration.service_id.as_str()).get_results::<JsonRow>(held.connection()).await.map_err(PersistenceError::database)?
+        .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(registration.service_id.as_str()).get_results::<JsonRow>(conn).await.map_err(PersistenceError::database)?
         .into_iter().map(|row|serde_json::from_value(row.value).map_err(PersistenceError::database)).collect::<PersistenceResult<Vec<AccountabilityProjection>>>()?;
     let proof = ReadProof {
         checked_at: at,
@@ -459,5 +490,5 @@ pub(crate) async fn acquire(
             "native read has no current unreserved Applet content source",
         ));
     }
-    Ok(Some(Box::new(NativeDeliveryGuard { held, proof })))
+    Ok(proof)
 }

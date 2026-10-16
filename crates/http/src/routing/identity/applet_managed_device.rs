@@ -182,3 +182,50 @@ pub(crate) fn test_service(state: AppState) -> salvo::Service {
             .goal(echo),
     )
 }
+
+/// Resolve the real Service identity for one native content response. Storage
+/// independently rechecks registration, exact scope and current installation.
+pub(crate) async fn content_delivery_guard(
+    state: &AppState,
+    device: &VerifiedAppletManagedDevice,
+    views: &[arkret_wire::CommittedEventView],
+) -> Result<Box<dyn coland_storage::AccountContentDeliveryGuard>, AppError> {
+    let unavailable = || AppError::not_found("native content is unavailable");
+    let record = crate::routing::extensions::applet_bridge::record::applet_record(
+        state,
+        device.authority.applet_id.as_str(),
+        &device.metadata.effective_scope,
+    )
+    .await
+    .ok()
+    .flatten()
+    .ok_or_else(unavailable)?;
+    let epoch = crate::routing::extensions::applet_bridge::registration_epoch_evidence_from_event(
+        &record.registration_event,
+    )
+    .map_err(|_| unavailable())?;
+    let service_did_document =
+        crate::jws_verify::resolve_did_document(state, &epoch.did).map_err(|_| {
+            crate::app_error!(
+                TemporarilyUnavailable,
+                "current Applet Service identity is unavailable"
+            )
+        })?;
+    let mut input = coland_storage::AccountContentDeliveryInput::committed(views);
+    input.applet_endpoint = Some(coland_storage::AppletManagedDeviceScopeGuard {
+        authority: device.authority.clone(),
+        effective_scope: device.metadata.effective_scope.clone(),
+        service_did_document,
+    });
+    input.credential_expires_at = Some(device.transport_expires_at);
+    state
+        .authority_commits()
+        .acquire_committed_content_delivery(
+            &device.authority.account_id,
+            &state.service_core_id(),
+            &input,
+        )
+        .await
+        .map_err(|_| unavailable())?
+        .ok_or_else(unavailable)
+}

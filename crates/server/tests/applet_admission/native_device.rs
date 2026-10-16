@@ -1146,6 +1146,65 @@ async fn native_get(
     .send(&service(fixture.state.clone()))
     .await
 }
+async fn native_signer_query(
+    fixture: &Fixture,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    key: &SigningKey,
+    selectors: &[arkret_models_identity::SignerKeyQuerySelector],
+) -> salvo::Response {
+    let body = arkret_models_identity::SignerKeysQueryRequestBody {
+        request_id: arkret_wire::RequestId::new(format!("ak:request:{}", uuid::Uuid::now_v7()))
+            .unwrap(),
+        realm_id: fixture.realm.clone(),
+        recipient_account_id: authority.account_id.clone(),
+        queries: selectors.to_vec(),
+    };
+    managed_device_http_request_body(
+        &fixture.state,
+        authority,
+        &managed_device_metadata(authority),
+        ServiceOperationId::SelfSignerKeysReadResolveV1,
+        key,
+        Some(arkret_canonical::canonical_json_bytes(&body).unwrap()),
+    )
+    .add_header("content-type", "application/json", true)
+    .send(&service(fixture.state.clone()))
+    .await
+}
+async fn native_historical_selector(
+    fixture: &Fixture,
+    event: &Event,
+) -> arkret_models_identity::SignerKeyQuerySelector {
+    let persistence = fixture.state.test_persistence();
+    let store = persistence.authority_commits();
+    let record = store
+        .committed_event(&event.event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let fact = store
+        .producer_signer_fact(event, &record.commit)
+        .await
+        .unwrap()
+        .unwrap();
+    let committed_event_ref = arkret_wire::CommittedEventRef {
+        event_id: event.event_id.clone(),
+        commit_id: record.commit.commit_id,
+        stream_ref: record.commit.stream_ref,
+        stream_position: record.commit.stream_position,
+    };
+    let sender = match fact {
+        arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact::AccountDevice(fact) =>
+            arkret_models_identity::HistoricalSignerKeyQuerySender::AccountDevice {
+                actor: fact.actor, device_id: fact.device_id, verification_method: fact.verification_method, committed_event_ref,
+            },
+        arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact::Service(fact) =>
+            arkret_models_identity::HistoricalSignerKeyQuerySender::Service {
+                actor: fact.actor, verification_method: fact.verification_method, committed_event_ref,
+            },
+    };
+    arkret_models_identity::SignerKeyQuerySelector::HistoricalEvent { sender }
+}
 async fn native_current_revoke(fixture: &Fixture, grant: &arkret_wire::GrantId) {
     let rows = fixture
         .state
@@ -1172,6 +1231,50 @@ async fn native_read_exercise(context: Box<NativeSourcesContext>) {
         mut actors,
         ..
     } = *context;
+    let mut historical_events = Vec::new();
+    for (authority, key, child) in &actors {
+        let event = native_message(
+            &fixture,
+            &install,
+            authority,
+            key,
+            child,
+            &strand,
+            "original native signer before replacement",
+        );
+        let (status, outcome) =
+            native_phase(|| post(&fixture, authority, key, &event, vec![])).await;
+        assert_eq!(status, StatusCode::OK, "{outcome}");
+        historical_events.push(event);
+    }
+    let service_subject = ActorId::account(actors[0].0.account_id.clone());
+    let service_child =
+        native_phase(|| native_message_child(&fixture, &install, &service_subject, &messages))
+            .await;
+    let rows = fixture
+        .state
+        .test_persistence()
+        .capability_grant_current_results()
+        .snapshot_for_realm(&fixture.realm)
+        .await
+        .unwrap();
+    let child_row = rows
+        .iter()
+        .find(|row| row.grant_id == service_child)
+        .unwrap();
+    let service_original = fixture
+        .state
+        .test_persistence()
+        .authority_commits()
+        .committed_event_by_commit_id(&child_row.revision.commit_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        service_original.event.actual_signer(),
+        ActorId::Service { .. }
+    ));
+    historical_events.push(service_original.event);
     native_phase(|| native_current_revoke(&fixture, &reading)).await;
     for (index, (_, _, child)) in actors.iter().enumerate() {
         let rows = fixture
@@ -1195,6 +1298,24 @@ async fn native_read_exercise(context: Box<NativeSourcesContext>) {
     }
     let event=fixture.admin_event(EventKind::MessageCreate,ScopeRef::Realm{realm_id:fixture.realm.clone()},json!({"strand_id":strand,"track_name":"discussion","content":{"kind":"ak.content.text","format":"plain","body":"actual member content for independent native readers"}}));
     native_phase(|| accepted_admin_domain_event(&fixture, event.clone())).await;
+    historical_events.push(event.clone());
+    let mut selectors = Vec::new();
+    for original in &historical_events {
+        selectors.push(native_historical_selector(&fixture, original).await);
+    }
+    let mut original_answers = Vec::new();
+    for selector in &selectors {
+        original_answers.push(
+            fixture
+                .state
+                .test_persistence()
+                .authority_commits()
+                .historical_producer_signer_key(&fixture.realm, selector)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
     let read_parent = native_business_parent(
         &fixture,
         &install,
@@ -1210,6 +1331,12 @@ async fn native_read_exercise(context: Box<NativeSourcesContext>) {
         assert_eq!(response.status_code, Some(StatusCode::NOT_FOUND));
         let problem = response.take_json::<Value>().await.unwrap();
         assert!(problem.get("event").is_none());
+    }
+    for (authority, key, _) in &actors {
+        let mut response =
+            native_phase(|| native_signer_query(&fixture, authority, key, &selectors)).await;
+        assert_eq!(response.status_code, Some(StatusCode::NOT_FOUND));
+        let _: Value = response.take_json().await.unwrap();
     }
     assert_eq!(before, business(&fixture).await);
     for (index, (authority, key, _)) in actors.iter_mut().enumerate() {
@@ -1257,13 +1384,131 @@ async fn native_read_exercise(context: Box<NativeSourcesContext>) {
         assert_eq!(hidden[0], hidden[1]);
     }
     assert_eq!(before, business(&fixture).await);
+    for (authority, key, _) in &actors {
+        let mut response =
+            native_phase(|| native_signer_query(&fixture, authority, key, &selectors)).await;
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        let result: arkret_models_identity::SignerKeysQueryOutcome =
+            response.take_json().await.unwrap();
+        assert_eq!(result.results.len(), historical_events.len());
+        assert_eq!(
+            result.results, original_answers,
+            "replacement must preserve the original historical authorization instance"
+        );
+        for ((selector, original), answer) in selectors
+            .iter()
+            .zip(&historical_events)
+            .zip(&result.results)
+        {
+            assert_eq!(answer.selector(), selector);
+            assert!(answer.key().is_some() || answer.service_key().is_some());
+            let record = fixture
+                .state
+                .test_persistence()
+                .authority_commits()
+                .committed_event(&original.event_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let fact = fixture
+                .state
+                .test_persistence()
+                .authority_commits()
+                .producer_signer_fact(original, &record.commit)
+                .await
+                .unwrap()
+                .unwrap();
+            arkret_identity::account_device_signer_evidence::verify_historical_producer_event_signature(
+                original, &fact, fixture.realm.digest_suite_code().digest_suite(),
+            ).unwrap();
+        }
+        let arkret_models_identity::SignerKeyQuerySelector::HistoricalEvent {
+            sender:
+                arkret_models_identity::HistoricalSignerKeyQuerySender::AccountDevice {
+                    actor,
+                    device_id,
+                    verification_method,
+                    committed_event_ref,
+                },
+        } = &selectors[0]
+        else {
+            unreachable!()
+        };
+        let mut wrong = committed_event_ref.clone();
+        wrong.stream_position += 1;
+        let probes = vec![
+            arkret_models_identity::SignerKeyQuerySelector::HistoricalEvent {
+                sender: arkret_models_identity::HistoricalSignerKeyQuerySender::AccountDevice {
+                    actor: actor.clone(),
+                    device_id: device_id.clone(),
+                    verification_method: verification_method.clone(),
+                    committed_event_ref: wrong,
+                },
+            },
+            arkret_models_identity::SignerKeyQuerySelector::CurrentAdmission {
+                sender: arkret_models_identity::CurrentSignerKeyQuerySender::AccountDevice {
+                    actor: actor.clone(),
+                    device_id: device_id.clone(),
+                    verification_method: verification_method.clone(),
+                },
+            },
+        ];
+        let mut response =
+            native_phase(|| native_signer_query(&fixture, authority, key, &probes)).await;
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        let hidden: arkret_models_identity::SignerKeysQueryOutcome =
+            response.take_json().await.unwrap();
+        assert!(hidden.results.iter().all(|a| matches!(
+            a,
+            arkret_models_identity::SignerKeyQueryOutcome::Unavailable { .. }
+        )));
+    }
+    for (authority, key, _) in &actors {
+        let private_body = arkret_models_identity::SignerKeysQueryRequestBody {
+            request_id: arkret_wire::RequestId::new(format!("ak:request:{}", uuid::Uuid::now_v7()))
+                .unwrap(),
+            realm_id: authority.pcr_realm_id.clone(),
+            recipient_account_id: authority.account_id.clone(),
+            queries: vec![
+                arkret_models_identity::SignerKeyQuerySelector::HistoricalEvent {
+                    sender: arkret_models_identity::HistoricalSignerKeyQuerySender::AccountDevice {
+                        actor: ActorId::account(authority.account_id.clone()),
+                        device_id: authority.device_id.clone(),
+                        verification_method: arkret_wire::DidUrl::new(format!(
+                            "{}#{}",
+                            authority.native_did, authority.device_id
+                        ))
+                        .unwrap(),
+                        committed_event_ref: authority.selector.authorization_ref.clone(),
+                    },
+                },
+            ],
+        };
+        private_body.validate().unwrap();
+        let mut response = managed_device_http_request_body(
+            &fixture.state,
+            authority,
+            &managed_device_metadata(authority),
+            ServiceOperationId::SelfSignerKeysReadResolveV1,
+            key,
+            Some(arkret_canonical::canonical_json_bytes(&private_body).unwrap()),
+        )
+        .add_header("content-type", "application/json", true)
+        .send(&service(fixture.state.clone()))
+        .await;
+        assert_eq!(response.status_code, Some(StatusCode::NOT_FOUND));
+        let _: Value = response.take_json().await.unwrap();
+    }
+    assert_eq!(before, business(&fixture).await);
     let (authority, key, _) = &actors[0];
-    let mut response = native_phase(|| native_get(&fixture, authority, key, &event.event_id)).await;
+    let mut response =
+        native_phase(|| native_signer_query(&fixture, authority, key, &selectors)).await;
     assert_eq!(response.status_code, Some(StatusCode::OK));
     let mut close = native_phase(|| native_current_revoke(&fixture, &read_parent));
     tokio::select! { _=&mut close=>panic!("source revoke crossed an unconsumed native delivery cut"), _=tokio::time::sleep(std::time::Duration::from_millis(30))=>{} }
-    let row: arkret_wire::CommittedEventView = response.take_json().await.unwrap();
-    assert_eq!(row.reducer_input().unwrap(), &event);
+    let result: arkret_models_identity::SignerKeysQueryOutcome =
+        response.take_json().await.unwrap();
+    assert_eq!(result.results.len(), selectors.len());
     close.await;
     let before = business(&fixture).await;
     for (authority, key, _) in &actors {
@@ -1272,6 +1517,11 @@ async fn native_read_exercise(context: Box<NativeSourcesContext>) {
         assert_eq!(response.status_code, Some(StatusCode::NOT_FOUND));
         let _: Value = response.take_json().await.unwrap();
     }
+    assert_eq!(before, business(&fixture).await);
+    let mut response =
+        native_phase(|| native_signer_query(&fixture, authority, key, &selectors)).await;
+    assert_eq!(response.status_code, Some(StatusCode::NOT_FOUND));
+    let _: Value = response.take_json().await.unwrap();
     assert_eq!(before, business(&fixture).await);
     use arkret_models_collaboration::governance::grant_constraint::{
         GrantConstraintEffect, GrantConstraintKind,
@@ -1298,12 +1548,37 @@ async fn native_read_exercise(context: Box<NativeSourcesContext>) {
         "expired source cannot hand off prepared bytes"
     );
     assert_eq!(before, business(&fixture).await);
+    // Each response is independently prepared while its source is active.
+    // A retained delivery cut must not be followed by an awaited request
+    // requiring the same PCR nonce writer before the first body is drained.
+    let mut temporal =
+        GrantConstraint::new(GrantConstraintKind::Temporal, GrantConstraintEffect::Allow);
+    temporal.expires_at = Some(arkret_canonical::normalize_timestamp_canonical(
+        chrono::Utc::now() + chrono::Duration::seconds(3),
+    ));
+    let _signer_short = native_business_parent(
+        &fixture,
+        &install,
+        vec![temporal],
+        vec!["ak.event.read".into()],
+        None,
+    )
+    .await;
+    let mut signer_response =
+        native_phase(|| native_signer_query(&fixture, authority, key, &selectors)).await;
+    assert_eq!(signer_response.status_code, Some(StatusCode::OK));
+    let before = business(&fixture).await;
+    tokio::time::sleep(std::time::Duration::from_millis(3200)).await;
+    assert!(
+        signer_response.take_json::<Value>().await.is_err(),
+        "expired sources cannot hand off prepared historical facts"
+    );
+    assert_eq!(before, business(&fixture).await);
     assert_ne!(content_parent, read_parent);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn native_member_reads_require_actual_scope_device_and_service_content_sources_through_handoff()
- {
+async fn native_member_event_and_signer_reads_require_actual_sources_through_handoff() {
     tokio::spawn(native_phase(|| async {
         let context = native_phase(native_sources_setup).await;
         native_phase(|| native_read_exercise(context)).await;

@@ -107,44 +107,13 @@ async fn native_committed_event(
     };
     view.validate_shape()
         .map_err(|_| AppError::not_found("committed event not found"))?;
-    let record = crate::routing::extensions::applet_bridge::record::applet_record(
+    let guard = crate::routing::identity::applet_managed_device::content_delivery_guard(
         state,
-        device.authority.applet_id.as_str(),
-        &device.metadata.effective_scope,
+        device,
+        std::slice::from_ref(&view),
     )
     .await
-    .ok()
-    .flatten()
-    .ok_or_else(|| AppError::not_found("committed event not found"))?;
-    let epoch = crate::routing::extensions::applet_bridge::registration_epoch_evidence_from_event(
-        &record.registration_event,
-    )
     .map_err(|_| AppError::not_found("committed event not found"))?;
-    let service_did_document =
-        crate::jws_verify::resolve_did_document(state, &epoch.did).map_err(|_| {
-            crate::app_error!(
-                TemporarilyUnavailable,
-                "current Applet Service identity is unavailable"
-            )
-        })?;
-    let mut input =
-        coland_storage::AccountContentDeliveryInput::committed(std::slice::from_ref(&view));
-    input.applet_endpoint = Some(coland_storage::AppletManagedDeviceScopeGuard {
-        authority: device.authority.clone(),
-        effective_scope: device.metadata.effective_scope.clone(),
-        service_did_document,
-    });
-    input.credential_expires_at = Some(device.transport_expires_at);
-    let guard = state
-        .authority_commits()
-        .acquire_committed_content_delivery(
-            &device.authority.account_id,
-            &state.service_core_id(),
-            &input,
-        )
-        .await
-        .map_err(|_| AppError::not_found("committed event not found"))?
-        .ok_or_else(|| AppError::not_found("committed event not found"))?;
     coland_http::result::guarded_json_ok(view, Some(guard))
 }
 

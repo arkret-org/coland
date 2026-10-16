@@ -11,7 +11,7 @@ use arkret_wire::{
     CommittedEventRef, CurrentSelector, EventId, RealmId, StationSigningKey, TypedCurrentRow,
 };
 use coland_http::error::AppError;
-use coland_http::result::{JsonResult, json_ok};
+use coland_http::result::{GuardedJsonResult, guarded_json_ok};
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
 
@@ -46,10 +46,15 @@ async fn self_query(
     body: JsonBody<SignerKeysQueryRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<SignerKeysQueryOutcome> {
+) -> GuardedJsonResult<SignerKeysQueryOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
     let body = body.into_inner();
+    if let Ok(device) =
+        depot.get_typed::<super::applet_managed_device::VerifiedAppletManagedDevice>()
+    {
+        return native_self_query(state, device, &body).await;
+    }
+    let session = aa.authenticated_session(state, req).await?;
     body.validate().map_err(self_request_error)?;
     let actor = super::session_actor::validated_session_actor(state, &session).await?;
     if actor.as_account_id() != Some(&body.recipient_account_id)
@@ -57,7 +62,95 @@ async fn self_query(
     {
         return Err(AppError::not_found("signer key unavailable"));
     }
-    json_ok(resolve_self_signer_keys(state, &session, &body).await?)
+    guarded_json_ok(
+        resolve_self_signer_keys(state, &session, &body).await?,
+        None,
+    )
+}
+
+/// Historical dependencies disclose only a fact for an exact Full Event the
+/// real recipient may currently receive. No PCR/control fallback is available.
+async fn native_self_query(
+    state: &AppState,
+    device: &super::applet_managed_device::VerifiedAppletManagedDevice,
+    body: &SignerKeysQueryRequestBody,
+) -> GuardedJsonResult<SignerKeysQueryOutcome> {
+    body.validate().map_err(self_request_error)?;
+    if device.operation != arkret_wire::ServiceOperationId::SelfSignerKeysReadResolveV1
+        || body.recipient_account_id != device.authority.account_id
+        || body.recipient_account_id.station_id != state.service_core_id()
+        || body.realm_id != *device.metadata.effective_scope.realm_id()
+    {
+        return Err(AppError::not_found("signer key unavailable"));
+    }
+    let actor = arkret_wire::ActorId::account(body.recipient_account_id.clone());
+    let mut results = Vec::with_capacity(body.queries.len());
+    let mut views = Vec::new();
+    for selector in &body.queries {
+        let mut resolved = None;
+        if let Some(reference) = selector.committed_event_ref() {
+            if let Ok(coland_storage::MemberCommittedEventRead::Read(view)) = state
+                .authority_commits()
+                .committed_event_for_member(&reference.event_id, &actor, &state.service_core_id())
+                .await
+            {
+                let commit = view.commit();
+                if let arkret_wire::CommittedEventView::Full(full) = view.as_ref() {
+                    if commit.realm_id == body.realm_id
+                        && commit.event_ref == reference.event_id
+                        && commit.commit_id == reference.commit_id
+                        && commit.stream_ref == reference.stream_ref
+                        && commit.stream_position == reference.stream_position
+                    {
+                        // Signed metadata cannot substitute for the original
+                        // resource's authoritative scope, including mixed batches.
+                        if full.event.scope_ref != device.metadata.effective_scope {
+                            return Err(AppError::not_found("signer key unavailable"));
+                        }
+                        resolved = state
+                            .authority_commits()
+                            .historical_producer_signer_key(&body.realm_id, selector)
+                            .await
+                            .ok()
+                            .flatten();
+                        if resolved.is_some()
+                            && !views
+                                .iter()
+                                .any(|v: &arkret_wire::CommittedEventView| v.commit() == commit)
+                        {
+                            views.push(*view);
+                        }
+                    }
+                }
+            }
+        }
+        // A current selector alone has no authoritative target scope. It cannot
+        // mint a disclosure path from the caller's metadata or PCR identity.
+        results.push(
+            resolved.unwrap_or_else(|| SignerKeyQueryOutcome::Unavailable {
+                selector: selector.clone(),
+            }),
+        );
+    }
+    let guard = if views.is_empty() {
+        None
+    } else {
+        Some(
+            super::applet_managed_device::content_delivery_guard(state, device, &views)
+                .await
+                .map_err(|_| AppError::not_found("signer key unavailable"))?,
+        )
+    };
+    let outcome = SignerKeysQueryOutcome {
+        request_id: body.request_id.clone(),
+        realm_id: body.realm_id.clone(),
+        recipient_account_id: body.recipient_account_id.clone(),
+        results,
+    };
+    outcome
+        .validate_for_request(body)
+        .map_err(self_result_error)?;
+    guarded_json_ok(outcome, guard)
 }
 
 pub(crate) fn self_request_error(error: arkret_wire::WireError) -> AppError {

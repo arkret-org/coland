@@ -98,6 +98,7 @@ pub fn protocol_router() -> Router {
         .push(Router::with_path("root").push(recovery::protocol_router()))
         .push(
             Router::with_path("self")
+                .hoop(session_pop::verify_session_pop)
                 .push(account::protocol_router())
                 // Spec `account_data` group (`ak.self.account_data.*`).
                 .push(account_data::router())

@@ -320,41 +320,24 @@ pub(crate) async fn require_business_in_connection(
         .ok_or_else(|| denied("native terminal grant has no current"))?;
     if child.issuer_id != service
         || !matches!(&child.subject,CapabilitySubject::Actor(actor) if actor==&event.actor_id)
-        || !crate::capability_grant_current_results::grant_is_active_at(child, at)
+        || child.status != arkret_models_collaboration::governance::grant_constraint::CapabilityGrantStatus::Active
     {
         return Err(denied(
             "native terminal grant differs from its real subject or Service source",
         ));
     }
-    let [
-        IssuerAuthorityRef::Grant {
-            grant_id: parent_id,
-        },
-    ] = child.issuer_authority_refs.as_slice()
-    else {
-        return Err(denied(
-            "native business requires an implemented exact Service parent",
-        ));
-    };
-    let parent = grants
-        .get(parent_id)
-        .ok_or_else(|| denied("native Service parent has no current"))?;
-    if !matches!(&parent.subject,CapabilitySubject::Actor(actor) if actor==&service)
-        || !crate::capability_grant_current_results::grant_is_active_at(parent, at)
-    {
-        return Err(denied(
-            "native Service parent is inactive or names another complete Service",
-        ));
-    }
-    if parent
+    let parents = child
         .issuer_authority_refs
         .iter()
-        .any(|source| !matches!(source, IssuerAuthorityRef::RealmRoot { .. }))
-    {
-        return Err(denied(
-            "native business ancestor contribution and quota consumer is unavailable",
-        ));
-    }
+        .map(|source| match source {
+            IssuerAuthorityRef::Grant { grant_id } => grants
+                .get(grant_id)
+                .ok_or_else(|| denied("native Service source has no current")),
+            _ => Err(denied(
+                "native terminal child must name actual Service grants",
+            )),
+        })
+        .collect::<PersistenceResult<Vec<_>>>()?;
     let sources=sql_query("SELECT e.envelope->'payload' AS value FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.applet.managed_actor.provision' AND e.envelope#>'{payload,actor_id}'=$1")
         .bind::<Jsonb,_>(json!(event.actor_id)).load::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     if sources.len() != 1 {
@@ -384,29 +367,89 @@ pub(crate) async fn require_business_in_connection(
         issuer_authority_refs: child.issuer_authority_refs.clone(),
         issued_at: child.issued_at,
     };
-    crate::capability_grant_current_results::validate_managed_parent(
-        parent,
-        &definition,
-        role,
-        at,
-    )?;
+    crate::capability_grant_current_results::validate_managed_sources(&parents, &definition, role)?;
     let root=sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1")
         .bind::<Text,_>(event.realm_id.as_str()).get_result::<crate::capability_grant_current_results::RealmAuthorityRootReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    crate::capability_grant_current_results::validate_ancestor_graph(
-        &GrantId::from_event_id(&event.event_id),
-        &id,
-        &grants,
-        &crate::capability_grant_current_results::decode_authority_root(root)?,
-        &event.realm_id,
-        at,
-        &mut std::collections::BTreeSet::new(),
-        0,
-    )?;
+    let root = crate::capability_grant_current_results::decode_authority_root(root)?;
+    let sources = arkret_policy::grant_authority::current_sources(
+        child, CapabilityActionId::MessageCreate.as_str(), &target, &grants, at,
+        |source| matches!(source, IssuerAuthorityRef::RealmRoot { realm_id, authority_event_ref, authority_generation }
+            if realm_id==&event.realm_id && authority_event_ref==&root.authority_event_ref
+                && authority_generation==&root.authority_generation),
+    ).map_err(|error| PersistenceError::Conflict(error.to_string()))?;
     let actions = [CapabilityActionId::MessageCreate.as_str()];
-    crate::boxed_future(|| {
-        crate::managed_message_actor::require_producer_grant(
-            conn, event, commit, prepared, parent, &service, &actions, &target, &facts,
-        )
-    })
-    .await
+    let mut accepted = Vec::new();
+    let mut reservations = Vec::new();
+    let mut actors = std::collections::BTreeSet::from([service.clone()]);
+    for source in &sources {
+        if let CapabilitySubject::Actor(actor) = &source.subject {
+            actors.insert(actor.clone());
+        }
+    }
+    for actor in actors {
+        let matching=grants.values().filter(|grant|
+            matches!(&grant.subject, CapabilitySubject::Actor(subject) if subject==&actor)
+            && arkret_policy::grant_authority::contributes(grant,actions[0],&target)
+            && arkret_policy::grant_authority::current_sources(grant,actions[0],&target,&grants,at,
+                |source| matches!(source,IssuerAuthorityRef::RealmRoot{realm_id,authority_event_ref,authority_generation}
+                    if realm_id==&event.realm_id && authority_event_ref==&root.authority_event_ref
+                        && authority_generation==&root.authority_generation)).is_ok()
+        ).collect::<Vec<_>>();
+        let mut source_facts = facts.clone();
+        source_facts.executed_by = Some(actor.clone());
+        accepted.extend(
+            crate::boxed_future(|| {
+                crate::managed_message_actor::require_source_global_refusals(
+                    conn,
+                    event,
+                    commit,
+                    prepared,
+                    &matching,
+                    &actor,
+                    &actions,
+                    &target,
+                    &source_facts,
+                )
+            })
+            .await?,
+        );
+    }
+    for source in sources {
+        let CapabilitySubject::Actor(actor) = &source.subject else {
+            return Err(denied(
+                "native ancestor source has no complete Actor subject",
+            ));
+        };
+        let mut source_facts = facts.clone();
+        source_facts.executed_by = Some(actor.clone());
+        let (approvals, quota) = crate::boxed_future(|| {
+            crate::managed_message_actor::evaluate_producer_grant(
+                conn,
+                event,
+                commit,
+                prepared,
+                source,
+                actor,
+                &actions,
+                &target,
+                &source_facts,
+                true,
+            )
+        })
+        .await?;
+        accepted.extend(approvals);
+        reservations.extend(quota);
+    }
+    if !crate::capability_quota::try_reserve_in_connection(
+        conn,
+        &reservations,
+        event.event_id.as_str(),
+    )
+    .await?
+    {
+        return Err(PersistenceError::Conflict(
+            "rate_limited: Applet ancestor quota is exhausted".into(),
+        ));
+    }
+    Ok(accepted)
 }

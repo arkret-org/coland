@@ -747,152 +747,13 @@ pub(crate) async fn managed_subject_role(
     }))
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "The runtime grant binds verified producer, authority, expiry and operation evidence."
-)]
-fn managed_runtime_grant(
-    id: &GrantId,
-    issuer: &ActorId,
-    subject: &CapabilitySubject,
-    realm: &RealmId,
-    actions: &[String],
-    constraints: &[arkret_models_collaboration::governance::grant_constraint::GrantConstraint],
-    refs: &[IssuerAuthorityRef],
-    at: chrono::DateTime<chrono::Utc>,
-) -> PersistenceResult<arkret_policy::authz::authority::Grant> {
-    let CapabilitySubject::Actor(subject) = subject else {
-        return Err(conflict("managed grant subject is not Actor"));
-    };
-    let constraints = constraints
-        .iter()
-        .filter(|c| {
-            matches!(
-                c.constraint_kind,
-                GrantConstraintKind::AuthorityControl | GrantConstraintKind::Temporal
-            )
-        })
-        .map(|c| {
-            serde_json::from_value(serde_json::to_value(c).map_err(PersistenceError::database)?)
-                .map_err(PersistenceError::database)
-        })
-        .collect::<PersistenceResult<Vec<arkret_policy::authz::authority::GrantConstraint>>>()?;
-    Ok(arkret_policy::authz::authority::Grant {
-        grant_id: id.to_string(),
-        realm_id: realm.to_string(),
-        issuer_id: issuer.clone(),
-        subject_id: subject.clone(),
-        resource: realm.to_string(),
-        actions: actions.to_vec(),
-        constraints,
-        revoked: false,
-        created_at: at,
-        issuer_authority_refs: serde_json::from_value(
-            serde_json::to_value(refs).map_err(PersistenceError::database)?,
-        )
-        .map_err(PersistenceError::database)?,
-        authority_depth: 0,
-        authority_root_refs: vec![],
-    })
-}
-
-pub(crate) fn validate_managed_parent(
-    parent: &CapabilityGrant,
+pub(crate) fn validate_managed_sources(
+    parents: &[&CapabilityGrant],
     child: &arkret_models_collaboration::events_payloads::CapabilityGrantCreateBody,
     role: arkret_models_collaboration::governance::grant_constraint::ManagedActorRole,
-    _at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
-    for constraints in [&parent.constraints, &child.constraints] {
-        let bindings=constraints.iter().filter(|c| c.constraint_subkind==Some(
-            arkret_models_collaboration::governance::grant_constraint::GrantConstraintSubkind::AppletAuthority)).collect::<Vec<_>>();
-        let [binding] = bindings.as_slice() else {
-            return Err(conflict("managed authority binding is not unique"));
-        };
-        if binding.constraint_kind != GrantConstraintKind::AuthorityControl
-            || binding.effect != GrantConstraintEffect::Allow
-            || binding.evaluation_class != Some(arkret_wire::EvaluationClass::GrantLocal)
-        {
-            return Err(conflict(
-                "managed authority binding must be allow and grant-local",
-            ));
-        }
-    }
-    let realm = parent
-        .realm_id
-        .as_ref()
-        .ok_or_else(|| conflict("managed parent Realm absent"))?;
-    let projected_parent = managed_runtime_grant(
-        &parent.id,
-        &parent.issuer_id,
-        &parent.subject,
-        realm,
-        &parent.actions,
-        &parent.constraints,
-        &parent.issuer_authority_refs,
-        parent.issued_at,
-    )?;
-    let projected_child = managed_runtime_grant(
-        &parent.id,
-        &child.issuer_id,
-        &child.subject,
-        realm,
-        &child.actions,
-        &child.constraints,
-        &child.issuer_authority_refs,
-        child.issued_at,
-    )?;
-    if !arkret_policy::authz::authority::validate_managed_service_child(
-        &projected_parent,
-        &projected_child,
-        role,
-        |_, _| {
-            child.resources.iter().all(|c| {
-                parent
-                    .resources
-                    .iter()
-                    .any(|p| resource_selector_covers(p, c))
-            })
-        },
-    ) {
-        return Err(conflict("managed Service child exceeds its parent"));
-    }
-    // Issuance preserves the source constraints; it neither exercises the
-    // delegated business action nor consumes its quota or detached approvals.
-    // Preserve the full typed constraint, including members not represented
-    // by the runtime projection. Only the formal terminal-control narrowing,
-    // Applet executor rebinding, and a shorter temporal window may differ.
-    let CapabilitySubject::Actor(child_actor) = &child.subject else {
-        return Err(conflict("managed child subject is not an Account"));
-    };
-    for constraint in &parent.constraints {
-        let retained=child.constraints.iter().any(|candidate| {
-            let mut expected=constraint.clone();
-            match (constraint.constraint_kind,constraint.constraint_subkind) {
-                (GrantConstraintKind::AuthorityControl,
-                    Some(arkret_models_collaboration::governance::grant_constraint::GrantConstraintSubkind::AppletAuthority)) => {
-                    expected.executed_by=Some(child_actor.clone());
-                },
-                (GrantConstraintKind::AuthorityControl,None) => {
-                    if !candidate.allowed_managed_actor_roles.iter().all(|r|constraint.allowed_managed_actor_roles.contains(r)) {return false;}
-                    expected.max_authority_depth=Some(0);
-                    expected.authority_regrant_allowed=Some(false);
-                    expected.allowed_managed_actor_roles=candidate.allowed_managed_actor_roles.clone();
-                },
-                (GrantConstraintKind::Temporal,_) => {
-                    if constraint.expires_at.is_some_and(|expiry|candidate.expires_at.is_none_or(|v|v>expiry)) {return false;}
-                    if constraint.not_before.is_some_and(|from|candidate.not_before.is_none_or(|v|v<from)) {return false;}
-                    expected.expires_at=candidate.expires_at;
-                    expected.not_before=candidate.not_before;
-                },
-                _ => {},
-            }
-            &expected==candidate
-        });
-        if !retained {
-            return Err(conflict("managed child drops or widens parent constraints"));
-        }
-    }
-    Ok(())
+    arkret_policy::grant_authority::validate_managed_service_sources(child, parents, role)
+        .map_err(|error| conflict(error.to_string()))
 }
 
 fn materialize_capability_grant<'a>(
@@ -1107,11 +968,11 @@ async fn materialize_capability_grant_inner(
     .await?;
     if managed_role.is_some()
         && (!matches!(body.issuer_id, ActorId::Service { .. })
-            || body.issuer_authority_refs.len() != 1
-            || !matches!(
-                body.issuer_authority_refs[0],
-                IssuerAuthorityRef::Grant { .. }
-            ))
+            || body.issuer_authority_refs.is_empty()
+            || body
+                .issuer_authority_refs
+                .iter()
+                .any(|source| !matches!(source, IssuerAuthorityRef::Grant { .. })))
     {
         return Err(conflict(
             "managed Account authority must come from its Applet Service parent",
@@ -1252,9 +1113,7 @@ async fn materialize_capability_grant_inner(
                     return Err(conflict("grant_exceeds_issuer_authority"));
                 }
                 require_delegable_parent(parent)?;
-                if let Some(role) = managed_role {
-                    validate_managed_parent(parent, &body, role, commit.committed_at)?;
-                } else {
+                if managed_role.is_none() {
                     validate_parent_constraints(parent, &body)?;
                 }
                 deepest = deepest.max(parent.authority_depth);
@@ -1262,6 +1121,11 @@ async fn materialize_capability_grant_inner(
                 parent_ids.push(parent_id.clone());
             }
         }
+    }
+
+    if let Some(role) = managed_role {
+        let parents = parent_ids.iter().map(|id| &rows[id]).collect::<Vec<_>>();
+        validate_managed_sources(&parents, &body, role)?;
     }
 
     // capabilities.md §3.2 / §10.3: a closed upstream ancestor refuses the

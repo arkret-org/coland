@@ -647,6 +647,7 @@ pub(crate) struct RealmAuthorizationCut {
     direct_conversation: Option<ProfileAuthority>,
     /// Narrow delegated Service admission to the signed authorization_ref.
     selected_grant: Option<GrantId>,
+    native_operation: Option<WireResourceSelector>,
 }
 
 impl RealmAuthorizationCut {
@@ -808,6 +809,7 @@ impl RealmAuthorizationCut {
             lifecycle,
             direct_conversation: None,
             selected_grant: None,
+            native_operation: None,
         })
     }
 
@@ -827,6 +829,7 @@ impl RealmAuthorizationCut {
             && event.actor_id.as_account_id().is_some()
             && event.executed_by.is_none()
         {
+            cut.native_operation = Some(cut.event_operation(event).0);
             cut.selected_grant = Some(
                 event
                     .authorization_ref
@@ -1197,6 +1200,22 @@ impl RealmAuthorizationCut {
                     .actions
                     .iter()
                     .any(|action| arkret_policy::owner_may_author_action(action).unwrap_or(false)));
+        // A signed reference selects the positive authority path, never the
+        // global refusal set of the actual Account's effective grants.
+        let evaluation = match evaluation {
+            GrantEvaluation::Allowed(paths) if self.native_operation.is_some() => {
+                let paths = paths
+                    .into_iter()
+                    .filter(|path| self.selected_grant.as_ref() == Some(&path.grant.id))
+                    .collect::<Vec<_>>();
+                if paths.is_empty() {
+                    GrantEvaluation::Unsatisfied
+                } else {
+                    GrantEvaluation::Allowed(paths)
+                }
+            }
+            other => other,
+        };
         match evaluation {
             GrantEvaluation::Denied => Err(capability_denied(
                 "a deny constraint of an effective grant matches the operation",
@@ -1268,12 +1287,18 @@ impl RealmAuthorizationCut {
             let Some(root) = root else {
                 return false;
             };
-            self.selected_grant.as_ref().is_none_or(|selected| selected == *grant_id)
+            (self.native_operation.is_some() || self.selected_grant.as_ref().is_none_or(|selected| selected == *grant_id))
                 && matches!(&grant.subject, CapabilitySubject::Actor(subject) if subject == &self.actor)
                 && grant.realm_id.as_ref() == Some(&self.realm_id)
-                && grant_is_active_at(grant, at)
+                && (self.native_operation.is_some() || grant_is_active_at(grant, at))
                 && !grant.issuer_authority_refs.is_empty()
-                && grant
+                && if let Some(target) = &self.native_operation {
+                    arkret_policy::grant_authority::current_sources(grant,
+                        CapabilityActionId::MessageCreate.as_str(), target, &self.grants, at,
+                        |source| matches!(source, IssuerAuthorityRef::RealmRoot { realm_id, authority_event_ref, authority_generation }
+                            if realm_id==&self.realm_id && authority_event_ref==&root.authority_event_ref
+                                && authority_generation==&root.authority_generation)).is_ok()
+                } else { grant
                     .issuer_authority_refs
                     .iter()
                     .all(|authority_ref| match authority_ref {
@@ -1312,7 +1337,7 @@ impl RealmAuthorizationCut {
                             )
                             .is_ok()
                         }
-                    })
+                    }) }
         })
     }
 
@@ -3841,6 +3866,76 @@ mod operation_fact_tests {
     use super::*;
 
     #[test]
+    fn native_message_cut_uses_action_windows_and_keeps_global_refusals() {
+        let realm: RealmId = "ak:realm:AY6DJbBwavsGTQuBZZiqqw9MVcqPZ8QX8invQ3i2kpi7"
+            .parse()
+            .unwrap();
+        let account = |did: &str| {
+            ActorId::account(arkret_wire::AccountId::new(
+                did.parse().unwrap(),
+                "ak:did_core:web:station.example".parse().unwrap(),
+            ))
+        };
+        let actor = account("ak:did_core:web:bot.example");
+        let owner = account("ak:did_core:web:owner.example");
+        let service = ActorId::service("ak:did_core:web:applet.example".parse().unwrap());
+        let event = |seed| {
+            arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [seed; 32])
+        };
+        let root_event = event(0x70);
+        let parent_id = GrantId::from_event_id(&event(0x71));
+        let child_id = GrantId::from_event_id(&event(0x72));
+        let root_ref = json!({"kind":"realm_root","realm_id":realm,"authority_event_ref":root_event,"authority_generation":0});
+        let parent:CapabilityGrant=serde_json::from_value(json!({"id":parent_id,"schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":owner,"subject":service,"actions":["ak.message.create","ak.event.read"],"resources":[{"kind":"realm","realm_id":realm}],"constraints":[{"constraint_kind":"authority_control","effect":"allow","authority_regrant_allowed":false,"max_authority_depth":0}],"issuer_authority_refs":[root_ref],"authority_depth":1,"authority_root_refs":[root_ref],"issued_at":"2026-09-21T00:00:00.000Z","status":"active"})).unwrap();
+        let mut child:CapabilityGrant=serde_json::from_value(json!({"id":child_id,"schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":service,"subject":actor,"actions":["ak.message.create","ak.event.read"],"resources":[{"kind":"realm","realm_id":realm}],"constraints":[{"constraint_kind":"temporal","effect":"allow","applies_to_actions":["ak.event.read"],"expires_at":"2026-09-22T00:00:00.000Z"}],"issuer_authority_refs":[{"kind":"grant","grant_id":parent_id}],"authority_depth":2,"authority_root_refs":[root_ref],"issued_at":"2026-09-21T00:00:00.000Z","status":"active"})).unwrap();
+        let target = WireResourceSelector::realm(realm.clone());
+        let at = "2026-09-23T00:00:00Z".parse().unwrap();
+        assert!(!grant_is_active_at(&child, at));
+        let mut cut = RealmAuthorizationCut {
+            realm_id: realm.clone(),
+            actor,
+            root: Some(RealmAuthorityRootCurrent {
+                realm_id: realm,
+                controller_actor_id: owner,
+                controller_epoch: 0,
+                authority_generation: 0,
+                authority_event_ref: root_event,
+            }),
+            grants: BTreeMap::from([(parent_id, parent), (child_id.clone(), child.clone())]),
+            revisions: BTreeMap::new(),
+            policy_bundle: None,
+            actor_membership: Some("join".into()),
+            lifecycle: RealmLifecycleGates::default(),
+            direct_conversation: None,
+            selected_grant: Some(child_id),
+            native_operation: Some(target.clone()),
+        };
+        assert_eq!(cut.effective_grants(at).count(), 1);
+        assert!(matches!(
+            cut.evaluate(
+                &[CapabilityActionId::MESSAGE_CREATE],
+                &target,
+                &OperationFacts::default(),
+                at
+            ),
+            GrantEvaluation::Allowed(_)
+        ));
+        child.id = GrantId::from_event_id(&event(0x73));
+        child.constraints=vec![serde_json::from_value(json!({"constraint_kind":"scope_limitation","effect":"deny","denied_strand_ids":["ak:strand:AZ6GqZWWvnQ2KFwbBD-MenomzWNz-31MUAuKzBXIP0zv"]})).unwrap()];
+        cut.grants.insert(child.id.clone(), child);
+        assert_eq!(cut.effective_grants(at).count(), 2);
+        assert!(matches!(
+            cut.evaluate(
+                &[CapabilityActionId::MESSAGE_CREATE],
+                &target,
+                &OperationFacts::default(),
+                at
+            ),
+            GrantEvaluation::Denied
+        ));
+    }
+
+    #[test]
     fn readonly_positive_coverage_rechecks_recurrence_at_handoff() {
         use arkret_models_collaboration::governance::grant_constraint::{
             GrantConstraint, GrantConstraintEffect, GrantConstraintKind, GrantConstraintRecurrence,
@@ -3902,6 +3997,7 @@ mod operation_fact_tests {
             lifecycle: RealmLifecycleGates::default(),
             direct_conversation: None,
             selected_grant: None,
+            native_operation: None,
         };
         let before = "2026-09-21T01:00:00Z".parse().unwrap();
         let after = "2026-09-21T09:30:00Z".parse().unwrap();
@@ -3947,6 +4043,7 @@ mod operation_fact_tests {
             lifecycle: RealmLifecycleGates::default(),
             direct_conversation: None,
             selected_grant: None,
+            native_operation: None,
         };
         let (target, facts) = cut.event_operation(&event);
         assert_eq!(
@@ -4016,6 +4113,7 @@ mod operation_fact_tests {
             lifecycle: RealmLifecycleGates::default(),
             direct_conversation: None,
             selected_grant: None,
+            native_operation: None,
         };
         let (target, facts) = cut.event_operation(&event);
         assert_eq!(target, WireResourceSelector::realm(realm_id));

@@ -276,9 +276,11 @@ async fn require_applet_producer_inner(
             .map_err(denied)?;
         if let Some(target) = grants.get(&payload.grant_id) {
             target.issuer_id == service
-                && matches!(target.issuer_authority_refs.as_slice(),
-                    [arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::Grant {grant_id:parent}]
-                        if parent==&grant_id)
+                && target.issuer_authority_refs.iter().all(|source| matches!(source,
+                    arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::Grant { .. }))
+                && target.issuer_authority_refs.iter().any(|source| matches!(source,
+                    arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::Grant {grant_id:parent}
+                        if parent==&grant_id))
                 && crate::capability_grant_current_results::managed_subject_role(
                     conn,
                     event,
@@ -528,6 +530,108 @@ pub(crate) async fn require_producer_grant(
     target: &arkret_wire::WireResourceSelector,
     facts: &coland_storage::OperationFacts,
 ) -> PersistenceResult<Vec<crate::approval_admission::QualifiedApproval>> {
+    let (accepted, reservations) = crate::boxed_future(|| {
+        evaluate_producer_grant(
+            conn, event, commit, prepared, grant, actor, actions, target, facts, false,
+        )
+    })
+    .await?;
+    if !reservations.is_empty() && grant.issuer_authority_refs.iter().any(|source|
+        !matches!(source,arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::RealmRoot { .. })) {
+        return Err(denied("source quota needs its complete ancestor authority consumer"));
+    }
+    if !crate::capability_quota::try_reserve_in_connection(
+        conn,
+        &reservations,
+        event.event_id.as_str(),
+    )
+    .await?
+    {
+        return Err(PersistenceError::Conflict(
+            "rate_limited: Applet source quota is exhausted".into(),
+        ));
+    }
+    Ok(accepted)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The original grant, actual source subject and operation stay bound to one accepting cut."
+)]
+pub(crate) async fn evaluate_producer_grant(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
+    grant: &arkret_models_collaboration::governance::grant_constraint::CapabilityGrant,
+    actor: &ActorId,
+    actions: &[&str],
+    target: &arkret_wire::WireResourceSelector,
+    facts: &coland_storage::OperationFacts,
+    authority_source: bool,
+) -> PersistenceResult<(
+    Vec<crate::approval_admission::QualifiedApproval>,
+    Vec<coland_storage::QuotaReservation>,
+)> {
+    let (markers, accepted, missing) = crate::boxed_future(|| {
+        prepare_producer_grant_approvals(
+            conn, event, commit, prepared, grant, actions, target, facts,
+        )
+    })
+    .await?;
+    let operation = coland_storage::AuthorizationOperation {
+        actor,
+        actions,
+        target,
+        at: commit.committed_at,
+        facts,
+    };
+    let evaluation = if authority_source {
+        coland_storage::evaluate_authority_sources_with_verified_approvals(
+            &operation,
+            std::iter::once(grant),
+            &markers,
+        )
+    } else {
+        coland_storage::evaluate_grants_with_verified_approvals(
+            &operation,
+            std::iter::once(grant),
+            &markers,
+        )
+    };
+    if matches!(evaluation, coland_storage::GrantEvaluation::RequiresReview) && missing {
+        return Err(PersistenceError::Conflict(
+            "approval_required: Applet producer grant approval is not satisfied".into(),
+        ));
+    }
+    if let coland_storage::GrantEvaluation::Allowed(mut satisfied) = evaluation {
+        if let Some(satisfied) = satisfied.pop() {
+            return Ok((accepted, satisfied.reservations));
+        }
+    }
+    Err(denied(
+        "Applet producer grant constraints do not permit this action",
+    ))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Detached evidence remains bound to its original grant and actual operation."
+)]
+async fn prepare_producer_grant_approvals(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
+    grant: &arkret_models_collaboration::governance::grant_constraint::CapabilityGrant,
+    actions: &[&str],
+    target: &arkret_wire::WireResourceSelector,
+    facts: &coland_storage::OperationFacts,
+) -> PersistenceResult<(
+    Vec<coland_storage::VerifiedGrantApproval>,
+    Vec<crate::approval_admission::QualifiedApproval>,
+    bool,
+)> {
     let mut markers = Vec::new();
     let mut accepted = Vec::new();
     let mut missing = false;
@@ -556,7 +660,41 @@ pub(crate) async fn require_producer_grant(
             Err(error) => return Err(error),
         }
     }
-    let evaluation = coland_storage::evaluate_grants_with_verified_approvals(
+    Ok((markers, accepted, missing))
+}
+
+/// A referenced source cannot bypass another effective grant's global refusal.
+/// This check counts no positive allow path and reserves no quota.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Global source refusals preserve their own immutable proof and actual holder."
+)]
+pub(crate) async fn require_source_global_refusals(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
+    grants: &[&arkret_models_collaboration::governance::grant_constraint::CapabilityGrant],
+    actor: &ActorId,
+    actions: &[&str],
+    target: &arkret_wire::WireResourceSelector,
+    facts: &coland_storage::OperationFacts,
+) -> PersistenceResult<Vec<crate::approval_admission::QualifiedApproval>> {
+    let mut markers = Vec::new();
+    let mut accepted = Vec::new();
+    let mut missing = false;
+    for grant in grants {
+        let (proved, qualified, unproved) = crate::boxed_future(|| {
+            prepare_producer_grant_approvals(
+                conn, event, commit, prepared, grant, actions, target, facts,
+            )
+        })
+        .await?;
+        markers.extend(proved);
+        accepted.extend(qualified);
+        missing |= unproved;
+    }
+    let evaluation = coland_storage::evaluate_authority_sources_with_verified_approvals(
         &coland_storage::AuthorizationOperation {
             actor,
             actions,
@@ -564,36 +702,29 @@ pub(crate) async fn require_producer_grant(
             at: commit.committed_at,
             facts,
         },
-        std::iter::once(grant),
+        grants.iter().copied(),
         &markers,
     );
     if matches!(evaluation, coland_storage::GrantEvaluation::RequiresReview) && missing {
         return Err(PersistenceError::Conflict(
-            "approval_required: Applet producer grant approval is not satisfied".into(),
+            "approval_required: an effective source grant requires review".into(),
         ));
     }
-    if let coland_storage::GrantEvaluation::Allowed(satisfied) = evaluation {
-        for grant in satisfied {
-            if !grant.reservations.is_empty() && grant.grant.issuer_authority_refs.iter().any(|source|!matches!(source,arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::RealmRoot{..})) {
-                return Err(denied("source quota needs its complete ancestor authority consumer"));
-            }
-            if crate::capability_quota::try_reserve_in_connection(
-                conn,
-                &grant.reservations,
-                event.event_id.as_str(),
-            )
-            .await?
-            {
-                return Ok(accepted);
-            }
+    match evaluation {
+        coland_storage::GrantEvaluation::Denied => {
+            return Err(PersistenceError::Conflict(
+                "capability_denied: an effective source grant has a global deny".into(),
+            ));
         }
-        return Err(PersistenceError::Conflict(
-            "rate_limited: Applet source quota is exhausted".into(),
-        ));
+        coland_storage::GrantEvaluation::Quarantined
+        | coland_storage::GrantEvaluation::RequiresReview => {
+            return Err(denied(
+                "an effective source grant requires quarantine or review",
+            ));
+        }
+        _ => {}
     }
-    Err(denied(
-        "Applet producer grant constraints do not permit this action",
-    ))
+    Ok(accepted)
 }
 
 async fn accepted_event(conn: &mut AsyncPgConnection, id: &EventId) -> PersistenceResult<Event> {

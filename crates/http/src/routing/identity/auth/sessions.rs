@@ -488,6 +488,13 @@ fn agent_recipient_operation(method: &str, path: &str) -> Option<&'static str> {
         return Some(operation.as_str());
     }
     match (method, path) {
+        ("GET", "/_arkret/self/contacts") => Some(ServiceOperationId::SELF_CONTACT_READ_LIST_V1),
+        ("POST", "/_arkret/self/contacts/respond") => {
+            Some(ServiceOperationId::SELF_CONTACT_COMMAND_RESPOND_V1)
+        }
+        ("POST", "/_arkret/self/direct-conversations/resolve") => {
+            Some(ServiceOperationId::SELF_DIRECT_CONVERSATION_READ_RESOLVE_V1)
+        }
         ("POST", "/_arkret/self/signer-keys/query") => {
             Some(ServiceOperationId::SELF_SIGNER_KEYS_READ_RESOLVE_V1)
         }
@@ -1083,6 +1090,57 @@ mod tests {
         assert!(classify_agent_marker(false, Some(true)).is_err());
         assert!(classify_agent_marker(true, Some(false)).is_err());
         assert!(classify_agent_marker(true, None).is_err());
+    }
+
+    #[test]
+    fn agent_contact_operations_keep_exact_scope_and_http_boundaries() {
+        use arkret_wire::ServiceOperationId;
+        for (method, path, operation) in [
+            (
+                "GET",
+                "/_arkret/self/contacts",
+                ServiceOperationId::SELF_CONTACT_READ_LIST_V1,
+            ),
+            (
+                "POST",
+                "/_arkret/self/contacts/respond",
+                ServiceOperationId::SELF_CONTACT_COMMAND_RESPOND_V1,
+            ),
+            (
+                "POST",
+                "/_arkret/self/direct-conversations/resolve",
+                ServiceOperationId::SELF_DIRECT_CONVERSATION_READ_RESOLVE_V1,
+            ),
+        ] {
+            let exact = [operation.to_owned()];
+            assert_eq!(
+                require_agent_operation_scope(method, path, Some(&exact)),
+                Ok(())
+            );
+            let queue = [ServiceOperationId::SELF_DEVICE_MESSAGES_READ_LIST_V1.to_owned()];
+            assert!(require_agent_operation_scope(method, path, Some(&queue)).is_err());
+            assert!(require_agent_operation_scope(method, path, None).is_err());
+            assert!(
+                require_agent_operation_scope(method, &format!("{path}/extra"), Some(&exact))
+                    .is_err()
+            );
+            assert!(
+                require_agent_operation_scope(
+                    if method == "GET" { "POST" } else { "GET" },
+                    path,
+                    Some(&exact)
+                )
+                .is_err()
+            );
+            assert!(
+                require_agent_operation_scope(
+                    method,
+                    &path.replace("/_arkret/", "/_coland/"),
+                    Some(&exact)
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]

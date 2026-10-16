@@ -3303,9 +3303,9 @@ impl RealmAuthorizationCut {
         .await
     }
 
-    /// The native subject supplies its own consent. AppletJoin is a governance
-    /// label and never a transferable authority to author another Account join.
-    pub(crate) async fn require_managed_self_membership_action_in_connection(
+    /// Native join and public Profile intent retain their original subject.
+    /// The Applet action selects governance approval, never transferable authority.
+    pub(crate) async fn require_managed_self_action_in_connection(
         &self,
         conn: &mut AsyncPgConnection,
         event: &arkret_wire::Event,
@@ -3346,7 +3346,14 @@ impl RealmAuthorizationCut {
             )
             .await?
         };
-        crate::approval_admission::consume_and_audit(conn,event,commit,&accepted,&serde_json::json!({"managed_self_membership_admission":true,"scope_ref":event.scope_ref})).await
+        crate::approval_admission::consume_and_audit(
+            conn,
+            event,
+            commit,
+            &accepted,
+            &serde_json::json!({"managed_self_action_admission":true,"scope_ref":event.scope_ref}),
+        )
+        .await
     }
 
     fn timeline_target(

@@ -28,6 +28,14 @@ struct JsonRow {
 
 /// The actual domain action, never a union of alternative membership actions.
 pub(crate) fn action(event: &Event) -> PersistenceResult<CapabilityActionId> {
+    if event.executed_by.is_none()
+        && matches!(
+            event.kind,
+            EventKind::ProfileCreate | EventKind::ProfileUpdate
+        )
+    {
+        return Ok(CapabilityActionId::AppletPublish);
+    }
     if event.kind != EventKind::MemberState || event.executed_by.is_some() {
         return Err(denied("native Event has no implemented business consumer"));
     }
@@ -62,7 +70,7 @@ pub(crate) async fn installation(
     let actual_action = action(event)?;
     let encrypted=sql_query("SELECT to_jsonb(EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.mls.genesis' AND c.realm_id=$1 AND e.envelope->'scope_ref'=$2)) AS value")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(json!(event.scope_ref)).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    if encrypted.value.as_bool() != Some(false) {
+    if event.kind == EventKind::MemberState && encrypted.value.as_bool() != Some(false) {
         return Err(PersistenceError::Conflict("applet_e2ee_join_unauthorized: independent Applet MLS join consent is not established at this cut".into()));
     }
 
@@ -113,7 +121,7 @@ pub(crate) async fn installation(
     Ok((registration, row.value))
 }
 
-/// Subject-only join binds an active accepted installation grant. It never
+/// Subject-only metadata binds an active accepted installation grant. It never
 /// spends a fabricated join capability or lets a Service sign the consent.
 pub(crate) async fn require_installation_binding(
     conn: &mut AsyncPgConnection,
@@ -126,7 +134,7 @@ pub(crate) async fn require_installation_binding(
     let id: GrantId = event
         .authorization_ref
         .as_ref()
-        .ok_or_else(|| denied("subject-only Applet join has no installation grant"))?
+        .ok_or_else(|| denied("subject-only Applet action has no installation grant"))?
         .as_str()
         .parse()
         .map_err(|_| denied("Applet installation grant selector is invalid"))?;
@@ -145,7 +153,7 @@ pub(crate) async fn require_installation_binding(
                 .as_ref()
                 == Some(&id)
         })
-        .ok_or_else(|| denied("subject-only join reference is outside its exact installation"))?;
+        .ok_or_else(|| denied("subject-only action reference is outside its exact installation"))?;
     let rows=sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_results WHERE realm_id=$1 ORDER BY grant_id FOR SHARE")
         .bind::<Text,_>(event.realm_id.as_str()).load::<CapabilityGrantCurrentResultReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let mut grants = std::collections::BTreeMap::new();
@@ -163,7 +171,7 @@ pub(crate) async fn require_installation_binding(
         || source["actor_id"] != json!(grant.issuer_id)
     {
         return Err(denied(
-            "subject-only join installation grant is not active for its exact Service",
+            "subject-only action installation grant is not active for its exact Service",
         ));
     }
     let bindings = grant
@@ -181,7 +189,7 @@ pub(crate) async fn require_installation_binding(
         || binding.registration_epoch.as_ref() != Some(&registration.registration_epoch)
         || binding.executed_by.as_ref() != Some(&service)
     {
-        return Err(denied("subject-only join installation authority differs"));
+        return Err(denied("subject-only action installation authority differs"));
     }
     let root=sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1")
         .bind::<Text,_>(event.realm_id.as_str()).get_result::<crate::capability_grant_current_results::RealmAuthorityRootReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
@@ -207,20 +215,32 @@ pub(crate) async fn select_management(
     Vec<arkret_models_collaboration::governance::operation_wire::Policy>,
     arkret_policy::applet_management::AppletManagementDecision,
 )> {
+    let operation = if event.kind == EventKind::MemberState {
+        AppletPolicyOperation::Join
+    } else {
+        AppletPolicyOperation::Publish
+    };
+    let circle = match &event.scope_ref {
+        ScopeRef::Circle { circle_id, .. } => Some(circle_id),
+        _ => None,
+    };
     let service = ActorId::service(registration.service_id.clone());
     // A complete authoritative read is mandatory even when no Policy exists.
     let policies =
         crate::policy_current_results::read_scoped_applet_management_policies_in_connection(
             conn,
             &event.realm_id,
-            None,
+            circle,
         )
         .await?;
-    let resources = [PolicyResourceSelector {
-        kind: PolicyResourceKind::Realm,
-        realm_id: Some(event.realm_id.clone()),
-        resource_ref: Some(event.realm_id.to_string()),
-    }];
+    let mut resources = crate::agent_management_admission::event_content_resources(event)?;
+    if let Some(circle) = circle {
+        resources.push(PolicyResourceSelector {
+            kind: PolicyResourceKind::Object,
+            realm_id: Some(event.realm_id.clone()),
+            resource_ref: Some(circle.to_string()),
+        });
+    }
     let decision = arkret_policy::applet_management::select_applet_management(
         Some(&policies),
         &arkret_policy::applet_management::AppletManagementContext {
@@ -229,7 +249,7 @@ pub(crate) async fn select_management(
             applet_id: &registration.applet_id,
             effective_scope: &event.scope_ref,
             managed_actor_id: Some(&event.actor_id),
-            operation: AppletPolicyOperation::Join,
+            operation,
             content_action: None,
             resources: Some(&resources),
             at,
@@ -241,7 +261,7 @@ pub(crate) async fn select_management(
         PolicyEffect::Deny | PolicyEffect::Quarantine
     ) {
         return Err(denied(
-            "current Applet management Policy rejects native join",
+            "current Applet management Policy rejects the native action",
         ));
     }
     Ok((policies, decision))

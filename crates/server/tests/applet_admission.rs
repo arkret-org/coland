@@ -6145,7 +6145,14 @@ fn creation_operation_vote_at(
             &event.scope_ref,
             event.actor_id.signing_principal_id(),
             ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-            CapabilityActionId::AppletJoin,
+            if matches!(
+                event.kind,
+                EventKind::ProfileCreate | EventKind::ProfileUpdate
+            ) {
+                CapabilityActionId::AppletPublish
+            } else {
+                CapabilityActionId::AppletJoin
+            },
         ),
     };
     let arkret_models_identity::principal_registration_anchor::PrincipalRegistrationAnchor::WebvhRegistration {log_entries,..}=&fixture.pcr.history.registration_anchor;

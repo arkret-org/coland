@@ -777,7 +777,7 @@ pub(crate) async fn admit_member_state_in_connection(
         .await?;
         RealmAuthorizationCut::read(conn, &event.realm_id, &event.actor_id)
             .await?
-            .require_managed_self_membership_action_in_connection(conn, event, commit, prepared)
+            .require_managed_self_action_in_connection(conn, event, commit, prepared)
             .await?;
     }
     admit_member_state(conn, event, commit, review, prepared).await

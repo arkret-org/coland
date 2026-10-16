@@ -1589,6 +1589,15 @@ pub(crate) async fn prepare_admission_in_connection(
         {
             let (registration, _) =
                 crate::applet_device_admission::installation(conn, event, guard, at).await?;
+            if crate::applet_scope_profiles::is_profile(event)
+                && !crate::boxed_future(|| {
+                    crate::applet_scope_profiles::prepare(conn, event, guard, at)
+                })
+                .await?
+                .is_public()
+            {
+                return Ok(None);
+            }
             let (_, decision) =
                 crate::applet_device_admission::select_management(conn, event, &registration, at)
                     .await?;

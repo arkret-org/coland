@@ -29,6 +29,8 @@ use super::{
 /// other accepted kind refuses the cut rather than risk an omitted result.
 pub(crate) const DISCLOSED_EVENT_KINDS: &[EventKind] = &[
     EventKind::RealmCreate,
+    EventKind::ProfileCreate,
+    EventKind::ProfileUpdate,
     EventKind::RealmProfile,
     EventKind::RealmPolicyBundle,
     EventKind::PolicySet,
@@ -161,8 +163,7 @@ const AUDITED_FAMILIES: &[&str] = &[
     "key_backup_active_series_current_results",
     "pcr_device_generation_current_results",
     "pcr_device_authorization_current_results",
-    // PCR-stream Actor Profile and accountability state: no row of an
-    // ordinary collaboration Realm, so any row refuses the cut below.
+    // Ordinary scope Profiles are shared; PCR identity remains private.
     "actor_profile_current_results",
     "identity_accountability_current_results",
     // Controller-PCR Agent provisioning state: likewise never in an ordinary
@@ -976,7 +977,7 @@ async fn disclosure_facts_in_connection(
             OR EXISTS(SELECT 1 FROM agent_key_current_results WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM key_backup_active_series_current_results WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM pcr_device_generation_current_results WHERE realm_id=$1) \
-            OR EXISTS(SELECT 1 FROM actor_profile_current_results WHERE realm_id=$1) \
+            OR EXISTS(SELECT 1 FROM actor_profile_current_results p WHERE p.realm_id=$1 AND NOT EXISTS(SELECT 1 FROM realm_bootstrap_current_results g WHERE g.realm_id=$1 AND g.result_family='realm_genesis' AND g.value->>'purpose'='collaboration')) \
             OR EXISTS(SELECT 1 FROM agent_pcr_genesis_declaration_current_results WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM agent_selector_claim_current_results WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM pcr_device_authorization_current_results WHERE realm_id=$1) \
@@ -1610,6 +1611,14 @@ pub(crate) fn disclose_to_account(
             CurrentSelector::MlsGroup { scope_ref } => Some(
                 CommitStreamRef::from_scope(scope_ref, None).map_err(PersistenceError::database)?,
             ),
+            CurrentSelector::ActorProfile { actor_profile_id } => {
+                crate::applet_scope_profiles::validate_disclosed(
+                    actor_profile_id,
+                    source_stream_ref,
+                    value,
+                )?;
+                Some(source_stream_ref.clone())
+            }
             CurrentSelector::Policy { .. } => {
                 crate::policy_current_results::management_policy_scope_target(
                     &material.realm_id,
@@ -2135,6 +2144,13 @@ pub(crate) fn disclose_to_account(
             | CurrentSelector::InviteLiveTarget { .. }
             | CurrentSelector::InviteDirectedInvitee { .. }
             | CurrentSelector::CapabilityGrant { .. } => {}
+            CurrentSelector::ActorProfile { actor_profile_id } => {
+                crate::applet_scope_profiles::validate_disclosed(
+                    actor_profile_id,
+                    source_stream_ref,
+                    value,
+                )?;
+            }
             CurrentSelector::Policy { policy_id } => {
                 crate::policy_current_results::validate_disclosed_shared_policy(
                     &material.realm_id,

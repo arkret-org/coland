@@ -865,6 +865,9 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
             continue;
         }
         match selector {
+            S::ActorProfile {actor_profile_id} => {
+                crate::applet_scope_profiles::validate_disclosed(actor_profile_id,source_stream_ref,value)?;
+            }
             S::AgentInteraction { agent_account_id } => {
                 if *source_stream_ref
                     != (arkret_wire::CommitStreamRef::Realm {
@@ -1285,6 +1288,9 @@ pub(crate) async fn advance_in_connection(
                 commit.committed_at,
             )
             .await?;
+        }
+        arkret_wire::EventKind::ProfileCreate | arkret_wire::EventKind::ProfileUpdate => {
+            crate::applet_scope_profiles::project_replica(conn, event, commit).await?;
         }
         arkret_wire::EventKind::RealmTombstone
         | arkret_wire::EventKind::RealmArchive

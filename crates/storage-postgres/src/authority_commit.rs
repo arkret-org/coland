@@ -777,6 +777,11 @@ pub(crate) const SNAPSHOT_CURRENT_SQL: &str = "SELECT result.*, covering.stream_
                 current_commit_id, current_stream_position, value \
            FROM policy_current_results WHERE realm_id = $1 \
          UNION ALL \
+         SELECT 'actor_profile'::text AS selector_kind, to_jsonb(actor_profile_id) AS selector_subject, \
+                current_commit_id,current_stream_position,value \
+           FROM actor_profile_current_results WHERE realm_id=$1 \
+             AND EXISTS(SELECT 1 FROM realm_bootstrap_current_results g WHERE g.realm_id=$1 AND g.result_family='realm_genesis' AND g.value->>'purpose'='collaboration') \
+         UNION ALL \
          SELECT 'member_state'::text AS selector_kind, member_id::jsonb AS selector_subject, \
                 current_commit_id, current_stream_position, value \
            FROM member_state_current_results WHERE realm_id = $1 \
@@ -1047,6 +1052,7 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
                 },
                 ("member_identity_updates", Some(selector)) => serde_json::from_value::<arkret_wire::CurrentSelector>(selector)
                     .map_err(|error| PersistenceError::Internal(format!("stored member identity selector is invalid: {error}")))?,
+                ("actor_profile", Some(id)) => arkret_wire::CurrentSelector::ActorProfile {actor_profile_id:serde_json::from_value(id).map_err(PersistenceError::database)?},
                 ("applet_registration", Some(applet_id)) => arkret_wire::CurrentSelector::AppletRegistration {
                     applet_id: serde_json::from_value(applet_id).map_err(PersistenceError::database)?,
                 },
@@ -1298,6 +1304,7 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
                 | arkret_wire::CurrentSelector::InviteLiveTarget { .. }
                 | arkret_wire::CurrentSelector::InviteDirectedInvitee { .. }
                 | arkret_wire::CurrentSelector::MlsGroup { .. }
+                | arkret_wire::CurrentSelector::ActorProfile { .. }
         ) && !current_state_entries.iter().any(|current| {
             let arkret_wire::TypedCurrentRow::Value {
                 selector: current_selector,
@@ -1643,6 +1650,33 @@ pub(crate) async fn commit_transaction_with_approvals_in_connection(
     .await
 }
 
+/// The native scope Profile unit is the only ordinary writer of these kinds.
+pub(crate) async fn commit_managed_scope_profile_in_connection(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
+    admission: &crate::applet_scope_profiles::Admission,
+) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
+    if !admission.applies_to(&transaction.event) {
+        return Err(
+            PersistenceError::Conflict("scope Profile unit original changed".into()).into(),
+        );
+    }
+    let result = commit_transaction_in_connection_with_device_guard(
+        conn,
+        transaction,
+        VerifiedPcrUnit::ManagedScopeProfile,
+        prepared,
+    )
+    .await?;
+    if matches!(result, AuthorityCommitWriteOutcome::Committed) {
+        admission
+            .write(conn, &transaction.event, &transaction.commit)
+            .await?;
+    }
+    Ok(result)
+}
+
 /// Only the registered PCR genesis, recovery and accepted-device UoWs may
 /// call this after they validate the Event/Commit and its authority proof.
 pub(crate) async fn commit_verified_pcr_device_transaction_in_connection(
@@ -1777,6 +1811,7 @@ enum VerifiedPcrUnit {
     KeyBackupPointer,
     RecoveryPolicy,
     ProfileOrAccountability,
+    ManagedScopeProfile,
     AgentProvision,
     AgentPcrGenesis,
     AgentControl,
@@ -1909,7 +1944,9 @@ async fn commit_transaction_with_device_guard_inner(
             | arkret_wire::EventKind::IdentityAccountabilityGrant
     ) && !matches!(
         verified_unit,
-        VerifiedPcrUnit::ProfileOrAccountability | VerifiedPcrUnit::Applet
+        VerifiedPcrUnit::ProfileOrAccountability
+            | VerifiedPcrUnit::Applet
+            | VerifiedPcrUnit::ManagedScopeProfile
     ) && !(verified_unit == VerifiedPcrUnit::AgentControl
         && crate::agent_control::is_agent_control_event(&transaction.event))
     {

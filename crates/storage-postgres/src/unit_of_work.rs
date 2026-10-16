@@ -2809,6 +2809,30 @@ async fn commit_prepared_event_inner(
 ) -> Result<(), PgTransactionError> {
     let event = &request.authority_commit.event;
 
+    let scope_profile = if crate::applet_scope_profiles::is_profile(event) {
+        let Some(coland_storage::SelfProducerCommitGuard::AppletManagedDevice(guard)) =
+            request.self_producer_guard.as_ref()
+        else {
+            return Err(PersistenceError::Conflict(
+                "actor_profile_or_accountability_unit_required".into(),
+            )
+            .into());
+        };
+        Some(
+            crate::boxed_future(|| {
+                crate::applet_scope_profiles::prepare(
+                    conn,
+                    event,
+                    guard,
+                    request.authority_commit.commit.committed_at,
+                )
+            })
+            .await?,
+        )
+    } else {
+        None
+    };
+
     let management_review = crate::boxed_future(|| {
         crate::agent_management_review::prepare_admission_in_connection(
             conn,
@@ -2967,12 +2991,36 @@ async fn commit_prepared_event_inner(
     .await?;
     queue_event_in_connection(conn, event, request.event.received_at).await?;
 
-    let authority_write = crate::authority_commit::commit_transaction_with_approvals_in_connection(
-        conn,
-        &request.authority_commit,
-        event_approvals,
-    )
-    .await?;
+    if let Some(profile) = scope_profile.as_ref() {
+        if profile.is_public() {
+            let cut =
+                crate::realm_authorization_cut::RealmAuthorizationCut::read_for_event(conn, event)
+                    .await?;
+            cut.require_managed_self_action_in_connection(
+                conn,
+                event,
+                &request.authority_commit.commit,
+                event_approvals,
+            )
+            .await?;
+        }
+    }
+    let authority_write = if let Some(profile) = scope_profile.as_ref() {
+        crate::authority_commit::commit_managed_scope_profile_in_connection(
+            conn,
+            &request.authority_commit,
+            event_approvals,
+            profile,
+        )
+        .await?
+    } else {
+        crate::authority_commit::commit_transaction_with_approvals_in_connection(
+            conn,
+            &request.authority_commit,
+            event_approvals,
+        )
+        .await?
+    };
     match authority_write {
         AuthorityCommitWriteOutcome::Committed => outcome.event_inserted = true,
         AuthorityCommitWriteOutcome::Duplicate => {}

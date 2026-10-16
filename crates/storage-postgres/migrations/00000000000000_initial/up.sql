@@ -4573,14 +4573,17 @@ CREATE TABLE pcr_device_revocation_proposals (
 CREATE INDEX pcr_device_revocation_proposals_commit
  ON pcr_device_revocation_proposals(commit_id);
 
--- actor_profile typed current (profiles-presence.md section 2.3). One global
--- Actor Profile per create-derived id, projected in its owner's Principal
--- Control Realm by the transaction that writes the accepting RealmCommit. The
--- self-service surface keeps one profile lineage per PCR, so the Realm is
--- unique; the value is the complete materialized object.
+-- Actor Profile current: one lineage per full Account and exact signed scope.
+-- PCR identity and ordinary Applet interaction profiles never share a lineage.
 CREATE TABLE actor_profile_current_results (
- realm_id TEXT NOT NULL UNIQUE,
+ realm_id TEXT NOT NULL,
  actor_profile_id TEXT PRIMARY KEY,
+ actor_id JSONB NOT NULL,
+ scope_ref JSONB NOT NULL,
+ UNIQUE(scope_ref,actor_id),
+ CHECK(actor_id->>'kind'='account'),
+ CHECK(scope_ref->>'kind' IN ('realm','circle')),
+ CHECK(scope_ref->>'realm_id'=realm_id),
  current_commit_id TEXT NOT NULL REFERENCES realm_commits(commit_id),
  current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
  value JSONB NOT NULL,

@@ -1,4 +1,4 @@
-//! Creation-specific facts consumed by the shared private management ledger.
+//! Native Device Event and creation facts for the shared private management ledger.
 use arkret_models_integration::{
     AppletManagedActorCommittedRequest, AppletManagedActorProvisionPayload,
 };
@@ -16,7 +16,19 @@ pub(super) fn event_target(request: &ManagementReviewRequestBody) -> Persistence
         return Err(hidden());
     };
     if !native_event(request)
-        || request.management_operation != ManagementOperation::Join
+        || !matches!(
+            (
+                request.management_operation,
+                crate::applet_device_admission::action(event)?
+            ),
+            (
+                ManagementOperation::Join,
+                arkret_wire::CapabilityActionId::AppletJoin
+            ) | (
+                ManagementOperation::Publish,
+                arkret_wire::CapabilityActionId::AppletPublish
+            )
+        )
         || event.scope_ref != request.effective_scope
         || !matches!(request.requester_actor_id, ActorId::Service { .. })
     {
@@ -73,6 +85,17 @@ pub(super) async fn event_pins(
         )
         .await?
         .ok_or_else(hidden)?;
+    let scope_profile = if crate::applet_scope_profiles::is_profile(event) {
+        let profile =
+            crate::boxed_future(|| crate::applet_scope_profiles::prepare(conn, event, &guard, at))
+                .await?;
+        if !profile.is_public() {
+            return Err(hidden());
+        }
+        Some(profile.pins())
+    } else {
+        None
+    };
     let (policies, decision) =
         crate::applet_device_admission::select_management(conn, event, &registration, at).await?;
     let ids = policies
@@ -83,6 +106,11 @@ pub(super) async fn event_pins(
         .bind::<diesel::sql_types::Array<Text>,_>(ids).load::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let membership=sql_query("SELECT to_jsonb(m) AS value FROM member_state_current_results m WHERE realm_id=$1 AND member_id=$2 FOR SHARE")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(event.actor_id.to_string()).get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    let circle = match &event.scope_ref {
+        ScopeRef::Circle{circle_id,..}=>Some(sql_query("SELECT jsonb_build_object('circle',to_jsonb(c),'membership',to_jsonb(m)) AS value FROM circle_current_results c JOIN circle_member_state_current_results m ON m.realm_id=c.realm_id AND m.circle_id=c.circle_id WHERE c.realm_id=$1 AND c.circle_id=$2 AND m.member_id=$3 FOR SHARE OF c,m")
+            .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).bind::<Text,_>(event.actor_id.to_string()).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?.value),
+        _=>None,
+    };
     let mut pending = std::collections::BTreeSet::from([event
         .authorization_ref
         .as_ref()
@@ -114,7 +142,7 @@ pub(super) async fn event_pins(
         json!({"producer":source,"original_proof":event.producer_proof,"scope":event.scope_ref,
         "device_scopes":authority.scopes,"device_expires_at":authority.expires_at,"device_generation":authority.current_device_generation_ref,
         "registration":registration,"installation_status":installation["status"],"package":installation["package"],"registration_event":installation["registration_event"],
-        "resolution":identity.projection,"resolution_source":identity.current_event,"profile":profile.value,"membership":membership.map(|r|r.value),
+        "scope_profile":scope_profile,"circle":circle,"resolution":identity.projection,"resolution_source":identity.current_event,"profile":profile.value,"membership":membership.map(|r|r.value),
         "grant_revisions":grants,"authority_root":root.value,"policies":policies,"policy_revisions":revisions.into_iter().map(|r|r.value).collect::<Vec<_>>() }),
         decision.review_requirements,
     ))

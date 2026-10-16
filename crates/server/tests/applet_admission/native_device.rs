@@ -14,6 +14,32 @@ async fn authorize(
     device_id: DeviceId,
     allow_join: bool,
 ) -> coland_storage::AppletManagedDeviceAuthority {
+    let actions = if allow_join {
+        json!(["ak.applet.join", "ak.event.read"])
+    } else {
+        json!(["ak.event.read"])
+    };
+    authorize_scopes(
+        fixture,
+        install,
+        bundle,
+        namespace,
+        key,
+        device_id,
+        json!([{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":actions}]),
+    )
+    .await
+}
+
+async fn authorize_scopes(
+    fixture: &Fixture,
+    install: &Installed,
+    bundle: &Value,
+    namespace: &str,
+    key: &SigningKey,
+    device_id: DeviceId,
+    scopes: Value,
+) -> coland_storage::AppletManagedDeviceAuthority {
     use arkret_models_collaboration::events_payloads::DeviceAuthorizePayload;
     use ed25519_dalek::Signer as _;
     let provision = &bundle["managed_actor_provision_event"]["payload"];
@@ -27,15 +53,10 @@ async fn authorize(
     ));
     let controller = SigningKey::from_bytes(&seed);
     let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-    let actions = if allow_join {
-        json!(["ak.applet.join", "ak.event.read"])
-    } else {
-        json!(["ak.event.read"])
-    };
     let mut payload:DeviceAuthorizePayload=serde_json::from_value(json!({
         "device_id":device_id,"device_public_key_did":format!("did:key:{}",arkret_canonical::ed25519_pubkey_to_did_key_multibase(key.verifying_key().as_bytes())),
         "hpke_key":arkret_canonical::ed25519_pubkey_to_did_key_multibase(&[119;32]),"algorithms":["Ed25519"],"device_key_algorithm":"Ed25519",
-        "authorized_by":actor.signing_principal_id(),"scopes":[{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":actions}],
+        "authorized_by":actor.signing_principal_id(),"scopes":scopes,
         "not_before":now-chrono::Duration::seconds(1),"expires_at":now+chrono::Duration::hours(1),"authorization_binding_kind":"applet_managed_delegation","authorized_generation_ref":1,"device_signature":"AA","applet_id":install.package.applet_id
     })).unwrap();
     payload.device_signature = serde_json::from_value(json!(arkret_canonical::base64url_encode(
@@ -278,5 +299,175 @@ async fn native_join_review_binds_service_requester_device_original_and_atomic_c
         let (status,superseded)=fixture.service_post(&install.package,"/_arkret/self/management-reviews/status",ServiceOperationId::SELF_MANAGEMENT_REVIEW_READ_STATUS_V1,&json!({"request_id":pending_request.request_id}),"native-source-status").await;
         assert_eq!(status,StatusCode::OK,"{superseded}");assert_eq!(superseded["status"],"superseded");assert_eq!(business_without_reviews(before),business_without_reviews(business(&fixture).await));
         let (status,consumed)=fixture.service_post(&install.package,"/_arkret/self/management-reviews/status",ServiceOperationId::SELF_MANAGEMENT_REVIEW_READ_STATUS_V1,&json!({"request_id":request.request_id}),"native-original-consumed-status").await;assert_eq!(status,StatusCode::OK,"{consumed}");assert_eq!(consumed["status"],"consumed");
+    })).await.unwrap();
+}
+
+fn profile_create(
+    fixture: &Fixture,
+    install: &Installed,
+    bundle: &Value,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    key: &SigningKey,
+    mode: &str,
+) -> Event {
+    let mut object = bundle["profile_event"]["payload"]["object"].clone();
+    object["profile_fields"]["applet_interaction"] =
+        json!({"effective_scope":{"kind":"realm","realm_id":fixture.realm},"mode":mode});
+    let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let mut event = arkret_wire::test_support::raw_event_for_actor_at(
+        EventKind::ProfileCreate.as_str(),
+        ScopeRef::Realm {
+            realm_id: fixture.realm.clone(),
+        },
+        ActorId::account(authority.account_id.clone()),
+        json!({"object":object}),
+        now,
+    )
+    .unwrap();
+    event.applet_id = Some(install.package.applet_id.clone());
+    event.authorization_ref = Some(install.bot_outcome.authorization_ref.clone().into());
+    sign_managed_device_event(event, authority, key, now)
+}
+fn profile_update(
+    original: &Event,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    key: &SigningKey,
+    patch: Value,
+) -> Event {
+    let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let mut event=arkret_wire::test_support::raw_event_for_actor_at(EventKind::ProfileUpdate.as_str(),original.scope_ref.clone(),original.actor_id.clone(),json!({"target_ref":arkret_wire::ActorProfileId::from_event_id(&original.event_id),"patch":patch}),now).unwrap();
+    event.applet_id = original.applet_id.clone();
+    event.authorization_ref = original.authorization_ref.clone();
+    sign_managed_device_event(event, authority, key, now)
+}
+async fn publish_policy(fixture: &Fixture, install: &Installed, effect: &str) -> Event {
+    let id = format!("ak:policy:{}", uuid::Uuid::now_v7());
+    let admin = ActorId::account(fixture.pcr.history.account.clone());
+    let mut rule = json!({"rule_id":"native_publish","kind":"applet","effect":effect,"applet_target":{"kind":"installation","applet_id":install.package.applet_id,"effective_scope":{"kind":"realm","realm_id":fixture.realm}},"applet_operations":["publish"]});
+    if effect == "require_review" {
+        rule["review_requirement"] =
+            json!({"approver_actor_ids":[admin],"threshold":1,"max_age_seconds":3600});
+    }
+    let event=fixture.admin_event(EventKind::PolicySet,ScopeRef::Realm{realm_id:fixture.realm.clone()},json!({"policy_id":id,"expected_revision":null,"value":{"schema":"ak.schema.policy.v1","id":id,"realm_id":fixture.realm,"policy_kind":"applet","default_effect":"allow","created_by":admin,"created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now()),"rules":[rule]}}));
+    accepted_admin_domain_event(fixture, event.clone()).await;
+    event
+}
+async fn approved_profile(
+    fixture: &Fixture,
+    install: &Installed,
+    event: &Event,
+) -> (ManagementReviewRequestBody, arkret_wire::ApprovalSignature) {
+    let request = ManagementReviewRequestBody {
+        request_id: format!("publish-{}", uuid::Uuid::now_v7()),
+        effective_scope: event.scope_ref.clone(),
+        management_operation: ManagementOperation::Publish,
+        requester_actor_id: ActorId::service(install.package.service_id.clone()),
+        target: ManagementReviewTarget::Event {
+            event: Box::new(event.clone()),
+        },
+    };
+    let (status, pending) = fixture
+        .service_post(
+            &install.package,
+            "/_arkret/self/management-reviews/requests",
+            ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_REQUEST_V1,
+            &json!(request),
+            &format!("request-{}", uuid::Uuid::now_v7()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "publish pending: {pending}");
+    assert_eq!(pending["status"], "pending");
+    let vote = creation_review_vote(fixture, &request);
+    let (status,approved)=fixture.admin_post("/_arkret/self/management-reviews/decisions",ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_DECIDE_V1,&json!({"request_id":request.request_id,"expected_status":"pending","decision":"approve","approval_signatures":[vote]}),None).await;
+    assert_eq!(status, StatusCode::OK, "publish approved: {approved}");
+    assert_eq!(approved["status"], "approved");
+    (request, vote)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_profiles_keep_full_subject_scope_and_reserved_identity() {
+    tokio::spawn(Box::pin(async {
+        let fixture=Box::pin(Fixture::new()).await;
+        let namespace=format!("bridge.{}",uuid::Uuid::now_v7().simple());
+        let native=NativeAppletService::new(&format!("ak:applet:{}",uuid::Uuid::now_v7()),&namespace,&fixture.state.service_core_id());
+        let install=Box::pin(fixture.install_package(true,native.package.clone(),&namespace)).await;
+        let ghost=fixture.ghost_body(&install,&namespace,"scope-profile").await;assert_eq!(fixture.ghost_commit(&install,&ghost,"scope-profile-ghost").await.0,StatusCode::CREATED);
+        let mut profiles=Vec::new();
+        for bundle in [install.bot_body["managed_actor_bundle"].clone(),ghost["managed_actor_bundle"].clone()] {
+            let key=SigningKey::from_bytes(&[125;32]);let device=DeviceId::new(format!("ak:device:{}",uuid::Uuid::now_v7())).unwrap();
+            let narrow=authorize(&fixture,&install,&bundle,&namespace,&key,device.clone(),true).await;
+            let join=join_event(&fixture,&install,&narrow,&key,&install.bot_outcome.authorization_ref);
+            let (status,out)=post(&fixture,&narrow,&key,&join,vec![]).await;assert_eq!(status,StatusCode::OK,"{out}");
+            let denied=profile_create(&fixture,&install,&bundle,&narrow,&key,"public");let before=business(&fixture).await;
+            assert!(!post(&fixture,&narrow,&key,&denied,vec![]).await.0.is_success());assert_eq!(before,business(&fixture).await);
+            let authority=authorize_scopes(&fixture,&install,&bundle,&namespace,&key,device,json!([{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":["ak.applet.join","ak.applet.publish","ak.event.read"]}])).await;
+            let original=profile_create(&fixture,&install,&bundle,&authority,&key,"public");
+            for (field,value) in [("managed_by_applet",json!("ak:applet:00000000-0000-4000-8000-000000000999")),("applet_interaction",json!({"effective_scope":{"kind":"realm","realm_id":authority.pcr_realm_id},"mode":"public"}))] {
+                let mut wrong=original.clone();wrong.payload.get_mut("object").unwrap()["profile_fields"][field]=value;
+                let wrong=sign_managed_device_event(wrong,&authority,&key,original.created_at);let before=business(&fixture).await;
+                assert!(!post(&fixture,&authority,&key,&wrong,vec![]).await.0.is_success());assert_eq!(before,business(&fixture).await);
+            }
+            let (status,out)=post(&fixture,&authority,&key,&original,vec![]).await;assert_eq!(status,StatusCode::OK,"scope create: {out}");assert_accepted_event(&fixture,&original).await;
+            let update=profile_update(&original,&authority,&key,json!({"display_name":"Native scope profile"}));
+            let (status,out)=post(&fixture,&authority,&key,&update,vec![]).await;assert_eq!(status,StatusCode::OK,"scope update: {out}");
+            let before=business(&fixture).await;assert_eq!(post(&fixture,&authority,&key,&original,vec![]).await.0,StatusCode::OK);assert_eq!(before,business(&fixture).await);
+            for patch in [json!({"accountable_principal_ids":[]}),json!({"profile_fields.managed_by_applet":null})] {
+                let wrong=profile_update(&original,&authority,&key,patch);let before=business(&fixture).await;
+                assert!(!post(&fixture,&authority,&key,&wrong,vec![]).await.0.is_success());assert_eq!(before,business(&fixture).await);
+            }
+            profiles.push((original,authority,key));
+        }
+        let material=fixture.state.test_persistence().authority_commits().realm_state_snapshot_material_for_account(&fixture.realm,&fixture.pcr.history.account).await.unwrap().unwrap();
+        let rows=material.current_state_entries.iter().filter_map(|row|{let arkret_wire::TypedCurrentRow::Value{selector:arkret_wire::CurrentSelector::ActorProfile{actor_profile_id},value,..}=row else{return None};Some((actor_profile_id,value))}).collect::<Vec<_>>();assert_eq!(rows.len(),2);
+        for (original,authority,key) in &profiles {
+            let id=arkret_wire::ActorProfileId::from_event_id(&original.event_id);let row=rows.iter().find(|(found,_)|**found==id).unwrap();assert_eq!(row.1["principal_id"],json!(authority.account_id.principal_id));assert!(row.1.get("resolution").is_none());
+            let before=business(&fixture).await;
+            let missing=before["profiles"].as_array().unwrap().iter().find(|p|p["actor_profile_id"]==id.as_str()).unwrap().clone();
+            {let mut conn=fixture.pool.get().await.unwrap();diesel::sql_query("DELETE FROM actor_profile_current_results WHERE actor_profile_id=$1").bind::<diesel::sql_types::Text,_>(id.as_str()).execute(&mut conn).await.unwrap();}
+            let incomplete=business(&fixture).await;let next=profile_update(original,authority,key,json!({"display_name":"Unavailable current"}));let (status,error)=post(&fixture,authority,key,&next,vec![]).await;assert_eq!(status,StatusCode::CONFLICT,"{error}");assert!(error.to_string().contains("revision_unavailable"),"{error}");assert_eq!(incomplete,business(&fixture).await);
+            {let mut conn=fixture.pool.get().await.unwrap();diesel::sql_query("INSERT INTO actor_profile_current_results SELECT r.* FROM jsonb_populate_recordset(NULL::actor_profile_current_results,$1) r").bind::<diesel::sql_types::Jsonb,_>(json!([missing])).execute(&mut conn).await.unwrap();}assert_eq!(before,business(&fixture).await);
+        }
+        publish_policy(&fixture,&install,"deny").await;
+        for (original,authority,key) in &profiles {
+            let public=profile_update(original,authority,key,json!({"display_name":"Still public"}));let before=business(&fixture).await;assert!(!post(&fixture,authority,key,&public,vec![]).await.0.is_success());assert_eq!(before,business(&fixture).await);
+            let private=profile_update(original,authority,key,json!({"profile_fields.applet_interaction.mode":"private"}));let (status,out)=post(&fixture,authority,key,&private,vec![]).await;assert_eq!(status,StatusCode::OK,"private transition: {out}");
+            let reopen=profile_update(original,authority,key,json!({"profile_fields.applet_interaction.mode":"public"}));let before=business(&fixture).await;assert!(!post(&fixture,authority,key,&reopen,vec![]).await.0.is_success());assert_eq!(before,business(&fixture).await);
+        }
+    })).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_public_profile_review_consumes_exact_postimage_and_rolls_back() {
+    tokio::spawn(Box::pin(async {
+        let fixture=Box::pin(Fixture::new()).await;fixture.enable_management_authority();
+        let namespace=format!("bridge.{}",uuid::Uuid::now_v7().simple());let native=NativeAppletService::new(&format!("ak:applet:{}",uuid::Uuid::now_v7()),&namespace,&fixture.state.service_core_id());
+        let install=Box::pin(fixture.install_package(true,native.package.clone(),&namespace)).await;
+        let key=SigningKey::from_bytes(&[126;32]);let device=DeviceId::new(format!("ak:device:{}",uuid::Uuid::now_v7())).unwrap();
+        let authority=authorize_scopes(&fixture,&install,&install.bot_body["managed_actor_bundle"],&namespace,&key,device,json!([{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":["ak.applet.join","ak.applet.publish","ak.event.read"]}])).await;
+        let join=join_event(&fixture,&install,&authority,&key,&install.bot_outcome.authorization_ref);let (status,out)=post(&fixture,&authority,&key,&join,vec![]).await;assert_eq!(status,StatusCode::OK,"{out}");
+        publish_policy(&fixture,&install,"require_review").await;
+        let original=profile_create(&fixture,&install,&install.bot_body["managed_actor_bundle"],&authority,&key,"public");
+        let before=business(&fixture).await;let (status,error)=post(&fixture,&authority,&key,&original,vec![]).await;assert!(!status.is_success(),"{error}");assert!(error.to_string().contains("approval_required"),"{error}");assert_eq!(before,business(&fixture).await);
+        let (request,vote)=approved_profile(&fixture,&install,&original).await;
+        let before=business(&fixture).await;
+        {let mut conn=fixture.pool.get().await.unwrap();diesel::sql_query("CREATE FUNCTION fail_native_profile() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'native profile fault'; END $$").execute(&mut conn).await.unwrap();diesel::sql_query("CREATE TRIGGER fail_native_profile BEFORE INSERT ON actor_profile_current_results FOR EACH ROW EXECUTE FUNCTION fail_native_profile()").execute(&mut conn).await.unwrap();}
+        let (status,error)=post(&fixture,&authority,&key,&original,vec![vote.clone()]).await;
+        {let mut conn=fixture.pool.get().await.unwrap();diesel::sql_query("DROP TRIGGER fail_native_profile ON actor_profile_current_results").execute(&mut conn).await.unwrap();diesel::sql_query("DROP FUNCTION fail_native_profile()").execute(&mut conn).await.unwrap();}
+        assert!(status.is_server_error(),"{error}");assert_eq!(before,business(&fixture).await);
+        {let mut conn=fixture.pool.get().await.unwrap();diesel::sql_query("CREATE FUNCTION fail_native_profile_source() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'native profile retained source fault'; END $$").execute(&mut conn).await.unwrap();diesel::sql_query("CREATE TRIGGER fail_native_profile_source BEFORE INSERT ON agent_producer_signer_keys FOR EACH ROW EXECUTE FUNCTION fail_native_profile_source()").execute(&mut conn).await.unwrap();}
+        let (status,error)=post(&fixture,&authority,&key,&original,vec![vote.clone()]).await;
+        {let mut conn=fixture.pool.get().await.unwrap();diesel::sql_query("DROP TRIGGER fail_native_profile_source ON agent_producer_signer_keys").execute(&mut conn).await.unwrap();diesel::sql_query("DROP FUNCTION fail_native_profile_source()").execute(&mut conn).await.unwrap();}
+        assert!(status.is_server_error(),"failure after ledger and nonce consumption: {error}");assert_eq!(before,business(&fixture).await);
+        let (status,out)=post(&fixture,&authority,&key,&original,vec![vote.clone()]).await;assert_eq!(status,StatusCode::OK,"reviewed profile: {out}");let after=business(&fixture).await;assert_eq!(after["reviews"].as_array().unwrap().iter().find(|r|r["request_id"]==request.request_id).unwrap()["status"],"consumed");
+        assert_eq!(post(&fixture,&authority,&key,&original,vec![vote]).await.0,StatusCode::OK);assert_eq!(after,business(&fixture).await);
+        // Any patch whose materialized postimage stays public needs a new review.
+        for patch in [json!({"display_name":"Reviewed display"}),json!({"profile_fields.applet_interaction":{"effective_scope":original.scope_ref,"mode":"public"}}),json!({"profile_fields.applet_interaction.mode":"public"})] {
+            let next=profile_update(&original,&authority,&key,patch);let before=business(&fixture).await;let (status,error)=post(&fixture,&authority,&key,&next,vec![]).await;assert!(!status.is_success(),"{error}");assert!(error.to_string().contains("approval_required"),"{error}");assert_eq!(before,business(&fixture).await);
+        }
+        let pending=profile_update(&original,&authority,&key,json!({"display_name":"Stale postimage"}));let (stale,vote)=approved_profile(&fixture,&install,&pending).await;
+        let private=profile_update(&original,&authority,&key,json!({"profile_fields.applet_interaction.mode":"private"}));assert_eq!(post(&fixture,&authority,&key,&private,vec![]).await.0,StatusCode::OK);
+        let before=business(&fixture).await;let (status,error)=post(&fixture,&authority,&key,&pending,vec![vote]).await;assert!(!status.is_success(),"stale Profile revision: {error}");assert_eq!(business_without_reviews(before),business_without_reviews(business(&fixture).await));
+        let (status,out)=fixture.service_post(&install.package,"/_arkret/self/management-reviews/status",ServiceOperationId::SELF_MANAGEMENT_REVIEW_READ_STATUS_V1,&json!({"request_id":stale.request_id}),"stale-publish-status").await;assert_eq!(status,StatusCode::OK,"{out}");assert_eq!(out["status"],"superseded");
+        let reopening=profile_update(&original,&authority,&key,json!({"profile_fields.applet_interaction.mode":"public"}));let (_,vote)=approved_profile(&fixture,&install,&reopening).await;let (status,out)=post(&fixture,&authority,&key,&reopening,vec![vote]).await;assert_eq!(status,StatusCode::OK,"reviewed reopen: {out}");
     })).await.unwrap();
 }

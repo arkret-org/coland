@@ -956,14 +956,14 @@ fn require_supported_policy(
                             !matches!(
                                 op,
                                 AppletPolicyOperation::CreateBot | AppletPolicyOperation::MapGhost
-                            ) && !(matches!(op,AppletPolicyOperation::Join)
-                                && matches!(&rule.applet_target,Some(arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::Installation {effective_scope:arkret_wire::ScopeRef::Realm {realm_id},..}) if document.realm_id.as_ref()==Some(realm_id)))
+                            ) && !(matches!(op,AppletPolicyOperation::Join | AppletPolicyOperation::Publish)
+                                && matches!(&rule.applet_target,Some(arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::Installation {effective_scope,..}) if matches!(effective_scope,arkret_wire::ScopeRef::Realm{realm_id} if document.realm_id.as_ref()==Some(realm_id)) || matches!((op,effective_scope),(AppletPolicyOperation::Publish,arkret_wire::ScopeRef::Circle{realm_id,..}) if document.realm_id.as_ref()==Some(realm_id))))
                         })
                     })
             })
         {
             return Err(refused(
-                "Applet Policy requires established consumers; only creation and exact Realm installation join rules with an allow default are supported",
+                "Applet Policy requires established consumers; only creation, exact Realm installation join and exact installation publish rules with an allow default are supported",
             ));
         }
         return Ok(());
@@ -1252,8 +1252,10 @@ mod admission_tests {
         let mut broad = policy.clone();
         broad.rules[0].applet_target = Some(AppletPolicyTarget::All {});
         assert!(require_supported_policy(&broad, &scope).is_err());
+        let mut publish = policy.clone();
+        publish.rules[0].applet_operations = Some(vec![AppletPolicyOperation::Publish]);
+        assert!(require_supported_policy(&publish, &scope).is_ok());
         for op in [
-            AppletPolicyOperation::Publish,
             AppletPolicyOperation::Execute,
             AppletPolicyOperation::Read,
             AppletPolicyOperation::Deliver,

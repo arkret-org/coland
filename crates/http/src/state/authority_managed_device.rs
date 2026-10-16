@@ -60,7 +60,10 @@ pub(super) async fn submit(
     if let Some(original) = unit::exact_replay(state, event).await? {
         return Ok(SelfAuthoritySubmitOutcome::Ordinary(original));
     }
-    if event.kind != EventKind::MemberState {
+    if !matches!(
+        event.kind,
+        EventKind::MemberState | EventKind::ProfileCreate | EventKind::ProfileUpdate
+    ) {
         return Err(ServiceError::UnsupportedEventKind(
             "native Event kind has no accepting domain unit".into(),
         ));

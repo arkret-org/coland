@@ -21,6 +21,7 @@ mod authority_forward;
 mod authority_franking;
 mod authority_handoff;
 mod authority_key_backup_pointer;
+mod authority_managed_device;
 mod authority_mls_unit;
 pub(crate) mod authority_pcr;
 mod authority_port;

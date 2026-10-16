@@ -225,6 +225,14 @@ pub struct ManagementReviewCurrent {
     pub station_id: arkret_wire::DidCoreId,
     pub observations: Vec<crate::AccountStatusCurrentObservation>,
     pub applet_candidate: Option<Box<crate::AppletAuthoringCandidate>>,
+    pub applet_event: Option<Box<AppletEventReviewCurrent>>,
+}
+
+/// Receiver-derived resolver material and PCR lock plan, never permission.
+#[derive(Clone)]
+pub struct AppletEventReviewCurrent {
+    pub pcr_realm_id: arkret_wire::RealmId,
+    pub service_did_document: arkret_identity::DidDocument,
 }
 
 impl std::fmt::Debug for ManagementReviewCurrent {
@@ -235,6 +243,19 @@ impl std::fmt::Debug for ManagementReviewCurrent {
 
 #[async_trait]
 pub trait AgentStore: Send + Sync {
+    /// In-process business preparation bound to the exact native original.
+    /// This material is never exposed through the private lookup operation.
+    async fn management_review_event_material(
+        &self,
+        event: &arkret_wire::Event,
+        request_id: &str,
+        signatures: &[arkret_wire::ApprovalSignature],
+    ) -> PersistenceResult<ManagementReviewMaterial> {
+        let _ = (event, request_id, signatures);
+        Err(crate::PersistenceError::NotFound(
+            "management review not found".into(),
+        ))
+    }
     /// Confidential in-process material for the historical signature resolver.
     async fn management_review_material(
         &self,

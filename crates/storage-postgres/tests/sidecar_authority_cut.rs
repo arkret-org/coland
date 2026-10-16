@@ -6396,6 +6396,7 @@ async fn management_current_for_accounts(
         station_id: station.core.clone(),
         observations,
         applet_candidate: None,
+        applet_event: None,
     }
 }
 
@@ -6428,6 +6429,7 @@ async fn management_current_from_receiver(
         station_id: station.core.clone(),
         observations,
         applet_candidate: None,
+        applet_event: None,
     }
 }
 
@@ -7979,6 +7981,7 @@ async fn management_unstored_current_for_accounts(
         station_id: station.core.clone(),
         observations,
         applet_candidate: None,
+        applet_event: None,
     }
 }
 

@@ -44,14 +44,33 @@ pub(crate) async fn prepare_event_approvals_with_management_current(
     } else {
         let mut accounts = std::collections::BTreeSet::new();
         for id in management_ids {
-            let material = state
-                .persistence()
-                .management_review_material(&submission.event.actor_id, &id, signatures)
-                .await
+            let material =
+                if submission.event.applet_id.is_some() && submission.event.executed_by.is_none() {
+                    state
+                        .persistence()
+                        .management_review_event_material(&submission.event, &id, signatures)
+                        .await
+                } else {
+                    state
+                        .persistence()
+                        .management_review_material(&submission.event.actor_id, &id, signatures)
+                        .await
+                }
                 .map_err(ServiceError::from)?;
             accounts.extend(material.accounts);
         }
-        Some(observe_management_accounts(state, accounts).await?)
+        let mut current = observe_management_accounts(state, accounts).await?;
+        if submission.event.applet_id.is_some() && submission.event.executed_by.is_none() {
+            current.applet_event =
+                crate::routing::extensions::applet_bridge::prepare_event_current(
+                    state,
+                    &arkret_models_integration::management_review::ManagementReviewTarget::Event {
+                        event: Box::new(submission.event.clone()),
+                    },
+                )
+                .await?;
+        }
+        Some(current)
     };
     Ok(Some(EventApprovalCommit {
         carrier_binding: None,
@@ -93,6 +112,7 @@ pub(crate) async fn observe_management_accounts(
             station_id: state.service_core_id(),
             observations,
             applet_candidate: None,
+            applet_event: None,
         })
     })
     .await

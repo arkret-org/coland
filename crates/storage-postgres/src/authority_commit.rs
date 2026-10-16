@@ -2215,6 +2215,29 @@ pub(crate) async fn check_self_producer_guard_in_connection(
         .verification_method;
     match guard {
         SelfProducerCommitGuard::MimiFacade { .. } => unreachable!("MIMI guard dispatched above"),
+        SelfProducerCommitGuard::AppletManagedDevice(guard) => {
+            let current = crate::pcr_applet_device_authority::for_event_in_connection(
+                conn,
+                event,
+                committed_at,
+            )
+            .await
+            .map_err(PgTransactionError::into_persistence)?
+            .ok_or_else(|| {
+                PersistenceError::Conflict(
+                    "unauthenticated: native managed Device authority is absent".into(),
+                )
+            })?;
+            if current != guard.authority
+                || event.scope_ref != guard.effective_scope
+                || event.applet_id.as_ref() != Some(&current.applet_id)
+            {
+                return Err(PersistenceError::Conflict(
+                    "capability_denied: managed Device instance or exact scope changed".into(),
+                ));
+            }
+            Ok(())
+        }
         SelfProducerCommitGuard::HumanDevice(selector)
         | SelfProducerCommitGuard::HumanDeviceEvidence { selector, .. } => {
             if selector.principal_id != actor.principal_id

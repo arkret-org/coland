@@ -83,6 +83,17 @@ impl PersistenceHandle {
             .management_review_status(caller, request, current, at)
             .await
     }
+    pub async fn management_review_event_material(
+        &self,
+        event: &arkret_wire::Event,
+        id: &str,
+        signatures: &[arkret_wire::ApprovalSignature],
+    ) -> PersistenceResult<coland_storage::ManagementReviewMaterial> {
+        self.persistence
+            .agents()
+            .management_review_event_material(event, id, signatures)
+            .await
+    }
     pub async fn management_review_material(
         &self,
         caller: &arkret_wire::ActorId,

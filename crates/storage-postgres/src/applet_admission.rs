@@ -1273,8 +1273,11 @@ async fn verify_admin_producer(
         .verify_event_id_matches_content_with_digest_suite(suite)
         .map_err(rejected)?;
     match guard {
-        coland_storage::SelfProducerCommitGuard::MimiFacade { .. } => {
-            return Err(rejected("MIMI facade is not an Applet admin producer"));
+        coland_storage::SelfProducerCommitGuard::MimiFacade { .. }
+        | coland_storage::SelfProducerCommitGuard::AppletManagedDevice(_) => {
+            return Err(rejected(
+                "this producer cannot administer an Applet installation",
+            ));
         }
         coland_storage::SelfProducerCommitGuard::HumanDevice(selector)
         | coland_storage::SelfProducerCommitGuard::HumanDeviceEvidence { selector, .. } => {

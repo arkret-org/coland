@@ -82,7 +82,19 @@ async fn request_review(
         let mut current =
             crate::approval_admission::observe_management_accounts(state, accounts).await?;
         current.applet_candidate = prepare_candidate(state, &body.target).await?;
+        current.applet_event = super::extensions::applet_bridge::prepare_event_current(state,&body.target).await?;
         let producer = match (&body.target, &session) {
+            (ManagementReviewTarget::Event { event }, None) if event.applet_id.is_some() => {
+                let authority=state.persistence().applet_managed_event_producer(event,chrono::Utc::now()).await?
+                    .ok_or_else(||coland_services::ServiceError::Conflict("capability_denied: management target has no native Device producer".into()))?;
+                if caller!=arkret_wire::ActorId::service(authority.source_service_id.clone()) {
+                    return Err(coland_services::ServiceError::Conflict("capability_denied: management requester is not the native Account's Service".into()));
+                }
+                let material=current.applet_event.as_ref().ok_or_else(||coland_services::ServiceError::Conflict("revision_unavailable: native management resolver material is absent".into()))?;
+                Some(coland_storage::SelfProducerCommitGuard::AppletManagedDevice(Box::new(coland_storage::AppletManagedDeviceEventGuard {
+                    authority,effective_scope:event.scope_ref.clone(),service_did_document:material.service_did_document.clone(),
+                })))
+            }
             (ManagementReviewTarget::Event { event }, Some(session)) => {
                 Some(crate::state::verify_self_event_producer(state, session, event).await?)
             }
@@ -153,6 +165,11 @@ async fn review_status(
         ) && chrono::Utc::now() < material.outcome.expires_at
         {
             current.applet_candidate = prepare_candidate(state, &material.request.target).await?;
+            current.applet_event = super::extensions::applet_bridge::prepare_event_current(
+                state,
+                &material.request.target,
+            )
+            .await?;
         }
         state
             .persistence()
@@ -211,6 +228,12 @@ async fn decide_review(
         {
             current_accounts.applet_candidate =
                 prepare_candidate(state, &material.request.target).await?;
+            current_accounts.applet_event =
+                super::extensions::applet_bridge::prepare_event_current(
+                    state,
+                    &material.request.target,
+                )
+                .await?;
         }
         let methods = if body.decision == ManagementReviewDecision::Approve {
             let mut signatures = material.outcome.approval_signatures;

@@ -346,6 +346,7 @@ impl<'a> CreationAuthority<'a> {
             station_id: crate::applet_admission::target_station(self.input)?.clone(),
             observations: Vec::new(),
             applet_candidate: None,
+            applet_event: None,
         };
         let current = prepared.map_or(&empty_current, |prepared| &prepared.current);
         let relevant = self

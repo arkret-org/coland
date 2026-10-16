@@ -3226,10 +3226,30 @@ impl RealmAuthorizationCut {
         if event.applet_id.is_some() {
             let registration = crate::managed_message_actor::registration(conn, event).await?;
             facts.applet_id = Some(registration.applet_id.to_string());
-            facts.executed_by = Some(crate::managed_message_actor::registered_executor(
-                event,
-                &registration,
-            )?);
+            facts.executed_by = Some(
+                if event.executed_by.is_none() && event.actor_id.as_account_id().is_some() {
+                    let authority = crate::pcr_applet_device_authority::for_event_in_connection(
+                        conn,
+                        event,
+                        chrono::Utc::now(),
+                    )
+                    .await
+                    .map_err(crate::PgTransactionError::into_persistence)?
+                    .ok_or_else(|| {
+                        capability_denied("native Applet executor has no accepted Device producer")
+                    })?;
+                    if authority.source_service_id != registration.service_id
+                        || authority.applet_id != registration.applet_id
+                    {
+                        return Err(capability_denied(
+                            "native Applet executor provenance differs",
+                        ));
+                    }
+                    event.actor_id.clone()
+                } else {
+                    crate::managed_message_actor::registered_executor(event, &registration)?
+                },
+            );
             facts.registration_epoch = Some(registration.registration_epoch.to_string());
         }
         Ok(())
@@ -3283,8 +3303,8 @@ impl RealmAuthorizationCut {
         .await
     }
 
-    /// A managed actor entering itself is not already a joined member. Its
-    /// explicit action grant still owes every ordinary constraint and quota.
+    /// The native subject supplies its own consent. AppletJoin is a governance
+    /// label and never a transferable authority to author another Account join.
     pub(crate) async fn require_managed_self_membership_action_in_connection(
         &self,
         conn: &mut AsyncPgConnection,
@@ -3293,29 +3313,40 @@ impl RealmAuthorizationCut {
         prepared: Option<&coland_storage::EventApprovalCommit>,
     ) -> PersistenceResult<()> {
         self.require_open_lifecycle(event)?;
-        let actions = Self::unconditional_actions(&event.kind);
         let (target, mut facts) = self.event_operation(event);
         self.complete_event_facts_in_connection(conn, event, &mut facts)
             .await?;
-        let action = if event
-            .payload
-            .get("membership")
-            .and_then(serde_json::Value::as_str)
-            == Some("join")
-        {
-            CapabilityActionId::AppletJoin
+        let accepted = if event.executed_by.is_none() {
+            let action = crate::applet_device_admission::action(event)?;
+            crate::approval_admission::require_governance(
+                conn,
+                event,
+                commit,
+                prepared,
+                action,
+                &target,
+                &facts,
+                &[],
+            )
+            .await?
         } else {
-            CapabilityActionId::RealmAdmin
-        };
-        let accepted = crate::boxed_future(|| {
+            let actions = Self::unconditional_actions(&event.kind);
+            let action = if event
+                .payload
+                .get("membership")
+                .and_then(serde_json::Value::as_str)
+                == Some("join")
+            {
+                CapabilityActionId::AppletJoin
+            } else {
+                CapabilityActionId::RealmAdmin
+            };
             self.require_selected_action_with_approvals(
                 conn, event, commit, prepared, action, &target, &facts, &actions,
             )
-        })
-        .await?;
-        crate::approval_admission::consume_and_audit(
-            conn, event, commit, &accepted, &serde_json::json!({"managed_self_membership_admission":true,"scope_ref":event.scope_ref}),
-        ).await
+            .await?
+        };
+        crate::approval_admission::consume_and_audit(conn,event,commit,&accepted,&serde_json::json!({"managed_self_membership_admission":true,"scope_ref":event.scope_ref})).await
     }
 
     fn timeline_target(

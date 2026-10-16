@@ -223,3 +223,48 @@ pub(super) async fn prepare_creation_approvals(
         current,
     }))
 }
+
+/// Resolver material for a real Device Event; no acceptance or current allow.
+pub(crate) async fn prepare_event_current(
+    state: &AppState,
+    target: &ManagementReviewTarget,
+) -> coland_services::ServiceResult<Option<Box<coland_storage::AppletEventReviewCurrent>>> {
+    let ManagementReviewTarget::Event { event } = target else {
+        return Ok(None);
+    };
+    let Some(applet) = &event.applet_id else {
+        return Ok(None);
+    };
+    let account = event.actor_id.as_account_id().ok_or_else(|| {
+        coland_services::ServiceError::Conflict(
+            "capability_denied: native management target is not an Account".into(),
+        )
+    })?;
+    let record = super::record::applet_record(state, applet.as_str(), &event.scope_ref)
+        .await
+        .map_err(|e| {
+            coland_services::ServiceError::Conflict(format!("temporarily_unavailable: {e}"))
+        })?
+        .ok_or_else(|| {
+            coland_services::ServiceError::NotFound("Applet installation not found".into())
+        })?;
+    let resolution = state
+        .persistence()
+        .principal_resolution_by_account_id(account)
+        .await?
+        .ok_or_else(|| {
+            coland_services::ServiceError::NotFound("native PCR resolution not found".into())
+        })?;
+    let epoch = super::types::registration_epoch_evidence_from_event(&record.registration_event)
+        .map_err(|e| coland_services::ServiceError::SchemaViolation(e.to_string()))?;
+    let service_did_document =
+        crate::jws_verify::resolve_did_document(state, &epoch.did).map_err(|_| {
+            coland_services::ServiceError::Conflict(
+                "temporarily_unavailable: Service DID current is unavailable".into(),
+            )
+        })?;
+    Ok(Some(Box::new(coland_storage::AppletEventReviewCurrent {
+        pcr_realm_id: resolution.pcr_realm_id,
+        service_did_document,
+    })))
+}

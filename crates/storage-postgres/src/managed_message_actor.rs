@@ -607,7 +607,23 @@ pub(crate) async fn require_managed_actor_in_connection(
 ) -> PersistenceResult<()> {
     let registration = registration(conn, event).await?;
     let service = ActorId::service(registration.service_id.clone());
-    if event.executed_by.as_ref() != Some(&service) || event.payload.contains_key("agent_context") {
+    if event.executed_by.is_none() {
+        let authority =
+            crate::pcr_applet_device_authority::for_event_in_connection(conn, event, at)
+                .await
+                .map_err(crate::PgTransactionError::into_persistence)?
+                .ok_or_else(|| denied("managed Account has no accepted native Device producer"))?;
+        if authority.source_service_id != registration.service_id
+            || event.applet_id.as_ref() != Some(&authority.applet_id)
+            || event.payload.contains_key("agent_context")
+        {
+            return Err(denied(
+                "native managed identity differs from its Applet Service",
+            ));
+        }
+    } else if event.executed_by.as_ref() != Some(&service)
+        || event.payload.contains_key("agent_context")
+    {
         return Err(denied(
             "managed Message executor is not its accepted Service",
         ));

@@ -478,6 +478,48 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
     crate::error::render_error(res, status, code, &detail);
 }
 
+async fn submit_managed_device(
+    app_state: &AppState,
+    req: &mut Request,
+    device: &crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice,
+    res: &mut Response,
+) {
+    no_store(res);
+    if device.operation != arkret_wire::ServiceOperationId::SelfEventsCommandSubmitV1 {
+        return crate::error::render_error_code(
+            ErrorCode::Unauthenticated,
+            res,
+            "managed operation differs from actual route",
+        );
+    }
+    let Some((request, _exact_body)) =
+        parse_exact_closed_body::<SelfAuthoritySubmitRequest>(req, res).await
+    else {
+        return;
+    };
+    if let Err(error) = request.validate() {
+        return crate::error::render_error_code(
+            ErrorCode::SchemaViolation,
+            res,
+            &validation_error(error),
+        );
+    }
+    let result = app_state
+        .authority()
+        .submit_managed_device(&device.metadata, &device.authority, request.clone())
+        .await
+        .and_then(|outcome| {
+            outcome
+                .validate_for_request(&request)
+                .map_err(invalid_application_output)?;
+            Ok(outcome)
+        });
+    match result {
+        Ok(outcome) => res.render(Json(outcome)),
+        Err(error) => render_service_error(res, error),
+    }
+}
+
 #[handler]
 pub(crate) async fn submit_self(req: &mut Request, depot: &Depot, res: &mut Response) {
     #[cfg(feature = "conformance-harness")]
@@ -493,6 +535,11 @@ pub(crate) async fn submit_self(req: &mut Request, depot: &Depot, res: &mut Resp
     };
     if req.headers().contains_key("source-service-id") {
         return submit_applet_control(app_state, req, res).await;
+    }
+    if let Ok(device) = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>(
+    ) {
+        return submit_managed_device(app_state, req, device, res).await;
     }
     let Some(session) = crate::routing::auth_or_render(app_state, req, res).await else {
         #[cfg(feature = "conformance-harness")]

@@ -6,6 +6,120 @@ use coland_storage::{AppletAdmissionRequest, AppletAuthoringCandidate, Managemen
 
 use super::*;
 
+pub(super) fn native_event(request: &ManagementReviewRequestBody) -> bool {
+    matches!(&request.target, ManagementReviewTarget::Event {event} if event.applet_id.is_some())
+}
+
+pub(super) fn event_target(request: &ManagementReviewRequestBody) -> PersistenceResult<&Event> {
+    request.validate().map_err(invalid)?;
+    let ManagementReviewTarget::Event { event } = &request.target else {
+        return Err(hidden());
+    };
+    if !native_event(request)
+        || request.management_operation != ManagementOperation::Join
+        || event.scope_ref != request.effective_scope
+        || !matches!(request.requester_actor_id, ActorId::Service { .. })
+    {
+        return Err(hidden());
+    }
+    crate::applet_device_admission::action(event)?;
+    Ok(event)
+}
+
+pub(super) async fn event_pins(
+    conn: &mut AsyncPgConnection,
+    request: &ManagementReviewRequestBody,
+    at: DateTime<Utc>,
+    current: &ManagementReviewCurrent,
+) -> PersistenceResult<(Value, Vec<ManagementReviewRequirement>)> {
+    let event = event_target(request)?;
+    let material = current.applet_event.as_ref().ok_or_else(|| {
+        refused(
+            "revision_unavailable",
+            "native management resolver material is unavailable",
+        )
+    })?;
+    let authority = crate::pcr_applet_device_authority::for_event_in_connection(conn, event, at)
+        .await
+        .map_err(crate::PgTransactionError::into_persistence)?
+        .ok_or_else(hidden)?;
+    if material.pcr_realm_id != authority.pcr_realm_id
+        || current.station_id != authority.account_id.station_id
+        || request.requester_actor_id != ActorId::service(authority.source_service_id.clone())
+    {
+        return Err(refused(
+            "capability_denied",
+            "native management source or Service requester differs",
+        ));
+    }
+    let guard = coland_storage::AppletManagedDeviceEventGuard {
+        authority: authority.clone(),
+        effective_scope: event.scope_ref.clone(),
+        service_did_document: material.service_did_document.clone(),
+    };
+    crate::applet_device_admission::require_installation_binding(conn, event, &guard, at).await?;
+    let (registration, installation) =
+        crate::applet_device_admission::installation(conn, event, &guard, at).await?;
+    let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
+        conn,
+        &event.realm_id,
+        &event.actor_id,
+    )
+    .await?;
+    cut.require_open_lifecycle(event)?;
+    let source =
+        crate::agent_producer_signer_keys::prepare_local_account_device_source_in_connection(
+            conn, event, at,
+        )
+        .await?
+        .ok_or_else(hidden)?;
+    let (policies, decision) =
+        crate::applet_device_admission::select_management(conn, event, &registration, at).await?;
+    let ids = policies
+        .iter()
+        .map(|p| p.id.to_string())
+        .collect::<Vec<_>>();
+    let revisions=sql_query("SELECT to_jsonb(p) AS value FROM policy_current_results p WHERE policy_id=ANY($1) ORDER BY policy_id FOR SHARE")
+        .bind::<diesel::sql_types::Array<Text>,_>(ids).load::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    let membership=sql_query("SELECT to_jsonb(m) AS value FROM member_state_current_results m WHERE realm_id=$1 AND member_id=$2 FOR SHARE")
+        .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(event.actor_id.to_string()).get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    let mut pending = std::collections::BTreeSet::from([event
+        .authorization_ref
+        .as_ref()
+        .ok_or_else(hidden)?
+        .to_string()]);
+    let mut grants = std::collections::BTreeMap::new();
+    while let Some(id) = pending.pop_first() {
+        if grants.contains_key(&id) {
+            continue;
+        }
+        let row=sql_query("SELECT to_jsonb(g) AS value FROM capability_grant_current_results g WHERE realm_id=$1 AND grant_id=$2 FOR SHARE")
+            .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(&id).get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(hidden)?;
+        let value: arkret_models_collaboration::governance::grant_constraint::CapabilityGrant =
+            serde_json::from_value(row.value["value"].clone()).map_err(invalid)?;
+        for source in value.issuer_authority_refs {
+            if let arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::Grant {grant_id}=source {pending.insert(grant_id.to_string());}
+        }
+        grants.insert(id, row.value);
+    }
+    let root=sql_query("SELECT to_jsonb(r) AS value FROM realm_authority_root_current_results r WHERE realm_id=$1 FOR SHARE")
+        .bind::<Text,_>(event.realm_id.as_str()).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    let identity =
+        crate::pcr_applet_device::current_resolution_in_connection(conn, &authority.account_id)
+            .await
+            .map_err(crate::PgTransactionError::into_persistence)?;
+    let profile=sql_query("SELECT to_jsonb(p) AS value FROM actor_profile_current_results p WHERE realm_id=$1 FOR SHARE")
+        .bind::<Text,_>(authority.pcr_realm_id.as_str()).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    Ok((
+        json!({"producer":source,"original_proof":event.producer_proof,"scope":event.scope_ref,
+        "device_scopes":authority.scopes,"device_expires_at":authority.expires_at,"device_generation":authority.current_device_generation_ref,
+        "registration":registration,"installation_status":installation["status"],"package":installation["package"],"registration_event":installation["registration_event"],
+        "resolution":identity.projection,"resolution_source":identity.current_event,"profile":profile.value,"membership":membership.map(|r|r.value),
+        "grant_revisions":grants,"authority_root":root.value,"policies":policies,"policy_revisions":revisions.into_iter().map(|r|r.value).collect::<Vec<_>>() }),
+        decision.review_requirements,
+    ))
+}
+
 pub(super) fn creation(request: &ManagementReviewRequestBody) -> bool {
     !matches!(request.target, ManagementReviewTarget::Event { .. })
 }
@@ -211,6 +325,7 @@ pub(crate) async fn lock_approval_accounts(
             station_id: station.clone(),
             observations: Vec::new(),
             applet_candidate: None,
+            applet_event: None,
         });
     if current.station_id != *station {
         return Err(refused(
@@ -253,6 +368,7 @@ pub(crate) async fn lock_approval_accounts(
         scope.realm_id(),
         &accounts.into_iter().collect::<Vec<_>>(),
         Some(&current),
+        &[],
     )
     .await?;
     Ok(())
@@ -314,6 +430,7 @@ pub(crate) async fn prepare_admission(
             station_id: station.clone(),
             observations: Vec::new(),
             applet_candidate: None,
+            applet_event: None,
         });
     if current.station_id != *station {
         return Err(refused(

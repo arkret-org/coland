@@ -198,10 +198,20 @@ fn realm(request: &ManagementReviewRequestBody) -> PersistenceResult<&arkret_wir
 fn beneficiary(request: &ManagementReviewRequestBody) -> PersistenceResult<ActorId> {
     if applet::creation(request) {
         applet::beneficiary(request)
+    } else if applet::native_event(request) {
+        Ok(applet::event_target(request)?.actor_id.clone())
     } else {
         Ok(ActorId::account(target(request)?.2))
     }
 }
+fn candidate_event(request: &ManagementReviewRequestBody) -> PersistenceResult<&Event> {
+    if applet::native_event(request) {
+        applet::event_target(request)
+    } else {
+        Ok(target(request)?.0)
+    }
+}
+
 fn operation_name(operation: ManagementOperation) -> &'static str {
     match operation {
         ManagementOperation::Join => "join",
@@ -363,6 +373,9 @@ async fn pins(
     if applet::creation(request) {
         return Box::pin(applet::pins(conn, request, at, current)).await;
     }
+    if applet::native_event(request) {
+        return Box::pin(applet::event_pins(conn, request, at, current)).await;
+    }
     let (event, controller, agent) = target(request)?;
     crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &event.realm_id).await?;
     let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
@@ -516,9 +529,14 @@ async fn lock_current_account_realms(
     realm: &arkret_wire::RealmId,
     accounts: &[AccountId],
     current: Option<&coland_storage::ManagementReviewCurrent>,
+    extra_realms: &[arkret_wire::RealmId],
 ) -> PersistenceResult<std::collections::BTreeMap<AccountId, arkret_wire::RealmId>> {
     let mut pcrs = std::collections::BTreeMap::new();
     let mut realms = std::collections::BTreeSet::from([realm.clone()]);
+    realms.extend(extra_realms.iter().cloned());
+    if let Some(event) = current.and_then(|current| current.applet_event.as_deref()) {
+        realms.insert(event.pcr_realm_id.clone());
+    }
     for account in accounts {
         let current = current.ok_or_else(|| {
             refused(
@@ -568,7 +586,7 @@ async fn require_current_accounts(
     accounts: &[AccountId],
     current: &coland_storage::ManagementReviewCurrent,
 ) -> PersistenceResult<()> {
-    let pcrs = lock_current_account_realms(conn, realm, accounts, Some(current)).await?;
+    let pcrs = lock_current_account_realms(conn, realm, accounts, Some(current), &[]).await?;
     for (account, pcr) in pcrs {
         if crate::morph_projection_reads::human_realm_in_connection(conn, &account).await? != pcr {
             return Err(refused(
@@ -971,6 +989,12 @@ async fn qualify(
             ));
         }
         let required_action = match request.management_operation {
+            ManagementOperation::Join if applet::native_event(&request) => {
+                arkret_wire::CapabilityActionId::AppletJoin
+            }
+            ManagementOperation::Publish if applet::native_event(&request) => {
+                arkret_wire::CapabilityActionId::AppletPublish
+            }
             ManagementOperation::Join => arkret_wire::CapabilityActionId::AgentJoin,
             ManagementOperation::Publish => arkret_wire::CapabilityActionId::AgentPublish,
             ManagementOperation::CreateBot => arkret_wire::CapabilityActionId::AppletBotProvision,
@@ -1169,7 +1193,7 @@ fn material_accounts(
         return Ok(accounts.into_iter().collect());
     }
     let request = row.request();
-    if !applet::creation(&request) {
+    if !applet::creation(&request) && !applet::native_event(&request) {
         accounts.insert(target(&request)?.1);
     }
     let retained: Vec<arkret_wire::ApprovalSignature> =
@@ -1250,6 +1274,55 @@ pub(crate) async fn material_in_connection(
     })
 }
 
+pub(crate) async fn event_material_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    id: &str,
+    signatures: &[arkret_wire::ApprovalSignature],
+) -> PersistenceResult<coland_storage::ManagementReviewMaterial> {
+    let row = read(conn, id, false).await?.ok_or_else(hidden)?;
+    let request = row.request();
+    // Only evidence already delivered in the actual business request may
+    // prepare its private approval cut. A candidate Device proof alone is
+    // never a private request lookup credential or pending-status oracle.
+    let votes = signatures
+        .iter()
+        .filter(|vote| {
+            matches!(&vote.input.approval_context,
+        arkret_wire::ApprovalContext::Management {request_id,..} if request_id==id)
+        })
+        .collect::<Vec<_>>();
+    if row.status != "approved" || votes.is_empty() || json!(votes) != row.approval_signatures {
+        return Err(hidden());
+    }
+    if !applet::native_event(&request) || candidate_event(&request)? != event {
+        return Err(hidden());
+    }
+    let producer = event
+        .verify_producer_proof_self_consistency(event.realm_id.digest_suite_code().digest_suite())
+        .map_err(invalid)?
+        .ok_or_else(hidden)?;
+    let resolution =
+        crate::pcr_applet_device::current_resolution_in_connection(conn, &producer.account_id)
+            .await
+            .map_err(crate::PgTransactionError::into_persistence)?;
+    lock_current_account_realms(conn, &event.realm_id, &[], None, &[resolution.pcr_realm_id])
+        .await?;
+    let authority =
+        crate::pcr_applet_device_authority::for_event_in_connection(conn, event, Utc::now())
+            .await
+            .map_err(crate::PgTransactionError::into_persistence)?
+            .ok_or_else(hidden)?;
+    if request.requester_actor_id != ActorId::service(authority.source_service_id) {
+        return Err(hidden());
+    }
+    Ok(coland_storage::ManagementReviewMaterial {
+        request: request.as_ref().clone(),
+        outcome: row.outcome()?,
+        accounts: material_accounts(&row, &request.requester_actor_id, &[])?,
+    })
+}
+
 /// Final business admission uses this independently locked ledger, not the
 /// earlier approve response. Nonce consumption happens only with the Commit.
 pub(crate) async fn require_approved_in_connection(
@@ -1285,12 +1358,6 @@ pub(crate) async fn require_approved_in_connection(
         })
         .cloned()
         .collect::<Vec<_>>();
-    if methods.len() != prepared.methods.len() {
-        return Err(refused(
-            "signature_invalid",
-            "management candidate contains unrelated approval material",
-        ));
-    }
     for method in &methods {
         let arkret_wire::ApprovalContext::Management { request_id, .. } =
             &method.signature.input.approval_context
@@ -1314,7 +1381,7 @@ pub(crate) async fn require_approved_in_connection(
     .await?
     .ok_or_else(hidden)?;
     let request = row.request();
-    let (candidate, ..) = target(&request)?;
+    let candidate = candidate_event(&request)?;
     if json!(candidate) != json!(event) {
         return Err(refused(
             "duplicate_conflict",
@@ -1327,9 +1394,9 @@ pub(crate) async fn require_approved_in_connection(
             "management current AA observations are unavailable",
         )
     })?;
-    let accounts = material_accounts(&row, &event.actor_id, &[])?;
+    let accounts = material_accounts(&row, &request.requester_actor_id, &[])?;
     require_current_accounts(conn, &event.realm_id, &accounts, current).await?;
-    require_active_caller(&event.actor_id, current)?;
+    require_active_caller(&request.requester_actor_id, current)?;
     refresh(conn, &mut row, at, current).await?;
     if row.status != "approved" {
         return Err(refused(
@@ -1418,8 +1485,18 @@ pub(crate) async fn lock_candidate_current_realms_in_connection(
     conn: &mut AsyncPgConnection,
     event: &Event,
     prepared: Option<&coland_storage::EventApprovalCommit>,
+    producer: Option<&coland_storage::SelfProducerCommitGuard>,
 ) -> PersistenceResult<()> {
+    let extra_realms = match producer {
+        Some(coland_storage::SelfProducerCommitGuard::AppletManagedDevice(guard)) => {
+            vec![guard.authority.pcr_realm_id.clone()]
+        }
+        _ => Vec::new(),
+    };
     let Some(prepared) = prepared else {
+        if !extra_realms.is_empty() {
+            lock_current_account_realms(conn, &event.realm_id, &[], None, &extra_realms).await?;
+        }
         return Ok(());
     };
     let ids = prepared
@@ -1436,6 +1513,9 @@ pub(crate) async fn lock_candidate_current_realms_in_connection(
         })
         .collect::<std::collections::BTreeSet<_>>();
     if ids.is_empty() {
+        if !extra_realms.is_empty() {
+            lock_current_account_realms(conn, &event.realm_id, &[], None, &extra_realms).await?;
+        }
         return Ok(());
     }
     if ids.len() != 1 {
@@ -1447,14 +1527,14 @@ pub(crate) async fn lock_candidate_current_realms_in_connection(
     let id = ids.into_iter().next().ok_or_else(hidden)?;
     let row = read(conn, &id, false).await?.ok_or_else(hidden)?;
     let request = row.request();
-    let (candidate, ..) = target(&request)?;
+    let candidate = candidate_event(&request)?;
     if json!(candidate) != json!(event) {
         return Err(refused(
             "duplicate_conflict",
             "approved candidate bytes changed",
         ));
     }
-    let required = material_accounts(&row, &event.actor_id, &[])?;
+    let required = material_accounts(&row, &request.requester_actor_id, &[])?;
     let current = prepared.management_current.as_ref();
     if required.iter().any(|account| {
         !current.is_some_and(|current| {
@@ -1486,7 +1566,7 @@ pub(crate) async fn lock_candidate_current_realms_in_connection(
             .into_iter()
             .collect()
     };
-    lock_current_account_realms(conn, &event.realm_id, &accounts, current).await?;
+    lock_current_account_realms(conn, &event.realm_id, &accounts, current, &extra_realms).await?;
     Ok(())
 }
 
@@ -1495,6 +1575,7 @@ pub(crate) async fn prepare_admission_in_connection(
     event: &Event,
     prepared: Option<&coland_storage::EventApprovalCommit>,
     at: DateTime<Utc>,
+    producer: Option<&coland_storage::SelfProducerCommitGuard>,
 ) -> PersistenceResult<Option<ReviewAdmission>> {
     if !prepared.is_some_and(|p| {
         p.methods.iter().any(|m| {
@@ -1504,6 +1585,20 @@ pub(crate) async fn prepare_admission_in_connection(
             )
         })
     }) {
+        if let Some(coland_storage::SelfProducerCommitGuard::AppletManagedDevice(guard)) = producer
+        {
+            let (registration, _) =
+                crate::applet_device_admission::installation(conn, event, guard, at).await?;
+            let (_, decision) =
+                crate::applet_device_admission::select_management(conn, event, &registration, at)
+                    .await?;
+            if !decision.review_requirements.is_empty() {
+                return Err(refused(
+                    "approval_required",
+                    "native action requires its current private management decision",
+                ));
+            }
+        }
         return Ok(None);
     }
     crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &event.realm_id).await?;

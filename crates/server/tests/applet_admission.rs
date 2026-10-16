@@ -2452,6 +2452,17 @@ fn managed_device_http_request(
     operation: arkret_wire::ServiceOperationId,
     signer: &SigningKey,
 ) -> salvo::test::RequestBuilder {
+    managed_device_http_request_body(state, authority, metadata, operation, signer, None)
+}
+
+fn managed_device_http_request_body(
+    state: &AppState,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    metadata: &AppletManagedDeviceMetadata,
+    operation: arkret_wire::ServiceOperationId,
+    signer: &SigningKey,
+    provided_body: Option<Vec<u8>>,
+) -> salvo::test::RequestBuilder {
     let descriptor = operation.descriptor();
     let path = descriptor
         .http_path
@@ -2465,13 +2476,15 @@ fn managed_device_http_request(
         })
         .collect::<Vec<_>>()
         .join("/");
-    let body = if descriptor.http_method == "GET" || descriptor.http_method == "HEAD" {
-        Vec::new()
-    } else if descriptor.body_class == Some("binary_stream") {
-        vec![0, 255, 1, 2]
-    } else {
-        b"{}".to_vec()
-    };
+    let body = provided_body.unwrap_or_else(|| {
+        if descriptor.http_method == "GET" || descriptor.http_method == "HEAD" {
+            Vec::new()
+        } else if descriptor.body_class == Some("binary_stream") {
+            vec![0, 255, 1, 2]
+        } else {
+            b"{}".to_vec()
+        }
+    });
     let scheme = state
         .config()
         .public_base_url
@@ -6128,7 +6141,12 @@ fn creation_operation_vote_at(
                 CapabilityActionId::AppletGhostProvision,
             )
         }
-        _ => panic!("fixture signs only actual creation requests"),
+        ManagementReviewTarget::Event { event } => (
+            &event.scope_ref,
+            event.actor_id.signing_principal_id(),
+            ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+            CapabilityActionId::AppletJoin,
+        ),
     };
     let arkret_models_identity::principal_registration_anchor::PrincipalRegistrationAnchor::WebvhRegistration {log_entries,..}=&fixture.pcr.history.registration_anchor;
     let entries = log_entries
@@ -6153,12 +6171,20 @@ fn creation_operation_vote_at(
     let mut signature = ApprovalSignature {
         input: ApprovalSignatureInput {
             approval_context: context,
-            approval_target: ApprovalTarget::Operation,
+            approval_target: match target {
+                ManagementReviewTarget::Event { event } => ApprovalTarget::Event {
+                    event_id: event.event_id.clone(),
+                },
+                _ => ApprovalTarget::Operation,
+            },
             request_canonical_digest: target.canonical_target_digest().unwrap(),
             operation: operation.into(),
             action,
             realm_id: scope.realm_id().clone(),
-            initiating_actor_id: ActorId::service(service.clone()),
+            initiating_actor_id: match target {
+                ManagementReviewTarget::Event { event } => event.actual_signer().clone(),
+                _ => ActorId::service(service.clone()),
+            },
             approver_did: fixture.pcr.history.did.clone(),
             approved_at: at,
             nonce: format!(
@@ -7633,3 +7659,6 @@ async fn combined_creation_approval_scenario() {
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{error}");
     assert_eq!(stable, authority_snapshot(&fixture.pool).await);
 }
+
+#[path = "applet_admission/native_device.rs"]
+mod native_device;

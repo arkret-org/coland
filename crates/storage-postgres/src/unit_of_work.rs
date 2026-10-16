@@ -2547,6 +2547,7 @@ async fn commit_one_inner(
         conn,
         event,
         event_approvals,
+        request.self_producer_guard.as_ref(),
     )
     .await?;
 
@@ -2694,9 +2695,19 @@ async fn commit_one_inner(
             request.authority_commit.producer_signer_fact.as_ref(),
         )?;
         prepared_service = Some(fact);
+    } else if let Some(coland_storage::SelfProducerCommitGuard::AppletManagedDevice(guard)) =
+        request.self_producer_guard.as_ref()
+    {
+        crate::applet_device_admission::require_installation_binding(
+            conn,
+            event,
+            guard,
+            request.authority_commit.commit.committed_at,
+        )
+        .await?;
     } else if event.applet_id.is_some() {
         return Err(PersistenceError::Conflict(
-            "failed_precondition: Applet Event requires its exact Service producer guard"
+            "failed_precondition: Applet Event requires its exact accepted producer guard"
                 .to_owned(),
         )
         .into());
@@ -2804,6 +2815,7 @@ async fn commit_prepared_event_inner(
             event,
             event_approvals,
             request.authority_commit.commit.committed_at,
+            request.self_producer_guard.as_ref(),
         )
     })
     .await?;

@@ -257,7 +257,7 @@ fn refuse_deferred_call_payload(event: &arkret_wire::Event) -> ServiceResult<()>
 /// The other Station that currently governs `realm_id`, if any. Only a
 /// durable current-authority record names it; a Realm this Station knows
 /// nothing about has no forwarding target.
-async fn remote_governance(
+pub(super) async fn remote_governance(
     state: &AppState,
     realm_id: &arkret_wire::RealmId,
 ) -> ServiceResult<Option<arkret_wire::DidCoreId>> {
@@ -271,6 +271,16 @@ async fn remote_governance(
 
 #[async_trait::async_trait]
 impl AuthorityProtocolPort for AppState {
+    async fn submit_managed_device(
+        &self,
+        metadata: &arkret_models_integration::AppletManagedDeviceMetadata,
+        authority: &coland_storage::AppletManagedDeviceAuthority,
+        request: arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest,
+    ) -> ServiceResult<arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome>
+    {
+        super::authority_managed_device::submit(self, metadata, authority, request).await
+    }
+
     async fn submit_self_audit_pair(
         &self,
         session: &SessionIdentityState,

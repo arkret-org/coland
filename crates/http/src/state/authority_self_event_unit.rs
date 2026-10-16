@@ -79,7 +79,7 @@ pub(crate) async fn refresh_direct_conversation_peer_claim(
     Ok(())
 }
 
-/// How the Event's human-device or Agent producer was resolved
+/// How the Event's real Account Device, Service or Agent producer was resolved
 /// (device-lifecycle §8.2.2): locally at this Station's PCR, or from the
 /// evidence an `authority_forward` carried from the producer's Station.
 pub(super) enum AdmittedProducer {

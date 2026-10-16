@@ -2878,6 +2878,19 @@ pub struct AuthenticatedPeerContext {
 
 #[async_trait]
 pub trait AuthorityProtocolPort: Send + Sync {
+    /// The caller supplies the mounted native transport identity, never a Session.
+    /// Each implemented domain still owns its source, current and atomic gates.
+    async fn submit_managed_device(
+        &self,
+        _metadata: &arkret_models_integration::AppletManagedDeviceMetadata,
+        _authority: &coland_storage::AppletManagedDeviceAuthority,
+        _request: SelfAuthoritySubmitRequest,
+    ) -> ServiceResult<SelfAuthoritySubmitOutcome> {
+        Err(ServiceError::UnsupportedEventKind(
+            "managed Device submission has no accepting domain unit".into(),
+        ))
+    }
+
     async fn submit_self_event(
         &self,
         session: &crate::identity::SessionIdentityState,

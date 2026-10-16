@@ -102,6 +102,7 @@ mod policy_action_admission;
 mod policy_current_results;
 pub use invite_current_results::PgInviteCurrentResultStore;
 mod applet_authoring_context;
+mod applet_device_admission;
 mod call_state_current_results;
 mod circle_current_results;
 mod circle_reads;

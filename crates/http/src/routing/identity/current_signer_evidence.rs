@@ -94,8 +94,14 @@ async fn native_self_query(
                 .committed_event_for_member(&reference.event_id, &actor, &state.service_core_id())
                 .await
             {
+                let Some(view) = (*view)
+                    .into_effective_scope(&device.metadata.effective_scope)
+                    .map_err(|_| AppError::not_found("signer key unavailable"))?
+                else {
+                    return Err(AppError::not_found("signer key unavailable"));
+                };
                 let commit = view.commit();
-                if let arkret_wire::CommittedEventView::Full(full) = view.as_ref() {
+                if let arkret_wire::CommittedEventView::Full(_) = &view {
                     if commit.realm_id == body.realm_id
                         && commit.event_ref == reference.event_id
                         && commit.commit_id == reference.commit_id
@@ -104,7 +110,11 @@ async fn native_self_query(
                     {
                         // Signed metadata cannot substitute for the original
                         // resource's authoritative scope, including mixed batches.
-                        if full.event.scope_ref != device.metadata.effective_scope {
+                        if view
+                            .disclosure_scope()
+                            .map_err(|_| AppError::not_found("signer key unavailable"))?
+                            != device.metadata.effective_scope
+                        {
                             return Err(AppError::not_found("signer key unavailable"));
                         }
                         resolved = state
@@ -118,7 +128,7 @@ async fn native_self_query(
                                 .iter()
                                 .any(|v: &arkret_wire::CommittedEventView| v.commit() == commit)
                         {
-                            views.push(*view);
+                            views.push(view);
                         }
                     }
                 }

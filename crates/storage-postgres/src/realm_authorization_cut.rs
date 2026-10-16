@@ -2036,6 +2036,7 @@ impl RealmAuthorizationCut {
 
     /// Current content reads retain their own membership and disclosure gates.
     pub(crate) fn require_open_content_read(&self) -> PersistenceResult<()> {
+        self.require_membership_basis("current content read")?;
         if self.lifecycle.terminal {
             return Err(capability_denied(
                 "terminal Realm refuses current content reads",
@@ -2084,13 +2085,17 @@ impl RealmAuthorizationCut {
     /// The Realm has an authority root and a policy bundle at this cut and the
     /// actor is a joined member of it.
     pub(crate) fn require_governed_member(&self, kind: &EventKind) -> PersistenceResult<()> {
+        self.require_membership_basis(kind.as_str())
+    }
+
+    fn require_membership_basis(&self, operation: &str) -> PersistenceResult<()> {
         if self.profile_authorized() {
             return if self.actor_is_joined() {
                 Ok(())
             } else {
                 Err(capability_denied(format!(
                     "{} is not a joined member of the Realm",
-                    kind.as_str()
+                    operation
                 )))
             };
         }
@@ -2107,7 +2112,7 @@ impl RealmAuthorizationCut {
         if !self.actor_is_joined() {
             return Err(capability_denied(format!(
                 "{} is not a joined member of the Realm",
-                kind.as_str()
+                operation
             )));
         }
         Ok(())

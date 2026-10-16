@@ -1,5 +1,6 @@
 //! Session-free delivery at the real managed Account, PCR and resource cut.
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use arkret_models_collaboration::governance::accountability::AccountabilityProjection;
 use arkret_models_collaboration::governance::grant_constraint::{
@@ -38,7 +39,7 @@ struct ReadOperation {
     targets: Vec<WireResourceSelector>,
     facts: OperationFacts,
 }
-struct ReadProof {
+struct ReadContext {
     checked_at: chrono::DateTime<chrono::Utc>,
     credential_expiry: chrono::DateTime<chrono::Utc>,
     endpoint: AppletManagedDeviceScopeGuard,
@@ -48,21 +49,32 @@ struct ReadProof {
     grants: BTreeMap<GrantId, CapabilityGrant>,
     policies: Vec<Policy>,
     accountability: Vec<AccountabilityProjection>,
+    cut: crate::realm_authorization_cut::RealmAuthorizationCut,
+}
+struct ReadProof {
+    context: Arc<ReadContext>,
     resources: Vec<PolicyResourceSelector>,
+    complete_resources: bool,
     operations: Vec<ReadOperation>,
 }
-impl ReadProof {
+impl ReadContext {
     fn root_current(&self, source: &IssuerAuthorityRef) -> bool {
         matches!(source,IssuerAuthorityRef::RealmRoot{realm_id,authority_event_ref,authority_generation}
             if realm_id==self.endpoint.effective_scope.realm_id() && authority_event_ref==&self.root.authority_event_ref
                 && authority_generation==&self.root.authority_generation)
     }
+}
+impl ReadProof {
     fn permits_at(&self, at: chrono::DateTime<chrono::Utc>) -> bool {
-        at >= self.checked_at
-            && at >= self.endpoint.authority.not_before
-            && at < self.endpoint.authority.expires_at
-            && at < self.credential_expiry
-            && self.accountability.iter().any(|a| a.verifies_at(at))
+        at >= self.context.checked_at
+            && at >= self.context.endpoint.authority.not_before
+            && at < self.context.endpoint.authority.expires_at
+            && at < self.context.credential_expiry
+            && self
+                .context
+                .accountability
+                .iter()
+                .any(|a| a.verifies_at(at))
             && self
                 .operations
                 .iter()
@@ -73,18 +85,40 @@ impl ReadProof {
         operation: &ReadOperation,
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<bool> {
-        let service = ActorId::service(self.registration.service_id.clone());
-        let account = ActorId::account(self.endpoint.authority.account_id.clone());
+        if !self
+            .context
+            .endpoint
+            .authority
+            .scopes
+            .permits(&self.context.endpoint.effective_scope, &[operation.action])
+            || (!self.complete_resources
+                && self
+                    .context
+                    .policies
+                    .iter()
+                    .flat_map(|p| &p.rules)
+                    .any(|rule| {
+                        rule.resources.as_ref().is_some_and(|resources| {
+                            resources
+                                .iter()
+                                .any(|r| r.kind != PolicyResourceKind::Realm)
+                        })
+                    }))
+        {
+            return Ok(false);
+        }
+        let service = ActorId::service(self.context.registration.service_id.clone());
+        let account = ActorId::account(self.context.endpoint.authority.account_id.clone());
         let action = operation.action.as_str();
         let actions = [action];
         for mode in [AppletPolicyOperation::Read, AppletPolicyOperation::Deliver] {
             let decision = arkret_policy::applet_management::select_applet_management(
-                Some(&self.policies),
+                Some(&self.context.policies),
                 &arkret_policy::applet_management::AppletManagementContext {
-                    realm_id: self.endpoint.effective_scope.realm_id(),
+                    realm_id: self.context.endpoint.effective_scope.realm_id(),
                     requester_actor_id: &service,
-                    applet_id: &self.registration.applet_id,
-                    effective_scope: &self.endpoint.effective_scope,
+                    applet_id: &self.context.registration.applet_id,
+                    effective_scope: &self.context.endpoint.effective_scope,
                     managed_actor_id: Some(&account),
                     operation: mode,
                     content_action: Some(operation.action),
@@ -104,9 +138,9 @@ impl ReadProof {
                     actor,
                     action,
                     target,
-                    &self.grants,
+                    &self.context.grants,
                     at,
-                    |source| self.root_current(source),
+                    |source| self.context.root_current(source),
                 )
                 .map_err(|e| PersistenceError::Conflict(e.to_string()))?;
                 let mut facts = operation.facts.clone();
@@ -131,9 +165,9 @@ impl ReadProof {
                         if arkret_policy::grant_authority::managed_service_source(
                             grant,
                             &service,
-                            &self.registration.applet_id,
-                            &self.registration.registration_epoch,
-                            self.role,
+                            &self.context.registration.applet_id,
+                            &self.context.registration.registration_epoch,
+                            self.context.role,
                             action,
                         ) {
                             candidates
@@ -152,9 +186,9 @@ impl ReadProof {
                 grant,
                 action,
                 target,
-                &self.grants,
+                &self.context.grants,
                 at,
-                |source| self.root_current(source),
+                |source| self.context.root_current(source),
             )
             .map_err(|e| PersistenceError::Conflict(e.to_string()))?;
             sources.push(grant);
@@ -170,9 +204,9 @@ impl ReadProof {
                     actor,
                     action,
                     target,
-                    &self.grants,
+                    &self.context.grants,
                     at,
-                    |source| self.root_current(source),
+                    |source| self.context.root_current(source),
                 )
                 .map_err(|e| PersistenceError::Conflict(e.to_string()))?;
                 let op = AuthorizationOperation {
@@ -235,8 +269,10 @@ pub(crate) async fn acquire(
             endpoint.effective_scope,
             ScopeRef::Realm { .. } | ScopeRef::Circle { .. }
         )
-        || input.committed_events.is_empty()
-        || input.committed_events.len() > 64
+        || input.stream_scans.len() > 1
+        || (input.stream_scans.is_empty()
+            && (input.committed_events.is_empty() || input.committed_events.len() > 64))
+        || (!input.stream_scans.is_empty() && !input.committed_events.is_empty())
         || !input.current_views.is_empty()
         || !input.projection_lists.is_empty()
         || !input.morph_lists.is_empty()
@@ -299,92 +335,106 @@ pub(crate) async fn acquire(
     if current != endpoint.authority {
         return Err(refused("native read Device instance changed"));
     }
-    let mut proofs = Vec::with_capacity(input.committed_events.len());
-    for original in &input.committed_events {
-        proofs.push(
-            crate::boxed_future(|| {
-                event_proof(
-                    held.connection(),
-                    station,
-                    endpoint,
-                    &current,
-                    original,
-                    at,
-                    credential_expiry,
-                )
-            })
-            .await?,
-        );
+    let mut events = input.committed_events.as_slice();
+    if let Some((request, page)) = input.stream_scans.as_slice().first() {
+        page.validate_for_request(request)
+            .map_err(PersistenceError::database)?;
+        if request.stream_ref.scope_ref() != endpoint.effective_scope {
+            return Err(refused("native scan differs from its authenticated scope"));
+        }
+        let fresh = crate::boxed_future(|| {
+            crate::account_stream_scan::scan_stream_for_account_in_connection(
+                held.connection(),
+                request,
+                account,
+                station,
+            )
+        })
+        .await
+        .map_err(crate::PgTransactionError::into_persistence)?;
+        let coland_storage::AccountStreamScan::Page(fresh) = fresh else {
+            return Err(refused("native stream history is not currently proved"));
+        };
+        let fresh = fresh
+            .into_effective_scope(&endpoint.effective_scope)
+            .map_err(PersistenceError::database)?
+            .ok_or_else(|| refused("native page contains another data scope"))?;
+        if &fresh != page {
+            return Err(refused(
+                "native stream page or floor changed before handoff",
+            ));
+        }
+        events = &page.committed_events;
+    }
+    let context = Arc::new(
+        crate::boxed_future(|| {
+            read_context(held.connection(), endpoint, &current, at, credential_expiry)
+        })
+        .await?,
+    );
+    let mut proofs = Vec::with_capacity(events.len() + 1);
+    if !input.stream_scans.is_empty() {
+        let proof = stream_proof(Arc::clone(&context));
+        if tracing::enabled!(tracing::Level::DEBUG) && !proof.permits_at(at) {
+            tracing::debug!(
+                stage = "stream_permission",
+                "native content preparation refused"
+            );
+        }
+        proofs.push(proof);
+    }
+    for original in events {
+        let kind = original
+            .reducer_input()
+            .map(|event| event.kind.as_str())
+            .unwrap_or("withheld");
+        let proof=crate::boxed_future(|| event_proof(
+            held.connection(), station, Arc::clone(&context), original,
+        )).await.map_err(|error| {
+            tracing::debug!(stage="event_material",event_kind=kind,error=%error,"native content preparation refused");
+            error
+        })?;
+        if tracing::enabled!(tracing::Level::DEBUG) && !proof.permits_at(at) {
+            tracing::debug!(
+                stage = "event_permission",
+                event_kind = kind,
+                "native content preparation refused"
+            );
+        }
+        proofs.push(proof);
+    }
+    if proofs.is_empty() || !proofs.iter().all(|p| p.permits_at(at)) {
+        return Err(refused(
+            "native read has no current unreserved Applet content source",
+        ));
     }
     Ok(Some(Box::new(NativeDeliveryGuard { held, proofs })))
 }
 
-async fn event_proof(
+async fn read_context(
     conn: &mut diesel_async::AsyncPgConnection,
-    station: &DidCoreId,
     endpoint: &AppletManagedDeviceScopeGuard,
     current: &coland_storage::AppletManagedDeviceAuthority,
-    original: &CommittedEventView,
     at: chrono::DateTime<chrono::Utc>,
     credential_expiry: chrono::DateTime<chrono::Utc>,
-) -> PersistenceResult<ReadProof> {
+) -> PersistenceResult<ReadContext> {
     let account = &endpoint.authority.account_id;
-    let full = crate::committed_disclosure::accepted_full_event_in_connection(
-        conn,
-        &original.commit().event_ref,
-    )
-    .await?
-    .ok_or_else(|| refused("native read target scope is unproved"))?;
-    if full.event.scope_ref != endpoint.effective_scope
-        || full.event.realm_id != *endpoint.effective_scope.realm_id()
-    {
-        return Err(refused(
-            "native read target differs from its authenticated scope",
-        ));
-    }
+    let scope = &endpoint.effective_scope;
+    let actor = ActorId::account(account.clone());
     let encrypted=sql_query("SELECT to_jsonb(EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.mls.genesis' AND c.realm_id=$1 AND e.envelope->'scope_ref'=$2)) AS value")
-        .bind::<Text,_>(full.event.realm_id.as_str()).bind::<Jsonb,_>(serde_json::json!(full.event.scope_ref)).get_result::<JsonRow>(conn).await.map_err(PersistenceError::database)?;
+        .bind::<Text,_>(scope.realm_id().as_str()).bind::<Jsonb,_>(serde_json::json!(scope)).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     if encrypted.value.as_bool() != Some(false) {
         return Err(PersistenceError::Conflict(
             "applet_e2ee_join_unauthorized: native MLS read consent is not established".into(),
         ));
     }
-    let actor = ActorId::account(account.clone());
-    let reread = crate::boxed_future(|| {
-        crate::account_stream_scan::committed_event_for_member_in_connection(
-            conn,
-            &full.event.event_id,
-            &actor,
-            station,
-        )
-    })
-    .await
-    .map_err(crate::PgTransactionError::into_persistence)?;
-    let coland_storage::MemberCommittedEventRead::Read(reread) = reread else {
-        return Err(refused("native Event history is not currently visible"));
-    };
-    if reread.as_ref() != original {
-        return Err(refused("native Event disclosure changed before handoff"));
-    }
-    let mut actions = vec![CapabilityActionId::EventRead];
-    if matches!(original, CommittedEventView::Full(_))
-        && matches!(
-            full.event.kind,
-            EventKind::MessageCreate
-                | EventKind::MessageRevise
-                | EventKind::MorphCreate
-                | EventKind::MorphUpdate
-        )
-    {
-        actions.push(CapabilityActionId::ObjectReadContent);
-    }
     let (registration, _) = crate::boxed_future(|| {
         crate::applet_device_admission::installation_for_device(
             conn,
             current,
-            &full.event.scope_ref,
+            scope,
             &endpoint.service_did_document,
-            &actions,
+            &[CapabilityActionId::EventRead],
             at,
             false,
         )
@@ -408,39 +458,184 @@ async fn event_proof(
         arkret_models_integration::AppletManagedActorRole::Ghost => ManagedActorRole::Ghost,
     };
     let root=sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1 FOR SHARE")
-        .bind::<Text,_>(full.event.realm_id.as_str()).get_result::<RealmAuthorityRootReadRow>(conn).await.map_err(PersistenceError::database)?;
+        .bind::<Text,_>(scope.realm_id().as_str()).get_result::<RealmAuthorityRootReadRow>(conn).await.map_err(PersistenceError::database)?;
     let rows=sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_results WHERE realm_id=$1 ORDER BY grant_id FOR SHARE")
-        .bind::<Text,_>(full.event.realm_id.as_str()).get_results::<CapabilityGrantCurrentResultReadRow>(conn).await.map_err(PersistenceError::database)?;
+        .bind::<Text,_>(scope.realm_id().as_str()).get_results::<CapabilityGrantCurrentResultReadRow>(conn).await.map_err(PersistenceError::database)?;
     let mut grants = BTreeMap::new();
     for row in rows {
         let row = decode_row(row)?;
         grants.insert(row.grant_id, row.value);
     }
     let cut = crate::boxed_future(|| {
-        crate::realm_authorization_cut::RealmAuthorizationCut::read(
-            conn,
-            &full.event.realm_id,
-            &actor,
-        )
+        crate::realm_authorization_cut::RealmAuthorizationCut::read(conn, scope.realm_id(), &actor)
     })
     .await?;
-    cut.require_governed_member(&full.event.kind)?;
     cut.require_open_content_read()?;
-    let mut resources = crate::agent_management_admission::event_content_resources(&full.event)?;
-    if let ScopeRef::Circle { circle_id, .. } = &full.event.scope_ref {
+    let policies =
+        crate::policy_current_results::read_scoped_applet_management_policies_in_connection(
+            conn,
+            scope.realm_id(),
+            scope.circle_id(),
+        )
+        .await?;
+    let accountability=sql_query("SELECT value FROM identity_accountability_current_results WHERE subject_id=$1 AND issuer_id=$2 ORDER BY realm_id,scope_set_digest FOR SHARE")
+        .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(registration.service_id.as_str()).get_results::<JsonRow>(conn).await.map_err(PersistenceError::database)?
+        .into_iter().map(|row|serde_json::from_value(row.value).map_err(PersistenceError::database)).collect::<PersistenceResult<Vec<AccountabilityProjection>>>()?;
+    Ok(ReadContext {
+        checked_at: at,
+        credential_expiry,
+        endpoint: endpoint.clone(),
+        registration,
+        role,
+        root: decode_authority_root(root)?,
+        grants,
+        policies,
+        accountability,
+        cut,
+    })
+}
+
+fn scope_resources(scope: &ScopeRef) -> Vec<PolicyResourceSelector> {
+    let mut resources = vec![PolicyResourceSelector {
+        kind: PolicyResourceKind::Realm,
+        realm_id: Some(scope.realm_id().clone()),
+        resource_ref: Some(scope.realm_id().to_string()),
+    }];
+    if let ScopeRef::Circle {
+        realm_id,
+        circle_id,
+    } = scope
+    {
         resources.push(PolicyResourceSelector {
             kind: PolicyResourceKind::Object,
-            realm_id: Some(full.event.realm_id.clone()),
+            realm_id: Some(realm_id.clone()),
             resource_ref: Some(circle_id.to_string()),
         });
     }
+    resources
+}
+fn scope_operation(context: &ReadContext) -> ReadOperation {
+    let scope = &context.endpoint.effective_scope;
+    let target = match scope {
+        ScopeRef::Circle {
+            realm_id,
+            circle_id,
+        } => WireResourceSelector::circle(realm_id.clone(), circle_id.clone()),
+        _ => WireResourceSelector::realm(scope.realm_id().clone()),
+    };
+    ReadOperation {
+        action: CapabilityActionId::EventRead,
+        targets: vec![target],
+        facts: OperationFacts {
+            circle_id: scope.circle_id().map(ToString::to_string),
+            applet_id: Some(context.registration.applet_id.to_string()),
+            registration_epoch: Some(context.registration.registration_epoch.to_string()),
+            ..OperationFacts::default()
+        },
+    }
+}
+fn stream_proof(context: Arc<ReadContext>) -> ReadProof {
+    ReadProof {
+        resources: scope_resources(&context.endpoint.effective_scope),
+        operations: vec![scope_operation(&context)],
+        complete_resources: true,
+        context,
+    }
+}
+
+async fn event_proof(
+    conn: &mut diesel_async::AsyncPgConnection,
+    station: &DidCoreId,
+    context: Arc<ReadContext>,
+    original: &CommittedEventView,
+) -> PersistenceResult<ReadProof> {
+    original
+        .validate_shape()
+        .map_err(PersistenceError::database)?;
+    let scope = &context.endpoint.effective_scope;
+    if original
+        .disclosure_scope()
+        .map_err(PersistenceError::database)?
+        != *scope
+    {
+        return Err(refused("native Event differs from its authenticated scope"));
+    }
+    let actor = ActorId::account(context.endpoint.authority.account_id.clone());
+    let reread = crate::boxed_future(|| {
+        crate::account_stream_scan::committed_event_for_member_in_connection(
+            conn,
+            &original.commit().event_ref,
+            &actor,
+            station,
+        )
+    })
+    .await
+    .map_err(crate::PgTransactionError::into_persistence)?;
+    let coland_storage::MemberCommittedEventRead::Read(reread) = reread else {
+        return Err(refused("native Event history is not currently visible"));
+    };
+    let reread = (*reread)
+        .into_effective_scope(scope)
+        .map_err(PersistenceError::database)?
+        .ok_or_else(|| refused("native Event has another data scope"))?;
+    if &reread != original {
+        return Err(refused("native Event disclosure changed before handoff"));
+    }
+    let full = crate::committed_disclosure::accepted_full_event_in_connection(
+        conn,
+        &original.commit().event_ref,
+    )
+    .await?;
+    let Some(full) = full else {
+        if matches!(original, CommittedEventView::Full(_)) {
+            return Err(refused("native Full Event source is unavailable"));
+        }
+        // The held member reader proves this opaque chain node, not any
+        // missing payload or narrower resource facts.
+        let mut operation = scope_operation(&context);
+        let mut target = WireResourceSelector::realm(scope.realm_id().clone());
+        target.kind = arkret_wire::ResourceSelectorKind::Event;
+        target.event_id = Some(original.commit().event_ref.clone());
+        operation.targets.push(target);
+        return Ok(ReadProof {
+            resources: scope_resources(scope),
+            operations: vec![operation],
+            complete_resources: false,
+            context,
+        });
+    };
+    full.validate_shape().map_err(PersistenceError::database)?;
+    if &full.commit != original.commit() {
+        return Err(refused("native full source differs from its exact Commit"));
+    }
+    let mut resources = crate::agent_management_admission::event_content_resources(&full.event)?;
+    if let ScopeRef::Circle { circle_id, .. } = scope {
+        resources.push(PolicyResourceSelector {
+            kind: PolicyResourceKind::Object,
+            realm_id: Some(scope.realm_id().clone()),
+            resource_ref: Some(circle_id.to_string()),
+        });
+    }
+    let mut actions = vec![CapabilityActionId::EventRead];
+    if matches!(original, CommittedEventView::Full(_))
+        && matches!(
+            full.event.kind,
+            EventKind::MessageCreate
+                | EventKind::MessageRevise
+                | EventKind::MorphCreate
+                | EventKind::MorphUpdate
+        )
+    {
+        actions.push(CapabilityActionId::ObjectReadContent);
+    }
     let mut operations = Vec::new();
     for action in actions {
-        let (target, mut facts) = cut.content_scope_facts(&full.event, action)?;
-        facts.applet_id = Some(registration.applet_id.to_string());
-        facts.registration_epoch = Some(registration.registration_epoch.to_string());
+        let (target, mut facts) = context.cut.content_scope_facts(&full.event, action)?;
+        facts.circle_id = scope.circle_id().map(ToString::to_string);
+        facts.applet_id = Some(context.registration.applet_id.to_string());
+        facts.registration_epoch = Some(context.registration.registration_epoch.to_string());
         let mut targets = crate::agent_management_admission::content_capability_targets(
-            &full.event.realm_id,
+            scope.realm_id(),
             &resources,
         );
         if !targets.contains(&target) {
@@ -449,7 +644,7 @@ async fn event_proof(
         if let ScopeRef::Circle {
             realm_id,
             circle_id,
-        } = &full.event.scope_ref
+        } = scope
         {
             let circle = WireResourceSelector::circle(realm_id.clone(), circle_id.clone());
             if !targets.contains(&circle) {
@@ -462,33 +657,10 @@ async fn event_proof(
             facts,
         });
     }
-    let policies =
-        crate::policy_current_results::read_scoped_applet_management_policies_in_connection(
-            conn,
-            &full.event.realm_id,
-            full.event.scope_ref.circle_id(),
-        )
-        .await?;
-    let accountability=sql_query("SELECT value FROM identity_accountability_current_results WHERE subject_id=$1 AND issuer_id=$2 ORDER BY realm_id,scope_set_digest FOR SHARE")
-        .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(registration.service_id.as_str()).get_results::<JsonRow>(conn).await.map_err(PersistenceError::database)?
-        .into_iter().map(|row|serde_json::from_value(row.value).map_err(PersistenceError::database)).collect::<PersistenceResult<Vec<AccountabilityProjection>>>()?;
-    let proof = ReadProof {
-        checked_at: at,
-        credential_expiry,
-        endpoint: endpoint.clone(),
-        registration,
-        role,
-        root: decode_authority_root(root)?,
-        grants,
-        policies,
-        accountability,
+    Ok(ReadProof {
+        context,
         resources,
         operations,
-    };
-    if !proof.permits_at(at) {
-        return Err(refused(
-            "native read has no current unreserved Applet content source",
-        ));
-    }
-    Ok(proof)
+        complete_resources: true,
+    })
 }

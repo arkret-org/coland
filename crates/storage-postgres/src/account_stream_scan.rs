@@ -58,120 +58,127 @@ pub(crate) async fn scan_stream_for_account(
 ) -> PersistenceResult<AccountStreamScan> {
     request
         .validate()
-        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-    let caller = ActorId::account(account.clone()).to_string();
+        .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
     let mut conn = pg_conn(pool).await?;
     conn.transaction::<_, PgTransactionError, _>(async move |conn| {
         sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .execute(&mut *conn)
             .await?;
-        let Some(tenure) = sql_query("SELECT service_id FROM realm_authorities WHERE realm_id=$1")
-            .bind::<Text, _>(request.realm_id.as_str())
-            .get_result::<TenureRow>(&mut *conn)
-            .await
-            .optional()?
-        else {
-            return Ok(AccountStreamScan::NotAuthorized);
-        };
-        let members = sql_query(
-            "SELECT member_id, membership FROM member_state_current_results \
-             WHERE realm_id=$1 ORDER BY member_id",
-        )
-        .bind::<Text, _>(request.realm_id.as_str())
-        .load::<MemberRow>(&mut *conn)
-        .await?;
-        if !members
-            .iter()
-            .any(|row| row.member_id == caller && row.membership == "join")
-        {
-            return Ok(AccountStreamScan::NotAuthorized);
-        }
-        let caller_actor = ActorId::account(account.clone());
-        let floor = match (&request.stream_ref, tenure.service_id == issuer.as_str()) {
-            (CommitStreamRef::Realm { .. }, true) => {
-                caller_realm_floor_in_connection(conn, &request.realm_id, &caller_actor).await?
-            }
-            (CommitStreamRef::Circle { circle_id, .. }, true) => {
-                caller_circle_floor_in_connection(conn, &request.realm_id, circle_id, &caller_actor)
-                    .await?
-            }
-            (CommitStreamRef::Sidecar { sidecar_id, .. }, true) => {
-                crate::sidecar_authority_cut::public_material_floor_in_connection(
-                    conn,
-                    &request.realm_id,
-                    sidecar_id,
-                    &caller_actor,
-                )
-                .await?
-            }
-            (CommitStreamRef::Realm { .. }, false) => {
-                match replica_realm_floor_in_connection(conn, &request.realm_id, &caller_actor)
-                    .await?
-                {
-                    Ok(floor) => Some(floor),
-                    Err(reason) => return Ok(AccountStreamScan::Unproved(reason)),
-                }
-            }
-            (CommitStreamRef::Circle { circle_id, .. }, false) => {
-                match replica_circle_floor_in_connection(
-                    conn,
-                    &request.realm_id,
-                    circle_id,
-                    &caller_actor,
-                )
-                .await?
-                {
-                    Ok(floor) => Some(floor),
-                    Err(reason) => return Ok(AccountStreamScan::Unproved(reason)),
-                }
-            }
-            (CommitStreamRef::Sidecar { sidecar_id, .. }, false) => {
-                match crate::sidecar_replica_authority::handshake_floor_in_connection(
-                    conn,
-                    &request.realm_id,
-                    sidecar_id,
-                    &caller_actor,
-                )
-                .await?
-                {
-                    Ok(floor) => floor,
-                    Err(reason) => return Ok(AccountStreamScan::Unproved(reason)),
-                }
-            }
-            _ => {
-                return Ok(AccountStreamScan::Unproved(
-                    "the requested stream has no proved disclosure rule",
-                ));
-            }
-        };
-        let Some(floor) = floor else {
-            if matches!(
-                request.stream_ref,
-                CommitStreamRef::Circle { .. } | CommitStreamRef::Sidecar { .. }
-            ) {
-                return Ok(AccountStreamScan::NotAuthorized);
-            }
-            return Ok(AccountStreamScan::Unproved(
-                "the caller's join or history floor is not proved at this cut",
-            ));
-        };
-        let page = crate::authority_commit::stream_page_above_floor_in_connection(
-            conn,
-            request,
-            Some(floor),
-        )
-        .await?;
-        // Per-Event disclosure applies on top of the interval: a withheld row
-        // keeps its Commit so the page stays one verifiable chain.
-        let committed_events =
-            disclose_page_to_member(conn, page.committed_events.clone(), &caller_actor).await?;
-        Ok(AccountStreamScan::Page(StreamScanOutcome {
-            committed_events,
-            ..page
-        }))
+        scan_stream_for_account_in_connection(conn, request, account, issuer).await
     })
     .await
     .map_err(PgTransactionError::into_persistence)
+}
+
+pub(crate) async fn scan_stream_for_account_in_connection(
+    conn: &mut AsyncPgConnection,
+    request: &StreamScanRequest,
+    account: &AccountId,
+    issuer: &DidCoreId,
+) -> Result<AccountStreamScan, PgTransactionError> {
+    request
+        .validate()
+        .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
+    let caller = ActorId::account(account.clone()).to_string();
+    let Some(tenure) = sql_query("SELECT service_id FROM realm_authorities WHERE realm_id=$1")
+        .bind::<Text, _>(request.realm_id.as_str())
+        .get_result::<TenureRow>(&mut *conn)
+        .await
+        .optional()?
+    else {
+        return Ok(AccountStreamScan::NotAuthorized);
+    };
+    let members = sql_query(
+        "SELECT member_id, membership FROM member_state_current_results \
+         WHERE realm_id=$1 ORDER BY member_id",
+    )
+    .bind::<Text, _>(request.realm_id.as_str())
+    .load::<MemberRow>(&mut *conn)
+    .await?;
+    if !members
+        .iter()
+        .any(|row| row.member_id == caller && row.membership == "join")
+    {
+        return Ok(AccountStreamScan::NotAuthorized);
+    }
+    let caller_actor = ActorId::account(account.clone());
+    let floor = match (&request.stream_ref, tenure.service_id == issuer.as_str()) {
+        (CommitStreamRef::Realm { .. }, true) => {
+            caller_realm_floor_in_connection(conn, &request.realm_id, &caller_actor).await?
+        }
+        (CommitStreamRef::Circle { circle_id, .. }, true) => {
+            caller_circle_floor_in_connection(conn, &request.realm_id, circle_id, &caller_actor)
+                .await?
+        }
+        (CommitStreamRef::Sidecar { sidecar_id, .. }, true) => {
+            crate::sidecar_authority_cut::public_material_floor_in_connection(
+                conn,
+                &request.realm_id,
+                sidecar_id,
+                &caller_actor,
+            )
+            .await?
+        }
+        (CommitStreamRef::Realm { .. }, false) => {
+            match replica_realm_floor_in_connection(conn, &request.realm_id, &caller_actor).await? {
+                Ok(floor) => Some(floor),
+                Err(reason) => return Ok(AccountStreamScan::Unproved(reason)),
+            }
+        }
+        (CommitStreamRef::Circle { circle_id, .. }, false) => {
+            match replica_circle_floor_in_connection(
+                conn,
+                &request.realm_id,
+                circle_id,
+                &caller_actor,
+            )
+            .await?
+            {
+                Ok(floor) => Some(floor),
+                Err(reason) => return Ok(AccountStreamScan::Unproved(reason)),
+            }
+        }
+        (CommitStreamRef::Sidecar { sidecar_id, .. }, false) => {
+            match crate::sidecar_replica_authority::handshake_floor_in_connection(
+                conn,
+                &request.realm_id,
+                sidecar_id,
+                &caller_actor,
+            )
+            .await?
+            {
+                Ok(floor) => floor,
+                Err(reason) => return Ok(AccountStreamScan::Unproved(reason)),
+            }
+        }
+        _ => {
+            return Ok(AccountStreamScan::Unproved(
+                "the requested stream has no proved disclosure rule",
+            ));
+        }
+    };
+    let Some(floor) = floor else {
+        if matches!(
+            request.stream_ref,
+            CommitStreamRef::Circle { .. } | CommitStreamRef::Sidecar { .. }
+        ) {
+            return Ok(AccountStreamScan::NotAuthorized);
+        }
+        return Ok(AccountStreamScan::Unproved(
+            "the caller's join or history floor is not proved at this cut",
+        ));
+    };
+    let page =
+        crate::authority_commit::stream_page_above_floor_in_connection(conn, request, Some(floor))
+            .await?;
+    // Per-Event disclosure applies on top of the interval: a withheld row
+    // keeps its Commit so the page stays one verifiable chain.
+    let committed_events =
+        disclose_page_to_member(conn, page.committed_events.clone(), &caller_actor).await?;
+    Ok(AccountStreamScan::Page(StreamScanOutcome {
+        committed_events,
+        ..page
+    }))
 }
 
 #[derive(QueryableByName)]

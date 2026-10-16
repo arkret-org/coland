@@ -1496,6 +1496,11 @@ impl AccountStatusCurrentObservation {
 pub struct AccountContentDeliveryInput {
     pub realms: Vec<arkret_wire::RealmId>,
     pub committed_events: Vec<arkret_wire::CommittedEventView>,
+    /// Exact prepared scan and original SDK response, re-read on the held cut.
+    pub stream_scans: Vec<(
+        arkret_wire::StreamScanRequest,
+        arkret_wire::StreamScanOutcome,
+    )>,
     pub current_views:
         Vec<arkret_models_collaboration::sync_frames::current_results::AccountCurrentView>,
     pub projection_lists: Vec<(

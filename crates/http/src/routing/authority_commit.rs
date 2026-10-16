@@ -769,6 +769,26 @@ async fn scan_stream(req: &mut Request, depot: &Depot, res: &mut Response) {
             return crate::error::render_error_code(ErrorCode::InternalError, res, &error);
         }
     };
+    if let Ok(device) = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>(
+    ) {
+        let Some(request) = parse_closed_body::<StreamScanRequest>(req, res).await else {
+            return;
+        };
+        match native_stream_scan(app_state, device, request).await {
+            Ok(outcome) => {
+                no_store(res);
+                salvo::Scribe::render(outcome, res);
+            }
+            Err(error) => crate::routing::render_error(
+                res,
+                error.http_status(),
+                error.wire_code(),
+                &error.message,
+            ),
+        }
+        return;
+    }
     let Some(session) = crate::routing::auth_or_render(app_state, req, res).await else {
         #[cfg(feature = "conformance-harness")]
         trace_stream_read_refusal("authentication", "other", None);
@@ -845,6 +865,53 @@ async fn scan_stream(req: &mut Request, depot: &Depot, res: &mut Response) {
         stream_kind = match request.stream_ref { arkret_wire::CommitStreamRef::Realm {..} => "realm", arkret_wire::CommitStreamRef::Circle {..} => "circle", arkret_wire::CommitStreamRef::Sidecar {..} => "sidecar", _ => "unknown" },
         "authorized stream scan direction");
     render_stream_scan(res, &request, result);
+}
+
+async fn native_stream_scan(
+    state: &AppState,
+    device: &crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice,
+    request: StreamScanRequest,
+) -> coland_http::result::GuardedJsonResult<arkret_wire::StreamScanOutcome> {
+    let unavailable =
+        || coland_http::error::AppError::capability_denied("native stream content is unavailable");
+    request
+        .validate()
+        .map_err(|e| coland_http::error::AppError::schema_violation(e.to_string()))?;
+    if device.operation != arkret_wire::ServiceOperationId::SelfCommittedEventReadScanV1
+        || request.stream_ref.scope_ref() != device.metadata.effective_scope
+        || !matches!(
+            device.metadata.effective_scope,
+            arkret_wire::ScopeRef::Realm { .. } | arkret_wire::ScopeRef::Circle { .. }
+        )
+    {
+        return Err(unavailable());
+    }
+    let result = state
+        .authority()
+        .scan_stream_for_account(&device.authority.account_id, request.clone())
+        .await
+        .map_err(|_| unavailable())?;
+    let coland_storage::AccountStreamScan::Page(outcome) = result else {
+        return Err(unavailable());
+    };
+    let outcome = outcome
+        .into_effective_scope(&device.metadata.effective_scope)
+        .map_err(|_| unavailable())?
+        .ok_or_else(unavailable)?;
+    outcome
+        .validate_for_request(&request)
+        .map_err(|_| unavailable())?;
+    let input = coland_storage::AccountContentDeliveryInput {
+        realms: vec![request.realm_id.clone()],
+        stream_scans: vec![(request, outcome.clone())],
+        ..Default::default()
+    };
+    let guard = crate::routing::identity::applet_managed_device::content_delivery_guard_for_input(
+        state, device, input,
+    )
+    .await
+    .map_err(|_| unavailable())?;
+    coland_http::result::guarded_json_ok(outcome, Some(guard))
 }
 
 /// Render one caller-scoped scan decision. A refused caller receives the

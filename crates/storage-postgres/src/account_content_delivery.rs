@@ -1445,6 +1445,11 @@ pub(crate) async fn acquire(
         })
         .await;
     }
+    if !input.stream_scans.is_empty() {
+        return Err(PersistenceError::Conflict(
+            "capability_denied: stream delivery requires its exact native consumer".into(),
+        ));
+    }
     if input.remote_watch_read.is_some() || input.audited_watch_read.is_some() {
         return Box::pin(acquire_remote_watch_delivery(pool, account, station, input)).await;
     }

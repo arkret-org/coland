@@ -116,7 +116,7 @@ pub(crate) async fn prepare_management_candidate(
 pub(super) async fn prepare_creation_approvals(
     state: &AppState,
     input: &AppletAuthoringCandidate,
-) -> Result<Option<coland_storage::ManagementOperationApprovalCommit>, AppError> {
+) -> Result<Option<coland_storage::OperationApprovalCommit>, AppError> {
     let (target, signatures, operation) = match &input.request {
         AppletAdmissionRequest::Managed(AppletManagedActorCommittedRequest::Bot(body)) => (
             ManagementReviewTarget::BotCreation {
@@ -140,20 +140,33 @@ pub(super) async fn prepare_creation_approvals(
         return Ok(None);
     }
     let result: coland_services::ServiceResult<_> = async {
+        let methods = crate::approval_admission::prepare_approval_methods(
+            state,
+            signatures,
+            chrono::Utc::now(),
+        )
+        .await?;
         let mut accounts = std::collections::BTreeSet::new();
         let mut ids = std::collections::BTreeSet::new();
+        let mut management_votes = Vec::new();
+        let mut has_action_votes = false;
         for signature in signatures {
-            let arkret_wire::ApprovalContext::Management { request_id, .. } =
-                &signature.input.approval_context
-            else {
-                return Err(coland_services::ServiceError::protocol(
-                    arkret_wire::ErrorCode::SignatureInvalid,
-                    "creation contains unrelated approval context",
-                ));
-            };
-            ids.insert(request_id.clone());
+            match &signature.input.approval_context {
+                arkret_wire::ApprovalContext::Management { request_id, .. } => {
+                    ids.insert(request_id.clone());
+                    management_votes.push(signature.clone());
+                }
+                arkret_wire::ApprovalContext::Grant { .. }
+                | arkret_wire::ApprovalContext::RealmGovernance { .. } => has_action_votes = true,
+                _ => {
+                    return Err(coland_services::ServiceError::protocol(
+                        arkret_wire::ErrorCode::SignatureInvalid,
+                        "creation contains an unrelated approval context",
+                    ));
+                }
+            }
         }
-        if ids.len() != 1 {
+        if ids.len() > 1 {
             return Err(coland_services::ServiceError::protocol(
                 arkret_wire::ErrorCode::SignatureInvalid,
                 "creation combines different management requests",
@@ -163,21 +176,24 @@ pub(super) async fn prepare_creation_approvals(
             accounts.extend(
                 state
                     .persistence()
-                    .management_review_material(&input.admin_actor_id, &id, signatures)
+                    .management_review_material(&input.admin_actor_id, &id, &management_votes)
                     .await
                     .map_err(coland_services::ServiceError::from)?
                     .accounts,
             );
         }
+        if has_action_votes {
+            accounts.extend(
+                state
+                    .persistence()
+                    .applet_creation_approval_accounts(input)
+                    .await
+                    .map_err(coland_services::ServiceError::from)?,
+            );
+        }
         let mut current =
             crate::approval_admission::observe_management_accounts(state, accounts).await?;
         current.applet_candidate = Some(Box::new(input.clone()));
-        let methods = crate::approval_admission::prepare_approval_methods(
-            state,
-            signatures,
-            chrono::Utc::now(),
-        )
-        .await?;
         Ok((current, methods))
     }
     .await;
@@ -198,7 +214,7 @@ pub(super) async fn prepare_creation_approvals(
             });
         AppError::from_rejection(code, error.to_string())
     })?;
-    Ok(Some(coland_storage::ManagementOperationApprovalCommit {
+    Ok(Some(coland_storage::OperationApprovalCommit {
         target_digest: target
             .canonical_target_digest()
             .map_err(|e| AppError::schema_violation(e.to_string()))?,

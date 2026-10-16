@@ -291,6 +291,23 @@ impl AppletStore for PgAppletStore {
         })?
     }
 
+    async fn creation_approval_accounts(
+        &self,
+        candidate: &coland_storage::AppletAuthoringCandidate,
+    ) -> PersistenceResult<Vec<arkret_wire::AccountId>> {
+        let pool = self.pool.clone();
+        let candidate = Box::new(candidate.clone());
+        tokio::spawn(async move {
+            crate::applet_action_approval::prepare_accounts(&pool, &candidate).await
+        })
+        .await
+        .map_err(|error| {
+            PersistenceError::Internal(format!(
+                "creation approval preparation task failed: {error}"
+            ))
+        })?
+    }
+
     async fn get_identity(
         &self,
         applet_id: &str,

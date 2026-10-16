@@ -259,9 +259,9 @@ pub(super) async fn provision(
         preview_subject_key: applet_authoring_preview_subject_key(&body.authoring_request)?,
         operation_id: "ak.self.applet.bot.command.provision".to_owned(),
         idempotency_key: key.clone(),
-        management_approval: None,
+        operation_approvals: None,
     };
-    input.management_approval =
+    input.operation_approvals =
         super::management_review::prepare_creation_approvals(state, &input.candidate).await?;
     let station = state.service_core_id();
     let service = ActorId::service(basis.service_id.clone());

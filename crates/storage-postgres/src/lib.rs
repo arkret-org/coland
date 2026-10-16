@@ -52,6 +52,7 @@ mod agent_producer_signer_keys;
 mod agent_provisioning;
 mod agent_session_authority;
 mod agents;
+mod applet_action_approval;
 mod applet_admission;
 mod applet_authority_material;
 mod applet_current_results;

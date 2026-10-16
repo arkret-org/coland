@@ -2081,9 +2081,9 @@ async fn provision_ghost_actor_endpoint(
         preview_subject_key: applet_authoring_preview_subject_key(&provision.authoring_request)?,
         operation_id: "ak.self.applet.ghost.command.provision".to_owned(),
         idempotency_key: idempotency_key.clone(),
-        management_approval: None,
+        operation_approvals: None,
     };
-    input.management_approval =
+    input.operation_approvals =
         super::management_review::prepare_creation_approvals(state, &input.candidate).await?;
     let target_station_id = record.target_station_id.clone();
     let outcome_actor = ghost_actor_id.clone();

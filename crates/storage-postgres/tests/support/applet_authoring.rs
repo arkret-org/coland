@@ -1252,7 +1252,7 @@ impl AppletAuthoringFactory {
             preview_subject_key: preview,
             operation_id: operation.to_owned(),
             idempotency_key: format!("contract-{}", uuid::Uuid::now_v7()),
-            management_approval: None,
+            operation_approvals: None,
         }
     }
 }

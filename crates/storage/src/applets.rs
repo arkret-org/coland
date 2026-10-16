@@ -78,6 +78,16 @@ pub trait AppletStore: Send + Sync {
             "unsupported_feature: Applet authoring aggregate is unavailable".to_owned(),
         ))
     }
+    /// Station-private preparation of exact approval participant Accounts.
+    /// No RPC, vote qualification or business write occurs in this read.
+    async fn creation_approval_accounts(
+        &self,
+        _candidate: &AppletAuthoringCandidate,
+    ) -> PersistenceResult<Vec<arkret_wire::AccountId>> {
+        Err(super::PersistenceError::Conflict(
+            "unsupported_feature: creation approval preparation is unavailable".into(),
+        ))
+    }
     async fn get_identity(
         &self,
         applet_id: &str,
@@ -242,7 +252,7 @@ pub struct AppletAuthoringUnitWrite {
     pub preview_subject_key: String,
     pub operation_id: String,
     pub idempotency_key: String,
-    pub management_approval: Option<crate::ManagementOperationApprovalCommit>,
+    pub operation_approvals: Option<crate::OperationApprovalCommit>,
 }
 
 impl std::ops::Deref for AppletAuthoringUnitWrite {

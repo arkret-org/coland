@@ -62,7 +62,7 @@ fn bundle(
         coland_storage::AppletAdmissionRequest::Install(_) => None,
     }
 }
-fn target_station(
+pub(crate) fn target_station(
     input: &coland_storage::AppletAuthoringCandidate,
 ) -> PersistenceResult<&arkret_wire::DidCoreId> {
     match &input.request {
@@ -72,7 +72,7 @@ fn target_station(
         _ => Ok(request(input)?.basis.target_station_id()),
     }
 }
-fn effective_scope(
+pub(crate) fn effective_scope(
     input: &coland_storage::AppletAuthoringCandidate,
 ) -> PersistenceResult<&ScopeRef> {
     match &input.request {
@@ -808,7 +808,7 @@ async fn admit_in_connection(
         crate::agent_management_review::applet::lock_approval_accounts(
             conn,
             input,
-            input.management_approval.as_ref(),
+            input.operation_approvals.as_ref(),
         )
         .await?;
     }
@@ -876,19 +876,25 @@ async fn admit_in_connection(
             conn,
             input,
             &validated,
-            input.management_approval.as_ref(),
+            input.operation_approvals.as_ref(),
             input.accepted_at,
         ))
         .await?
     } else {
-        if input.management_approval.is_some() {
+        if input.operation_approvals.is_some() {
             return Err(rejected("install does not accept management approval"));
         }
         Vec::new()
     };
     let provision = validated.provision.as_ref();
+    let mut action_qualified = Vec::new();
     if admin_count == 0 {
-        let (_, reservations) = creation_grant(conn, input, &validated).await?;
+        let authority =
+            crate::applet_action_approval::CreationAuthority::read(conn, input, &validated).await?;
+        let (reservations, qualified) =
+            crate::boxed_future(|| authority.admit(conn, input.operation_approvals.as_ref()))
+                .await?;
+        action_qualified = qualified;
         if let Some(bundle) = bundle(input) {
             // Identity creation and its quota share this aggregate transaction.
             // The accepted provision is the operation identity, independent of
@@ -1152,6 +1158,14 @@ async fn admit_in_connection(
         sql_query("UPDATE applet_authoring_previews SET status='committed',committed_at=$3 WHERE subject_key=$1 AND request_digest=$2 AND status='current'")
             .bind::<Text,_>(&input.preview_subject_key).bind::<Text,_>(input.request_digest.as_str()).bind::<Timestamptz,_>(input.accepted_at).execute(&mut *conn).await.map_err(PersistenceError::database)?;
     }
+    crate::applet_action_approval::consume(
+        conn,
+        input,
+        &action_qualified,
+        &refs,
+        &finalization.response_body,
+    )
+    .await?;
     crate::agent_management_review::applet::consume(
         conn,
         input,
@@ -1420,7 +1434,7 @@ fn validate_finalized_refs(
     Ok(())
 }
 
-async fn require_exact_service_grant(
+pub(crate) async fn require_exact_service_grant(
     conn: &mut AsyncPgConnection,
     input: &coland_storage::AppletAuthoringCandidate,
     provision: &AppletManagedActorProvisionPayload,
@@ -1498,7 +1512,7 @@ async fn require_exact_service_grant(
     Ok(accepted_registration)
 }
 
-fn creation_authorization_ref(
+pub(crate) fn creation_authorization_ref(
     input: &coland_storage::AppletAuthoringCandidate,
     provision: &AppletManagedActorProvisionPayload,
 ) -> PersistenceResult<arkret_wire::GrantId> {
@@ -1685,58 +1699,4 @@ pub(crate) async fn validate_managed_current(
         }
     }
     Ok(())
-}
-
-pub(crate) async fn creation_grant(
-    conn: &mut AsyncPgConnection,
-    input: &coland_storage::AppletAuthoringCandidate,
-    validated: &ValidatedAppletUnit,
-) -> PersistenceResult<(Value, Vec<coland_storage::QuotaReservation>)> {
-    let p = validated
-        .provision
-        .as_ref()
-        .ok_or_else(|| rejected("managed provenance absent"))?;
-    let grant_actor = applet_grant_subject(input);
-    let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
-        conn,
-        &validated.portal_realm,
-        &grant_actor,
-    )
-    .await?;
-    cut.require_open_business_mutation()?;
-    let registration = require_exact_service_grant(conn, input, p, &validated.portal_realm)
-        .await?
-        .ok_or_else(|| rejected("current registration absent"))?;
-    let target = match effective_scope(input)? {
-        ScopeRef::Realm { realm_id } => arkret_wire::WireResourceSelector::realm(realm_id.clone()),
-        ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } => arkret_wire::WireResourceSelector::circle(realm_id.clone(), circle_id.clone()),
-        _ => return Err(rejected("unsupported creation scope")),
-    };
-    let facts = coland_storage::OperationFacts {
-        applet_id: Some(registration.applet_id.to_string()),
-        executed_by: Some(ActorId::service(registration.service_id)),
-        registration_epoch: Some(registration.registration_epoch.to_string()),
-        ..Default::default()
-    };
-    let action = match p.actor_role {
-        AppletManagedActorRole::Bot => arkret_wire::CapabilityActionId::APPLET_BOT_PROVISION,
-        AppletManagedActorRole::Ghost => arkret_wire::CapabilityActionId::APPLET_GHOST_PROVISION,
-    };
-    let creation_ref = creation_authorization_ref(input, p)?;
-    let actions = [action];
-    let evaluation = cut.evaluate(&actions, &target, &facts, input.accepted_at);
-    let coland_storage::GrantEvaluation::Allowed(satisfied) = evaluation else {
-        return Err(rejected("exact managed provisioning grant is unavailable"));
-    };
-    let selected = satisfied
-        .iter()
-        .find(|grant| grant.grant.id == creation_ref)
-        .ok_or_else(|| rejected("exact managed provisioning grant is unavailable"))?;
-    Ok((
-        serde_json::to_value(selected.grant).map_err(rejected)?,
-        selected.reservations.clone(),
-    ))
 }

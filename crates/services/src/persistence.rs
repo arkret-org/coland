@@ -37,6 +37,15 @@ pub struct PersistenceHandle {
 }
 
 impl PersistenceHandle {
+    pub async fn applet_creation_approval_accounts(
+        &self,
+        candidate: &coland_storage::AppletAuthoringCandidate,
+    ) -> PersistenceResult<Vec<arkret_wire::AccountId>> {
+        self.persistence
+            .applets()
+            .creation_approval_accounts(candidate)
+            .await
+    }
     pub async fn managed_pcr_creation_context(
         &self,
         genesis: &arkret_wire::EventId,

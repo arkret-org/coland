@@ -473,6 +473,12 @@ pub(in crate::routing) fn submit_one_error_to_app_error(
 ) -> AppError {
     let code = code.into();
     let message = format!("{context}: {detail}");
+    if code == arkret_wire::ReasonCode::APPROVAL_REQUIRED {
+        return crate::app_error!(ClaimRequired, message).with_reason_code(code);
+    }
+    if code == arkret_wire::ReasonCode::APPROVAL_NONCE_REUSED {
+        return crate::app_error!(FailedPrecondition, message).with_reason_code(code);
+    }
     // The Circle subset invariant is a registered sub-reason of
     // `failed_precondition`, not a top-level error code. Preserve the 422
     // admission class and carry the exact reducer discriminator separately.

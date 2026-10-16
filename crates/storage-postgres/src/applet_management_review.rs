@@ -35,7 +35,7 @@ pub(super) fn beneficiary(request: &ManagementReviewRequestBody) -> PersistenceR
     Ok(provision.actor_id)
 }
 
-pub(super) fn target(
+pub(crate) fn target(
     input: &AppletAuthoringCandidate,
 ) -> PersistenceResult<ManagementReviewTarget> {
     match &input.request {
@@ -124,7 +124,9 @@ pub(super) async fn pins(
     crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &validated.portal_realm)
         .await?;
     crate::applet_admission::validate_managed_current(conn, &input, &mut validated).await?;
-    let (grant, _) = crate::applet_admission::creation_grant(conn, &input, &validated).await?;
+    let grant = crate::applet_action_approval::CreationAuthority::read(conn, &input, &validated)
+        .await?
+        .pin_grant()?;
     let provision = validated.provision.as_ref().ok_or_else(hidden)?;
     if provision.actor_id != beneficiary(request)? {
         return Err(hidden());
@@ -200,36 +202,16 @@ pub(super) fn operation(request: &ManagementReviewRequestBody) -> arkret_wire::S
 pub(crate) async fn lock_approval_accounts(
     conn: &mut AsyncPgConnection,
     input: &AppletAuthoringCandidate,
-    prepared: Option<&coland_storage::ManagementOperationApprovalCommit>,
+    prepared: Option<&coland_storage::OperationApprovalCommit>,
 ) -> PersistenceResult<()> {
-    let candidate_target = target(input)?;
-    let (scope, station) = match &candidate_target {
-        ManagementReviewTarget::BotCreation { request_body, .. } => {
-            let basis = request_body
-                .authoring_request
-                .basis
-                .bot()
-                .ok_or_else(hidden)?;
-            (&basis.effective_scope, &basis.target_station_id)
-        }
-        ManagementReviewTarget::GhostCreation { request_body, .. } => {
-            let basis = request_body
-                .authoring_request
-                .basis
-                .ghost()
-                .ok_or_else(hidden)?;
-            (&basis.effective_scope, &basis.target_station_id)
-        }
-        _ => return Err(hidden()),
-    };
-    let mut current =
-        prepared
-            .map(|p| p.current.clone())
-            .unwrap_or_else(|| ManagementReviewCurrent {
-                station_id: station.clone(),
-                observations: Vec::new(),
-                applet_candidate: None,
-            });
+    let (scope, station, _) = creation_binding(input)?;
+    let mut current = prepared
+        .map(|prepared| prepared.current.clone())
+        .unwrap_or_else(|| ManagementReviewCurrent {
+            station_id: station.clone(),
+            observations: Vec::new(),
+            applet_candidate: None,
+        });
     if current.station_id != *station {
         return Err(refused(
             "revision_unavailable",
@@ -237,57 +219,70 @@ pub(crate) async fn lock_approval_accounts(
         ));
     }
     current.applet_candidate = Some(Box::new(input.clone()));
-    let Some(prepared) = prepared else {
-        lock_current_account_realms(conn, scope.realm_id(), &[], Some(&current)).await?;
-        return Ok(());
-    };
-    let id = approval_request_id(&prepared.methods)?;
-    let row = read(conn, &id, false).await?.ok_or_else(hidden)?;
-    let request = row.request();
-    if prepared.target_digest != target(input)?.canonical_target_digest().map_err(invalid)?
-        || request.target.canonical_target_digest().map_err(invalid)? != prepared.target_digest
-        || prepared.operation != operation(&request)
-        || request.requester_actor_id != input.admin_actor_id
-    {
-        return Err(refused(
-            "signature_invalid",
-            "creation approval differs from actual target",
-        ));
+    let mut accounts = current
+        .observations
+        .iter()
+        .map(|observation| observation.record().account_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(prepared) = prepared {
+        let (expected_operation, digest) = crate::applet_action_approval::operation_binding(input)?;
+        if prepared.operation != expected_operation || prepared.target_digest != digest {
+            return Err(refused(
+                "signature_invalid",
+                "operation approval preparation differs from the actual target",
+            ));
+        }
+        if let Some(id) = approval_request_id(&prepared.methods)? {
+            let row = read(conn, &id, false).await?.ok_or_else(hidden)?;
+            let request = row.request();
+            if request.target.canonical_target_digest().map_err(invalid)? != digest
+                || operation(&request) != expected_operation
+                || request.requester_actor_id != input.admin_actor_id
+                || request.effective_scope != *scope
+            {
+                return Err(refused(
+                    "signature_invalid",
+                    "creation management intent differs from actual target",
+                ));
+            }
+            accounts.extend(material_accounts(&row, &request.requester_actor_id, &[])?);
+        }
     }
-    let accounts = material_accounts(&row, &request.requester_actor_id, &[])?;
-    lock_current_account_realms(conn, realm(&request)?, &accounts, Some(&current)).await?;
+    lock_current_account_realms(
+        conn,
+        scope.realm_id(),
+        &accounts.into_iter().collect::<Vec<_>>(),
+        Some(&current),
+    )
+    .await?;
     Ok(())
 }
 
-fn approval_request_id(methods: &[ApprovalHistoricalMethod]) -> PersistenceResult<String> {
+fn approval_request_id(methods: &[ApprovalHistoricalMethod]) -> PersistenceResult<Option<String>> {
     let mut ids = std::collections::BTreeSet::new();
     for method in methods {
-        let arkret_wire::ApprovalContext::Management { request_id, .. } =
+        if let arkret_wire::ApprovalContext::Management { request_id, .. } =
             &method.signature.input.approval_context
-        else {
-            return Err(refused(
-                "signature_invalid",
-                "creation includes unrelated approval context",
-            ));
-        };
-        ids.insert(request_id.clone());
+        {
+            ids.insert(request_id.clone());
+        }
     }
-    if ids.len() != 1 {
+    if ids.len() > 1 {
         return Err(refused(
-            "approval_required",
-            "creation needs one exact management request",
+            "signature_invalid",
+            "creation combines different management requests",
         ));
     }
-    ids.into_iter().next().ok_or_else(hidden)
+    Ok(ids.pop_first())
 }
 
-/// Called inside the aggregate after the Applet and complete PCR/Realm lock
-/// plan. This grants only management admission, never the creation grant itself.
+/// Management admission is independent of grant and Realm-governance approval.
+/// All supplied outer evidence must still match the receiver's preparation.
 pub(crate) async fn prepare_admission(
     conn: &mut AsyncPgConnection,
     input: &AppletAuthoringCandidate,
     validated: &crate::applet_admission::ValidatedAppletUnit,
-    prepared: Option<&coland_storage::ManagementOperationApprovalCommit>,
+    prepared: Option<&coland_storage::OperationApprovalCommit>,
     at: DateTime<Utc>,
 ) -> PersistenceResult<Vec<crate::approval_admission::QualifiedApproval>> {
     let supplied = match &input.request {
@@ -309,18 +304,64 @@ pub(crate) async fn prepare_admission(
     } {
         return Err(refused(
             "signature_invalid",
-            "prepared creation votes differ from the actual outer evidence",
+            "prepared creation votes differ from actual outer evidence",
         ));
     }
-    if prepared.is_none() {
-        let (scope, station, operation) = creation_binding(input)?;
+    let (scope, station, management_operation) = creation_binding(input)?;
+    let mut current = prepared
+        .map(|prepared| prepared.current.clone())
+        .unwrap_or_else(|| ManagementReviewCurrent {
+            station_id: station.clone(),
+            observations: Vec::new(),
+            applet_candidate: None,
+        });
+    if current.station_id != *station {
+        return Err(refused(
+            "revision_unavailable",
+            "creation observations name another receiving Station",
+        ));
+    }
+    current.applet_candidate = Some(Box::new(input.clone()));
+    let accounts = current
+        .observations
+        .iter()
+        .map(|observation| observation.record().account_id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    require_current_accounts(conn, scope.realm_id(), &accounts, &current).await?;
+    let (expected_operation, digest) = crate::applet_action_approval::operation_binding(input)?;
+    if prepared.is_some_and(|prepared| {
+        prepared.operation != expected_operation || prepared.target_digest != digest
+    }) {
+        return Err(refused(
+            "signature_invalid",
+            "operation preparation differs from actual target",
+        ));
+    }
+    let methods = prepared
+        .map(|prepared| {
+            prepared
+                .methods
+                .iter()
+                .filter(|method| {
+                    matches!(
+                        method.signature.input.approval_context,
+                        arkret_wire::ApprovalContext::Management { .. }
+                    )
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let Some(id) = approval_request_id(&methods)? else {
         current_installation(conn, input, scope, station).await?;
         let provision = validated.provision.as_ref().ok_or_else(hidden)?;
         let (_, decision) = select_current_creation(
             conn,
             input,
             scope,
-            operation,
+            management_operation,
             if input.prior_managed_refs.is_empty() {
                 None
             } else {
@@ -336,117 +377,61 @@ pub(crate) async fn prepare_admission(
             ));
         }
         return Ok(Vec::new());
-    }
-    let target = target(input)?;
-    let scope = match &target {
-        ManagementReviewTarget::BotCreation { request_body, .. } => request_body
-            .authoring_request
-            .basis
-            .bot()
-            .ok_or_else(hidden)?
-            .effective_scope
-            .clone(),
-        ManagementReviewTarget::GhostCreation { request_body, .. } => request_body
-            .authoring_request
-            .basis
-            .ghost()
-            .ok_or_else(hidden)?
-            .effective_scope
-            .clone(),
-        _ => return Err(hidden()),
     };
-    let mut current =
-        prepared
-            .map(|p| p.current.clone())
-            .unwrap_or_else(|| ManagementReviewCurrent {
-                station_id: input.package.service_id.clone(),
-                observations: Vec::new(),
-                applet_candidate: None,
-            });
-    // The local Station is the signed creation target, not the remote Service.
-    let target_station = match &target {
-        ManagementReviewTarget::BotCreation { request_body, .. } => request_body
-            .authoring_request
-            .basis
-            .bot()
-            .ok_or_else(hidden)?
-            .target_station_id
-            .clone(),
-        ManagementReviewTarget::GhostCreation { request_body, .. } => request_body
-            .authoring_request
-            .basis
-            .ghost()
-            .ok_or_else(hidden)?
-            .target_station_id
-            .clone(),
-        _ => return Err(hidden()),
-    };
-    if prepared.is_some() && current.station_id != target_station {
-        return Err(refused(
-            "revision_unavailable",
-            "creation observations name another receiving Station",
-        ));
-    }
-    current.station_id = target_station;
-    current.applet_candidate = Some(Box::new(input.clone()));
-    let prepared = prepared.ok_or_else(hidden)?;
-    let id = approval_request_id(&prepared.methods)?;
     let mut row = read(conn, &id, true).await?.ok_or_else(hidden)?;
     let request = row.request();
     if !creation(&request)
-        || request.target.canonical_target_digest().map_err(invalid)?
-            != target.canonical_target_digest().map_err(invalid)?
+        || request.target.canonical_target_digest().map_err(invalid)? != digest
         || request.requester_actor_id != input.admin_actor_id
-        || request.effective_scope != scope
-        || prepared.operation != operation(&request)
-        || prepared.target_digest != target.canonical_target_digest().map_err(invalid)?
+        || request.effective_scope != *scope
+        || operation(&request) != expected_operation
     {
         return Err(refused(
             "signature_invalid",
             "approved creation target changed",
         ));
     }
-    let accounts = material_accounts(&row, &request.requester_actor_id, &[])?;
-    require_current_accounts(conn, realm(&request)?, &accounts, &current).await?;
     Box::pin(refresh(conn, &mut row, at, &current)).await?;
     if row.status != "approved" {
         return Err(refused(
             "approval_required",
-            "creation has no current unconsumed approval",
+            "creation has no current unconsumed management approval",
         ));
     }
     if json!(
-        prepared
-            .methods
+        methods
             .iter()
-            .map(|m| &m.signature)
+            .map(|method| &method.signature)
             .collect::<Vec<_>>()
     ) != row.approval_signatures
     {
         return Err(refused(
             "signature_invalid",
-            "creation votes differ from durable decision",
+            "creation management votes differ from durable decision",
         ));
     }
-    for (method, basis) in prepared
-        .methods
-        .iter()
-        .zip(row.approval_basis.as_array().ok_or_else(hidden)?)
-    {
+    let bases = row.approval_basis.as_array().ok_or_else(hidden)?;
+    if bases.len() != methods.len() {
+        return Err(refused(
+            "signature_invalid",
+            "creation management basis count differs",
+        ));
+    }
+    for (method, basis) in methods.iter().zip(bases) {
         if basis["public_key"] != json!(arkret_canonical::base64url_encode(method.public_key))
             || basis["control_history"] != json!(method.control_history)
         {
             return Err(refused(
                 "signature_invalid",
-                "creation vote history changed",
+                "creation management vote history changed",
             ));
         }
     }
-    let qualified = qualify(conn, &row, &prepared.methods, at, &current).await?;
+    let qualified = qualify(conn, &row, &methods, at, &current).await?;
     if !threshold_met(&row, &qualified)? {
         return Err(refused(
             "approval_required",
-            "creation threshold is not currently met",
+            "creation management threshold is not currently met",
         ));
     }
     Ok(qualified)
@@ -465,31 +450,8 @@ pub(crate) async fn consume(
     let id = qualified[0].qualification_basis["management_request_id"]
         .as_str()
         .ok_or_else(hidden)?;
-    let target = target(input)?;
-    let digest = target.canonical_target_digest().map_err(invalid)?;
-    let op = match target {
-        ManagementReviewTarget::BotCreation { .. } => "ak.self.applet.bot.command.provision.v1",
-        _ => "ak.self.applet.ghost.command.provision.v1",
-    };
-    let outcome = json!({"operation":op,"target_digest":digest,"committed_event_refs":refs,"response_body":response});
-    for vote in qualified {
-        let method = &vote.method;
-        let context =
-            arkret_canonical::canonical_json_string(&method.signature.input.approval_context)
-                .map_err(invalid)?;
-        let basis = json!({"historical_method":method.signature.proof.verification_method,"public_key":arkret_canonical::ed25519_pubkey_to_did_key_multibase(&method.public_key),
-            "native_control_history":method.control_history,"qualification":vote.qualification_basis,"management_request_id":id});
-        let inserted=sql_query("INSERT INTO event_approval_private_audit(approval_context,approver_did,nonce,realm_id,operation_id,operation_target_digest,operation_outcome,evidence,accepted_basis,accepted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(approval_context,approver_did,nonce) DO NOTHING")
-            .bind::<Text,_>(context).bind::<Text,_>(method.signature.input.approver_did.as_str()).bind::<Text,_>(&method.signature.input.nonce)
-            .bind::<Text,_>(method.signature.input.realm_id.as_str()).bind::<Text,_>(op).bind::<Text,_>(digest.as_str()).bind::<Jsonb,_>(&outcome)
-            .bind::<Jsonb,_>(json!(method.signature)).bind::<Jsonb,_>(basis).bind::<Timestamptz,_>(input.accepted_at).execute(&mut *conn).await.map_err(PersistenceError::database)?;
-        if inserted != 1 {
-            return Err(refused(
-                "approval_nonce_reused",
-                "creation approval nonce already consumed",
-            ));
-        }
-    }
+    crate::applet_action_approval::consume(conn, input, qualified, refs, response).await?;
+    let outcome = crate::applet_action_approval::accepted_outcome(input, refs, response)?;
     let updated=sql_query("UPDATE management_review_requests SET status='consumed',accepted_operation_outcome=$2 WHERE request_id=$1 AND status='approved'")
         .bind::<Text,_>(id).bind::<Jsonb,_>(outcome).execute(conn).await.map_err(PersistenceError::database)?;
     if updated != 1 {
@@ -534,6 +496,20 @@ async fn current_installation(
         ));
     }
     Ok(installation)
+}
+
+pub(crate) async fn require_current_installation(
+    conn: &mut AsyncPgConnection,
+    input: &AppletAuthoringCandidate,
+) -> PersistenceResult<()> {
+    current_installation(
+        conn,
+        input,
+        crate::applet_admission::effective_scope(input)?,
+        crate::applet_admission::target_station(input)?,
+    )
+    .await
+    .map(|_| ())
 }
 
 async fn select_current_creation(

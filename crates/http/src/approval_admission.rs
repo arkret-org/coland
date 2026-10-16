@@ -70,24 +70,37 @@ pub(crate) async fn observe_management_accounts(
     state: &AppState,
     accounts: std::collections::BTreeSet<arkret_wire::AccountId>,
 ) -> coland_services::ServiceResult<coland_storage::ManagementReviewCurrent> {
-    let mut observations = Vec::with_capacity(accounts.len());
-    for account in accounts {
-        observations.push(
-            crate::routing::events::peer::refresh_current_account_status(state, &account)
-                .await
-                .map_err(|_| {
-                    coland_services::ServiceError::protocol(
-                        arkret_wire::ErrorCode::TemporarilyUnavailable,
-                        "management Account Authority current observation is unavailable",
-                    )
-                })?,
-        );
-    }
-    Ok(coland_storage::ManagementReviewCurrent {
-        station_id: state.service_core_id(),
-        observations,
-        applet_candidate: None,
+    // Own the RPC future so a deep HTTP middleware poll chain cannot retain
+    // its frames while the transport creates a fresh connection. This task
+    // is immediately awaited without a business authorization cut held across
+    // RPC. The existing refresh still appends authenticated AA replica records.
+    let state = state.clone();
+    tokio::spawn(async move {
+        let mut observations = Vec::with_capacity(accounts.len());
+        for account in accounts {
+            observations.push(
+                crate::routing::events::peer::refresh_current_account_status(&state, &account)
+                    .await
+                    .map_err(|_| {
+                        coland_services::ServiceError::protocol(
+                            arkret_wire::ErrorCode::TemporarilyUnavailable,
+                            "management Account Authority current observation is unavailable",
+                        )
+                    })?,
+            );
+        }
+        Ok(coland_storage::ManagementReviewCurrent {
+            station_id: state.service_core_id(),
+            observations,
+            applet_candidate: None,
+        })
     })
+    .await
+    .map_err(|error| {
+        ServiceError::Internal(format!(
+            "management current observation task failed: {error}"
+        ))
+    })?
 }
 
 /// Resolve the same historical evidence for Event and operation approvals.

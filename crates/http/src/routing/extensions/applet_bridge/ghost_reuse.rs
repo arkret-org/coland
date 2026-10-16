@@ -158,9 +158,9 @@ pub(super) async fn provision(
         )?,
         operation_id: "ak.self.applet.ghost.command.provision".to_owned(),
         idempotency_key: key.clone(),
-        management_approval: None,
+        operation_approvals: None,
     };
-    input.management_approval =
+    input.operation_approvals =
         super::management_review::prepare_creation_approvals(state, &input.candidate).await?;
     let finalizer: coland_storage::AppletUnitFinalizer = std::sync::Arc::new(move |refs| {
         // These are reopened accepted tuples, never freshly authored Events.

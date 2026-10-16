@@ -503,7 +503,7 @@ pub(super) async fn register_package_install(
         preview_subject_key: String::new(),
         operation_id: "ak.self.applet.command.install".to_owned(),
         idempotency_key: idempotency_key.clone(),
-        management_approval: None,
+        operation_approvals: None,
     };
     let audit_package = package.clone();
     let admin_actor = owner_actor.clone();

@@ -422,28 +422,88 @@ pub(crate) fn require_outcome(
 /// lifecycle may advance; current native material permission is independent.
 pub(crate) async fn require_stored_outcome(
     conn: &mut AsyncPgConnection,
+    operation: arkret_wire::ServiceOperationId,
     outcome: &arkret_models_crypto::PeerKeyPackagesClaimOutcome,
     endpoints: &[AppletManagedDeviceScopeGuard],
-) -> PersistenceResult<()> {
+) -> PersistenceResult<chrono::DateTime<Utc>> {
+    use arkret_wire::ServiceOperationId;
+    // Peer command/query recover the original signed result and its closed
+    // ledger state after the original intent expires (section 9.2.3). Self
+    // consumers deliver current material; neither mode changes the outcome.
+    let material_read = match operation {
+        ServiceOperationId::SelfKeysKeypackagesReadClaimV1
+        | ServiceOperationId::SelfKeysKeypackagesCommandClaimV1 => true,
+        ServiceOperationId::PeerKeysKeypackagesReadClaimV1
+        | ServiceOperationId::PeerKeysKeypackagesCommandClaimV1 => false,
+        _ => return Err(denied("claim delivery has no mounted consumer")),
+    };
     outcome.validate_shape().map_err(denied)?;
-    let ledger=sql_query("SELECT outcome AS payload FROM peer_keypackage_claims WHERE source_id=$1 AND claim_request_id=$2 AND request_digest=$3 FOR SHARE NOWAIT")
+    #[derive(QueryableByName)]
+    struct DeliveryLedger {
+        #[diesel(sql_type=Jsonb)]
+        payload: Value,
+        #[diesel(sql_type=Text)]
+        state: String,
+        #[diesel(sql_type=BigInt)]
+        expires_at: i64,
+        #[diesel(sql_type=Nullable<BigInt>)]
+        claim_expires_at_unix_ms: Option<i64>,
+    }
+    let ledger=sql_query("SELECT outcome AS payload,state,expires_at,claim_expires_at_unix_ms FROM peer_keypackage_claims WHERE source_id=$1 AND claim_request_id=$2 AND request_digest=$3 FOR SHARE NOWAIT")
         .bind::<Text,_>(outcome.claim_receipt.source_id.as_str())
         .bind::<Text,_>(outcome.claim_request_id.as_str())
         .bind::<Text,_>(outcome.claim_receipt.request_digest.as_str())
-        .get_result::<JsonPayloadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+        .get_result::<DeliveryLedger>(&mut *conn).await.map_err(PersistenceError::database)?;
     if arkret_canonical::canonical_json_bytes(&ledger.payload).map_err(denied)?
         != arkret_canonical::canonical_json_bytes(outcome).map_err(denied)?
     {
         return Err(denied("claim delivery differs from immutable ledger"));
     }
+    let mut deadline = chrono::DateTime::from_timestamp(ledger.expires_at, 0)
+        .ok_or_else(|| denied("claim retention window is invalid"))?;
+    if material_read {
+        match ledger.state.as_str() {
+            "claimed" | "last_resort_claimed" => {
+                let claim_deadline = ledger
+                    .claim_expires_at_unix_ms
+                    .and_then(chrono::DateTime::from_timestamp_millis)
+                    .ok_or_else(|| denied("claim material window is unavailable"))?;
+                deadline = deadline.min(claim_deadline);
+            }
+            "consumed" => {}
+            _ => {
+                return Err(denied(
+                    "claim is terminally unavailable for material delivery",
+                ));
+            }
+        }
+    }
     for claim in &outcome.claims {
-        let row=sql_query("SELECT to_jsonb(k) AS payload FROM mls_key_packages k WHERE keypackage_ref=$1 FOR SHARE NOWAIT")
-            .bind::<Text,_>(&claim.keypackage_ref).get_result::<JsonPayloadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-        // Device and scope are immutable original publication fields. Parse
-        // using the SDK scope/Account models; SQL bytea is not a wire object.
-        let scope: Option<ScopeRef> =
-            serde_json::from_value(row.payload["effective_scope"].clone()).map_err(denied)?;
-        if let Some(scope) = scope {
+        let row = crate::mls::key_package_for_delivery(conn, &claim.keypackage_ref)
+            .await?
+            .ok_or_else(|| denied("original claim package is unavailable"))?;
+        if let Some(scope) = &row.effective_scope {
+            if material_read {
+                let lifecycle = row.lifecycle().map_err(denied)?;
+                if matches!(
+                    lifecycle.claim_state,
+                    coland_storage::PersistedKeyPackageClaimState::Revoked
+                        | coland_storage::PersistedKeyPackageClaimState::Retired
+                ) || (matches!(
+                    lifecycle.claim_state,
+                    coland_storage::PersistedKeyPackageClaimState::Available
+                ) && !row.last_resort)
+                    || Utc::now().timestamp() < row.lifetime_not_before
+                {
+                    return Err(denied(
+                        "original native package is not available for delivery",
+                    ));
+                }
+                deadline = deadline.min(
+                    chrono::DateTime::from_timestamp(row.lifetime_not_after, 0)
+                        .ok_or_else(|| denied("original package window is invalid"))?,
+                );
+            }
             let guard = endpoints
                 .iter()
                 .find(|endpoint| {
@@ -451,7 +511,7 @@ pub(crate) async fn require_stored_outcome(
                         && claim.device_id.as_ref() == Some(&endpoint.authority.device_id)
                 })
                 .ok_or_else(|| denied("claim omits its true native target proof"))?;
-            if guard.effective_scope != scope
+            if &guard.effective_scope != scope
                 || claim.device_authorize_event_id.as_ref()
                     != Some(&guard.authority.selector.authorization_ref.event_id)
             {
@@ -475,5 +535,8 @@ pub(crate) async fn require_stored_outcome(
             ));
         }
     }
-    Ok(())
+    if Utc::now() >= deadline {
+        return Err(denied("original claim material window ended"));
+    }
+    Ok(deadline)
 }

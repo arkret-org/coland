@@ -385,8 +385,9 @@ pub(crate) async fn acquire(
             crate::boxed_future(|| endpoint.require_current(held.connection())).await?;
         }
 
-        crate::mls_keypackage_claim_admission::require_stored_outcome(
+        let material_deadline = crate::mls_keypackage_claim_admission::require_stored_outcome(
             held.connection(),
+            claim.operation,
             outcome,
             endpoints,
         )
@@ -410,7 +411,7 @@ pub(crate) async fn acquire(
                     mls_scope_read_proof(
                         held.connection(),
                         endpoint,
-                        credential_expiry,
+                        credential_expiry.min(material_deadline),
                         outcome.claim_receipt.request.strand_id.as_ref(),
                     )
                 })

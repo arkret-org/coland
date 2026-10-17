@@ -686,8 +686,45 @@ async fn circle(ghost: bool) {
         StatusCode::OK,
         "actual Circle native claim: {outcome}"
     );
+    let query = arkret_models_crypto::KeyPackagesClaimQueryRequestBody {
+        claim_id: arkret_wire::KeypackageClaimId::new(
+            outcome["claims"][0]["claim_id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        )
+        .unwrap(),
+    };
+    let before = native_phase(|| snapshot(&fixture)).await;
+    let (status, bytes) =
+        native_phase(|| query_wire(&fixture.state, &authority, &key, &scope, &query)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        arkret_canonical::canonical_json_bytes(&outcome).unwrap(),
+        bytes
+    );
+    let (status, bytes) =
+        native_phase(|| query_wire(&fixture.state, &authority, &key, &realm, &query)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let error: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        error["type"],
+        "https://arkret.org/problems/keypackage_unknown"
+    );
+    assert_eq!(before, native_phase(|| snapshot(&fixture)).await);
     native_phase(|| fixture.revoke(&install)).await;
     let before = native_phase(|| snapshot(&fixture)).await;
+    let (status, bytes) =
+        native_phase(|| query_wire(&fixture.state, &authority, &key, &scope, &query)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Realm A fence must preserve Circle B owner read"
+    );
+    assert_eq!(
+        arkret_canonical::canonical_json_bytes(&outcome).unwrap(),
+        bytes
+    );
     let (status, replay) = native_phase(|| claim(&fixture, &authority, &key, &scope, &body)).await;
     assert_eq!(
         status,
@@ -1122,4 +1159,633 @@ async fn fresh_unqualified_claim(
         native_phase(|| claim_wire(&fixture.state, authority, key, scope, &body)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(original, replay);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_claim_owner_reads_original_outcome_without_session() {
+    for ghost in [false, true] {
+        tokio::spawn(native_phase(|| own_claim_read(ghost)))
+            .await
+            .unwrap();
+    }
+}
+async fn own_claim_read(ghost: bool) {
+    let fixture = native_phase(Fixture::new).await;
+    let scope = ScopeRef::Realm {
+        realm_id: fixture.realm.clone(),
+    };
+    native_phase(|| activate_mls(&fixture, scope.clone())).await;
+    let namespace = format!("bridge.{}", uuid::Uuid::now_v7().simple());
+    let native = mls_service(&fixture, &namespace);
+    let install =
+        native_phase(|| fixture.install_package(true, native.package.clone(), &namespace)).await;
+    let bundle = if ghost {
+        let body = native_phase(|| fixture.ghost_body(&install, &namespace, "claim-device")).await;
+        assert_eq!(
+            native_phase(|| fixture.ghost_commit(&install, &body, "claim-device"))
+                .await
+                .0,
+            StatusCode::CREATED
+        );
+        body["managed_actor_bundle"].clone()
+    } else {
+        install.bot_body["managed_actor_bundle"].clone()
+    };
+    let key = SigningKey::from_bytes(&[177; 32]);
+    let device = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
+    let authority = native_phase(|| {
+        authorize(
+            &fixture,
+            &install,
+            &bundle,
+            &namespace,
+            &key,
+            device.clone(),
+            true,
+        )
+    })
+    .await;
+    let event = join_event(
+        &fixture,
+        &install,
+        &authority,
+        &key,
+        &install.bot_outcome.authorization_ref,
+    );
+    let (status, outcome) = native_phase(|| post(&fixture, &authority, &key, &event, vec![])).await;
+    assert_eq!(status, StatusCode::OK, "real native membership: {outcome}");
+    let _read_parent = native_phase(|| {
+        native_business_parent(
+            &fixture,
+            &install,
+            vec![],
+            vec!["ak.event.read".into()],
+            None,
+        )
+    })
+    .await;
+    let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
+        ActorId::account(authority.account_id.clone()),
+        device,
+        arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone()),
+    )
+    .unwrap();
+    let fingerprint =
+        arkret_canonical::ed25519_pubkey_to_did_key_multibase(key.verifying_key().as_bytes());
+    let method = format!("did:key:{fingerprint}#{fingerprint}");
+
+    let upload = fresh_upload(&identity, &method, &key, &scope);
+    assert_eq!(
+        native_phase(|| upload_in_scope(&fixture, &authority, &key, &upload, &scope))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let body = request(
+        &authority,
+        &key,
+        &scope,
+        &upload.keypackages[0].keypackage_ref,
+    );
+    let (status, original) =
+        native_phase(|| claim_wire(&fixture.state, &authority, &key, &scope, &body)).await;
+    assert_eq!(status, StatusCode::OK);
+    let outcome: arkret_models_crypto::KeyPackagesClaimOutcome =
+        serde_json::from_slice(&original).unwrap();
+    let query = arkret_models_crypto::KeyPackagesClaimQueryRequestBody {
+        claim_id: arkret_wire::KeypackageClaimId::new(outcome.claims[0].claim_id.clone()).unwrap(),
+    };
+    let before = native_phase(|| snapshot(&fixture)).await;
+    let (status, bytes) =
+        native_phase(|| query_wire(&fixture.state, &authority, &key, &scope, &query)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "true native owner must read its original claim without a Session: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert_eq!(
+        original, bytes,
+        "claim read must retain the original complete response bytes"
+    );
+    assert_eq!(
+        before,
+        native_phase(|| snapshot(&fixture)).await,
+        "read does not mutate package or ledger"
+    );
+    let unknown = arkret_models_crypto::KeyPackagesClaimQueryRequestBody {
+        claim_id: arkret_wire::KeypackageClaimId::new(format!(
+            "ak:keypackage_claim:{}",
+            uuid::Uuid::now_v7()
+        ))
+        .unwrap(),
+    };
+    let (status, error) =
+        native_phase(|| query_wire(&fixture.state, &authority, &key, &scope, &unknown)).await;
+    let error: Value = serde_json::from_slice(&error).unwrap();
+    assert!(!status.is_success());
+    assert_eq!(
+        error["type"],
+        "https://arkret.org/problems/keypackage_unknown"
+    );
+    assert_eq!(before, native_phase(|| snapshot(&fixture)).await);
+    let other_key = SigningKey::from_bytes(&[182; 32]);
+    let other = native_phase(|| {
+        authorize(
+            &fixture,
+            &install,
+            &bundle,
+            &namespace,
+            &other_key,
+            DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap(),
+            true,
+        )
+    })
+    .await;
+    let before = native_phase(|| snapshot(&fixture)).await;
+    let (status, bytes) =
+        native_phase(|| query_wire(&fixture.state, &other, &other_key, &scope, &query)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let error: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        error["type"],
+        "https://arkret.org/problems/keypackage_unknown"
+    );
+    assert_eq!(before, native_phase(|| snapshot(&fixture)).await);
+    let (status, bytes) =
+        native_phase(|| query_wire(&fixture.state, &authority, &key, &scope, &query)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        original, bytes,
+        "adding another genuine Device does not replace the original Device"
+    );
+    let reopened = native_phase(|| {
+        coland_test_support::app_state_with_persistence(
+            fixture.state.config().clone(),
+            std::sync::Arc::new(coland_storage_postgres::PgPersistenceStore::new(
+                fixture.pool.clone(),
+            )),
+        )
+    })
+    .await;
+    native_phase(|| reopened.hydrate()).await.unwrap();
+    let (status, bytes) =
+        native_phase(|| query_wire(&reopened, &authority, &key, &scope, &query)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        original, bytes,
+        "cold owner read uses genuine durable authority"
+    );
+    native_phase(|| {
+        revoked_package_read(
+            &fixture,
+            &install.package,
+            &authority,
+            &key,
+            &scope,
+            &identity,
+            &method,
+        )
+    })
+    .await;
+    let (status, bytes) =
+        native_phase(|| query_wire(&fixture.state, &authority, &key, &scope, &query)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        original, bytes,
+        "revoking a separate package does not revoke this original claim"
+    );
+    native_phase(|| fixture.revoke(&install)).await;
+    let before = native_phase(|| snapshot(&fixture)).await;
+    let (status, error) =
+        native_phase(|| query_wire(&fixture.state, &authority, &key, &scope, &query)).await;
+    let error: Value = serde_json::from_slice(&error).unwrap();
+    assert!(!status.is_success());
+    assert_eq!(
+        error["type"],
+        "https://arkret.org/problems/keypackage_unknown"
+    );
+    assert_eq!(before, native_phase(|| snapshot(&fixture)).await);
+}
+async fn query_wire(
+    state: &AppState,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    key: &SigningKey,
+    scope: &ScopeRef,
+    body: &arkret_models_crypto::KeyPackagesClaimQueryRequestBody,
+) -> (StatusCode, Vec<u8>) {
+    let mut metadata = managed_device_metadata(authority);
+    metadata.effective_scope = scope.clone();
+    let mut response = managed_device_http_request_with_idempotency_at(
+        state,
+        authority,
+        &metadata,
+        ServiceOperationId::SelfKeysKeypackagesReadClaimV1,
+        key,
+        Some(arkret_canonical::canonical_json_bytes(body).unwrap()),
+        None,
+        &format!("native-claim-read-{}", uuid::Uuid::now_v7()),
+    )
+    .add_header("content-type", "application/json", true)
+    .send(&service(state.clone()))
+    .await;
+    (
+        response.status_code.unwrap(),
+        response.take_bytes(None).await.unwrap().to_vec(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn query_consent_expiry_blocks_already_prepared_original_outcome_at_handoff() {
+    tokio::spawn(native_phase(|| async {
+        use arkret_models_collaboration::governance::grant_constraint::{GrantConstraintEffect,GrantConstraintKind};
+        let fixture=native_phase(Fixture::new).await;
+        let scope=ScopeRef::Realm{realm_id:fixture.realm.clone()};
+        native_phase(||activate_mls(&fixture,scope.clone())).await;
+        let namespace=format!("bridge.{}",uuid::Uuid::now_v7().simple());
+        let native=mls_service(&fixture,&namespace);
+        let deadline=arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()+chrono::Duration::seconds(15));
+        let mut temporal=GrantConstraint::new(GrantConstraintKind::Temporal,GrantConstraintEffect::Allow);
+        temporal.expires_at=Some(deadline);
+        let extras=["ak.message.create","ak.applet.bot.provision","ak.applet.ghost.provision"].into_iter().map(|action|(action.to_owned(),vec![temporal.clone()])).collect();
+        let (package,outcome,body,install_key)=native_phase(||fixture.install_service_with_constraints(true,native.package.clone(),scope.clone(),extras)).await;
+        let (bot_outcome,bot_body)=native_phase(||fixture.provision_bot_in_scope(&package,&namespace,outcome.registration_event_ref.clone(),scope.clone())).await;
+        let install=Installed { package, outcome, bot_outcome, bot_body, body, key:install_key };
+        let key=SigningKey::from_bytes(&[176;32]);
+        let device=DeviceId::new(format!("ak:device:{}",uuid::Uuid::now_v7())).unwrap();
+        let authority=native_phase(||authorize(&fixture,&install,&install.bot_body["managed_actor_bundle"],&namespace,&key,device,true)).await;
+        let event=join_event(&fixture,&install,&authority,&key,&install.bot_outcome.authorization_ref);
+        let (status,outcome)=native_phase(||post(&fixture,&authority,&key,&event,vec![])).await;
+        assert_eq!(status,StatusCode::OK,"original finite consent is initially live: {outcome}");
+        let _read_parent=native_phase(||native_business_parent(&fixture,&install,vec![],vec!["ak.event.read".into()],None)).await;
+        let identity=arkret_mls::ArkretMlsIdentity::new_human_device(ActorId::account(authority.account_id.clone()),authority.device_id.clone(),arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone())).unwrap();
+        let fingerprint=arkret_canonical::ed25519_pubkey_to_did_key_multibase(key.verifying_key().as_bytes());
+        let upload=fresh_upload(&identity,&format!("did:key:{fingerprint}#{fingerprint}"),&key,&scope);
+        assert_eq!(native_phase(||upload_in_scope(&fixture,&authority,&key,&upload,&scope)).await.0,StatusCode::OK);
+        let command=request(&authority,&key,&scope,&upload.keypackages[0].keypackage_ref);
+        let (status,bytes)=native_phase(||claim_wire(&fixture.state,&authority,&key,&scope,&command)).await;
+        assert_eq!(status,StatusCode::OK);
+        let original:arkret_models_crypto::KeyPackagesClaimOutcome=serde_json::from_slice(&bytes).unwrap();
+        let body=arkret_models_crypto::KeyPackagesClaimQueryRequestBody {claim_id:arkret_wire::KeypackageClaimId::new(original.claims[0].claim_id.clone()).unwrap()};
+        let mut metadata=managed_device_metadata(&authority);metadata.effective_scope=scope.clone();
+        let mut response=native_phase(||async {managed_device_http_request_with_idempotency_at(&fixture.state,&authority,&metadata,ServiceOperationId::SelfKeysKeypackagesReadClaimV1,&key,Some(arkret_canonical::canonical_json_bytes(&body).unwrap()),None,command.claim_request_id.as_str()).add_header("content-type","application/json",true).send(&service(fixture.state.clone())).await}).await;
+        assert_eq!(response.status_code,Some(StatusCode::OK),"query must prepare original material before expiry");
+        let before=native_phase(||snapshot(&fixture)).await;
+        let remaining=(deadline-chrono::Utc::now()).to_std().unwrap_or_default();
+        tokio::time::sleep(remaining+std::time::Duration::from_millis(100)).await;
+        assert!(response.take_json::<Value>().await.is_err(),"expired original E2EE consent cannot hand off prepared bytes while a separate read parent remains active");
+        assert_eq!(before,native_phase(||snapshot(&fixture)).await);
+        let (status,error)=native_phase(||query_wire(&fixture.state,&authority,&key,&scope,&body)).await;
+        assert!(!status.is_success(),"expired current consent cannot expose original claim: {error:?}");
+        assert_eq!(before,native_phase(||snapshot(&fixture)).await);
+    })).await.unwrap();
+}
+
+async fn revoked_package_read(
+    fixture: &Fixture,
+    package: &AppletPackage,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    key: &SigningKey,
+    scope: &ScopeRef,
+    identity: &arkret_mls::ArkretMlsIdentity,
+    method: &str,
+) {
+    let upload = fresh_upload(identity, method, key, scope);
+    assert_eq!(
+        native_phase(|| upload_in_scope(fixture, authority, key, &upload, scope))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let command = request(authority, key, scope, &upload.keypackages[0].keypackage_ref);
+    let (status, bytes) =
+        native_phase(|| claim_wire(&fixture.state, authority, key, scope, &command)).await;
+    assert_eq!(status, StatusCode::OK);
+    let outcome: arkret_models_crypto::KeyPackagesClaimOutcome =
+        serde_json::from_slice(&bytes).unwrap();
+    let original_outcome = outcome.clone();
+    let query = arkret_models_crypto::KeyPackagesClaimQueryRequestBody {
+        claim_id: arkret_wire::KeypackageClaimId::new(outcome.claims[0].claim_id.clone()).unwrap(),
+    };
+    let unsigned = arkret_models_crypto::KeyPackagesRevokeUnsignedRequest {
+        key_package_refs: vec![upload.keypackages[0].keypackage_ref.clone()],
+        device_id: authority.device_id.clone(),
+        reason: None,
+    };
+    let signature = arkret_signatures::keypackages::sign_keypackages_revoke_request(
+        &unsigned,
+        method,
+        &key.to_bytes(),
+    )
+    .unwrap();
+    let revoke = unsigned.into_signed(signature);
+    let mut metadata = managed_device_metadata(authority);
+    metadata.effective_scope = scope.clone();
+    let mut response = native_phase(|| async {
+        managed_device_http_request_body(
+            &fixture.state,
+            authority,
+            &metadata,
+            ServiceOperationId::SelfKeysKeypackagesCommandRevokeV1,
+            key,
+            Some(arkret_canonical::canonical_json_bytes(&revoke).unwrap()),
+        )
+        .add_header("content-type", "application/json", true)
+        .send(&service(fixture.state.clone()))
+        .await
+    })
+    .await;
+    assert_eq!(response.status_code, Some(StatusCode::OK));
+    let outcome: arkret_models_crypto::KeyPackagesRevokeOutcome =
+        response.take_json().await.unwrap();
+    assert_eq!(outcome.revoked, revoke.key_package_refs);
+    let before = native_phase(|| snapshot(fixture)).await;
+    let (status, bytes) =
+        native_phase(|| query_wire(&fixture.state, authority, key, scope, &query)).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "an actually revoked package must not be returned from its old immutable outcome: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let error: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        error["type"],
+        "https://arkret.org/problems/keypackage_unknown"
+    );
+    assert_eq!(before, native_phase(|| snapshot(fixture)).await);
+    native_phase(|| {
+        stored_recovery_delivery(
+            fixture,
+            package,
+            authority,
+            scope,
+            &original_outcome,
+            &command,
+        )
+    })
+    .await;
+    assert_eq!(before, native_phase(|| snapshot(fixture)).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn query_claim_deadline_blocks_original_outcome_before_background_cleanup() {
+    tokio::spawn(native_phase(|| async {
+        use arkret_models_collaboration::governance::grant_constraint::{
+            GrantConstraintEffect, GrantConstraintKind,
+        };
+        let fixture = native_phase(Fixture::new).await;
+        let scope = ScopeRef::Realm {
+            realm_id: fixture.realm.clone(),
+        };
+        native_phase(|| activate_mls(&fixture, scope.clone())).await;
+        let namespace = format!("bridge.{}", uuid::Uuid::now_v7().simple());
+        let native = mls_service(&fixture, &namespace);
+        let deadline = arkret_canonical::normalize_timestamp_canonical(
+            chrono::Utc::now() + chrono::Duration::seconds(30),
+        );
+        let mut temporal =
+            GrantConstraint::new(GrantConstraintKind::Temporal, GrantConstraintEffect::Allow);
+        temporal.expires_at = Some(deadline);
+        let extras = [
+            "ak.message.create",
+            "ak.applet.bot.provision",
+            "ak.applet.ghost.provision",
+        ]
+        .into_iter()
+        .map(|action| (action.to_owned(), vec![temporal.clone()]))
+        .collect();
+        let (package, outcome, body, install_key) = native_phase(|| {
+            fixture.install_service_with_constraints(
+                true,
+                native.package.clone(),
+                scope.clone(),
+                extras,
+            )
+        })
+        .await;
+        let (bot_outcome, bot_body) = native_phase(|| {
+            fixture.provision_bot_in_scope(
+                &package,
+                &namespace,
+                outcome.registration_event_ref.clone(),
+                scope.clone(),
+            )
+        })
+        .await;
+        let install = Installed {
+            package,
+            outcome,
+            bot_outcome,
+            bot_body,
+            body,
+            key: install_key,
+        };
+        let key = SigningKey::from_bytes(&[176; 32]);
+        let device = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
+        let authority = native_phase(|| {
+            authorize(
+                &fixture,
+                &install,
+                &install.bot_body["managed_actor_bundle"],
+                &namespace,
+                &key,
+                device,
+                true,
+            )
+        })
+        .await;
+        let event = join_event(
+            &fixture,
+            &install,
+            &authority,
+            &key,
+            &install.bot_outcome.authorization_ref,
+        );
+        let (status, outcome) =
+            native_phase(|| post(&fixture, &authority, &key, &event, vec![])).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "original finite consent is initially live: {outcome}"
+        );
+        let _read_parent = native_phase(|| {
+            native_business_parent(
+                &fixture,
+                &install,
+                vec![],
+                vec!["ak.event.read".into()],
+                None,
+            )
+        })
+        .await;
+        let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
+            ActorId::account(authority.account_id.clone()),
+            authority.device_id.clone(),
+            arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone()),
+        )
+        .unwrap();
+        let fingerprint =
+            arkret_canonical::ed25519_pubkey_to_did_key_multibase(key.verifying_key().as_bytes());
+        let upload = fresh_upload(
+            &identity,
+            &format!("did:key:{fingerprint}#{fingerprint}"),
+            &key,
+            &scope,
+        );
+        assert_eq!(
+            native_phase(|| upload_in_scope(&fixture, &authority, &key, &upload, &scope))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let mut command = request(
+            &authority,
+            &key,
+            &scope,
+            &upload.keypackages[0].keypackage_ref,
+        );
+        command.expires_at = arkret_canonical::normalize_timestamp_canonical(
+            chrono::Utc::now() + chrono::Duration::seconds(5),
+        );
+        resign(&mut command, &key);
+        let (status, bytes) =
+            native_phase(|| claim_wire(&fixture.state, &authority, &key, &scope, &command)).await;
+        assert_eq!(status, StatusCode::OK);
+        let original: arkret_models_crypto::KeyPackagesClaimOutcome =
+            serde_json::from_slice(&bytes).unwrap();
+        let body = arkret_models_crypto::KeyPackagesClaimQueryRequestBody {
+            claim_id: arkret_wire::KeypackageClaimId::new(original.claims[0].claim_id.clone())
+                .unwrap(),
+        };
+        let mut metadata = managed_device_metadata(&authority);
+        metadata.effective_scope = scope.clone();
+        let mut response = native_phase(|| async {
+            managed_device_http_request_with_idempotency_at(
+                &fixture.state,
+                &authority,
+                &metadata,
+                ServiceOperationId::SelfKeysKeypackagesReadClaimV1,
+                &key,
+                Some(arkret_canonical::canonical_json_bytes(&body).unwrap()),
+                None,
+                command.claim_request_id.as_str(),
+            )
+            .add_header("content-type", "application/json", true)
+            .send(&service(fixture.state.clone()))
+            .await
+        })
+        .await;
+        assert_eq!(
+            response.status_code,
+            Some(StatusCode::OK),
+            "query must prepare original material before expiry"
+        );
+        let before = native_phase(|| snapshot(&fixture)).await;
+        let remaining = (command.expires_at - chrono::Utc::now())
+            .to_std()
+            .unwrap_or_default();
+        tokio::time::sleep(remaining + std::time::Duration::from_millis(100)).await;
+        assert!(
+            response.take_json::<Value>().await.is_err(),
+            "expired original claim cannot hand off prepared material before background cleanup"
+        );
+        assert_eq!(before, native_phase(|| snapshot(&fixture)).await);
+        let (status, error) =
+            native_phase(|| query_wire(&fixture.state, &authority, &key, &scope, &body)).await;
+        assert!(
+            !status.is_success(),
+            "expired original claim cannot expose material: {error:?}"
+        );
+        assert_eq!(before, native_phase(|| snapshot(&fixture)).await);
+        assert!(
+            chrono::Utc::now() < deadline,
+            "independent original E2EE consent must still be live"
+        );
+        let store = coland_storage_postgres::PgMlsKeyPackageStore {
+            pool: fixture.pool.clone(),
+        };
+        let expired = native_phase(|| {
+            store.revoke_expired_peer_claims(chrono::Utc::now().timestamp_millis())
+        })
+        .await
+        .unwrap();
+        assert_eq!(expired, vec![upload.keypackages[0].keypackage_id.clone()]);
+        let ledger = native_phase(|| {
+            store.get_peer_claim(
+                fixture.state.service_id(),
+                command.claim_request_id.as_str(),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(ledger.state, "revoked");
+        native_phase(|| {
+            stored_recovery_delivery(
+                &fixture,
+                &install.package,
+                &authority,
+                &scope,
+                &original,
+                &command,
+            )
+        })
+        .await;
+    }))
+    .await
+    .unwrap();
+}
+
+// This exercises the accepting delivery consumer with actual native authority,
+// signed outcome, package and ledger. It does not claim that a local self claim
+// can be queried through the cross-Station peer HTTP transport.
+async fn stored_recovery_delivery(
+    fixture: &Fixture,
+    package: &AppletPackage,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    scope: &ScopeRef,
+    outcome: &arkret_models_crypto::KeyPackagesClaimOutcome,
+    command: &arkret_models_crypto::KeyPackagesClaimRequestBody,
+) {
+    let endpoint = coland_storage::AppletManagedDeviceScopeGuard {
+        authority: authority.clone(),
+        effective_scope: scope.clone(),
+        service_did_document: applet_service_id_document(package),
+    };
+    let outcome = arkret_models_crypto::PeerKeyPackagesClaimOutcome {
+        claim_request_id: outcome.claim_request_id.clone(),
+        claims: outcome.claims.clone(),
+        claim_receipt: outcome.claim_receipt.clone(),
+    };
+    for operation in [
+        ServiceOperationId::PeerKeysKeypackagesReadClaimV1,
+        ServiceOperationId::PeerKeysKeypackagesCommandClaimV1,
+    ] {
+        let input = coland_storage::AccountContentDeliveryInput {
+            realms: vec![scope.realm_id().clone()],
+            keypackage_claims: vec![coland_storage::MlsKeyPackageClaimDelivery {
+                operation,
+                outcome: outcome.clone(),
+                endpoints: vec![endpoint.clone()],
+                command: (operation == ServiceOperationId::PeerKeysKeypackagesCommandClaimV1)
+                    .then(|| arkret_models_crypto::PeerKeyPackagesClaimRequestBody::from(command)),
+            }],
+            applet_endpoint: Some(endpoint.clone()),
+            credential_expires_at: Some(chrono::Utc::now() + chrono::Duration::seconds(10)),
+            ..Default::default()
+        };
+        let store = PgAuthorityCommitStore {
+            pool: fixture.pool.clone(),
+        };
+        let station = fixture.state.service_core_id();
+        let guard = native_phase(|| {
+            store.acquire_committed_content_delivery(&authority.account_id, &station, &input)
+        })
+        .await
+        .unwrap()
+        .expect("stored result retains its original signed outcome after claim expiry or revoke");
+        assert!(guard.permits_handoff());
+        native_phase(|| guard.finish()).await.unwrap();
+    }
 }

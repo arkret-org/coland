@@ -333,6 +333,8 @@ pub struct MlsKeyPackageClaimAdmission {
 /// reconstructed from the historical receipt's unsigned request.
 #[derive(Clone, Debug)]
 pub struct MlsKeyPackageClaimDelivery {
+    /// Mounted consumer, never a caller-selected wire disclosure mode.
+    pub operation: arkret_wire::ServiceOperationId,
     pub outcome: arkret_models_crypto::PeerKeyPackagesClaimOutcome,
     pub endpoints: Vec<crate::AppletManagedDeviceScopeGuard>,
     pub command: Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>,

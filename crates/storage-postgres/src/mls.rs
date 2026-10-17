@@ -27,6 +27,20 @@ fn format_authorize_event_id(token: &[u8]) -> String {
             .expect("mls_key_packages authorize Event id is a 33-octet Event id"),
     )
 }
+pub(super) async fn key_package_for_delivery(
+    conn: &mut diesel_async::AsyncPgConnection,
+    reference: &str,
+) -> PersistenceResult<Option<MlsKeyPackageRow>> {
+    sql_query(
+        "SELECT id,keypackage_ref,keypackage_digest,owner_account_id,effective_scope,actor_id,device_id,endpoint_verification_method, \
+         key_package_bytes,capabilities,capabilities_digest,last_resort,last_resort_realm_id,lifetime_not_before,lifetime_not_after, \
+         claimed_by_mls_group_id,device_authorize_event_id,agent_key_authorize_event_id,claimed_at,claim_expires_at_unix_ms,consumed_at,created_at \
+         FROM mls_key_packages WHERE keypackage_ref=$1 FOR SHARE NOWAIT",
+    )
+    .bind::<Text,_>(reference).get_result::<MlsKeyPackagePgRow>(conn).await.optional()
+    .map_err(PersistenceError::database)?.map(validated_keypackage_row).transpose()
+}
+
 // Serialize native authority before the row lock, using the same lock order
 // as publication and MLS admission. Recheck the immutable row after the CAS.
 async fn claim_candidate(

@@ -137,6 +137,7 @@ pub(super) async fn targets(
 
 pub(super) async fn delivery_guard(
     state: &AppState,
+    operation: arkret_wire::ServiceOperationId,
     outcome: &PeerKeyPackagesClaimOutcome,
     source: Option<&NativeRequester>,
     credential_deadline: DateTime<Utc>,
@@ -179,6 +180,7 @@ pub(super) async fn delivery_guard(
     let input = coland_storage::AccountContentDeliveryInput {
         realms: vec![primary.effective_scope.realm_id().clone()],
         keypackage_claims: vec![coland_storage::MlsKeyPackageClaimDelivery {
+            operation,
             outcome: outcome.clone(),
             endpoints,
             command: command.cloned(),

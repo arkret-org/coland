@@ -932,6 +932,7 @@ async fn peer_claim_keypackage(
     let guard = if let Some(claim) = &outcome.claim_outcome {
         mls_keypackage_native::delivery_guard(
             state,
+            arkret_wire::ServiceOperationId::PeerKeysKeypackagesCommandClaimV1,
             claim,
             None,
             mls_keypackage_native::peer_deadline(req)?,
@@ -1301,6 +1302,7 @@ async fn peer_query_keypackage_claim(
     let guard = if let Some(claim) = &outcome.claim_outcome {
         mls_keypackage_native::delivery_guard(
             state,
+            arkret_wire::ServiceOperationId::PeerKeysKeypackagesReadClaimV1,
             claim,
             None,
             mls_keypackage_native::peer_deadline(req)?,
@@ -2215,6 +2217,7 @@ async fn claim_keypackage(
     };
     let guard = mls_keypackage_native::delivery_guard(
         state,
+        arkret_wire::ServiceOperationId::SelfKeysKeypackagesCommandClaimV1,
         &peer_outcome,
         source.as_ref(),
         credential_deadline,
@@ -2385,7 +2388,7 @@ async fn claim_keypackage_session(
 /// (device-lifecycle.md §9 `claims/query`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ClaimReader {
-    /// A human device session: its complete AccountId and device.
+    /// A real Account Device: its complete AccountId and device.
     Device {
         actor: arkret_wire::ActorId,
         device_id: String,
@@ -2481,13 +2484,23 @@ async fn query_own_keypackage_claim(
     body: JsonBody<KeyPackagesClaimQueryRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<KeyPackagesClaimOutcome> {
+) -> coland_http::result::GuardedJsonResult<KeyPackagesClaimOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
     let body = body.into_inner();
-    let reader = claim_reader(state, &session)
-        .await
-        .ok_or_else(keypackage_claim_unknown)?;
+    let native = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>()
+        .ok();
+    let reader = if let Some(native) = native {
+        ClaimReader::Device {
+            actor: arkret_wire::ActorId::account(native.authority.account_id.clone()),
+            device_id: native.authority.device_id.to_string(),
+        }
+    } else {
+        let session = aa.authenticated_session(state, req).await?;
+        claim_reader(state, &session)
+            .await
+            .ok_or_else(keypackage_claim_unknown)?
+    };
     let row = state
         .mls_key_packages()
         .peer_claim_by_claim_id(body.claim_id.as_str())
@@ -2495,6 +2508,8 @@ async fn query_own_keypackage_claim(
         .map_err(|error| AppError::internal(format!("claim read ledger: {error}")))?
         .filter(|row| row.keypackage_id.is_some() && row.expires_at > now().timestamp())
         .ok_or_else(keypackage_claim_unknown)?;
+    let retention_deadline =
+        DateTime::from_timestamp(row.expires_at, 0).ok_or_else(keypackage_claim_unknown)?;
     let outcome = row
         .outcome
         .map(serde_json::from_value::<PeerKeyPackagesClaimOutcome>)
@@ -2510,7 +2525,46 @@ async fn query_own_keypackage_claim(
     if !owned {
         return Err(keypackage_claim_unknown());
     }
-    json_ok(outcome.into())
+    let guard = if let Some(native) = native {
+        let record = outcome
+            .claims
+            .iter()
+            .find(|record| record.claim_id == body.claim_id.as_str())
+            .ok_or_else(keypackage_claim_unknown)?;
+        if record.device_authorize_event_id.as_ref()
+            != Some(&native.authority.selector.authorization_ref.event_id)
+            || outcome.claim_receipt.request.intended_realm_id
+                != *native.metadata.effective_scope.realm_id()
+            || native
+                .metadata
+                .effective_scope
+                .canonical_mls_group_id()
+                .ok()
+                .as_ref()
+                != Some(&outcome.claim_receipt.request.mls_group_id)
+        {
+            return Err(keypackage_claim_unknown());
+        }
+        let source = (
+            crate::routing::identity::applet_managed_device::scope_guard(state, native)
+                .await
+                .map_err(|_| keypackage_claim_unknown())?,
+            native.transport_expires_at.min(retention_deadline),
+        );
+        mls_keypackage_native::delivery_guard(
+            state,
+            arkret_wire::ServiceOperationId::SelfKeysKeypackagesReadClaimV1,
+            &outcome,
+            Some(&source),
+            source.1,
+            None,
+        )
+        .await
+        .map_err(|_| keypackage_claim_unknown())?
+    } else {
+        None
+    };
+    coland_http::result::guarded_json_ok(outcome.into(), guard)
 }
 
 pub(crate) async fn capture_relayed_keypackage_claim_outcome(

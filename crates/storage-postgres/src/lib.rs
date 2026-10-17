@@ -126,6 +126,7 @@ mod mls;
 mod mls_group_current_results;
 mod mls_group_state_material_read;
 mod mls_keypackage_publication;
+mod mls_keypackage_revocation;
 mod mls_recipient_attestation_outbox;
 mod mls_roster_attest_add;
 mod mls_roster_authority_read;

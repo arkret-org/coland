@@ -375,7 +375,7 @@ pub fn apply_key_package_claim(
     row: &MlsKeyPackageRow,
     claim: &MlsKeyPackageClaim<'_>,
 ) -> Option<MlsKeyPackageRow> {
-    if row.id != claim.id {
+    if row.id != claim.id || row.consumed_at.is_some() {
         return None;
     }
     let (group_id, terminal_without_claim, retiring) = match claim.target {
@@ -401,10 +401,11 @@ pub fn apply_key_package_claim(
     {
         return None;
     }
-    if row
-        .claimed_by_mls_group_id
-        .as_deref()
-        .is_some_and(|claimed| claimed != group_id)
+    if !terminal_without_claim
+        && row
+            .claimed_by_mls_group_id
+            .as_deref()
+            .is_some_and(|claimed| claimed != group_id)
         && !(row.last_resort && !terminal_without_claim)
     {
         return None;
@@ -579,6 +580,38 @@ mod key_package_claim_transition_tests {
     }
 
     #[test]
+    fn claimed_packages_revoke_and_consumed_packages_never_rearm() {
+        let published = row(false);
+        let claimed = apply_key_package_claim(
+            &published,
+            &claim(MlsKeyPackageClaimTarget::Group("group-a")),
+        )
+        .unwrap();
+        let revoked =
+            apply_key_package_claim(&claimed, &claim(MlsKeyPackageClaimTarget::Revoke)).unwrap();
+        assert_eq!(revoked.claimed_by_mls_group_id.as_deref(), Some("revoked"));
+        assert!(revoked.claimed_at.is_none());
+        assert!(revoked.claim_expires_at_unix_ms.is_none());
+        assert!(
+            apply_key_package_claim(&revoked, &claim(MlsKeyPackageClaimTarget::Group("group-a")))
+                .is_none()
+        );
+        let mut consumed = claimed.clone();
+        consumed.consumed_at = Some(11);
+        for target in [
+            MlsKeyPackageClaimTarget::Group("group-a"),
+            MlsKeyPackageClaimTarget::Group("group-b"),
+            MlsKeyPackageClaimTarget::Revoke,
+            MlsKeyPackageClaimTarget::Retire,
+        ] {
+            assert!(apply_key_package_claim(&consumed, &claim(target)).is_none());
+        }
+        assert!(
+            apply_key_package_claim(&row(true), &claim(MlsKeyPackageClaimTarget::Revoke)).is_some()
+        );
+    }
+
+    #[test]
     fn terminal_and_last_resort_transitions_share_one_oracle() {
         let ordinary = row(false);
         let retired = apply_key_package_claim(&ordinary, &claim(MlsKeyPackageClaimTarget::Retire))
@@ -631,6 +664,12 @@ pub struct MlsGroupCurrentRecord {
     /// base the next transition is verified from. Never a wire value.
     pub public_state: Vec<u8>,
 }
+/// Internal committed result; the outcome is the shared SDK wire DTO.
+pub struct MlsKeyPackageRevocation {
+    pub outcome: arkret_models_crypto::KeyPackagesRevokeOutcome,
+    pub records: Vec<MlsKeyPackageRow>,
+}
+
 /// G3.S1 — KeyPackage store. The `try_claim` CAS path is what
 /// guarantees at-most-one Welcome per published KeyPackage.
 #[async_trait]
@@ -652,6 +691,19 @@ pub trait MlsKeyPackageStore: Send + Sync {
         ))
     }
 
+    /// Revoke original own material under the current PCR Device cut, even
+    /// after an installation fence. No new business material is returned.
+    async fn revoke_for_applet_device(
+        &self,
+        _body: &arkret_models_crypto::KeyPackagesRevokeRequestBody,
+        _authority: &crate::AppletManagedDeviceAuthority,
+        _scope: &ScopeRef,
+        _expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<MlsKeyPackageRevocation> {
+        Err(super::PersistenceError::Conflict(
+            "capability_denied: native KeyPackage revocation is unavailable".into(),
+        ))
+    }
     async fn get(&self, id: &str) -> PersistenceResult<Option<MlsKeyPackageRow>>;
     async fn get_by_ref(&self, keypackage_ref: &str)
     -> PersistenceResult<Option<MlsKeyPackageRow>>;

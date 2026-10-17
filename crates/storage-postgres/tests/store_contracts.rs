@@ -2929,6 +2929,129 @@ async fn postgres_adapter_satisfies_last_resort_claim_ledger_contract() {
             .count(),
         1
     );
+    // This is the persistence contract boundary: the shared contract above
+    // supplies durable audit rows, without claiming an HTTP Device admission.
+    keypackage_revocation_closes_active_ledgers_atomically(
+        &restarted_store,
+        &namespace,
+        &concurrent,
+    )
+    .await;
+}
+
+async fn keypackage_revocation_closes_active_ledgers_atomically(
+    store: &PgMlsKeyPackageStore,
+    namespace: &str,
+    active: &PeerKeyPackageClaimLedgerRecord,
+) {
+    use diesel_async::RunQueryDsl;
+    let id = format!("{namespace}-keypackage-last-resort");
+    let original = store.get(&id).await.unwrap().unwrap();
+    let consumed = store
+        .get_peer_claim(
+            &active.source_id,
+            &format!("local-last-resort:{namespace}-01"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let expired = store
+        .get_peer_claim(
+            &active.source_id,
+            &format!("local-last-resort:{namespace}-02"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let mut conn = store.pool.get().await.unwrap();
+    diesel::sql_query("CREATE FUNCTION fail_keypackage_revoke_ledger() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'revoke ledger failure'; END $$").execute(&mut conn).await.unwrap();
+    diesel::sql_query("CREATE TRIGGER fail_keypackage_revoke_ledger BEFORE UPDATE ON peer_keypackage_claims FOR EACH ROW EXECUTE FUNCTION fail_keypackage_revoke_ledger()").execute(&mut conn).await.unwrap();
+    drop(conn);
+    let revoke = || coland_storage::MlsKeyPackageClaim {
+        applet_device_scope_guard: None,
+        id: &id,
+        target: coland_storage::MlsKeyPackageClaimTarget::Revoke,
+        intended_realm_id: None,
+        device_authorize_event_id: original.device_authorize_event_id.as_deref(),
+        agent_key_authorize_event_id: None,
+        device_revocation_gate: None,
+        claimed_at: 12,
+        claim_expires_at_unix_ms: None,
+    };
+    let failed = store.try_claim(revoke()).await;
+    let mut conn = store.pool.get().await.unwrap();
+    diesel::sql_query("DROP TRIGGER fail_keypackage_revoke_ledger ON peer_keypackage_claims")
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    diesel::sql_query("DROP FUNCTION fail_keypackage_revoke_ledger()")
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    drop(conn);
+    assert!(
+        failed.is_err(),
+        "ledger write failure refuses package revocation"
+    );
+    assert_eq!(
+        store.get(&id).await.unwrap().unwrap(),
+        original,
+        "package update rolls back with its ledger"
+    );
+    assert_eq!(
+        store
+            .get_peer_claim(&active.source_id, &active.claim_request_id)
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(active)
+    );
+    let revoked = store.try_claim(revoke()).await.unwrap().unwrap();
+    assert_eq!(revoked.claimed_by_mls_group_id.as_deref(), Some("revoked"));
+    let closed = store
+        .get_peer_claim(&active.source_id, &active.claim_request_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(closed.state, "revoked");
+    assert_eq!(
+        closed.outcome, active.outcome,
+        "the first outcome is immutable"
+    );
+    assert_eq!(closed.request_digest, active.request_digest);
+    assert_eq!(
+        store
+            .get_peer_claim(&consumed.source_id, &consumed.claim_request_id)
+            .await
+            .unwrap()
+            .unwrap(),
+        consumed
+    );
+    assert_eq!(
+        store
+            .get_peer_claim(&expired.source_id, &expired.claim_request_id)
+            .await
+            .unwrap()
+            .unwrap(),
+        expired
+    );
+    assert!(
+        store
+            .attach_peer_claim_consume_receipt(
+                &active.source_id,
+                &active.claim_request_id,
+                &active.request_digest,
+                &serde_json::json!({"receipt":"too-late"}),
+                13_000
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store.try_claim(revoke()).await.unwrap().is_none(),
+        "terminal package does not rearm"
+    );
 }
 
 #[tokio::test]

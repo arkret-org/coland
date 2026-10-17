@@ -3264,11 +3264,48 @@ async fn revoke_keypackages(
     req: &mut Request,
 ) -> JsonResult<KeyPackagesRevokeOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
     let body = body.into_inner();
-    if session.account_pk.is_none() && session.agent_session().is_none() {
+    if let Ok(native) = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>(
+    ) {
+        if body.device_id != native.authority.device_id {
+            return Err(AppError::capability_denied(
+                "KeyPackage revoke must name the authenticated Device",
+            ));
+        }
+        let fingerprint =
+            arkret_canonical::ed25519_pubkey_to_did_key_multibase(&native.authority.public_key);
+        if !crate::routing::identity::device_signature_kid_points_to_device_key(
+            body.signature.kid.as_str(),
+            native.authority.account_id.principal_id.as_str(),
+            &format!("did:key:{fingerprint}"),
+        ) {
+            return Err(AppError::param_invalid(
+                "KeyPackage signature is not the original Device key",
+            ));
+        }
+        let result = state
+            .mls_key_packages()
+            .revoke_for_applet_device(
+                &body,
+                &native.authority,
+                &native.metadata.effective_scope,
+                native.transport_expires_at,
+            )
+            .await
+            .map_err(mls_keypackage_upload::service_error)?;
+        let ids = result
+            .records
+            .into_iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>();
+        state.projections().mark_key_packages_revoked(&ids);
+        return json_ok(result.outcome);
+    }
+    let session = aa.authenticated_session(state, req).await?;
+    if session.account_pk.is_none() || session.agent_session().is_some() {
         return Err(AppError::capability_denied(
-            "KeyPackage revoke requires an account- or Agent-bound session",
+            "KeyPackage revoke requires a real Account Device signer",
         ));
     }
     let session_owner_account_id = local_keypackage_owner_account_id(state, &session).await?;
@@ -3289,7 +3326,6 @@ async fn revoke_keypackages(
     verify_session_keypackage_revoke_signature(
         state,
         &session,
-        &refs,
         &body.signature,
         &revoke_signing_input,
     )
@@ -3305,7 +3341,9 @@ async fn revoke_keypackages(
         {
             Ok(Some(record))
                 if record.owner_account_id != session_owner_account_id
-                    || record.actor_id != session.actor =>
+                    || record.actor_id != session.actor
+                    || record.device_id.as_deref() != Some(device_id.as_str())
+                    || record.agent_key_authorize_event_id.is_some() =>
             {
                 failures.push(keypackage_ref_failure(keypackage_ref, "not_owner"));
             }
@@ -3770,55 +3808,11 @@ async fn verify_session_keypackage_write_signature(
 async fn verify_session_keypackage_revoke_signature(
     state: &AppState,
     session: &SessionRecord,
-    keypackage_refs: &[String],
     signature: &KeyOperationSignature,
     signing_input: &[u8],
 ) -> Result<(), AppError> {
     let principal = arkret_wire::DidCoreId::new(session.actor.clone())
         .map_err(|error| AppError::param_invalid(format!("invalid session principal: {error}")))?;
-    if session.agent_session().is_some() {
-        let binding = current_agent_keypackage_trust_binding(state, &principal)
-            .await?
-            .ok_or_else(|| AppError::capability_denied("Agent key authorization is unavailable"))?;
-        let authorize_event_id = binding
-            .agent_key_authorize_event_id
-            .as_deref()
-            .expect("Agent trust binding always carries authorization Event");
-        verify_agent_keypackage_batch(
-            state,
-            &principal,
-            authorize_event_id,
-            signature,
-            signing_input,
-        )
-        .await
-        .map_err(AppError::param_invalid)?;
-        for keypackage_ref in keypackage_refs {
-            let Some(record) = state
-                .mls_key_packages()
-                .key_package_by_ref(keypackage_ref)
-                .await
-                .map_err(|error| AppError::internal(error.to_string()))?
-            else {
-                // A locally-created package may race an asynchronous upload.
-                // The revoke outcome reports it as not_found (and therefore
-                // already unclaimable) instead of rejecting the whole signed
-                // batch before per-reference processing.
-                continue;
-            };
-            if record.actor_id != session.actor
-                || record.device_id.is_some()
-                || record.agent_key_authorize_event_id.as_deref() != Some(authorize_event_id)
-            {
-                return Err(crate::app_error!(
-                    FailedPrecondition,
-                    "Agent KeyPackage write binding differs from current authorization",
-                )
-                .with_internal_reason("claim_generation_mismatch"));
-            }
-        }
-        return Ok(());
-    }
     verify_device_keypackage_signature(
         state,
         &principal,

@@ -182,6 +182,17 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
             .await
     }
 
+    async fn revoke_for_applet_device(
+        &self,
+        body: &arkret_models_crypto::KeyPackagesRevokeRequestBody,
+        authority: &coland_storage::AppletManagedDeviceAuthority,
+        scope: &arkret_wire::ScopeRef,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<coland_storage::MlsKeyPackageRevocation> {
+        crate::mls_keypackage_revocation::revoke(&self.pool, body, authority, scope, expires_at)
+            .await
+    }
+
     async fn get(&self, id: &str) -> PersistenceResult<Option<MlsKeyPackageRow>> {
         let mut conn = pg_conn(&self.pool)
             .await
@@ -296,6 +307,9 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
                     "locked MLS KeyPackage row disappeared during claim".to_owned(),
                 )
                 .into());
+            }
+            if matches!(claim.target, MlsKeyPackageClaimTarget::Revoke) {
+                crate::mls_keypackage_revocation::close_claims(conn, &next.id, claim.claimed_at).await?;
             }
             Ok::<Option<MlsKeyPackageRow>, PgTransactionError>(Some(next))
         })
@@ -984,7 +998,7 @@ async fn load_peer_claim(
     .map_err(PersistenceError::database)
 }
 #[derive(QueryableByName)]
-struct MlsKeyPackagePgRow {
+pub(super) struct MlsKeyPackagePgRow {
     #[diesel(sql_type = Text)]
     id: String,
     #[diesel(sql_type = Text)]
@@ -1077,7 +1091,9 @@ impl From<PeerKeyPackageClaimPgRow> for PeerKeyPackageClaimLedgerRecord {
         }
     }
 }
-fn validated_keypackage_row(row: MlsKeyPackagePgRow) -> PersistenceResult<MlsKeyPackageRow> {
+pub(super) fn validated_keypackage_row(
+    row: MlsKeyPackagePgRow,
+) -> PersistenceResult<MlsKeyPackageRow> {
     let row = MlsKeyPackageRow {
         id: row.id,
         keypackage_ref: row.keypackage_ref,

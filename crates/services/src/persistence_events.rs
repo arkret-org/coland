@@ -642,6 +642,19 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
             .put_for_applet_device(record, guard, expires_at, body)
             .await?)
     }
+    async fn revoke_for_applet_device(
+        &self,
+        body: &arkret_models_crypto::KeyPackagesRevokeRequestBody,
+        authority: &coland_storage::AppletManagedDeviceAuthority,
+        scope: &arkret_wire::ScopeRef,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::ServiceResult<coland_storage::MlsKeyPackageRevocation> {
+        Ok(self
+            .0
+            .mls_key_packages()
+            .revoke_for_applet_device(body, authority, scope, expires_at)
+            .await?)
+    }
     async fn key_package(
         &self,
         id: &str,

@@ -233,7 +233,7 @@ pub(super) fn service_error(error: coland_services::ServiceError) -> AppError {
                 .unwrap_or(arkret_wire::ErrorCode::Conflict);
             AppError::from_rejection(
                 code,
-                "KeyPackage publication refused by its current authority",
+                "KeyPackage operation refused by its current authority",
             )
         }
         coland_services::ServiceError::NotFound(_) => {

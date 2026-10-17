@@ -826,7 +826,10 @@ impl RealmAuthorizationCut {
                 .await?;
         if matches!(
             event.kind,
-            EventKind::MessageCreate | EventKind::CircleMemberState
+            EventKind::MessageCreate
+                | EventKind::CircleMemberState
+                | EventKind::MlsGenesis
+                | EventKind::MlsCommit
         ) && event.applet_id.is_some()
             && event.actor_id.as_account_id().is_some()
             && event.executed_by.is_none()
@@ -890,6 +893,41 @@ impl RealmAuthorizationCut {
             },
             self.effective_grants(at).map(|(_, grant)| grant),
         )
+    }
+
+    /// Pure native MLS qualification preserves the Account's complete global
+    /// refusal set while selecting only its signed terminal positive path.
+    pub(crate) fn native_mls_reservations(
+        &self,
+        event: &arkret_wire::Event,
+        action: CapabilityActionId,
+        target: &WireResourceSelector,
+        facts: &OperationFacts,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<Vec<coland_storage::QuotaReservation>> {
+        self.require_open_lifecycle(event)?;
+        self.require_governed_member(&event.kind)?;
+        if self.native_operation.is_none() || self.is_direct_conversation() {
+            return Err(capability_denied(
+                "native MLS has no ordinary current authority path",
+            ));
+        }
+        let actions = Self::unconditional_actions(&event.kind);
+        if !actions.contains(&action.as_str()) {
+            return Err(capability_denied(
+                "native MLS action has no registered Event mapping",
+            ));
+        }
+        match self.evaluate(&actions, target, facts, at) {
+            GrantEvaluation::Allowed(paths) => paths
+                .into_iter()
+                .find(|path| self.selected_grant.as_ref() == Some(&path.grant.id))
+                .map(|path| path.reservations)
+                .ok_or_else(|| capability_denied("native MLS terminal path is not satisfied")),
+            _ => Err(capability_denied(
+                "native MLS current grant constraints refuse the operation",
+            )),
+        }
     }
 
     /// Whether an effective grant allows one of `actions` over the whole

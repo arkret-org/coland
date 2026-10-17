@@ -41,6 +41,27 @@ pub(crate) async fn record_idempotency_in_connection(
     .map(|_| ())
     .map_err(PersistenceError::database)
 }
+/// Compare under the unique row lock, in the accepting transaction. A
+/// conflicting retry identity must roll back the Event and every MLS effect.
+pub(crate) async fn record_native_mls_idempotency_in_connection(
+    conn: &mut diesel_async::AsyncPgConnection,
+    record: &IdempotencyRecord,
+) -> PersistenceResult<()> {
+    record_idempotency_in_connection(conn, record).await?;
+    let stored = sql_query(
+        "SELECT authenticated_actor,operation_id,idempotency_key,request_hash,response_status,response_body,created_at,expires_at \
+         FROM idempotency_keys WHERE actor_key=$1 AND operation_id=$2 AND idempotency_key=$3 FOR UPDATE",
+    ).bind::<Text,_>(actor_key(&record.authenticated_actor)?)
+        .bind::<Text,_>(&record.operation_id).bind::<Text,_>(&record.idempotency_key)
+        .get_result::<IdempotencyRow>(conn).await.map_err(PersistenceError::database)?;
+    if stored.request_hash != record.request_hash {
+        return Err(PersistenceError::Conflict(
+            "duplicate_conflict: native MLS retry key binds a different complete unit".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(QueryableByName)]
 struct IdempotencyRow {
     #[diesel(sql_type = Jsonb)]

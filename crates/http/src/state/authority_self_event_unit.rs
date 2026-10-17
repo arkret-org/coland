@@ -440,6 +440,9 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             ),
             _ => None,
         };
+        let native_mls_request = mls
+            .as_ref()
+            .and_then(|installation| installation.native_request.clone());
         let mut transaction = match mls {
             Some(mls) if is_mls => {
                 state
@@ -527,6 +530,10 @@ fn commit_event_unit_with_idempotency_impl<'a>(
                 transaction.commit.committed_at,
             ))
             .await?;
+        let idempotency = match native_mls_request {
+            Some(context) => Some(context.accepted_response(&transaction.commit)?),
+            None => idempotency,
+        };
         let command = coland_services::events::CommitAcceptedEventCommand {
             verified_media_participant:
                 crate::routing::interop::webrtc::prepare_verified_roster_participant(state, event)

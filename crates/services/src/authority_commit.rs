@@ -779,10 +779,14 @@ impl AuthorityCommitApplication {
         event: &Event,
         authority: &CurrentRealmAuthority,
         reason_code: &str,
+        native: Option<(
+            &coland_storage::AppletManagedDeviceScopeGuard,
+            &coland_storage::IdempotencyRecord,
+        )>,
     ) -> ServiceResult<AuthoritySubmitOutcome> {
         Ok(self
             .store()
-            .finalize_mls_rejection(event, authority, reason_code)
+            .finalize_mls_rejection(event, authority, reason_code, native)
             .await?)
     }
 

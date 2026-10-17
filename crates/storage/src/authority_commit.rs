@@ -2340,8 +2340,12 @@ pub trait AuthorityCommitStore: Send + Sync {
         event: &Event,
         authority: &CurrentRealmAuthority,
         reason_code: &str,
+        native: Option<(
+            &crate::AppletManagedDeviceScopeGuard,
+            &crate::IdempotencyRecord,
+        )>,
     ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
-        let _ = (event, authority, reason_code);
+        let _ = (event, authority, reason_code, native);
         Err(crate::PersistenceError::Conflict(
             "temporarily_unavailable: durable MLS refusal is unavailable".into(),
         ))

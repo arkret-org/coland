@@ -56,6 +56,7 @@ use super::authority_self_event_unit::{AdmittedProducer, SelfEventUnitEffects};
 pub(super) struct MlsUnitInstallation {
     pub(super) state: MlsStateInstallation,
     pub(super) welcomes: Vec<VerifiedMlsWelcome>,
+    pub(super) native_request: Option<super::authority_managed_device::mls::NativeMlsRequest>,
 }
 
 fn refused(code: ConflictCode, detail: impl std::fmt::Display) -> ServiceError {
@@ -104,7 +105,31 @@ pub(super) fn admit_mls_event<'a>(
         genesis_material,
         producer,
         producer_key,
+        None,
     ))
+}
+
+#[inline(never)]
+pub(super) fn admit_native_mls_event<'a>(
+    state: &'a AppState,
+    event: &'a Event,
+    welcomes: &'a [MlsWelcomeDelivery],
+    genesis_material: Option<&'a MlsGenesisMaterial>,
+    producer: AdmittedProducer,
+    producer_key: &'a arkret_signatures::PublicKeyMaterial,
+    native_request: Option<super::authority_managed_device::mls::NativeMlsRequest>,
+) -> impl std::future::Future<Output = ServiceResult<AuthoritySubmitOutcome>> + Send + 'a {
+    crate::boxed_future(move || {
+        admit_mls_event_inner(
+            state,
+            event,
+            welcomes,
+            genesis_material,
+            producer,
+            producer_key,
+            native_request,
+        )
+    })
 }
 
 async fn admit_mls_event_inner(
@@ -114,6 +139,7 @@ async fn admit_mls_event_inner(
     genesis_material: Option<&MlsGenesisMaterial>,
     producer: AdmittedProducer,
     producer_key: &arkret_signatures::PublicKeyMaterial,
+    native_request: Option<super::authority_managed_device::mls::NativeMlsRequest>,
 ) -> ServiceResult<AuthoritySubmitOutcome> {
     if let Some(outcome) = super::authority_self_event_unit::exact_replay(state, event).await? {
         return Ok(outcome);
@@ -124,6 +150,20 @@ async fn admit_mls_event_inner(
             "the MLS effective scope has no supported authority cut".to_owned(),
         ));
     }
+    let native_guard = match &producer {
+        AdmittedProducer::Local(guard) => match guard.as_ref() {
+            coland_storage::SelfProducerCommitGuard::AppletManagedDevice(guard) => {
+                Some(guard.clone())
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    let refusal_record = native_request
+        .as_ref()
+        .map(|context| context.refusal_record(arkret_wire::ReasonCode::GOVERNANCE_BINDING_MISMATCH))
+        .transpose()?;
+    let native_refusal = native_guard.as_deref().zip(refusal_record.as_ref());
     let refusal_authority = if event.kind == EventKind::MlsCommit {
         state
             .authority_commits()
@@ -158,6 +198,7 @@ async fn admit_mls_event_inner(
                             event,
                             authority,
                             arkret_wire::ReasonCode::GOVERNANCE_BINDING_MISMATCH,
+                            native_refusal,
                         )
                         .await;
                 }
@@ -178,6 +219,7 @@ async fn admit_mls_event_inner(
             mls: Some(MlsUnitInstallation {
                 state: installation,
                 welcomes,
+                native_request,
             }),
             ..SelfEventUnitEffects::default()
         },
@@ -200,6 +242,7 @@ async fn admit_mls_event_inner(
                     event,
                     authority,
                     arkret_wire::ReasonCode::GOVERNANCE_BINDING_MISMATCH,
+                    native_refusal,
                 )
                 .await;
         }
@@ -215,7 +258,7 @@ async fn admit_mls_event_inner(
             .ok_or_else(|| failed_precondition("MLS refusal has no current authority"))?;
         return state
             .authority_commits()
-            .finalize_mls_rejection(event, &authority, reason_code)
+            .finalize_mls_rejection(event, &authority, reason_code, native_refusal)
             .await;
     }
     Ok(outcome)

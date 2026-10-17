@@ -4707,14 +4707,30 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         event: &arkret_wire::Event,
         authority: &CurrentRealmAuthority,
         reason_code: &str,
+        native: Option<(
+            &coland_storage::AppletManagedDeviceScopeGuard,
+            &coland_storage::IdempotencyRecord,
+        )>,
     ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
         if event.kind != arkret_wire::EventKind::MlsCommit || event.realm_id != authority.realm_id {
             return Err(invalid(
                 "only an exact ordinary MLS Commit can receive this refusal fence",
             ));
         }
+        if event.applet_id.is_some()
+            && event.actor_id.as_account_id().is_some()
+            && event.executed_by.is_none()
+            && native.is_none()
+        {
+            return Err(PersistenceError::Conflict(
+                "capability_denied: native MLS refusal requires its original permission guard"
+                    .into(),
+            ));
+        }
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            let producer = native.map(|(guard, _)| SelfProducerCommitGuard::AppletManagedDevice(Box::new(guard.clone())));
+            crate::agent_management_review::lock_candidate_current_realms_in_connection(conn, event, None, producer.as_ref(), &[]).await?;
             let current = locked_authority(conn, &event.realm_id).await?
                 .ok_or_else(|| invalid("MLS refusal has no governance authority"))?;
             queue_event_in_connection(conn, event, chrono::Utc::now()).await?;
@@ -4730,6 +4746,25 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             if !same_authority(&current, authority) {
                 return Err(PersistenceError::Conflict("temporarily_unavailable: MLS refusal authority changed".into()).into());
             }
+            if let Some((guard, _)) = native {
+                crate::boxed_future(|| crate::applet_device_admission::require_mls_permission_in_connection(conn, event, guard, chrono::Utc::now(), true)).await?;
+                // A formerly stale key-access coordinate may have caught up
+                // while this refusal waited for the exclusive authority cut.
+                // Such a request must retry, never acquire a false finality fence.
+                let key = crate::mls_group_current_results::scope_key(&event.scope_ref)?;
+                let group = crate::mls_group_current_results::locked_group(conn, &key).await?
+                    .ok_or_else(|| PersistenceError::Conflict("failed_precondition: native MLS refusal has no current group".into()))?;
+                let payload: arkret_models_crypto::MlsCommitPayload = serde_json::from_value(serde_json::to_value(&event.payload).map_err(PersistenceError::database)?).map_err(PersistenceError::database)?;
+                let binding = payload.governance_binding();
+                if payload.base_group_state_ref() == &group.value.current_mls_commit_event_ref
+                    && payload.base_epoch() == group.value.epoch
+                    && Some(payload.next_epoch()) == group.value.epoch.checked_add(1)
+                    && binding.key_access_revision() == group.value.current_key_access_revision
+                    && payload.covers_key_access_revision() == group.value.current_key_access_revision
+                {
+                    return Err(PersistenceError::Conflict("temporarily_unavailable: native MLS refusal coordinate changed".into()).into());
+                }
+            }
             #[derive(QueryableByName)]
             struct RefusalRow {
                 #[diesel(sql_type = Text)]
@@ -4740,10 +4775,17 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 .execute(&mut *conn).await?;
             let refused = sql_query("SELECT rejection_reason FROM canonical_events WHERE id=$1 AND state='rejected'")
                 .bind::<Binary,_>(token.to_vec()).get_result::<RefusalRow>(&mut *conn).await?;
-            Ok(arkret_wire::AuthoritySubmitOutcome::Rejected {
+            let outcome = arkret_wire::AuthoritySubmitOutcome::Rejected {
                 status: arkret_wire::AuthorityRejectionStatus::Rejected,
                 reason_code: refused.rejection_reason,
-            })
+            };
+            if let Some((guard, record)) = native {
+                let mut record = record.clone();
+                record.response_body = serde_json::to_value(arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::Ordinary(outcome.clone())).map_err(PersistenceError::database)?;
+                crate::idempotency::record_native_mls_idempotency_in_connection(conn, &record).await?;
+                crate::boxed_future(|| crate::applet_device_admission::require_mls_permission_in_connection(conn, event, guard, chrono::Utc::now(), false)).await?;
+            }
+            Ok(outcome)
         }).await.map_err(PgTransactionError::into_persistence)
     }
 

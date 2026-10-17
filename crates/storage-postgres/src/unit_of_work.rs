@@ -2701,7 +2701,10 @@ async fn commit_one_inner(
     {
         if matches!(
             event.kind,
-            arkret_wire::EventKind::MessageCreate | arkret_wire::EventKind::CircleMemberState
+            arkret_wire::EventKind::MessageCreate
+                | arkret_wire::EventKind::CircleMemberState
+                | arkret_wire::EventKind::MlsGenesis
+                | arkret_wire::EventKind::MlsCommit
         ) {
             service_approvals = crate::boxed_future(|| {
                 crate::applet_device_admission::require_business_in_connection(
@@ -3256,11 +3259,35 @@ async fn commit_prepared_event_inner(
         ) && event.kind == arkret_wire::EventKind::SelfModerationReport
         {
             crate::mimi_admission::record_report_idempotency_in_connection(conn, record).await?;
+        } else if event.kind == arkret_wire::EventKind::MlsCommit
+            && matches!(
+                request.self_producer_guard,
+                Some(coland_storage::SelfProducerCommitGuard::AppletManagedDevice(_))
+            )
+        {
+            crate::idempotency::record_native_mls_idempotency_in_connection(conn, record).await?;
         } else {
             record_idempotency_in_connection(conn, record).await?;
         }
     }
     if matches!(authority_write, AuthorityCommitWriteOutcome::Committed) {
+        if matches!(
+            event.kind,
+            arkret_wire::EventKind::MlsGenesis | arkret_wire::EventKind::MlsCommit
+        ) && let Some(coland_storage::SelfProducerCommitGuard::AppletManagedDevice(guard)) =
+            request.self_producer_guard.as_ref()
+        {
+            crate::boxed_future(|| {
+                crate::applet_device_admission::require_mls_permission_in_connection(
+                    conn,
+                    event,
+                    guard,
+                    chrono::Utc::now(),
+                    false,
+                )
+            })
+            .await?;
+        }
         // A queue or later writer can wait beyond a native Welcome's claim or
         // consent window. Keep the original held cuts and recheck physical
         // time after all per-Event durable writes, before accepting the unit.

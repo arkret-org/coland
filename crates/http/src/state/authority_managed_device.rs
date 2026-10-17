@@ -11,11 +11,24 @@ use coland_storage::{
 
 use super::{AppState, authority_self_event_unit as unit};
 
+#[path = "authority_managed_device_mls.rs"]
+pub(super) mod mls;
+
 fn denied(detail: &str) -> ServiceError {
     ServiceError::Conflict(format!("capability_denied: {detail}"))
 }
 
-pub(super) async fn submit(
+#[inline(never)]
+pub(super) fn submit<'a>(
+    state: &'a AppState,
+    metadata: &'a AppletManagedDeviceMetadata,
+    authority: &'a AppletManagedDeviceAuthority,
+    request: SelfAuthoritySubmitRequest,
+) -> impl std::future::Future<Output = ServiceResult<SelfAuthoritySubmitOutcome>> + Send + 'a {
+    crate::boxed_future(move || submit_inner(state, metadata, authority, request))
+}
+
+async fn submit_inner(
     state: &AppState,
     metadata: &AppletManagedDeviceMetadata,
     authority: &AppletManagedDeviceAuthority,
@@ -27,10 +40,19 @@ pub(super) async fn submit(
     metadata
         .validate()
         .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
-    let SelfAuthoritySubmitRequest::Event(submission) = request else {
-        return Err(ServiceError::UnsupportedEventKind(
-            "this native submission branch has no accepting unit".into(),
-        ));
+    let native_mls = mls::NativeMlsRequest::from_request(&request)?;
+    let (submission, welcomes, typed_mls) = match request {
+        SelfAuthoritySubmitRequest::Event(submission) => (submission, Vec::new(), false),
+        SelfAuthoritySubmitRequest::MlsCommit(submission) => (
+            arkret_wire::EventAdmissionSubmission::new(submission.commit_event),
+            submission.welcomes,
+            true,
+        ),
+        _ => {
+            return Err(ServiceError::UnsupportedEventKind(
+                "this native submission branch has no accepting unit".into(),
+            ));
+        }
     };
     let event = &submission.event;
     unit::validate_replay_event_identity(event)?;
@@ -54,11 +76,32 @@ pub(super) async fn submit(
             "native Event differs from the authenticated Account, Device, Applet or exact scope",
         ));
     }
+    if event.kind == EventKind::MlsCommit && !typed_mls {
+        return Err(ServiceError::SchemaViolation(
+            "native MLS Commit requires its complete MlsCommitSubmission".into(),
+        ));
+    }
+    if matches!(event.kind, EventKind::MlsGenesis | EventKind::MlsCommit)
+        && submission.approval_signatures.is_some()
+    {
+        return Err(ServiceError::SchemaViolation(
+            "an MLS Event carries no approval signatures".into(),
+        ));
+    }
+    if let Some(context) = native_mls.as_ref()
+        && let Some(original) = context.replay(state).await?
+    {
+        return Ok(original);
+    }
     // Current transport still authenticates a replacement Device. Only the
     // complete stored original may recover its prior outcome before producer
     // or business current is rejudged; no new write follows this return.
     if let Some(original) = unit::exact_replay(state, event).await? {
-        return Ok(SelfAuthoritySubmitOutcome::Ordinary(original));
+        let original = SelfAuthoritySubmitOutcome::Ordinary(original);
+        return match native_mls.as_ref() {
+            Some(context) => context.retain_outcome(state, original).await,
+            None => Ok(original),
+        };
     }
     if !matches!(
         event.kind,
@@ -67,6 +110,8 @@ pub(super) async fn submit(
             | EventKind::ProfileCreate
             | EventKind::ProfileUpdate
             | EventKind::MessageCreate
+            | EventKind::MlsGenesis
+            | EventKind::MlsCommit
     ) {
         return Err(ServiceError::UnsupportedEventKind(
             "native Event kind has no accepting domain unit".into(),
@@ -115,6 +160,33 @@ pub(super) async fn submit(
             effective_scope: metadata.effective_scope.clone(),
             service_did_document,
         }));
+    if matches!(event.kind, EventKind::MlsGenesis | EventKind::MlsCommit) {
+        let producer_key = arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+            bytes: authority.public_key.to_vec(),
+        };
+        let result = super::authority_mls_unit::admit_native_mls_event(
+            state,
+            event,
+            &welcomes,
+            None,
+            unit::AdmittedProducer::Local(Box::new(guard)),
+            &producer_key,
+            native_mls.clone(),
+        )
+        .await;
+        // The losing attempt may have rolled back at an earlier domain fence.
+        // A completed racing retry identity still decides its first result.
+        if let Some(context) = native_mls.as_ref()
+            && let Some(original) = context.replay(state).await?
+        {
+            return Ok(original);
+        }
+        let outcome = SelfAuthoritySubmitOutcome::Ordinary(result?);
+        return match native_mls.as_ref() {
+            Some(context) => context.retain_outcome(state, outcome).await,
+            None => Ok(outcome),
+        };
+    }
     unit::commit_event_unit(
         state,
         &submission,

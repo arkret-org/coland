@@ -36,6 +36,13 @@ struct InstallationRow {
 
 /// The actual domain action, never a union of alternative membership actions.
 pub(crate) fn action(event: &Event) -> PersistenceResult<CapabilityActionId> {
+    if event.executed_by.is_none() {
+        match event.kind {
+            EventKind::MlsGenesis => return Ok(CapabilityActionId::MlsGenesis),
+            EventKind::MlsCommit => return Ok(CapabilityActionId::MlsCommit),
+            _ => {}
+        }
+    }
     if event.executed_by.is_none() && event.kind == EventKind::MessageCreate {
         return Ok(CapabilityActionId::MessageCreate);
     }
@@ -132,7 +139,7 @@ pub(crate) async fn installation(
         true,
     )
     .await?;
-    if mls_join {
+    if mls_join || matches!(event.kind, EventKind::MlsGenesis | EventKind::MlsCommit) {
         crate::boxed_future(|| {
             crate::applet_e2ee::require_current_consent(
                 conn,
@@ -365,7 +372,10 @@ pub(crate) async fn select_management(
         EventKind::CircleMemberState if action(event)? == CapabilityActionId::AppletJoin => {
             AppletPolicyOperation::Join
         }
-        EventKind::MessageCreate | EventKind::CircleMemberState => AppletPolicyOperation::Execute,
+        EventKind::MessageCreate
+        | EventKind::CircleMemberState
+        | EventKind::MlsGenesis
+        | EventKind::MlsCommit => AppletPolicyOperation::Execute,
         _ => AppletPolicyOperation::Publish,
     };
     let circle = match &event.scope_ref {
@@ -425,6 +435,8 @@ pub(crate) fn business_action(event: &Event) -> PersistenceResult<CapabilityActi
     match event.kind {
         EventKind::MessageCreate => Ok(CapabilityActionId::MessageCreate),
         EventKind::CircleMemberState => Ok(CapabilityActionId::CircleMemberAdd),
+        EventKind::MlsGenesis => Ok(CapabilityActionId::MlsGenesis),
+        EventKind::MlsCommit => Ok(CapabilityActionId::MlsCommit),
         _ => Err(denied("native business action has no domain consumer")),
     }
 }
@@ -466,7 +478,6 @@ async fn business_basis(
     cut.complete_event_facts_in_connection(conn, event, &mut facts)
         .await?;
     facts.applet_id = Some(registration.applet_id.to_string());
-    facts.executed_by = Some(service.clone());
     facts.registration_epoch = Some(registration.registration_epoch.to_string());
     let id: GrantId = event
         .authorization_ref
@@ -666,4 +677,154 @@ pub(crate) async fn require_business_in_connection(
         ));
     }
     Ok(accepted)
+}
+
+/// Recheck physical permission without charging a second logical operation.
+/// Refusal qualification may probe quota in a rolled-back savepoint; neither
+/// the refusal nor this final physical check consumes a business quota.
+pub(crate) async fn require_mls_permission_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    guard: &AppletManagedDeviceScopeGuard,
+    at: chrono::DateTime<chrono::Utc>,
+    probe_quota: bool,
+) -> PersistenceResult<()> {
+    use arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef;
+    if !matches!(event.kind, EventKind::MlsGenesis | EventKind::MlsCommit) {
+        return Err(denied("native MLS permission requires an actual MLS Event"));
+    }
+    if !crate::moderation_report_current_results::scope_member_in_connection(
+        conn,
+        &event.realm_id,
+        &event.scope_ref,
+        &event.actor_id,
+    )
+    .await?
+    {
+        return Err(denied(
+            "native MLS author is not a current member of its exact scope",
+        ));
+    }
+    let producer =
+        coland_storage::SelfProducerCommitGuard::AppletManagedDevice(Box::new(guard.clone()));
+    crate::authority_commit::check_self_producer_guard_in_connection(conn, event, &producer, at)
+        .await?;
+    let (registration, _) = installation(conn, event, guard, at).await?;
+    let (_, decision) = select_management(conn, event, &registration, at).await?;
+    if !decision.review_requirements.is_empty() {
+        return Err(PersistenceError::Conflict(
+            "approval_required: native MLS management review is unavailable".into(),
+        ));
+    }
+    let BusinessBasis {
+        service,
+        action,
+        target,
+        facts,
+        grants,
+        root,
+        sources,
+    } = business_basis(conn, event, guard, at).await?;
+    let cut = crate::boxed_future(|| {
+        crate::realm_authorization_cut::RealmAuthorizationCut::read_for_event(conn, event)
+    })
+    .await?;
+    let mut reservations = cut.native_mls_reservations(event, action, &target, &facts, at)?;
+    if crate::policy_action_admission::current_quorum(conn, event, action, &target, &facts, at)
+        .await?
+        .is_some_and(|quorum| quorum > 0)
+    {
+        return Err(PersistenceError::Conflict(
+            "approval_required: native MLS has no governance approval carrier".into(),
+        ));
+    }
+    let actions = [action.as_str()];
+    let mut actors = std::collections::BTreeSet::from([service]);
+    for source in &sources {
+        if let CapabilitySubject::Actor(actor) = &source.subject {
+            actors.insert(actor.clone());
+        }
+    }
+    for actor in actors {
+        let matching = arkret_policy::grant_authority::current_subject_grants(
+            &actor, actions[0], &target, &grants, at,
+            |source| matches!(source, IssuerAuthorityRef::RealmRoot { realm_id, authority_event_ref, authority_generation }
+                if realm_id == &event.realm_id && authority_event_ref == &root.authority_event_ref
+                    && authority_generation == &root.authority_generation),
+        ).map_err(|error| PersistenceError::Conflict(error.to_string()))?;
+        let mut source_facts = facts.clone();
+        source_facts.executed_by = Some(actor.clone());
+        let evaluation = coland_storage::evaluate_authority_sources_with_verified_approvals(
+            &coland_storage::AuthorizationOperation {
+                actor: &actor,
+                actions: &actions,
+                target: &target,
+                at,
+                facts: &source_facts,
+            },
+            matching.iter().copied(),
+            &[],
+        );
+        if matches!(
+            evaluation,
+            coland_storage::GrantEvaluation::Denied
+                | coland_storage::GrantEvaluation::Quarantined
+                | coland_storage::GrantEvaluation::RequiresReview
+        ) {
+            return Err(denied("native MLS source has a current global refusal"));
+        }
+    }
+    for source in sources {
+        let CapabilitySubject::Actor(ref actor) = source.subject else {
+            return Err(denied("native MLS source has no Actor"));
+        };
+        let mut source_facts = facts.clone();
+        source_facts.executed_by = Some(actor.clone());
+        match coland_storage::evaluate_authority_sources_with_verified_approvals(
+            &coland_storage::AuthorizationOperation {
+                actor,
+                actions: &actions,
+                target: &target,
+                at,
+                facts: &source_facts,
+            },
+            std::iter::once(&source),
+            &[],
+        ) {
+            coland_storage::GrantEvaluation::Allowed(paths) => {
+                let path = paths
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| denied("native MLS source has no satisfied path"))?;
+                reservations.extend(path.reservations);
+            }
+            _ => return Err(denied("native MLS source constraints refuse the operation")),
+        }
+    }
+    if probe_quota {
+        sql_query("SAVEPOINT native_mls_refusal_quota")
+            .execute(&mut *conn)
+            .await
+            .map_err(PersistenceError::database)?;
+        let permitted = crate::capability_quota::try_reserve_in_connection(
+            conn,
+            &reservations,
+            event.event_id.as_str(),
+        )
+        .await?;
+        sql_query("ROLLBACK TO SAVEPOINT native_mls_refusal_quota")
+            .execute(&mut *conn)
+            .await
+            .map_err(PersistenceError::database)?;
+        sql_query("RELEASE SAVEPOINT native_mls_refusal_quota")
+            .execute(&mut *conn)
+            .await
+            .map_err(PersistenceError::database)?;
+        if !permitted {
+            return Err(PersistenceError::Conflict(
+                "rate_limited: native MLS source quota is exhausted".into(),
+            ));
+        }
+    }
+    Ok(())
 }

@@ -33,7 +33,26 @@ async fn authorize(
     .await
 }
 
-async fn authorize_scopes(
+#[inline(never)]
+fn authorize_scopes<'a>(
+    fixture: &'a Fixture,
+    install: &'a Installed,
+    bundle: &'a Value,
+    namespace: &'a str,
+    key: &'a SigningKey,
+    device_id: DeviceId,
+    scopes: Value,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = coland_storage::AppletManagedDeviceAuthority> + Send + 'a>,
+> {
+    native_phase(move || {
+        authorize_scopes_until(
+            fixture, install, bundle, namespace, key, device_id, scopes, None,
+        )
+    })
+}
+
+async fn authorize_scopes_until(
     fixture: &Fixture,
     install: &Installed,
     bundle: &Value,
@@ -41,6 +60,7 @@ async fn authorize_scopes(
     key: &SigningKey,
     device_id: DeviceId,
     scopes: Value,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> coland_storage::AppletManagedDeviceAuthority {
     use arkret_models_collaboration::events_payloads::DeviceAuthorizePayload;
     use ed25519_dalek::Signer as _;
@@ -59,7 +79,7 @@ async fn authorize_scopes(
         "device_id":device_id,"device_public_key_did":format!("did:key:{}",arkret_canonical::ed25519_pubkey_to_did_key_multibase(key.verifying_key().as_bytes())),
         "hpke_key":arkret_canonical::ed25519_pubkey_to_did_key_multibase(&[119;32]),"algorithms":["Ed25519"],"device_key_algorithm":"Ed25519",
         "authorized_by":actor.signing_principal_id(),"scopes":scopes,
-        "not_before":arkret_canonical::format_timestamp_canonical(now-chrono::Duration::seconds(1)),"expires_at":arkret_canonical::format_timestamp_canonical(now+chrono::Duration::hours(1)),"authorization_binding_kind":"applet_managed_delegation","authorized_generation_ref":1,"device_signature":"AA","applet_id":install.package.applet_id
+        "not_before":arkret_canonical::format_timestamp_canonical(now-chrono::Duration::seconds(1)),"expires_at":arkret_canonical::format_timestamp_canonical(expires_at.unwrap_or(now+chrono::Duration::hours(1))),"authorization_binding_kind":"applet_managed_delegation","authorized_generation_ref":1,"device_signature":"AA","applet_id":install.package.applet_id
     })).unwrap();
     payload.device_signature = serde_json::from_value(json!(arkret_canonical::base64url_encode(
         key.sign(

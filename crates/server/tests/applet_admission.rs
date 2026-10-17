@@ -4297,6 +4297,13 @@ impl Fixture {
         config.account_authority_trust_domain = Some(config.trust_domain.clone());
         config.register_test_internal_authority_channel("applet-http-standard-grant".to_owned());
         let (state, pool) = coland_test_support::app_state_with_pool(config);
+        // A process abort can leave this fixture's fault trigger in its leased
+        // slot. Remove only the named test object before accepted prerequisites.
+        {
+            use diesel_async::SimpleAsyncConnection as _;
+            let mut conn = pool.get().await.unwrap();
+            conn.batch_execute("DROP TRIGGER IF EXISTS fail_native_membership ON member_state_current_results; DROP FUNCTION IF EXISTS fail_native_membership();").await.unwrap();
+        }
         let mut pcr = PcrGenesisFixture::new(state.service_did());
         Box::pin(pcr.admit(&state)).await.unwrap();
         let other_device = if with_second_device {

@@ -546,6 +546,7 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
             &stale.authority_commit.event,
             &authority,
             "governance_binding_mismatch",
+            None,
         )
         .await
         .unwrap();
@@ -561,7 +562,8 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
             .finalize_mls_rejection(
                 &stale.authority_commit.event,
                 &authority,
-                "different_late_reason"
+                "different_late_reason",
+                None,
             )
             .await
             .unwrap(),
@@ -576,6 +578,7 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
             &commit.authority_commit.event,
             &stale_authority,
             "governance_binding_mismatch",
+            None,
         )
         .await
         .unwrap();

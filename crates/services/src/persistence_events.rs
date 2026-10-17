@@ -667,6 +667,16 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
     ) -> crate::ServiceResult<Option<crate::events::MlsKeyPackageState>> {
         Ok(self.0.mls_key_packages().get_by_ref(keypackage_ref).await?)
     }
+    async fn peer_claim_candidates(
+        &self,
+        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    ) -> crate::ServiceResult<Vec<crate::events::MlsKeyPackageState>> {
+        Ok(self
+            .0
+            .mls_key_packages()
+            .peer_claim_candidates(body)
+            .await?)
+    }
     async fn claim_key_package(
         &self,
         command: crate::events::ClaimMlsKeyPackageCommand<'_>,

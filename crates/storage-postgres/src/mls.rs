@@ -168,6 +168,59 @@ impl PgMlsKeyPackageStore {
 }
 #[async_trait]
 impl MlsKeyPackageStore for PgMlsKeyPackageStore {
+    async fn peer_claim_candidates(
+        &self,
+        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    ) -> PersistenceResult<Vec<MlsKeyPackageRow>> {
+        body.validate_shape().map_err(|error| {
+            PersistenceError::SchemaViolation(format!("claim candidate command: {error}"))
+        })?;
+        let principal = body
+            .unsigned_request()
+            .target_principal_id()
+            .ok_or_else(|| {
+                PersistenceError::SchemaViolation("claim target identity is incomplete".into())
+            })?;
+        let owner = body
+            .target_account_id
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(PersistenceError::database)?;
+        let devices = body
+            .target_device_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        let reference = body
+            .target_keypackage_ref
+            .as_ref()
+            .map(|value| value.as_str());
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        // A Device belongs to the complete Account, whereas an Agent has its
+        // own principal and stores its package under its controller Account.
+        // An exact-reference command cannot fall back to another package.
+        sql_query(
+            "SELECT id,keypackage_ref,keypackage_digest,owner_account_id,effective_scope,actor_id,device_id,endpoint_verification_method, \
+             key_package_bytes,capabilities,capabilities_digest,last_resort,last_resort_realm_id,lifetime_not_before,lifetime_not_after, \
+             claimed_by_mls_group_id,device_authorize_event_id,agent_key_authorize_event_id,claimed_at,claim_expires_at_unix_ms,consumed_at,created_at \
+             FROM mls_key_packages WHERE actor_id=$1 AND ($2::jsonb IS NULL OR owner_account_id=$2) \
+             AND (($2::jsonb IS NOT NULL AND device_id IS NOT NULL AND agent_key_authorize_event_id IS NULL) \
+                  OR ($2::jsonb IS NULL AND device_id IS NULL AND agent_key_authorize_event_id IS NOT NULL)) \
+             AND (cardinality($3::text[])=0 OR device_id=ANY($3)) \
+             AND ($4::text IS NULL OR keypackage_ref=$4) \
+             AND claimed_by_mls_group_id IS NULL AND consumed_at IS NULL \
+             ORDER BY created_at ASC,id ASC",
+        )
+        .bind::<Text,_>(principal.as_str())
+        .bind::<Nullable<Jsonb>,_>(owner)
+        .bind::<diesel::sql_types::Array<Text>,_>(devices)
+        .bind::<Nullable<Text>,_>(reference)
+        .load::<MlsKeyPackagePgRow>(&mut *conn).await.map_err(PersistenceError::database)?
+        .into_iter().map(validated_keypackage_row).collect()
+    }
     async fn put(&self, record: &MlsKeyPackageRow) -> PersistenceResult<bool> {
         self.put_guarded(record, None).await
     }

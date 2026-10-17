@@ -1105,7 +1105,11 @@ async fn claim_keypackage_at_destination(
     let now_unix_ms = now().timestamp_millis();
     let now_secs = now_unix_ms.div_euclid(1000);
     let candidate_ids = {
-        let keypackages = state.projections().mls_key_package_records();
+        let keypackages = state
+            .mls_key_packages()
+            .peer_claim_candidates(body)
+            .await
+            .map_err(|error| AppError::internal(format!("peer claim candidates: {error}")))?;
         let mut candidates = keypackages
             .iter()
             .filter_map(|keypackage| {
@@ -1121,6 +1125,13 @@ async fn claim_keypackage_at_destination(
             })
             .filter(|(_, keypackage)| {
                 target_keypackage_ref.is_none_or(|expected| keypackage.keypackage_ref == expected)
+            })
+            .filter(|(_, keypackage)| {
+                keypackage.effective_scope.as_ref().is_none_or(|scope| {
+                    scope
+                        .canonical_mls_group_id()
+                        .is_ok_and(|group| group == body.mls_group_id)
+                })
             })
             .filter(|(_, keypackage)| {
                 keypackage.lifetime_not_after.saturating_mul(1000)

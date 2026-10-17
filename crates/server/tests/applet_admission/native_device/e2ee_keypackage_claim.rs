@@ -915,3 +915,211 @@ async fn exercise_worker_budget(ghost: bool) {
         "both exact retries leave all business rows and projections unchanged"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_worker_started_before_publication_claims_the_actual_durable_package() {
+    for ghost in [false, true] {
+        tokio::spawn(native_phase(|| exercise_fresh_publication(ghost)))
+            .await
+            .unwrap();
+    }
+}
+async fn exercise_fresh_publication(ghost: bool) {
+    let fixture = native_phase(Fixture::new).await;
+    let scope = ScopeRef::Realm {
+        realm_id: fixture.realm.clone(),
+    };
+    native_phase(|| activate_mls(&fixture, scope.clone())).await;
+    let namespace = format!("bridge.{}", uuid::Uuid::now_v7().simple());
+    let native = mls_service(&fixture, &namespace);
+    let install =
+        native_phase(|| fixture.install_package(true, native.package.clone(), &namespace)).await;
+    let bundle = if ghost {
+        let body = native_phase(|| fixture.ghost_body(&install, &namespace, "claim-device")).await;
+        assert_eq!(
+            native_phase(|| fixture.ghost_commit(&install, &body, "claim-device"))
+                .await
+                .0,
+            StatusCode::CREATED
+        );
+        body["managed_actor_bundle"].clone()
+    } else {
+        install.bot_body["managed_actor_bundle"].clone()
+    };
+    let key = SigningKey::from_bytes(&[177; 32]);
+    let device = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
+    let authority = native_phase(|| {
+        authorize(
+            &fixture,
+            &install,
+            &bundle,
+            &namespace,
+            &key,
+            device.clone(),
+            true,
+        )
+    })
+    .await;
+    let event = join_event(
+        &fixture,
+        &install,
+        &authority,
+        &key,
+        &install.bot_outcome.authorization_ref,
+    );
+    let (status, outcome) = native_phase(|| post(&fixture, &authority, &key, &event, vec![])).await;
+    assert_eq!(status, StatusCode::OK, "real native membership: {outcome}");
+    let _read_parent = native_phase(|| {
+        native_business_parent(
+            &fixture,
+            &install,
+            vec![],
+            vec!["ak.event.read".into()],
+            None,
+        )
+    })
+    .await;
+    let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
+        ActorId::account(authority.account_id.clone()),
+        device,
+        arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone()),
+    )
+    .unwrap();
+    let fingerprint =
+        arkret_canonical::ed25519_pubkey_to_did_key_multibase(key.verifying_key().as_bytes());
+    let method = format!("did:key:{fingerprint}#{fingerprint}");
+
+    let reopened = native_phase(|| {
+        coland_test_support::app_state_with_persistence(
+            fixture.state.config().clone(),
+            std::sync::Arc::new(coland_storage_postgres::PgPersistenceStore::new(
+                fixture.pool.clone(),
+            )),
+        )
+    })
+    .await;
+    native_phase(|| reopened.hydrate()).await.unwrap();
+    assert_eq!(fixture.state.service_core_id(), reopened.service_core_id());
+    // Publication happens strictly after this independent worker's ordinary
+    // startup. No cache is cleared, copied, refreshed or seeded for the test.
+    let upload = fresh_upload(&identity, &method, &key, &scope);
+    let (status, outcome) =
+        native_phase(|| upload_in_scope(&fixture, &authority, &key, &upload, &scope)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "actual later publication: {outcome}"
+    );
+    assert_eq!(outcome["accepted"], 1);
+    let store = coland_storage_postgres::PgMlsKeyPackageStore {
+        pool: fixture.pool.clone(),
+    };
+    let reference = upload.keypackages[0].keypackage_ref.as_str();
+    let row = native_phase(|| store.get_by_ref(reference))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(row.claimed_by_mls_group_id.is_none());
+    let body = request(&authority, &key, &scope, reference);
+    let (status, original) =
+        native_phase(|| claim_wire(&reopened, &authority, &key, &scope, &body)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an already-running independent worker must claim the actual fresh durable publication without cache injection: {}",
+        String::from_utf8_lossy(&original)
+    );
+    let outcome: arkret_models_crypto::KeyPackagesClaimOutcome =
+        serde_json::from_slice(&original).unwrap();
+    assert_eq!(outcome.claims.len(), 1);
+    assert_eq!(outcome.claims[0].keypackage_ref.as_str(), reference);
+    let (status, replay) =
+        native_phase(|| claim_wire(&fixture.state, &authority, &key, &scope, &body)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        original, replay,
+        "the publisher worker recovers the same accepted bytes"
+    );
+    native_phase(|| {
+        fresh_unqualified_claim(
+            &fixture, &reopened, &authority, &key, &scope, &identity, &method,
+        )
+    })
+    .await;
+}
+
+async fn fresh_unqualified_claim(
+    fixture: &Fixture,
+    reopened: &AppState,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    key: &SigningKey,
+    scope: &ScopeRef,
+    identity: &arkret_mls::ArkretMlsIdentity,
+    method: &str,
+) {
+    let upload = fresh_upload(identity, method, key, scope);
+    let (status, outcome) =
+        native_phase(|| upload_in_scope(fixture, authority, key, &upload, scope)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "second actual publication: {outcome}"
+    );
+    let reference = upload.keypackages[0].keypackage_ref.as_str();
+    let store = coland_storage_postgres::PgMlsKeyPackageStore {
+        pool: fixture.pool.clone(),
+    };
+    let mut body = request(authority, key, scope, reference);
+    // Selection isolation is checked on the real published row. These reads
+    // do not assert that the altered target has accepted any authority.
+    let mut wrong = body.clone();
+    wrong.target_account_id.as_mut().unwrap().station_id =
+        arkret_wire::DidCoreId::new("ak:did_core:web:other-station.example").unwrap();
+    resign(&mut wrong, key);
+    let peer = arkret_models_crypto::PeerKeyPackagesClaimRequestBody::from(&wrong);
+    assert!(
+        native_phase(|| store.peer_claim_candidates(&peer))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let missing = fresh_upload(identity, method, key, scope);
+    let missing_body = request(
+        authority,
+        key,
+        scope,
+        &missing.keypackages[0].keypackage_ref,
+    );
+    let (status, _) =
+        native_phase(|| claim_wire(reopened, authority, key, scope, &missing_body)).await;
+    assert!(
+        !status.is_success(),
+        "an unknown exact reference cannot select another package"
+    );
+    assert!(
+        native_phase(|| store.get_by_ref(reference))
+            .await
+            .unwrap()
+            .unwrap()
+            .claimed_by_mls_group_id
+            .is_none()
+    );
+    body.target_keypackage_ref = None;
+    resign(&mut body, key);
+    let (status, original) =
+        native_phase(|| claim_wire(reopened, authority, key, scope, &body)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "unqualified fresh publication: {}",
+        String::from_utf8_lossy(&original)
+    );
+    let outcome: arkret_models_crypto::KeyPackagesClaimOutcome =
+        serde_json::from_slice(&original).unwrap();
+    assert_eq!(outcome.claims.len(), 1);
+    assert_eq!(outcome.claims[0].keypackage_ref.as_str(), reference);
+    let (status, replay) =
+        native_phase(|| claim_wire(&fixture.state, authority, key, scope, &body)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(original, replay);
+}

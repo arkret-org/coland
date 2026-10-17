@@ -738,6 +738,14 @@ pub trait MlsKeyPackageStore: Send + Sync {
     async fn get(&self, id: &str) -> PersistenceResult<Option<MlsKeyPackageRow>>;
     async fn get_by_ref(&self, keypackage_ref: &str)
     -> PersistenceResult<Option<MlsKeyPackageRow>>;
+    /// Read only this authenticated command's durable target candidates.
+    /// This is a private selection input, not an inventory response or an
+    /// authorization decision; the accepting transaction still performs CAS
+    /// and rechecks the original endpoint and all current authority gates.
+    async fn peer_claim_candidates(
+        &self,
+        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    ) -> PersistenceResult<Vec<MlsKeyPackageRow>>;
     /// Atomically claim the named KeyPackage for `mls_group_id`. Returns
     /// `Ok(Some(record))` on success (with `claimed_by_mls_group_id` /
     /// claim-window fields filled in), `Ok(None)` if the row is already

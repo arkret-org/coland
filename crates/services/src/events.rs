@@ -1210,6 +1210,10 @@ pub trait MlsKeyPackageMaintenancePort: Send + Sync {
         &self,
         keypackage_ref: &str,
     ) -> ServiceResult<Option<MlsKeyPackageState>>;
+    async fn peer_claim_candidates(
+        &self,
+        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    ) -> ServiceResult<Vec<MlsKeyPackageState>>;
     async fn claim_key_package(
         &self,
         command: ClaimMlsKeyPackageCommand<'_>,
@@ -1489,6 +1493,12 @@ impl MlsKeyPackageService {
     }
     pub async fn key_packages(&self) -> ServiceResult<Vec<MlsKeyPackageState>> {
         self.key_packages.key_packages().await
+    }
+    pub async fn peer_claim_candidates(
+        &self,
+        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    ) -> ServiceResult<Vec<MlsKeyPackageState>> {
+        self.key_packages.peer_claim_candidates(body).await
     }
     pub async fn key_packages_claimed_by_group(
         &self,

@@ -1323,29 +1323,7 @@ pub(crate) async fn advance_in_connection(
                 )
                 .await?;
             }
-            for (kind, value) in [
-                ("call_focus", body.focus.as_ref().map(serde_json::to_value)),
-                (
-                    "call_roster",
-                    body.roster_delta.as_ref().map(serde_json::to_value),
-                ),
-                (
-                    "call_moderation",
-                    body.moderation_delta.as_ref().map(serde_json::to_value),
-                ),
-            ] {
-                if let Some(value) = value {
-                    crate::call_state_current_results::write_axis(
-                        conn,
-                        event,
-                        commit,
-                        &body.call_id,
-                        kind,
-                        value.map_err(malformed)?,
-                    )
-                    .await?;
-                }
-            }
+            crate::call_state_current_results::write_axes(conn, event, commit, &body).await?;
         }
         arkret_wire::EventKind::RealmMediaService => {
             let body: arkret_models_collaboration::events_payloads::RealmMediaServicePayload =

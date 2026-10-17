@@ -5,7 +5,6 @@ DROP TABLE IF EXISTS pcr_private_handoff_imports;
 DROP TABLE IF EXISTS consent_private_proxy_cuts;
 DROP TABLE IF EXISTS consent_private_proxy_fences;
 DROP TABLE IF EXISTS invite_new_source_hmac_keys;
-DROP TABLE IF EXISTS public.call_media_subject_identities;
 DROP TABLE IF EXISTS registered_audit_forward_units;
 DROP TABLE IF EXISTS registered_audit_replica_units;
 DROP TABLE IF EXISTS watch_audit_read_results;

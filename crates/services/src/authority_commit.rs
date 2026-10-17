@@ -410,26 +410,10 @@ impl AuthorityCommitApplication {
         &self,
         request: &arkret_models_collaboration::objects::media::CallMediaTokenExchangeRequestBody,
         issuer: &arkret_wire::DidCoreId,
-        candidate: &arkret_models_collaboration::call_invitation::CallMediaRosterIdentity,
-        participant: &str,
     ) -> ServiceResult<bool> {
         Ok(self
             .store()
-            .check_call_media_release(request, issuer, candidate, participant)
-            .await?)
-    }
-    pub async fn call_media_identity_candidate(
-        &self,
-        request: &arkret_models_collaboration::objects::media::CallMediaTokenExchangeRequestBody,
-        candidate: &arkret_models_collaboration::call_invitation::CallMediaRosterIdentity,
-        participant: &str,
-    ) -> ServiceResult<(
-        arkret_models_collaboration::call_invitation::CallMediaRosterIdentity,
-        String,
-    )> {
-        Ok(self
-            .store()
-            .call_media_identity_candidate(request, candidate, participant)
+            .check_call_media_release(request, issuer)
             .await?)
     }
     pub async fn call_current_cut(

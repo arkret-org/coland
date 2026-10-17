@@ -4925,18 +4925,5 @@ CREATE UNIQUE INDEX management_review_one_nonterminal_target ON management_revie
  (requester_actor_key,effective_scope,management_operation,target_digest)
  WHERE status IN ('pending','approved');
 
--- Private identity mapping only; never an authorization or Consent ledger.
-CREATE TABLE public.call_media_subject_identities (
-    realm_id text NOT NULL,
-    call_id text NOT NULL,
-    subject_actor_id jsonb NOT NULL,
-    subject_device_id text NOT NULL,
-    roster_identity jsonb NOT NULL,
-    participant_id text NOT NULL,
-    PRIMARY KEY(realm_id,call_id,subject_actor_id,subject_device_id),
-    UNIQUE(realm_id,call_id,roster_identity),
-    UNIQUE(realm_id,call_id,participant_id)
-);
-
 -- Publication progress is distinct from reject-only response high water.
 CREATE TABLE public.consent_private_effect_cuts (LIKE public.consent_private_proxy_cuts INCLUDING ALL);

@@ -126,6 +126,7 @@ mod mls;
 mod mls_group_current_results;
 mod mls_group_state_material_read;
 mod mls_keypackage_claim_admission;
+mod mls_keypackage_claim_budget;
 mod mls_keypackage_claim_endpoints;
 mod mls_keypackage_publication;
 mod mls_keypackage_revocation;

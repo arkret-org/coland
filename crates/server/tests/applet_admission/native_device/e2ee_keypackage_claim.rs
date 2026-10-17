@@ -1,6 +1,8 @@
 //! Real native requester and target, without a synthesized Session or account row.
 use std::collections::BTreeSet;
 
+use coland_storage::MlsKeyPackageStore as _;
+
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -110,7 +112,9 @@ async fn exercise(ghost: bool) {
         "invalid participant signature must not touch claim state"
     );
     native_phase(|| rollback(&fixture, &authority, &key, &scope, &body)).await;
-    let (status, outcome) = native_phase(|| claim(&fixture, &authority, &key, &scope, &body)).await;
+    let (status, original_bytes) =
+        native_phase(|| claim_wire(&fixture.state, &authority, &key, &scope, &body)).await;
+    let outcome: Value = serde_json::from_slice(&original_bytes).unwrap();
     assert_eq!(
         status,
         StatusCode::OK,
@@ -133,7 +137,13 @@ async fn exercise(ghost: bool) {
     );
     let accepted = serde_json::to_value(&outcome).unwrap();
     let before = native_phase(|| snapshot(&fixture)).await;
-    let (status, replay) = native_phase(|| claim(&fixture, &authority, &key, &scope, &body)).await;
+    let (status, replay_bytes) =
+        native_phase(|| claim_wire(&fixture.state, &authority, &key, &scope, &body)).await;
+    let replay: Value = serde_json::from_slice(&replay_bytes).unwrap();
+    assert_eq!(
+        original_bytes, replay_bytes,
+        "exact retry preserves the actual complete HTTP response bytes"
+    );
     assert_eq!(status, StatusCode::OK, "{replay}");
     assert_eq!(
         accepted, replay,
@@ -251,10 +261,31 @@ async fn claim(
     scope: &ScopeRef,
     body: &arkret_models_crypto::KeyPackagesClaimRequestBody,
 ) -> (StatusCode, Value) {
+    claim_at(&fixture.state, authority, key, scope, body).await
+}
+
+async fn claim_at(
+    state: &AppState,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    key: &SigningKey,
+    scope: &ScopeRef,
+    body: &arkret_models_crypto::KeyPackagesClaimRequestBody,
+) -> (StatusCode, Value) {
+    let (status, bytes) = claim_wire(state, authority, key, scope, body).await;
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+async fn claim_wire(
+    state: &AppState,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    key: &SigningKey,
+    scope: &ScopeRef,
+    body: &arkret_models_crypto::KeyPackagesClaimRequestBody,
+) -> (StatusCode, Vec<u8>) {
     let mut metadata = managed_device_metadata(authority);
     metadata.effective_scope = scope.clone();
     let mut response = managed_device_http_request_with_idempotency_at(
-        &fixture.state,
+        state,
         authority,
         &metadata,
         ServiceOperationId::SelfKeysKeypackagesCommandClaimV1,
@@ -264,11 +295,11 @@ async fn claim(
         body.claim_request_id.as_str(),
     )
     .add_header("content-type", "application/json", true)
-    .send(&service(fixture.state.clone()))
+    .send(&service(state.clone()))
     .await;
     (
         response.status_code.unwrap(),
-        response.take_json().await.unwrap(),
+        response.take_bytes(None).await.unwrap().to_vec(),
     )
 }
 
@@ -714,4 +745,173 @@ async fn native_claim_holds_real_human_counterpart_pcr_until_body_handoff() {
         assert!(!status.is_success(),"old original target must not redeliver after actual revoke: {error}");
         assert_eq!(before,native_phase(||snapshot(&fixture)).await);
     })).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_claim_budget_is_shared_by_independent_station_workers() {
+    for ghost in [false, true] {
+        tokio::spawn(native_phase(|| exercise_worker_budget(ghost)))
+            .await
+            .unwrap();
+    }
+}
+
+async fn exercise_worker_budget(ghost: bool) {
+    let fixture = native_phase(Fixture::new).await;
+    let scope = ScopeRef::Realm {
+        realm_id: fixture.realm.clone(),
+    };
+    native_phase(|| activate_mls(&fixture, scope.clone())).await;
+    let namespace = format!("bridge.{}", uuid::Uuid::now_v7().simple());
+    let native = mls_service(&fixture, &namespace);
+    let install =
+        native_phase(|| fixture.install_package(true, native.package.clone(), &namespace)).await;
+    let bundle = if ghost {
+        let body = native_phase(|| fixture.ghost_body(&install, &namespace, "claim-device")).await;
+        assert_eq!(
+            native_phase(|| fixture.ghost_commit(&install, &body, "claim-device"))
+                .await
+                .0,
+            StatusCode::CREATED
+        );
+        body["managed_actor_bundle"].clone()
+    } else {
+        install.bot_body["managed_actor_bundle"].clone()
+    };
+    let key = SigningKey::from_bytes(&[177; 32]);
+    let device = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
+    let authority = native_phase(|| {
+        authorize(
+            &fixture,
+            &install,
+            &bundle,
+            &namespace,
+            &key,
+            device.clone(),
+            true,
+        )
+    })
+    .await;
+    let event = join_event(
+        &fixture,
+        &install,
+        &authority,
+        &key,
+        &install.bot_outcome.authorization_ref,
+    );
+    let (status, outcome) = native_phase(|| post(&fixture, &authority, &key, &event, vec![])).await;
+    assert_eq!(status, StatusCode::OK, "real native membership: {outcome}");
+    let _read_parent = native_phase(|| {
+        native_business_parent(
+            &fixture,
+            &install,
+            vec![],
+            vec!["ak.event.read".into()],
+            None,
+        )
+    })
+    .await;
+    let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
+        ActorId::account(authority.account_id.clone()),
+        device,
+        arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone()),
+    )
+    .unwrap();
+    let fingerprint =
+        arkret_canonical::ed25519_pubkey_to_did_key_multibase(key.verifying_key().as_bytes());
+    let method = format!("did:key:{fingerprint}#{fingerprint}");
+
+    let mut uploads = Vec::new();
+    for _ in 0..6 {
+        let body = fresh_upload(&identity, &method, &key, &scope);
+        let (status, outcome) =
+            native_phase(|| upload_in_scope(&fixture, &authority, &key, &body, &scope)).await;
+        assert_eq!(status, StatusCode::OK, "fresh actual package: {outcome}");
+        assert_eq!(outcome["accepted"], 1);
+        uploads.push(body);
+    }
+    // Both workers use the same durable identity and ordinary startup hydration.
+    // No package cache is cleared or populated by a test-only back door.
+    let reopened = native_phase(|| {
+        coland_test_support::app_state_with_persistence(
+            fixture.state.config().clone(),
+            std::sync::Arc::new(coland_storage_postgres::PgPersistenceStore::new(
+                fixture.pool.clone(),
+            )),
+        )
+    })
+    .await;
+    native_phase(|| reopened.hydrate()).await.unwrap();
+    assert_eq!(fixture.state.service_core_id(), reopened.service_core_id());
+    let source_id = fixture.state.service_core_id();
+    let store = coland_storage_postgres::PgMlsKeyPackageStore {
+        pool: fixture.pool.clone(),
+    };
+    let mut accepted = Vec::new();
+    let mut bodies = Vec::new();
+    for (index, upload) in uploads.iter().enumerate() {
+        let body = request(
+            &authority,
+            &key,
+            &scope,
+            upload.keypackages[0].keypackage_ref.as_str(),
+        );
+        let state = if index % 2 == 0 {
+            &fixture.state
+        } else {
+            &reopened
+        };
+        let (status, outcome) =
+            native_phase(|| claim_at(state, &authority, &key, &scope, &body)).await;
+        if index < 5 {
+            assert_eq!(status, StatusCode::OK, "attempt {index}: {outcome}");
+            accepted.push(outcome);
+        } else {
+            assert!(
+                !status.is_success(),
+                "six real native claims across two independent workers must share the five-attempt Station budget, got {status}: {outcome}"
+            );
+            let package =
+                native_phase(|| store.get_by_ref(upload.keypackages[0].keypackage_ref.as_str()))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(
+                package.claimed_by_mls_group_id.is_none(),
+                "quota rejection cannot claim the sixth package"
+            );
+            let ledger = native_phase(|| {
+                store.get_peer_claim(source_id.as_str(), body.claim_request_id.as_str())
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(ledger.state, "claim_failed");
+            assert!(ledger.keypackage_id.is_none() && ledger.outcome.is_none());
+        }
+        bodies.push(body);
+    }
+    let before = native_phase(|| snapshot(&fixture)).await;
+    let (status, replay) =
+        native_phase(|| claim_at(&reopened, &authority, &key, &scope, &bodies[0])).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "accepted retry after quota: {replay}"
+    );
+    assert_eq!(
+        replay, accepted[0],
+        "retry preserves the first original receipt"
+    );
+    let (status, error) =
+        native_phase(|| claim_at(&fixture.state, &authority, &key, &scope, &bodies[5])).await;
+    assert!(
+        !status.is_success(),
+        "denied original attempt cannot get a second decision: {error}"
+    );
+    assert_eq!(
+        before,
+        native_phase(|| snapshot(&fixture)).await,
+        "both exact retries leave all business rows and projections unchanged"
+    );
 }

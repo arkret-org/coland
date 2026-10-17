@@ -1004,17 +1004,6 @@ async fn claim_keypackage_at_destination(
         .unsigned_request()
         .requester_principal_id(&body.requester_authorization)
         .ok_or_else(|| peer_claim_schema_violation("claim requester identity is incomplete"))?;
-    let target_rate_limit_key = if let Some(account_id) = &body.target_account_id {
-        account_id
-            .canonical_key()
-            .map_err(|error| AppError::internal(format!("target AccountId key: {error}")))?
-    } else if let Some(agent_id) = &body.target_agent_id {
-        agent_id.as_str().to_owned()
-    } else {
-        return Err(peer_claim_schema_violation(
-            "claim target rate-limit identity is incomplete",
-        ));
-    };
     let body_value = serde_json::to_value(body)
         .map_err(|error| AppError::internal(format!("KeyPackage claim serialize: {error}")))?;
     let source_id = body.service_binding.source_id.as_str().to_owned();
@@ -1032,15 +1021,24 @@ async fn claim_keypackage_at_destination(
         return replay_peer_claim(existing, &request_digest);
     }
     validate_peer_claim_time_window(body)?;
-    if state.peer_keypackage_claim_rate_limited(&source_id, &target_rate_limit_key) {
-        tracing::warn!(
-            %source_id,
-            target_rate_limit_key,
-            reason = "keypackage_claim_rate_limited",
-            "peer KeyPackage claim rejected by protocol quota"
-        );
-        record_peer_claim_failed(state, body, &source_id, &request_digest).await?;
-        return Err(peer_claim_failed());
+    match state
+        .mls_key_packages()
+        .record_peer_claim_attempt(body)
+        .await
+        .map_err(|error| AppError::internal(format!("peer claim attempt budget: {error}")))?
+    {
+        coland_storage::PeerKeyPackageClaimRateDecision::Allowed => {}
+        coland_storage::PeerKeyPackageClaimRateDecision::DuplicateConflict => {
+            return Err(peer_claim_duplicate_conflict());
+        }
+        coland_storage::PeerKeyPackageClaimRateDecision::Unavailable => {
+            return Err(peer_claim_failed());
+        }
+        coland_storage::PeerKeyPackageClaimRateDecision::RateLimited => {
+            tracing::warn!(outward_bucket = "claim_failed", "KeyPackage claim rejected");
+            record_peer_claim_failed(state, body, &source_id, &request_digest).await?;
+            return Err(peer_claim_failed());
+        }
     }
 
     let native_targets = mls_keypackage_native::targets(state, body).await?;
@@ -2195,7 +2193,7 @@ async fn claim_keypackage(
         let session = session.expect("the non-native branch authenticated its real session above");
         let deadline = session.expires_at;
         (
-            crate::boxed_future(|| claim_keypackage_session(state, session, body, req)).await?,
+            crate::boxed_future(|| claim_keypackage_session(state, session, body)).await?,
             deadline,
         )
     };
@@ -2219,7 +2217,6 @@ async fn claim_keypackage_session(
     state: &AppState,
     session: SessionRecord,
     body: KeyPackagesClaimRequestBody,
-    req: &Request,
 ) -> JsonResult<KeyPackagesClaimOutcome> {
     if session.agent_session().is_some()
         != matches!(

@@ -410,6 +410,15 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
         .map_err(|error| error.into_persistence())
     }
 
+    async fn record_peer_claim_attempt(
+        &self,
+        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    ) -> PersistenceResult<coland_storage::PeerKeyPackageClaimRateDecision> {
+        crate::mls_keypackage_claim_budget::record_attempt(&self.pool, body).await
+    }
+    async fn prune_peer_claim_attempts(&self) -> PersistenceResult<usize> {
+        crate::mls_keypackage_claim_budget::prune(&self.pool).await
+    }
     async fn get_peer_claim(
         &self,
         source_id: &str,

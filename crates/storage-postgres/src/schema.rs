@@ -896,6 +896,20 @@ diesel::table! {
 }
 
 diesel::table! {
+    keypackage_claim_attempts (source_id, claim_request_id) {
+        source_id -> Text,
+        claim_request_id -> Text,
+        request_digest -> Text,
+        requester_identity -> Text,
+        target_identity -> Text,
+        source_target_identity -> Text,
+        rejection_reason -> Nullable<Text>,
+        attempted_at -> Timestamptz,
+        expires_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     peer_keypackage_claims (source_id, claim_request_id) {
         source_id -> Text,
         claim_request_id -> Text,
@@ -1499,6 +1513,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     notifications,
     one_time_keys,
     organizations,
+    keypackage_claim_attempts,
     peer_keypackage_claims,
     policy_documents,
     principal_resolution_events,

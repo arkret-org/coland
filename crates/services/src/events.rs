@@ -1221,6 +1221,11 @@ pub trait MlsKeyPackageMaintenancePort: Send + Sync {
         now_unix_ms: i64,
         peer_consume_receipt: Option<&Value>,
     ) -> ServiceResult<Option<MlsKeyPackageState>>;
+    async fn record_peer_claim_attempt(
+        &self,
+        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    ) -> ServiceResult<coland_storage::PeerKeyPackageClaimRateDecision>;
+    async fn prune_peer_claim_attempts(&self) -> ServiceResult<usize>;
     async fn peer_claim(
         &self,
         source_id: &str,
@@ -1358,6 +1363,15 @@ impl MlsKeyPackageService {
         self.key_packages
             .consume_key_package_claim(id, mls_group_id, now_unix_ms, peer_consume_receipt)
             .await
+    }
+    pub async fn record_peer_claim_attempt(
+        &self,
+        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    ) -> ServiceResult<coland_storage::PeerKeyPackageClaimRateDecision> {
+        self.key_packages.record_peer_claim_attempt(body).await
+    }
+    pub async fn prune_peer_claim_attempts(&self) -> ServiceResult<usize> {
+        self.key_packages.prune_peer_claim_attempts().await
     }
     pub async fn peer_claim(
         &self,

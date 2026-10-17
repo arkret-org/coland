@@ -1,5 +1,5 @@
 //! True native requester/recipient evidence, without a synthetic Session.
-use coland_storage::{AppletManagedDeviceScopeGuard, DeviceRevocationStore};
+use coland_storage::AppletManagedDeviceScopeGuard;
 
 use super::*;
 use crate::routing::identity::applet_managed_device::{self, VerifiedAppletManagedDevice};

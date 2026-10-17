@@ -338,6 +338,15 @@ pub struct MlsKeyPackageClaimDelivery {
     pub command: Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>,
 }
 
+/// Private attempt accounting, never a claim receipt or business authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeerKeyPackageClaimRateDecision {
+    Allowed,
+    RateLimited,
+    DuplicateConflict,
+    Unavailable,
+}
+
 /// One candidate CAS attempt for a peer claim. The storage adapter must make
 /// the KeyPackage transition and terminal ledger insert atomic.
 pub struct PeerKeyPackageClaimAttempt<'a> {
@@ -747,6 +756,15 @@ pub trait MlsKeyPackageStore: Send + Sync {
         now_unix_ms: i64,
         peer_consume_receipt: Option<&Value>,
     ) -> PersistenceResult<Option<MlsKeyPackageRow>>;
+    /// Charge an already authenticated original SDK command against the
+    /// shared closed requester, target and source/target budgets. Exact
+    /// retries recover their first decision without another charge.
+    async fn record_peer_claim_attempt(
+        &self,
+        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    ) -> PersistenceResult<PeerKeyPackageClaimRateDecision>;
+    /// Reclaim expired private attempt decisions using the database clock.
+    async fn prune_peer_claim_attempts(&self) -> PersistenceResult<usize>;
     /// Read a peer claim ledger row without revealing KeyPackage inventory.
     async fn get_peer_claim(
         &self,
@@ -771,8 +789,9 @@ pub trait MlsKeyPackageStore: Send + Sync {
         &self,
         keypackage_id: &str,
     ) -> PersistenceResult<Option<PeerKeyPackageClaimLedgerRecord>>;
-    /// Atomically claim one ordinary KeyPackage and persist the exact terminal
-    /// success outcome. Last-resort rows are never eligible on this path.
+    /// Atomically claim one eligible KeyPackage and persist its exact terminal
+    /// outcome. Reusable last-resort packages remain published and keep an
+    /// independent audit for every claim.
     async fn try_claim_peer(
         &self,
         attempt: PeerKeyPackageClaimAttempt<'_>,

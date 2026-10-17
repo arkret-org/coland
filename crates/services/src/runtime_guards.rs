@@ -4,9 +4,6 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::Mutex;
 
-const PEER_KEYPACKAGE_CLAIM_WINDOW: Duration = Duration::seconds(60);
-const PEER_KEYPACKAGE_CLAIM_MAX_PER_WINDOW: u32 = 5;
-const PEER_KEYPACKAGE_CLAIM_TRACKER_MAX_ENTRIES: usize = 16_384;
 const REALM_JOIN_BOOTSTRAP_WINDOW: Duration = Duration::seconds(60);
 const REALM_JOIN_BOOTSTRAP_MAX_PER_WINDOW: u32 = 10;
 const REALM_JOIN_BOOTSTRAP_TRACKER_MAX_ENTRIES: usize = 16_384;
@@ -56,7 +53,6 @@ pub struct RuntimeGuardService {
 }
 
 struct RuntimeGuards {
-    peer_keypackage_claims: Mutex<BTreeMap<(String, String), WindowRecord>>,
     realm_join_bootstraps: Mutex<BTreeMap<(String, String), WindowRecord>>,
     device_pairing_handoffs: Mutex<BTreeMap<String, WindowRecord>>,
     key_backup_downloads: Mutex<BTreeMap<String, WindowRecord>>,
@@ -74,7 +70,6 @@ impl Default for RuntimeGuardService {
     fn default() -> Self {
         Self {
             inner: Arc::new(RuntimeGuards {
-                peer_keypackage_claims: Mutex::new(BTreeMap::new()),
                 realm_join_bootstraps: Mutex::new(BTreeMap::new()),
                 device_pairing_handoffs: Mutex::new(BTreeMap::new()),
                 key_backup_downloads: Mutex::new(BTreeMap::new()),
@@ -85,24 +80,6 @@ impl Default for RuntimeGuardService {
 }
 
 impl RuntimeGuardService {
-    pub fn peer_keypackage_claim_rate_limited(
-        &self,
-        source_id: &str,
-        target_identity_key: &str,
-    ) -> bool {
-        let mut records = self.inner.peer_keypackage_claims.lock();
-        let now = Utc::now();
-        prune_window_records(&mut records, now - PEER_KEYPACKAGE_CLAIM_WINDOW);
-        let key = (source_id.to_owned(), target_identity_key.to_owned());
-        record_window_attempt(
-            &mut records,
-            key,
-            now,
-            PEER_KEYPACKAGE_CLAIM_WINDOW,
-            PEER_KEYPACKAGE_CLAIM_TRACKER_MAX_ENTRIES,
-        ) > PEER_KEYPACKAGE_CLAIM_MAX_PER_WINDOW
-    }
-
     /// Charge one authenticated device-pairing handoff attempt (finalize or
     /// code claim) against all three tiers. Every tier is charged on every
     /// call so a caller cannot dodge the account ceiling by rotating devices.

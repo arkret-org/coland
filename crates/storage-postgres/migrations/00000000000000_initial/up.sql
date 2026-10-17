@@ -1904,6 +1904,26 @@ ALTER TABLE ONLY public.mls_key_packages
 
 CREATE INDEX mls_key_packages_by_owner_endpoint ON public.mls_key_packages USING btree (owner_account_id, actor_id, device_id, endpoint_verification_method, claimed_by_mls_group_id);
 
+-- Authenticated claim attempts share one database-clock budget across workers.
+-- Only identity digests and a short-lived first decision are retained; this
+-- table is neither a claim reservation nor a receipt or authority source.
+CREATE TABLE public.keypackage_claim_attempts (
+    source_id text NOT NULL,
+    claim_request_id text NOT NULL,
+    request_digest text NOT NULL,
+    requester_identity text NOT NULL CHECK (requester_identity ~ '^sha256:[0-9a-f]{64}$'),
+    target_identity text NOT NULL CHECK (target_identity ~ '^sha256:[0-9a-f]{64}$'),
+    source_target_identity text NOT NULL CHECK (source_target_identity ~ '^sha256:[0-9a-f]{64}$'),
+    rejection_reason text CHECK (rejection_reason IS NULL OR rejection_reason='keypackage_claim_rate_limited'),
+    attempted_at timestamptz NOT NULL,
+    expires_at timestamptz NOT NULL CHECK (expires_at > attempted_at),
+    PRIMARY KEY (source_id,claim_request_id)
+);
+CREATE INDEX keypackage_claim_attempts_requester_idx ON public.keypackage_claim_attempts(requester_identity,attempted_at);
+CREATE INDEX keypackage_claim_attempts_target_idx ON public.keypackage_claim_attempts(target_identity,attempted_at);
+CREATE INDEX keypackage_claim_attempts_source_target_idx ON public.keypackage_claim_attempts(source_target_identity,attempted_at);
+CREATE INDEX keypackage_claim_attempts_expiry_idx ON public.keypackage_claim_attempts(expires_at);
+
 CREATE TABLE public.peer_keypackage_claims (
     source_id text NOT NULL,
     claim_request_id text NOT NULL,

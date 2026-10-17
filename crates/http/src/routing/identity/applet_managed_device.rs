@@ -249,8 +249,9 @@ pub(crate) async fn scope_guard_for_authority(
         &record.registration_event,
     )
     .map_err(|_| unavailable())?;
-    let service_did_document =
-        crate::jws_verify::resolve_did_document(state, &epoch.did).map_err(|_| {
+    let service_did_document = crate::jws_verify::resolve_did_document_async(state, &epoch.did)
+        .await
+        .map_err(|_| {
             crate::app_error!(
                 TemporarilyUnavailable,
                 "current Applet Service identity is unavailable"

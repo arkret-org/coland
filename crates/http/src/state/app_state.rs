@@ -1789,18 +1789,6 @@ impl AppState {
         }
     }
 
-    /// Record a new peer KeyPackage claim attempt. Duplicate deliveries are
-    /// checked against the durable idempotency ledger before this method is
-    /// called and therefore do not consume quota.
-    pub fn peer_keypackage_claim_rate_limited(
-        &self,
-        source_id: &str,
-        target_identity_key: &str,
-    ) -> bool {
-        self.runtime_guards
-            .peer_keypackage_claim_rate_limited(source_id, target_identity_key)
-    }
-
     /// Layered quota for the two authenticated device-pairing handoff
     /// operations (`device-lifecycle.md` §2.1.1 clauses 5 and 8).
     pub fn device_pairing_handoff_rate_limited(

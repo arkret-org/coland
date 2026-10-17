@@ -710,6 +710,23 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
             .consume_claim(id, mls_group_id, now_unix_ms, peer_consume_receipt)
             .await?)
     }
+    async fn record_peer_claim_attempt(
+        &self,
+        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    ) -> crate::ServiceResult<coland_storage::PeerKeyPackageClaimRateDecision> {
+        Ok(self
+            .0
+            .mls_key_packages()
+            .record_peer_claim_attempt(body)
+            .await?)
+    }
+    async fn prune_peer_claim_attempts(&self) -> crate::ServiceResult<usize> {
+        Ok(self
+            .0
+            .mls_key_packages()
+            .prune_peer_claim_attempts()
+            .await?)
+    }
     async fn peer_claim(
         &self,
         source_id: &str,

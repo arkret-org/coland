@@ -293,6 +293,48 @@ pub(crate) async fn locked_membership_basis(
     }
 }
 
+// Raw storage bases are also retained by review digests. Business admission
+// consumes only the SDK currents decoded after their complete accepted-source
+// correspondence and writer barriers have been checked.
+async fn locked_circle_current(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    circle: &CircleId,
+) -> PersistenceResult<Circle> {
+    let basis = crate::boxed_future(|| locked_circle_basis(conn, realm, circle)).await?;
+    let value = basis
+        .get("value")
+        .cloned()
+        .ok_or_else(|| unavailable("Circle value is absent"))?;
+    serde_json::from_value(value)
+        .map_err(|error| schema(&format!("stored Circle is invalid: {error}")))
+}
+
+async fn locked_membership_current(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    circle: &CircleId,
+    member: &arkret_wire::ActorId,
+    before: &RealmCommit,
+) -> PersistenceResult<Option<CircleMemberStateCurrent>> {
+    let Some(basis) =
+        crate::boxed_future(|| locked_membership_basis(conn, realm, circle, member, Some(before)))
+            .await?
+    else {
+        return Ok(None);
+    };
+    let value = basis
+        .get("value")
+        .cloned()
+        .ok_or_else(|| unavailable("Circle membership value is absent"))?;
+    let current: CircleMemberStateCurrent = serde_json::from_value(value)
+        .map_err(|error| schema(&format!("stored Circle membership is invalid: {error}")))?;
+    current
+        .validate()
+        .map_err(|error| schema(&error.to_string()))?;
+    Ok(Some(current))
+}
+
 fn circle_id(event: &Event) -> CircleId {
     CircleId::from_event_id(&event.event_id)
 }
@@ -412,7 +454,7 @@ pub(crate) async fn admit_with_audit_in_connection(
                     "cross-actor Circle membership needs its audit and manager cut",
                 ));
             }
-            let next = payload.membership.as_str();
+            let next = payload.membership;
             crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &event.realm_id)
                 .await?;
             // circle.md section 9.1: the parent current must be join, and a
@@ -439,34 +481,43 @@ pub(crate) async fn admit_with_audit_in_connection(
                 )
                 .await?;
             }
-            let circle_basis = locked_circle_basis(conn, realm_id, circle_id).await?;
-            let circle: Circle = serde_json::from_value(circle_basis["value"].clone())
-                .map_err(|error| schema(&format!("stored Circle is invalid: {error}")))?;
+            let circle = locked_circle_current(conn, realm_id, circle_id).await?;
             if circle.state != CircleState::Active {
                 return Err(conflict(
                     ConflictCode::FailedPrecondition,
                     "circle_not_active",
                 ));
             }
-            if !paired && next == "join" && circle.join_rule != CircleJoinRule::Public {
+            if !paired
+                && next == CircleMembership::Join
+                && circle.join_rule != CircleJoinRule::Public
+            {
                 return Err(conflict(
                     ConflictCode::UnsupportedFeature,
                     "Circle self-entry requires a public Circle",
                 ));
             }
-            if next == "knock" && circle.join_rule != CircleJoinRule::Knock {
+            if next == CircleMembership::Knock && circle.join_rule != CircleJoinRule::Knock {
                 return Err(conflict(
                     ConflictCode::FailedPrecondition,
                     "Circle knock requires its knock join rule",
                 ));
             }
             let current =
-                locked_membership_basis(conn, realm_id, circle_id, &member, Some(commit)).await?;
-            let previous = current.as_ref().and_then(|row| row["membership"].as_str());
+                locked_membership_current(conn, realm_id, circle_id, &member, commit).await?;
+            let previous = current.as_ref().map(|row| row.membership);
             let expected_matches = match &payload.expected_membership {
                 WirePresence::Missing => true,
                 WirePresence::Null => previous.is_none(),
-                WirePresence::Value(expected) => previous == Some(expected.as_str()),
+                WirePresence::Value(expected) => {
+                    previous
+                        == Some(match expected {
+                            CircleMembership::Join => MembershipState::Join,
+                            CircleMembership::Knock => MembershipState::Knock,
+                            CircleMembership::Leave => MembershipState::Leave,
+                            CircleMembership::Ban => MembershipState::Ban,
+                        })
+                }
             };
             if !expected_matches {
                 return Err(conflict(
@@ -476,14 +527,20 @@ pub(crate) async fn admit_with_audit_in_connection(
             }
             if !matches!(
                 (previous, next),
-                (None | Some("leave"), "join" | "knock") | (Some("join" | "knock"), "leave")
+                (
+                    None | Some(MembershipState::Leave),
+                    CircleMembership::Join | CircleMembership::Knock
+                ) | (
+                    Some(MembershipState::Join | MembershipState::Knock),
+                    CircleMembership::Leave
+                )
             ) {
                 return Err(conflict(
                     ConflictCode::InvalidMembershipTransition,
                     "Circle self-membership edge is invalid",
                 ));
             }
-            if next == "join" {
+            if next == CircleMembership::Join {
                 let managed = sql_query("SELECT EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.applet.managed_actor.provision' AND e.envelope#>'{payload,actor_id}'=$1) AS present")
                     .bind::<Jsonb,_>(json!(&member)).get_result::<PresentRow>(&mut *conn).await.map_err(PersistenceError::database)?;
                 if managed.present || event.applet_id.is_some() {
@@ -511,7 +568,7 @@ pub(crate) async fn admit_with_audit_in_connection(
                         .await?;
                 }
             }
-            if next == "join" {
+            if next == CircleMembership::Join {
                 let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
                     conn, realm_id, &member,
                 )

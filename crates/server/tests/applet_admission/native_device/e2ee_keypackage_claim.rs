@@ -4,6 +4,8 @@ use std::collections::BTreeSet;
 use coland_storage::MlsKeyPackageStore as _;
 
 use super::*;
+#[path = "e2ee_keypackage_consume.rs"]
+mod consume;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_device_claims_a_genuine_scope_bound_package_without_session() {

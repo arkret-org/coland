@@ -8,7 +8,7 @@ fn denied(detail: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Conflict(format!("capability_denied: {detail}"))
 }
 
-async fn lock_cuts(
+pub(crate) async fn lock_cuts(
     conn: &mut AsyncPgConnection,
     endpoints: &[&AppletManagedDeviceScopeGuard],
     counterparts: &[crate::mls_keypackage_claim_endpoints::ClaimEndpoint],

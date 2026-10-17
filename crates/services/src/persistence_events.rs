@@ -623,6 +623,16 @@ fn encode_mls_contract<T: serde::Serialize>(
 
 #[async_trait::async_trait]
 impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMaintenance {
+    async fn consume_for_applet_device(
+        &self,
+        command: coland_storage::AppletDeviceKeyPackageConsume<'_>,
+    ) -> crate::ServiceResult<coland_storage::MlsKeyPackageConsumption> {
+        Ok(self
+            .0
+            .mls_key_packages()
+            .consume_for_applet_device(command)
+            .await?)
+    }
     async fn store_key_package(
         &self,
         record: &crate::events::MlsKeyPackageState,

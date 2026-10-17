@@ -703,10 +703,38 @@ pub struct MlsKeyPackageRevocation {
     pub records: Vec<MlsKeyPackageRow>,
 }
 
+pub type MlsKeyPackageConsumeReceiptIssuer = std::sync::Arc<
+    dyn Fn(
+            &arkret_models_crypto::KeyPackagesConsumeRequestBody,
+            chrono::DateTime<chrono::Utc>,
+        ) -> PersistenceResult<arkret_models_crypto::KeyPackageConsumeReceipt>
+        + Send
+        + Sync,
+>;
+
+/// Complete original command and trusted ingress evidence for narrow cleanup.
+/// The issuer runs only inside the same accepting transaction as the claim.
+pub struct AppletDeviceKeyPackageConsume<'a> {
+    pub body: &'a arkret_models_crypto::KeyPackagesConsumeRequestBody,
+    pub authority: &'a crate::AppletManagedDeviceAuthority,
+    pub effective_scope: &'a ScopeRef,
+    pub transport_expires_at: chrono::DateTime<chrono::Utc>,
+    pub issue_receipt: &'a MlsKeyPackageConsumeReceiptIssuer,
+}
+
+pub struct MlsKeyPackageConsumption {
+    pub outcome: arkret_models_crypto::KeyPackagesConsumeOutcome,
+    pub record: MlsKeyPackageRow,
+}
+
 /// G3.S1 — KeyPackage store. The `try_claim` CAS path is what
 /// guarantees at-most-one Welcome per published KeyPackage.
 #[async_trait]
 pub trait MlsKeyPackageStore: Send + Sync {
+    async fn consume_for_applet_device(
+        &self,
+        command: AppletDeviceKeyPackageConsume<'_>,
+    ) -> PersistenceResult<MlsKeyPackageConsumption>;
     /// Insert a fresh KeyPackage row. Returns `Ok(false)` if the
     /// `id` is already present (re-publishes of the same id are
     /// idempotent — production fixtures sometimes resubmit on retry).

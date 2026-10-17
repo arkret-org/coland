@@ -821,6 +821,7 @@ async fn verify_welcomes(
         .collect::<BTreeMap<_, _>>();
     let local = state.service_core_id();
     let mut claims = BTreeMap::new();
+    let mut native_targets = BTreeMap::new();
     for welcome in welcomes {
         verify_welcome_proof(welcome, producer_method, producer_key)?;
         if welcome.realm_id != event.realm_id
@@ -839,6 +840,9 @@ async fn verify_welcomes(
             continue;
         }
         let (claim, record) = resolve_claim(state, event, welcome).await?;
+        if let Some(guard) = native_welcome_target(state, welcome).await? {
+            native_targets.insert(welcome.welcome_id.clone(), guard);
+        }
         let leaf = arkret_mls::author_leaf_from_key_package_bytes(
             &arkret_canonical::base64url_decode(&record.keypackage).map_err(schema)?,
             0,
@@ -875,6 +879,7 @@ async fn verify_welcomes(
         verified.push(VerifiedMlsWelcome {
             delivery: welcome.clone(),
             claim,
+            applet_device_scope_guard: native_targets.remove(&welcome.welcome_id),
             roster_witness: None,
         });
     }
@@ -1431,4 +1436,39 @@ mod tests {
             Some(ConflictCode::SignatureInvalid)
         );
     }
+}
+
+/// Resolver evidence for a real native recipient. Storage independently checks
+/// that evidence and refuses an omitted proof for a native publication.
+pub(super) async fn native_welcome_target(
+    state: &AppState,
+    welcome: &MlsWelcomeDelivery,
+) -> ServiceResult<Option<coland_storage::AppletManagedDeviceScopeGuard>> {
+    let MlsWelcomeRecipientEndpoint::Device { device_id } = &welcome.recipient_endpoint else {
+        return Ok(None);
+    };
+    let account = welcome
+        .recipient_actor_id
+        .as_account_id()
+        .ok_or_else(|| failed_precondition("Welcome has no Account"))?;
+    let Some(authority) = state
+        .persistence()
+        .applet_managed_device_authority(account, device_id, chrono::Utc::now())
+        .await?
+    else {
+        return Ok(None);
+    };
+    crate::routing::identity::applet_managed_device::scope_guard_for_authority(
+        state,
+        &authority,
+        &welcome.effective_scope,
+    )
+    .await
+    .map(Some)
+    .map_err(|error| {
+        ServiceError::protocol(
+            arkret_wire::ErrorCode::TemporarilyUnavailable,
+            error.to_string(),
+        )
+    })
 }

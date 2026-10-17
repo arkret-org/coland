@@ -940,10 +940,13 @@ pub struct MlsInstalledBase {
 /// local claim: its Welcome rides the Commit's committed-replication intent
 /// to that Station, which re-verifies the claim (encryption-and-audit.md
 /// §2.2).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct VerifiedMlsWelcome {
     pub delivery: MlsWelcomeDelivery,
     pub claim: Option<MlsWelcomeClaimLedgerKey>,
+    /// Required for a locally hosted native package; storage checks the original
+    /// package and current PCR/scope facts inside the accepting transaction.
+    pub applet_device_scope_guard: Option<crate::AppletManagedDeviceScopeGuard>,
     /// Absent until the immutable Genesis selector is verified from the
     /// accepted committed-replication carrier.
     pub roster_witness: Option<VerifiedMlsRecipientRosterWitness>,

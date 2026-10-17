@@ -53,7 +53,19 @@ fn mls_service(fixture: &Fixture, namespace: &str) -> NativeAppletService {
     native
 }
 
+struct MlsGenesisRuntime {
+    group: arkret_mls::ArkretMlsGroup,
+    accepted: arkret_wire::CommittedEventFullView,
+}
+
 async fn activate_mls(fixture: &Fixture, scope: ScopeRef) {
+    let _ = native_phase(|| activate_mls_with_private_state(fixture, scope)).await;
+}
+
+async fn activate_mls_with_private_state(
+    fixture: &Fixture,
+    scope: ScopeRef,
+) -> Box<MlsGenesisRuntime> {
     let actor = ActorId::account(fixture.pcr.history.account.clone());
     let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
         actor.clone(),
@@ -66,7 +78,7 @@ async fn activate_mls(fixture: &Fixture, scope: ScopeRef) {
     let binding =
         arkret_models_crypto::MlsGovernanceBindingPayload::new(scope.clone(), None, 0, 0, 0)
             .unwrap();
-    let group = identity
+    let mut group = identity
         .create_group_with_governance_binding(&scope, &binding)
         .unwrap();
     let (info, tree) = group.public_group_state_bytes().unwrap();
@@ -92,7 +104,7 @@ async fn activate_mls(fixture: &Fixture, scope: ScopeRef) {
         base: None,
         epoch: 0,
         public_state: tracker.export_state().unwrap(),
-        member_principals: [actor].into_iter().collect(),
+        member_principals: [actor.clone()].into_iter().collect(),
         consumed_proposals: vec![],
         public_blobs: vec![],
     });
@@ -101,6 +113,21 @@ async fn activate_mls(fixture: &Fixture, scope: ScopeRef) {
         .await
         .unwrap();
     assert_accepted_event(fixture, &event).await;
+    group
+        .install_local_creator_binding(actor, Some(fixture.pcr.history.events[1].event_id.clone()))
+        .unwrap();
+    let store = PgAuthorityCommitStore {
+        pool: fixture.pool.clone(),
+    };
+    let accepted = native_phase(|| store.committed_event(&event.event_id))
+        .await
+        .unwrap()
+        .unwrap();
+    let accepted = arkret_wire::CommittedEventFullView {
+        event: accepted.event,
+        commit: accepted.commit,
+    };
+    Box::new(MlsGenesisRuntime { group, accepted })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1189,6 +1189,10 @@ pub use coland_storage::{
 
 #[async_trait::async_trait]
 pub trait MlsKeyPackageMaintenancePort: Send + Sync {
+    async fn consume_for_applet_device(
+        &self,
+        command: coland_storage::AppletDeviceKeyPackageConsume<'_>,
+    ) -> ServiceResult<coland_storage::MlsKeyPackageConsumption>;
     async fn store_key_package(&self, record: &MlsKeyPackageState) -> ServiceResult<bool>;
     async fn store_key_package_for_applet_device(
         &self,
@@ -1303,6 +1307,12 @@ pub struct MlsKeyPackageService {
 }
 
 impl MlsKeyPackageService {
+    pub async fn consume_for_applet_device(
+        &self,
+        command: coland_storage::AppletDeviceKeyPackageConsume<'_>,
+    ) -> ServiceResult<coland_storage::MlsKeyPackageConsumption> {
+        self.key_packages.consume_for_applet_device(command).await
+    }
     pub fn new(key_packages: Arc<dyn MlsKeyPackageMaintenancePort>) -> Self {
         Self { key_packages }
     }

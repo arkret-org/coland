@@ -397,6 +397,7 @@ pub(crate) async fn commit_mls_group_current_result_in_connection(
         let Some(claim) = welcome.claim.as_ref() else {
             continue;
         };
+        require_native_welcome_target(conn, welcome).await?;
         require_live_claim(conn, claim, commit.committed_at).await?;
         crate::devices::enqueue_mls_welcome_in_connection(
             conn,
@@ -627,12 +628,19 @@ async fn queue_one_replicated_welcome(
         bind_claim_welcome_in_connection(conn, claim, delivery).await?;
         return store_recipient_roster_outbox(conn, event, commit, welcome, at).await;
     }
+    require_native_welcome_target(conn, welcome).await?;
     require_live_claim(conn, claim, at).await?;
     crate::devices::enqueue_mls_welcome_in_connection(conn, delivery, event_pk, at, None)
         .await
         .map_err(crate::PgTransactionError::into_persistence)?;
     bind_claim_welcome_in_connection(conn, claim, delivery).await?;
-    store_recipient_roster_outbox(conn, event, commit, welcome, at).await
+    store_recipient_roster_outbox(conn, event, commit, welcome, at).await?;
+    if welcome.applet_device_scope_guard.is_some() {
+        // Queue/outbox writers may wait while temporal sources expire. Refuse
+        // only this delivery at the replica's existing savepoint.
+        crate::boxed_future(|| require_native_welcome_target(conn, welcome)).await?;
+    }
+    Ok(())
 }
 
 async fn store_recipient_roster_outbox(
@@ -991,6 +999,101 @@ async fn require_joined_recipient(
 
 /// The claim ledger row a Welcome was verified against must still hold the
 /// same request and a live claim (device-lifecycle.md, claim ledger rules).
+/// A historical claim cannot authorize a new native Welcome after a scope
+/// fence. Discover the immutable package from the original ledger, then check
+/// its exact original Account/Device and all current sources at the held cut.
+pub(crate) async fn require_native_welcome_target(
+    conn: &mut AsyncPgConnection,
+    welcome: &coland_storage::VerifiedMlsWelcome,
+) -> PersistenceResult<()> {
+    let claim = welcome
+        .claim
+        .as_ref()
+        .ok_or_else(|| failed_precondition("local Welcome has no claim"))?;
+    #[derive(QueryableByName)]
+    struct Package {
+        #[diesel(sql_type=Text)]
+        keypackage_ref: String,
+        #[diesel(sql_type=Nullable<Jsonb>)]
+        effective_scope: Option<serde_json::Value>,
+        #[diesel(sql_type=Nullable<BigInt>)]
+        claim_expires_at_unix_ms: Option<i64>,
+    }
+    // Preserve the existing non-native verified ledger path. Native identity
+    // is independent of a caller-supplied guard and survives Device revocation
+    // and removal of unused material.
+    let account = welcome
+        .delivery
+        .recipient_actor_id
+        .as_account_id()
+        .ok_or_else(|| failed_precondition("Welcome has no Account"))?;
+    let native=sql_query("SELECT g.envelope AS value FROM principal_resolutions p JOIN canonical_events g ON g.envelope->>'event_id'=p.genesis_event_id WHERE p.principal_id=$1 AND p.station_id=$2 AND g.state='committed' AND g.envelope #>> '{payload,object,purpose}'='applet_managed_control'")
+        .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str())
+        .get_result::<HistoryAccessRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.is_some();
+    let package=sql_query("SELECT p.keypackage_ref,p.effective_scope,l.claim_expires_at_unix_ms FROM peer_keypackage_claims l JOIN mls_key_packages p ON p.id=l.keypackage_id WHERE l.source_id=$1 AND l.claim_request_id=$2 AND l.request_digest=$3")
+        .bind::<Text,_>(&claim.source_id).bind::<Text,_>(&claim.claim_request_id).bind::<Text,_>(&claim.request_digest)
+        .get_result::<Package>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    let Some(package) = package else {
+        if native || welcome.applet_device_scope_guard.is_some() {
+            return Err(failed_precondition(
+                "native Welcome original package is unavailable",
+            ));
+        }
+        return Ok(());
+    };
+    let guard = match (&package.effective_scope, &welcome.applet_device_scope_guard) {
+        (None, None) if !native => return Ok(()),
+        (Some(_), Some(guard)) => guard,
+        _ => {
+            return Err(failed_precondition(
+                "Welcome native package requires its exact current proof",
+            ));
+        }
+    };
+    if serde_json::to_value(&guard.effective_scope).map_err(PersistenceError::database)?
+        != package.effective_scope.unwrap()
+        || welcome.delivery.effective_scope != guard.effective_scope
+        || welcome.delivery.recipient_actor_id
+            != arkret_wire::ActorId::account(guard.authority.account_id.clone())
+        || !matches!(&welcome.delivery.recipient_endpoint,arkret_wire::MlsWelcomeRecipientEndpoint::Device{device_id} if device_id==&guard.authority.device_id)
+    {
+        return Err(binding_mismatch(
+            "Welcome differs from its native recipient proof",
+        ));
+    }
+    // Local UOWs planned this PCR in their ordered current cut. A replica may
+    // already hold its business cut: avoid an inverse-order wait and drop this
+    // delivery at its savepoint if another transaction owns the PCR.
+    sql_query(
+        "SELECT to_jsonb(a) AS value FROM realm_authorities a WHERE realm_id=$1 FOR UPDATE NOWAIT",
+    )
+    .bind::<Text, _>(guard.authority.pcr_realm_id.as_str())
+    .get_result::<HistoryAccessRow>(&mut *conn)
+    .await
+    .map_err(|error| match error {
+        diesel::result::Error::DatabaseError(_, ref info)
+            if info.message().contains("could not obtain lock") =>
+        {
+            PersistenceError::Conflict("temporarily_unavailable: native Welcome PCR is busy".into())
+        }
+        other => PersistenceError::database(other),
+    })?;
+    // All current cuts precede the package/ledger lock, as in claim and consume.
+    crate::mls_keypackage_claim_admission::lock_cuts(conn, &[guard], &[]).await?;
+    let row = crate::mls::key_package_for_delivery(conn, &package.keypackage_ref)
+        .await?
+        .ok_or_else(|| failed_precondition("Welcome original package disappeared"))?;
+    let deadline = package
+        .claim_expires_at_unix_ms
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .ok_or_else(|| failed_precondition("native Welcome has no original claim expiry"))?
+        .min(guard.authority.expires_at);
+    crate::boxed_future(|| {
+        crate::mls_keypackage_claim_admission::require_target(conn, &row, guard, deadline)
+    })
+    .await
+}
+
 async fn require_live_claim(
     conn: &mut AsyncPgConnection,
     claim: &coland_storage::MlsWelcomeClaimLedgerKey,

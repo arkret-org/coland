@@ -80,6 +80,7 @@ url = "2.5"
 uuid = { workspace = true, features = ["v4", "v7", "serde"] }
 
 [dev-dependencies]
+garth = { version = "0.3.0", path = "../../../garth", default-features = false }
 arkret-bridge-runtime = { version = "0.3.0", path = "../../../bridges/crates/runtime", default-features = false, features = ["edge", "managed-authoring"] }
 coland-contracts.workspace = true
 diesel = { workspace = true, features = ["postgres", "serde_json"] }

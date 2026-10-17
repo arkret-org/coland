@@ -2217,6 +2217,7 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
                 claim_request_id: ledger.claim_request_id.clone(),
                 request_digest: ledger.request_digest.clone(),
             }),
+            applet_device_scope_guard: None,
             roster_witness: Some(sidecar_readiness::add_witness(
                 claim_outcome,
                 &delivery,
@@ -2509,7 +2510,7 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
             )
             .unwrap(),
             request_digest: arkret_wire::Hash::new(
-                arkret_canonical::canonical_sha256(&consume.unsigned()).unwrap(),
+                arkret_models_crypto::keypackages_consume_request_digest(&consume).unwrap(),
             )
             .unwrap(),
             claim_id,
@@ -12097,6 +12098,7 @@ async fn owned_consumer_queue_later_welcome(
             claim_request_id: ledger.claim_request_id.clone(),
             request_digest: ledger.request_digest.clone(),
         }),
+        applet_device_scope_guard: None,
         roster_witness: Some(sidecar_readiness::add_witness(
             claim_outcome,
             &delivery,

@@ -169,12 +169,22 @@ async fn verified_replicated_welcomes(
             refused(&"the recipient is not hosted here");
             continue;
         }
-        match super::authority_mls_unit::resolve_claim(state, event, welcome).await {
-            Ok((claim, _)) => verified.push(VerifiedMlsWelcome {
-                delivery: welcome.clone(),
-                claim: Some(claim),
-                roster_witness: None,
-            }),
+        let preparation: ServiceResult<_> = async {
+            let (claim, _) =
+                super::authority_mls_unit::resolve_claim(state, event, welcome).await?;
+            let guard = super::authority_mls_unit::native_welcome_target(state, welcome).await?;
+            Ok((claim, guard))
+        }
+        .await;
+        match preparation {
+            Ok((claim, guard)) => {
+                verified.push(VerifiedMlsWelcome {
+                    delivery: welcome.clone(),
+                    claim: Some(claim),
+                    applet_device_scope_guard: guard,
+                    roster_witness: None,
+                });
+            }
             Err(error @ (ServiceError::Database(_) | ServiceError::Internal(_))) => {
                 return Err(error);
             }

@@ -2973,8 +2973,13 @@ async fn consume_keypackages(
     req: &mut Request,
 ) -> JsonResult<KeyPackagesConsumeOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
     let body = body.into_inner();
+    if let Ok(native) = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>(
+    ) {
+        return crate::boxed_future(|| mls_keypackage_native::consume(state, native, &body)).await;
+    }
+    let session = aa.authenticated_session(state, req).await?;
     let durable_receipt = &body.recipient_durable_receipt;
     let recipient_principal_id = durable_receipt
         .recipient_principal_id()
@@ -3408,7 +3413,7 @@ fn build_keypackage_consume_receipt(
 fn consume_request_digest(
     body: &KeyPackagesConsumeRequestBody,
 ) -> Result<arkret_wire::Hash, AppError> {
-    let digest = arkret_canonical::canonical_sha256(&body.unsigned())
+    let digest = arkret_models_crypto::keypackages_consume_request_digest(body)
         .map_err(|error| AppError::internal(format!("consume request digest failed: {error}")))?;
     arkret_wire::Hash::new(digest)
         .map_err(|error| AppError::internal(format!("consume request digest invalid: {error}")))

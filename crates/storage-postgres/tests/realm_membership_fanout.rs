@@ -4501,6 +4501,7 @@ fn replicated_welcome(
             },
         },
         claim: Some(claim),
+        applet_device_scope_guard: None,
         roster_witness: None,
     }
 }

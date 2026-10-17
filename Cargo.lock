@@ -1889,6 +1889,7 @@ dependencies = [
  "dotenvy",
  "ed25519-dalek 3.0.0",
  "floria-contracts",
+ "garth",
  "futures-util",
  "hex",
  "hmac 0.13.0",

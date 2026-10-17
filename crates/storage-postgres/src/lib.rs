@@ -128,6 +128,7 @@ mod mls_group_state_material_read;
 mod mls_keypackage_claim_admission;
 mod mls_keypackage_claim_budget;
 mod mls_keypackage_claim_endpoints;
+mod mls_keypackage_consume;
 mod mls_keypackage_publication;
 mod mls_keypackage_revocation;
 mod mls_recipient_attestation_outbox;

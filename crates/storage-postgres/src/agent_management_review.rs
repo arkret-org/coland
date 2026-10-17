@@ -1486,13 +1486,23 @@ pub(crate) async fn lock_candidate_current_realms_in_connection(
     event: &Event,
     prepared: Option<&coland_storage::EventApprovalCommit>,
     producer: Option<&coland_storage::SelfProducerCommitGuard>,
+    welcomes: &[coland_storage::VerifiedMlsWelcome],
 ) -> PersistenceResult<()> {
-    let extra_realms = match producer {
+    let mut extra_realms = welcomes
+        .iter()
+        .filter_map(|welcome| {
+            welcome
+                .applet_device_scope_guard
+                .as_ref()
+                .map(|guard| guard.authority.pcr_realm_id.clone())
+        })
+        .collect::<Vec<_>>();
+    extra_realms.extend(match producer {
         Some(coland_storage::SelfProducerCommitGuard::AppletManagedDevice(guard)) => {
             vec![guard.authority.pcr_realm_id.clone()]
         }
         _ => Vec::new(),
-    };
+    });
     let Some(prepared) = prepared else {
         if !extra_realms.is_empty() {
             lock_current_account_realms(conn, &event.realm_id, &[], None, &extra_realms).await?;

@@ -182,6 +182,12 @@ impl PgMlsKeyPackageStore {
 }
 #[async_trait]
 impl MlsKeyPackageStore for PgMlsKeyPackageStore {
+    async fn consume_for_applet_device(
+        &self,
+        command: coland_storage::AppletDeviceKeyPackageConsume<'_>,
+    ) -> PersistenceResult<coland_storage::MlsKeyPackageConsumption> {
+        crate::mls_keypackage_consume::consume(&self.pool, command).await
+    }
     async fn peer_claim_candidates(
         &self,
         body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
@@ -1138,7 +1144,7 @@ pub(super) struct MlsKeyPackagePgRow {
 }
 
 #[derive(QueryableByName)]
-struct PeerKeyPackageClaimPgRow {
+pub(super) struct PeerKeyPackageClaimPgRow {
     #[diesel(sql_type = Text)]
     source_id: arkret_wire::DidCoreId,
     #[diesel(sql_type = Text)]

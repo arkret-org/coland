@@ -1083,6 +1083,7 @@ async fn mls_lifecycle_body() {
             claim_request_id: ledger.claim_request_id.clone(),
             request_digest: ledger.request_digest.clone(),
         }),
+        applet_device_scope_guard: None,
         roster_witness: None,
     }];
     commit_request.authority_commit.recipient_queue_capacity = 16;

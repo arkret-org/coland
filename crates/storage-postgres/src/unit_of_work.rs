@@ -2548,6 +2548,7 @@ async fn commit_one_inner(
         event,
         event_approvals,
         request.self_producer_guard.as_ref(),
+        &request.authority_commit.welcomes,
     )
     .await?;
 
@@ -3257,6 +3258,19 @@ async fn commit_prepared_event_inner(
             crate::mimi_admission::record_report_idempotency_in_connection(conn, record).await?;
         } else {
             record_idempotency_in_connection(conn, record).await?;
+        }
+    }
+    if matches!(authority_write, AuthorityCommitWriteOutcome::Committed) {
+        // A queue or later writer can wait beyond a native Welcome's claim or
+        // consent window. Keep the original held cuts and recheck physical
+        // time after all per-Event durable writes, before accepting the unit.
+        for welcome in &request.authority_commit.welcomes {
+            if welcome.applet_device_scope_guard.is_some() {
+                crate::boxed_future(|| {
+                    crate::mls_group_current_results::require_native_welcome_target(conn, welcome)
+                })
+                .await?;
+            }
         }
     }
     Ok(())

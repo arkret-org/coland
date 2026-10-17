@@ -222,3 +222,77 @@ pub(super) fn peer_deadline(req: &Request) -> Result<DateTime<Utc>, AppError> {
         .map_err(|_| peer_claim_failed())?;
     DateTime::from_timestamp(signature.expires, 0).ok_or_else(peer_claim_failed)
 }
+
+pub(super) async fn consume(
+    state: &AppState,
+    native: &VerifiedAppletManagedDevice,
+    body: &KeyPackagesConsumeRequestBody,
+) -> JsonResult<KeyPackagesConsumeOutcome> {
+    body.validate_shape().map_err(AppError::param_invalid)?;
+    let receipt = &body.recipient_durable_receipt;
+    let authority = &native.authority;
+    let arkret_models_crypto::RecipientMlsDurableSigner::Device {
+        recipient_account_id,
+        recipient_device_id,
+        device_verification_method,
+    } = &receipt.recipient
+    else {
+        return Err(AppError::capability_denied(
+            "native consume requires its real Device",
+        ));
+    };
+    let fingerprint = arkret_canonical::ed25519_pubkey_to_did_key_multibase(&authority.public_key);
+    if native.operation != arkret_wire::ServiceOperationId::SelfKeysKeypackagesCommandConsumeV1
+        || recipient_account_id != &authority.account_id
+        || recipient_device_id != &authority.device_id
+        || !crate::routing::identity::device_signature_kid_points_to_device_key(
+            device_verification_method.as_str(),
+            authority.account_id.principal_id.as_str(),
+            &format!("did:key:{fingerprint}"),
+        )
+    {
+        return Err(AppError::capability_denied(
+            "native consume differs from its original Device",
+        ));
+    }
+    let issuance_state = state.clone();
+    let issuer: coland_storage::MlsKeyPackageConsumeReceiptIssuer =
+        std::sync::Arc::new(move |body, at| {
+            build_keypackage_consume_receipt(&issuance_state, body, at)
+                .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
+        });
+    let consumed = state
+        .mls_key_packages()
+        .consume_for_applet_device(coland_storage::AppletDeviceKeyPackageConsume {
+            body,
+            authority,
+            effective_scope: &native.metadata.effective_scope,
+            transport_expires_at: native.transport_expires_at,
+            issue_receipt: &issuer,
+        })
+        .await
+        .map_err(|error| match error {
+            coland_services::ServiceError::Conflict(detail)
+                if detail.starts_with("capability_denied:") =>
+            {
+                AppError::capability_denied("native consume current Device is unavailable")
+            }
+            coland_services::ServiceError::Conflict(_)
+            | coland_services::ServiceError::NotFound(_) => {
+                AppError::conflict("native consume differs from its original durable delivery")
+            }
+            coland_services::ServiceError::SchemaViolation(_) => {
+                AppError::param_invalid("native consume is invalid")
+            }
+            _ => crate::app_error!(
+                TemporarilyUnavailable,
+                "native consume persistence is unavailable"
+            ),
+        })?;
+    if let Some(at) = consumed.record.consumed_at {
+        state
+            .projections()
+            .mark_key_package_consumed(&consumed.record.id, at);
+    }
+    json_ok(consumed.outcome)
+}

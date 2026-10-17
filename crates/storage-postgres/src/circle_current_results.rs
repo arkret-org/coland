@@ -26,12 +26,6 @@ struct CircleRow {
 }
 
 #[derive(diesel::QueryableByName)]
-struct MemberRow {
-    #[diesel(sql_type = Text)]
-    membership: String,
-}
-
-#[derive(diesel::QueryableByName)]
 struct PresentRow {
     #[diesel(sql_type = Bool)]
     present: bool,
@@ -157,6 +151,146 @@ fn member_state_payload(event: &Event) -> PersistenceResult<CircleMemberStatePay
     event
         .as_circle_member_state()
         .map_err(|error| schema(&format!("Circle membership payload is invalid: {error}")))
+}
+
+fn member_current(event: &Event) -> PersistenceResult<CircleMemberStateCurrent> {
+    let payload = member_state_payload(event)?;
+    let current = CircleMemberStateCurrent {
+        membership: serde_json::from_value(json!(payload.membership))
+            .map_err(|_| schema("membership invalid"))?,
+        parent_membership_revision: payload.parent_membership_revision,
+        effective_at: payload.effective_at.unwrap_or(event.created_at),
+    };
+    current
+        .validate()
+        .map_err(|error| schema(&error.to_string()))?;
+    Ok(current)
+}
+
+fn unavailable(detail: &str) -> PersistenceError {
+    PersistenceError::Conflict(format!("revision_unavailable: {detail}"))
+}
+
+#[derive(diesel::QueryableByName)]
+struct AcceptedBasis {
+    #[diesel(sql_type = Jsonb)]
+    record: Value,
+    #[diesel(sql_type = Jsonb)]
+    envelope: Value,
+    #[diesel(sql_type = Jsonb)]
+    commit_json: Value,
+}
+
+/// Keep the actual locked Circle and its complete accepted create together.
+pub(crate) async fn locked_circle_basis(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    circle: &CircleId,
+) -> PersistenceResult<Value> {
+    let row = sql_query("SELECT to_jsonb(r) AS record,e.envelope,c.commit_json FROM circle_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position AND c.stream_ref=r.source_stream_ref JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE r.realm_id=$1 AND r.circle_id=$2 FOR SHARE OF r,c,e")
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(circle.as_str())
+        .get_result::<AcceptedBasis>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+        .ok_or_else(|| unavailable("Circle current has no complete accepted source"))?;
+    let event: Event = serde_json::from_value(row.envelope).map_err(PersistenceError::database)?;
+    let commit: RealmCommit =
+        serde_json::from_value(row.commit_json).map_err(PersistenceError::database)?;
+    let mut payload: CircleCreatePayload =
+        serde_json::from_value(json!(&event.payload)).map_err(PersistenceError::database)?;
+    payload.object.id = Some(circle.clone());
+    if event.kind != EventKind::CircleCreate
+        || CircleId::from_event_id(&event.event_id) != *circle
+        || event.realm_id != *realm
+        || event.scope_ref
+            != (ScopeRef::Realm {
+                realm_id: realm.clone(),
+            })
+        || commit.event_ref != event.event_id
+        || commit.realm_id != *realm
+        || commit.stream_ref
+            != (CommitStreamRef::Realm {
+                realm_id: realm.clone(),
+            })
+        || row.record["value"] != json!(payload.object)
+    {
+        return Err(unavailable(
+            "Circle current differs from its actual accepted create",
+        ));
+    }
+    Ok(row.record)
+}
+
+/// Absence is proved from the complete local Circle stream, not inferred from
+/// a missing current row. A previous source with a lost or corrupt projection
+/// is unavailable, and cannot become a new self-join.
+pub(crate) async fn locked_membership_basis(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    circle: &CircleId,
+    member: &arkret_wire::ActorId,
+    before: Option<&RealmCommit>,
+) -> PersistenceResult<Option<Value>> {
+    let stream = json!(CommitStreamRef::Circle {
+        realm_id: realm.clone(),
+        circle_id: circle.clone()
+    });
+    // Final admission runs inside the accepting transaction after its Commit
+    // insert. That candidate is not an earlier membership source; review has
+    // no candidate Commit and instead pins the complete accepted current.
+    let before_position = before
+        .map(|commit| {
+            if commit.realm_id != *realm || json!(commit.stream_ref) != stream {
+                return Err(unavailable(
+                    "Circle pre-state cut differs from its actual stream",
+                ));
+            }
+            i64::try_from(commit.stream_position).map_err(PersistenceError::database)
+        })
+        .transpose()?;
+    let missing = sql_query("SELECT EXISTS(SELECT 1 FROM realm_commits c LEFT JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE c.realm_id=$1 AND c.stream_ref=$2 AND e.pk IS NULL) AS present")
+        .bind::<Text,_>(realm.as_str()).bind::<Jsonb,_>(&stream).get_result::<PresentRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    if missing.present {
+        return Err(unavailable("Circle history has an unavailable original"));
+    }
+    let current = sql_query("SELECT to_jsonb(m) AS value FROM circle_member_state_current_results m WHERE realm_id=$1 AND circle_id=$2 AND member_id=$3 FOR UPDATE")
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(circle.as_str()).bind::<Text,_>(member.to_string())
+        .get_result::<CircleRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    let latest = sql_query("SELECT '{}'::jsonb AS record,e.envelope,c.commit_json FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE c.realm_id=$1 AND c.stream_ref=$2 AND e.kind='ak.circle.member.state' AND e.envelope#>'{payload,member_id}'=$3 AND ($4::bigint IS NULL OR c.stream_position<$4) ORDER BY c.stream_position DESC LIMIT 1 FOR SHARE OF c,e")
+        .bind::<Text,_>(realm.as_str()).bind::<Jsonb,_>(&stream).bind::<Jsonb,_>(json!(member)).bind::<diesel::sql_types::Nullable<BigInt>,_>(before_position)
+        .get_result::<AcceptedBasis>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    match (current, latest) {
+        (None, None) => Ok(None),
+        (Some(row), Some(original)) => {
+            let event: Event =
+                serde_json::from_value(original.envelope).map_err(PersistenceError::database)?;
+            let commit: RealmCommit =
+                serde_json::from_value(original.commit_json).map_err(PersistenceError::database)?;
+            let payload = member_state_payload(&event)?;
+            let expected = member_current(&event)?;
+            if event.realm_id != *realm
+                || event.scope_ref
+                    != (ScopeRef::Circle {
+                        realm_id: realm.clone(),
+                        circle_id: circle.clone(),
+                    })
+                || payload.circle_id != *circle
+                || payload.member_id != *member
+                || commit.realm_id != *realm
+                || commit.event_ref != event.event_id
+                || json!(commit.stream_ref) != stream
+                || row.value["current_commit_id"] != json!(commit.commit_id)
+                || row.value["current_stream_position"] != json!(commit.stream_position)
+                || row.value["source_stream_ref"] != stream
+                || row.value["membership"] != json!(expected.membership)
+                || row.value["value"] != json!(expected)
+            {
+                return Err(unavailable(
+                    "Circle membership current differs from its latest accepted source",
+                ));
+            }
+            Ok(Some(row.value))
+        }
+        _ => Err(unavailable("Circle membership source and current disagree")),
+    }
 }
 
 fn circle_id(event: &Event) -> CircleId {
@@ -305,17 +439,8 @@ pub(crate) async fn admit_with_audit_in_connection(
                 )
                 .await?;
             }
-            let circle = sql_query(
-                "SELECT value FROM circle_current_results WHERE realm_id=$1 AND circle_id=$2 FOR SHARE",
-            )
-            .bind::<Text, _>(event.realm_id.as_str())
-            .bind::<Text, _>(circle_id.as_str())
-            .get_result::<CircleRow>(&mut *conn)
-            .await
-            .optional()
-            .map_err(PersistenceError::database)?
-            .ok_or_else(|| PersistenceError::NotFound("Circle is not available".to_owned()))?;
-            let circle: Circle = serde_json::from_value(circle.value)
+            let circle_basis = locked_circle_basis(conn, realm_id, circle_id).await?;
+            let circle: Circle = serde_json::from_value(circle_basis["value"].clone())
                 .map_err(|error| schema(&format!("stored Circle is invalid: {error}")))?;
             if circle.state != CircleState::Active {
                 return Err(conflict(
@@ -335,17 +460,9 @@ pub(crate) async fn admit_with_audit_in_connection(
                     "Circle knock requires its knock join rule",
                 ));
             }
-            let current = sql_query(
-                "SELECT membership FROM circle_member_state_current_results \
-                 WHERE circle_id=$1 AND member_id=$2 FOR UPDATE",
-            )
-            .bind::<Text, _>(circle_id.as_str())
-            .bind::<Text, _>(member.to_string())
-            .get_result::<MemberRow>(&mut *conn)
-            .await
-            .optional()
-            .map_err(PersistenceError::database)?;
-            let previous = current.as_ref().map(|row| row.membership.as_str());
+            let current =
+                locked_membership_basis(conn, realm_id, circle_id, &member, Some(commit)).await?;
+            let previous = current.as_ref().and_then(|row| row["membership"].as_str());
             let expected_matches = match &payload.expected_membership {
                 WirePresence::Missing => true,
                 WirePresence::Null => previous.is_none(),
@@ -365,6 +482,34 @@ pub(crate) async fn admit_with_audit_in_connection(
                     ConflictCode::InvalidMembershipTransition,
                     "Circle self-membership edge is invalid",
                 ));
+            }
+            if next == "join" {
+                let managed = sql_query("SELECT EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.applet.managed_actor.provision' AND e.envelope#>'{payload,actor_id}'=$1) AS present")
+                    .bind::<Jsonb,_>(json!(&member)).get_result::<PresentRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+                if managed.present || event.applet_id.is_some() {
+                    if member != event.actor_id
+                        || event.applet_id.is_none()
+                        || event.executed_by.is_some()
+                    {
+                        return Err(conflict(
+                            ConflictCode::CapabilityDenied,
+                            "managed Circle join requires its original self Device consent",
+                        ));
+                    }
+                    crate::managed_message_actor::require_managed_actor_in_connection(
+                        conn,
+                        event,
+                        commit.committed_at,
+                    )
+                    .await?;
+                    let cut =
+                        crate::realm_authorization_cut::RealmAuthorizationCut::read_for_event(
+                            conn, event,
+                        )
+                        .await?;
+                    cut.require_managed_self_action_in_connection(conn, event, commit, prepared)
+                        .await?;
+                }
             }
             if next == "join" {
                 let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
@@ -451,15 +596,7 @@ pub(crate) async fn commit_in_connection(
             let member = payload.member_id.clone();
             let membership = payload.membership.as_str();
             // The signed parent revision is copied verbatim, never derived.
-            let current = CircleMemberStateCurrent {
-                membership: serde_json::from_value(json!(membership))
-                    .map_err(|_| schema("membership invalid"))?,
-                parent_membership_revision: payload.parent_membership_revision.clone(),
-                effective_at: payload.effective_at.unwrap_or(event.created_at),
-            };
-            current
-                .validate()
-                .map_err(|error| schema(&error.to_string()))?;
+            let current = member_current(event)?;
             let value = serde_json::to_value(&current).map_err(PersistenceError::database)?;
             let changed = sql_query(
                 "INSERT INTO circle_member_state_current_results \

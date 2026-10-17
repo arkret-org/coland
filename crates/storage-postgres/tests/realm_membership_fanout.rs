@@ -5513,8 +5513,60 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
             .unwrap(),
         CommittedReplicaOutcome::Stored
     );
-    let strand = circle_event(
+    // Scoped business source changes stay on the actual Circle stream and
+    // freeze its real membership witness. They never use a Realm-only route.
+    let scoped_grant = circle_event(
         &creator_join.authority_commit,
+        arkret_wire::EventKind::CapabilityGrant,
+        serde_json::json!({"grant":{
+            "schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":creator,
+            "subject":remote,"actions":["ak.event.read"],
+            "resources":[{"kind":"circle","realm_id":realm,"circle_id":circle,"match_scope":"exact"}],
+            "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":root_event_ref,"authority_generation":0}],
+            "issued_at":arkret_canonical::format_timestamp_canonical(at)
+        }}),
+    );
+    let scoped_grant = heap_future(|| ordinary_realm::source_request(&pool, scoped_grant)).await;
+    uow.commit_event(scoped_grant.clone()).await.unwrap();
+    let grant_rows = fanout_rows(&pool, &scoped_grant).await;
+    assert_eq!(grant_rows.len(), 1);
+    let grant_witnesses: Vec<RealmFanoutAuthorityWitness> =
+        serde_json::from_value(grant_rows[0].realm_fanout["authority_witnesses"].clone()).unwrap();
+    assert_eq!(grant_witnesses, witnesses);
+    assert_eq!(
+        member
+            .install_committed_replica(&replica(&unit, &scoped_grant, false))
+            .await
+            .unwrap(),
+        CommittedReplicaOutcome::Stored
+    );
+    let grant_id =
+        arkret_wire::GrantId::from_event_id(&scoped_grant.authority_commit.event.event_id);
+    let grant_revision = arkret_wire::CurrentRevision {
+        commit_id: scoped_grant.authority_commit.commit.commit_id.clone(),
+        stream_position: scoped_grant.authority_commit.commit.stream_position,
+    };
+    let scoped_revoke = circle_event(
+        &scoped_grant.authority_commit,
+        arkret_wire::EventKind::CapabilityRevoke,
+        serde_json::json!({"grant_id":grant_id,"expected_revision":grant_revision,"reason":"scoped_source_closed"}),
+    );
+    let scoped_revoke = heap_future(|| ordinary_realm::source_request(&pool, scoped_revoke)).await;
+    uow.commit_event(scoped_revoke.clone()).await.unwrap();
+    let revoke_rows = fanout_rows(&pool, &scoped_revoke).await;
+    assert_eq!(revoke_rows.len(), 1);
+    let revoke_witnesses: Vec<RealmFanoutAuthorityWitness> =
+        serde_json::from_value(revoke_rows[0].realm_fanout["authority_witnesses"].clone()).unwrap();
+    assert_eq!(revoke_witnesses, witnesses);
+    assert_eq!(
+        member
+            .install_committed_replica(&replica(&unit, &scoped_revoke, false))
+            .await
+            .unwrap(),
+        CommittedReplicaOutcome::Stored
+    );
+    let strand = circle_event(
+        &scoped_revoke.authority_commit,
         arkret_wire::EventKind::StrandCreate,
         serde_json::json!({"object":{
             "schema":"ak.schema.strand.v1","realm_id":realm,"scope_circle_id":circle,

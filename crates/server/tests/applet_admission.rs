@@ -5044,10 +5044,20 @@ async fn admin_domain_request(
     let store = PgAuthorityCommitStore {
         pool: fixture.pool.clone(),
     };
-    let stream = arkret_wire::CommitStreamRef::Realm {
-        realm_id: fixture.realm.clone(),
+    let stream =
+        arkret_wire::CommitStreamRef::from_scope(&event.scope_ref, Some(event.realm_id.clone()))
+            .unwrap();
+    let stream_head = store.stream_head(&stream).await.unwrap();
+    let head = match stream_head.as_ref() {
+        Some(head) => head.clone(),
+        None => store
+            .stream_head(&arkret_wire::CommitStreamRef::Realm {
+                realm_id: fixture.realm.clone(),
+            })
+            .await
+            .unwrap()
+            .unwrap(),
     };
-    let head = store.stream_head(&stream).await.unwrap().unwrap();
     let accepted = store
         .committed_event_by_commit_id(&head.commit_id)
         .await
@@ -5066,11 +5076,16 @@ async fn admin_domain_request(
         welcomes: vec![],
         recipient_queue_capacity: 0,
     };
-    let request = ordinary_realm::request_for_event(
+    let mut request = ordinary_realm::request_for_event(
         &previous,
         event.clone(),
         arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()),
     );
+    request.authority_commit.commit.stream_ref = stream;
+    request.authority_commit.commit.stream_position = stream_head
+        .as_ref()
+        .map_or(0, |head| head.stream_position + 1);
+    request.authority_commit.commit.previous_commit_ref = stream_head.map(|head| head.commit_id);
     let mut request = ordinary_realm::source_request(&fixture.pool, request).await;
     if let Some(fact) = request
         .authority_commit
@@ -7103,382 +7118,502 @@ async fn creation_action_approvals_bind_bot_ghost_and_reuse_without_a_management
         .unwrap();
 }
 
+// Keep the scenario driver small beneath the real HTTP admission poll stack.
+// Construct and await each owned phase without enlarging the default stack.
+#[inline(never)]
+fn creation_approval_phase<F: std::future::Future>(
+    make: impl FnOnce() -> F,
+) -> std::pin::Pin<Box<F>> {
+    Box::pin(make())
+}
+
+struct CreationActionApprovalContext {
+    fixture: Box<Fixture>,
+    _native: NativeAppletService,
+    namespace: String,
+    is_bot: bool,
+    action: &'static str,
+    operation: &'static str,
+    scope: ScopeRef,
+    approval: GrantConstraint,
+    package: AppletPackage,
+    installed: AppletInstallOutcome,
+    governance_id: &'static str,
+    path: String,
+    body: Value,
+    target: arkret_models_integration::management_review::ManagementReviewTarget,
+    grant_id: arkret_wire::GrantId,
+}
+
 async fn creation_action_approval_scenario() {
-    use arkret_wire::{ApprovalContext, GrantId, ServiceOperationId};
     for is_bot in [true, false] {
-        let fixture = Box::pin(Fixture::new()).await;
-        fixture.enable_management_authority();
-        let namespace = format!("bridge.{}", uuid::Uuid::now_v7().simple());
-        let native = NativeAppletService::new(
-            &format!("ak:applet:{}", uuid::Uuid::now_v7()),
-            &namespace,
-            &fixture.state.service_core_id(),
-        );
-        let action = if is_bot {
-            "ak.applet.bot.provision"
-        } else {
-            "ak.applet.ghost.provision"
-        };
-        let operation = if is_bot {
-            ServiceOperationId::SELF_APPLET_BOT_COMMAND_PROVISION_V1
-        } else {
-            ServiceOperationId::SELF_APPLET_GHOST_COMMAND_PROVISION_V1
-        };
-        let scope = ScopeRef::Realm {
-            realm_id: fixture.realm.clone(),
-        };
-        let approval:GrantConstraint=serde_json::from_value(json!({"constraint_kind":"claim_based","constraint_subkind":"approval","effect":"require_review","approval_required":true,"approval_mode":"before_commit","approval_actor_ids":[fixture.pcr.history.account.principal_id],"approval_threshold":1,"timeout":"PT2S"})).unwrap();
-        let (package, installed, ..) = fixture
-            .install_service_with_constraints(
-                true,
-                native.package.clone(),
-                scope.clone(),
-                BTreeMap::from([(action.to_owned(), vec![approval.clone()])]),
-            )
-            .await;
-        let governance_id = if is_bot {
-            "create_bot_approval"
-        } else {
-            "map_ghost_approval"
-        };
-        creation_governance_quorum(&fixture, action, governance_id, 2).await;
-        let path = format!(
-            "/_arkret/self/applets/{}/{}s/provision",
-            package.applet_id,
-            if is_bot { "bot" } else { "ghost" }
-        );
-        let mut body = creation_body_for_service(
-            &fixture,
-            &package,
-            &installed,
-            &scope,
-            &namespace,
-            "action-original",
-            is_bot,
+        let mut context = creation_approval_phase(|| creation_action_approval_setup(is_bot)).await;
+        let administrator_grant =
+            creation_approval_phase(|| creation_action_approval_qualification(&mut context)).await;
+        let vote =
+            creation_approval_phase(|| creation_action_approval_consumption(&mut context)).await;
+        creation_approval_phase(|| {
+            creation_action_approval_replay_and_mapping(&mut context, &vote)
+        })
+        .await;
+        creation_approval_phase(|| {
+            creation_action_approval_admin_revocation(&mut context, &administrator_grant)
+        })
+        .await;
+    }
+}
+
+async fn creation_action_approval_setup(is_bot: bool) -> Box<CreationActionApprovalContext> {
+    use arkret_wire::{GrantId, ServiceOperationId};
+    let fixture = Box::new(creation_approval_phase(Fixture::new).await);
+    fixture.enable_management_authority();
+    let namespace = format!("bridge.{}", uuid::Uuid::now_v7().simple());
+    let native = NativeAppletService::new(
+        &format!("ak:applet:{}", uuid::Uuid::now_v7()),
+        &namespace,
+        &fixture.state.service_core_id(),
+    );
+    let action = if is_bot {
+        "ak.applet.bot.provision"
+    } else {
+        "ak.applet.ghost.provision"
+    };
+    let operation = if is_bot {
+        ServiceOperationId::SELF_APPLET_BOT_COMMAND_PROVISION_V1
+    } else {
+        ServiceOperationId::SELF_APPLET_GHOST_COMMAND_PROVISION_V1
+    };
+    let scope = ScopeRef::Realm {
+        realm_id: fixture.realm.clone(),
+    };
+    let approval:GrantConstraint=serde_json::from_value(json!({"constraint_kind":"claim_based","constraint_subkind":"approval","effect":"require_review","approval_required":true,"approval_mode":"before_commit","approval_actor_ids":[fixture.pcr.history.account.principal_id],"approval_threshold":1,"timeout":"PT2S"})).unwrap();
+    let (package, installed, ..) = fixture
+        .install_service_with_constraints(
+            true,
+            native.package.clone(),
+            scope.clone(),
+            BTreeMap::from([(action.to_owned(), vec![approval.clone()])]),
         )
         .await;
-        let target = operation_target(&package, &body, is_bot);
-        let grant_id: GrantId = body["authoring_request"]["basis"]["authorization_ref"]
-            .as_str()
-            .unwrap()
-            .parse()
-            .unwrap();
-        let before = authority_snapshot(&fixture.pool).await;
-        let (status, error) = fixture
-            .service_post(&package, &path, operation, &body, "action-unapproved")
-            .await;
-        assert_creation_approval_missing(status, &error);
-        assert_eq!(before, authority_snapshot(&fixture.pool).await);
-        let realm_vote =
-            creation_operation_vote(&fixture, &target, ApprovalContext::RealmGovernance {});
-        body["approval_signatures"] = json!([realm_vote]);
-        let (status, error) = fixture
-            .service_post(
-                &package,
-                &path,
-                operation,
-                &body,
-                "governance-is-not-grant-approval",
-            )
-            .await;
-        assert_creation_approval_missing(status, &error);
-        assert_eq!(before, authority_snapshot(&fixture.pool).await);
-        let grant_vote = creation_operation_vote(
-            &fixture,
-            &target,
-            ApprovalContext::Grant {
-                grant_id: grant_id.clone(),
-            },
-        );
-        body["approval_signatures"] = json!([grant_vote, realm_vote]);
-        let (status, error) = fixture
-            .service_post(
-                &package,
-                &path,
-                operation,
-                &body,
-                "root-owner-without-explicit-admin",
-            )
-            .await;
-        assert_creation_approval_missing(status, &error);
-        assert_eq!(before, authority_snapshot(&fixture.pool).await);
-        let wrong_scope = fixture.new_circle_scope().await;
-        grant_creation_vote_administrator(&fixture, &wrong_scope).await;
-        let before = authority_snapshot(&fixture.pool).await;
-        let (status, error) = fixture
-            .service_post(
-                &package,
-                &path,
-                operation,
-                &body,
-                "admin-in-other-scope-cannot-approve",
-            )
-            .await;
-        assert_creation_approval_missing(status, &error);
-        assert_eq!(before, authority_snapshot(&fixture.pool).await);
-        let administrator_grant = grant_creation_vote_administrator(&fixture, &scope).await;
-        let before = authority_snapshot(&fixture.pool).await;
-        let (status, error) = fixture
-            .service_post(
-                &package,
-                &path,
-                operation,
-                &body,
-                "one-principal-cannot-meet-two-votes",
-            )
-            .await;
-        assert_creation_approval_missing(status, &error);
-        assert!(
-            error.to_string().contains("effective_approval_quorum=2"),
-            "{error}"
-        );
-        assert!(error.to_string().contains("counted_approvals=1"), "{error}");
-        assert_eq!(before, authority_snapshot(&fixture.pool).await);
-        creation_governance_quorum(&fixture, action, governance_id, 1).await;
-        let before = authority_snapshot(&fixture.pool).await;
-        let expired_vote = creation_operation_vote(
-            &fixture,
-            &target,
-            ApprovalContext::Grant {
-                grant_id: grant_id.clone(),
-            },
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
-        body["approval_signatures"] = json!([expired_vote]);
-        let (status, error) = fixture
-            .service_post(
-                &package,
-                &path,
-                operation,
-                &body,
-                "expired-creation-approval",
-            )
-            .await;
-        assert_creation_approval_missing(status, &error);
-        assert_eq!(before, authority_snapshot(&fixture.pool).await);
-        let future = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now())
-            + chrono::TimeDelta::milliseconds(arkret_wire::hlc::HARD_FUTURE_SKEW_MS / 2);
-        let vote = creation_operation_vote_at(
-            &fixture,
-            &target,
-            ApprovalContext::Grant {
-                grant_id: grant_id.clone(),
-            },
-            future,
-        );
-        body["approval_signatures"] = json!([expired_vote, vote]);
-        let (status, accepted) = fixture
-            .service_post(
-                &package,
-                &path,
-                operation,
-                &body,
-                "one-original-vote-two-independent-requirements",
-            )
-            .await;
-        assert_eq!(status, StatusCode::CREATED, "{accepted}");
-        let after = authority_snapshot(&fixture.pool).await;
-        assert_eq!(
-            after["reviews"], before["reviews"],
-            "action approval never fabricates a private management request"
-        );
-        let audit = after["approval_audit"]
+    let governance_id = if is_bot {
+        "create_bot_approval"
+    } else {
+        "map_ghost_approval"
+    };
+    creation_governance_quorum(&fixture, action, governance_id, 2).await;
+    let path = format!(
+        "/_arkret/self/applets/{}/{}s/provision",
+        package.applet_id,
+        if is_bot { "bot" } else { "ghost" }
+    );
+    let body = creation_body_for_service(
+        &fixture,
+        &package,
+        &installed,
+        &scope,
+        &namespace,
+        "action-original",
+        is_bot,
+    )
+    .await;
+    let target = operation_target(&package, &body, is_bot);
+    let grant_id: GrantId = body["authoring_request"]["basis"]["authorization_ref"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    Box::new(CreationActionApprovalContext {
+        fixture,
+        _native: native,
+        namespace,
+        is_bot,
+        action,
+        operation,
+        scope,
+        approval,
+        package,
+        installed,
+        governance_id,
+        path,
+        body,
+        target,
+        grant_id,
+    })
+}
+
+async fn creation_action_approval_qualification(
+    context: &mut CreationActionApprovalContext,
+) -> arkret_wire::GrantId {
+    let fixture = context.fixture.as_ref();
+    let action = context.action;
+    let operation = context.operation;
+    let scope = &context.scope;
+    let package = &context.package;
+    let governance_id = context.governance_id;
+    let path = &context.path;
+    let body = &mut context.body;
+    let target = &context.target;
+    let grant_id = &context.grant_id;
+    let before = authority_snapshot(&fixture.pool).await;
+    let (status, error) = fixture
+        .service_post(package, path, operation, body, "action-unapproved")
+        .await;
+    assert_creation_approval_missing(status, &error);
+    assert_eq!(before, authority_snapshot(&fixture.pool).await);
+    let realm_vote = creation_operation_vote(
+        fixture,
+        target,
+        arkret_wire::ApprovalContext::RealmGovernance {},
+    );
+    body["approval_signatures"] = json!([realm_vote]);
+    let (status, error) = fixture
+        .service_post(
+            package,
+            path,
+            operation,
+            body,
+            "governance-is-not-grant-approval",
+        )
+        .await;
+    assert_creation_approval_missing(status, &error);
+    assert_eq!(before, authority_snapshot(&fixture.pool).await);
+    let grant_vote = creation_operation_vote(
+        fixture,
+        target,
+        arkret_wire::ApprovalContext::Grant {
+            grant_id: grant_id.clone(),
+        },
+    );
+    body["approval_signatures"] = json!([grant_vote, realm_vote]);
+    let (status, error) = fixture
+        .service_post(
+            package,
+            path,
+            operation,
+            body,
+            "root-owner-without-explicit-admin",
+        )
+        .await;
+    assert_creation_approval_missing(status, &error);
+    assert_eq!(before, authority_snapshot(&fixture.pool).await);
+    let wrong_scope = fixture.new_circle_scope().await;
+    grant_creation_vote_administrator(fixture, &wrong_scope).await;
+    let before = authority_snapshot(&fixture.pool).await;
+    let (status, error) = fixture
+        .service_post(
+            package,
+            path,
+            operation,
+            body,
+            "admin-in-other-scope-cannot-approve",
+        )
+        .await;
+    assert_creation_approval_missing(status, &error);
+    assert_eq!(before, authority_snapshot(&fixture.pool).await);
+    let administrator_grant = grant_creation_vote_administrator(fixture, scope).await;
+    let before = authority_snapshot(&fixture.pool).await;
+    let (status, error) = fixture
+        .service_post(
+            package,
+            path,
+            operation,
+            body,
+            "one-principal-cannot-meet-two-votes",
+        )
+        .await;
+    assert_creation_approval_missing(status, &error);
+    assert!(
+        error.to_string().contains("effective_approval_quorum=2"),
+        "{error}"
+    );
+    assert!(error.to_string().contains("counted_approvals=1"), "{error}");
+    assert_eq!(before, authority_snapshot(&fixture.pool).await);
+    creation_governance_quorum(fixture, action, governance_id, 1).await;
+    administrator_grant
+}
+
+async fn creation_action_approval_consumption(
+    context: &mut CreationActionApprovalContext,
+) -> arkret_wire::ApprovalSignature {
+    let fixture = context.fixture.as_ref();
+    let operation = context.operation;
+    let package = &context.package;
+    let path = &context.path;
+    let body = &mut context.body;
+    let target = &context.target;
+    let grant_id = &context.grant_id;
+    let before = authority_snapshot(&fixture.pool).await;
+    let expired_vote = creation_operation_vote(
+        fixture,
+        target,
+        arkret_wire::ApprovalContext::Grant {
+            grant_id: grant_id.clone(),
+        },
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
+    body["approval_signatures"] = json!([expired_vote]);
+    let (status, error) = fixture
+        .service_post(package, path, operation, body, "expired-creation-approval")
+        .await;
+    assert_creation_approval_missing(status, &error);
+    assert_eq!(before, authority_snapshot(&fixture.pool).await);
+    let future = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now())
+        + chrono::TimeDelta::milliseconds(arkret_wire::hlc::HARD_FUTURE_SKEW_MS / 2);
+    let vote = creation_operation_vote_at(
+        fixture,
+        target,
+        arkret_wire::ApprovalContext::Grant {
+            grant_id: grant_id.clone(),
+        },
+        future,
+    );
+    body["approval_signatures"] = json!([expired_vote, vote]);
+    let (status, accepted) = fixture
+        .service_post(
+            package,
+            path,
+            operation,
+            body,
+            "one-original-vote-two-independent-requirements",
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{accepted}");
+    let after = authority_snapshot(&fixture.pool).await;
+    assert_eq!(
+        after["reviews"], before["reviews"],
+        "action approval never fabricates a private management request"
+    );
+    let audit = after["approval_audit"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["nonce"] == vote.input.nonce)
+        .unwrap();
+    assert!(
+        !after["approval_audit"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|row| row["nonce"] == vote.input.nonce)
-            .unwrap();
-        assert!(
-            !after["approval_audit"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|row| row["nonce"] == expired_vote.input.nonce),
-            "expired grant evidence cannot be consumed through the governance layer"
-        );
-        assert!(audit["event_id"].is_null());
-        assert!(audit["accepted_commit_id"].is_null());
-        assert_eq!(audit["operation_outcome"]["response_body"], accepted);
-        assert_eq!(
-            audit["accepted_basis"]["qualifications"]
-                .as_array()
-                .unwrap()
-                .len(),
-            2
-        );
-        let (status, retry) = fixture
-            .service_post(
-                &package,
-                &path,
-                operation,
-                &body,
-                "one-original-vote-two-independent-requirements",
-            )
-            .await;
-        assert_eq!(status, StatusCode::OK, "{retry}");
-        assert_eq!(accepted, retry);
-        assert_eq!(after, authority_snapshot(&fixture.pool).await);
-        let mut other = creation_body_for_service(
-            &fixture,
-            &package,
-            &installed,
-            &scope,
-            &namespace,
-            "action-other",
-            is_bot,
+            .any(|row| row["nonce"] == expired_vote.input.nonce),
+        "expired grant evidence cannot be consumed through the governance layer"
+    );
+    assert!(audit["event_id"].is_null());
+    assert!(audit["accepted_commit_id"].is_null());
+    assert_eq!(audit["operation_outcome"]["response_body"], accepted);
+    assert_eq!(
+        audit["accepted_basis"]["qualifications"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let (status, retry) = fixture
+        .service_post(
+            package,
+            path,
+            operation,
+            body,
+            "one-original-vote-two-independent-requirements",
         )
         .await;
-        let mut replay = creation_operation_vote(
-            &fixture,
-            &operation_target(&package, &other, is_bot),
-            ApprovalContext::Grant {
-                grant_id: grant_id.clone(),
-            },
-        );
-        replay.input.nonce = vote.input.nonce.clone();
-        replay.proof.jws = arkret_signatures::Ed25519DetachedJwsSigner::from_seed(
-            [70; 32],
-            replay.proof.verification_method.as_str(),
+    assert_eq!(status, StatusCode::OK, "{retry}");
+    assert_eq!(accepted, retry);
+    assert_eq!(after, authority_snapshot(&fixture.pool).await);
+    vote
+}
+
+async fn creation_action_approval_replay_and_mapping(
+    context: &mut CreationActionApprovalContext,
+    vote: &arkret_wire::ApprovalSignature,
+) {
+    let fixture = context.fixture.as_ref();
+    let namespace = &context.namespace;
+    let action = context.action;
+    let operation = context.operation;
+    let scope = &context.scope;
+    let approval = context.approval.clone();
+    let package = &context.package;
+    let installed = &context.installed;
+    let path = &context.path;
+    let grant_id = &context.grant_id;
+    let is_bot = context.is_bot;
+    let mut other = creation_body_for_service(
+        fixture,
+        package,
+        installed,
+        scope,
+        namespace,
+        "action-other",
+        is_bot,
+    )
+    .await;
+    let mut replay = creation_operation_vote(
+        fixture,
+        &operation_target(package, &other, is_bot),
+        arkret_wire::ApprovalContext::Grant {
+            grant_id: grant_id.clone(),
+        },
+    );
+    replay.input.nonce = vote.input.nonce.clone();
+    replay.proof.jws = arkret_signatures::Ed25519DetachedJwsSigner::from_seed(
+        [70; 32],
+        replay.proof.verification_method.as_str(),
+    )
+    .sign_detached_jws(
+        &arkret_signatures::approval_signature::approval_signature_signing_bytes(&replay).unwrap(),
+    );
+    other["approval_signatures"] = json!([replay]);
+    let stable = authority_snapshot(&fixture.pool).await;
+    let (status, error) = fixture
+        .service_post(
+            package,
+            path,
+            operation,
+            &other,
+            "same-nonce-new-signed-target",
         )
-        .sign_detached_jws(
-            &arkret_signatures::approval_signature::approval_signature_signing_bytes(&replay)
-                .unwrap(),
-        );
-        other["approval_signatures"] = json!([replay]);
-        let stable = authority_snapshot(&fixture.pool).await;
-        let (status, error) = fixture
-            .service_post(
-                &package,
-                &path,
-                operation,
-                &other,
-                "same-nonce-new-signed-target",
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::from_u16(arkret_wire::ErrorCode::FailedPrecondition.http_status()).unwrap(),
+        "{error}"
+    );
+    let problem: arkret_wire::problem_details::Problem = serde_json::from_value(error).unwrap();
+    assert_eq!(
+        problem.extensions.get("reason_code"),
+        Some(&json!("approval_nonce_reused"))
+    );
+    assert_eq!(stable, authority_snapshot(&fixture.pool).await);
+    if !is_bot {
+        let circle = fixture.new_circle_scope().await;
+        let (_, second, ..) = fixture
+            .install_service_with_constraints(
+                true,
+                package.clone(),
+                circle.clone(),
+                BTreeMap::from([(action.to_owned(), vec![approval])]),
             )
             .await;
-        assert_eq!(
-            status,
-            StatusCode::from_u16(arkret_wire::ErrorCode::FailedPrecondition.http_status()).unwrap(),
-            "{error}"
-        );
-        let problem: arkret_wire::problem_details::Problem = serde_json::from_value(error).unwrap();
-        assert_eq!(
-            problem.extensions.get("reason_code"),
-            Some(&json!("approval_nonce_reused"))
-        );
-        assert_eq!(stable, authority_snapshot(&fixture.pool).await);
-        if !is_bot {
-            let circle = fixture.new_circle_scope().await;
-            let (_, second, ..) = fixture
-                .install_service_with_constraints(
-                    true,
-                    package.clone(),
-                    circle.clone(),
-                    BTreeMap::from([(action.to_owned(), vec![approval])]),
-                )
-                .await;
-            let mut mapping = creation_body_for_service(
-                &fixture,
-                &package,
-                &second,
-                &circle,
-                &namespace,
-                "action-original",
-                false,
-            )
-            .await;
-            assert!(mapping.get("managed_actor_bundle").is_none());
-            let mapping_id: GrantId = mapping["authoring_request"]["basis"]["authorization_ref"]
+        let mut mapping = creation_body_for_service(
+            fixture,
+            package,
+            &second,
+            &circle,
+            namespace,
+            "action-original",
+            false,
+        )
+        .await;
+        assert!(mapping.get("managed_actor_bundle").is_none());
+        let mapping_id: arkret_wire::GrantId =
+            mapping["authoring_request"]["basis"]["authorization_ref"]
                 .as_str()
                 .unwrap()
                 .parse()
                 .unwrap();
-            let mapping_target = operation_target(&package, &mapping, false);
-            let mapping_vote = creation_operation_vote(
-                &fixture,
-                &mapping_target,
-                ApprovalContext::Grant {
-                    grant_id: mapping_id,
-                },
-            );
-            let root_vote = creation_operation_vote(
-                &fixture,
-                &mapping_target,
-                ApprovalContext::Grant { grant_id },
-            );
-            mapping["approval_signatures"] = json!([mapping_vote, root_vote]);
-            let before_mapping = authority_snapshot(&fixture.pool).await;
-            let (status, outcome) = fixture
-                .service_post(
-                    &package,
-                    &path,
-                    operation,
-                    &mapping,
-                    "reviewed-native-ghost-mapping",
-                )
-                .await;
-            assert_eq!(status, StatusCode::CREATED, "{outcome}");
-            let after_mapping = authority_snapshot(&fixture.pool).await;
-            for key in ["events", "commits", "completions", "outbox"] {
-                assert_eq!(
-                    before_mapping[key], after_mapping[key],
-                    "mapping changed {key}"
-                );
-            }
-            assert_eq!(after_mapping["reviews"], before_mapping["reviews"]);
-        }
-        let rows = fixture
-            .state
-            .test_persistence()
-            .capability_grant_current_results()
-            .snapshot_for_realm(&fixture.realm)
-            .await
-            .unwrap();
-        let current = rows
-            .iter()
-            .find(|row| row.grant_id == administrator_grant)
-            .unwrap();
-        let revoke = fixture.admin_event(
-            EventKind::CapabilityRevoke,
-            scope.clone(),
-            json!({"grant_id":administrator_grant,"expected_revision":current.revision,"reason":"approval_administrator_closed"}),
-        );
-        accepted_admin_domain_event(&fixture, revoke).await;
-        let mut blocked = creation_body_for_service(
-            &fixture,
-            &package,
-            &installed,
-            &scope,
-            &namespace,
-            "admin-revoked",
-            is_bot,
-        )
-        .await;
-        let blocked_target = operation_target(&package, &blocked, is_bot);
-        let blocked_vote = creation_operation_vote(
-            &fixture,
-            &blocked_target,
-            ApprovalContext::Grant {
-                grant_id: body["authoring_request"]["basis"]["authorization_ref"]
-                    .as_str()
-                    .unwrap()
-                    .parse()
-                    .unwrap(),
+        let mapping_target = operation_target(package, &mapping, false);
+        let mapping_vote = creation_operation_vote(
+            fixture,
+            &mapping_target,
+            arkret_wire::ApprovalContext::Grant {
+                grant_id: mapping_id,
             },
         );
-        blocked["approval_signatures"] = json!([blocked_vote]);
-        let before = authority_snapshot(&fixture.pool).await;
-        let (status, error) = fixture
+        let root_vote = creation_operation_vote(
+            fixture,
+            &mapping_target,
+            arkret_wire::ApprovalContext::Grant {
+                grant_id: grant_id.clone(),
+            },
+        );
+        mapping["approval_signatures"] = json!([mapping_vote, root_vote]);
+        let before_mapping = authority_snapshot(&fixture.pool).await;
+        let (status, outcome) = fixture
             .service_post(
-                &package,
-                &path,
+                package,
+                path,
                 operation,
-                &blocked,
-                "revoked-admin-cannot-approve",
+                &mapping,
+                "reviewed-native-ghost-mapping",
             )
             .await;
-        assert_creation_approval_missing(status, &error);
-        assert_eq!(before, authority_snapshot(&fixture.pool).await);
+        assert_eq!(status, StatusCode::CREATED, "{outcome}");
+        let after_mapping = authority_snapshot(&fixture.pool).await;
+        for key in ["events", "commits", "completions", "outbox"] {
+            assert_eq!(
+                before_mapping[key], after_mapping[key],
+                "mapping changed {key}"
+            );
+        }
+        assert_eq!(after_mapping["reviews"], before_mapping["reviews"]);
     }
+}
+
+async fn creation_action_approval_admin_revocation(
+    context: &mut CreationActionApprovalContext,
+    administrator_grant: &arkret_wire::GrantId,
+) {
+    let fixture = context.fixture.as_ref();
+    let namespace = &context.namespace;
+    let operation = context.operation;
+    let scope = &context.scope;
+    let package = &context.package;
+    let installed = &context.installed;
+    let path = &context.path;
+    let body = &mut context.body;
+    let is_bot = context.is_bot;
+    let rows = fixture
+        .state
+        .test_persistence()
+        .capability_grant_current_results()
+        .snapshot_for_realm(&fixture.realm)
+        .await
+        .unwrap();
+    let current = rows
+        .iter()
+        .find(|row| row.grant_id == *administrator_grant)
+        .unwrap();
+    let revoke = fixture.admin_event(
+        EventKind::CapabilityRevoke,
+        scope.clone(),
+        json!({"grant_id":administrator_grant,"expected_revision":current.revision,"reason":"approval_administrator_closed"}),
+    );
+    accepted_admin_domain_event(fixture, revoke).await;
+    let mut blocked = creation_body_for_service(
+        fixture,
+        package,
+        installed,
+        scope,
+        namespace,
+        "admin-revoked",
+        is_bot,
+    )
+    .await;
+    let blocked_target = operation_target(package, &blocked, is_bot);
+    let blocked_vote = creation_operation_vote(
+        fixture,
+        &blocked_target,
+        arkret_wire::ApprovalContext::Grant {
+            grant_id: body["authoring_request"]["basis"]["authorization_ref"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap(),
+        },
+    );
+    blocked["approval_signatures"] = json!([blocked_vote]);
+    let before = authority_snapshot(&fixture.pool).await;
+    let (status, error) = fixture
+        .service_post(
+            package,
+            path,
+            operation,
+            &blocked,
+            "revoked-admin-cannot-approve",
+        )
+        .await;
+    assert_creation_approval_missing(status, &error);
+    assert_eq!(before, authority_snapshot(&fixture.pool).await);
 }
 
 async fn approve_creation_management(

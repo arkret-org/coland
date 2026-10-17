@@ -359,6 +359,31 @@ pub(crate) fn validate_operation_candidate(
     Ok(())
 }
 
+// The predicate describes the original managed target, not the approving
+// Account. Trusted native/current facts are prepared at the accepting cut.
+// Keep this structural proof work out of the generic async qualification poll
+// frame, including creation paths that never exercise this predicate.
+#[inline(never)]
+fn rejects_managed_self_join_context(event: Option<&Event>, facts: &OperationFacts) -> bool {
+    event.is_none_or(|event| {
+        event.actor_id.as_account_id().is_none()
+            || event.executed_by.is_some()
+            || event.applet_id.is_none()
+            || event
+                .verify_producer_proof_self_consistency(
+                    event.realm_id.digest_suite_code().digest_suite(),
+                )
+                .ok()
+                .flatten()
+                .is_none()
+            || facts.applet_id.as_deref() != event.applet_id.as_ref().map(|id| id.as_str())
+            || facts.executed_by.as_ref() != Some(&event.actor_id)
+            || facts.registration_epoch.is_none()
+            || crate::applet_device_admission::action(event).ok()
+                != Some(CapabilityActionId::AppletJoin)
+    })
+}
+
 /// A DID earns one vote only through a joined complete Actor's current grant,
 /// with the full shared constraint evaluator on the exact action and target.
 /// Governance requires an actual grant; List WIP also recognizes the registry
@@ -574,6 +599,7 @@ async fn qualify_principal_or_actor(
         }
         let checks = arkret_schema::capability_action_descriptor(action).required_evaluator_checks;
         if checks.iter().any(|check| match *check {
+            "applet_managed_self_join" => rejects_managed_self_join_context(event, facts),
             "actor_eq_target_author" => facts.target_owner.as_ref() != Some(&actor),
             "actor_ne_watcher_actor" => event
                 .and_then(|event| serde_json::to_value(&event.payload).ok())

@@ -2698,7 +2698,10 @@ async fn commit_one_inner(
     } else if let Some(coland_storage::SelfProducerCommitGuard::AppletManagedDevice(guard)) =
         request.self_producer_guard.as_ref()
     {
-        if event.kind == arkret_wire::EventKind::MessageCreate {
+        if matches!(
+            event.kind,
+            arkret_wire::EventKind::MessageCreate | arkret_wire::EventKind::CircleMemberState
+        ) {
             service_approvals = crate::boxed_future(|| {
                 crate::applet_device_admission::require_business_in_connection(
                     conn,

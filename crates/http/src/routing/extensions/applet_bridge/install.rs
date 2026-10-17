@@ -13,7 +13,7 @@ use arkret_models_integration::{
     AppletInstallOutcome, AppletInstallPlan, AppletInstallRequestBody,
     AppletManagedActorProvisionPayload, AppletPackage, AppletRegistrationEpochEvidence,
     AppletScopeRejection, AppletWireNamespaces, CapabilityConstraint, DeniedScope, E2eeEffect,
-    E2eePolicy, EventSubmission, NamespaceConflict, ScopeGrant, WidgetEffect,
+    EventSubmission, NamespaceConflict, ScopeGrant, WidgetEffect,
 };
 use arkret_wire::{
     ActorId, CapabilityActionId, Event, ResourceMatchScope, ScopeRef, WireResourceSelector,
@@ -449,7 +449,6 @@ pub(super) async fn register_package_install(
     let submitted_plan_digest = commit.plan_digest.to_string();
     let effective_scope = basis.effective_scope.clone();
     let actor_policy = basis.actor_policy.clone();
-    let e2ee_policy = basis.e2ee_policy.clone();
     let package = commit.applet_package.clone();
     let typed_applet_id = package.applet_id.clone();
     let applet_id = package.applet_id.to_string();
@@ -506,8 +505,10 @@ pub(super) async fn register_package_install(
     let identity_value = encode_applet_identity(&identity)?;
 
     let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-    let e2ee_authorization_refs =
-        e2ee_authorization_refs_for_install(&package, e2ee_policy.as_ref())?;
+    let e2ee_authorization_refs = commit.e2ee_join_authorization_refs().map_err(|error| {
+        AppError::capability_denied(error.to_string())
+            .with_wire_code("applet_e2ee_join_unauthorized")
+    })?;
     debug_assert!(!approved_actions.is_empty());
     let effective_status = if approved_actions.len() < package.requested_scopes.len() {
         AppletInstallEffectiveStatus::PartiallyInstalled
@@ -1132,23 +1133,6 @@ pub(super) fn e2ee_effect_for_package(package: &AppletPackage) -> E2eeEffect {
         plaintext_access: "policy_declared".to_owned(),
         authorization_refs: None,
     }
-}
-
-fn package_requests_mls_join(package: &AppletPackage) -> bool {
-    package.e2ee_policy.mls_join_requested.unwrap_or(false)
-}
-
-fn e2ee_authorization_refs_for_install(
-    package: &AppletPackage,
-    _e2ee_policy: Option<&E2eePolicy>,
-) -> Result<Vec<arkret_wire::EventId>, AppError> {
-    if !package_requests_mls_join(package) {
-        return Ok(Vec::new());
-    }
-    Err(AppError::capability_denied(
-        "applet E2EE MLS join has no registered independent authorization artifact",
-    )
-    .with_wire_code("applet_e2ee_join_unauthorized"))
 }
 
 pub(super) fn widget_effect_for_package(package: &AppletPackage) -> WidgetEffect {
@@ -1858,17 +1842,6 @@ mod tests {
             )
             .is_err()
         );
-    }
-
-    #[test]
-    fn applet_mls_join_fails_closed_without_registered_authorization_artifact() {
-        let mut package = sample_package();
-        package.e2ee_policy.mls_join_requested = Some(true);
-        let requested_policy = E2eePolicy {
-            mls_join_allowed: Some(true),
-        };
-
-        assert!(e2ee_authorization_refs_for_install(&package, Some(&requested_policy)).is_err());
     }
 
     #[test]

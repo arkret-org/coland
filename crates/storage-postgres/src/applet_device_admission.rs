@@ -97,14 +97,11 @@ pub(crate) async fn installation(
     let actual_action = action(event)?;
     let encrypted=sql_query("SELECT to_jsonb(EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.mls.genesis' AND c.realm_id=$1 AND e.envelope->'scope_ref'=$2)) AS value")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(json!(event.scope_ref)).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    if matches!(
+    let mls_join = matches!(
         event.kind,
         EventKind::MemberState | EventKind::CircleMemberState
     ) && actual_action == CapabilityActionId::AppletJoin
-        && encrypted.value.as_bool() != Some(false)
-    {
-        return Err(PersistenceError::Conflict("applet_e2ee_join_unauthorized: independent Applet MLS join consent is not established at this cut".into()));
-    }
+        && encrypted.value.as_bool() != Some(false);
 
     if event.actor_id != ActorId::account(authority.account_id.clone())
         || event.applet_id.as_ref() != Some(&authority.applet_id)
@@ -117,7 +114,7 @@ pub(crate) async fn installation(
     {
         actions.push(CapabilityActionId::CircleMemberAdd);
     }
-    installation_for_device(
+    let installed = installation_for_device(
         conn,
         authority,
         &guard.effective_scope,
@@ -126,7 +123,20 @@ pub(crate) async fn installation(
         at,
         true,
     )
-    .await
+    .await?;
+    if mls_join {
+        crate::boxed_future(|| {
+            crate::applet_e2ee::require_current_consent(
+                conn,
+                &installed.0,
+                &installed.1,
+                &guard.effective_scope,
+                at,
+            )
+        })
+        .await?;
+    }
+    Ok(installed)
 }
 
 /// Current exact installation and accepted native identity, independent of an

@@ -958,12 +958,18 @@ fn require_supported_policy(
                                 AppletPolicyOperation::CreateBot | AppletPolicyOperation::MapGhost
                             ) && !(matches!(op,AppletPolicyOperation::Join | AppletPolicyOperation::Publish)
                                 && matches!(&rule.applet_target,Some(arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::Installation {effective_scope,..}) if matches!(effective_scope,arkret_wire::ScopeRef::Realm{realm_id}|arkret_wire::ScopeRef::Circle{realm_id,..} if document.realm_id.as_ref()==Some(realm_id))))
+                                && !(matches!(op,AppletPolicyOperation::Install)
+                                    && match &rule.applet_target {
+                                        Some(arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::All {} | arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::Requester { .. }) => true,
+                                        Some(arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::Installation { effective_scope, .. }) => document.realm_id.as_ref() == effective_scope.realm_id_opt(),
+                                        _ => false,
+                                    })
                         })
                     })
             })
         {
             return Err(refused(
-                "Applet Policy requires established consumers; only creation and exact Realm/Circle installation join or publish rules with an allow default are supported",
+                "Applet Policy requires established consumers; only install, creation and exact Realm/Circle installation join or publish rules with an allow default are supported",
             ));
         }
         return Ok(());
@@ -1283,6 +1289,12 @@ mod admission_tests {
         let mut broad = policy.clone();
         broad.rules[0].applet_target = Some(AppletPolicyTarget::All {});
         assert!(require_supported_policy(&broad, &scope).is_err());
+        broad.rules[0].applet_operations = Some(vec![AppletPolicyOperation::Install]);
+        assert!(require_supported_policy(&broad, &scope).is_ok());
+        broad.rules[0].applet_target = Some(AppletPolicyTarget::Requester {
+            actor_id: policy.created_by.clone(),
+        });
+        assert!(require_supported_policy(&broad, &scope).is_ok());
         let mut publish = policy.clone();
         publish.rules[0].applet_operations = Some(vec![AppletPolicyOperation::Publish]);
         assert!(require_supported_policy(&publish, &scope).is_ok());

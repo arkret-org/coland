@@ -218,6 +218,7 @@ pub(crate) fn validate_input(
     }
     input.package.validate().map_err(rejected)?;
     if let coland_storage::AppletAdmissionRequest::Install(body) = &input.request {
+        body.e2ee_join_authorization_refs().map_err(rejected)?;
         let basis = &body.authoring_request_basis;
         basis.validate().map_err(rejected)?;
         if body.applet_package != input.package {
@@ -867,6 +868,12 @@ async fn admit_in_connection(
             .await?;
             verify_admin_producer(conn, e, guard, input.accepted_at).await?;
         }
+        if let coland_storage::AppletAdmissionRequest::Install(body) = &input.request {
+            crate::boxed_future(|| {
+                crate::applet_e2ee::require_install_policy(conn, body, input.accepted_at)
+            })
+            .await?;
+        }
     }
     if admin_count == 0 {
         validate_managed_current(conn, input, &mut validated).await?;
@@ -1386,7 +1393,8 @@ fn validate_finalized_refs(
                 || outcome.applet_id != input.package.applet_id
                 || outcome.registration_epoch != input.package.registration_epoch
                 || outcome.capability_grant_refs != grants
-                || !outcome.e2ee_authorization_refs.is_empty()
+                || outcome.e2ee_authorization_refs
+                    != body.e2ee_join_authorization_refs().map_err(rejected)?
                 || outcome.widget_policy_ref.is_some()
             {
                 return Err(rejected(

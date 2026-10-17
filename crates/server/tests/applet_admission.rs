@@ -4737,13 +4737,13 @@ impl Fixture {
         }
     }
 
-    async fn install_service_with_constraints(
+    async fn prepare_install_service_with_constraints(
         &self,
         ghost: bool,
         package: AppletPackage,
         scope: ScopeRef,
         creation_constraints: BTreeMap<String, Vec<GrantConstraint>>,
-    ) -> (AppletPackage, AppletInstallOutcome, Value, String) {
+    ) -> (AppletPackage, Value) {
         ingest_applet_service_id_document(&self.state, &package).await;
         let evidence = applet_registration_epoch_evidence(&package);
         let registration = self.admin_event(
@@ -4819,8 +4819,8 @@ impl Fixture {
             "schema":AppletInstallAuthoringRequestBasis::SCHEMA,"purpose":"install_service","target_station_id":self.state.service_core_id(),
             "install_actor_id":registration.actor_id,"applet_id":package.applet_id,"service_id":package.service_id,"package_digest":package.package_digest,
             "effective_scope":scope,"approval_request":{"approve_actions":actions,
-                "ghost_actor_mode":if ghost {"policy_declared"} else {"disallowed"},"delegated_native_actors_allowed":false,"e2ee_join_allowed":false,"widget_allowed":false},
-            "actor_policy":{"ghost_actor_mode":"policy_declared"},"e2ee_policy":{"mls_join_allowed":false},"widget_policy":{"widget_allowed":false},
+                "ghost_actor_mode":if ghost {"policy_declared"} else {"disallowed"},"delegated_native_actors_allowed":false,"e2ee_join_allowed":package.e2ee_policy.mls_join_requested == Some(true),"widget_allowed":false},
+            "actor_policy":{"ghost_actor_mode":"policy_declared"},"e2ee_policy":{"mls_join_allowed":package.e2ee_policy.mls_join_requested == Some(true)},"widget_policy":{"widget_allowed":false},
             "registration_event":registration,"capability_grant_events":grants,
         })).unwrap();
         let preview_body = serde_json::to_value(AppletInstallPreviewRequestBody {
@@ -4848,6 +4848,23 @@ impl Fixture {
             plan_digest: plan.plan_digest,
         })
         .unwrap();
+        (package, body)
+    }
+
+    async fn install_service_with_constraints(
+        &self,
+        ghost: bool,
+        package: AppletPackage,
+        scope: ScopeRef,
+        creation_constraints: BTreeMap<String, Vec<GrantConstraint>>,
+    ) -> (AppletPackage, AppletInstallOutcome, Value, String) {
+        let (package, body) = Box::pin(self.prepare_install_service_with_constraints(
+            ghost,
+            package,
+            scope,
+            creation_constraints,
+        ))
+        .await;
         let key = format!("install-{}", uuid::Uuid::now_v7());
         let service_before = authority_snapshot(&self.pool).await;
         let (status, outcome) = self

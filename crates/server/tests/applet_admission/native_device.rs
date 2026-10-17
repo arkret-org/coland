@@ -1,4 +1,6 @@
 //! Real native Device join through the mounted self/events route and private ledger.
+#[path = "native_device/e2ee.rs"]
+mod e2ee;
 use arkret_models_integration::management_review::*;
 use arkret_wire::{DeviceId, ManagementOperation, ServiceOperationId};
 use coland_storage::DeviceRevocationStore as _;

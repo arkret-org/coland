@@ -162,10 +162,12 @@ async fn post(
     let body = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
         submission,
     );
+    let mut metadata = managed_device_metadata(authority);
+    metadata.effective_scope = event.scope_ref.clone();
     let mut response = managed_device_http_request_body(
         &fixture.state,
         authority,
-        &managed_device_metadata(authority),
+        &metadata,
         ServiceOperationId::SelfEventsCommandSubmitV1,
         key,
         Some(arkret_canonical::canonical_json_bytes(&body).unwrap()),

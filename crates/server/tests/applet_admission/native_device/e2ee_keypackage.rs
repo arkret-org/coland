@@ -6,6 +6,9 @@ use super::*;
 #[path = "e2ee_keypackage_targets.rs"]
 mod targets;
 
+#[path = "e2ee_keypackage_input.rs"]
+mod input;
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bot_and_ghost_upload_scope_bound_keypackages_without_session() {
     tokio::spawn(native_phase(|| async {

@@ -1,6 +1,6 @@
 //! Independent MLS consent from the existing accepted installation originals.
 //! Device authority, membership and per-operation Policy remain separate gates.
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use arkret_models_collaboration::governance::grant_constraint::CapabilitySubject;
 use arkret_models_collaboration::governance::operation_wire::{
@@ -177,27 +177,35 @@ pub(crate) async fn require_current_consent(
         .get_result::<crate::capability_grant_current_results::RealmAuthorityRootReadRow>(&mut *conn)
         .await.map_err(PersistenceError::database)?;
     let root = crate::capability_grant_current_results::decode_authority_root(root)?;
+    let mut current_binding = false;
     for source in &basis.capability_grant_events {
         let id = GrantId::from_event_id(&source.event_id);
-        let grant = grants
-            .get(&id)
-            .ok_or_else(|| refused("install grant current is absent"))?;
-        if !crate::capability_grant_current_results::grant_is_active_at(grant, at)
-            || !matches!(&grant.subject, CapabilitySubject::Actor(actor) if actor == &ActorId::service(registration.service_id.clone()))
+        let grant = grants.get(&id).ok_or_else(|| {
+            PersistenceError::Conflict(
+                "temporarily_unavailable: original install grant current is unavailable".into(),
+            )
+        })?;
+        if !matches!(&grant.subject, CapabilitySubject::Actor(actor) if actor == &ActorId::service(registration.service_id.clone()))
             || source.actor_id != grant.issuer_id
+            || grant.realm_id.as_ref() != Some(scope.realm_id())
         {
-            return Err(refused("exact install grant consent is no longer active"));
+            return Err(refused("exact install grant ownership differs"));
         }
-        crate::capability_grant_current_results::validate_ancestor_graph(
-            &GrantId::from_event_id(&basis.registration_event.event_id),
+        // Creation and business grants are independently withdrawable. Every
+        // original remains audit provenance; a closed unrelated original is
+        // not a new lifetime condition on the Account's explicit MLS consent.
+        current_binding |= crate::capability_grant_current_results::accepted_grant_is_current(
             &id,
             &grants,
             &root,
             scope.realm_id(),
             at,
-            &mut BTreeSet::new(),
-            0,
         )?;
+    }
+    if !current_binding {
+        return Err(refused(
+            "no current exact installation grant binds MLS consent",
+        ));
     }
     Ok(())
 }

@@ -295,3 +295,87 @@ async fn bot_and_ghost_encrypted_join_reconstruct_exact_accepted_consent() {
         assert_eq!(before, business(&fixture).await);
     })).await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_creation_grants_keeps_existing_accounts_independent_e2ee_join_consent() {
+    tokio::spawn(Box::pin(async {
+        let fixture = Box::pin(Fixture::new()).await;
+        let scope = ScopeRef::Realm { realm_id: fixture.realm.clone() };
+        Box::pin(activate_mls(&fixture, scope.clone())).await;
+        let namespace = format!("bridge.{}", uuid::Uuid::now_v7().simple());
+        let native = mls_service(&fixture, &namespace);
+        let install = Box::pin(fixture.install_package(true, native.package.clone(), &namespace)).await;
+        let ghost = Box::pin(fixture.ghost_body(&install, &namespace, "existing-after-create-close")).await;
+        assert_eq!(fixture.ghost_commit(&install, &ghost, "existing-before-create-close").await.0, StatusCode::CREATED);
+        let remaining = Box::pin(fixture.ghost_body(&install, &namespace, "existing-before-all-close")).await;
+        assert_eq!(fixture.ghost_commit(&install, &remaining, "remaining-before-create-close").await.0, StatusCode::CREATED);
+        let mut devices = Vec::new();
+        for bundle in [install.bot_body["managed_actor_bundle"].clone(), ghost["managed_actor_bundle"].clone(), remaining["managed_actor_bundle"].clone()] {
+            let key = SigningKey::from_bytes(&[159;32]);
+            let authority = Box::pin(authorize(&fixture, &install, &bundle, &namespace, &key, DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap(), true)).await;
+            devices.push((authority,key));
+        }
+        let body: AppletInstallRequestBody = serde_json::from_value(install.body.clone()).unwrap();
+        let mut binding = None;
+        for original in &body.authoring_request_basis.capability_grant_events {
+            let payload: CapabilityGrantPayload = serde_json::from_value(json!(original.payload)).unwrap();
+            let id = arkret_wire::GrantId::from_event_id(&original.event_id);
+            if payload.grant.actions == ["ak.message.create"] {
+                binding = Some(id);
+                continue;
+            }
+            assert!(payload.grant.actions.iter().all(|a| matches!(a.as_str(), "ak.applet.bot.provision" | "ak.applet.ghost.provision")));
+            let rows = fixture.state.test_persistence().capability_grant_current_results().snapshot_for_realm(&fixture.realm).await.unwrap();
+            let current = rows.iter().find(|r| r.grant_id == id).unwrap();
+            let revoke = fixture.admin_event(EventKind::CapabilityRevoke, scope.clone(), json!({"grant_id":id,"expected_revision":current.revision,"reason":"stop new identity creation only"}));
+            Box::pin(accepted_admin_domain_event(&fixture,revoke)).await;
+        }
+        let binding = binding.unwrap();
+        let rows = fixture.state.test_persistence().capability_grant_current_results().snapshot_for_realm(&fixture.realm).await.unwrap();
+        assert_eq!(rows.iter().find(|r| r.grant_id == binding).unwrap().value.status, arkret_models_collaboration::governance::grant_constraint::CapabilityGrantStatus::Active);
+        let (remaining_authority,remaining_key) = devices.pop().unwrap();
+        for (authority,key) in devices {
+            assert!(fixture.state.test_persistence().device_revocations().applet_managed_device_authority(&authority.account_id,&authority.device_id,chrono::Utc::now()).await.unwrap().is_some());
+            let event = join_event(&fixture,&install,&authority,&key,&binding);
+            let before = business(&fixture).await;
+            let (status,outcome) = Box::pin(post(&fixture,&authority,&key,&event,vec![])).await;
+            if !status.is_success() { assert_eq!(before,business(&fixture).await,"failed join must have no business effects"); }
+            assert_eq!(status,StatusCode::OK,"existing Account with explicit MLS consent and a live installation binding: {outcome}");
+            assert_accepted_event(&fixture,&event).await;
+        }
+
+        // Missing current is not a known withdrawal. Restore only this
+        // fixture's derived row before any assertion, leaving its originals.
+        #[derive(diesel::QueryableByName)]
+        struct OriginalCurrent { #[diesel(sql_type=diesel::sql_types::Jsonb)] value:Value }
+        let mut conn = fixture.pool.get().await.unwrap();
+        let original = diesel::sql_query("SELECT to_jsonb(g) AS value FROM capability_grant_current_results g WHERE realm_id=$1 AND grant_id=$2")
+            .bind::<diesel::sql_types::Text,_>(fixture.realm.as_str()).bind::<diesel::sql_types::Text,_>(binding.as_str())
+            .get_result::<OriginalCurrent>(&mut conn).await.unwrap();
+        assert_eq!(diesel::sql_query("DELETE FROM capability_grant_current_results WHERE realm_id=$1 AND grant_id=$2")
+            .bind::<diesel::sql_types::Text,_>(fixture.realm.as_str()).bind::<diesel::sql_types::Text,_>(binding.as_str())
+            .execute(&mut conn).await.unwrap(),1);
+        drop(conn);
+        let event = join_event(&fixture,&install,&remaining_authority,&remaining_key,&binding);
+        let before = business(&fixture).await;
+        let (status,error) = Box::pin(post(&fixture,&remaining_authority,&remaining_key,&event,vec![])).await;
+        let after = business(&fixture).await;
+        let mut conn = fixture.pool.get().await.unwrap();
+        diesel::sql_query("INSERT INTO capability_grant_current_results SELECT (jsonb_populate_record(NULL::capability_grant_current_results,$1)).*")
+            .bind::<diesel::sql_types::Jsonb,_>(&original.value).execute(&mut conn).await.unwrap();
+        drop(conn);
+        assert_eq!(status,StatusCode::SERVICE_UNAVAILABLE,"unknown consent binding current: {error}");
+        assert_eq!(before,after);
+
+        let rows = fixture.state.test_persistence().capability_grant_current_results().snapshot_for_realm(&fixture.realm).await.unwrap();
+        let current = rows.iter().find(|r| r.grant_id == binding).unwrap();
+        let revoke = fixture.admin_event(EventKind::CapabilityRevoke,scope,json!({"grant_id":binding,"expected_revision":current.revision,"reason":"close last installation binding"}));
+        Box::pin(accepted_admin_domain_event(&fixture,revoke)).await;
+        let event = join_event(&fixture,&install,&remaining_authority,&remaining_key,&binding);
+        let before = business(&fixture).await;
+        let (status,error) = Box::pin(post(&fixture,&remaining_authority,&remaining_key,&event,vec![])).await;
+        assert_eq!(status,StatusCode::FORBIDDEN,"all original bindings withdrawn: {error}");
+        assert_eq!(error["type"],"https://arkret.org/problems/applet_e2ee_join_unauthorized","{error}");
+        assert_eq!(before,business(&fixture).await);
+    })).await.unwrap();
+}

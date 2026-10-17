@@ -11,6 +11,9 @@
 
 use std::collections::BTreeMap;
 
+#[path = "device_messages_native.rs"]
+mod native;
+
 use arkret_models_collaboration::device_messages::{
     DeviceMessageDeliveredRow, DeviceMessageDeliveredStatus, DeviceMessageTarget,
     DeviceMessageUnknownRow, DeviceMessageUnknownStatus,
@@ -901,6 +904,15 @@ async fn get_device_messages(
     req: &mut Request,
 ) -> coland_http::result::GuardedJsonResult<DeviceMessagesGetOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
+    if let Ok(native) = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>(
+    ) {
+        let after = after.into_inner();
+        return crate::boxed_future(|| {
+            native::list(state, native, after.as_deref(), limit.into_inner())
+        })
+        .await;
+    }
     let session = aa.authenticated_session(state, req).await?;
     let cursor = after.into_inner();
     let cursor_position = match cursor {
@@ -1041,6 +1053,12 @@ async fn ack_device_messages(
     req: &mut Request,
 ) -> JsonResult<DeviceMessagesAckOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
+    if let Ok(native) = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>(
+    ) {
+        let body = body.into_inner();
+        return crate::boxed_future(|| native::ack(state, native, &body)).await;
+    }
     let session = aa.authenticated_session(state, req).await?;
     let body = body.into_inner();
     let selector = recipient_queue_selector(&session)?;

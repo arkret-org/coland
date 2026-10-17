@@ -73,7 +73,7 @@ impl<T: salvo::oapi::ToSchema> salvo::oapi::EndpointOutRegister for GuardedJson<
 
 impl<T: Serialize + Send> salvo::Scribe for GuardedJson<T> {
     fn render(self, res: &mut salvo::Response) {
-        let (value, guard) = match (self.value, self.guard) {
+        let (value, mut guard) = match (self.value, self.guard) {
             (Ok(value), None) => {
                 salvo::Scribe::render(Json(value), res);
                 return;
@@ -114,7 +114,7 @@ impl<T: Serialize + Send> salvo::Scribe for GuardedJson<T> {
             salvo::http::HeaderValue::from_static(content_type),
         );
         res.stream(async_stream::stream! {
-            if !guard.permits_handoff() {
+            if !guard.prepare_handoff().await {
                 yield Err(std::io::Error::other("content delivery time authority changed"));
                 return;
             }

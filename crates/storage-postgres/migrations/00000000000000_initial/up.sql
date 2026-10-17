@@ -1482,10 +1482,18 @@ CREATE TABLE public.device_message_ack_tokens (
     recipient text NOT NULL,
     device_id text NOT NULL,
     recipient_device_authorization jsonb NOT NULL,
+    effective_scope jsonb,
+    delivered_positions bigint[],
     queue_position bigint NOT NULL,
     issued_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone NOT NULL,
-    consumed_at timestamp with time zone
+    consumed_at timestamp with time zone,
+    CONSTRAINT device_message_ack_tokens_exact_page_check CHECK (
+        (effective_scope IS NULL AND delivered_positions IS NULL)
+        OR (effective_scope IS NOT NULL AND delivered_positions IS NOT NULL
+            AND array_ndims(delivered_positions)=1 AND cardinality(delivered_positions)>0
+            AND array_position(delivered_positions,NULL) IS NULL)
+    )
 );
 
 CREATE INDEX device_message_ack_tokens_device_idx ON public.device_message_ack_tokens USING btree (recipient, device_id, expires_at);

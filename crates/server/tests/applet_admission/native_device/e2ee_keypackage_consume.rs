@@ -5,6 +5,8 @@ use coland_storage::{
 };
 
 use super::*;
+#[path = "e2ee_device_queue.rs"]
+mod queue;
 struct PrivateGroupFile(std::path::PathBuf);
 impl Drop for PrivateGroupFile {
     fn drop(&mut self) {
@@ -35,6 +37,11 @@ enum GroupCase {
     Realm,
     Circle,
     LastResort,
+    QueueList,
+    QueueClaimExpiry,
+    QueueScopes,
+    QueuePages,
+    QueueBackendDrop,
 }
 async fn exercise_consume(ghost: bool, fenced: bool, refusal: Option<AddRefusal>, case: GroupCase) {
     let fixture = native_phase(Fixture::new).await;
@@ -82,14 +89,15 @@ async fn exercise_consume(ghost: bool, fenced: bool, refusal: Option<AddRefusal>
     );
     let (status, outcome) = native_phase(|| post(&fixture, &authority, &key, &event, vec![])).await;
     assert_eq!(status, StatusCode::OK, "real native membership: {outcome}");
-    if matches!(case, GroupCase::Circle) {
+    let mut sibling_scope = None;
+    if matches!(case, GroupCase::Circle | GroupCase::QueueScopes) {
         authority = native_phase(|| {
             circle_membership(
                 &fixture, &install, &namespace, &bundle, &authority, &key, false,
             )
         })
         .await;
-        scope = authority
+        let circle_scope = authority
             .scopes
             .entries()
             .iter()
@@ -97,7 +105,13 @@ async fn exercise_consume(ghost: bool, fenced: bool, refusal: Option<AddRefusal>
             .unwrap()
             .effective_scope
             .clone();
-        genesis = native_phase(|| activate_mls_with_private_state(&fixture, scope.clone())).await;
+        if matches!(case, GroupCase::Circle) {
+            scope = circle_scope;
+            genesis =
+                native_phase(|| activate_mls_with_private_state(&fixture, scope.clone())).await;
+        } else {
+            sibling_scope = Some(circle_scope);
+        }
     }
     let _read_parent = native_phase(|| {
         native_business_parent_in_scope(
@@ -120,6 +134,38 @@ async fn exercise_consume(ghost: bool, fenced: bool, refusal: Option<AddRefusal>
         arkret_canonical::ed25519_pubkey_to_did_key_multibase(key.verifying_key().as_bytes());
     let method = format!("did:key:{fingerprint}#{fingerprint}");
 
+    let prior = if matches!(case, GroupCase::QueuePages) {
+        Some(
+            native_phase(|| {
+                queue::pages::first(
+                    &fixture,
+                    &install,
+                    &authority,
+                    &key,
+                    &method,
+                    &scope,
+                    &mut genesis,
+                    ghost,
+                )
+            })
+            .await,
+        )
+    } else {
+        None
+    };
+    let native_ack_count = if prior.is_some() && !ghost { 2 } else { 1 };
+    let sibling = if let Some(other) = &sibling_scope {
+        Some(
+            native_phase(|| {
+                queue::accepted_sibling(
+                    &fixture, &install, &authority, &key, &identity, &method, other,
+                )
+            })
+            .await,
+        )
+    } else {
+        None
+    };
     let mut upload = fresh_upload(&identity, &method, &key, &scope);
     if matches!(case, GroupCase::LastResort) {
         let mut unsigned = upload.unsigned();
@@ -158,7 +204,8 @@ async fn exercise_consume(ghost: bool, fenced: bool, refusal: Option<AddRefusal>
     if matches!(
         refusal,
         Some(AddRefusal::ClaimExpiry | AddRefusal::ClaimExpiryWhileQueued)
-    ) {
+    ) || matches!(case, GroupCase::QueueClaimExpiry)
+    {
         command.expires_at = arkret_canonical::normalize_timestamp_canonical(
             chrono::Utc::now()
                 + chrono::Duration::seconds(
@@ -221,35 +268,21 @@ async fn exercise_consume(ghost: bool, fenced: bool, refusal: Option<AddRefusal>
         }
         let before = native_phase(|| business_snapshot(&fixture)).await;
         let uow = coland_storage_postgres::PgEventCommitUnitOfWork::new(fixture.pool.clone());
-        let error = if matches!(refusal, AddRefusal::ClaimExpiryWhileQueued) {
-            use diesel_async::SimpleAsyncConnection as _;
-            let mut blocker = fixture.pool.get().await.unwrap();
-            blocker
-                .batch_execute(
-                    "BEGIN; LOCK TABLE device_messages, mls_welcome_deliveries IN SHARE MODE",
-                )
-                .await
-                .unwrap();
-            let pending = tokio::spawn(native_phase(move || async move {
-                uow.commit_event(prepared).await
-            }));
-            let observed = native_phase(|| wait_for_welcome_queue_lock(&fixture)).await;
-            let delay = (command.expires_at - chrono::Utc::now()).to_std();
-            if !observed || delay.is_err() {
-                blocker.batch_execute("ROLLBACK").await.unwrap();
-                let result = pending.await.unwrap();
-                panic!(
-                    "the real queue writer must be observed while its claim is live; observed={observed}; result after release={result:?}"
-                );
-            }
-            tokio::time::sleep(delay.unwrap() + std::time::Duration::from_millis(250)).await;
-            blocker.batch_execute("ROLLBACK").await.unwrap();
-            pending.await.unwrap().unwrap_err()
-        } else {
-            native_phase(|| uow.commit_event(prepared))
-                .await
-                .unwrap_err()
-        };
+        if matches!(refusal, AddRefusal::ClaimExpiryWhileQueued) {
+            native_phase(|| {
+                queue::assert_http_queue_expiry(&fixture, &prepared, command.expires_at)
+            })
+            .await;
+            assert_eq!(
+                before,
+                native_phase(|| business_snapshot(&fixture)).await,
+                "the complete attested HTTP unit rolls back after its physical claim expires during queue wait"
+            );
+            return;
+        }
+        let error = native_phase(|| uow.commit_event(prepared))
+            .await
+            .unwrap_err();
         assert_eq!(
             error.conflict_code(),
             Some(match refusal {
@@ -292,17 +325,82 @@ async fn exercise_consume(ghost: bool, fenced: bool, refusal: Option<AddRefusal>
         .find_map(|item| match &item.delivery {
             arkret_models_collaboration::device_messages::RecipientDelivery::MlsWelcome {
                 mls_welcome,
-            } => Some(mls_welcome.clone()),
+            } if mls_welcome.welcome_id == welcome.welcome_id => Some(mls_welcome.clone()),
             _ => None,
         })
         .expect("actual Add atomically queued its Welcome for the real Account Device");
     assert_eq!(queued, welcome);
+    if let Some(other) = &sibling {
+        let position_of = |delivery: &arkret_wire::MlsWelcomeDelivery| {
+            deliveries.iter().find(|row|matches!(&row.delivery,arkret_models_collaboration::device_messages::RecipientDelivery::MlsWelcome{mls_welcome} if mls_welcome==delivery)).unwrap().position
+        };
+        assert!(
+            position_of(other) < position_of(&welcome),
+            "the unread Circle item must precede the Realm item in the original durable queue"
+        );
+    }
+    if matches!(case, GroupCase::QueueBackendDrop) {
+        native_phase(|| queue::assert_backend_loss(&fixture, &install, &authority, &key, &scope))
+            .await;
+        return;
+    }
+    if matches!(case, GroupCase::QueueClaimExpiry) {
+        native_phase(|| {
+            queue::assert_claim_expiry(&fixture, &authority, &key, &scope, command.expires_at)
+        })
+        .await;
+        return;
+    }
+    let native_page = if matches!(
+        case,
+        GroupCase::QueueList | GroupCase::QueueScopes | GroupCase::QueuePages
+    ) {
+        Some(if let Some(prior) = &prior {
+            native_phase(|| queue::pages::next(&fixture, &authority, &key, &scope, prior, &queued))
+                .await
+        } else {
+            native_phase(|| queue::assert_initial_list(&fixture, &authority, &key, &scope, &queued))
+                .await
+        })
+    } else {
+        None
+    };
+    if let (Some(other), Some(page)) = (&sibling_scope, &native_page) {
+        native_phase(|| queue::assert_other_scope_refused(&fixture, &authority, &key, other, page))
+            .await;
+    }
+    if let Some(page) = &native_page {
+        native_phase(|| {
+            queue::assert_cold_continuation(
+                &fixture,
+                &authority,
+                &key,
+                &scope,
+                page.next_cursor.as_deref().unwrap(),
+            )
+        })
+        .await;
+    }
+    if let Some(page) = &native_page {
+        native_phase(|| {
+            queue::assert_native_token_cannot_use_legacy_ack(
+                &fixture,
+                &authority,
+                page.ack_token.as_deref().unwrap(),
+            )
+        })
+        .await;
+    }
     let position=deliveries.iter().find(|item|matches!(&item.delivery,arkret_models_collaboration::device_messages::RecipientDelivery::MlsWelcome{mls_welcome} if mls_welcome==&queued)).unwrap().position;
-    let ack = native_phase(|| queue.issue_recipient_ack_token(&selector, position))
-        .await
-        .unwrap()
-        .unwrap();
-    if ghost {
+    let ack = if let Some(page) = &native_page {
+        page.ack_token.clone().unwrap()
+    } else {
+        native_phase(|| queue.issue_recipient_ack_token(&selector, position))
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    if ghost && native_page.is_none() {
         assert_eq!(
             native_phase(|| queue.ack_recipient_with_token(&selector, &ack))
                 .await
@@ -413,7 +511,9 @@ async fn exercise_consume(ghost: bool, fenced: bool, refusal: Option<AddRefusal>
     let restored: arkret_models_crypto::MlsGroupStateRecord =
         serde_json::from_slice(&std::fs::read(&private.0).unwrap()).unwrap();
     let restored = arkret_mls::ArkretMlsGroup::restore_from_state_record(&restored).unwrap();
-    assert_eq!(restored.epoch(), 1);
+    let accepted_payload: MlsCommitPayload =
+        serde_json::from_value(serde_json::to_value(&accepted.event.payload).unwrap()).unwrap();
+    assert_eq!(restored.epoch(), accepted_payload.next_epoch());
     let body = garth::mls::signed_welcome_consume(
         &queued,
         &read,
@@ -436,6 +536,13 @@ async fn exercise_consume(ghost: bool, fenced: bool, refusal: Option<AddRefusal>
     .unwrap();
     if fenced {
         native_phase(|| fixture.revoke(&install)).await;
+    }
+    if ghost && native_page.is_some() {
+        native_phase(|| {
+            queue::assert_ack(&fixture, &authority, &key, &scope, &ack, native_ack_count)
+        })
+        .await;
+        native_phase(|| queue::assert_ack(&fixture, &authority, &key, &scope, &ack, 0)).await;
     }
     assert!(
         private.0.is_file(),
@@ -650,7 +757,14 @@ async fn exercise_consume(ghost: bool, fenced: bool, refusal: Option<AddRefusal>
         assert_eq!(status, StatusCode::OK);
         assert_eq!(bytes, recovered);
     }
-    if !ghost {
+    if !ghost && native_page.is_some() {
+        native_phase(|| {
+            queue::assert_ack(&fixture, &authority, &key, &scope, &ack, native_ack_count)
+        })
+        .await;
+        native_phase(|| queue::assert_ack(&fixture, &authority, &key, &scope, &ack, 0)).await;
+    }
+    if !ghost && native_page.is_none() {
         assert_eq!(
             native_phase(|| queue.ack_recipient_with_token(&selector, &ack))
                 .await
@@ -662,6 +776,41 @@ async fn exercise_consume(ghost: bool, fenced: bool, refusal: Option<AddRefusal>
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+    if let Some(prior) = &prior {
+        native_phase(|| {
+            queue::assert_ack(
+                &fixture,
+                &authority,
+                &key,
+                &scope,
+                prior.page.ack_token.as_deref().unwrap(),
+                0,
+            )
+        })
+        .await;
+    }
+    if let Some(other) = &sibling {
+        native_phase(|| queue::assert_sibling_preserved(&fixture, &authority, &key, other)).await;
+    }
+    if let Some(page) = native_page {
+        let before = native_phase(|| business_snapshot(&fixture)).await;
+        native_phase(|| {
+            queue::assert_after_ack(
+                &fixture,
+                &authority,
+                &key,
+                &scope,
+                page.next_cursor.as_deref().unwrap(),
+                fenced,
+            )
+        })
+        .await;
+        assert_eq!(
+            before,
+            native_phase(|| business_snapshot(&fixture)).await,
+            "empty or fenced continuation allocates no ACK token or cursor"
         );
     }
 }
@@ -678,7 +827,7 @@ async fn prepare_add(
     coland_storage::EventCommitRequest,
     Vec<arkret_mls::MlsVerifiedLeafBinding>,
 ) {
-    let creator_bindings = genesis.group.verified_leaf_bindings().unwrap();
+    let mut creator_bindings = genesis.group.verified_leaf_bindings().unwrap();
     let groups = coland_storage_postgres::PgMlsGroupCurrentStore {
         pool: fixture.pool.clone(),
     };
@@ -699,21 +848,64 @@ async fn prepare_add(
     )
     .unwrap();
     let package = arkret_mls::mls_key_package_record_from_claim(claim).unwrap();
-    let added = genesis
+    let actor = ActorId::account(authority.account_id.clone());
+    let added = if genesis
         .group
-        .add_member_with_governance_binding(&package, &binding)
-        .unwrap();
+        .member_endpoint_replacement_actor(&package.endpoint, &actor)
+        .unwrap()
+        .is_some()
+    {
+        creator_bindings.retain(|leaf| leaf.actor_id != actor || leaf.endpoint != package.endpoint);
+        genesis
+            .group
+            .replace_member_endpoint(&package, &actor, Some(&binding))
+            .unwrap()
+    } else {
+        genesis
+            .group
+            .add_member_with_governance_binding(&package, &binding)
+            .unwrap()
+    };
     let mut tracker = arkret_mls::MlsPublicGroupTracker::restore(
         &current.public_state,
         scope.canonical_mls_group_id().unwrap().as_str(),
         current.value.epoch,
     )
     .unwrap();
-    tracker
+    let arkret_mls::MlsPublicHandshakeTransition::Commit {
+        consumed_proposals, ..
+    } = tracker
         .process_public_handshake(
             &arkret_canonical::base64url_decode(added.commit.commit.as_str()).unwrap(),
         )
-        .unwrap();
+        .unwrap()
+    else {
+        panic!("actual Commit transition required")
+    };
+    let installed_leaf =
+        |leaf: arkret_mls::MlsPublicEndpointLeaf| coland_storage::MlsProposalLeafProvenance {
+            leaf_index: leaf.leaf_index,
+            actor_id: leaf.actor_id,
+            signature_key: leaf.signature_key,
+        };
+    let consumed_proposals = consumed_proposals
+        .into_iter()
+        .map(|proposal| coland_storage::MlsConsumedProposalInstallation {
+            ordinal: proposal.ordinal,
+            proposal_ref: proposal.proposal_ref,
+            proposal_type: proposal.proposal_type,
+            proposal_wire: proposal.proposal_wire,
+            sender_leaf: installed_leaf(proposal.sender_leaf),
+            target_before: proposal.target_before.map(installed_leaf),
+            target_after: proposal.target_after.map(installed_leaf),
+        })
+        .collect();
+    let member_principals = tracker
+        .leaves()
+        .unwrap()
+        .into_iter()
+        .map(|leaf| leaf.actor_id)
+        .collect();
     let payload = MlsCommitPayload::new(
         current.value.current_mls_commit_event_ref.clone(),
         current.value.current_key_access_revision,
@@ -778,8 +970,8 @@ async fn prepare_add(
         }),
         epoch: current.value.epoch + 1,
         public_state: tracker.export_state().unwrap(),
-        member_principals: Default::default(),
-        consumed_proposals: vec![],
+        member_principals,
+        consumed_proposals,
         public_blobs: vec![coland_storage::MlsPublicBlob {
             blob_ref: arkret_wire::BlobRef::new(format!("ak:blob:{digest}")).unwrap(),
             sha256: hex.to_owned(),
@@ -821,12 +1013,41 @@ async fn accepted_add(
     let mut omitted = request.clone();
     omitted.authority_commit.welcomes[0].applet_device_scope_guard = None;
     let before = native_phase(|| business_snapshot(fixture)).await;
+    let omitted_error = native_phase(|| uow.commit_event(omitted))
+        .await
+        .unwrap_err();
     assert!(
-        native_phase(|| uow.commit_event(omitted)).await.is_err(),
-        "a native target cannot omit its current proof"
+        omitted_error
+            .to_string()
+            .contains("Welcome native package requires its exact current proof"),
+        "omitting the native current proof must fail at that exact boundary: {omitted_error}"
     );
     assert_eq!(before, native_phase(|| business_snapshot(fixture)).await);
-    native_phase(|| uow.commit_event(request)).await.unwrap();
+    let idempotency = uuid::Uuid::now_v7();
+    let submission =
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::MlsCommit(
+            arkret_wire::MlsCommitSubmission {
+                commit_event: request.authority_commit.event.clone(),
+                welcomes: vec![welcome.clone()],
+                idempotency_key: arkret_wire::UuidV7::new(idempotency).unwrap(),
+            },
+        );
+    let body = serde_json::to_value(&submission).unwrap();
+    let token = idempotency.to_string();
+    let (status, outcome) = native_phase(|| {
+        fixture.admin_post(
+            "/_arkret/self/events",
+            ServiceOperationId::SelfEventsCommandSubmitV1.as_str(),
+            &body,
+            Some(&token),
+        )
+    })
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "actual Human MLS submission must prepare the native recipient's complete historical attestation: {outcome}"
+    );
     let store = PgAuthorityCommitStore {
         pool: fixture.pool.clone(),
     };

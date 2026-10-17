@@ -500,6 +500,8 @@ diesel::table! {
         recipient -> Text,
         device_id -> Text,
         recipient_device_authorization -> Jsonb,
+        effective_scope -> Nullable<Jsonb>,
+        delivered_positions -> Nullable<Array<Int8>>,
         queue_position -> Int8,
         issued_at -> Timestamptz,
         expires_at -> Timestamptz,

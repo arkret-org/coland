@@ -18,7 +18,7 @@ conformance-harness = []
 test-support = ["coland-storage/test-support", "arkret-wire/test-support", "arkret-signatures/signer", "dep:arkret-bootstrap", "dep:ed25519-dalek"]
 
 [dependencies]
-arkret.workspace = true
+arkret = { workspace = true, features = ["server"] }
 arkret-bootstrap = { workspace = true, optional = true }
 ed25519-dalek = { workspace = true, optional = true }
 anyhow = { workspace = true }

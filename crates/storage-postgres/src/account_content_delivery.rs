@@ -706,6 +706,25 @@ impl DeliveryGuard {
             .map_err(PersistenceError::database)?;
         Ok(guard)
     }
+    /// Probe this same held transaction; never reacquire a new connection or
+    /// authorization cut after a backend lost the locks protecting its bytes.
+    pub(crate) async fn probe(&mut self) -> PersistenceResult<()> {
+        sql_query("SELECT 1")
+            .execute(self.connection())
+            .await
+            .map_err(PersistenceError::database)?;
+        Ok(())
+    }
+    /// A native queue page commits its private allocations only after the
+    /// guarded response frame crossed the same held authorization cut.
+    pub(crate) async fn commit(mut self: Box<Self>) -> PersistenceResult<()> {
+        sql_query("COMMIT")
+            .execute(self.connection())
+            .await
+            .map_err(PersistenceError::database)?;
+        drop(self.connection.take());
+        Ok(())
+    }
     pub(crate) fn connection(&mut self) -> &mut AsyncPgConnection {
         self.connection.as_mut().expect("content cut is held")
     }

@@ -52,7 +52,7 @@ struct ReadContext {
     accountability: Vec<AccountabilityProjection>,
     cut: crate::realm_authorization_cut::RealmAuthorizationCut,
 }
-struct ReadProof {
+pub(crate) struct ReadProof {
     context: Arc<ReadContext>,
     resources: Vec<PolicyResourceSelector>,
     complete_resources: bool,
@@ -66,7 +66,7 @@ impl ReadContext {
     }
 }
 impl ReadProof {
-    fn permits_at(&self, at: chrono::DateTime<chrono::Utc>) -> bool {
+    pub(crate) fn permits_at(&self, at: chrono::DateTime<chrono::Utc>) -> bool {
         at >= self.context.checked_at
             && at >= self.context.endpoint.authority.not_before
             && at < self.context.endpoint.authority.expires_at
@@ -262,6 +262,15 @@ impl AccountContentDeliveryGuard for NativeDeliveryGuard {
                 .endpoint_windows
                 .iter()
                 .all(|window| window.permits_at(at))
+    }
+    async fn prepare_handoff(&mut self) -> bool {
+        if !self.permits_handoff() {
+            return false;
+        }
+        matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), self.held.probe()).await,
+            Ok(Ok(()))
+        ) && self.permits_handoff()
     }
     async fn finish(self: Box<Self>) -> PersistenceResult<()> {
         self.held.finish().await
@@ -778,7 +787,7 @@ async fn event_proof(
 
 /// Admission-time scope reading for existing MLS material. The caller holds
 /// the real PCR/business cuts in its own transaction, not a parallel lease.
-async fn mls_scope_read_proof(
+pub(crate) async fn mls_scope_read_proof(
     conn: &mut diesel_async::AsyncPgConnection,
     endpoint: &AppletManagedDeviceScopeGuard,
     expires_at: chrono::DateTime<chrono::Utc>,

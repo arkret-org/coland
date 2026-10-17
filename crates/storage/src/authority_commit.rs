@@ -1643,6 +1643,11 @@ pub trait AccountContentDeliveryGuard: Send {
     fn permits_handoff(&self) -> bool {
         false
     }
+    /// Finish any asynchronous validation at the physical frame boundary.
+    /// The implementation retains its original cut and rechecks its clock.
+    async fn prepare_handoff(&mut self) -> bool {
+        self.permits_handoff()
+    }
     async fn finish(self: Box<Self>) -> PersistenceResult<()>;
 }
 

@@ -79,6 +79,7 @@ impl PgMlsKeyPackageStore {
         native: Option<(
             &coland_storage::AppletManagedDeviceScopeGuard,
             chrono::DateTime<chrono::Utc>,
+            &arkret_models_crypto::KeyPackagesUploadRequestBody,
         )>,
     ) -> PersistenceResult<bool> {
         match (&record.device_id, &record.device_authorize_event_id, &record.agent_key_authorize_event_id) {
@@ -96,8 +97,8 @@ impl PgMlsKeyPackageStore {
             .await
             .map_err(PersistenceError::database)?;
         conn.transaction::<_,PgTransactionError,_>(async move |conn| {
-        if let Some((guard, expires_at)) = native {
-            crate::mls_keypackage_publication::require_native(conn, record, guard, expires_at).await?;
+        if let Some((guard, expires_at, body)) = native {
+            crate::mls_keypackage_publication::require_native_publication(conn, record, guard, expires_at, body).await?;
         } else if record.effective_scope.is_some() {
             return Err(PersistenceError::Conflict("capability_denied: scoped Device publication requires its native guard".into()).into());
         }
@@ -175,8 +176,10 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
         record: &MlsKeyPackageRow,
         guard: &coland_storage::AppletManagedDeviceScopeGuard,
         expires_at: chrono::DateTime<chrono::Utc>,
+        body: &arkret_models_crypto::KeyPackagesUploadRequestBody,
     ) -> PersistenceResult<bool> {
-        self.put_guarded(record, Some((guard, expires_at))).await
+        self.put_guarded(record, Some((guard, expires_at, body)))
+            .await
     }
 
     async fn get(&self, id: &str) -> PersistenceResult<Option<MlsKeyPackageRow>> {

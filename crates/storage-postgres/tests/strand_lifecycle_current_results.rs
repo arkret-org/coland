@@ -15,6 +15,11 @@ use diesel_async::{RunQueryDsl, SimpleAsyncConnection};
 use ordinary_realm::{next_request, open_discussion};
 use serde_json::{Value, json};
 
+// Keep fixture-owned requests off the test runtime's outer poll frame.
+fn heap_future<F: std::future::Future>(make: impl FnOnce() -> F) -> std::pin::Pin<Box<F>> {
+    Box::pin(make())
+}
+
 #[derive(diesel::QueryableByName, Debug, PartialEq)]
 struct Current {
     #[diesel(sql_type = Text)]
@@ -136,6 +141,10 @@ async fn lifecycle_for_actor(
 
 #[tokio::test]
 async fn strand_create_checks_capability_and_exact_replay_preserves_all_rows() {
+    heap_future(case_strand_create_checks_capability_and_exact_replay_preserves_all_rows).await;
+}
+
+async fn case_strand_create_checks_capability_and_exact_replay_preserves_all_rows() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let opened = Box::pin(open_discussion(&pool, "create-capability-replay")).await;
@@ -165,6 +174,10 @@ async fn strand_create_checks_capability_and_exact_replay_preserves_all_rows() {
 
 #[tokio::test]
 async fn strand_archive_checks_capability_and_exact_replay_preserves_all_rows() {
+    heap_future(case_strand_archive_checks_capability_and_exact_replay_preserves_all_rows).await;
+}
+
+async fn case_strand_archive_checks_capability_and_exact_replay_preserves_all_rows() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let opened = Box::pin(open_discussion(&pool, "archive-capability-replay")).await;
@@ -196,6 +209,10 @@ async fn strand_archive_checks_capability_and_exact_replay_preserves_all_rows() 
 
 #[tokio::test]
 async fn strand_restore_checks_capability_and_exact_replay_preserves_all_rows() {
+    heap_future(case_strand_restore_checks_capability_and_exact_replay_preserves_all_rows).await;
+}
+
+async fn case_strand_restore_checks_capability_and_exact_replay_preserves_all_rows() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let opened = Box::pin(open_discussion(&pool, "restore-capability-replay")).await;
@@ -286,6 +303,10 @@ async fn assert_refused(
 
 #[tokio::test]
 async fn stage_initial_cas_concurrent_winner_and_noop_revision_are_durable() {
+    heap_future(case_stage_initial_cas_concurrent_winner_and_noop_revision_are_durable).await;
+}
+
+async fn case_stage_initial_cas_concurrent_winner_and_noop_revision_are_durable() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let discussion = Box::pin(open_discussion(&pool, "strand-stage-cas")).await;
@@ -459,6 +480,10 @@ async fn stage_initial_cas_concurrent_winner_and_noop_revision_are_durable() {
 
 #[tokio::test]
 async fn archive_restore_fsm_and_accepting_time_replay_do_not_diverge() {
+    heap_future(case_archive_restore_fsm_and_accepting_time_replay_do_not_diverge).await;
+}
+
+async fn case_archive_restore_fsm_and_accepting_time_replay_do_not_diverge() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let discussion = Box::pin(open_discussion(&pool, "strand-lifecycle-fsm")).await;
@@ -582,6 +607,10 @@ async fn archive_restore_fsm_and_accepting_time_replay_do_not_diverge() {
 
 #[tokio::test]
 async fn transition_actor_realm_and_scope_refusals_leave_no_durable_footprint() {
+    heap_future(case_transition_actor_realm_and_scope_refusals_leave_no_durable_footprint).await;
+}
+
+async fn case_transition_actor_realm_and_scope_refusals_leave_no_durable_footprint() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let discussion = Box::pin(open_discussion(&pool, "strand-transition-gates")).await;
@@ -726,6 +755,10 @@ async fn foreign_station_stage_request(
 
 #[tokio::test]
 async fn transition_update_fault_rolls_back_event_commit_and_current_together() {
+    heap_future(case_transition_update_fault_rolls_back_event_commit_and_current_together).await;
+}
+
+async fn case_transition_update_fault_rolls_back_event_commit_and_current_together() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let discussion = Box::pin(open_discussion(&pool, "strand-transition-fault")).await;

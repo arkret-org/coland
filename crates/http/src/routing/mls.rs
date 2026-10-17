@@ -733,10 +733,10 @@ async fn upload_keypackage(
     let mut accepted = 0_u32;
     let mut key_package_refs = Vec::new();
     let mut rejected = Vec::new();
-    for entry in body.keypackages {
+    for entry in &body.keypackages {
         if entry.keypackage_id.is_empty() {
             rejected.push(keypackage_failure(
-                &entry,
+                entry,
                 endpoint_device_id,
                 "keypackage_id_missing",
             ));
@@ -745,7 +745,7 @@ async fn upload_keypackage(
         let keypackage_id = entry.keypackage_id.clone();
         if entry.keypackage_ref.is_empty() {
             rejected.push(keypackage_failure(
-                &entry,
+                entry,
                 endpoint_device_id,
                 "keypackage_ref_missing",
             ));
@@ -756,19 +756,19 @@ async fn upload_keypackage(
         let key_package_bytes = match decode_key_package(&key_package_bytes_b64) {
             Ok(bytes) => bytes,
             Err(reason) => {
-                rejected.push(keypackage_failure(&entry, endpoint_device_id, reason));
+                rejected.push(keypackage_failure(entry, endpoint_device_id, reason));
                 continue;
             }
         };
-        if let Err(reason) = validate_keypackage_ciphersuite(&entry, &key_package_bytes) {
-            rejected.push(keypackage_failure(&entry, endpoint_device_id, reason));
+        if let Err(reason) = validate_keypackage_ciphersuite(entry, &key_package_bytes) {
+            rejected.push(keypackage_failure(entry, endpoint_device_id, reason));
             continue;
         }
         let keypackage_digest = arkret_canonical::sha256_digest(&key_package_bytes);
         let capabilities = match validate_capabilities(&entry.capabilities) {
             Ok(value) => value,
             Err(reason) => {
-                rejected.push(keypackage_failure(&entry, endpoint_device_id, reason));
+                rejected.push(keypackage_failure(entry, endpoint_device_id, reason));
                 continue;
             }
         };
@@ -776,7 +776,7 @@ async fn upload_keypackage(
             .is_err()
         {
             rejected.push(keypackage_failure(
-                &entry,
+                entry,
                 endpoint_device_id,
                 "keypackage_capabilities_signed_binding_invalid",
             ));
@@ -793,7 +793,7 @@ async fn upload_keypackage(
             )
             .await
         {
-            rejected.push(keypackage_failure(&entry, endpoint_device_id, reason));
+            rejected.push(keypackage_failure(entry, endpoint_device_id, reason));
             continue;
         }
         if let Some((guard, _)) = &native {
@@ -802,7 +802,7 @@ async fn upload_keypackage(
                 &guard.authority.public_key,
                 &key_package_bytes,
             ) {
-                rejected.push(keypackage_failure(&entry, endpoint_device_id, reason));
+                rejected.push(keypackage_failure(entry, endpoint_device_id, reason));
                 continue;
             }
         } else if let Some(endpoint_device_id) = endpoint_device_id
@@ -814,7 +814,7 @@ async fn upload_keypackage(
             )
             .await
         {
-            rejected.push(keypackage_failure(&entry, Some(endpoint_device_id), reason));
+            rejected.push(keypackage_failure(entry, Some(endpoint_device_id), reason));
             continue;
         }
         let created_at = entry.created_at.timestamp();
@@ -824,7 +824,7 @@ async fn upload_keypackage(
             && expires_at.saturating_sub(created_at) > LAST_RESORT_KEYPACKAGE_MAX_LIFETIME_SECS
         {
             rejected.push(keypackage_failure(
-                &entry,
+                entry,
                 endpoint_device_id,
                 "last_resort_keypackage_lifetime_too_long",
             ));
@@ -861,14 +861,14 @@ async fn upload_keypackage(
             ) {
                 Ok(record) => record,
                 Err(reason) => {
-                    rejected.push(keypackage_failure(&entry, endpoint_device_id, reason));
+                    rejected.push(keypackage_failure(entry, endpoint_device_id, reason));
                     continue;
                 }
             };
         let inserted = if let Some((guard, expires_at)) = &native {
             state
                 .mls_key_packages()
-                .store_key_package_for_applet_device(&record, guard, *expires_at)
+                .store_key_package_for_applet_device(&record, guard, *expires_at, &body)
                 .await
         } else {
             state.mls_key_packages().store_key_package(&record).await

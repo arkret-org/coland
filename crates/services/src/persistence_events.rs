@@ -634,11 +634,12 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
         record: &crate::events::MlsKeyPackageState,
         guard: &coland_storage::AppletManagedDeviceScopeGuard,
         expires_at: chrono::DateTime<chrono::Utc>,
+        body: &arkret_models_crypto::KeyPackagesUploadRequestBody,
     ) -> crate::ServiceResult<bool> {
         Ok(self
             .0
             .mls_key_packages()
-            .put_for_applet_device(record, guard, expires_at)
+            .put_for_applet_device(record, guard, expires_at, body)
             .await?)
     }
     async fn key_package(

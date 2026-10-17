@@ -1194,6 +1194,7 @@ pub trait MlsKeyPackageMaintenancePort: Send + Sync {
         record: &MlsKeyPackageState,
         guard: &coland_storage::AppletManagedDeviceScopeGuard,
         expires_at: chrono::DateTime<chrono::Utc>,
+        body: &arkret_models_crypto::KeyPackagesUploadRequestBody,
     ) -> ServiceResult<bool>;
 
     async fn key_package(&self, id: &str) -> ServiceResult<Option<MlsKeyPackageState>>;
@@ -1307,9 +1308,10 @@ impl MlsKeyPackageService {
         record: &MlsKeyPackageState,
         guard: &coland_storage::AppletManagedDeviceScopeGuard,
         expires_at: chrono::DateTime<chrono::Utc>,
+        body: &arkret_models_crypto::KeyPackagesUploadRequestBody,
     ) -> ServiceResult<bool> {
         self.key_packages
-            .store_key_package_for_applet_device(record, guard, expires_at)
+            .store_key_package_for_applet_device(record, guard, expires_at, body)
             .await
     }
     pub async fn key_package(&self, id: &str) -> ServiceResult<Option<MlsKeyPackageState>> {

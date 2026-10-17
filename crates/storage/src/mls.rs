@@ -645,6 +645,7 @@ pub trait MlsKeyPackageStore: Send + Sync {
         _record: &MlsKeyPackageRow,
         _guard: &crate::AppletManagedDeviceScopeGuard,
         _expires_at: chrono::DateTime<chrono::Utc>,
+        _body: &arkret_models_crypto::KeyPackagesUploadRequestBody,
     ) -> PersistenceResult<bool> {
         Err(super::PersistenceError::Conflict(
             "capability_denied: native KeyPackage publication is unavailable".into(),

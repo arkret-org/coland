@@ -36,9 +36,14 @@ pub(super) async fn resolve(
         let group = scope
             .canonical_mls_group_id()
             .map_err(|error| AppError::param_invalid(error.to_string()))?;
-        if body.mls_group_id.as_ref() != Some(&group) || body.strand_id.is_some() {
+        if (body.mls_group_id.is_none() && body.strand_id.is_none())
+            || body
+                .mls_group_id
+                .as_ref()
+                .is_some_and(|actual| actual != &group)
+        {
             return Err(AppError::capability_denied(
-                "native KeyPackage needs one exact signed MLS group target",
+                "native KeyPackage needs a signed target at its exact scope",
             ));
         }
         let fingerprint =

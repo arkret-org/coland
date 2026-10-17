@@ -20,11 +20,12 @@ struct Row {
     value: Value,
 }
 
-pub(crate) async fn require_native(
+async fn require_current(
     conn: &mut AsyncPgConnection,
     record: &MlsKeyPackageRow,
     guard: &AppletManagedDeviceScopeGuard,
     expires_at: chrono::DateTime<chrono::Utc>,
+    publication: Option<&arkret_models_crypto::KeyPackagesUploadRequestBody>,
 ) -> PersistenceResult<()> {
     if record.effective_scope.as_ref() != Some(&guard.effective_scope)
         || record.owner_account_id != guard.authority.account_id
@@ -103,29 +104,6 @@ pub(crate) async fn require_native(
     .await?;
 
     let scope = &guard.effective_scope;
-    let group = crate::mls_group_current_results::locked_group(
-        conn,
-        &crate::mls_group_current_results::scope_key(scope)?,
-    )
-    .await?
-    .ok_or_else(|| denied("KeyPackage target has no accepted MLS group"))?;
-    if group.realm_id != *scope.realm_id() || group.value.effective_scope != *scope {
-        return Err(denied(
-            "KeyPackage target group differs from its real scope",
-        ));
-    }
-    // Membership can advance the typed current revision without replacing
-    // the accepted MLS head. Verify both writers at their actual positions.
-    let original = sql_query("SELECT e.envelope AS value FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk JOIN realm_commits revision ON revision.realm_id=c.realm_id AND revision.stream_ref=c.stream_ref JOIN canonical_events writer ON writer.pk=revision.event_pk WHERE e.state='committed' AND e.kind IN ('ak.mls.genesis','ak.mls.commit') AND e.envelope->>'event_id'=$1 AND revision.commit_id=$2 AND revision.stream_position=$3 AND c.stream_position<=revision.stream_position AND c.realm_id=$4 AND e.envelope->'scope_ref'=$5 AND writer.state='committed' AND writer.kind IN ('ak.mls.genesis','ak.mls.commit','ak.member.state','ak.invite.accept','ak.circle.member.state') AND writer.envelope->'scope_ref'=$5")
-        .bind::<Text,_>(group.value.current_mls_commit_event_ref.as_str()).bind::<Text,_>(group.current_commit_id.as_str())
-        .bind::<BigInt,_>(i64::try_from(group.current_stream_position).map_err(PersistenceError::database)?)
-        .bind::<Text,_>(scope.realm_id().as_str()).bind::<Jsonb,_>(json!(scope))
-        .get_result::<Row>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
-    if original.is_none() {
-        return Err(PersistenceError::Conflict(
-            "temporarily_unavailable: native KeyPackage group original is unavailable".into(),
-        ));
-    }
     let actor = ActorId::account(record.owner_account_id.clone());
     let cut =
         crate::realm_authorization_cut::RealmAuthorizationCut::read(conn, scope.realm_id(), &actor)
@@ -173,6 +151,13 @@ pub(crate) async fn require_native(
             kind: PolicyResourceKind::Object,
             realm_id: Some(scope.realm_id().clone()),
             resource_ref: Some(circle.to_string()),
+        });
+    }
+    if let Some(strand) = publication.and_then(|body| body.strand_id.as_ref()) {
+        resources.push(PolicyResourceSelector {
+            kind: PolicyResourceKind::Strand,
+            realm_id: Some(scope.realm_id().clone()),
+            resource_ref: Some(strand.to_string()),
         });
     }
     let decision = arkret_policy::applet_management::select_applet_management(
@@ -223,6 +208,136 @@ pub(crate) async fn require_native(
         || chrono::Utc::now() >= current.expires_at
     {
         return Err(denied("KeyPackage publication window expired"));
+    }
+    Ok(())
+}
+
+// A claim returns existing group material and retains its accepted group gate.
+// Publication only creates a public, scope-bound package and may precede genesis.
+pub(crate) async fn require_native(
+    conn: &mut AsyncPgConnection,
+    record: &MlsKeyPackageRow,
+    guard: &AppletManagedDeviceScopeGuard,
+    expires_at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<()> {
+    require_current(conn, record, guard, expires_at, None).await?;
+    require_existing_group(conn, &guard.effective_scope).await
+}
+
+pub(crate) async fn require_native_publication(
+    conn: &mut AsyncPgConnection,
+    record: &MlsKeyPackageRow,
+    guard: &AppletManagedDeviceScopeGuard,
+    expires_at: chrono::DateTime<chrono::Utc>,
+    body: &arkret_models_crypto::KeyPackagesUploadRequestBody,
+) -> PersistenceResult<()> {
+    body.validate_shape().map_err(denied)?;
+    if body.actor_id != ActorId::account(record.owner_account_id.clone())
+        || body.principal_id != record.owner_account_id.principal_id
+        || body.device_id.as_ref().map(|value| value.as_str()) != record.device_id.as_deref()
+        || body.agent_verification_method.is_some()
+        || body.agent_key_authorize_event_id.is_some()
+        || body.expires_at.is_some_and(|end| chrono::Utc::now() >= end)
+    {
+        return Err(denied(
+            "publication differs from its signed owner or request window",
+        ));
+    }
+    let entry = body
+        .keypackages
+        .iter()
+        .find(|entry| entry.keypackage_id == record.id)
+        .ok_or_else(|| denied("publication is absent from the original signed batch"))?;
+    if entry.keypackage_ref != record.keypackage_ref
+        || arkret_canonical::base64url_decode(entry.keypackage.as_bytes()).map_err(denied)?
+            != record.key_package_bytes
+        || entry.capabilities != record.capabilities
+        || entry.created_at.timestamp() != record.created_at
+        || entry.created_at.timestamp() != record.lifetime_not_before
+        || entry.expires_at.timestamp() != record.lifetime_not_after
+        || entry.last_resort.unwrap_or(false) != record.last_resort
+    {
+        return Err(denied("publication differs from the original signed entry"));
+    }
+    let input =
+        arkret_models_crypto::keypackages_upload_signing_input(&body.unsigned()).map_err(denied)?;
+    arkret_signatures::keypackages::verify_keypackage_signing_input(
+        &guard.authority.public_key,
+        body.endpoint_signature.kid.as_str(),
+        &input,
+        &body.endpoint_signature,
+    )
+    .map_err(denied)?;
+    require_current(conn, record, guard, expires_at, Some(body)).await?;
+    if body.mls_group_id.is_none() && body.strand_id.is_none() {
+        return Err(denied("publication has no original signed resource target"));
+    }
+    if let Some(group) = &body.mls_group_id {
+        if *group
+            != guard
+                .effective_scope
+                .canonical_mls_group_id()
+                .map_err(denied)?
+        {
+            return Err(denied(
+                "signed group differs from the actual publication scope",
+            ));
+        }
+    }
+    if let Some(strand) = &body.strand_id {
+        let actual = crate::strand_current_results::locked_active_strand_scope(
+            conn,
+            guard.effective_scope.realm_id(),
+            strand,
+        )
+        .await
+        .map_err(|error| match error {
+            PersistenceError::Conflict(_) => denied("signed Strand is unavailable at this scope"),
+            other => other,
+        })?;
+        if actual != guard.effective_scope {
+            return Err(denied(
+                "signed Strand differs from the actual publication scope",
+            ));
+        }
+    }
+    let at = chrono::Utc::now();
+    if at >= expires_at
+        || at >= guard.authority.expires_at
+        || at.timestamp() >= record.lifetime_not_after
+        || body.expires_at.is_some_and(|end| at >= end)
+    {
+        return Err(denied("original publication request expired"));
+    }
+    Ok(())
+}
+
+async fn require_existing_group(
+    conn: &mut AsyncPgConnection,
+    scope: &ScopeRef,
+) -> PersistenceResult<()> {
+    let group = crate::mls_group_current_results::locked_group(
+        conn,
+        &crate::mls_group_current_results::scope_key(scope)?,
+    )
+    .await?
+    .ok_or_else(|| denied("KeyPackage target has no accepted MLS group"))?;
+    if group.realm_id != *scope.realm_id() || group.value.effective_scope != *scope {
+        return Err(denied(
+            "KeyPackage target group differs from its real scope",
+        ));
+    }
+    // Membership can advance the typed current revision without replacing
+    // the accepted MLS head. Verify both writers at their actual positions.
+    let original = sql_query("SELECT e.envelope AS value FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk JOIN realm_commits revision ON revision.realm_id=c.realm_id AND revision.stream_ref=c.stream_ref JOIN canonical_events writer ON writer.pk=revision.event_pk WHERE e.state='committed' AND e.kind IN ('ak.mls.genesis','ak.mls.commit') AND e.envelope->>'event_id'=$1 AND revision.commit_id=$2 AND revision.stream_position=$3 AND c.stream_position<=revision.stream_position AND c.realm_id=$4 AND e.envelope->'scope_ref'=$5 AND writer.state='committed' AND writer.kind IN ('ak.mls.genesis','ak.mls.commit','ak.member.state','ak.invite.accept','ak.circle.member.state') AND writer.envelope->'scope_ref'=$5")
+        .bind::<Text,_>(group.value.current_mls_commit_event_ref.as_str()).bind::<Text,_>(group.current_commit_id.as_str())
+        .bind::<BigInt,_>(i64::try_from(group.current_stream_position).map_err(PersistenceError::database)?)
+        .bind::<Text,_>(scope.realm_id().as_str()).bind::<Jsonb,_>(json!(scope))
+        .get_result::<Row>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    if original.is_none() {
+        return Err(PersistenceError::Conflict(
+            "temporarily_unavailable: native KeyPackage group original is unavailable".into(),
+        ));
     }
     Ok(())
 }

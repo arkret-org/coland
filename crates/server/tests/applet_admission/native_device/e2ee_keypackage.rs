@@ -3,6 +3,9 @@ use ed25519_dalek::Signer as _;
 
 use super::*;
 
+#[path = "e2ee_keypackage_targets.rs"]
+mod targets;
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bot_and_ghost_upload_scope_bound_keypackages_without_session() {
     tokio::spawn(native_phase(|| async {
@@ -179,12 +182,28 @@ async fn upload(
     key: &SigningKey,
     body: &arkret_models_crypto::KeyPackagesUploadRequestBody,
 ) -> (StatusCode, Value) {
+    let scope = authority
+        .scopes
+        .entries()
+        .iter()
+        .find(|entry| {
+            entry.effective_scope.canonical_mls_group_id().ok().as_ref()
+                == body.mls_group_id.as_ref()
+        })
+        .map(|entry| &entry.effective_scope)
+        .unwrap_or(&authority.scopes.entries()[0].effective_scope);
+    upload_in_scope(fixture, authority, key, body, scope).await
+}
+
+async fn upload_in_scope(
+    fixture: &Fixture,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    key: &SigningKey,
+    body: &arkret_models_crypto::KeyPackagesUploadRequestBody,
+    scope: &ScopeRef,
+) -> (StatusCode, Value) {
     let mut metadata = managed_device_metadata(authority);
-    if let Some(entry) = authority.scopes.entries().iter().find(|entry| {
-        entry.effective_scope.canonical_mls_group_id().ok().as_ref() == body.mls_group_id.as_ref()
-    }) {
-        metadata.effective_scope = entry.effective_scope.clone();
-    }
+    metadata.effective_scope = scope.clone();
     let mut response = managed_device_http_request_body(
         &fixture.state,
         authority,
@@ -425,9 +444,57 @@ async fn circle_publication(
     identity: &arkret_mls::ArkretMlsIdentity,
     method: &str,
 ) -> coland_storage::AppletManagedDeviceAuthority {
+    let authority = native_phase(|| {
+        circle_membership(fixture, install, namespace, bundle, previous, key, true)
+    })
+    .await;
+    let scope = authority
+        .scopes
+        .entries()
+        .iter()
+        .find(|entry| matches!(entry.effective_scope, ScopeRef::Circle { .. }))
+        .unwrap()
+        .effective_scope
+        .clone();
+    let body = fresh_upload(identity, method, key, &scope);
+    let (status, outcome) = native_phase(|| upload(fixture, &authority, key, &body)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "exact Circle KeyPackage publication: {outcome}"
+    );
+    assert_eq!(outcome["accepted"], 1, "{outcome}");
+    let stored = fixture
+        .state
+        .test_persistence()
+        .mls_key_packages()
+        .get_by_ref(&body.keypackages[0].keypackage_ref)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.owner_account_id, authority.account_id);
+    assert_eq!(stored.effective_scope.as_ref(), Some(&scope));
+    assert_eq!(
+        stored.device_authorize_event_id.as_deref(),
+        Some(authority.selector.authorization_ref.event_id.as_str())
+    );
+    authority
+}
+
+async fn circle_membership(
+    fixture: &Fixture,
+    install: &Installed,
+    namespace: &str,
+    bundle: &Value,
+    previous: &coland_storage::AppletManagedDeviceAuthority,
+    key: &SigningKey,
+    activate_group: bool,
+) -> coland_storage::AppletManagedDeviceAuthority {
     let scope = native_phase(|| fixture.new_circle_scope()).await;
     native_phase(|| super::circle::join_founder(fixture, &scope)).await;
-    native_phase(|| activate_mls(fixture, scope.clone())).await;
+    if activate_group {
+        native_phase(|| activate_mls(fixture, scope.clone())).await;
+    }
     native_phase(|| {
         fixture.install_service_with_constraints(
             true,
@@ -472,28 +539,6 @@ async fn circle_publication(
         status,
         StatusCode::OK,
         "actual encrypted Circle membership before publication: {outcome}"
-    );
-    let body = fresh_upload(identity, method, key, &scope);
-    let (status, outcome) = native_phase(|| upload(fixture, &authority, key, &body)).await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "exact Circle KeyPackage publication: {outcome}"
-    );
-    assert_eq!(outcome["accepted"], 1, "{outcome}");
-    let stored = fixture
-        .state
-        .test_persistence()
-        .mls_key_packages()
-        .get_by_ref(&body.keypackages[0].keypackage_ref)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(stored.owner_account_id, authority.account_id);
-    assert_eq!(stored.effective_scope.as_ref(), Some(&scope));
-    assert_eq!(
-        stored.device_authorize_event_id.as_deref(),
-        Some(authority.selector.authorization_ref.event_id.as_str())
     );
     authority
 }

@@ -487,7 +487,7 @@ async fn circle_publication(
     authority
 }
 
-async fn circle_membership(
+pub(super) async fn circle_membership(
     fixture: &Fixture,
     install: &Installed,
     namespace: &str,

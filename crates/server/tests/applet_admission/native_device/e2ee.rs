@@ -3,6 +3,8 @@
 mod circle;
 #[path = "e2ee_keypackage.rs"]
 mod keypackage;
+#[path = "e2ee_read.rs"]
+mod read;
 use coland_storage::EventCommitUnitOfWork as _;
 
 use super::*;

@@ -2,7 +2,9 @@
 //! Device authority, membership and per-operation Policy remain separate gates.
 use std::collections::BTreeMap;
 
-use arkret_models_collaboration::governance::grant_constraint::CapabilitySubject;
+use arkret_models_collaboration::governance::grant_constraint::{
+    CapabilityGrant, CapabilitySubject,
+};
 use arkret_models_collaboration::governance::operation_wire::{
     AppletPolicyOperation, PolicyResourceKind, PolicyResourceSelector,
 };
@@ -94,8 +96,34 @@ struct Original {
     envelope: Value,
 }
 
-/// Requires a current exact installation from `installation_for_device` at the
-/// same locked cut. No cached boolean or membership/Welcome implies consent.
+/// Original consent selectors, retained with the same held current graph.
+/// This is an in-process proof for the final handoff clock, never a wire token.
+pub(crate) struct CurrentConsent {
+    scope: ScopeRef,
+    grant_ids: Vec<GrantId>,
+}
+impl CurrentConsent {
+    pub(crate) fn permits_at(
+        &self,
+        grants: &BTreeMap<GrantId, CapabilityGrant>,
+        root: &crate::capability_grant_current_results::RealmAuthorityRootCurrent,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<bool> {
+        let mut current = false;
+        for id in &self.grant_ids {
+            current |= crate::capability_grant_current_results::accepted_grant_is_current(
+                id,
+                grants,
+                root,
+                self.scope.realm_id(),
+                at,
+            )?;
+        }
+        Ok(current)
+    }
+}
+
+/// Write consumers validate at their acceptance cut and retain no read token.
 pub(crate) async fn require_current_consent(
     conn: &mut AsyncPgConnection,
     registration: &AppletRegistrationPayload,
@@ -103,6 +131,20 @@ pub(crate) async fn require_current_consent(
     scope: &ScopeRef,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
+    crate::boxed_future(|| current_consent(conn, registration, installation, scope, at))
+        .await
+        .map(|_| ())
+}
+
+/// Requires a current exact installation from `installation_for_device` at the
+/// same locked cut. No cached boolean or membership/Welcome implies consent.
+pub(crate) async fn current_consent(
+    conn: &mut AsyncPgConnection,
+    registration: &AppletRegistrationPayload,
+    installation: &Value,
+    scope: &ScopeRef,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<CurrentConsent> {
     let digest = installation
         .get("install_body_digest")
         .and_then(Value::as_str)
@@ -178,7 +220,6 @@ pub(crate) async fn require_current_consent(
         .get_result::<crate::capability_grant_current_results::RealmAuthorityRootReadRow>(&mut *conn)
         .await.map_err(PersistenceError::database)?;
     let root = crate::capability_grant_current_results::decode_authority_root(root)?;
-    let mut current_binding = false;
     for source in &basis.capability_grant_events {
         let id = GrantId::from_event_id(&source.event_id);
         let grant = grants.get(&id).ok_or_else(|| {
@@ -192,21 +233,22 @@ pub(crate) async fn require_current_consent(
         {
             return Err(refused("exact install grant ownership differs"));
         }
-        // Creation and business grants are independently withdrawable. Every
-        // original remains audit provenance; a closed unrelated original is
-        // not a new lifetime condition on the Account's explicit MLS consent.
-        current_binding |= crate::capability_grant_current_results::accepted_grant_is_current(
-            &id,
-            &grants,
-            &root,
-            scope.realm_id(),
-            at,
-        )?;
     }
-    if !current_binding {
+    // Creation and business grants are independently withdrawable. Every
+    // original remains audit provenance; a closed unrelated original is
+    // not a new lifetime condition on the Account's explicit MLS consent.
+    let consent = CurrentConsent {
+        scope: scope.clone(),
+        grant_ids: basis
+            .capability_grant_events
+            .iter()
+            .map(|source| GrantId::from_event_id(&source.event_id))
+            .collect(),
+    };
+    if !consent.permits_at(&grants, &root, at)? {
         return Err(refused(
             "no current exact installation grant binds MLS consent",
         ));
     }
-    Ok(())
+    Ok(consent)
 }

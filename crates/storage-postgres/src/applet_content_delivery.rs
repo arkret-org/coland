@@ -48,6 +48,7 @@ struct ReadContext {
     root: RealmAuthorityRootCurrent,
     grants: BTreeMap<GrantId, CapabilityGrant>,
     policies: Vec<Policy>,
+    e2ee_consent: Option<crate::applet_e2ee::CurrentConsent>,
     accountability: Vec<AccountabilityProjection>,
     cut: crate::realm_authorization_cut::RealmAuthorizationCut,
 }
@@ -70,6 +71,11 @@ impl ReadProof {
             && at >= self.context.endpoint.authority.not_before
             && at < self.context.endpoint.authority.expires_at
             && at < self.context.credential_expiry
+            && self.context.e2ee_consent.as_ref().is_none_or(|consent| {
+                consent
+                    .permits_at(&self.context.grants, &self.context.root, at)
+                    .unwrap_or(false)
+            })
             && self
                 .context
                 .accountability
@@ -424,12 +430,10 @@ async fn read_context(
     let actor = ActorId::account(account.clone());
     let encrypted=sql_query("SELECT to_jsonb(EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.mls.genesis' AND c.realm_id=$1 AND e.envelope->'scope_ref'=$2)) AS value")
         .bind::<Text,_>(scope.realm_id().as_str()).bind::<Jsonb,_>(serde_json::json!(scope)).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    if encrypted.value.as_bool() != Some(false) {
-        return Err(PersistenceError::Conflict(
-            "applet_e2ee_join_unauthorized: native MLS read consent is not established".into(),
-        ));
-    }
-    let (registration, _) = crate::boxed_future(|| {
+    let encrypted = encrypted.value.as_bool().ok_or_else(|| {
+        PersistenceError::SchemaViolation("native encryption source is not a boolean".into())
+    })?;
+    let (registration, installation) = crate::boxed_future(|| {
         crate::applet_device_admission::installation_for_device(
             conn,
             current,
@@ -441,6 +445,16 @@ async fn read_context(
         )
     })
     .await?;
+    let e2ee_consent = if encrypted {
+        Some(
+            crate::boxed_future(|| {
+                crate::applet_e2ee::current_consent(conn, &registration, &installation, scope, at)
+            })
+            .await?,
+        )
+    } else {
+        None
+    };
     let sources=sql_query("SELECT e.envelope->'payload' AS value FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.applet.managed_actor.provision' AND e.envelope#>'{payload,actor_id}'=$1")
         .bind::<Jsonb,_>(serde_json::json!(actor)).get_results::<JsonRow>(conn).await.map_err(PersistenceError::database)?;
     let [source] = sources.as_slice() else {
@@ -491,6 +505,7 @@ async fn read_context(
         root: decode_authority_root(root)?,
         grants,
         policies,
+        e2ee_consent,
         accountability,
         cut,
     })

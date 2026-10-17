@@ -300,6 +300,7 @@ pub(crate) async fn select_management(
             operation,
             content_action: (operation == AppletPolicyOperation::Execute)
                 .then_some(CapabilityActionId::MessageCreate),
+            device_control: None,
             resources: Some(&resources),
             at,
         },

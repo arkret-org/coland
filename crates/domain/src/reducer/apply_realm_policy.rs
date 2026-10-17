@@ -442,7 +442,7 @@ impl ProjectionState {
                     // The covering Commit already decided the whole-axis CAS.
                     // This cache only restores its accepted effective roster.
                     let actor =
-                        serde_json::to_value(actor_id).expect("typed roster alias serializes");
+                        serde_json::to_value(actor_id).expect("typed roster actor serializes");
                     entries.retain(|entry| {
                         entry.get("value").and_then(|value| value.get("actor_id")) != Some(&actor)
                             || entry

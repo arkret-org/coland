@@ -122,6 +122,7 @@ impl ReadProof {
                     managed_actor_id: Some(&account),
                     operation: mode,
                     content_action: Some(operation.action),
+                    device_control: None,
                     resources: Some(&self.resources),
                     at,
                 },

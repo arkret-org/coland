@@ -701,6 +701,7 @@ async fn select_current_creation(
                 _ => return Err(hidden()),
             },
             content_action: None,
+            device_control: None,
             resources: Some(&resources),
             at,
         },

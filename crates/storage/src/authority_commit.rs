@@ -1429,7 +1429,7 @@ pub struct SignalScopeAuthority {
     pub product_authority: Option<Box<arkret_models_collaboration::SignalProductAuthority>>,
 }
 
-/// Accepted Call state and anonymous roster at one held stream head.
+/// Accepted Call state and complete-ActorId roster at one held stream head.
 #[derive(Clone, Debug)]
 pub struct CallCurrentCut {
     pub scope_ref: arkret_wire::ScopeRef,
@@ -1668,24 +1668,9 @@ pub trait AuthorityCommitStore: Send + Sync {
         &self,
         _request: &arkret_models_collaboration::objects::media::CallMediaTokenExchangeRequestBody,
         _issuer: &arkret_wire::DidCoreId,
-        _candidate: &arkret_models_collaboration::call_invitation::CallMediaRosterIdentity,
-        _participant: &str,
     ) -> PersistenceResult<bool> {
         Err(PersistenceError::Conflict(
             "temporarily_unavailable: media release cut is unavailable".to_owned(),
-        ))
-    }
-    async fn call_media_identity_candidate(
-        &self,
-        _request: &arkret_models_collaboration::objects::media::CallMediaTokenExchangeRequestBody,
-        _candidate: &arkret_models_collaboration::call_invitation::CallMediaRosterIdentity,
-        _participant: &str,
-    ) -> PersistenceResult<(
-        arkret_models_collaboration::call_invitation::CallMediaRosterIdentity,
-        String,
-    )> {
-        Err(PersistenceError::Conflict(
-            "temporarily_unavailable: private media identity store is unavailable".to_owned(),
         ))
     }
     async fn realm_media_service_current(

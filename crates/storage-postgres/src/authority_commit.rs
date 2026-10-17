@@ -2810,8 +2810,6 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         &self,
         request: &arkret_models_collaboration::objects::media::CallMediaTokenExchangeRequestBody,
         issuer: &arkret_wire::DidCoreId,
-        candidate: &arkret_models_collaboration::call_invitation::CallMediaRosterIdentity,
-        participant: &str,
     ) -> PersistenceResult<bool> {
         let mut conn = pg_conn(&self.pool)
             .await
@@ -2820,8 +2818,8 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             if !crate::call_state_current_results::release_in_connection(conn,request,issuer).await? {
                 return Ok(false);
             }
-            // The release cut orders the identity reservation and once-only
-            // voluntary intent with the same current permissions and Call.
+            // The release cut orders once-only voluntary intent with the
+            // current permissions and exact accepted Call.
             if let arkret_models_collaboration::call_invitation::CallMediaJoinContext::Voluntary(intent)=&request.join_context {
                 if intent.expires_at<=chrono::Utc::now() {return Ok(false)};
                 let consumed=sql_query("INSERT INTO call_voluntary_join_nonces(subject_actor_id,subject_device_id,nonce,expires_at) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING")
@@ -2830,63 +2828,8 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                     .bind::<Timestamptz,_>(intent.expires_at).execute(&mut *conn).await?;
                 if consumed!=1 {return Ok(false)};
             }
-            let subject=serde_json::to_value(&request.actor_id).map_err(PersistenceError::database)?;
-            sql_query("INSERT INTO call_media_subject_identities(realm_id,call_id,subject_actor_id,subject_device_id,roster_identity,participant_id) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(realm_id,call_id,subject_actor_id,subject_device_id) DO NOTHING")
-                .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.call_id.as_str())
-                .bind::<Jsonb,_>(&subject).bind::<Text,_>(request.device_id.as_str())
-                .bind::<Jsonb,_>(serde_json::to_value(candidate).map_err(PersistenceError::database)?)
-                .bind::<Text,_>(participant).execute(&mut *conn).await?;
-            #[derive(QueryableByName)]
-            struct Identity {#[diesel(sql_type=Jsonb)] roster_identity:Value,#[diesel(sql_type=Text)] participant_id:String}
-            let row=sql_query("SELECT roster_identity,participant_id FROM call_media_subject_identities WHERE realm_id=$1 AND call_id=$2 AND subject_actor_id=$3 AND subject_device_id=$4 FOR UPDATE")
-                .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.call_id.as_str())
-                .bind::<Jsonb,_>(subject).bind::<Text,_>(request.device_id.as_str()).get_result::<Identity>(&mut *conn).await?;
-            let held:arkret_models_collaboration::call_invitation::CallMediaRosterIdentity=serde_json::from_value(row.roster_identity).map_err(PersistenceError::database)?;
-            if &held!=candidate || row.participant_id!=participant {
-                // Roll back a nonce reserved by this competing attempt too.
-                return Err(PersistenceError::Conflict("temporarily_unavailable: private media identity advanced; retry with its current mapping".into()).into());
-            }
             Ok(true)
         }).await.map_err(PgTransactionError::into_persistence)
-    }
-    async fn call_media_identity_candidate(
-        &self,
-        request: &arkret_models_collaboration::objects::media::CallMediaTokenExchangeRequestBody,
-        candidate: &arkret_models_collaboration::call_invitation::CallMediaRosterIdentity,
-        participant: &str,
-    ) -> PersistenceResult<(
-        arkret_models_collaboration::call_invitation::CallMediaRosterIdentity,
-        String,
-    )> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
-        #[derive(QueryableByName)]
-        struct Identity {
-            #[diesel(sql_type=Jsonb)]
-            roster_identity: Value,
-            #[diesel(sql_type=Text)]
-            participant_id: String,
-        }
-        let row=sql_query("SELECT roster_identity,participant_id FROM call_media_subject_identities WHERE realm_id=$1 AND call_id=$2 AND subject_actor_id=$3 AND subject_device_id=$4")
-            .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.call_id.as_str())
-            .bind::<Jsonb,_>(serde_json::to_value(&request.actor_id).map_err(PersistenceError::database)?)
-            .bind::<Text,_>(request.device_id.as_str()).get_result::<Identity>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
-        let Some(row) = row else {
-            return Ok((candidate.clone(), participant.to_owned()));
-        };
-        let identity: arkret_models_collaboration::call_invitation::CallMediaRosterIdentity =
-            serde_json::from_value(row.roster_identity).map_err(PersistenceError::database)?;
-        if matches!(
-            &request.join_context,
-            arkret_models_collaboration::call_invitation::CallMediaJoinContext::Refresh(_)
-        ) && (&identity != candidate || row.participant_id != participant)
-        {
-            return Err(PersistenceError::Conflict(
-                "failed_precondition: private mapping differs from accepted refresh receipt".into(),
-            ));
-        }
-        Ok((identity, row.participant_id))
     }
     async fn call_current_cut(
         &self,

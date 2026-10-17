@@ -511,7 +511,7 @@ async fn handle_rtc_token_with_original(
     original: Option<Value>,
 ) -> JsonResult<CallMediaTokenExchangeOutcome> {
     // The request body is the SDK typed shape: `realm_id`/`call_id`/`actor_id`/
-    // `device_id` arrive already validated as the corresponding scalar id types,
+    // `device_id` retain their exact complete ActorId and typed DeviceId shapes,
     // and the response binding carries the same typed ids — so the wire outcome
     // reuses `arkret_models_collaboration::objects::media::CallMediaTokenExchangeOutcome` directly
     // instead of a stringly coland mirror.
@@ -651,32 +651,8 @@ async fn handle_rtc_token_with_original(
     // `^ak:rtc_participant:<uuidv7>$`.
     let refresh =
         validate_token_join_context(state, session, &body, &call_cells, original.as_ref()).await?;
-    let participant_id = refresh
-        .as_ref()
-        .map(|(identity, id)| {
-            let _ = identity;
-            id.clone()
-        })
-        .unwrap_or_else(|| arkret_identifiers::new_prefixed_uuid7("ak:rtc_participant:"));
-    let roster_identity = refresh.map(|(identity, _)| identity).unwrap_or_else(|| {
-        let key = ed25519_dalek::SigningKey::from_bytes(&rand::random::<[u8; 32]>());
-        arkret_models_collaboration::call_invitation::CallMediaRosterIdentity {
-            actor_id: arkret_wire::DidCoreId::new(format!(
-                "ak:did_core:key:{}",
-                arkret_canonical::ed25519_pubkey_to_did_key_multibase(
-                    key.verifying_key().as_bytes()
-                )
-            ))
-            .expect("random DID key is a core identifier"),
-            device_id: DeviceId::new(arkret_identifiers::new_prefixed_uuid7("ak:device:"))
-                .expect("UUID7 device alias"),
-        }
-    });
-    let (roster_identity, participant_id) = state
-        .authority_commits()
-        .call_media_identity_candidate(&body, &roster_identity, &participant_id)
-        .await
-        .map_err(|e| crate::app_error!(TemporarilyUnavailable, e.to_string()))?;
+    let participant_id =
+        refresh.unwrap_or_else(|| arkret_identifiers::new_prefixed_uuid7("ak:rtc_participant:"));
     let signing_key = state.notary_signing_key();
     // `bindings/livekit.md` §2/§5 — publish grants are derived from the
     // caller's `desired_media`. Absent the field we default to audio+video
@@ -744,7 +720,6 @@ async fn handle_rtc_token_with_original(
         participant_binding: CallMediaParticipantBinding {
             expires_at,
             issuer_kid,
-            subject_binding_digest: String::new(),
             sig: String::new(),
         },
         expires_at,
@@ -752,42 +727,12 @@ async fn handle_rtc_token_with_original(
         call_id,
         actor_id: actor_id.clone(),
         device_id: device_id.clone(),
-        roster_identity: roster_identity.clone(),
-        subject_binding: arkret_models_collaboration::call_invitation::CallMediaSubjectBinding {
-            realm_id: body.realm_id.clone(),
-            call_id: body.call_id.clone(),
-            subject_actor_id: actor_id,
-            subject_device_id: device_id,
-            roster_identity,
-            focus_id: body.focus_id.clone(),
-            participant_id: participant_id.clone(),
-            media: arkret_models_collaboration::call_invitation::CallInvitationMedia {
-                audio: desired_media.0,
-                video: desired_media.1,
-                screen: desired_media.2,
-            },
-            expires_at,
-            nonce: crate::routing::call_admission::nonce(),
-            issuer_kid: DidUrl::new(configured_media_issuer_kid(state))
-                .map_err(|e| AppError::internal(e.to_string()))?,
-            sig: String::new(),
+        media: arkret_models_collaboration::call_invitation::CallInvitationMedia {
+            audio: desired_media.0,
+            video: desired_media.1,
+            screen: desired_media.2,
         },
     };
-    outcome.subject_binding.sig = URL_SAFE_NO_PAD.encode(
-        signing_key
-            .sign(
-                &outcome
-                    .subject_binding
-                    .signature_input()
-                    .map_err(|e| AppError::internal(e.to_string()))?,
-            )
-            .to_bytes(),
-    );
-    outcome.participant_binding.subject_binding_digest =
-        arkret_models_collaboration::call_invitation::canonical_request_digest(
-            &outcome.subject_binding,
-        )
-        .map_err(|e| AppError::internal(e.to_string()))?;
     let signing_input = arkret_signatures::media::participant_binding_signing_input(
         &arkret_signatures::media::ParticipantBindingContext::from_outcome(&outcome),
     )
@@ -822,12 +767,7 @@ async fn handle_rtc_token_with_original(
     })?;
     if !state
         .authority_commits()
-        .check_call_media_release(
-            &body,
-            &state.service_core_id(),
-            &outcome.roster_identity,
-            &outcome.participant_id,
-        )
+        .check_call_media_release(&body, &state.service_core_id())
         .await
         .map_err(|e| crate::app_error!(TemporarilyUnavailable, e.to_string()))?
     {
@@ -845,13 +785,7 @@ async fn validate_token_join_context(
     body: &CallMediaTokenExchangeRequestBody,
     cells: &CallMediaCells,
     original: Option<&Value>,
-) -> Result<
-    Option<(
-        arkret_models_collaboration::call_invitation::CallMediaRosterIdentity,
-        String,
-    )>,
-    AppError,
-> {
+) -> Result<Option<String>, AppError> {
     use arkret_models_collaboration::call_invitation::*;
     let invalid = |message: &str| crate::app_error!(FailedPrecondition, message.to_owned());
     let current = cells
@@ -948,51 +882,32 @@ async fn validate_token_join_context(
             Ok(None)
         }
         CallMediaJoinContext::Refresh(context) => {
-            let receipt = &context.subject_binding;
-            if receipt.subject_actor_id != body.actor_id
-                || receipt.subject_device_id != body.device_id
-                || receipt.realm_id != body.realm_id
-                || receipt.call_id != body.call_id
-                || receipt.focus_id != body.focus_id
-                || context.participant_id != receipt.participant_id
-                || !media.is_subset_of(&receipt.media)
-            {
-                return Err(invalid(
-                    "refresh receipt is not the exact authenticated leg",
-                ));
-            }
             let (participant, commit) = current
                 .participants
                 .iter()
                 .find(|(p, _)| {
-                    p.actor_id == receipt.roster_identity.actor_id
-                        && p.device_id == receipt.roster_identity.device_id.as_str()
+                    p.actor_id == body.actor_id
+                        && p.device_id == body.device_id.as_str()
                         && p.participant_id.as_deref() == Some(context.participant_id.as_str())
                         && p.focus_id.as_deref() == Some(body.focus_id.as_str())
                 })
-                .ok_or_else(|| invalid("refresh has no active accepted participant"))?;
+                .ok_or_else(|| {
+                    invalid(
+                        "refresh has no active accepted participant for this exact actor/device",
+                    )
+                })?;
             let binding = participant
                 .participant_binding
                 .as_ref()
-                .ok_or_else(|| invalid("accepted leg has no compact binding"))?;
-            if binding.issuer_kid != receipt.issuer_kid
-                || binding.expires_at != receipt.expires_at
-                || binding.subject_binding_digest
-                    != canonical_request_digest(receipt)
-                        .map_err(|e| AppError::internal(e.to_string()))?
-                || participant.media.as_ref().is_none_or(|m| {
-                    !media.is_subset_of(&CallInvitationMedia {
-                        audio: m.audio.unwrap_or(false),
-                        video: m.video.unwrap_or(false),
-                        screen: m.screen.unwrap_or(false),
-                    })
-                })
-            {
-                return Err(invalid(
-                    "refresh differs from accepted alias, binding or media",
-                ));
+                .ok_or_else(|| invalid("accepted leg has no participant binding"))?;
+            if !media.is_subset_of(
+                &participant
+                    .signed_media()
+                    .map_err(|e| AppError::param_invalid(e.to_string()))?,
+            ) {
+                return Err(invalid("refresh exceeds the accepted signed media range"));
             }
-            let did = arkret_identity::verification_method_did(receipt.issuer_kid.as_str())
+            let did = arkret_identity::verification_method_did(binding.issuer_kid.as_str())
                 .map_err(|e| AppError::param_invalid(e.to_string()))?;
             let key = if did.method() == "key" {
                 let doc = state
@@ -1002,7 +917,7 @@ async fn validate_token_join_context(
                     .map_err(|e| crate::app_error!(TemporarilyUnavailable, e.to_string()))?;
                 let value = doc
                     .verification_methods
-                    .get(receipt.issuer_kid.as_str())
+                    .get(binding.issuer_kid.as_str())
                     .ok_or_else(|| invalid("historical issuer method is unavailable"))?;
                 arkret_signatures::PublicKeyMaterial::Ed25519Multibase {
                     value: value.clone(),
@@ -1020,7 +935,7 @@ async fn validate_token_join_context(
                     .verification_method
                     .iter()
                     .find(|m| {
-                        m.id == receipt.issuer_kid.as_str()
+                        m.id == binding.issuer_kid.as_str()
                             && m.controller == did
                             && doc.assertion_method.contains(&m.id)
                     })
@@ -1031,25 +946,15 @@ async fn validate_token_join_context(
                     value: method.public_key_multibase.clone(),
                 }
             };
-            if !arkret_signatures::proof::verify_detached_ed25519_signature(
-                &key,
-                &receipt
-                    .signature_input()
-                    .map_err(|e| AppError::internal(e.to_string()))?,
-                &receipt.sig,
-            ) {
-                return Err(invalid("refresh subject receipt signature is invalid"));
-            }
             let public = arkret_signatures::media::ParticipantBindingContext {
                 actor_id: &participant.actor_id,
                 call_id: &body.call_id,
-                device_id: &receipt.roster_identity.device_id,
+                device_id: &body.device_id,
                 expires_at: binding.expires_at,
                 focus_id: &body.focus_id,
-                participant_id: &receipt.participant_id,
+                participant_id: &context.participant_id,
                 realm_id: &body.realm_id,
                 issuer_kid: binding.issuer_kid.as_str(),
-                subject_binding_digest: &binding.subject_binding_digest,
                 media: participant
                     .signed_media()
                     .map_err(|e| AppError::param_invalid(e.to_string()))?,
@@ -1060,12 +965,9 @@ async fn validate_token_join_context(
                     .map_err(|e| AppError::internal(e.to_string()))?,
                 &binding.sig,
             ) {
-                return Err(invalid("accepted anonymous binding is invalid"));
+                return Err(invalid("accepted participant binding is invalid"));
             }
-            Ok(Some((
-                receipt.roster_identity.clone(),
-                receipt.participant_id.clone(),
-            )))
+            Ok(Some(context.participant_id.clone()))
         }
     }
 }

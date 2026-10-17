@@ -298,85 +298,103 @@ async fn read_before_in_connection(
     }))
 }
 
-pub(crate) async fn write_axis(
+pub(crate) async fn write_axes(
     conn: &mut AsyncPgConnection,
     event: &Event,
     commit: &RealmCommit,
-    call: &CallId,
-    kind: &str,
-    mut value: serde_json::Value,
+    payload: &CallStatePayload,
 ) -> PersistenceResult<()> {
-    let selector = serde_json::json!({"kind":kind,"call_id":call});
-    #[derive(QueryableByName)]
-    struct Old {
-        #[diesel(sql_type=Jsonb)]
-        value: serde_json::Value,
-        #[diesel(sql_type=Jsonb)]
-        source_stream_ref: serde_json::Value,
-        #[diesel(sql_type=Text)]
-        current_commit_id: String,
-        #[diesel(sql_type=BigInt)]
-        current_stream_position: i64,
-    }
-    let old=sql_query("SELECT value,source_stream_ref,current_commit_id,current_stream_position FROM call_component_current_results WHERE realm_id=$1 AND call_id=$2 AND selector=$3 FOR UPDATE")
+    payload.validate().map_err(invalid)?;
+    let call = &payload.call_id;
+    for (kind, value) in [
+        (
+            "call_focus",
+            payload.focus.as_ref().map(serde_json::to_value),
+        ),
+        (
+            "call_roster",
+            payload.roster_delta.as_ref().map(serde_json::to_value),
+        ),
+        (
+            "call_moderation",
+            payload.moderation_delta.as_ref().map(serde_json::to_value),
+        ),
+    ] {
+        let Some(value) = value else { continue };
+        let mut value = value.map_err(PersistenceError::database)?;
+        let selector = serde_json::json!({"kind":kind,"call_id":call});
+        #[derive(QueryableByName)]
+        struct Old {
+            #[diesel(sql_type=Jsonb)]
+            value: serde_json::Value,
+            #[diesel(sql_type=Jsonb)]
+            source_stream_ref: serde_json::Value,
+            #[diesel(sql_type=Text)]
+            current_commit_id: String,
+            #[diesel(sql_type=BigInt)]
+            current_stream_position: i64,
+        }
+        let old=sql_query("SELECT value,source_stream_ref,current_commit_id,current_stream_position FROM call_component_current_results WHERE realm_id=$1 AND call_id=$2 AND selector=$3 FOR UPDATE")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(call.as_str()).bind::<Jsonb,_>(&selector)
         .get_result::<Old>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
-    let stream = serde_json::to_value(&commit.stream_ref).map_err(PersistenceError::database)?;
-    if old
-        .as_ref()
-        .is_some_and(|old| old.source_stream_ref != stream || old.current_stream_position < 0)
-    {
-        return Err(invalid("Call axis source or position differs"));
-    }
-    let rich = matches!(kind, "call_roster" | "call_moderation");
-    if rich {
-        let mut assertions = match &old {
-            Some(old) => old
-                .value
-                .get("assertions")
-                .and_then(|a| a.as_array())
-                .cloned()
-                .ok_or_else(|| invalid("Call axis is not a complete assertion set"))?,
-            None => Vec::new(),
-        };
-        let index = if kind == "call_roster" { 7 } else { 6 };
-        let assertion = serde_json::json!({"tag_id":format!("{}:{}",event.event_id,index),"source_commit":commit,"value":value});
-        if let Some(existing) = assertions
-            .iter()
-            .find(|a| a["tag_id"] == assertion["tag_id"])
-        {
-            if existing != &assertion {
-                return Err(invalid("Call assertion dot has a different carrier"));
-            }
-            return Ok(());
-        }
+        let stream =
+            serde_json::to_value(&commit.stream_ref).map_err(PersistenceError::database)?;
         if old
             .as_ref()
-            .is_some_and(|o| o.current_stream_position as u64 >= commit.stream_position)
+            .is_some_and(|old| old.source_stream_ref != stream || old.current_stream_position < 0)
         {
-            return Err(invalid(
-                "complete Call axis omitted an earlier accepted assertion",
-            ));
+            return Err(invalid("Call axis source or position differs"));
         }
-        assertions.push(assertion);
-        assertions.sort_by(|a, b| a["tag_id"].as_str().cmp(&b["tag_id"].as_str()));
-        value = serde_json::json!({"assertions":assertions});
-    } else if let Some(old) = &old {
-        if old.current_stream_position as u64 > commit.stream_position {
-            return Ok(());
-        }
-        if old.current_stream_position as u64 == commit.stream_position {
-            if old.current_commit_id != commit.commit_id.as_str() || old.value != value {
-                return Err(invalid("Call axis forks its current position"));
+        let rich = matches!(kind, "call_roster" | "call_moderation");
+        if rich {
+            let mut assertions = match &old {
+                Some(old) => old
+                    .value
+                    .get("assertions")
+                    .and_then(|a| a.as_array())
+                    .cloned()
+                    .ok_or_else(|| invalid("Call axis is not a complete assertion set"))?,
+                None => Vec::new(),
+            };
+            let index = if kind == "call_roster" { 7 } else { 6 };
+            let assertion = serde_json::json!({"tag_id":format!("{}:{}",event.event_id,index),"source_commit":commit,"value":value});
+            if let Some(existing) = assertions
+                .iter()
+                .find(|a| a["tag_id"] == assertion["tag_id"])
+            {
+                if existing != &assertion {
+                    return Err(invalid("Call assertion dot has a different carrier"));
+                }
+                continue;
             }
-            return Ok(());
+            if old
+                .as_ref()
+                .is_some_and(|o| o.current_stream_position as u64 >= commit.stream_position)
+            {
+                return Err(invalid(
+                    "complete Call axis omitted an earlier accepted assertion",
+                ));
+            }
+            assertions.push(assertion);
+            assertions.sort_by(|a, b| a["tag_id"].as_str().cmp(&b["tag_id"].as_str()));
+            value = serde_json::json!({"assertions":assertions});
+        } else if let Some(old) = &old {
+            if old.current_stream_position as u64 > commit.stream_position {
+                continue;
+            }
+            if old.current_stream_position as u64 == commit.stream_position {
+                if old.current_commit_id != commit.commit_id.as_str() || old.value != value {
+                    return Err(invalid("Call axis forks its current position"));
+                }
+                continue;
+            }
         }
-    }
-    sql_query("INSERT INTO call_component_current_results(realm_id,call_id,selector,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(realm_id,call_id,selector) DO UPDATE SET source_stream_ref=EXCLUDED.source_stream_ref,current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at")
+        sql_query("INSERT INTO call_component_current_results(realm_id,call_id,selector,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(realm_id,call_id,selector) DO UPDATE SET source_stream_ref=EXCLUDED.source_stream_ref,current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(call.as_str()).bind::<Jsonb,_>(selector)
         .bind::<Jsonb,_>(serde_json::to_value(&commit.stream_ref).map_err(PersistenceError::database)?)
         .bind::<Text,_>(commit.commit_id.as_str()).bind::<BigInt,_>(commit.stream_position as i64)
-        .bind::<Jsonb,_>(value).bind::<Timestamptz,_>(commit.committed_at).execute(conn).await.map_err(PersistenceError::database)?;
+        .bind::<Jsonb,_>(value).bind::<Timestamptz,_>(commit.committed_at).execute(&mut *conn).await.map_err(PersistenceError::database)?;
+    }
     Ok(())
 }
 
@@ -555,32 +573,7 @@ async fn commit_state(
             .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(payload.call_id.as_str()).bind::<Text,_>(commit.commit_id.as_str()).bind::<BigInt,_>(commit.stream_position as i64)
             .bind::<Jsonb,_>(serde_json::to_value(t).map_err(PersistenceError::database)?).bind::<Timestamptz,_>(commit.committed_at).execute(&mut *conn).await.map_err(PersistenceError::database)?;
     }
-    for (kind, value) in [
-        (
-            "call_focus",
-            payload.focus.as_ref().map(serde_json::to_value),
-        ),
-        (
-            "call_roster",
-            payload.roster_delta.as_ref().map(serde_json::to_value),
-        ),
-        (
-            "call_moderation",
-            payload.moderation_delta.as_ref().map(serde_json::to_value),
-        ),
-    ] {
-        if let Some(value) = value {
-            write_axis(
-                conn,
-                event,
-                commit,
-                &payload.call_id,
-                kind,
-                value.map_err(PersistenceError::database)?,
-            )
-            .await?;
-        }
-    }
+    write_axes(conn, event, commit, &payload).await?;
     Ok(())
 }
 
@@ -626,30 +619,34 @@ pub(crate) async fn release_in_connection(
     if let arkret_models_collaboration::call_invitation::CallMediaJoinContext::Refresh(context) =
         &request.join_context
     {
-        let receipt = &context.subject_binding;
-        let digest =
-            arkret_models_collaboration::call_invitation::canonical_request_digest(receipt)
-                .map_err(PersistenceError::database)?;
         let Some((participant, joined)) = cut.participants.iter().find(|(p, _)| {
-            p.actor_id == receipt.roster_identity.actor_id
-                && p.device_id == receipt.roster_identity.device_id.as_str()
+            p.actor_id == request.actor_id
+                && p.device_id == request.device_id.as_str()
                 && p.participant_id.as_deref() == Some(context.participant_id.as_str())
                 && p.focus_id.as_deref() == Some(request.focus_id.as_str())
         }) else {
             return Ok(false);
         };
-        if cut.moderation_history.as_ref().is_some_and(|history|history.assertions.iter().any(|assertion| {
-            matches!(&assertion.value,CallModerationDelta::RemoveParticipant{removal} if removal.action==CallParticipantRemovalAction::Kick
-                && removal.actor_id==request.actor_id && removal.device_id.as_deref()==Some(request.device_id.as_str())
-                && assertion.source_commit.stream_position>joined.stream_position)
-        })) {return Ok(false)};
-        if participant
-            .participant_binding
-            .as_ref()
-            .is_none_or(|b| b.subject_binding_digest != digest)
+        if cut.moderation_history.as_ref().is_some_and(|history| {
+            history.assertions.iter().any(|assertion| {
+                matches!(&assertion.value, CallModerationDelta::RemoveParticipant { removal }
+                if removal.action == CallParticipantRemovalAction::Kick
+                    && removal.actor_id == request.actor_id
+                    && removal.device_id.as_deref() == Some(request.device_id.as_str())
+                    && assertion.source_commit.stream_position > joined.stream_position)
+            })
+        }) {
+            return Ok(false);
+        }
+        if participant.participant_binding.is_none()
+            || !request.invitation_media().is_subset_of(
+                &participant
+                    .signed_media()
+                    .map_err(|e| invalid(&e.to_string()))?,
+            )
         {
             return Ok(false);
-        };
+        }
     }
     let authorization = crate::realm_authorization_cut::RealmAuthorizationCut::read_accepted(
         conn,

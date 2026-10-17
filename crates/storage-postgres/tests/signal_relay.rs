@@ -65,7 +65,6 @@ fn record() -> SignalRelayRecord {
         sent_at: at,
         expires_at: envelope.expires_at,
         envelope,
-        call_invitation: None,
         position: 0,
     }
 }
@@ -115,50 +114,49 @@ async fn eight_process_equivalent_racers_allocate_and_insert_exactly_once() {
 }
 
 #[tokio::test]
-async fn one_exact_envelope_retains_each_complete_holder_direction_independently() {
-    use arkret_models_collaboration::call_invitation::*;
+async fn same_principal_at_two_stations_keeps_distinct_admitted_relay_envelopes() {
     let database = TestDatabase::lease().await;
     let relay = PgSignalRelayStore {
         pool: database.pool(),
     };
-    let mut first = record();
-    let holder = AccountId::new(
-        "ak:did_core:web:bob.example".parse().unwrap(),
-        "ak:did_core:web:station.example".parse().unwrap(),
-    );
-    first.call_invitation = Some(CallInvitationEnvelope {
-        inviter_actor_id: first.envelope.sender_actor_id.clone(),
-        holder_account_id: holder.clone(),
-        scope_ref: first.scope_ref.clone(),
-        call_id: "ak:call:ARzVic5s2NUShp82C8GPo-shbkm7isUWyvILLThc3aNL"
-            .parse()
-            .unwrap(),
-        media: CallInvitationMedia {
-            audio: true,
-            video: false,
-            screen: false,
-        },
-        envelope_digest: call_invitation_envelope_digest(&first.envelope).unwrap(),
-        expires_at: first.expires_at,
-        proof: CallInvitationProof {
-            verification_method: first.envelope.proof.verification_method.clone(),
-            jws: "a..b".into(),
-        },
-    });
+    let first = record();
     let mut second = first.clone();
-    second
-        .call_invitation
-        .as_mut()
+    let mut account = second
+        .envelope
+        .sender_actor_id
+        .as_account_id()
         .unwrap()
-        .holder_account_id
-        .station_id = "ak:did_core:web:other-station.example".parse().unwrap();
+        .clone();
+    account.station_id = "ak:did_core:web:other-station.example".parse().unwrap();
+    second.envelope.sender_actor_id = ActorId::account(account);
+    second.envelope.proof.envelope_digest = second.envelope.envelope_digest().unwrap();
+    second.envelope.validate_structural().unwrap();
+    second.sender_actor_id = second.envelope.sender_actor_id.to_string();
+    second.envelope_digest = second.envelope.envelope_digest().unwrap().to_string();
+    assert_ne!(first.envelope_digest, second.envelope_digest);
     assert!(relay.append(first.clone()).await.unwrap());
     assert!(!relay.append(first.clone()).await.unwrap());
     assert!(relay.append(second.clone()).await.unwrap());
     assert!(!relay.append(second.clone()).await.unwrap());
     let rows = relay.list_for_realm(&first.realm_id).await.unwrap();
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].call_invitation, first.call_invitation);
-    assert_eq!(rows[1].call_invitation, second.call_invitation);
-    assert_eq!(rows[0].envelope, rows[1].envelope);
+    assert_ne!(rows[0].sender_actor_id, rows[1].sender_actor_id);
+    assert_eq!(
+        rows[0].envelope.sender_actor_id.signing_principal_id(),
+        rows[1].envelope.sender_actor_id.signing_principal_id()
+    );
+    assert_ne!(
+        rows[0]
+            .envelope
+            .sender_actor_id
+            .as_account_id()
+            .unwrap()
+            .station_id,
+        rows[1]
+            .envelope
+            .sender_actor_id
+            .as_account_id()
+            .unwrap()
+            .station_id
+    );
 }

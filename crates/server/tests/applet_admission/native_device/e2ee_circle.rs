@@ -1,7 +1,7 @@
 //! Exact encrypted Circle admission through real native Account Devices.
 use super::*;
 
-async fn join_founder(fixture: &Fixture, scope: &ScopeRef) -> Value {
+pub(super) async fn join_founder(fixture: &Fixture, scope: &ScopeRef) -> Value {
     let actor = ActorId::account(fixture.pcr.history.account.clone());
     let parent =
         ordinary_realm::parent_membership_revision(&fixture.pool, &fixture.realm, &actor).await;
@@ -18,11 +18,12 @@ async fn join_founder(fixture: &Fixture, scope: &ScopeRef) -> Value {
     parent
 }
 
-async fn deny_join_policy(
+pub(super) async fn deny_policy(
     fixture: &Fixture,
     install: &Installed,
     scope: &ScopeRef,
     policy_scope: ScopeRef,
+    operation: &str,
 ) -> Event {
     let id = format!("ak:policy:{}", uuid::Uuid::now_v7());
     let admin = ActorId::account(fixture.pcr.history.account.clone());
@@ -33,14 +34,14 @@ async fn deny_join_policy(
             "created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now()),
             "rules":[{"rule_id":"exact_circle_join","kind":"applet","effect":"deny",
                 "applet_target":{"kind":"installation","applet_id":install.package.applet_id,"effective_scope":scope},
-                "applet_operations":["join"]}]
+                "applet_operations":[operation]}]
         }
     }));
     native_phase(|| accepted_admin_domain_event(fixture, event.clone())).await;
     event
 }
 
-async fn allow_join_policy(fixture: &Fixture, previous: &Event) {
+pub(super) async fn allow_policy(fixture: &Fixture, previous: &Event) {
     #[derive(diesel::QueryableByName)]
     struct Current {
         #[diesel(sql_type=diesel::sql_types::Jsonb)]
@@ -296,7 +297,7 @@ async fn circle_actor(
     );
     assert_eq!(before, after);
 
-    let policy = native_phase(|| deny_join_policy(fixture, install, scope, policy_scope)).await;
+    let policy = native_phase(|| deny_policy(fixture, install, scope, policy_scope, "join")).await;
     native_phase(|| {
         assert_refused(
             fixture,
@@ -308,7 +309,7 @@ async fn circle_actor(
         )
     })
     .await;
-    native_phase(|| allow_join_policy(fixture, &policy)).await;
+    native_phase(|| allow_policy(fixture, &policy)).await;
     let (status, accepted) = native_phase(|| post(fixture, &authority, &key, &event, vec![])).await;
     assert_eq!(
         status,

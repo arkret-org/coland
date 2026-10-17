@@ -1,6 +1,8 @@
 //! Independent consent uses real accepted installation and MLS Genesis sources.
 #[path = "e2ee_circle.rs"]
 mod circle;
+#[path = "e2ee_keypackage.rs"]
+mod keypackage;
 use coland_storage::EventCommitUnitOfWork as _;
 
 use super::*;

@@ -629,6 +629,18 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
     ) -> crate::ServiceResult<bool> {
         Ok(self.0.mls_key_packages().put(record).await?)
     }
+    async fn store_key_package_for_applet_device(
+        &self,
+        record: &crate::events::MlsKeyPackageState,
+        guard: &coland_storage::AppletManagedDeviceScopeGuard,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::ServiceResult<bool> {
+        Ok(self
+            .0
+            .mls_key_packages()
+            .put_for_applet_device(record, guard, expires_at)
+            .await?)
+    }
     async fn key_package(
         &self,
         id: &str,
@@ -649,6 +661,7 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
             .0
             .mls_key_packages()
             .try_claim(coland_storage::MlsKeyPackageClaim {
+                applet_device_scope_guard: command.applet_device_scope_guard.cloned(),
                 id: command.id,
                 target: match command.target {
                     crate::events::ClaimMlsKeyPackageTarget::Group(group_id) => {
@@ -732,6 +745,7 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
             .0
             .mls_key_packages()
             .try_claim_peer(coland_storage::PeerKeyPackageClaimAttempt {
+                applet_device_scope_guard: attempt.applet_device_scope_guard.cloned(),
                 keypackage_id: attempt.keypackage_id,
                 mls_group_id: attempt.mls_group_id,
                 device_authorize_event_id: attempt.device_authorize_event_id,
@@ -859,13 +873,13 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
 
     async fn retire_owner_account_keypackages(
         &self,
-        owner_account_pk: coland_storage::AccountPk,
+        owner_account_id: arkret_wire::AccountId,
         retired_at: i64,
     ) -> crate::ServiceResult<usize> {
         let rows = self.0.mls_key_packages().snapshot_all().await?;
         let mut retired = 0;
         for row in rows.into_iter().filter(|row| {
-            row.owner_account_pk == owner_account_pk
+            row.owner_account_id == owner_account_id
                 && row.claimed_by_mls_group_id.is_none()
                 && row.consumed_at.is_none()
         }) {
@@ -873,6 +887,7 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
                 .0
                 .mls_key_packages()
                 .try_claim(coland_storage::MlsKeyPackageClaim {
+                    applet_device_scope_guard: None,
                     id: &row.id,
                     target: coland_storage::MlsKeyPackageClaimTarget::Retire,
                     intended_realm_id: None,

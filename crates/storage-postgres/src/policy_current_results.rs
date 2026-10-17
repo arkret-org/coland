@@ -956,7 +956,7 @@ fn require_supported_policy(
                             !matches!(
                                 op,
                                 AppletPolicyOperation::CreateBot | AppletPolicyOperation::MapGhost
-                            ) && !(matches!(op,AppletPolicyOperation::Join | AppletPolicyOperation::Publish)
+                            ) && !(matches!(op,AppletPolicyOperation::Join | AppletPolicyOperation::Publish | AppletPolicyOperation::Execute)
                                 && matches!(&rule.applet_target,Some(arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::Installation {effective_scope,..}) if matches!(effective_scope,arkret_wire::ScopeRef::Realm{realm_id}|arkret_wire::ScopeRef::Circle{realm_id,..} if document.realm_id.as_ref()==Some(realm_id))))
                                 && !(matches!(op,AppletPolicyOperation::Install)
                                     && match &rule.applet_target {
@@ -969,7 +969,7 @@ fn require_supported_policy(
             })
         {
             return Err(refused(
-                "Applet Policy requires established consumers; only install, creation and exact Realm/Circle installation join or publish rules with an allow default are supported",
+                "Applet Policy requires established consumers; only install, creation and exact Realm/Circle installation join, publish or execute rules with an allow default are supported",
             ));
         }
         return Ok(());
@@ -1298,8 +1298,12 @@ mod admission_tests {
         let mut publish = policy.clone();
         publish.rules[0].applet_operations = Some(vec![AppletPolicyOperation::Publish]);
         assert!(require_supported_policy(&publish, &scope).is_ok());
+        let mut execute = policy.clone();
+        execute.rules[0].applet_operations = Some(vec![AppletPolicyOperation::Execute]);
+        assert!(require_supported_policy(&execute, &scope).is_ok());
+        execute.rules[0].effect = arkret_wire::PolicyEffect::RequireReview;
+        assert!(require_supported_policy(&execute, &scope).is_err());
         for op in [
-            AppletPolicyOperation::Execute,
             AppletPolicyOperation::Read,
             AppletPolicyOperation::Deliver,
             AppletPolicyOperation::Serve,

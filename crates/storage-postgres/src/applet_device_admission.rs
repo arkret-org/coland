@@ -26,6 +26,14 @@ struct JsonRow {
     value: Value,
 }
 
+#[derive(QueryableByName)]
+struct InstallationRow {
+    #[diesel(sql_type=Jsonb)]
+    value: Value,
+    #[diesel(sql_type=diesel::sql_types::Bool)]
+    globally_fenced: bool,
+}
+
 /// The actual domain action, never a union of alternative membership actions.
 pub(crate) fn action(event: &Event) -> PersistenceResult<CapabilityActionId> {
     if event.executed_by.is_none() && event.kind == EventKind::MessageCreate {
@@ -155,6 +163,43 @@ pub(crate) async fn installation_for_device(
     {
         return Err(denied("native resource exceeds its original Device pair"));
     }
+    crate::boxed_future(|| {
+        installation_at_scope(conn, authority, scope, service_did_document, at, writer)
+    })
+    .await
+}
+
+/// The registered KeyPackage control rule requires an exact original scope,
+/// without pretending that an empty business-action set authorizes anything.
+pub(crate) async fn installation_for_keypackage_publication(
+    conn: &mut AsyncPgConnection,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    scope: &ScopeRef,
+    service_did_document: &arkret_identity::DidDocument,
+    at: chrono::DateTime<chrono::Utc>,
+    writer: bool,
+) -> PersistenceResult<(arkret_models_integration::AppletRegistrationPayload, Value)> {
+    if !matches!(scope, ScopeRef::Realm { .. } | ScopeRef::Circle { .. })
+        || !authority.scopes.contains_scope(scope)
+    {
+        return Err(denied(
+            "native KeyPackage exceeds its original Device scope",
+        ));
+    }
+    crate::boxed_future(|| {
+        installation_at_scope(conn, authority, scope, service_did_document, at, writer)
+    })
+    .await
+}
+
+async fn installation_at_scope(
+    conn: &mut AsyncPgConnection,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    scope: &ScopeRef,
+    service_did_document: &arkret_identity::DidDocument,
+    at: chrono::DateTime<chrono::Utc>,
+    writer: bool,
+) -> PersistenceResult<(arkret_models_integration::AppletRegistrationPayload, Value)> {
     let registration = crate::managed_message_actor::registration_for_scope(
         conn,
         scope.realm_id(),
@@ -180,18 +225,26 @@ pub(crate) async fn installation_for_device(
         "FOR SHARE OF i,m NOWAIT"
     };
     let query = format!(
-        "SELECT i.record AS value FROM applet_installations i JOIN applet_registration_current_results r ON r.realm_id=$3 AND r.applet_id=i.applet_id JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref AND a.registration_event_ref=i.record#>>'{{registration_event,event_id}}' JOIN applet_managed_identities m ON m.applet_id=i.applet_id AND m.target_station_id=$4 WHERE i.applet_id=$1 AND i.effective_scope_key=$2 AND m.record->>'globally_fenced_at' IS NULL {locking}"
+        "SELECT i.record AS value,(m.record->>'globally_fenced_at' IS NOT NULL) AS globally_fenced FROM applet_installations i JOIN applet_registration_current_results r ON r.realm_id=$3 AND r.applet_id=i.applet_id JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref AND a.registration_event_ref=i.record#>>'{{registration_event,event_id}}' JOIN applet_managed_identities m ON m.applet_id=i.applet_id AND m.target_station_id=$4 WHERE i.applet_id=$1 AND i.effective_scope_key=$2 {locking}"
     );
     let row = sql_query(query)
         .bind::<Text, _>(authority.applet_id.as_str())
         .bind::<Text, _>(key)
         .bind::<Text, _>(scope.realm_id().as_str())
         .bind::<Text, _>(authority.account_id.station_id.as_str())
-        .get_result::<JsonRow>(&mut *conn)
+        .get_result::<InstallationRow>(&mut *conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
         .ok_or_else(|| denied("native Applet exact installation is absent or fenced"))?;
+    if row.globally_fenced
+        || row.value.get("revoked_at").is_some_and(|v| !v.is_null())
+        || row.value["status"] == "revoked"
+    {
+        return Err(PersistenceError::Conflict(
+            "applet_revoked: native exact installation is fenced".into(),
+        ));
+    }
     if row.value["effective_scope"] != json!(scope)
         || row.value["package"]["registration_epoch"] != json!(registration.registration_epoch)
         || row.value.get("revoked_at").is_some_and(|v| !v.is_null())
@@ -339,6 +392,7 @@ pub(crate) async fn select_management(
     let decision = arkret_policy::applet_management::select_applet_management(
         Some(&policies),
         &arkret_policy::applet_management::AppletManagementContext {
+            device_control: None,
             realm_id: &event.realm_id,
             requester_actor_id: &service,
             applet_id: &registration.applet_id,

@@ -204,6 +204,30 @@ pub(crate) async fn content_delivery_guard_for_input(
     mut input: coland_storage::AccountContentDeliveryInput,
 ) -> Result<Box<dyn coland_storage::AccountContentDeliveryGuard>, AppError> {
     let unavailable = || AppError::not_found("native content is unavailable");
+    input.applet_endpoint = Some(scope_guard(state, device).await?);
+    input.credential_expires_at = Some(device.transport_expires_at);
+    state
+        .authority_commits()
+        .acquire_committed_content_delivery(
+            &device.authority.account_id,
+            &state.service_core_id(),
+            &input,
+        )
+        .await
+        .map_err(|error| {
+            tracing::debug!(stage="native_delivery_cut", error=%error, "native content preparation refused");
+            unavailable()
+        })?
+        .ok_or_else(unavailable)
+}
+
+/// Current resolver evidence only; each native writer rechecks its actual
+/// resource, Device and installation under the accepting transaction's locks.
+pub(crate) async fn scope_guard(
+    state: &AppState,
+    device: &VerifiedAppletManagedDevice,
+) -> Result<coland_storage::AppletManagedDeviceScopeGuard, AppError> {
+    let unavailable = || AppError::not_found("native scope identity is unavailable");
     let record = crate::routing::extensions::applet_bridge::record::applet_record(
         state,
         device.authority.applet_id.as_str(),
@@ -224,23 +248,9 @@ pub(crate) async fn content_delivery_guard_for_input(
                 "current Applet Service identity is unavailable"
             )
         })?;
-    input.applet_endpoint = Some(coland_storage::AppletManagedDeviceScopeGuard {
+    Ok(coland_storage::AppletManagedDeviceScopeGuard {
         authority: device.authority.clone(),
         effective_scope: device.metadata.effective_scope.clone(),
         service_did_document,
-    });
-    input.credential_expires_at = Some(device.transport_expires_at);
-    state
-        .authority_commits()
-        .acquire_committed_content_delivery(
-            &device.authority.account_id,
-            &state.service_core_id(),
-            &input,
-        )
-        .await
-        .map_err(|error| {
-            tracing::debug!(stage="native_delivery_cut", error=%error, "native content preparation refused");
-            unavailable()
-        })?
-        .ok_or_else(unavailable)
+    })
 }

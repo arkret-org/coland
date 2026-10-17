@@ -55,6 +55,7 @@ pub(crate) async fn require_install_policy(
     let decision = arkret_policy::applet_management::select_applet_management(
         Some(&policies),
         &arkret_policy::applet_management::AppletManagementContext {
+            device_control: None,
             realm_id: scope.realm_id(),
             requester_actor_id: &basis.install_actor_id,
             applet_id: &body.applet_package.applet_id,

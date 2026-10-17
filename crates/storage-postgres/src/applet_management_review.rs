@@ -724,6 +724,7 @@ async fn select_current_creation(
     let decision = arkret_policy::applet_management::select_applet_management(
         Some(&policies),
         &arkret_policy::applet_management::AppletManagementContext {
+            device_control: None,
             realm_id: scope.realm_id(),
             requester_actor_id: &input.admin_actor_id,
             applet_id: &input.package.applet_id,

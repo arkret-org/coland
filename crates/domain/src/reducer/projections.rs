@@ -154,8 +154,9 @@ pub struct MlsKeyPackageProjection {
     pub id: String,
     pub keypackage_ref: String,
     pub keypackage_digest: String,
-    /// Local `accounts.pk`; never serialized as a protocol identifier.
-    pub owner_account_pk: i64,
+    /// Complete Account owner; the endpoint principal may instead be an Agent.
+    pub owner_account_id: arkret_wire::AccountId,
+    pub effective_scope: Option<arkret_wire::ScopeRef>,
     pub actor_id: String,
     pub device_id: Option<String>,
     /// Exact Agent runtime verification method used by the non-device endpoint.

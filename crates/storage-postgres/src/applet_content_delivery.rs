@@ -115,6 +115,7 @@ impl ReadProof {
             let decision = arkret_policy::applet_management::select_applet_management(
                 Some(&self.context.policies),
                 &arkret_policy::applet_management::AppletManagementContext {
+                    device_control: None,
                     realm_id: self.context.endpoint.effective_scope.realm_id(),
                     requester_actor_id: &service,
                     applet_id: &self.context.registration.applet_id,

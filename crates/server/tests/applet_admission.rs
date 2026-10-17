@@ -3490,6 +3490,13 @@ async fn ingest_managed_actor_current_document(state: &AppState, actor: &Managed
 struct NativeAppletService {
     package: AppletPackage,
     history: Arc<Mutex<Vec<Value>>>,
+    managed_author: Arc<
+        Mutex<
+            Option<
+                Arc<arkret_bridge_runtime::managed_actor_authoring::ManagedActorAuthoringService>,
+            >,
+        >,
+    >,
     stop: Arc<std::sync::atomic::AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -3604,6 +3611,11 @@ impl NativeAppletService {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let server_stop = stop.clone();
         let served = history.clone();
+        let managed_author = Arc::new(Mutex::new(
+            None::<Arc<arkret_bridge_runtime::managed_actor_authoring::ManagedActorAuthoringService>>,
+        ));
+        let served_author = managed_author.clone();
+        let runtime = tokio::runtime::Handle::current();
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let thread = std::thread::spawn(move || {
             let mut connections = Vec::new();
@@ -3622,6 +3634,8 @@ impl NativeAppletService {
                 };
                 let tls = tls.clone();
                 let served = served.clone();
+                let served_author = served_author.clone();
+                let runtime = runtime.clone();
                 // Fresh current resolution may open multiple TLS connections.
                 // An idle connection must not block another request's proof.
                 connections.push(std::thread::spawn(move || {
@@ -3647,8 +3661,18 @@ impl NativeAppletService {
                 }
                 let request = String::from_utf8_lossy(&bytes);
                 if bytes.is_empty() { return; }
+                let path = request.lines().next().unwrap().split_whitespace().nth(1).unwrap();
+                let author = served_author.lock().unwrap().clone();
+                let local_id = path.strip_prefix("/webvh/").and_then(|p| p.strip_suffix("/did.jsonl").or_else(||p.strip_suffix("/did.json")));
+                let published = match (author, local_id) {
+                    (Some(author), Some(local_id)) if local_id != "service" => runtime.block_on(author.published_principal(local_id)).unwrap(),
+                    _ => None,
+                };
                 let entries = served.lock().unwrap();
-                let body = if request
+                let body = if let Some((document, history)) = published {
+                    if path.ends_with("did.jsonl") { history.iter().map(|e|serde_json::to_string(e).unwrap()+"\n").collect::<String>() }
+                    else { serde_json::to_string(&document).unwrap() }
+                } else if request
                     .lines()
                     .next()
                     .is_some_and(|l| l.contains("did.jsonl"))
@@ -3680,6 +3704,7 @@ impl NativeAppletService {
         Self {
             package,
             history,
+            managed_author,
             stop,
             thread: Some(thread),
         }
@@ -4200,6 +4225,12 @@ impl Fixture {
         Self::new_inner(true).await
     }
     async fn new_inner(with_second_device: bool) -> Self {
+        Self::new_inner_with_public_base_url(with_second_device, None).await
+    }
+    async fn new_inner_with_public_base_url(
+        with_second_device: bool,
+        public_base_url: Option<String>,
+    ) -> Self {
         let _ = tracing_subscriber::fmt()
             .with_env_filter("warn,coland_storage_postgres::applet_content_delivery=debug,coland_http::routing::identity::applet_managed_device=debug")
             .with_test_writer()
@@ -4224,6 +4255,9 @@ impl Fixture {
             ],
             ..coland_test_support::app_config()
         };
+        if let Some(public_base_url) = public_base_url {
+            config.public_base_url = public_base_url;
+        }
         config.account_authority_trust_domain = Some(config.trust_domain.clone());
         config.register_test_internal_authority_channel("applet-http-standard-grant".to_owned());
         let (state, pool) = coland_test_support::app_state_with_pool(config);
@@ -7833,3 +7867,6 @@ async fn combined_creation_approval_scenario() {
 
 #[path = "applet_admission/native_device.rs"]
 mod native_device;
+
+#[path = "applet_admission/managed_runtime.rs"]
+mod managed_runtime;

@@ -1852,6 +1852,7 @@ dependencies = [
  "anyhow",
  "arkret",
  "arkret-bootstrap",
+ "arkret-bridge-runtime",
  "arkret-canonical",
  "arkret-crypto",
  "arkret-event-draft",

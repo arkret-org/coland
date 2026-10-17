@@ -317,15 +317,20 @@ pub(super) async fn validate_managed_actor_current_method_evidence(
     provision: &AppletManagedActorProvisionPayload,
 ) -> Result<(), AppError> {
     let did = &provision.initial_resolution.did;
-    crate::jws_verify::enforce_high_risk_did_freshness(state, did)
-        .await
-        .map_err(|error| {
-            AppError::param_invalid(
-                "Applet-managed WebVH evidence lacks a fresh trusted current resolution",
-            )
-            .with_reason_code("identity_method_evidence_invalid")
-            .with_reason_detail(error)
-        })?;
+    let ingested = state.dids().document(did.as_str()).await.map_err(|error| {
+        AppError::internal(format!("managed DID current lookup failed: {error}"))
+    })?;
+    if ingested.is_some() {
+        crate::jws_verify::enforce_high_risk_did_freshness(state, did)
+            .await
+            .map_err(|error| {
+                AppError::param_invalid(
+                    "Applet-managed WebVH evidence lacks a fresh trusted current resolution",
+                )
+                .with_reason_code("identity_method_evidence_invalid")
+                .with_reason_detail(error)
+            })?;
+    }
     let history_head = Hash::new(provision.initial_resolution.method_history_head.clone())
         .map_err(|error| {
             AppError::param_invalid(format!(
@@ -333,16 +338,17 @@ pub(super) async fn validate_managed_actor_current_method_evidence(
             ))
             .with_reason_code("identity_method_evidence_invalid")
         })?;
-    let pinned = state
-        .dids()
-        .resolve_pinned_webvh_state(did, &provision.initial_resolution.version_id, &history_head)
-        .await
-        .map_err(|error| {
-            AppError::param_invalid(format!(
-                "Applet-managed WebVH evidence is not an accepted trusted history state: {error}"
-            ))
-            .with_reason_code("identity_method_evidence_invalid")
-        })?;
+    let pinned = if ingested.is_some() {
+        state.dids().resolve_current_webvh_state(did).await
+    } else {
+        state.dids().resolve_current_external_webvh_state(did).await
+    }
+    .map_err(|error| {
+        AppError::param_invalid(format!(
+            "Applet-managed WebVH evidence is not an accepted trusted history state: {error}"
+        ))
+        .with_reason_code("identity_method_evidence_invalid")
+    })?;
     if !managed_actor_pinned_resolution_is_current(
         &pinned,
         did,
@@ -353,6 +359,43 @@ pub(super) async fn validate_managed_actor_current_method_evidence(
             "Applet-managed WebVH evidence is a historical prefix rather than the current trusted head",
         )
         .with_reason_code("identity_method_evidence_invalid"));
+    }
+    if ingested.is_none() {
+        let (_, logs, _) = provision.method_history_evidence.webvh_material();
+        let now = chrono::Utc::now();
+        let document = coland_services::identity::DidDocumentState {
+            did: did.to_string(),
+            did_document: pinned.document,
+            key_log_head: Some(history_head.to_string()),
+            seq: logs.len() as u64,
+            method_evidence: serde_json::to_value(&provision.method_history_evidence)
+                .map_err(|e| AppError::internal(e.to_string()))?,
+            fetched_at: now,
+            expires_at: now + chrono::Duration::minutes(15),
+            updated_at: now,
+        };
+        let result = state
+            .dids()
+            .ingest_verified_history(None, document)
+            .await
+            .map_err(|error| {
+                AppError::internal(format!("managed native history ingestion failed: {error}"))
+            })?;
+        if result == coland_services::identity::DidLogCommitResult::Conflict {
+            return Err(
+                AppError::conflict("managed native history changed before ingestion")
+                    .with_wire_code("failed_precondition"),
+            );
+        }
+        // Re-read durable ingestion before publishing a resolver cache entry.
+        // The aggregate admission still locks and rechecks this original row.
+        crate::jws_verify::enforce_high_risk_did_freshness(state, did)
+            .await
+            .map_err(|error| {
+                AppError::internal(format!(
+                    "managed native history ingestion is unavailable: {error}"
+                ))
+            })?;
     }
     Ok(())
 }

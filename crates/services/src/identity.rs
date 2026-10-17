@@ -2556,6 +2556,11 @@ pub trait DidDocumentPort: Send + Sync {
     async fn log_events(&self, did: &str) -> ServiceResult<Vec<DidLogEvent>>;
     async fn store_document(&self, document: DidDocumentState) -> ServiceResult<()>;
     async fn append_log_event(&self, event: DidLogEvent) -> ServiceResult<()>;
+    async fn ingest_verified_history(
+        &self,
+        expected_current_head: Option<String>,
+        document: DidDocumentState,
+    ) -> ServiceResult<DidLogCommitResult>;
     async fn service_registration(
         &self,
         key: &ServiceRegistrationKey,
@@ -2778,6 +2783,17 @@ impl DidService {
         self.resolver.resolve_current_service_did(did).await
     }
 
+    /// Resolve a fresh external native head without preferring local history.
+    /// This is used before atomically ingesting a newly published Principal.
+    pub async fn resolve_current_external_webvh_state(
+        &self,
+        did: &Did,
+    ) -> Result<PinnedDidDocumentState, PinnedDidResolutionError> {
+        self.resolver
+            .resolve_current_external_webvh_state(did)
+            .await
+    }
+
     pub async fn resolve_current_webvh_state(
         &self,
         did: &Did,
@@ -2887,6 +2903,16 @@ impl DidService {
 
     pub async fn store_document(&self, document: DidDocumentState) -> ServiceResult<()> {
         self.documents.store_document(document).await
+    }
+
+    pub async fn ingest_verified_history(
+        &self,
+        expected_current_head: Option<String>,
+        document: DidDocumentState,
+    ) -> ServiceResult<DidLogCommitResult> {
+        self.documents
+            .ingest_verified_history(expected_current_head, document)
+            .await
     }
 
     pub async fn append_log_event(&self, event: DidLogEvent) -> ServiceResult<()> {
@@ -3523,6 +3549,14 @@ mod tests {
             _event: DidLogEvent,
         ) -> ServiceResult<ServiceRegistrationCommitResult> {
             Ok(ServiceRegistrationCommitResult::Conflict)
+        }
+
+        async fn ingest_verified_history(
+            &self,
+            _expected_current_head: Option<String>,
+            _document: DidDocumentState,
+        ) -> ServiceResult<DidLogCommitResult> {
+            Ok(DidLogCommitResult::Conflict)
         }
 
         async fn commit_log_operation(

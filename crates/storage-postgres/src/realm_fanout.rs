@@ -779,6 +779,8 @@ pub(crate) async fn plan_realm_fanout_in_connection(
             && matches!(
                 event.kind,
                 arkret_wire::EventKind::CircleMemberState
+                    | arkret_wire::EventKind::CapabilityGrant
+                    | arkret_wire::EventKind::CapabilityRevoke
                     | arkret_wire::EventKind::PolicySet
                     | arkret_wire::EventKind::StrandWatchSet
                     | arkret_wire::EventKind::AuditAccessed

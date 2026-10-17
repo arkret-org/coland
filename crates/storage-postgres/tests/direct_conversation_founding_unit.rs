@@ -4792,7 +4792,7 @@ async fn claim_human_peer_package(
         pk: i64,
     }
     let mut conn = pair.pool.get().await.unwrap();
-    let owner = diesel::sql_query("INSERT INTO accounts(principal_id,station_id) VALUES($1,$2) ON CONFLICT(principal_id,station_id) DO UPDATE SET principal_id=EXCLUDED.principal_id RETURNING pk")
+    let _owner = diesel::sql_query("INSERT INTO accounts(principal_id,station_id) VALUES($1,$2) ON CONFLICT(principal_id,station_id) DO UPDATE SET principal_id=EXCLUDED.principal_id RETURNING pk")
         .bind::<Text,_>(pair.peer.principal_id.as_str()).bind::<Text,_>(pair.peer.station_id.as_str())
         .get_result::<Owner>(&mut conn).await.unwrap().pk;
     drop(conn);
@@ -4805,7 +4805,8 @@ async fn claim_human_peer_package(
                 id: package.keypackage_id.clone(),
                 keypackage_ref: package.keypackage_ref.to_string(),
                 keypackage_digest: package.keypackage_ref.to_string(),
-                owner_account_pk: coland_storage::AccountPk(owner),
+                owner_account_id: pair.peer.clone(),
+                effective_scope: None,
                 actor_id: pair.peer.principal_id.to_string(),
                 device_id: Some(device.to_string()),
                 endpoint_verification_method: None,
@@ -4932,6 +4933,7 @@ async fn claim_human_peer_package(
     let group = scope.canonical_mls_group_id().unwrap();
     let result = store
         .try_claim_peer(coland_storage::PeerKeyPackageClaimAttempt {
+            applet_device_scope_guard: None,
             keypackage_id: &package.keypackage_id,
             mls_group_id: group.as_str(),
             device_authorize_event_id: Some(guard.authorization_ref.event_id.as_str()),

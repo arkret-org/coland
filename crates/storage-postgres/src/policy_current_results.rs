@@ -956,14 +956,20 @@ fn require_supported_policy(
                             !matches!(
                                 op,
                                 AppletPolicyOperation::CreateBot | AppletPolicyOperation::MapGhost
-                            ) && !(matches!(op,AppletPolicyOperation::Join | AppletPolicyOperation::Publish)
-                                && matches!(&rule.applet_target,Some(arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::Installation {effective_scope,..}) if matches!(effective_scope,arkret_wire::ScopeRef::Realm{realm_id} if document.realm_id.as_ref()==Some(realm_id)) || matches!((op,effective_scope),(AppletPolicyOperation::Publish,arkret_wire::ScopeRef::Circle{realm_id,..}) if document.realm_id.as_ref()==Some(realm_id))))
+                            ) && !(matches!(op,AppletPolicyOperation::Join | AppletPolicyOperation::Publish | AppletPolicyOperation::Execute)
+                                && matches!(&rule.applet_target,Some(arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::Installation {effective_scope,..}) if matches!(effective_scope,arkret_wire::ScopeRef::Realm{realm_id}|arkret_wire::ScopeRef::Circle{realm_id,..} if document.realm_id.as_ref()==Some(realm_id))))
+                                && !(matches!(op,AppletPolicyOperation::Install)
+                                    && match &rule.applet_target {
+                                        Some(arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::All {} | arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::Requester { .. }) => true,
+                                        Some(arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::Installation { effective_scope, .. }) => document.realm_id.as_ref() == effective_scope.realm_id_opt(),
+                                        _ => false,
+                                    })
                         })
                     })
             })
         {
             return Err(refused(
-                "Applet Policy requires established consumers; only creation, exact Realm installation join and exact installation publish rules with an allow default are supported",
+                "Applet Policy requires established consumers; only install, creation and exact Realm/Circle installation join, publish or execute rules with an allow default are supported",
             ));
         }
         return Ok(());
@@ -1227,7 +1233,7 @@ mod admission_tests {
     }
 
     #[test]
-    fn applet_join_configuration_stays_within_the_established_native_realm_consumer() {
+    fn applet_join_configuration_stays_within_established_native_scope_consumers() {
         use arkret_models_collaboration::governance::operation_wire::{
             AppletPolicyOperation, AppletPolicyTarget, PolicyRuleKind,
         };
@@ -1249,14 +1255,55 @@ mod admission_tests {
             effective_scope: scope.clone(),
         });
         assert!(require_supported_policy(&policy, &scope).is_ok());
+        let circle = arkret_wire::ScopeRef::Circle {
+            realm_id: realm.clone(),
+            circle_id: arkret_wire::CircleId::from_event_id(&arkret_wire::EventId::from_digest(
+                arkret_canonical::DigestSuite::Sha256,
+                [217; 32],
+            )),
+        };
+        let mut circle_join = policy.clone();
+        if let Some(AppletPolicyTarget::Installation {
+            effective_scope, ..
+        }) = &mut circle_join.rules[0].applet_target
+        {
+            *effective_scope = circle.clone();
+        }
+        assert!(require_supported_policy(&circle_join, &scope).is_ok());
+        assert!(require_supported_policy(&circle_join, &circle).is_ok());
+        circle_join.rules[0].effect = arkret_wire::PolicyEffect::RequireReview;
+        circle_join.rules[0].review_requirement = Some(
+            arkret_models_collaboration::governance::operation_wire::ManagementReviewRequirement {
+                approver_actor_ids: vec![policy.created_by.clone()],
+                threshold: 1,
+                max_age_seconds: 60,
+            },
+        );
+        circle_join.validate().unwrap();
+        assert!(require_supported_policy(&circle_join, &circle).is_ok());
+        let mut wrong_realm = circle_join.clone();
+        wrong_realm.realm_id = Some(arkret_wire::RealmId::from_event_id(
+            &arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [218; 32]),
+        ));
+        assert!(require_supported_policy(&wrong_realm, &circle).is_err());
         let mut broad = policy.clone();
         broad.rules[0].applet_target = Some(AppletPolicyTarget::All {});
         assert!(require_supported_policy(&broad, &scope).is_err());
+        broad.rules[0].applet_operations = Some(vec![AppletPolicyOperation::Install]);
+        assert!(require_supported_policy(&broad, &scope).is_ok());
+        broad.rules[0].applet_target = Some(AppletPolicyTarget::Requester {
+            actor_id: policy.created_by.clone(),
+        });
+        assert!(require_supported_policy(&broad, &scope).is_ok());
         let mut publish = policy.clone();
         publish.rules[0].applet_operations = Some(vec![AppletPolicyOperation::Publish]);
         assert!(require_supported_policy(&publish, &scope).is_ok());
+        let mut execute = policy.clone();
+        execute.rules[0].applet_operations = Some(vec![AppletPolicyOperation::Execute]);
+        assert!(require_supported_policy(&execute, &scope).is_ok());
+        execute.rules[0].effect = arkret_wire::PolicyEffect::RequireReview;
+        assert!(require_supported_policy(&execute, &scope).is_err());
         for op in [
-            AppletPolicyOperation::Execute,
             AppletPolicyOperation::Read,
             AppletPolicyOperation::Deliver,
             AppletPolicyOperation::Serve,

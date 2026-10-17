@@ -206,6 +206,8 @@ pub enum ConflictCode {
     ApprovalRequired,
     /// The applet was revoked between admission and commit.
     AppletRevoked,
+    /// The exact installation has no independent current MLS join consent.
+    AppletE2eeJoinUnauthorized,
     /// An Actor Profile `accountable_principal_ids` entry has no committed
     /// active accountability record at the accepting Commit
     /// (`zh/models/actor.md` section 3.3.1).
@@ -394,10 +396,11 @@ pub enum ConflictCode {
 
 impl ConflictCode {
     /// Every registered code, in the order the variants are declared.
-    pub const ALL: [Self; 86] = [
+    pub const ALL: [Self; 87] = [
         Self::ApprovalNonceReused,
         Self::ApprovalRequired,
         Self::AppletRevoked,
+        Self::AppletE2eeJoinUnauthorized,
         Self::AccountabilityGrantMissing,
         Self::BackupRevisionStale,
         Self::CapabilityDenied,
@@ -495,6 +498,9 @@ impl ConflictCode {
             Self::ApprovalNonceReused => arkret_wire::ReasonCode::APPROVAL_NONCE_REUSED,
             Self::ApprovalRequired => arkret_wire::ReasonCode::APPROVAL_REQUIRED,
             Self::AppletRevoked => "applet_revoked",
+            Self::AppletE2eeJoinUnauthorized => {
+                arkret_wire::ErrorCode::APPLET_E2EE_JOIN_UNAUTHORIZED
+            }
             Self::AccountabilityGrantMissing => {
                 arkret_wire::ReasonCode::ACCOUNTABILITY_GRANT_MISSING
             }

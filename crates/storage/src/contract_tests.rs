@@ -3101,7 +3101,7 @@ pub async fn assert_federation_outbox_store_contract(
 async fn mls_keypackage_contract_account(
     accounts: &dyn super::AccountStore,
     device: &DeviceRevocationGateSelector,
-) -> AccountPk {
+) -> arkret_wire::AccountId {
     accounts
         .put(&super::AccountRecord {
             pk: AccountPk(0),
@@ -3114,13 +3114,14 @@ async fn mls_keypackage_contract_account(
             created_at: database_timestamp_now(),
         })
         .await
-        .expect("register KeyPackage Account owner")
+        .expect("register KeyPackage Account owner");
+    arkret_wire::AccountId::new(device.principal_id.clone(), device.station_id.clone())
 }
 
 fn mls_keypackage_contract_row(
     namespace: &str,
     suffix: &str,
-    owner_account_pk: AccountPk,
+    owner_account_id: arkret_wire::AccountId,
     device: &DeviceRevocationGateSelector,
 ) -> MlsKeyPackageRow {
     MlsKeyPackageRow {
@@ -3128,9 +3129,10 @@ fn mls_keypackage_contract_row(
         keypackage_ref: format!("ak:mls:keypackage:{namespace}-{suffix}"),
         keypackage_digest:
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
-        owner_account_pk,
+        owner_account_id,
+        effective_scope: None,
         // The KeyPackage wire binds the cryptographic endpoint principal;
-        // the exact Station Account is carried by owner_account_pk above.
+        // the exact Station Account is carried by owner_account_id above.
         actor_id: device.principal_id.to_string(),
         device_id: Some(device.device_id.clone()),
         endpoint_verification_method: None,
@@ -3177,6 +3179,7 @@ fn mls_claim<'a>(
     device: &'a DeviceRevocationGateSelector,
 ) -> MlsKeyPackageClaim<'a> {
     MlsKeyPackageClaim {
+        applet_device_scope_guard: None,
         id,
         target,
         intended_realm_id: None,
@@ -3197,12 +3200,16 @@ pub async fn assert_mls_keypackage_retirement_contract(
     namespace: &str,
     device: &DeviceRevocationGateSelector,
 ) {
-    let owner_account_pk = mls_keypackage_contract_account(accounts, device).await;
-    let published = mls_keypackage_contract_row(namespace, "published", owner_account_pk, device);
-    let claimed = mls_keypackage_contract_row(namespace, "claimed", owner_account_pk, device);
-    let consumed = mls_keypackage_contract_row(namespace, "consumed", owner_account_pk, device);
-    let late = mls_keypackage_contract_row(namespace, "late-consume", owner_account_pk, device);
-    let revoked = mls_keypackage_contract_row(namespace, "revoked", owner_account_pk, device);
+    let owner_account_id = mls_keypackage_contract_account(accounts, device).await;
+    let published =
+        mls_keypackage_contract_row(namespace, "published", owner_account_id.clone(), device);
+    let claimed =
+        mls_keypackage_contract_row(namespace, "claimed", owner_account_id.clone(), device);
+    let consumed =
+        mls_keypackage_contract_row(namespace, "consumed", owner_account_id.clone(), device);
+    let late =
+        mls_keypackage_contract_row(namespace, "late-consume", owner_account_id.clone(), device);
+    let revoked = mls_keypackage_contract_row(namespace, "revoked", owner_account_id, device);
     for row in [&published, &claimed, &consumed, &late, &revoked] {
         assert!(store.put(row).await.expect("publish KeyPackage"));
     }
@@ -3390,9 +3397,9 @@ pub async fn assert_last_resort_claim_ledger_contract(
     namespace: &str,
     device: &DeviceRevocationGateSelector,
 ) {
-    let owner_account_pk = mls_keypackage_contract_account(accounts, device).await;
+    let owner_account_id = mls_keypackage_contract_account(accounts, device).await;
     let mut keypackage =
-        mls_keypackage_contract_row(namespace, "last-resort", owner_account_pk, device);
+        mls_keypackage_contract_row(namespace, "last-resort", owner_account_id, device);
     keypackage.last_resort = true;
     let realm_id = "ak:realm:Abeq9pC3fxOERl1X0ivHa5cJCBy41KfYu5LKvGfPFq5K";
     keypackage.last_resort_realm_id = Some(realm_id.to_owned());
@@ -3442,6 +3449,7 @@ pub async fn assert_last_resort_claim_ledger_contract(
         assert!(matches!(
             store
                 .try_claim_peer(PeerKeyPackageClaimAttempt {
+                    applet_device_scope_guard: None,
                     keypackage_id: &keypackage.id,
                     mls_group_id: &group_id,
                     device_authorize_event_id: None,
@@ -3671,6 +3679,7 @@ pub async fn assert_last_resort_claim_ledger_contract(
     assert!(matches!(
         store
             .try_claim_peer(PeerKeyPackageClaimAttempt {
+                applet_device_scope_guard: None,
                 keypackage_id: &keypackage.id,
                 mls_group_id: &group_id,
                 device_authorize_event_id: None,

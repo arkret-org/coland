@@ -42,7 +42,8 @@ fn publish_projection(
         keypackage_id: id.to_owned(),
         keypackage_ref: id.to_owned(),
         keypackage_digest: arkret_canonical::sha256_digest(&key_package_bytes),
-        owner_account_pk: 1,
+        owner_account_id: fixture_actor(actor).as_account_id().unwrap().clone(),
+        effective_scope: None,
         actor_id: fixture_actor(actor).to_string(),
         device_id: Some(device.to_owned()),
         lifetime: KeyPackageLifetimeProjection {

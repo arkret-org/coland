@@ -432,6 +432,12 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
                     coland_storage::ConflictCode::DeviceUnauthorized => {
                         Some(arkret_wire::ErrorCode::DeviceUnauthorized)
                     }
+                    coland_storage::ConflictCode::AppletRevoked => {
+                        Some(arkret_wire::ErrorCode::AppletRevoked)
+                    }
+                    coland_storage::ConflictCode::AppletE2eeJoinUnauthorized => {
+                        Some(arkret_wire::ErrorCode::AppletE2eeJoinUnauthorized)
+                    }
                     coland_storage::ConflictCode::SignatureInvalid => {
                         Some(arkret_wire::ErrorCode::SignatureInvalid)
                     }

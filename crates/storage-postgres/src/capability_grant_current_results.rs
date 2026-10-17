@@ -362,15 +362,86 @@ pub(crate) fn validate_ancestor_graph(
     visiting: &mut BTreeSet<GrantId>,
     depth: u64,
 ) -> PersistenceResult<()> {
-    if depth > 4 || current_id == child_id || !visiting.insert(current_id.clone()) {
+    if ancestor_graph_current(
+        child_id,
+        current_id,
+        rows,
+        root,
+        realm_id,
+        accepted_at,
+        visiting,
+        depth,
+        false,
+    )? {
+        Ok(())
+    } else {
+        Err(conflict("grant_revoked_upstream"))
+    }
+}
+
+/// Continuity of an already accepted grant, not permission to exercise an
+/// action or re-issue its profile-specific initial authority. A known closed
+/// lineage is distinct from unavailable current evidence.
+pub(crate) fn accepted_grant_is_current(
+    grant_id: &GrantId,
+    rows: &BTreeMap<GrantId, CapabilityGrant>,
+    root: &RealmAuthorityRootCurrent,
+    realm_id: &RealmId,
+    accepted_at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<bool> {
+    ancestor_graph_current(
+        // An accepted grant cannot be an ancestor of a new candidate here.
+        // The traversal still detects all actual cycles through `visiting`.
+        grant_id,
+        grant_id,
+        rows,
+        root,
+        realm_id,
+        accepted_at,
+        &mut BTreeSet::new(),
+        0,
+        true,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The original grant cut and legacy error mapping remain explicit."
+)]
+fn ancestor_graph_current(
+    child_id: &GrantId,
+    current_id: &GrantId,
+    rows: &BTreeMap<GrantId, CapabilityGrant>,
+    root: &RealmAuthorityRootCurrent,
+    realm_id: &RealmId,
+    accepted_at: chrono::DateTime<chrono::Utc>,
+    visiting: &mut BTreeSet<GrantId>,
+    depth: u64,
+    complete_current: bool,
+) -> PersistenceResult<bool> {
+    if depth > 4
+        || (!complete_current && current_id == child_id)
+        || !visiting.insert(current_id.clone())
+    {
         return Err(conflict("authority_cycle"));
     }
-    let parent = rows
-        .get(current_id)
-        .ok_or_else(|| conflict("grant_exceeds_issuer_authority"))?;
+    let parent = rows.get(current_id).ok_or_else(|| {
+        if complete_current {
+            conflict("temporarily_unavailable: accepted grant current is unavailable")
+        } else {
+            conflict("grant_exceeds_issuer_authority")
+        }
+    })?;
     require_delegable_parent(parent)?;
+    if complete_current
+        && (parent.realm_id.as_ref() != Some(realm_id) || parent.issuer_authority_refs.is_empty())
+    {
+        return Err(conflict(
+            "temporarily_unavailable: accepted grant authority current is incomplete",
+        ));
+    }
     if parent.realm_id.as_ref() != Some(realm_id) || !grant_is_active_at(parent, accepted_at) {
-        return Err(conflict("grant_revoked_upstream"));
+        return Ok(false);
     }
     for authority_ref in &parent.issuer_authority_refs {
         match authority_ref {
@@ -387,18 +458,24 @@ pub(crate) fn validate_ancestor_graph(
                     || root.authority_event_ref != *authority_event_ref
                     || root.authority_generation != *authority_generation
                 {
-                    return Err(conflict("grant_revoked_upstream"));
+                    return Ok(false);
                 }
             }
             IssuerAuthorityRef::Grant { grant_id } => {
-                let ancestor = rows
-                    .get(grant_id)
-                    .ok_or_else(|| conflict("grant_revoked_upstream"))?;
+                let Some(ancestor) = rows.get(grant_id) else {
+                    return if complete_current {
+                        Err(conflict(
+                            "temporarily_unavailable: accepted grant ancestor current is unavailable",
+                        ))
+                    } else {
+                        Ok(false)
+                    };
+                };
                 if !matches!(&ancestor.subject, CapabilitySubject::Actor(actor) if actor == &parent.issuer_id)
                 {
                     return Err(conflict("grant_exceeds_issuer_authority"));
                 }
-                validate_ancestor_graph(
+                if !ancestor_graph_current(
                     child_id,
                     grant_id,
                     rows,
@@ -407,12 +484,15 @@ pub(crate) fn validate_ancestor_graph(
                     accepted_at,
                     visiting,
                     depth + 1,
-                )?;
+                    complete_current,
+                )? {
+                    return Ok(false);
+                }
             }
         }
     }
     visiting.remove(current_id);
-    Ok(())
+    Ok(true)
 }
 
 fn parent_covers(
@@ -1921,6 +2001,67 @@ mod tests {
             "issued_at": "2026-09-21T00:00:00.000Z",
             "status": status
         })
+    }
+
+    #[test]
+    fn accepted_continuity_distinguishes_closed_initial_authority_from_unknown_current() {
+        let realm: RealmId = REALM_ID.parse().unwrap();
+        let id: GrantId = GRANT_ID.parse().unwrap();
+        let at = "2026-10-17T00:00:00.000Z".parse().unwrap();
+        let mut grant: CapabilityGrant = serde_json::from_value(grant_value("active")).unwrap();
+        let root = RealmAuthorityRootCurrent {
+            realm_id: realm.clone(),
+            controller_actor_id: grant.issuer_id.clone(),
+            controller_epoch: 0,
+            authority_generation: 0,
+            authority_event_ref: EventId::from_digest(
+                arkret_canonical::DigestSuite::Sha256,
+                [0x55; 32],
+            ),
+        };
+        grant.actions = vec!["ak.applet.bot.provision".into()];
+        grant.subject = CapabilitySubject::Actor(ActorId::service(
+            "ak:did_core:web:applet.example".parse().unwrap(),
+        ));
+        grant.authority_depth = 1;
+        assert!(!arkret_policy::owner_may_grant("ak.applet.bot.provision").unwrap());
+        grant.issuer_authority_refs = vec![IssuerAuthorityRef::RealmRoot {
+            realm_id: realm.clone(),
+            authority_event_ref: root.authority_event_ref.clone(),
+            authority_generation: 0,
+        }];
+        let mut grants = BTreeMap::from([(id.clone(), grant.clone())]);
+        // Initial issuer qualification is already accepted. Current continuity
+        // must neither re-issue nor erase that profile-specific source.
+        assert!(accepted_grant_is_current(&id, &grants, &root, &realm, at).unwrap());
+        grants.get_mut(&id).unwrap().status = CapabilityGrantStatus::Revoked;
+        assert!(!accepted_grant_is_current(&id, &grants, &root, &realm, at).unwrap());
+        grants.insert(id.clone(), grant.clone());
+        let mut changed_root = root.clone();
+        changed_root.authority_generation = 1;
+        assert!(!accepted_grant_is_current(&id, &grants, &changed_root, &realm, at).unwrap());
+        assert_eq!(
+            accepted_grant_is_current(&id, &BTreeMap::new(), &root, &realm, at)
+                .unwrap_err()
+                .conflict_code(),
+            Some(coland_storage::ConflictCode::TemporarilyUnavailable)
+        );
+        let missing = GrantId::from_event_id(&EventId::from_digest(
+            arkret_canonical::DigestSuite::Sha256,
+            [0x56; 32],
+        ));
+        grants.get_mut(&id).unwrap().issuer_authority_refs =
+            vec![IssuerAuthorityRef::Grant { grant_id: missing }];
+        assert_eq!(
+            accepted_grant_is_current(&id, &grants, &root, &realm, at)
+                .unwrap_err()
+                .conflict_code(),
+            Some(coland_storage::ConflictCode::TemporarilyUnavailable)
+        );
+        grants.get_mut(&id).unwrap().issuer_authority_refs = vec![IssuerAuthorityRef::Grant {
+            grant_id: id.clone(),
+        }];
+        assert!(accepted_grant_is_current(&id, &grants, &root, &realm, at).is_err());
     }
 
     #[test]

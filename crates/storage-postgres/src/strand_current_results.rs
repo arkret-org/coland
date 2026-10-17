@@ -32,6 +32,116 @@ fn reject_lifecycle(code: coland_storage::ConflictCode, detail: &str) -> Persist
     PersistenceError::Conflict(format!("{}: {detail}", code.as_str()))
 }
 
+/// Resolve one active Strand from its accepted creation and current writer.
+/// A caller's metadata is never used to invent the object's Circle binding.
+pub(crate) async fn locked_active_strand_scope(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    strand: &arkret_wire::StrandId,
+) -> PersistenceResult<arkret_wire::ScopeRef> {
+    #[derive(diesel::QueryableByName)]
+    struct Source {
+        #[diesel(sql_type = Jsonb)]
+        value: Value,
+        #[diesel(sql_type = Jsonb)]
+        creation: Value,
+        #[diesel(sql_type = Jsonb)]
+        current_writer: Value,
+        #[diesel(sql_type = Jsonb)]
+        stream_ref: Value,
+    }
+    let creating_event =
+        arkret_wire::EventIdentityKey::new(strand.digest_suite_code(), strand.digest_bytes())
+            .event_id();
+    let source = diesel::sql_query(
+        "SELECT s.value,created.envelope AS creation,writer.envelope AS current_writer,c.stream_ref \
+         FROM strand_current_results s \
+         JOIN realm_commits c ON c.commit_id=s.current_commit_id \
+         JOIN canonical_events writer ON writer.pk=c.event_pk \
+         JOIN canonical_events created ON created.id=$3 AND created.realm_id=s.realm_id \
+         JOIN realm_commits creation ON creation.event_pk=created.pk AND creation.realm_id=s.realm_id \
+         WHERE s.realm_id=$1 AND s.strand_id=$2 \
+           AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position \
+           AND writer.state='committed' AND created.state='committed' \
+           AND created.kind='ak.strand.create' AND creation.stream_ref=c.stream_ref \
+           AND creation.stream_position<=c.stream_position FOR SHARE OF s",
+    )
+    .bind::<Text, _>(realm.as_str())
+    .bind::<Text, _>(strand.as_str())
+    .bind::<diesel::sql_types::Binary, _>(creating_event.token_bytes().to_vec())
+    .get_result::<Source>(&mut *conn)
+    .await
+    .optional()
+    .map_err(PersistenceError::database)?
+    .ok_or_else(|| reject("signed Strand has no accepted current source"))?;
+    let object: arkret_models_collaboration::objects::strand::Strand =
+        serde_json::from_value(source.value).map_err(PersistenceError::database)?;
+    if object.id.as_ref() != Some(strand)
+        || &object.realm_id != realm
+        || object.state != Some(arkret_wire::ObjectState::Active)
+    {
+        return Err(reject("signed Strand is absent, inactive or inconsistent"));
+    }
+    let scope = match object.scope_circle_id {
+        Some(circle_id) => arkret_wire::ScopeRef::Circle {
+            realm_id: realm.clone(),
+            circle_id,
+        },
+        None => arkret_wire::ScopeRef::Realm {
+            realm_id: realm.clone(),
+        },
+    };
+    let stream = match &scope {
+        arkret_wire::ScopeRef::Realm { realm_id } => arkret_wire::CommitStreamRef::Realm {
+            realm_id: realm_id.clone(),
+        },
+        arkret_wire::ScopeRef::Circle {
+            realm_id,
+            circle_id,
+        } => arkret_wire::CommitStreamRef::Circle {
+            realm_id: realm_id.clone(),
+            circle_id: circle_id.clone(),
+        },
+        _ => return Err(reject("signed Strand has an unsupported scope")),
+    };
+    if source.stream_ref != serde_json::to_value(stream).map_err(PersistenceError::database)? {
+        return Err(reject("signed Strand has a conflicting accepted stream"));
+    }
+    let creation: arkret_wire::Event =
+        serde_json::from_value(source.creation).map_err(PersistenceError::database)?;
+    let current: arkret_wire::Event =
+        serde_json::from_value(source.current_writer).map_err(PersistenceError::database)?;
+    for event in [&creation, &current] {
+        arkret_schema::validate_event_for_submit(event)
+            .map_err(|error| reject(error.to_string()))?;
+        if &event.realm_id != realm || event.scope_ref != scope {
+            return Err(reject("signed Strand writer has a conflicting scope"));
+        }
+    }
+    let current_target =
+        serde_json::to_value(&current.payload).map_err(PersistenceError::database)?;
+    let target_matches = match current.kind {
+        arkret_wire::EventKind::StrandCreate => current.event_id == creation.event_id,
+        arkret_wire::EventKind::StrandUpdate
+        | arkret_wire::EventKind::StrandTracksUpdate
+        | arkret_wire::EventKind::StrandArchive
+        | arkret_wire::EventKind::StrandRestore => {
+            current_target["target_ref"].as_str() == Some(strand.as_str())
+        }
+        arkret_wire::EventKind::StrandStageSet => {
+            current_target["strand_id"].as_str() == Some(strand.as_str())
+        }
+        _ => false,
+    };
+    if creation.kind != arkret_wire::EventKind::StrandCreate
+        || arkret_wire::StrandId::from_event_id(&creation.event_id) != *strand
+        || !target_matches
+    {
+        return Err(reject("signed Strand does not match its original writers"));
+    }
+    Ok(scope)
+}
+
 /// The registered `strand` current value an accepted `ak.strand.create`
 /// derives: the authored initial object with its Event-derived id and the
 /// `active` state. Every Station that projects the Event derives it here.
@@ -245,15 +355,32 @@ pub(crate) async fn commit_strand_transition_in_connection(
     }
     arkret_schema::validate_event_for_submit(event)
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-    let realm_scope = arkret_wire::ScopeRef::Realm {
-        realm_id: event.realm_id.clone(),
+    let (expected_stream, expected_circle) = match &event.scope_ref {
+        arkret_wire::ScopeRef::Realm { realm_id } if realm_id == &event.realm_id => (
+            arkret_wire::CommitStreamRef::Realm {
+                realm_id: realm_id.clone(),
+            },
+            None,
+        ),
+        arkret_wire::ScopeRef::Circle {
+            realm_id,
+            circle_id,
+        } if realm_id == &event.realm_id => (
+            arkret_wire::CommitStreamRef::Circle {
+                realm_id: realm_id.clone(),
+                circle_id: circle_id.clone(),
+            },
+            Some(circle_id),
+        ),
+        _ => {
+            return Err(reject(
+                "Strand transition has an unsupported effective scope",
+            ));
+        }
     };
-    let realm_stream = arkret_wire::CommitStreamRef::Realm {
-        realm_id: event.realm_id.clone(),
-    };
-    if event.scope_ref != realm_scope || commit.stream_ref != realm_stream {
+    if commit.event_ref != event.event_id || commit.stream_ref != expected_stream {
         return Err(reject(
-            "Strand transition requires a Realm-scope authority cut",
+            "Strand transition requires its exact signed scope stream",
         ));
     }
     let payload = serde_json::to_value(&event.payload).map_err(PersistenceError::database)?;
@@ -278,8 +405,7 @@ pub(crate) async fn commit_strand_transition_in_connection(
         "SELECT s.realm_id,s.current_commit_id,s.current_stream_position,s.value \
          FROM strand_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id \
          WHERE s.realm_id=$1 AND s.strand_id=$2 AND c.realm_id=s.realm_id \
-           AND c.stream_position=s.current_stream_position AND c.stream_ref->>'kind'='realm' \
-           AND c.stream_ref->>'realm_id'=s.realm_id FOR UPDATE OF s"
+           AND c.stream_position=s.current_stream_position AND c.stream_ref=$3 FOR UPDATE OF s"
     } else {
         // A verified snapshot can install current below its readable floor,
         // without replicating that row's historical Event/Commit. The replica
@@ -288,14 +414,22 @@ pub(crate) async fn commit_strand_transition_in_connection(
         "SELECT realm_id,current_commit_id,current_stream_position,value \
          FROM strand_current_results WHERE realm_id=$1 AND strand_id=$2 FOR UPDATE"
     };
-    let row = diesel::sql_query(current_sql)
+    let query = diesel::sql_query(current_sql)
         .bind::<Text, _>(event.realm_id.as_str())
-        .bind::<Text, _>(target.as_str())
-        .get_result::<StrandCurrentRow>(&mut *conn)
-        .await
-        .optional()
-        .map_err(PersistenceError::database)?
-        .ok_or_else(|| reject("Strand transition target has no confirmed current value"))?;
+        .bind::<Text, _>(target.as_str());
+    let row = if authorize {
+        query
+            .bind::<Jsonb, _>(
+                serde_json::to_value(&expected_stream).map_err(PersistenceError::database)?,
+            )
+            .get_result::<StrandCurrentRow>(&mut *conn)
+            .await
+    } else {
+        query.get_result::<StrandCurrentRow>(&mut *conn).await
+    }
+    .optional()
+    .map_err(PersistenceError::database)?
+    .ok_or_else(|| reject("Strand transition target has no confirmed current value"))?;
     let position = i64::try_from(commit.stream_position).map_err(PersistenceError::database)?;
     if row.current_stream_position >= position || row.current_commit_id == commit.commit_id.as_str()
     {
@@ -307,9 +441,13 @@ pub(crate) async fn commit_strand_transition_in_connection(
         serde_json::from_value(row.value.clone()).map_err(PersistenceError::database)?;
     if current.id.as_ref() != Some(&target)
         || current.realm_id != event.realm_id
-        || current.scope_circle_id.is_some()
+        || current.scope_circle_id.as_ref() != expected_circle
     {
         return Err(reject("Strand transition target identity or scope differs"));
+    }
+    if authorize && expected_circle.is_some() {
+        crate::circle_current_results::require_active_author_in_connection(conn, event, commit)
+            .await?;
     }
     if current.state == Some(arkret_wire::ObjectState::Redacted) {
         return Err(reject_lifecycle(

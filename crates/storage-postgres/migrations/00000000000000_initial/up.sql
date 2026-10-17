@@ -1865,7 +1865,8 @@ CREATE TABLE public.mls_key_packages (
     id text PRIMARY KEY,
     keypackage_ref text NOT NULL,
     keypackage_digest text NOT NULL,
-    owner_account_pk bigint NOT NULL,
+    owner_account_id jsonb NOT NULL CHECK (jsonb_typeof(owner_account_id)='object'),
+    effective_scope jsonb,
     actor_id text NOT NULL,
     device_id text,
     endpoint_verification_method text,
@@ -1901,11 +1902,7 @@ CREATE TABLE public.mls_key_packages (
 ALTER TABLE ONLY public.mls_key_packages
     ADD CONSTRAINT mls_key_packages_keypackage_ref_key UNIQUE (keypackage_ref);
 
-ALTER TABLE ONLY public.mls_key_packages
-    ADD CONSTRAINT mls_key_packages_owner_account_pk_fkey
-    FOREIGN KEY (owner_account_pk) REFERENCES public.accounts(pk);
-
-CREATE INDEX mls_key_packages_by_owner_endpoint ON public.mls_key_packages USING btree (owner_account_pk, actor_id, device_id, endpoint_verification_method, claimed_by_mls_group_id);
+CREATE INDEX mls_key_packages_by_owner_endpoint ON public.mls_key_packages USING btree (owner_account_id, actor_id, device_id, endpoint_verification_method, claimed_by_mls_group_id);
 
 CREATE TABLE public.peer_keypackage_claims (
     source_id text NOT NULL,

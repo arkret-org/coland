@@ -1,4 +1,6 @@
 //! Real native Device join through the mounted self/events route and private ledger.
+#[path = "native_device/e2ee.rs"]
+mod e2ee;
 use arkret_models_integration::management_review::*;
 use arkret_wire::{DeviceId, ManagementOperation, ServiceOperationId};
 use coland_storage::DeviceRevocationStore as _;
@@ -160,10 +162,12 @@ async fn post(
     let body = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
         submission,
     );
+    let mut metadata = managed_device_metadata(authority);
+    metadata.effective_scope = event.scope_ref.clone();
     let mut response = managed_device_http_request_body(
         &fixture.state,
         authority,
-        &managed_device_metadata(authority),
+        &metadata,
         ServiceOperationId::SelfEventsCommandSubmitV1,
         key,
         Some(arkret_canonical::canonical_json_bytes(&body).unwrap()),
@@ -485,6 +489,26 @@ fn native_business_parent<'a>(
     actions: Vec<String>,
     source: Option<arkret_wire::GrantId>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = arkret_wire::GrantId> + Send + 'a>> {
+    native_business_parent_in_scope(
+        fixture,
+        install,
+        extra,
+        actions,
+        source,
+        ScopeRef::Realm {
+            realm_id: fixture.realm.clone(),
+        },
+    )
+}
+#[inline(never)]
+fn native_business_parent_in_scope<'a>(
+    fixture: &'a Fixture,
+    install: &'a Installed,
+    extra: Vec<GrantConstraint>,
+    actions: Vec<String>,
+    source: Option<arkret_wire::GrantId>,
+    scope: ScopeRef,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = arkret_wire::GrantId> + Send + 'a>> {
     Box::pin(async move {
         use arkret_models_collaboration::governance::grant_constraint::{
             GrantConstraintEffect, GrantConstraintKind, ManagedActorRole,
@@ -508,9 +532,7 @@ fn native_business_parent<'a>(
         constraints.extend(extra);
         let event = fixture.admin_event(
             EventKind::CapabilityGrant,
-            ScopeRef::Realm {
-                realm_id: fixture.realm.clone(),
-            },
+            scope.clone(),
             json!(CapabilityGrantPayload {
                 grant: CapabilityGrantCreateBody {
                     schema: arkret_wire::SchemaId::CAPABILITY_V1.to_owned(),
@@ -518,9 +540,20 @@ fn native_business_parent<'a>(
                     issuer_id: ActorId::account(fixture.pcr.history.account.clone()),
                     subject: CapabilitySubject::Actor(service),
                     actions,
-                    resources: vec![arkret_wire::WireResourceSelector::realm(
-                        fixture.realm.clone()
-                    )],
+                    resources: vec![match &scope {
+                        ScopeRef::Circle {
+                            realm_id,
+                            circle_id,
+                        } => {
+                            let mut selector = arkret_wire::WireResourceSelector::circle(
+                                realm_id.clone(),
+                                circle_id.clone(),
+                            );
+                            selector.match_scope = Some(arkret_wire::ResourceMatchScope::Exact);
+                            selector
+                        }
+                        _ => arkret_wire::WireResourceSelector::realm(fixture.realm.clone()),
+                    }],
                     constraints,
                     issuer_authority_refs: match source {
                         Some(grant_id) => vec![IssuerAuthorityRef::Grant { grant_id }],
@@ -592,7 +625,7 @@ fn native_business_child_with_constraints<'a>(
         }
         constraints.extend(extra);
         let service = ActorId::service(install.package.service_id.clone());
-        let event = managed_service_event(
+        let mut event = managed_service_event(
             fixture,
             install,
             &service,
@@ -626,6 +659,30 @@ fn native_business_child_with_constraints<'a>(
                 }
             }),
         );
+        if let Some(circle) = parent.resources[0].circle_id.as_ref() {
+            event.scope_ref = ScopeRef::Circle {
+                realm_id: fixture.realm.clone(),
+                circle_id: circle.clone(),
+            };
+            event.producer_proof = None;
+            let mut authored = arkret_wire::AuthoredEvent::finalize_with_digest_suite(
+                event,
+                arkret_canonical::DigestSuite::Sha256,
+            )
+            .unwrap();
+            let signer = Ed25519PayloadSigner::new(
+                applet_service_signing_key(&install.package.webhook_auth.key_ref),
+                applet_service_did(&install.package),
+                install.package.webhook_auth.key_ref.clone(),
+            );
+            arkret_signatures::sign_event(
+                &mut authored,
+                &signer,
+                arkret_signatures::SignEventOptions::new(),
+            )
+            .unwrap();
+            event = authored.into_event();
+        }
         let id = arkret_wire::GrantId::from_event_id(&event.event_id);
         assert_managed_accepted(fixture, install, &event).await;
         id
@@ -909,33 +966,32 @@ async fn native_sources_setup_for_history(history: Option<&str>) -> Box<NativeSo
     })
 }
 async fn native_sources_exercise(context: Box<NativeSourcesContext>) {
-    use arkret_models_collaboration::governance::grant_constraint::{
-        GrantConstraintEffect, GrantConstraintKind,
-    };
-    let NativeSourcesContext {
-        native: _native,
-        namespace: _,
-        ghost_bundle: _,
-        fixture,
-        install,
-        ghost_actor,
-        strand,
-        ancestor,
-        messages,
-        reading,
-        sibling,
-        actors,
-    } = *context;
-    let (authority, key, child) = &actors[0];
+    let (authority, key, child) = &context.actors[0];
     let first = native_message(
-        &fixture,
-        &install,
+        &context.fixture,
+        &context.install,
         authority,
         key,
         child,
-        &strand,
+        &context.strand,
         "real Ghost with split action sources",
     );
+    native_phase(|| native_sources_refusals(&context, &first)).await;
+    let used = native_phase(|| native_sources_commits(&context, &first)).await;
+    native_phase(|| native_sources_exhaustion(&context, &first, &used)).await;
+}
+
+async fn native_sources_refusals(context: &NativeSourcesContext, first: &Event) {
+    use arkret_models_collaboration::governance::grant_constraint::{
+        GrantConstraintEffect, GrantConstraintKind,
+    };
+    let fixture = &context.fixture;
+    let install = &context.install;
+    let ghost_actor = context.ghost_actor.clone();
+    let messages = context.messages.clone();
+    let strand = &context.strand;
+    let actors = &context.actors;
+    let (authority, key, _) = &actors[0];
     let mut deny = GrantConstraint::new(
         GrantConstraintKind::ScopeLimitation,
         GrantConstraintEffect::Deny,
@@ -1017,7 +1073,19 @@ async fn native_sources_exercise(context: Box<NativeSourcesContext>) {
         json!({"grant_id":global_account,"expected_revision":current.revision,"reason":"remove independent Account deny"}),
     );
     assert_managed_accepted(&fixture, &install, &close).await;
+}
 
+async fn native_sources_commits(context: &NativeSourcesContext, first: &Event) -> Value {
+    let fixture = &context.fixture;
+    let install = &context.install;
+    let ghost_actor = context.ghost_actor.clone();
+    let strand = &context.strand;
+    let ancestor = context.ancestor.clone();
+    let messages = context.messages.clone();
+    let reading = context.reading.clone();
+    let sibling = context.sibling.clone();
+    let actors = &context.actors;
+    let (authority, key, child) = &actors[0];
     let (status, out) = post(&fixture, authority, key, &first, vec![]).await;
     assert_eq!(status, StatusCode::OK, "real Ghost multi-parent: {out}");
     let record = fixture
@@ -1079,6 +1147,16 @@ async fn native_sources_exercise(context: Box<NativeSourcesContext>) {
             .iter()
             .any(|r| r["grant_id"] == reading.as_str() || r["grant_id"] == sibling.as_str())
     );
+    used
+}
+
+async fn native_sources_exhaustion(context: &NativeSourcesContext, first: &Event, used: &Value) {
+    let fixture = &context.fixture;
+    let install = &context.install;
+    let strand = &context.strand;
+    let ancestor = context.ancestor.clone();
+    let actors = &context.actors;
+    let (authority, key, _) = &actors[0];
     let (bot, bot_key, bot_child) = &actors[1];
     let refused = native_message(
         &fixture,
@@ -1091,7 +1169,7 @@ async fn native_sources_exercise(context: Box<NativeSourcesContext>) {
     );
     let (status, error) = post(&fixture, bot, bot_key, &refused, vec![]).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{error}");
-    assert_eq!(used, business(&fixture).await);
+    assert_eq!(*used, business(&fixture).await);
     let rows = fixture
         .state
         .test_persistence()
@@ -2077,6 +2155,698 @@ async fn native_stream_scans_keep_actual_scope_pages_floors_and_final_delivery_c
         })
         .await;
         native_phase(|| native_scan_exercise(context)).await;
+    }))
+    .await
+    .unwrap();
+}
+
+fn native_circle_event(
+    install: &Installed,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    key: &SigningKey,
+    scope: &ScopeRef,
+    child: &arkret_wire::GrantId,
+    membership: &str,
+    parent: Option<Value>,
+    expected: Value,
+) -> Event {
+    let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let actor = ActorId::account(authority.account_id.clone());
+    let mut payload = json!({"circle_id":scope.circle_id().unwrap(),"member_id":actor,"membership":membership,"expected_membership":expected});
+    if let Some(parent) = parent {
+        payload["parent_membership_revision"] = parent;
+    }
+    let mut event = arkret_wire::test_support::raw_event_for_actor_at(
+        EventKind::CircleMemberState.as_str(),
+        scope.clone(),
+        actor,
+        payload,
+        now,
+    )
+    .unwrap();
+    event.applet_id = Some(install.package.applet_id.clone());
+    event.authorization_ref = Some(child.clone().into());
+    sign_managed_device_event(event, authority, key, now)
+}
+
+async fn native_circle_snapshot(fixture: &Fixture) -> Value {
+    #[derive(diesel::QueryableByName)]
+    struct Row {
+        #[diesel(sql_type=diesel::sql_types::Jsonb)]
+        value: Value,
+    }
+    let mut value = business(fixture).await;
+    let mut conn = fixture.pool.get().await.unwrap();
+    let rows = diesel::sql_query("SELECT coalesce(jsonb_agg(to_jsonb(m) ORDER BY circle_id,member_id),'[]'::jsonb) AS value FROM circle_member_state_current_results m").get_result::<Row>(&mut conn).await.unwrap();
+    value["circle_members"] = rows.value;
+    value
+}
+
+async fn native_circle_request(
+    fixture: &Fixture,
+    install: &Installed,
+    request: &ManagementReviewRequestBody,
+) -> (StatusCode, Value) {
+    fixture
+        .service_post(
+            &install.package,
+            "/_arkret/self/management-reviews/requests",
+            ServiceOperationId::SelfManagementReviewCommandRequestV1.as_str(),
+            &json!(request),
+            &format!("circle-request-{}", uuid::Uuid::now_v7()),
+        )
+        .await
+}
+
+async fn native_circle_approve(
+    fixture: &Fixture,
+    install: &Installed,
+    event: &Event,
+) -> (ManagementReviewRequestBody, arkret_wire::ApprovalSignature) {
+    let request = ManagementReviewRequestBody {
+        request_id: format!("native-circle-{}", uuid::Uuid::now_v7()),
+        effective_scope: event.scope_ref.clone(),
+        management_operation: ManagementOperation::Join,
+        requester_actor_id: ActorId::service(install.package.service_id.clone()),
+        target: ManagementReviewTarget::Event {
+            event: Box::new(event.clone()),
+        },
+    };
+    let before = native_circle_snapshot(fixture).await;
+    let (status, pending) = fixture
+        .service_post(
+            &install.package,
+            "/_arkret/self/management-reviews/requests",
+            ServiceOperationId::SelfManagementReviewCommandRequestV1.as_str(),
+            &json!(request),
+            &format!("circle-request-{}", uuid::Uuid::now_v7()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "native Circle pending: {pending}");
+    assert_eq!(pending["status"], "pending");
+    let requested = native_circle_snapshot(fixture).await;
+    for field in [
+        "quota_counters",
+        "quota_buckets",
+        "quota_consumptions",
+        "approval_audit",
+        "events",
+        "commits",
+        "circle_members",
+    ] {
+        assert_eq!(
+            before[field], requested[field],
+            "request must not spend {field}"
+        );
+    }
+    let vote = creation_review_vote(fixture, &request);
+    let (status, approved) = fixture.admin_post("/_arkret/self/management-reviews/decisions",ServiceOperationId::SelfManagementReviewCommandDecideV1.as_str(),&json!({"request_id":request.request_id,"expected_status":"pending","decision":"approve","approval_signatures":[vote]}),None).await;
+    assert_eq!(status, StatusCode::OK, "native Circle approval: {approved}");
+    assert_eq!(approved["status"], "approved");
+    (request, vote)
+}
+
+fn native_circle_governance_vote(
+    fixture: &Fixture,
+    event: &Event,
+    action: arkret_wire::CapabilityActionId,
+) -> arkret_wire::ApprovalSignature {
+    let mut vote = creation_operation_vote(
+        fixture,
+        &ManagementReviewTarget::Event {
+            event: Box::new(event.clone()),
+        },
+        arkret_wire::ApprovalContext::RealmGovernance {},
+    );
+    vote.input.action = action;
+    vote.proof.jws = arkret_signatures::Ed25519DetachedJwsSigner::from_seed(
+        [70; 32],
+        vote.proof.verification_method.as_str(),
+    )
+    .sign_detached_jws(
+        &arkret_signatures::approval_signature::approval_signature_signing_bytes(&vote).unwrap(),
+    );
+    vote
+}
+
+async fn native_circle_exercise(context: Box<NativeSourcesContext>) {
+    let NativeSourcesContext {
+        native: _native,
+        namespace,
+        ghost_bundle,
+        fixture,
+        install,
+        mut actors,
+        ..
+    } = *context;
+    fixture.enable_management_authority();
+    let scope = native_phase(|| fixture.new_circle_scope()).await;
+    let circle_id = scope.circle_id().unwrap().clone();
+    // Keep the existing Realm installation and both original Realm Devices active.
+    native_phase(|| {
+        fixture.install_service_with_constraints(
+            true,
+            install.package.clone(),
+            scope.clone(),
+            BTreeMap::new(),
+        )
+    })
+    .await;
+    let realm_reads = native_business_parent(
+        &fixture,
+        &install,
+        vec![],
+        vec!["ak.event.read".into(), "ak.object.read_content".into()],
+        None,
+    )
+    .await;
+    let circle_reads = native_business_parent_in_scope(
+        &fixture,
+        &install,
+        vec![],
+        vec!["ak.event.read".into(), "ak.object.read_content".into()],
+        None,
+        scope.clone(),
+    )
+    .await;
+    let quota: GrantConstraint = serde_json::from_value(json!({"constraint_kind":"quota","constraint_subkind":"rate","effect":"allow","max_operations":3,"period":"P1D","constraint_scope":"per_actor"})).unwrap();
+    native_phase(|| {
+        creation_governance_quorum(&fixture, "ak.applet.join", "circle_applet_join", 1)
+    })
+    .await;
+    native_phase(|| {
+        creation_governance_quorum(&fixture, "ak.circle.member.add", "circle_domain_join", 1)
+    })
+    .await;
+    let admin = ActorId::account(fixture.pcr.history.account.clone());
+    let approval_permission = fixture.admin_event(
+        EventKind::CapabilityGrant,
+        scope.clone(),
+        json!(CapabilityGrantPayload {
+            grant: CapabilityGrantCreateBody {
+                schema: arkret_wire::SchemaId::CAPABILITY_V1.into(),
+                realm_id: Some(fixture.realm.clone()),
+                issuer_id: admin.clone(),
+                subject: CapabilitySubject::Actor(admin.clone()),
+                actions: vec!["ak.applet.join".into(), "ak.circle.member.add".into()],
+                resources: vec![arkret_wire::WireResourceSelector::circle(
+                    fixture.realm.clone(),
+                    circle_id.clone()
+                )],
+                constraints: vec![],
+                issuer_authority_refs: vec![IssuerAuthorityRef::RealmRoot {
+                    realm_id: fixture.realm.clone(),
+                    authority_event_ref: fixture.authority_event_ref.clone().unwrap(),
+                    authority_generation: 0,
+                }],
+                issued_at: chrono::Utc::now(),
+            }
+        }),
+    );
+    native_phase(|| accepted_admin_domain_event(&fixture, approval_permission)).await;
+
+    let policy_id = format!("ak:policy:{}", uuid::Uuid::now_v7());
+    let policy = fixture.admin_event(EventKind::PolicySet,scope.clone(),json!({"policy_id":policy_id,"expected_revision":null,"value":{"schema":"ak.schema.policy.v1","id":policy_id,"realm_id":fixture.realm,"policy_kind":"applet","default_effect":"allow","created_by":admin,"created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now()),"rules":[{"rule_id":"circle_join","kind":"applet","effect":"require_review","applet_target":{"kind":"installation","applet_id":install.package.applet_id,"effective_scope":scope},"applet_operations":["join"],"review_requirement":{"approver_actor_ids":[admin],"threshold":1,"max_age_seconds":3600}}]}}));
+    native_phase(|| accepted_admin_domain_event(&fixture, policy)).await;
+    let create = fixture
+        .state
+        .test_persistence()
+        .authority_commits()
+        .committed_event(&EventId::from_token_bytes(circle_id.token_bytes()).unwrap())
+        .await
+        .unwrap()
+        .unwrap()
+        .event;
+    let selector = native_historical_selector(&fixture, &create).await;
+    let scan = arkret_wire::StreamScanRequest {
+        realm_id: fixture.realm.clone(),
+        stream_ref: arkret_wire::CommitStreamRef::Circle {
+            realm_id: fixture.realm.clone(),
+            circle_id: circle_id.clone(),
+        },
+        direction: arkret_wire::StreamScanDirection::After(None),
+        limit: 1000,
+    };
+    for (index, (realm_device, realm_key, _)) in actors.iter_mut().enumerate() {
+        let bundle = if index == 0 {
+            &ghost_bundle
+        } else {
+            &install.bot_body["managed_actor_bundle"]
+        };
+        *realm_device = native_phase(|| authorize_scopes(&fixture,&install,bundle,&namespace,realm_key,realm_device.device_id.clone(),json!([{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":["ak.applet.join","ak.event.read","ak.message.create","ak.object.read_content"]}]))).await;
+        let actor = ActorId::account(realm_device.account_id.clone());
+        let parent = native_business_parent_in_scope(
+            &fixture,
+            &install,
+            vec![quota.clone()],
+            vec!["ak.circle.member.add".into()],
+            None,
+            scope.clone(),
+        )
+        .await;
+        let child =
+            native_business_child(&fixture, &install, &actor, std::slice::from_ref(&parent)).await;
+        let sibling_parent = native_business_parent_in_scope(
+            &fixture,
+            &install,
+            vec![],
+            vec!["ak.circle.member.add".into()],
+            None,
+            scope.clone(),
+        )
+        .await;
+        let sibling_child = native_business_child(
+            &fixture,
+            &install,
+            &actor,
+            std::slice::from_ref(&sibling_parent),
+        )
+        .await;
+        let parent_revision =
+            ordinary_realm::parent_membership_revision(&fixture.pool, &fixture.realm, &actor).await;
+        let key = SigningKey::from_bytes(&[160 + index as u8; 32]);
+        let device = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
+        let narrow = native_phase(|| authorize_scopes(&fixture,&install,bundle,&namespace,&key,device.clone(),json!([{"effective_scope":scope,"actions":["ak.applet.join","ak.event.read","ak.object.read_content"]}]))).await;
+        let original = native_circle_event(
+            &install,
+            &narrow,
+            &key,
+            &scope,
+            &child,
+            "join",
+            Some(parent_revision.clone()),
+            Value::Null,
+        );
+        let before = native_circle_snapshot(&fixture).await;
+        let (status, error) =
+            native_phase(|| post(&fixture, &narrow, &key, &original, vec![])).await;
+        assert!(
+            !status.is_success(),
+            "missing original Circle action: {error}"
+        );
+        assert_eq!(before, native_circle_snapshot(&fixture).await);
+        let authority = native_phase(|| authorize_scopes(&fixture,&install,bundle,&namespace,&key,device,json!([{"effective_scope":scope,"actions":["ak.applet.join","ak.circle.member.add","ak.event.read","ak.object.read_content"]}]))).await;
+        let original = native_circle_event(
+            &install,
+            &authority,
+            &key,
+            &scope,
+            &child,
+            "join",
+            Some(parent_revision.clone()),
+            Value::Null,
+        );
+        let before = native_circle_snapshot(&fixture).await;
+        let (status, error) =
+            native_phase(|| post(&fixture, &authority, &key, &original, vec![])).await;
+        assert!(
+            !status.is_success() && error.to_string().contains("approval_required"),
+            "missing independent review: {error}"
+        );
+        assert_eq!(before, native_circle_snapshot(&fixture).await);
+        let mut stale_parent = parent_revision.clone();
+        stale_parent["stream_position"] =
+            json!(parent_revision["stream_position"].as_u64().unwrap() + 1);
+        let stale = native_circle_event(
+            &install,
+            &authority,
+            &key,
+            &scope,
+            &child,
+            "join",
+            Some(stale_parent),
+            Value::Null,
+        );
+        let (status, error) =
+            native_phase(|| post(&fixture, &authority, &key, &stale, vec![])).await;
+        assert!(!status.is_success(), "stale parent must not join: {error}");
+        assert_eq!(before, native_circle_snapshot(&fixture).await);
+        let stale_request = ManagementReviewRequestBody {
+            request_id: format!("stale-circle-{}", uuid::Uuid::now_v7()),
+            effective_scope: scope.clone(),
+            management_operation: ManagementOperation::Join,
+            requester_actor_id: ActorId::service(install.package.service_id.clone()),
+            target: ManagementReviewTarget::Event {
+                event: Box::new(stale),
+            },
+        };
+        let (status, error) =
+            native_phase(|| native_circle_request(&fixture, &install, &stale_request)).await;
+        assert!(
+            !status.is_success() && error.to_string().contains("failed_precondition"),
+            "stale signed parent cannot open a pending Circle review: {error}"
+        );
+        assert_eq!(before, native_circle_snapshot(&fixture).await);
+        let wrong_reference = native_circle_event(
+            &install,
+            &authority,
+            &key,
+            &scope,
+            &install.bot_outcome.authorization_ref,
+            "join",
+            Some(parent_revision.clone()),
+            Value::Null,
+        );
+        let (status, error) =
+            native_phase(|| post(&fixture, &authority, &key, &wrong_reference, vec![])).await;
+        assert!(
+            !status.is_success() && !error.to_string().contains("approval_required"),
+            "an installation ref cannot replace the real Circle child: {error}"
+        );
+        assert_eq!(before, native_circle_snapshot(&fixture).await);
+        let (request, vote) =
+            native_phase(|| native_circle_approve(&fixture, &install, &original)).await;
+        let join_governance = native_circle_governance_vote(
+            &fixture,
+            &original,
+            arkret_wire::CapabilityActionId::AppletJoin,
+        );
+        let domain_governance = native_circle_governance_vote(
+            &fixture,
+            &original,
+            arkret_wire::CapabilityActionId::CircleMemberAdd,
+        );
+        let votes = vec![
+            vote.clone(),
+            join_governance.clone(),
+            domain_governance.clone(),
+        ];
+        let before = native_circle_snapshot(&fixture).await;
+        for partial in [
+            vec![vote.clone()],
+            vec![vote.clone(), join_governance.clone()],
+            vec![vote.clone(), domain_governance.clone()],
+            vec![join_governance, domain_governance],
+        ] {
+            let (status, error) =
+                native_phase(|| post(&fixture, &authority, &key, &original, partial)).await;
+            assert!(
+                !status.is_success() && error.to_string().contains("approval_required"),
+                "management, Applet join governance and actual Circle governance are independent: {error}"
+            );
+            assert_eq!(before, native_circle_snapshot(&fixture).await);
+        }
+        #[derive(diesel::QueryableByName)]
+        struct SavedSource {
+            #[diesel(sql_type=diesel::sql_types::Jsonb)]
+            value: Value,
+        }
+        let saved_source = {
+            let mut conn = fixture.pool.get().await.unwrap();
+            diesel::sql_query("DELETE FROM capability_grant_current_results WHERE realm_id=$1 AND grant_id=$2 RETURNING to_jsonb(capability_grant_current_results) AS value")
+                .bind::<diesel::sql_types::Text,_>(fixture.realm.as_str()).bind::<diesel::sql_types::Text,_>(sibling_parent.as_str()).get_result::<SavedSource>(&mut conn).await.unwrap().value
+        };
+        let (status, error) =
+            native_phase(|| post(&fixture, &authority, &key, &original, votes.clone())).await;
+        {
+            let mut conn = fixture.pool.get().await.unwrap();
+            diesel::sql_query("INSERT INTO capability_grant_current_results SELECT * FROM jsonb_populate_record(NULL::capability_grant_current_results,$1)").bind::<diesel::sql_types::Jsonb,_>(saved_source).execute(&mut conn).await.unwrap();
+        }
+        assert!(
+            !status.is_success() && error.to_string().contains("revision_unavailable"),
+            "an unproved independent Account source cannot disappear behind the selected child: {error}"
+        );
+        assert_eq!(before, native_circle_snapshot(&fixture).await);
+        {
+            let mut conn = fixture.pool.get().await.unwrap();
+            diesel::sql_query("CREATE FUNCTION fail_native_circle() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'native Circle fault'; END $$").execute(&mut conn).await.unwrap();
+            diesel::sql_query("CREATE TRIGGER fail_native_circle BEFORE INSERT ON circle_member_state_current_results FOR EACH ROW EXECUTE FUNCTION fail_native_circle()").execute(&mut conn).await.unwrap();
+        }
+        let (status, error) =
+            native_phase(|| post(&fixture, &authority, &key, &original, votes.clone())).await;
+        {
+            let mut conn = fixture.pool.get().await.unwrap();
+            diesel::sql_query(
+                "DROP TRIGGER fail_native_circle ON circle_member_state_current_results",
+            )
+            .execute(&mut conn)
+            .await
+            .unwrap();
+            diesel::sql_query("DROP FUNCTION fail_native_circle()")
+                .execute(&mut conn)
+                .await
+                .unwrap();
+        }
+        assert!(
+            status.is_server_error(),
+            "real Circle writer rollback: {error}"
+        );
+        assert_eq!(before, native_circle_snapshot(&fixture).await);
+        let (status, accepted) =
+            native_phase(|| post(&fixture, &authority, &key, &original, votes.clone())).await;
+        assert_eq!(status, StatusCode::OK, "native Circle accepted: {accepted}");
+        let after = native_circle_snapshot(&fixture).await;
+        for grant in [&parent, &child] {
+            let counter = after["quota_counters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["grant_id"] == grant.as_str())
+                .unwrap();
+            assert_eq!(
+                counter["consumed"], 1,
+                "the selected child and original Service holder each spend once"
+            );
+        }
+        assert!(
+            !after["quota_counters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["grant_id"] == sibling_parent.as_str()
+                    || row["grant_id"] == sibling_child.as_str())
+        );
+        let row = after["reviews"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["request_id"] == request.request_id)
+            .unwrap();
+        assert_eq!(row["status"], "consumed");
+        let (status, replay) =
+            native_phase(|| post(&fixture, &authority, &key, &original, votes.clone())).await;
+        assert_eq!(status, StatusCode::OK, "native Circle replay: {replay}");
+        assert_eq!(accepted["commit"], replay["commit"]);
+        assert_eq!(replay["status"], "duplicate");
+        assert_eq!(after, native_circle_snapshot(&fixture).await);
+        // Same Account, two real Devices: exact Circle proof is not Realm proof.
+        let mut response =
+            native_phase(|| native_get(&fixture, &authority, &key, &create.event_id)).await;
+        let status = response.status_code;
+        let value = response.take_json::<Value>().await.unwrap();
+        assert_eq!(status, Some(StatusCode::OK), "Circle original: {value}");
+        let full: arkret_wire::CommittedEventView = serde_json::from_value(value).unwrap();
+        assert_eq!(full.reducer_input(), Some(&create));
+        let join_selector = native_historical_selector(&fixture, &original).await;
+        let expected_join_key = fixture
+            .state
+            .test_persistence()
+            .authority_commits()
+            .historical_producer_signer_key(&fixture.realm, &join_selector)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut joined_key_response = native_phase(|| {
+            native_signer_query(
+                &fixture,
+                &authority,
+                &key,
+                std::slice::from_ref(&join_selector),
+            )
+        })
+        .await;
+        assert_eq!(joined_key_response.status_code, Some(StatusCode::OK));
+        let joined_key: arkret_models_identity::SignerKeysQueryOutcome =
+            joined_key_response.take_json().await.unwrap();
+        assert_eq!(joined_key.results[0], expected_join_key);
+
+        let mut response =
+            native_phase(|| native_get(&fixture, realm_device, realm_key, &create.event_id)).await;
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        let withheld: arkret_wire::CommittedEventView = response.take_json().await.unwrap();
+        assert!(matches!(
+            withheld,
+            arkret_wire::CommittedEventView::Withheld(_)
+        ));
+        assert_eq!(withheld.commit(), full.commit());
+        let mut response = native_phase(|| {
+            native_signer_query(&fixture, &authority, &key, std::slice::from_ref(&selector))
+        })
+        .await;
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        let fact: arkret_models_identity::SignerKeysQueryOutcome =
+            response.take_json().await.unwrap();
+        assert!(!matches!(
+            fact.results[0],
+            arkret_models_identity::SignerKeyQueryOutcome::Unavailable { .. }
+        ));
+        let mut response = native_phase(|| {
+            native_signer_query(
+                &fixture,
+                realm_device,
+                realm_key,
+                std::slice::from_ref(&selector),
+            )
+        })
+        .await;
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        let fact: arkret_models_identity::SignerKeysQueryOutcome =
+            response.take_json().await.unwrap();
+        assert!(matches!(
+            fact.results[0],
+            arkret_models_identity::SignerKeyQueryOutcome::Unavailable { .. }
+        ));
+        let mut response = native_phase(|| native_scan(&fixture, &authority, &key, &scan)).await;
+        let status = response.status_code;
+        let value = response.take_json::<Value>().await.unwrap();
+        assert_eq!(
+            status,
+            Some(StatusCode::OK),
+            "Circle independent stream: {value}"
+        );
+        let page: arkret_wire::StreamScanOutcome = serde_json::from_value(value).unwrap();
+        page.validate_for_request(&scan).unwrap();
+        assert!(
+            page.committed_events
+                .iter()
+                .any(|v| v.reducer_input() == Some(&original))
+        );
+        assert!(
+            page.committed_events
+                .iter()
+                .all(|v| v.commit().stream_ref == scan.stream_ref)
+        );
+        // A missing projection after a real accepted join must never prove absence.
+        #[derive(diesel::QueryableByName)]
+        struct Saved {
+            #[diesel(sql_type=diesel::sql_types::Jsonb)]
+            value: Value,
+        }
+        let saved = {
+            let mut conn = fixture.pool.get().await.unwrap();
+            diesel::sql_query("DELETE FROM circle_member_state_current_results WHERE realm_id=$1 AND circle_id=$2 AND member_id=$3 RETURNING to_jsonb(circle_member_state_current_results) AS value")
+                .bind::<diesel::sql_types::Text,_>(fixture.realm.as_str()).bind::<diesel::sql_types::Text,_>(circle_id.as_str()).bind::<diesel::sql_types::Text,_>(actor.to_string()).get_result::<Saved>(&mut conn).await.unwrap().value
+        };
+        let duplicate = native_circle_event(
+            &install,
+            &authority,
+            &key,
+            &scope,
+            &child,
+            "join",
+            Some(parent_revision.clone()),
+            Value::Null,
+        );
+        let pending = ManagementReviewRequestBody {
+            request_id: format!("missing-circle-{}", uuid::Uuid::now_v7()),
+            effective_scope: scope.clone(),
+            management_operation: ManagementOperation::Join,
+            requester_actor_id: ActorId::service(install.package.service_id.clone()),
+            target: ManagementReviewTarget::Event {
+                event: Box::new(duplicate),
+            },
+        };
+        let (status, error) =
+            native_phase(|| native_circle_request(&fixture, &install, &pending)).await;
+        {
+            let mut conn = fixture.pool.get().await.unwrap();
+            diesel::sql_query("INSERT INTO circle_member_state_current_results SELECT * FROM jsonb_populate_record(NULL::circle_member_state_current_results,$1)").bind::<diesel::sql_types::Jsonb,_>(saved).execute(&mut conn).await.unwrap();
+        }
+        assert!(
+            !status.is_success() && error.to_string().contains("revision_unavailable"),
+            "lost Circle current is not first join: {error}"
+        );
+        assert_eq!(after, native_circle_snapshot(&fixture).await);
+        let leave = native_circle_event(
+            &install,
+            &authority,
+            &key,
+            &scope,
+            &child,
+            "leave",
+            None,
+            json!("join"),
+        );
+        let (status, out) = native_phase(|| {
+            post(
+                &fixture,
+                &authority,
+                &key,
+                &leave,
+                vec![native_circle_governance_vote(
+                    &fixture,
+                    &leave,
+                    arkret_wire::CapabilityActionId::CircleMemberAdd,
+                )],
+            )
+        })
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "leave uses domain action, not join review: {out}"
+        );
+        let rejoin = native_circle_event(
+            &install,
+            &authority,
+            &key,
+            &scope,
+            &child,
+            "join",
+            Some(parent_revision),
+            json!("leave"),
+        );
+        let (_, vote) = native_phase(|| native_circle_approve(&fixture, &install, &rejoin)).await;
+        let (status, out) = native_phase(|| {
+            post(
+                &fixture,
+                &authority,
+                &key,
+                &rejoin,
+                vec![
+                    vote,
+                    native_circle_governance_vote(
+                        &fixture,
+                        &rejoin,
+                        arkret_wire::CapabilityActionId::AppletJoin,
+                    ),
+                    native_circle_governance_vote(
+                        &fixture,
+                        &rejoin,
+                        arkret_wire::CapabilityActionId::CircleMemberAdd,
+                    ),
+                ],
+            )
+        })
+        .await;
+        assert_eq!(status, StatusCode::OK, "reviewed Circle rejoin: {out}");
+        let exhausted = native_circle_event(
+            &install,
+            &authority,
+            &key,
+            &scope,
+            &child,
+            "leave",
+            None,
+            json!("join"),
+        );
+        let before = native_circle_snapshot(&fixture).await;
+        let (status, error) =
+            native_phase(|| post(&fixture, &authority, &key, &exhausted, vec![])).await;
+        assert!(
+            !status.is_success() && error.to_string().contains("rate_limited"),
+            "original quota is spent once for join, leave and rejoin: {error}"
+        );
+        assert_eq!(before, native_circle_snapshot(&fixture).await);
+    }
+    let _ = (realm_reads, circle_reads);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_circle_join_review_and_original_reads_keep_two_device_scopes_separate() {
+    tokio::spawn(Box::pin(async {
+        let context = native_phase(native_sources_setup).await;
+        native_phase(|| native_circle_exercise(context)).await;
     }))
     .await
     .unwrap();

@@ -27,16 +27,65 @@ fn format_authorize_event_id(token: &[u8]) -> String {
             .expect("mls_key_packages authorize Event id is a 33-octet Event id"),
     )
 }
+// Serialize native authority before the row lock, using the same lock order
+// as publication and MLS admission. Recheck the immutable row after the CAS.
+async fn claim_candidate(
+    conn: &mut diesel_async::AsyncPgConnection,
+    id: &str,
+    group: &str,
+    deadline: Option<i64>,
+    guard: Option<&coland_storage::AppletManagedDeviceScopeGuard>,
+) -> PersistenceResult<Option<MlsKeyPackageRow>> {
+    let candidate=sql_query("SELECT id,keypackage_ref,keypackage_digest,owner_account_id,effective_scope,actor_id,device_id,endpoint_verification_method,key_package_bytes,capabilities,capabilities_digest,last_resort,last_resort_realm_id,lifetime_not_before,lifetime_not_after,claimed_by_mls_group_id,device_authorize_event_id,agent_key_authorize_event_id,claimed_at,claim_expires_at_unix_ms,consumed_at,created_at FROM mls_key_packages WHERE id=$1")
+        .bind::<Text,_>(id).get_result::<MlsKeyPackagePgRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+        .map(validated_keypackage_row).transpose()?;
+    let Some(candidate) = candidate else {
+        return Ok(None);
+    };
+    match (&candidate.effective_scope, guard) {
+        (Some(scope), Some(guard)) => {
+            if scope
+                .canonical_mls_group_id()
+                .map_err(PersistenceError::database)?
+                .as_str()
+                != group
+            {
+                return Ok(None);
+            }
+            let Some(expires_at) = deadline.and_then(chrono::DateTime::from_timestamp_millis)
+            else {
+                return Ok(None);
+            };
+            crate::boxed_future(|| {
+                crate::mls_keypackage_publication::require_native(
+                    conn, &candidate, guard, expires_at,
+                )
+            })
+            .await?;
+        }
+        (None, None) => {}
+        _ => return Ok(None),
+    }
+    Ok(Some(candidate))
+}
+
 pub struct PgMlsKeyPackageStore {
     pub pool: PgPool,
 }
-#[async_trait]
-impl MlsKeyPackageStore for PgMlsKeyPackageStore {
-    async fn put(&self, record: &MlsKeyPackageRow) -> PersistenceResult<bool> {
+impl PgMlsKeyPackageStore {
+    async fn put_guarded(
+        &self,
+        record: &MlsKeyPackageRow,
+        native: Option<(
+            &coland_storage::AppletManagedDeviceScopeGuard,
+            chrono::DateTime<chrono::Utc>,
+            &arkret_models_crypto::KeyPackagesUploadRequestBody,
+        )>,
+    ) -> PersistenceResult<bool> {
         match (&record.device_id, &record.device_authorize_event_id, &record.agent_key_authorize_event_id) {
             (Some(_), Some(_), None) | (None, None, Some(_)) | (None, None, None) => {}
             _ => return Err(PersistenceError::SchemaViolation(
-                "KeyPackage producer must bind one human device authorization or a non-device endpoint".into(),
+                "KeyPackage producer must bind one Account Device authorization or a non-device endpoint".into(),
             )),
         }
         record.lifecycle().map_err(|error| {
@@ -48,41 +97,47 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
             .await
             .map_err(PersistenceError::database)?;
         conn.transaction::<_,PgTransactionError,_>(async move |conn| {
+        if let Some((guard, expires_at, body)) = native {
+            crate::mls_keypackage_publication::require_native_publication(conn, record, guard, expires_at, body).await?;
+        } else if record.effective_scope.is_some() {
+            return Err(PersistenceError::Conflict("capability_denied: scoped Device publication requires its native guard".into()).into());
+        }
         // An exact existing id cannot publish new material. Do not relabel it
         // with a successor authorization merely because a retry arrived later.
         if sql_query("SELECT to_jsonb(id) AS payload FROM mls_key_packages WHERE id=$1")
             .bind::<Text,_>(&record.id).get_result::<super::JsonPayloadRow>(&mut *conn).await.optional()?.is_some() {
             return Ok(false);
         }
-        if let Some(original_authorize) = &record.device_authorize_event_id {
-            let device = record.device_id.as_deref().ok_or_else(||PersistenceError::SchemaViolation("human KeyPackage omits device".into()))?;
-            let binding = crate::device_revocations::local_device_binding_in_transaction(conn,&record.actor_id,device).await?
-                .ok_or_else(||PersistenceError::Conflict("device_unauthorized".into()))?;
-            if binding.authorization_ref.event_id.as_str() != original_authorize {
-                return Err(PersistenceError::Conflict("device authorization changed since upload verification".into()).into());
-            }
+        if native.is_none() {
             #[derive(QueryableByName)]
             struct Owner { #[diesel(sql_type=Text)] principal_id: String, #[diesel(sql_type=Text)] station_id: String }
-            let owner=sql_query("SELECT principal_id,station_id FROM accounts WHERE pk=$1").bind::<BigInt,_>(record.owner_account_pk.get()).get_result::<Owner>(&mut *conn).await?;
-            if owner.principal_id != binding.principal_id.as_str() || owner.station_id != binding.station_id.as_str() {
-                return Err(PersistenceError::Conflict("KeyPackage account differs from its original device authorization".into()).into());
+            let owner=sql_query("SELECT principal_id,station_id FROM accounts WHERE principal_id=$1 AND station_id=$2 FOR SHARE")
+                .bind::<Text,_>(record.owner_account_id.principal_id.as_str()).bind::<Text,_>(record.owner_account_id.station_id.as_str())
+                .get_result::<Owner>(&mut *conn).await.optional()?.ok_or_else(||PersistenceError::Conflict("KeyPackage Account owner is unavailable".into()))?;
+            if let Some(original_authorize) = &record.device_authorize_event_id {
+                let device = record.device_id.as_deref().ok_or_else(||PersistenceError::SchemaViolation("Account Device KeyPackage omits device".into()))?;
+                let binding = crate::device_revocations::local_device_binding_in_transaction(conn,&record.actor_id,device).await?
+                    .ok_or_else(||PersistenceError::Conflict("device_unauthorized".into()))?;
+                if binding.authorization_ref.event_id.as_str() != original_authorize || owner.principal_id != binding.principal_id.as_str() || owner.station_id != binding.station_id.as_str() {
+                    return Err(PersistenceError::Conflict("KeyPackage Account differs from its original device authorization".into()).into());
+                }
+                crate::ensure_gate_allowed_in_transaction(conn,&binding).await?;
             }
-            crate::ensure_gate_allowed_in_transaction(conn,&binding).await?;
         }
         let inserted = sql_query(
             "INSERT INTO mls_key_packages \
-             (id, keypackage_ref, keypackage_digest, owner_account_pk, actor_id, device_id, endpoint_verification_method, key_package_bytes, \
+             (id, keypackage_ref, keypackage_digest, owner_account_id, actor_id, device_id, endpoint_verification_method, key_package_bytes, \
               capabilities, capabilities_digest, last_resort, \
               last_resort_realm_id, lifetime_not_before, lifetime_not_after, \
               claimed_by_mls_group_id, device_authorize_event_id, agent_key_authorize_event_id, claimed_at, \
-              claim_expires_at_unix_ms, consumed_at, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) \
+              claim_expires_at_unix_ms, consumed_at, created_at, effective_scope) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22) \
              ON CONFLICT (id) DO NOTHING",
         )
         .bind::<Text, _>(&record.id)
         .bind::<Text, _>(&record.keypackage_ref)
         .bind::<Text, _>(&record.keypackage_digest)
-        .bind::<BigInt, _>(record.owner_account_pk.get())
+        .bind::<Jsonb, _>(serde_json::json!(record.owner_account_id))
         .bind::<Text, _>(&record.actor_id)
         .bind::<Nullable<Text>, _>(&record.device_id)
         .bind::<Nullable<Text>, _>(&record.endpoint_verification_method)
@@ -104,10 +159,38 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
         .bind::<Nullable<BigInt>, _>(record.claim_expires_at_unix_ms)
         .bind::<Nullable<BigInt>, _>(record.consumed_at)
         .bind::<BigInt, _>(record.created_at)
+        .bind::<Nullable<Jsonb>, _>(record.effective_scope.as_ref().map(serde_json::to_value).transpose().map_err(PersistenceError::database)?)
         .execute(&mut *conn)
         .await.map_err(PersistenceError::database)?;
         Ok(inserted > 0)
         }).await.map_err(PgTransactionError::into_persistence)
+    }
+}
+#[async_trait]
+impl MlsKeyPackageStore for PgMlsKeyPackageStore {
+    async fn put(&self, record: &MlsKeyPackageRow) -> PersistenceResult<bool> {
+        self.put_guarded(record, None).await
+    }
+    async fn put_for_applet_device(
+        &self,
+        record: &MlsKeyPackageRow,
+        guard: &coland_storage::AppletManagedDeviceScopeGuard,
+        expires_at: chrono::DateTime<chrono::Utc>,
+        body: &arkret_models_crypto::KeyPackagesUploadRequestBody,
+    ) -> PersistenceResult<bool> {
+        self.put_guarded(record, Some((guard, expires_at, body)))
+            .await
+    }
+
+    async fn revoke_for_applet_device(
+        &self,
+        body: &arkret_models_crypto::KeyPackagesRevokeRequestBody,
+        authority: &coland_storage::AppletManagedDeviceAuthority,
+        scope: &arkret_wire::ScopeRef,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<coland_storage::MlsKeyPackageRevocation> {
+        crate::mls_keypackage_revocation::revoke(&self.pool, body, authority, scope, expires_at)
+            .await
     }
 
     async fn get(&self, id: &str) -> PersistenceResult<Option<MlsKeyPackageRow>> {
@@ -115,7 +198,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
             .await
             .map_err(PersistenceError::database)?;
         sql_query(
-             "SELECT id, keypackage_ref, keypackage_digest, owner_account_pk, actor_id, device_id, endpoint_verification_method, \
+             "SELECT id, keypackage_ref, keypackage_digest, owner_account_id, effective_scope, actor_id, device_id, endpoint_verification_method, \
              key_package_bytes, capabilities, capabilities_digest, \
              last_resort, last_resort_realm_id, lifetime_not_before, lifetime_not_after, \
              claimed_by_mls_group_id, device_authorize_event_id, agent_key_authorize_event_id, claimed_at, \
@@ -139,7 +222,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
             .await
             .map_err(PersistenceError::database)?;
         sql_query(
-             "SELECT id, keypackage_ref, keypackage_digest, owner_account_pk, actor_id, device_id, endpoint_verification_method, \
+             "SELECT id, keypackage_ref, keypackage_digest, owner_account_id, effective_scope, actor_id, device_id, endpoint_verification_method, \
              key_package_bytes, capabilities, capabilities_digest, \
              last_resort, last_resort_realm_id, lifetime_not_before, lifetime_not_after, \
              claimed_by_mls_group_id, device_authorize_event_id, agent_key_authorize_event_id, claimed_at, \
@@ -169,7 +252,12 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
             // though the shared transition compares canonical strings.
             parse_authorize_event_id(claim.device_authorize_event_id)?;
             parse_authorize_event_id(claim.agent_key_authorize_event_id)?;
-            if gate_required {
+            let candidate = match claim.target {
+                MlsKeyPackageClaimTarget::Group(group) => claim_candidate(conn,claim.id,group,claim.claim_expires_at_unix_ms,claim.applet_device_scope_guard.as_ref()).await?,
+                _ => None,
+            };
+            if matches!(claim.target,MlsKeyPackageClaimTarget::Group(_)) && candidate.is_none() {return Ok(None);}
+            if gate_required && claim.applet_device_scope_guard.is_none() {
                 let selector = claim.device_revocation_gate.as_ref().ok_or_else(|| {
                     PersistenceError::SchemaViolation(
                         "device KeyPackage claim is missing revocation selector".to_owned(),
@@ -178,7 +266,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
                 crate::ensure_gate_allowed_in_transaction(conn, selector).await?;
             }
             let existing = sql_query(
-                "SELECT id, keypackage_ref, keypackage_digest, owner_account_pk, actor_id, device_id, endpoint_verification_method, \
+                "SELECT id, keypackage_ref, keypackage_digest, owner_account_id, effective_scope, actor_id, device_id, endpoint_verification_method, \
                  key_package_bytes, capabilities, capabilities_digest, \
                  last_resort, last_resort_realm_id, lifetime_not_before, lifetime_not_after, \
                  claimed_by_mls_group_id, device_authorize_event_id, agent_key_authorize_event_id, claimed_at, \
@@ -195,6 +283,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
             let Some(existing) = existing else {
                 return Ok(None);
             };
+            if candidate.as_ref().is_some_and(|candidate|!candidate.same_publication(&existing)) {return Ok(None);}
             let Some(next) = apply_key_package_claim(&existing, &claim) else {
                 return Ok(None);
             };
@@ -218,6 +307,9 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
                     "locked MLS KeyPackage row disappeared during claim".to_owned(),
                 )
                 .into());
+            }
+            if matches!(claim.target, MlsKeyPackageClaimTarget::Revoke) {
+                crate::mls_keypackage_revocation::close_claims(conn, &next.id, claim.claimed_at).await?;
             }
             Ok::<Option<MlsKeyPackageRow>, PgTransactionError>(Some(next))
         })
@@ -243,7 +335,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
                AND claimed_by_mls_group_id = $2 \
                AND consumed_at IS NULL \
                AND claim_expires_at_unix_ms > $3 \
-             RETURNING id, keypackage_ref, keypackage_digest, owner_account_pk, actor_id, device_id, endpoint_verification_method, \
+             RETURNING id, keypackage_ref, keypackage_digest, owner_account_id, effective_scope, actor_id, device_id, endpoint_verification_method, \
              key_package_bytes, capabilities, capabilities_digest, \
              last_resort, last_resort_realm_id, lifetime_not_before, lifetime_not_after, \
              claimed_by_mls_group_id, device_authorize_event_id, agent_key_authorize_event_id, claimed_at, \
@@ -435,7 +527,13 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
                 {
                     return Ok(PeerKeyPackageClaimAttemptResult::Existing(Box::new(existing)));
                 }
-                if attempt.device_authorize_event_id.is_some() {
+                let Some(candidate)=claim_candidate(conn,attempt.keypackage_id,attempt.mls_group_id,Some(attempt.claim_expires_at_unix_ms),attempt.applet_device_scope_guard.as_ref()).await? else {
+                    return Ok(PeerKeyPackageClaimAttemptResult::KeyPackageUnavailable);
+                };
+                if attempt.applet_device_scope_guard.is_some() && attempt.device_authorize_event_id != candidate.device_authorize_event_id.as_deref() {
+                    return Ok(PeerKeyPackageClaimAttemptResult::KeyPackageUnavailable);
+                }
+                if attempt.device_authorize_event_id.is_some() && attempt.applet_device_scope_guard.is_none() {
                     let selector = attempt.device_revocation_gate.as_ref().ok_or_else(|| {
                         PersistenceError::SchemaViolation(
                             "peer device KeyPackage claim is missing revocation selector"
@@ -459,7 +557,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
                         return Ok(PeerKeyPackageClaimAttemptResult::KeyPackageUnavailable);
                     }
                     let claimed = sql_query(
-                        "SELECT id, keypackage_ref, keypackage_digest, owner_account_pk, actor_id, device_id, endpoint_verification_method, \
+                        "SELECT id, keypackage_ref, keypackage_digest, owner_account_id, effective_scope, actor_id, device_id, endpoint_verification_method, \
                          key_package_bytes, capabilities, capabilities_digest, \
                          last_resort, last_resort_realm_id, lifetime_not_before, lifetime_not_after, \
                          claimed_by_mls_group_id, device_authorize_event_id, agent_key_authorize_event_id, claimed_at, \
@@ -488,10 +586,10 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
                     let Some(claimed) = claimed else {
                         return Ok(PeerKeyPackageClaimAttemptResult::KeyPackageUnavailable);
                     };
+                    let claimed=validated_keypackage_row(claimed)?;
+                    if !candidate.same_publication(&claimed) {return Err(PersistenceError::Conflict("duplicate_conflict: KeyPackage original changed during claim".into()).into());}
                     insert_peer_claim_strict(conn, attempt.ledger).await?;
-                    return Ok(PeerKeyPackageClaimAttemptResult::Claimed(Box::new(
-                        validated_keypackage_row(claimed)?,
-                    )));
+                    return Ok(PeerKeyPackageClaimAttemptResult::Claimed(Box::new(claimed)));
                 }
                 if attempt.ledger.key_package_use != "single_use"
                     || attempt.ledger.claim_expires_at_unix_ms
@@ -509,7 +607,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
                    AND ($4 IS NULL OR agent_key_authorize_event_id = $4) \
                    AND lifetime_not_after * 1000 > $5 \
                    AND $6 > $5 AND $6 <= lifetime_not_after * 1000 \
-             RETURNING id, keypackage_ref, keypackage_digest, owner_account_pk, actor_id, device_id, endpoint_verification_method, \
+             RETURNING id, keypackage_ref, keypackage_digest, owner_account_id, effective_scope, actor_id, device_id, endpoint_verification_method, \
              key_package_bytes, capabilities, capabilities_digest, \
                  last_resort, last_resort_realm_id, lifetime_not_before, lifetime_not_after, \
                  claimed_by_mls_group_id, device_authorize_event_id, agent_key_authorize_event_id, claimed_at, \
@@ -532,10 +630,10 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
                 let Some(claimed) = claimed else {
                     return Ok(PeerKeyPackageClaimAttemptResult::KeyPackageUnavailable);
                 };
+                let claimed=validated_keypackage_row(claimed)?;
+                if !candidate.same_publication(&claimed) {return Err(PersistenceError::Conflict("duplicate_conflict: KeyPackage original changed during claim".into()).into());}
                 insert_peer_claim_strict(conn, attempt.ledger).await?;
-                Ok(PeerKeyPackageClaimAttemptResult::Claimed(Box::new(
-                    validated_keypackage_row(claimed)?,
-                )))
+                Ok(PeerKeyPackageClaimAttemptResult::Claimed(Box::new(claimed)))
             })
             .await;
         match result {
@@ -785,7 +883,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
             .await
             .map_err(PersistenceError::database)?;
         sql_query(
-             "SELECT id, keypackage_ref, keypackage_digest, owner_account_pk, actor_id, device_id, endpoint_verification_method, \
+             "SELECT id, keypackage_ref, keypackage_digest, owner_account_id, effective_scope, actor_id, device_id, endpoint_verification_method, \
              key_package_bytes, capabilities, capabilities_digest, \
              last_resort, last_resort_realm_id, lifetime_not_before, lifetime_not_after, \
              claimed_by_mls_group_id, device_authorize_event_id, agent_key_authorize_event_id, claimed_at, \
@@ -811,7 +909,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
             .await
             .map_err(PersistenceError::database)?;
         sql_query(
-             "SELECT id, keypackage_ref, keypackage_digest, owner_account_pk, actor_id, device_id, endpoint_verification_method, \
+             "SELECT id, keypackage_ref, keypackage_digest, owner_account_id, effective_scope, actor_id, device_id, endpoint_verification_method, \
              key_package_bytes, capabilities, capabilities_digest, \
              last_resort, last_resort_realm_id, lifetime_not_before, lifetime_not_after, \
              claimed_by_mls_group_id, device_authorize_event_id, agent_key_authorize_event_id, claimed_at, \
@@ -900,15 +998,17 @@ async fn load_peer_claim(
     .map_err(PersistenceError::database)
 }
 #[derive(QueryableByName)]
-struct MlsKeyPackagePgRow {
+pub(super) struct MlsKeyPackagePgRow {
     #[diesel(sql_type = Text)]
     id: String,
     #[diesel(sql_type = Text)]
     keypackage_ref: String,
     #[diesel(sql_type = Text)]
     keypackage_digest: String,
-    #[diesel(sql_type = BigInt)]
-    owner_account_pk: i64,
+    #[diesel(sql_type = Jsonb)]
+    owner_account_id: Value,
+    #[diesel(sql_type = Nullable<Jsonb>)]
+    effective_scope: Option<Value>,
     #[diesel(sql_type = Text)]
     actor_id: arkret_wire::DidCoreId,
     #[diesel(sql_type = Nullable<Text>)]
@@ -991,42 +1091,44 @@ impl From<PeerKeyPackageClaimPgRow> for PeerKeyPackageClaimLedgerRecord {
         }
     }
 }
-impl From<MlsKeyPackagePgRow> for MlsKeyPackageRow {
-    fn from(row: MlsKeyPackagePgRow) -> Self {
-        Self {
-            id: row.id,
-            keypackage_ref: row.keypackage_ref,
-            keypackage_digest: row.keypackage_digest,
-            owner_account_pk: coland_storage::AccountPk(row.owner_account_pk),
-            actor_id: row.actor_id.to_string(),
-            device_id: row.device_id,
-            endpoint_verification_method: row.endpoint_verification_method,
-            key_package_bytes: row.key_package_bytes,
-            capabilities: json_string_array(row.capabilities),
-            capabilities_digest: row.capabilities_digest,
-            last_resort: row.last_resort,
-            last_resort_realm_id: row.last_resort_realm_id,
-            lifetime_not_before: row.lifetime_not_before,
-            lifetime_not_after: row.lifetime_not_after,
-            claimed_by_mls_group_id: row.claimed_by_mls_group_id,
-            device_authorize_event_id: row
-                .device_authorize_event_id
-                .as_deref()
-                .map(format_authorize_event_id),
-            agent_key_authorize_event_id: row
-                .agent_key_authorize_event_id
-                .as_deref()
-                .map(format_authorize_event_id),
-            claimed_at: row.claimed_at,
-            claim_expires_at_unix_ms: row.claim_expires_at_unix_ms,
-            consumed_at: row.consumed_at,
-            created_at: row.created_at,
-        }
-    }
-}
-
-fn validated_keypackage_row(row: MlsKeyPackagePgRow) -> PersistenceResult<MlsKeyPackageRow> {
-    let row = MlsKeyPackageRow::from(row);
+pub(super) fn validated_keypackage_row(
+    row: MlsKeyPackagePgRow,
+) -> PersistenceResult<MlsKeyPackageRow> {
+    let row = MlsKeyPackageRow {
+        id: row.id,
+        keypackage_ref: row.keypackage_ref,
+        keypackage_digest: row.keypackage_digest,
+        owner_account_id: serde_json::from_value(row.owner_account_id)
+            .map_err(PersistenceError::database)?,
+        effective_scope: row
+            .effective_scope
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(PersistenceError::database)?,
+        actor_id: row.actor_id.to_string(),
+        device_id: row.device_id,
+        endpoint_verification_method: row.endpoint_verification_method,
+        key_package_bytes: row.key_package_bytes,
+        capabilities: json_string_array(row.capabilities),
+        capabilities_digest: row.capabilities_digest,
+        last_resort: row.last_resort,
+        last_resort_realm_id: row.last_resort_realm_id,
+        lifetime_not_before: row.lifetime_not_before,
+        lifetime_not_after: row.lifetime_not_after,
+        claimed_by_mls_group_id: row.claimed_by_mls_group_id,
+        device_authorize_event_id: row
+            .device_authorize_event_id
+            .as_deref()
+            .map(format_authorize_event_id),
+        agent_key_authorize_event_id: row
+            .agent_key_authorize_event_id
+            .as_deref()
+            .map(format_authorize_event_id),
+        claimed_at: row.claimed_at,
+        claim_expires_at_unix_ms: row.claim_expires_at_unix_ms,
+        consumed_at: row.consumed_at,
+        created_at: row.created_at,
+    };
     row.lifecycle().map_err(|error| {
         PersistenceError::SchemaViolation(format!(
             "stored MLS KeyPackage lifecycle is invalid: {error}"

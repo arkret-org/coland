@@ -26,6 +26,14 @@ struct JsonRow {
     value: Value,
 }
 
+#[derive(QueryableByName)]
+struct InstallationRow {
+    #[diesel(sql_type=Jsonb)]
+    value: Value,
+    #[diesel(sql_type=diesel::sql_types::Bool)]
+    globally_fenced: bool,
+}
+
 /// The actual domain action, never a union of alternative membership actions.
 pub(crate) fn action(event: &Event) -> PersistenceResult<CapabilityActionId> {
     if event.executed_by.is_none() && event.kind == EventKind::MessageCreate {
@@ -38,6 +46,30 @@ pub(crate) fn action(event: &Event) -> PersistenceResult<CapabilityActionId> {
         )
     {
         return Ok(CapabilityActionId::AppletPublish);
+    }
+    if event.kind == EventKind::CircleMemberState && event.executed_by.is_none() {
+        let payload: arkret_models_collaboration::events_payloads::circle::CircleMemberStatePayload =
+            serde_json::from_value(json!(&event.payload))
+                .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
+        if payload.member_id != event.actor_id
+            || !matches!(&event.scope_ref, ScopeRef::Circle {realm_id,circle_id}
+                if realm_id == &event.realm_id && circle_id == &payload.circle_id)
+        {
+            return Err(denied(
+                "native Circle membership must retain its own Account and actual Circle",
+            ));
+        }
+        return match payload.membership {
+            arkret_models_collaboration::governance::circle::CircleMembership::Join => {
+                Ok(CapabilityActionId::AppletJoin)
+            }
+            arkret_models_collaboration::governance::circle::CircleMembership::Leave => {
+                Ok(CapabilityActionId::CircleMemberAdd)
+            }
+            _ => Err(denied(
+                "native Circle membership has no implemented self transition",
+            )),
+        };
     }
     if event.kind != EventKind::MemberState || event.executed_by.is_some() {
         return Err(denied("native Event has no implemented business consumer"));
@@ -73,9 +105,11 @@ pub(crate) async fn installation(
     let actual_action = action(event)?;
     let encrypted=sql_query("SELECT to_jsonb(EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.mls.genesis' AND c.realm_id=$1 AND e.envelope->'scope_ref'=$2)) AS value")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(json!(event.scope_ref)).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    if event.kind == EventKind::MemberState && encrypted.value.as_bool() != Some(false) {
-        return Err(PersistenceError::Conflict("applet_e2ee_join_unauthorized: independent Applet MLS join consent is not established at this cut".into()));
-    }
+    let mls_join = matches!(
+        event.kind,
+        EventKind::MemberState | EventKind::CircleMemberState
+    ) && actual_action == CapabilityActionId::AppletJoin
+        && encrypted.value.as_bool() != Some(false);
 
     if event.actor_id != ActorId::account(authority.account_id.clone())
         || event.applet_id.as_ref() != Some(&authority.applet_id)
@@ -83,16 +117,34 @@ pub(crate) async fn installation(
     {
         return Err(denied("native Event differs from its authenticated scope"));
     }
-    installation_for_device(
+    let mut actions = vec![actual_action];
+    if event.kind == EventKind::CircleMemberState && actual_action == CapabilityActionId::AppletJoin
+    {
+        actions.push(CapabilityActionId::CircleMemberAdd);
+    }
+    let installed = installation_for_device(
         conn,
         authority,
         &guard.effective_scope,
         &guard.service_did_document,
-        &[actual_action],
+        &actions,
         at,
         true,
     )
-    .await
+    .await?;
+    if mls_join {
+        crate::boxed_future(|| {
+            crate::applet_e2ee::require_current_consent(
+                conn,
+                &installed.0,
+                &installed.1,
+                &guard.effective_scope,
+                at,
+            )
+        })
+        .await?;
+    }
+    Ok(installed)
 }
 
 /// Current exact installation and accepted native identity, independent of an
@@ -111,6 +163,43 @@ pub(crate) async fn installation_for_device(
     {
         return Err(denied("native resource exceeds its original Device pair"));
     }
+    crate::boxed_future(|| {
+        installation_at_scope(conn, authority, scope, service_did_document, at, writer)
+    })
+    .await
+}
+
+/// The registered KeyPackage control rule requires an exact original scope,
+/// without pretending that an empty business-action set authorizes anything.
+pub(crate) async fn installation_for_keypackage_publication(
+    conn: &mut AsyncPgConnection,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    scope: &ScopeRef,
+    service_did_document: &arkret_identity::DidDocument,
+    at: chrono::DateTime<chrono::Utc>,
+    writer: bool,
+) -> PersistenceResult<(arkret_models_integration::AppletRegistrationPayload, Value)> {
+    if !matches!(scope, ScopeRef::Realm { .. } | ScopeRef::Circle { .. })
+        || !authority.scopes.contains_scope(scope)
+    {
+        return Err(denied(
+            "native KeyPackage exceeds its original Device scope",
+        ));
+    }
+    crate::boxed_future(|| {
+        installation_at_scope(conn, authority, scope, service_did_document, at, writer)
+    })
+    .await
+}
+
+async fn installation_at_scope(
+    conn: &mut AsyncPgConnection,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    scope: &ScopeRef,
+    service_did_document: &arkret_identity::DidDocument,
+    at: chrono::DateTime<chrono::Utc>,
+    writer: bool,
+) -> PersistenceResult<(arkret_models_integration::AppletRegistrationPayload, Value)> {
     let registration = crate::managed_message_actor::registration_for_scope(
         conn,
         scope.realm_id(),
@@ -136,18 +225,26 @@ pub(crate) async fn installation_for_device(
         "FOR SHARE OF i,m NOWAIT"
     };
     let query = format!(
-        "SELECT i.record AS value FROM applet_installations i JOIN applet_registration_current_results r ON r.realm_id=$3 AND r.applet_id=i.applet_id JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref AND a.registration_event_ref=i.record#>>'{{registration_event,event_id}}' JOIN applet_managed_identities m ON m.applet_id=i.applet_id AND m.target_station_id=$4 WHERE i.applet_id=$1 AND i.effective_scope_key=$2 AND m.record->>'globally_fenced_at' IS NULL {locking}"
+        "SELECT i.record AS value,(m.record->>'globally_fenced_at' IS NOT NULL) AS globally_fenced FROM applet_installations i JOIN applet_registration_current_results r ON r.realm_id=$3 AND r.applet_id=i.applet_id JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref AND a.registration_event_ref=i.record#>>'{{registration_event,event_id}}' JOIN applet_managed_identities m ON m.applet_id=i.applet_id AND m.target_station_id=$4 WHERE i.applet_id=$1 AND i.effective_scope_key=$2 {locking}"
     );
     let row = sql_query(query)
         .bind::<Text, _>(authority.applet_id.as_str())
         .bind::<Text, _>(key)
         .bind::<Text, _>(scope.realm_id().as_str())
         .bind::<Text, _>(authority.account_id.station_id.as_str())
-        .get_result::<JsonRow>(&mut *conn)
+        .get_result::<InstallationRow>(&mut *conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
         .ok_or_else(|| denied("native Applet exact installation is absent or fenced"))?;
+    if row.globally_fenced
+        || row.value.get("revoked_at").is_some_and(|v| !v.is_null())
+        || row.value["status"] == "revoked"
+    {
+        return Err(PersistenceError::Conflict(
+            "applet_revoked: native exact installation is fenced".into(),
+        ));
+    }
     if row.value["effective_scope"] != json!(scope)
         || row.value["package"]["registration_epoch"] != json!(registration.registration_epoch)
         || row.value.get("revoked_at").is_some_and(|v| !v.is_null())
@@ -265,7 +362,10 @@ pub(crate) async fn select_management(
 )> {
     let operation = match event.kind {
         EventKind::MemberState => AppletPolicyOperation::Join,
-        EventKind::MessageCreate => AppletPolicyOperation::Execute,
+        EventKind::CircleMemberState if action(event)? == CapabilityActionId::AppletJoin => {
+            AppletPolicyOperation::Join
+        }
+        EventKind::MessageCreate | EventKind::CircleMemberState => AppletPolicyOperation::Execute,
         _ => AppletPolicyOperation::Publish,
     };
     let circle = match &event.scope_ref {
@@ -292,15 +392,18 @@ pub(crate) async fn select_management(
     let decision = arkret_policy::applet_management::select_applet_management(
         Some(&policies),
         &arkret_policy::applet_management::AppletManagementContext {
+            device_control: None,
             realm_id: &event.realm_id,
             requester_actor_id: &service,
             applet_id: &registration.applet_id,
             effective_scope: &event.scope_ref,
             managed_actor_id: Some(&event.actor_id),
             operation,
-            content_action: (operation == AppletPolicyOperation::Execute)
-                .then_some(CapabilityActionId::MessageCreate),
-            device_control: None,
+            content_action: if operation == AppletPolicyOperation::Execute {
+                Some(business_action(event)?)
+            } else {
+                None
+            },
             resources: Some(&resources),
             at,
         },
@@ -317,24 +420,40 @@ pub(crate) async fn select_management(
     Ok((policies, decision))
 }
 
-/// A native Device spends its own terminal business grant. Its Service parent
-/// is evaluated separately as that Service, including the original quota key.
-/// The ordinary Message unit still admits the child, governance and content.
-pub(crate) async fn require_business_in_connection(
+pub(crate) fn business_action(event: &Event) -> PersistenceResult<CapabilityActionId> {
+    action(event)?;
+    match event.kind {
+        EventKind::MessageCreate => Ok(CapabilityActionId::MessageCreate),
+        EventKind::CircleMemberState => Ok(CapabilityActionId::CircleMemberAdd),
+        _ => Err(denied("native business action has no domain consumer")),
+    }
+}
+
+struct BusinessBasis {
+    service: ActorId,
+    action: CapabilityActionId,
+    target: arkret_wire::WireResourceSelector,
+    facts: coland_storage::OperationFacts,
+    grants: std::collections::BTreeMap<
+        GrantId,
+        arkret_models_collaboration::governance::grant_constraint::CapabilityGrant,
+    >,
+    root: crate::capability_grant_current_results::RealmAuthorityRootCurrent,
+    sources: Vec<arkret_models_collaboration::governance::grant_constraint::CapabilityGrant>,
+}
+
+/// Pure current source preparation for private review; no quota or vote is spent.
+async fn business_basis(
     conn: &mut AsyncPgConnection,
     event: &Event,
     guard: &AppletManagedDeviceScopeGuard,
-    commit: &arkret_wire::RealmCommit,
-    prepared: Option<&coland_storage::EventApprovalCommit>,
-) -> PersistenceResult<Vec<crate::approval_admission::QualifiedApproval>> {
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<BusinessBasis> {
     use arkret_models_collaboration::events_payloads::CapabilityGrantCreateBody;
     use arkret_models_collaboration::governance::grant_constraint::{
         IssuerAuthorityRef, ManagedActorRole,
     };
-    if event.kind != EventKind::MessageCreate {
-        return Err(denied("native business action has no domain consumer"));
-    }
-    let at = commit.committed_at;
+    let action = business_action(event)?;
     let (registration, _) = installation(conn, event, guard, at).await?;
     let service = ActorId::service(registration.service_id.clone());
     let cut = crate::boxed_future(|| {
@@ -344,6 +463,8 @@ pub(crate) async fn require_business_in_connection(
     cut.require_open_lifecycle(event)?;
     cut.require_governed_member(&event.kind)?;
     let (target, mut facts) = cut.event_operation(event);
+    cut.complete_event_facts_in_connection(conn, event, &mut facts)
+        .await?;
     facts.applet_id = Some(registration.applet_id.to_string());
     facts.executed_by = Some(service.clone());
     facts.registration_epoch = Some(registration.registration_epoch.to_string());
@@ -417,13 +538,62 @@ pub(crate) async fn require_business_in_connection(
     let root=sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1")
         .bind::<Text,_>(event.realm_id.as_str()).get_result::<crate::capability_grant_current_results::RealmAuthorityRootReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let root = crate::capability_grant_current_results::decode_authority_root(root)?;
-    let sources = arkret_policy::grant_authority::current_sources(
-        child, CapabilityActionId::MessageCreate.as_str(), &target, &grants, at,
+    // A selected positive child cannot erase an unproved independent Account
+    // lineage from the global refusal set. Only known closed sources may drop.
+    arkret_policy::grant_authority::current_subject_grants(
+        &event.actor_id, action.as_str(), &target, &grants, at,
         |source| matches!(source, IssuerAuthorityRef::RealmRoot { realm_id, authority_event_ref, authority_generation }
             if realm_id==&event.realm_id && authority_event_ref==&root.authority_event_ref
                 && authority_generation==&root.authority_generation),
     ).map_err(|error| PersistenceError::Conflict(error.to_string()))?;
-    let actions = [CapabilityActionId::MessageCreate.as_str()];
+    let sources = arkret_policy::grant_authority::current_sources(
+        child, action.as_str(), &target, &grants, at,
+        |source| matches!(source, IssuerAuthorityRef::RealmRoot { realm_id, authority_event_ref, authority_generation }
+            if realm_id==&event.realm_id && authority_event_ref==&root.authority_event_ref
+                && authority_generation==&root.authority_generation),
+    ).map_err(|error| PersistenceError::Conflict(error.to_string()))?;
+    let sources = sources.into_iter().cloned().collect();
+    Ok(BusinessBasis {
+        service,
+        action,
+        target,
+        facts,
+        grants,
+        root,
+        sources,
+    })
+}
+
+pub(crate) async fn require_business_binding(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    guard: &AppletManagedDeviceScopeGuard,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<()> {
+    business_basis(conn, event, guard, at).await.map(|_| ())
+}
+
+/// Spend the original Service ancestor paths alongside the ordinary domain unit.
+pub(crate) async fn require_business_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    guard: &AppletManagedDeviceScopeGuard,
+    commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
+) -> PersistenceResult<Vec<crate::approval_admission::QualifiedApproval>> {
+    use arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef;
+    let at = commit.committed_at;
+    let BusinessBasis {
+        service,
+        action,
+        target,
+        facts,
+        grants,
+        root,
+        sources,
+    } = business_basis(conn, event, guard, at).await?;
+    let actions = [action.as_str()];
+
     let mut accepted = Vec::new();
     let mut reservations = Vec::new();
     let mut actors = std::collections::BTreeSet::from([service.clone()]);
@@ -472,7 +642,7 @@ pub(crate) async fn require_business_in_connection(
                 event,
                 commit,
                 prepared,
-                source,
+                &source,
                 actor,
                 &actions,
                 &target,

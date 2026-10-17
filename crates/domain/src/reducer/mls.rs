@@ -3,7 +3,7 @@
 //! `ak.mls.genesis` and `ak.mls.commit` do not reach the reducer: their
 //! `mls_group` typed current result is written by the guarded authority unit
 //! of work at the covering RealmCommit. KeyPackage publication is not an
-//! Event: `apply_keypackage_upload_projection` maintains the dedicated
+//! Event: `prepare_keypackage_upload_projection` validates the dedicated
 //! KeyPackage ledger projection that `/_arkret/self/keys/keypackages/*`
 //! writes through.
 
@@ -39,8 +39,9 @@ pub struct MlsKeyPackagePublishProjection {
     pub keypackage_id: String,
     pub keypackage_ref: String,
     pub keypackage_digest: String,
-    /// Local `accounts.pk`; never part of a KeyPackage wire object.
-    pub owner_account_pk: i64,
+    /// Complete Account owner; never a service-local SQL identity.
+    pub owner_account_id: arkret_wire::AccountId,
+    pub effective_scope: Option<arkret_wire::ScopeRef>,
     pub actor_id: String,
     pub device_id: Option<String>,
     pub lifetime: KeyPackageLifetimeProjection,
@@ -51,36 +52,35 @@ pub struct MlsKeyPackagePublishProjection {
     pub created_at: i64,
 }
 
-pub fn apply_keypackage_upload_projection(
-    state: &mut ProjectionState,
+pub fn prepare_keypackage_upload_projection(
     projection: &MlsKeyPackagePublishProjection,
-) -> ProjectionEffect {
+) -> Result<MlsKeyPackageProjection, &'static str> {
     if projection.keypackage_id.is_empty() {
-        return reject("mls_keypackage_id_missing");
+        return Err("mls_keypackage_id_missing");
     }
     if projection.actor_id.is_empty() {
-        return reject("mls_keypackage_actor_missing");
+        return Err("mls_keypackage_actor_missing");
     }
     if projection.lifetime.not_after <= projection.lifetime.not_before {
-        return reject("mls_keypackage_lifetime_invalid");
+        return Err("mls_keypackage_lifetime_invalid");
     }
     if projection.key_package_bytes.is_empty() {
-        return reject("mls_keypackage_bytes_empty");
+        return Err("mls_keypackage_bytes_empty");
     }
     let computed_keypackage_digest = arkret_canonical::sha256_digest(&projection.key_package_bytes);
     if projection.keypackage_digest != computed_keypackage_digest {
-        return reject("mls_keypackage_digest_mismatch");
+        return Err("mls_keypackage_digest_mismatch");
     }
     let capabilities_digest = match arkret_canonical::canonical_json_bytes(&projection.capabilities)
     {
         Ok(bytes) => arkret_canonical::sha256_digest(bytes),
-        Err(_) => return reject("mls_keypackage_capabilities_digest_failed"),
+        Err(_) => return Err("mls_keypackage_capabilities_digest_failed"),
     };
     let (device_authorize_event_id, agent_key_authorize_event_id, endpoint_verification_method) =
         match &projection.trust_anchor {
             MlsKeyPackagePublishTrustAnchor::DeviceAuthorize(event_id) => {
                 if projection.device_id.is_none() {
-                    return reject("mls_keypackage_device_missing");
+                    return Err("mls_keypackage_device_missing");
                 }
                 (Some(event_id.clone()), None, None)
             }
@@ -93,11 +93,12 @@ pub fn apply_keypackage_upload_projection(
                 Some(verification_method.clone()),
             ),
         };
-    let row = MlsKeyPackageProjection {
+    Ok(MlsKeyPackageProjection {
         id: projection.keypackage_id.clone(),
         keypackage_ref: projection.keypackage_ref.clone(),
         keypackage_digest: projection.keypackage_digest.clone(),
-        owner_account_pk: projection.owner_account_pk,
+        owner_account_id: projection.owner_account_id.clone(),
+        effective_scope: projection.effective_scope.clone(),
         actor_id: projection.actor_id.clone(),
         device_id: projection.device_id.clone(),
         endpoint_verification_method,
@@ -114,8 +115,18 @@ pub fn apply_keypackage_upload_projection(
         claim_expires_at_unix_ms: None,
         consumed_at: None,
         created_at: projection.created_at,
-    };
+    })
+}
 
+#[cfg(test)]
+fn apply_keypackage_upload_projection(
+    state: &mut ProjectionState,
+    projection: &MlsKeyPackagePublishProjection,
+) -> ProjectionEffect {
+    let row = match prepare_keypackage_upload_projection(projection) {
+        Ok(row) => row,
+        Err(reason) => return reject(reason),
+    };
     // Insert is structural — duplicates of the same `keypackage_id`
     // replace in place (a republish of the same id by the same device
     // re-arms the row; the device is the sole source-of-truth for the

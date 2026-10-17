@@ -102,8 +102,7 @@ pub(crate) async fn set_account_lifecycle_state(
         };
         persist_account_lifecycle_record(state, account.pk, principal_id_value, &record).await?;
         if next_state == "deactivated" {
-            let fanout =
-                run_account_deactivation_fanout(state, principal_id_value, account.pk).await?;
+            let fanout = run_account_deactivation_fanout(state, principal_id_value).await?;
             sessions_revoked = fanout.sessions_revoked;
             devices_revoked = fanout.devices_revoked;
             keypackages_retired = fanout.keypackages_retired;
@@ -179,7 +178,6 @@ struct AccountDeactivationFanout {
 async fn run_account_deactivation_fanout(
     state: &AppState,
     principal_id: &str,
-    owner_account_pk: coland_storage::AccountPk,
 ) -> Result<AccountDeactivationFanout, AppError> {
     let sessions_revoked = revoke_sessions_for_actor(state, principal_id)
         .await
@@ -199,7 +197,7 @@ async fn run_account_deactivation_fanout(
         .map_err(|error| AppError::internal(error.to_string()))?;
     let (to_device_messages_dropped, push_routes_revoked) =
         purge_delivery_state_for_actor(state, principal_id).await?;
-    let keypackages_retired = retire_owner_account_keypackages(state, owner_account_pk).await?;
+    let keypackages_retired = retire_owner_account_keypackages(state, account_id).await?;
     let identity_link_cache_invalidated = state
         .invalidate_cached_handle_claims_for_subject(principal_id)
         .await;
@@ -241,11 +239,11 @@ async fn purge_delivery_state_for_actor(
 
 async fn retire_owner_account_keypackages(
     state: &AppState,
-    owner_account_pk: coland_storage::AccountPk,
+    owner_account_id: arkret_wire::AccountId,
 ) -> Result<usize, AppError> {
     state
         .mls_key_packages()
-        .retire_owner_account_keypackages(owner_account_pk, now().timestamp())
+        .retire_owner_account_keypackages(owner_account_id, now().timestamp())
         .await
         .map_err(|error| AppError::internal(format!("mls keypackage retirement failed: {error}")))
 }
@@ -542,7 +540,7 @@ pub(crate) async fn execute_account_status_erasure(
         },
     )
     .await?;
-    let fanout = run_account_deactivation_fanout(state, actor, account_pk).await?;
+    let fanout = run_account_deactivation_fanout(state, actor).await?;
     // `consent-model.md` section 6.1.1.4 -- erasure MUST drop the holder's
     // whole seen-source ledger. Consent revoke and source list edits must not,
     // which is why this lives here and not in those paths.

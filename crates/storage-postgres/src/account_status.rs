@@ -1014,10 +1014,10 @@ mod tests {
         .expect("insert device source");
         sql_query(
             "INSERT INTO mls_key_packages \
-             (id, keypackage_ref, keypackage_digest, owner_account_pk, actor_id, device_id, \
+             (id, keypackage_ref, keypackage_digest, owner_account_id, actor_id, device_id, \
               key_package_bytes, capabilities, capabilities_digest, last_resort, \
               lifetime_not_before, lifetime_not_after, device_authorize_event_id, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, '[]'::jsonb, $8, FALSE, 1, 2, $9, 1)",
+             VALUES ($1, $2, $3, (SELECT jsonb_build_object('principal_id',principal_id,'station_id',station_id) FROM accounts WHERE pk=$4), $5, $6, $7, '[]'::jsonb, $8, FALSE, 1, 2, $9, 1)",
         )
         .bind::<Text, _>(format!("key-package-{namespace}"))
         .bind::<Text, _>(format!("key-package-ref-{namespace}"))

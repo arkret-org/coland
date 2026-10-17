@@ -205,6 +205,23 @@ impl WebvhStore for FaultWebvhStore {
     async fn list_log_events(&self, did: &str) -> PersistenceResult<Vec<WebvhLogRecord>> {
         self.inner.webvh().list_log_events(did).await
     }
+    async fn ingest_verified_history(
+        &self,
+        expected_current_head: Option<String>,
+        document: WebvhDocumentRecord,
+    ) -> PersistenceResult<WebvhLogCommitOutcome> {
+        self.injector
+            .check(FaultPoint::WebvhLogCommit, FaultTiming::Before)?;
+        let result = self
+            .inner
+            .webvh()
+            .ingest_verified_history(expected_current_head, document)
+            .await?;
+        self.injector
+            .check(FaultPoint::WebvhLogCommit, FaultTiming::After)?;
+        Ok(result)
+    }
+
     async fn commit_log_operation(
         &self,
         expected_current_head: Option<String>,

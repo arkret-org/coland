@@ -1079,9 +1079,11 @@ pub(crate) fn device_signature_kid_points_to_device_key(
     actor: &str,
     device_public_key: &str,
 ) -> bool {
-    let expected_principal_id_key = device_public_key
-        .strip_prefix("did:key:")
-        .map_or_else(|| format!("did:key:{device_public_key}"), str::to_owned);
+    let expected_principal_id_key = if device_public_key.starts_with("did:key:") {
+        device_public_key.to_owned()
+    } else {
+        format!("did:key:{device_public_key}")
+    };
     kid == expected_principal_id_key
         || kid
             .strip_prefix(&expected_principal_id_key)
@@ -1419,6 +1421,18 @@ mod tests {
 
     #[test]
     fn device_signature_kid_projects_did_controller_to_core_actor() {
+        for key in ["z6MkAuthorizedDeviceKey", "did:key:z6MkAuthorizedDeviceKey"] {
+            assert!(device_signature_kid_points_to_device_key(
+                "did:key:z6MkAuthorizedDeviceKey#z6MkAuthorizedDeviceKey",
+                "ak:did_core:web:alice.example",
+                key,
+            ));
+            assert!(!device_signature_kid_points_to_device_key(
+                "did:key:z6MkAnotherDeviceKey#z6MkAnotherDeviceKey",
+                "ak:did_core:web:alice.example",
+                key,
+            ));
+        }
         assert!(device_signature_kid_points_to_device_key(
             "did:web:alice.example#ak:device:primary",
             "ak:did_core:web:alice.example",

@@ -863,6 +863,31 @@ async fn mls_lifecycle_body() {
         claimed.json(),
         "exact replay is the stored outcome"
     );
+    heap_future(|| async {
+        let before = upload_durable_cut(database.url()).await.unwrap();
+        let cached = state.test_projections().mls_key_package_records();
+        let replay = bob
+            .post(
+                &state,
+                "/_arkret/self/keys/keypackages/upload",
+                arkret_wire::ServiceOperationId::SELF_KEYS_KEYPACKAGES_UPLOAD_CREATE_V1,
+                &upload,
+            )
+            .await;
+        assert_eq!(
+            replay.status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&replay.bytes)
+        );
+        assert_eq!(before, upload_durable_cut(database.url()).await.unwrap());
+        assert_eq!(
+            cached,
+            state.test_projections().mls_key_package_records(),
+            "publication retry must preserve the real accepted claim in memory"
+        );
+    })
+    .await;
     let conflicting = claim_request(
         &alice,
         &bob,

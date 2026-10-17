@@ -515,7 +515,7 @@ pub(crate) async fn consumed_endpoint_in_connection(
     };
     let evidence = diesel::sql_query("SELECT convert_from(w.delivery_canonical_json,'UTF8')::jsonb AS delivery, \
         p.consume_receipt AS receipt,p.claim_request_id,k.keypackage_ref \
-        FROM mls_key_packages k JOIN accounts a ON a.pk=k.owner_account_pk \
+        FROM mls_key_packages k JOIN accounts a ON a.principal_id=k.owner_account_id->>'principal_id' AND a.station_id=k.owner_account_id->>'station_id' \
         JOIN peer_keypackage_claims p ON p.keypackage_id=k.id \
         JOIN keypackage_claim_welcome_bindings b ON b.source_id=p.source_id AND b.claim_request_id=p.claim_request_id \
         JOIN mls_welcome_provenance w ON w.claim_id=b.claim_id AND w.welcome_id=b.welcome_id AND w.commit_event_ref=b.commit_event_ref \

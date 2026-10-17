@@ -69,7 +69,12 @@ pub(super) async fn event_pins(
         effective_scope: event.scope_ref.clone(),
         service_did_document: material.service_did_document.clone(),
     };
-    crate::applet_device_admission::require_installation_binding(conn, event, &guard, at).await?;
+    if event.kind == arkret_wire::EventKind::CircleMemberState {
+        crate::applet_device_admission::require_business_binding(conn, event, &guard, at).await?;
+    } else {
+        crate::applet_device_admission::require_installation_binding(conn, event, &guard, at)
+            .await?;
+    }
     let (registration, installation) =
         crate::applet_device_admission::installation(conn, event, &guard, at).await?;
     let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
@@ -107,9 +112,38 @@ pub(super) async fn event_pins(
     let membership=sql_query("SELECT to_jsonb(m) AS value FROM member_state_current_results m WHERE realm_id=$1 AND member_id=$2 FOR SHARE")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(event.actor_id.to_string()).get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     let circle = match &event.scope_ref {
-        ScopeRef::Circle{circle_id,..}=>Some(sql_query("SELECT jsonb_build_object('circle',to_jsonb(c),'membership',to_jsonb(m)) AS value FROM circle_current_results c JOIN circle_member_state_current_results m ON m.realm_id=c.realm_id AND m.circle_id=c.circle_id WHERE c.realm_id=$1 AND c.circle_id=$2 AND m.member_id=$3 FOR SHARE OF c,m")
-            .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).bind::<Text,_>(event.actor_id.to_string()).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?.value),
-        _=>None,
+        ScopeRef::Circle { circle_id, .. } => {
+            let circle = crate::circle_current_results::locked_circle_basis(
+                conn,
+                &event.realm_id,
+                circle_id,
+            )
+            .await?;
+            let member = crate::circle_current_results::locked_membership_basis(
+                conn,
+                &event.realm_id,
+                circle_id,
+                &event.actor_id,
+                None,
+            )
+            .await?;
+            let parent = crate::member_state_admission::locked_membership_revision(
+                conn,
+                &event.realm_id,
+                &event.actor_id,
+            )
+            .await?;
+            let payload: arkret_models_collaboration::events_payloads::circle::CircleMemberStatePayload = serde_json::from_value(json!(&event.payload)).map_err(invalid)?;
+            if !matches!(parent, Some((arkret_wire::MembershipState::Join, ref revision)) if payload.parent_membership_revision.as_ref() == Some(revision))
+            {
+                return Err(refused(
+                    "failed_precondition",
+                    "native Circle review parent revision differs",
+                ));
+            }
+            Some(json!({"circle":circle,"membership":member}))
+        }
+        _ => None,
     };
     let mut pending = std::collections::BTreeSet::from([event
         .authorization_ref
@@ -690,6 +724,7 @@ async fn select_current_creation(
     let decision = arkret_policy::applet_management::select_applet_management(
         Some(&policies),
         &arkret_policy::applet_management::AppletManagementContext {
+            device_control: None,
             realm_id: scope.realm_id(),
             requester_actor_id: &input.admin_actor_id,
             applet_id: &input.package.applet_id,
@@ -701,7 +736,6 @@ async fn select_current_creation(
                 _ => return Err(hidden()),
             },
             content_action: None,
-            device_control: None,
             resources: Some(&resources),
             at,
         },

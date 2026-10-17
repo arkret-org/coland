@@ -1144,6 +1144,7 @@ pub struct ClaimMlsKeyPackageCommand<'a> {
     pub device_revocation_gate: Option<&'a coland_storage::DeviceRevocationGateSelector>,
     pub claimed_at: i64,
     pub claim_expires_at_unix_ms: Option<i64>,
+    pub applet_device_scope_guard: Option<&'a coland_storage::AppletManagedDeviceScopeGuard>,
 }
 
 pub enum ClaimMlsKeyPackageTarget<'a> {
@@ -1167,6 +1168,7 @@ pub struct PeerKeyPackageClaimCommand<'a> {
     pub claimed_at_unix_ms: i64,
     pub claim_expires_at_unix_ms: i64,
     pub ledger: &'a PeerKeyPackageClaimLedgerState,
+    pub applet_device_scope_guard: Option<&'a coland_storage::AppletManagedDeviceScopeGuard>,
 }
 
 pub struct PeerClaimTerminalTransitionCommand<'a> {
@@ -1187,6 +1189,21 @@ pub use coland_storage::{
 #[async_trait::async_trait]
 pub trait MlsKeyPackageMaintenancePort: Send + Sync {
     async fn store_key_package(&self, record: &MlsKeyPackageState) -> ServiceResult<bool>;
+    async fn store_key_package_for_applet_device(
+        &self,
+        record: &MlsKeyPackageState,
+        guard: &coland_storage::AppletManagedDeviceScopeGuard,
+        expires_at: chrono::DateTime<chrono::Utc>,
+        body: &arkret_models_crypto::KeyPackagesUploadRequestBody,
+    ) -> ServiceResult<bool>;
+
+    async fn revoke_for_applet_device(
+        &self,
+        body: &arkret_models_crypto::KeyPackagesRevokeRequestBody,
+        authority: &coland_storage::AppletManagedDeviceAuthority,
+        scope: &arkret_wire::ScopeRef,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> ServiceResult<coland_storage::MlsKeyPackageRevocation>;
     async fn key_package(&self, id: &str) -> ServiceResult<Option<MlsKeyPackageState>>;
     async fn key_package_by_ref(
         &self,
@@ -1265,7 +1282,7 @@ pub trait MlsKeyPackageMaintenancePort: Send + Sync {
     ) -> ServiceResult<Vec<MlsKeyPackageState>>;
     async fn retire_owner_account_keypackages(
         &self,
-        owner_account_pk: coland_storage::AccountPk,
+        owner_account_id: arkret_wire::AccountId,
         retired_at: i64,
     ) -> ServiceResult<usize>;
 }
@@ -1282,16 +1299,38 @@ impl MlsKeyPackageService {
 
     pub async fn retire_owner_account_keypackages(
         &self,
-        owner_account_pk: coland_storage::AccountPk,
+        owner_account_id: arkret_wire::AccountId,
         retired_at: i64,
     ) -> ServiceResult<usize> {
         self.key_packages
-            .retire_owner_account_keypackages(owner_account_pk, retired_at)
+            .retire_owner_account_keypackages(owner_account_id, retired_at)
             .await
     }
 
     pub async fn store_key_package(&self, record: &MlsKeyPackageState) -> ServiceResult<bool> {
         self.key_packages.store_key_package(record).await
+    }
+    pub async fn store_key_package_for_applet_device(
+        &self,
+        record: &MlsKeyPackageState,
+        guard: &coland_storage::AppletManagedDeviceScopeGuard,
+        expires_at: chrono::DateTime<chrono::Utc>,
+        body: &arkret_models_crypto::KeyPackagesUploadRequestBody,
+    ) -> ServiceResult<bool> {
+        self.key_packages
+            .store_key_package_for_applet_device(record, guard, expires_at, body)
+            .await
+    }
+    pub async fn revoke_for_applet_device(
+        &self,
+        body: &arkret_models_crypto::KeyPackagesRevokeRequestBody,
+        authority: &coland_storage::AppletManagedDeviceAuthority,
+        scope: &arkret_wire::ScopeRef,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> ServiceResult<coland_storage::MlsKeyPackageRevocation> {
+        self.key_packages
+            .revoke_for_applet_device(body, authority, scope, expires_at)
+            .await
     }
     pub async fn key_package(&self, id: &str) -> ServiceResult<Option<MlsKeyPackageState>> {
         self.key_packages.key_package(id).await

@@ -2006,7 +2006,8 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
                 id: package.keypackage_id.clone(),
                 keypackage_ref: package.keypackage_ref.to_string(),
                 keypackage_digest: package.keypackage_ref.to_string(),
-                owner_account_pk: coland_storage::AccountPk(owner),
+                owner_account_id: controller.clone(),
+                effective_scope: None,
                 actor_id: agent.principal_id.to_string(),
                 device_id: None,
                 endpoint_verification_method: Some(method.to_string()),
@@ -2064,6 +2065,7 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
         assert!(matches!(
             packages
                 .try_claim_peer(coland_storage::PeerKeyPackageClaimAttempt {
+                applet_device_scope_guard: None,
                     keypackage_id: &package.keypackage_id,
                     mls_group_id: group_id.as_str(),
                     device_authorize_event_id: None,
@@ -3830,11 +3832,7 @@ async fn case_encrypted_agent_join_rechecks_claimability_and_writes_nothing_on_r
         pk: i64,
     }
     let mut conn = pool.get().await.unwrap();
-    let wrong_owner=diesel::sql_query("INSERT INTO accounts(principal_id,station_id) VALUES($1,$2) \
-        ON CONFLICT(principal_id,station_id) DO UPDATE SET principal_id=EXCLUDED.principal_id RETURNING pk")
-        .bind::<Text,_>(agent.principal_id.as_str()).bind::<Text,_>(agent.station_id.as_str())
-        .get_result::<Account>(&mut *conn).await.unwrap().pk;
-    let owner =
+    let _owner =
         diesel::sql_query("INSERT INTO accounts(principal_id,station_id) VALUES($1,$2) ON CONFLICT(principal_id,station_id) DO UPDATE SET principal_id=EXCLUDED.principal_id RETURNING pk")
             .bind::<Text, _>(controller.principal_id.as_str())
             .bind::<Text, _>(controller.station_id.as_str())
@@ -3848,7 +3846,8 @@ async fn case_encrypted_agent_join_rechecks_claimability_and_writes_nothing_on_r
         id: "agent-membership-package".into(),
         keypackage_ref: format!("sha256:{}", "7".repeat(64)),
         keypackage_digest: format!("sha256:{}", "7".repeat(64)),
-        owner_account_pk: coland_storage::AccountPk(owner),
+        owner_account_id: controller.clone(),
+        effective_scope: None,
         actor_id: agent.principal_id.to_string(),
         device_id: None,
         endpoint_verification_method: Some(format!("{agent_did}#runtime-1")),
@@ -3876,7 +3875,10 @@ async fn case_encrypted_agent_join_rechecks_claimability_and_writes_nothing_on_r
         "agent_key_authorize_event_id=(SELECT id FROM canonical_events WHERE kind='ak.realm.create' ORDER BY pk LIMIT 1)",
         "endpoint_verification_method='did:web:wrong-agent.example#runtime-1'",
     ].into_iter().map(str::to_owned).collect::<Vec<_>>();
-    mutations.push(format!("owner_account_pk={wrong_owner}"));
+    mutations.push(format!(
+        "owner_account_id='{}'::jsonb",
+        serde_json::to_string(&agent).unwrap().replace('\'', "''")
+    ));
     for mutation in mutations {
         let mut conn = pool.get().await.unwrap();
         diesel::sql_query(format!(
@@ -11849,7 +11851,8 @@ async fn owned_consumer_queue_later_welcome(
             id: package.keypackage_id.clone(),
             keypackage_ref: package.keypackage_ref.to_string(),
             keypackage_digest: package.keypackage_ref.to_string(),
-            owner_account_pk: coland_storage::AccountPk(owner),
+            owner_account_id: controller.clone(),
+            effective_scope: None,
             actor_id: agent.principal_id.to_string(),
             device_id: None,
             endpoint_verification_method: Some(method.to_string()),
@@ -11907,6 +11910,7 @@ async fn owned_consumer_queue_later_welcome(
     assert!(matches!(
         packages
             .try_claim_peer(coland_storage::PeerKeyPackageClaimAttempt {
+                applet_device_scope_guard: None,
                 keypackage_id: &package.keypackage_id,
                 mls_group_id: group_id.as_str(),
                 device_authorize_event_id: None,

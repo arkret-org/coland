@@ -349,7 +349,7 @@ async fn require_applet_producer_inner(
     if !grant
         .resources
         .iter()
-        .any(|candidate| candidate == &resource)
+        .any(|candidate| candidate.is_exact_scope(&event.scope_ref))
     {
         return Err(denied(
             "Applet authorization grant does not name its exact installation scope",

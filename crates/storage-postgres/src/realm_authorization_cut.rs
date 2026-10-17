@@ -647,7 +647,7 @@ pub(crate) struct RealmAuthorizationCut {
     direct_conversation: Option<ProfileAuthority>,
     /// Narrow delegated Service admission to the signed authorization_ref.
     selected_grant: Option<GrantId>,
-    native_operation: Option<WireResourceSelector>,
+    native_operation: Option<(CapabilityActionId, WireResourceSelector)>,
 }
 
 impl RealmAuthorizationCut {
@@ -824,12 +824,17 @@ impl RealmAuthorizationCut {
         cut.direct_conversation =
             crate::direct_conversation_admission::profile_authority_in_connection(conn, event)
                 .await?;
-        if event.kind == EventKind::MessageCreate
-            && event.applet_id.is_some()
+        if matches!(
+            event.kind,
+            EventKind::MessageCreate | EventKind::CircleMemberState
+        ) && event.applet_id.is_some()
             && event.actor_id.as_account_id().is_some()
             && event.executed_by.is_none()
         {
-            cut.native_operation = Some(cut.event_operation(event).0);
+            cut.native_operation = Some((
+                crate::applet_device_admission::business_action(event)?,
+                cut.event_operation(event).0,
+            ));
             cut.selected_grant = Some(
                 event
                     .authorization_ref
@@ -1292,9 +1297,9 @@ impl RealmAuthorizationCut {
                 && grant.realm_id.as_ref() == Some(&self.realm_id)
                 && (self.native_operation.is_some() || grant_is_active_at(grant, at))
                 && !grant.issuer_authority_refs.is_empty()
-                && if let Some(target) = &self.native_operation {
+                && if let Some((action,target)) = &self.native_operation {
                     arkret_policy::grant_authority::current_sources(grant,
-                        CapabilityActionId::MessageCreate.as_str(), target, &self.grants, at,
+                        action.as_str(), target, &self.grants, at,
                         |source| matches!(source, IssuerAuthorityRef::RealmRoot { realm_id, authority_event_ref, authority_generation }
                             if realm_id==&self.realm_id && authority_event_ref==&root.authority_event_ref
                                 && authority_generation==&root.authority_generation)).is_ok()
@@ -3218,7 +3223,7 @@ impl RealmAuthorizationCut {
     }
 
     /// The target and operation facts an Event names in its own payload.
-    async fn complete_event_facts_in_connection(
+    pub(crate) async fn complete_event_facts_in_connection(
         &self,
         conn: &mut AsyncPgConnection,
         event: &arkret_wire::Event,
@@ -3923,7 +3928,7 @@ mod operation_fact_tests {
             lifecycle: RealmLifecycleGates::default(),
             direct_conversation: None,
             selected_grant: Some(child_id),
-            native_operation: Some(target.clone()),
+            native_operation: Some((CapabilityActionId::MessageCreate, target.clone())),
         };
         assert_eq!(cut.effective_grants(at).count(), 1);
         assert!(matches!(
@@ -3935,6 +3940,32 @@ mod operation_fact_tests {
             ),
             GrantEvaluation::Allowed(_)
         ));
+        let circle_target = WireResourceSelector::circle(
+            cut.realm_id.clone(),
+            arkret_wire::CircleId::from_event_id(&event(0x74)),
+        );
+        cut.native_operation = Some((CapabilityActionId::CircleMemberAdd, circle_target.clone()));
+        assert_eq!(
+            cut.effective_grants(at).count(),
+            0,
+            "message-only sources cannot authorize Circle membership"
+        );
+        for grant in cut.grants.values_mut() {
+            grant
+                .actions
+                .push(CapabilityActionId::CircleMemberAdd.as_str().into());
+        }
+        assert_eq!(cut.effective_grants(at).count(), 1);
+        assert!(matches!(
+            cut.evaluate(
+                &[CapabilityActionId::CircleMemberAdd.as_str()],
+                &circle_target,
+                &OperationFacts::default(),
+                at
+            ),
+            GrantEvaluation::Allowed(_)
+        ));
+        cut.native_operation = Some((CapabilityActionId::MessageCreate, target.clone()));
         child.id = GrantId::from_event_id(&event(0x73));
         child.constraints=vec![serde_json::from_value(json!({"constraint_kind":"scope_limitation","effect":"deny","denied_strand_ids":["ak:strand:AZ6GqZWWvnQ2KFwbBD-MenomzWNz-31MUAuKzBXIP0zv"]})).unwrap()];
         cut.grants.insert(child.id.clone(), child);

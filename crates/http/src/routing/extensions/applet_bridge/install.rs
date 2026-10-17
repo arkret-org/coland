@@ -13,7 +13,7 @@ use arkret_models_integration::{
     AppletInstallOutcome, AppletInstallPlan, AppletInstallRequestBody,
     AppletManagedActorProvisionPayload, AppletPackage, AppletRegistrationEpochEvidence,
     AppletScopeRejection, AppletWireNamespaces, CapabilityConstraint, DeniedScope, E2eeEffect,
-    E2eePolicy, EventSubmission, NamespaceConflict, ScopeGrant, WidgetEffect,
+    EventSubmission, NamespaceConflict, ScopeGrant, WidgetEffect,
 };
 use arkret_wire::{
     ActorId, CapabilityActionId, Event, ResourceMatchScope, ScopeRef, WireResourceSelector,
@@ -317,15 +317,20 @@ pub(super) async fn validate_managed_actor_current_method_evidence(
     provision: &AppletManagedActorProvisionPayload,
 ) -> Result<(), AppError> {
     let did = &provision.initial_resolution.did;
-    crate::jws_verify::enforce_high_risk_did_freshness(state, did)
-        .await
-        .map_err(|error| {
-            AppError::param_invalid(
-                "Applet-managed WebVH evidence lacks a fresh trusted current resolution",
-            )
-            .with_reason_code("identity_method_evidence_invalid")
-            .with_reason_detail(error)
-        })?;
+    let ingested = state.dids().document(did.as_str()).await.map_err(|error| {
+        AppError::internal(format!("managed DID current lookup failed: {error}"))
+    })?;
+    if ingested.is_some() {
+        crate::jws_verify::enforce_high_risk_did_freshness(state, did)
+            .await
+            .map_err(|error| {
+                AppError::param_invalid(
+                    "Applet-managed WebVH evidence lacks a fresh trusted current resolution",
+                )
+                .with_reason_code("identity_method_evidence_invalid")
+                .with_reason_detail(error)
+            })?;
+    }
     let history_head = Hash::new(provision.initial_resolution.method_history_head.clone())
         .map_err(|error| {
             AppError::param_invalid(format!(
@@ -333,16 +338,17 @@ pub(super) async fn validate_managed_actor_current_method_evidence(
             ))
             .with_reason_code("identity_method_evidence_invalid")
         })?;
-    let pinned = state
-        .dids()
-        .resolve_pinned_webvh_state(did, &provision.initial_resolution.version_id, &history_head)
-        .await
-        .map_err(|error| {
-            AppError::param_invalid(format!(
-                "Applet-managed WebVH evidence is not an accepted trusted history state: {error}"
-            ))
-            .with_reason_code("identity_method_evidence_invalid")
-        })?;
+    let pinned = if ingested.is_some() {
+        state.dids().resolve_current_webvh_state(did).await
+    } else {
+        state.dids().resolve_current_external_webvh_state(did).await
+    }
+    .map_err(|error| {
+        AppError::param_invalid(format!(
+            "Applet-managed WebVH evidence is not an accepted trusted history state: {error}"
+        ))
+        .with_reason_code("identity_method_evidence_invalid")
+    })?;
     if !managed_actor_pinned_resolution_is_current(
         &pinned,
         did,
@@ -353,6 +359,43 @@ pub(super) async fn validate_managed_actor_current_method_evidence(
             "Applet-managed WebVH evidence is a historical prefix rather than the current trusted head",
         )
         .with_reason_code("identity_method_evidence_invalid"));
+    }
+    if ingested.is_none() {
+        let (_, logs, _) = provision.method_history_evidence.webvh_material();
+        let now = chrono::Utc::now();
+        let document = coland_services::identity::DidDocumentState {
+            did: did.to_string(),
+            did_document: pinned.document,
+            key_log_head: Some(history_head.to_string()),
+            seq: logs.len() as u64,
+            method_evidence: serde_json::to_value(&provision.method_history_evidence)
+                .map_err(|e| AppError::internal(e.to_string()))?,
+            fetched_at: now,
+            expires_at: now + chrono::Duration::minutes(15),
+            updated_at: now,
+        };
+        let result = state
+            .dids()
+            .ingest_verified_history(None, document)
+            .await
+            .map_err(|error| {
+                AppError::internal(format!("managed native history ingestion failed: {error}"))
+            })?;
+        if result == coland_services::identity::DidLogCommitResult::Conflict {
+            return Err(
+                AppError::conflict("managed native history changed before ingestion")
+                    .with_wire_code("failed_precondition"),
+            );
+        }
+        // Re-read durable ingestion before publishing a resolver cache entry.
+        // The aggregate admission still locks and rechecks this original row.
+        crate::jws_verify::enforce_high_risk_did_freshness(state, did)
+            .await
+            .map_err(|error| {
+                AppError::internal(format!(
+                    "managed native history ingestion is unavailable: {error}"
+                ))
+            })?;
     }
     Ok(())
 }
@@ -406,7 +449,6 @@ pub(super) async fn register_package_install(
     let submitted_plan_digest = commit.plan_digest.to_string();
     let effective_scope = basis.effective_scope.clone();
     let actor_policy = basis.actor_policy.clone();
-    let e2ee_policy = basis.e2ee_policy.clone();
     let package = commit.applet_package.clone();
     let typed_applet_id = package.applet_id.clone();
     let applet_id = package.applet_id.to_string();
@@ -463,8 +505,10 @@ pub(super) async fn register_package_install(
     let identity_value = encode_applet_identity(&identity)?;
 
     let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-    let e2ee_authorization_refs =
-        e2ee_authorization_refs_for_install(&package, e2ee_policy.as_ref())?;
+    let e2ee_authorization_refs = commit.e2ee_join_authorization_refs().map_err(|error| {
+        AppError::capability_denied(error.to_string())
+            .with_wire_code("applet_e2ee_join_unauthorized")
+    })?;
     debug_assert!(!approved_actions.is_empty());
     let effective_status = if approved_actions.len() < package.requested_scopes.len() {
         AppletInstallEffectiveStatus::PartiallyInstalled
@@ -1089,23 +1133,6 @@ pub(super) fn e2ee_effect_for_package(package: &AppletPackage) -> E2eeEffect {
         plaintext_access: "policy_declared".to_owned(),
         authorization_refs: None,
     }
-}
-
-fn package_requests_mls_join(package: &AppletPackage) -> bool {
-    package.e2ee_policy.mls_join_requested.unwrap_or(false)
-}
-
-fn e2ee_authorization_refs_for_install(
-    package: &AppletPackage,
-    _e2ee_policy: Option<&E2eePolicy>,
-) -> Result<Vec<arkret_wire::EventId>, AppError> {
-    if !package_requests_mls_join(package) {
-        return Ok(Vec::new());
-    }
-    Err(AppError::capability_denied(
-        "applet E2EE MLS join has no registered independent authorization artifact",
-    )
-    .with_wire_code("applet_e2ee_join_unauthorized"))
 }
 
 pub(super) fn widget_effect_for_package(package: &AppletPackage) -> WidgetEffect {
@@ -1815,17 +1842,6 @@ mod tests {
             )
             .is_err()
         );
-    }
-
-    #[test]
-    fn applet_mls_join_fails_closed_without_registered_authorization_artifact() {
-        let mut package = sample_package();
-        package.e2ee_policy.mls_join_requested = Some(true);
-        let requested_policy = E2eePolicy {
-            mls_join_allowed: Some(true),
-        };
-
-        assert!(e2ee_authorization_refs_for_install(&package, Some(&requested_policy)).is_err());
     }
 
     #[test]

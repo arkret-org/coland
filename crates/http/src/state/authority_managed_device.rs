@@ -63,6 +63,7 @@ pub(super) async fn submit(
     if !matches!(
         event.kind,
         EventKind::MemberState
+            | EventKind::CircleMemberState
             | EventKind::ProfileCreate
             | EventKind::ProfileUpdate
             | EventKind::MessageCreate

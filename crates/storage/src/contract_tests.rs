@@ -3449,6 +3449,7 @@ pub async fn assert_last_resort_claim_ledger_contract(
         assert!(matches!(
             store
                 .try_claim_peer(PeerKeyPackageClaimAttempt {
+                    admission: None,
                     applet_device_scope_guard: None,
                     keypackage_id: &keypackage.id,
                     mls_group_id: &group_id,
@@ -3679,6 +3680,7 @@ pub async fn assert_last_resort_claim_ledger_contract(
     assert!(matches!(
         store
             .try_claim_peer(PeerKeyPackageClaimAttempt {
+                admission: None,
                 applet_device_scope_guard: None,
                 keypackage_id: &keypackage.id,
                 mls_group_id: &group_id,

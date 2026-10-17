@@ -317,9 +317,31 @@ pub struct MlsWelcomeClaimBinding {
     pub commit_event_ref: String,
 }
 
+/// Actual SDK command and any authenticated local native requester. Internal
+/// acceptance inputs only; the target still has its own independent guard.
+#[derive(Clone)]
+pub struct MlsKeyPackageClaimAdmission {
+    pub request: arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    pub requester: Option<(
+        crate::AppletManagedDeviceScopeGuard,
+        chrono::DateTime<chrono::Utc>,
+    )>,
+}
+
+/// Actual prepared claim response and native endpoint evidence. A fresh
+/// command is retained only when this response is to that command, never
+/// reconstructed from the historical receipt's unsigned request.
+#[derive(Clone, Debug)]
+pub struct MlsKeyPackageClaimDelivery {
+    pub outcome: arkret_models_crypto::PeerKeyPackagesClaimOutcome,
+    pub endpoints: Vec<crate::AppletManagedDeviceScopeGuard>,
+    pub command: Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>,
+}
+
 /// One candidate CAS attempt for a peer claim. The storage adapter must make
 /// the KeyPackage transition and terminal ledger insert atomic.
 pub struct PeerKeyPackageClaimAttempt<'a> {
+    pub admission: Option<std::sync::Arc<MlsKeyPackageClaimAdmission>>,
     pub keypackage_id: &'a str,
     pub mls_group_id: &'a str,
     pub device_authorize_event_id: Option<&'a str>,

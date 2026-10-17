@@ -1496,6 +1496,9 @@ impl AccountStatusCurrentObservation {
 pub struct AccountContentDeliveryInput {
     pub realms: Vec<arkret_wire::RealmId>,
     pub committed_events: Vec<arkret_wire::CommittedEventView>,
+    /// Exact immutable claim response and the real native endpoints whose
+    /// current material permission must remain held through this handoff.
+    pub keypackage_claims: Vec<crate::MlsKeyPackageClaimDelivery>,
     /// Exact prepared scan and original SDK response, re-read on the held cut.
     pub stream_scans: Vec<(
         arkret_wire::StreamScanRequest,

@@ -1808,7 +1808,24 @@ async fn authority_material_keeps_original_registration_after_same_scope_replace
 
 #[tokio::test]
 async fn restored_registration_value_does_not_revive_closed_instance() {
+    use arkret_event_draft::EventPayloadExt as _;
     let fixture = Fixture::new().await;
+    let whole_second = chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp(), 0).unwrap();
+    let probe=fixture.admin_event_at(EventKind::CircleCreate,ScopeRef::Realm{realm_id:fixture.realm.clone()},json!({"object":{
+        "schema":"ak.schema.circle.v1","realm_id":fixture.realm,"title":"Whole second","display":{"short_name":"Whole-second","color_token":"blue","symbol":{"glyph":"lock"}},
+        "directory_visibility":"members","join_rule":"public","history_access":"since_join","state":"active","created_by":ActorId::account(fixture.pcr.history.account.clone()),"created_at":arkret_canonical::format_timestamp_canonical(whole_second)
+    }}),whole_second);
+    assert_eq!(
+        probe
+            .as_circle_create()
+            .unwrap_or_else(|error| panic!(
+                "actual fixture must preserve the canonical whole-second SDK payload: {error}; {:?}",
+                probe.payload
+            ))
+            .object
+            .created_at,
+        whole_second
+    );
     let namespace = format!("bridge.{}", uuid::Uuid::now_v7().simple());
     let applet = format!("ak:applet:{}", uuid::Uuid::now_v7());
     let native = NativeAppletService::new(&applet, &namespace, &fixture.state.service_core_id());
@@ -2483,6 +2500,28 @@ fn managed_device_http_request_at(
     provided_body: Option<Vec<u8>>,
     provided_path: Option<&str>,
 ) -> salvo::test::RequestBuilder {
+    managed_device_http_request_with_idempotency_at(
+        state,
+        authority,
+        metadata,
+        operation,
+        signer,
+        provided_body,
+        provided_path,
+        "same-business-intent",
+    )
+}
+
+fn managed_device_http_request_with_idempotency_at(
+    state: &AppState,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    metadata: &AppletManagedDeviceMetadata,
+    operation: arkret_wire::ServiceOperationId,
+    signer: &SigningKey,
+    provided_body: Option<Vec<u8>>,
+    provided_path: Option<&str>,
+    idempotency_key: &str,
+) -> salvo::test::RequestBuilder {
     let descriptor = operation.descriptor();
     let path = descriptor
         .http_path
@@ -2521,10 +2560,7 @@ fn managed_device_http_request_at(
             state.service_id().to_owned(),
         ),
         ("content-digest".to_owned(), digest.clone()),
-        (
-            "idempotency-key".to_owned(),
-            "same-business-intent".to_owned(),
-        ),
+        ("idempotency-key".to_owned(), idempotency_key.to_owned()),
     ];
     let parts = SignedRequestParts {
         method: descriptor.http_method.to_owned(),
@@ -4461,18 +4497,28 @@ impl Fixture {
         )
     }
     fn admin_event(&self, kind: EventKind, scope: ScopeRef, payload: Value) -> Event {
+        self.admin_event_at(kind, scope, payload, chrono::Utc::now())
+    }
+    fn admin_event_at(
+        &self,
+        kind: EventKind,
+        scope: ScopeRef,
+        payload: Value,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Event {
         let mut event = arkret_wire::test_support::raw_event_at(
             kind.as_str(),
             scope,
             self.pcr.history.account.principal_id.clone(),
             self.state.service_core_id(),
             payload,
-            chrono::Utc::now(),
+            at,
         )
         .unwrap();
         if matches!(kind, EventKind::CircleCreate | EventKind::StrandCreate) {
-            event.payload.get_mut("object").unwrap()["created_at"] =
-                serde_json::to_value(event.created_at).unwrap();
+            event.payload.get_mut("object").unwrap()["created_at"] = serde_json::Value::String(
+                arkret_canonical::format_timestamp_canonical(event.created_at),
+            );
         }
         self.sign_admin(event)
     }

@@ -527,6 +527,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
                 {
                     return Ok(PeerKeyPackageClaimAttemptResult::Existing(Box::new(existing)));
                 }
+                crate::boxed_future(|| crate::mls_keypackage_claim_admission::require_admission(conn, &attempt)).await?;
                 let Some(candidate)=claim_candidate(conn,attempt.keypackage_id,attempt.mls_group_id,Some(attempt.claim_expires_at_unix_ms),attempt.applet_device_scope_guard.as_ref()).await? else {
                     return Ok(PeerKeyPackageClaimAttemptResult::KeyPackageUnavailable);
                 };
@@ -556,19 +557,19 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
                     {
                         return Ok(PeerKeyPackageClaimAttemptResult::KeyPackageUnavailable);
                     }
+                    let realm=attempt.admission.as_ref().map(|a|a.request.intended_realm_id.as_str()).or(candidate.last_resort_realm_id.as_deref()).ok_or_else(||PersistenceError::SchemaViolation("last-resort claim omits intended Realm".into()))?;
                     let claimed = sql_query(
-                        "SELECT id, keypackage_ref, keypackage_digest, owner_account_id, effective_scope, actor_id, device_id, endpoint_verification_method, \
-                         key_package_bytes, capabilities, capabilities_digest, \
-                         last_resort, last_resort_realm_id, lifetime_not_before, lifetime_not_after, \
-                         claimed_by_mls_group_id, device_authorize_event_id, agent_key_authorize_event_id, claimed_at, \
-                         claim_expires_at_unix_ms, consumed_at, created_at \
-                         FROM mls_key_packages \
-                         WHERE id = $1 AND last_resort AND claimed_by_mls_group_id IS NULL \
+                        "UPDATE mls_key_packages SET last_resort_realm_id=COALESCE(last_resort_realm_id,$6) \
+                         WHERE id = $1 AND last_resort AND claimed_by_mls_group_id IS NULL AND (last_resort_realm_id IS NULL OR last_resort_realm_id=$6) \
                            AND ($2 IS NULL OR device_authorize_event_id = $2) \
                            AND ($3 IS NULL OR agent_key_authorize_event_id = $3) \
                            AND lifetime_not_after * 1000 > $4 \
                            AND $5 > $4 AND $5 <= lifetime_not_after * 1000 \
-                         FOR SHARE",
+                         RETURNING id, keypackage_ref, keypackage_digest, owner_account_id, effective_scope, actor_id, device_id, endpoint_verification_method, \
+                         key_package_bytes, capabilities, capabilities_digest, \
+                         last_resort, last_resort_realm_id, lifetime_not_before, lifetime_not_after, \
+                         claimed_by_mls_group_id, device_authorize_event_id, agent_key_authorize_event_id, claimed_at, \
+                         claim_expires_at_unix_ms, consumed_at, created_at",
                     )
                     .bind::<Text, _>(attempt.keypackage_id)
                     .bind::<Nullable<Binary>, _>(parse_authorize_event_id(
@@ -579,6 +580,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
                     )?)
                     .bind::<BigInt, _>(attempt.claimed_at_unix_ms)
                     .bind::<BigInt, _>(attempt.claim_expires_at_unix_ms)
+                    .bind::<Text, _>(realm)
                     .get_result::<MlsKeyPackagePgRow>(conn)
                     .await
                     .optional()
@@ -588,7 +590,14 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
                     };
                     let claimed=validated_keypackage_row(claimed)?;
                     if !candidate.same_publication(&claimed) {return Err(PersistenceError::Conflict("duplicate_conflict: KeyPackage original changed during claim".into()).into());}
+                    crate::mls_keypackage_claim_admission::require_outcome(&attempt,&claimed)?;
+                    crate::boxed_future(||crate::mls_keypackage_claim_admission::require_admission(conn,&attempt)).await?;
+                    if let Some(guard)=&attempt.applet_device_scope_guard {
+                        let deadline=chrono::DateTime::from_timestamp_millis(attempt.claim_expires_at_unix_ms).ok_or_else(||PersistenceError::SchemaViolation("invalid claim expiry".into()))?;
+                        crate::boxed_future(||crate::mls_keypackage_claim_admission::require_target(conn,&claimed,guard,deadline)).await?;
+                    }
                     insert_peer_claim_strict(conn, attempt.ledger).await?;
+                    crate::boxed_future(||crate::mls_keypackage_claim_admission::require_admission(conn,&attempt)).await?;
                     return Ok(PeerKeyPackageClaimAttemptResult::Claimed(Box::new(claimed)));
                 }
                 if attempt.ledger.key_package_use != "single_use"
@@ -632,7 +641,14 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
                 };
                 let claimed=validated_keypackage_row(claimed)?;
                 if !candidate.same_publication(&claimed) {return Err(PersistenceError::Conflict("duplicate_conflict: KeyPackage original changed during claim".into()).into());}
+                crate::mls_keypackage_claim_admission::require_outcome(&attempt,&claimed)?;
+                crate::boxed_future(||crate::mls_keypackage_claim_admission::require_admission(conn,&attempt)).await?;
+                if let Some(guard)=&attempt.applet_device_scope_guard {
+                    let deadline=chrono::DateTime::from_timestamp_millis(attempt.claim_expires_at_unix_ms).ok_or_else(||PersistenceError::SchemaViolation("invalid claim expiry".into()))?;
+                        crate::boxed_future(||crate::mls_keypackage_claim_admission::require_target(conn,&claimed,guard,deadline)).await?;
+                }
                 insert_peer_claim_strict(conn, attempt.ledger).await?;
+                    crate::boxed_future(||crate::mls_keypackage_claim_admission::require_admission(conn,&attempt)).await?;
                 Ok(PeerKeyPackageClaimAttemptResult::Claimed(Box::new(claimed)))
             })
             .await;

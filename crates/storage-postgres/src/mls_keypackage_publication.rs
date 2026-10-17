@@ -220,8 +220,7 @@ pub(crate) async fn require_native(
     guard: &AppletManagedDeviceScopeGuard,
     expires_at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
-    require_current(conn, record, guard, expires_at, None).await?;
-    require_existing_group(conn, &guard.effective_scope).await
+    crate::mls_keypackage_claim_admission::require_target(conn, record, guard, expires_at).await
 }
 
 pub(crate) async fn require_native_publication(
@@ -312,7 +311,7 @@ pub(crate) async fn require_native_publication(
     Ok(())
 }
 
-async fn require_existing_group(
+pub(crate) async fn require_existing_group(
     conn: &mut AsyncPgConnection,
     scope: &ScopeRef,
 ) -> PersistenceResult<()> {

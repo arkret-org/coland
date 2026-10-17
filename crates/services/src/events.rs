@@ -1160,6 +1160,7 @@ pub use coland_storage::{
 };
 
 pub struct PeerKeyPackageClaimCommand<'a> {
+    pub admission: Option<&'a coland_storage::MlsKeyPackageClaimAdmission>,
     pub keypackage_id: &'a str,
     pub mls_group_id: &'a str,
     pub device_authorize_event_id: Option<&'a str>,

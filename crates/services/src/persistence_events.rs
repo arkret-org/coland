@@ -759,6 +759,7 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
             .0
             .mls_key_packages()
             .try_claim_peer(coland_storage::PeerKeyPackageClaimAttempt {
+                admission: attempt.admission.cloned().map(std::sync::Arc::new),
                 applet_device_scope_guard: attempt.applet_device_scope_guard.cloned(),
                 keypackage_id: attempt.keypackage_id,
                 mls_group_id: attempt.mls_group_id,

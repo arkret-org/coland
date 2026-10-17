@@ -227,11 +227,19 @@ pub(crate) async fn scope_guard(
     state: &AppState,
     device: &VerifiedAppletManagedDevice,
 ) -> Result<coland_storage::AppletManagedDeviceScopeGuard, AppError> {
+    scope_guard_for_authority(state, &device.authority, &device.metadata.effective_scope).await
+}
+
+pub(crate) async fn scope_guard_for_authority(
+    state: &AppState,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    effective_scope: &arkret_wire::ScopeRef,
+) -> Result<coland_storage::AppletManagedDeviceScopeGuard, AppError> {
     let unavailable = || AppError::not_found("native scope identity is unavailable");
     let record = crate::routing::extensions::applet_bridge::record::applet_record(
         state,
-        device.authority.applet_id.as_str(),
-        &device.metadata.effective_scope,
+        authority.applet_id.as_str(),
+        effective_scope,
     )
     .await
     .ok()
@@ -249,8 +257,8 @@ pub(crate) async fn scope_guard(
             )
         })?;
     Ok(coland_storage::AppletManagedDeviceScopeGuard {
-        authority: device.authority.clone(),
-        effective_scope: device.metadata.effective_scope.clone(),
+        authority: authority.clone(),
+        effective_scope: effective_scope.clone(),
         service_did_document,
     })
 }

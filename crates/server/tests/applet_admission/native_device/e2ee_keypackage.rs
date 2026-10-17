@@ -9,6 +9,8 @@ mod targets;
 #[path = "e2ee_keypackage_input.rs"]
 mod input;
 
+#[path = "e2ee_keypackage_claim.rs"]
+mod claim;
 #[path = "e2ee_keypackage_revoke.rs"]
 mod revoke;
 

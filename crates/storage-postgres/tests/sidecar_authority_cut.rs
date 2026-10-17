@@ -2065,6 +2065,7 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
         assert!(matches!(
             packages
                 .try_claim_peer(coland_storage::PeerKeyPackageClaimAttempt {
+                admission: None,
                 applet_device_scope_guard: None,
                     keypackage_id: &package.keypackage_id,
                     mls_group_id: group_id.as_str(),
@@ -11910,6 +11911,7 @@ async fn owned_consumer_queue_later_welcome(
     assert!(matches!(
         packages
             .try_claim_peer(coland_storage::PeerKeyPackageClaimAttempt {
+                admission: None,
                 applet_device_scope_guard: None,
                 keypackage_id: &package.keypackage_id,
                 mls_group_id: group_id.as_str(),

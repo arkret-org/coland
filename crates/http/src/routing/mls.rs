@@ -72,6 +72,8 @@ use crate::wire::now;
 #[path = "mls_payload_fields.rs"]
 pub(crate) mod payload_fields;
 
+#[path = "mls_keypackage_native.rs"]
+mod mls_keypackage_native;
 #[path = "mls_keypackage_upload.rs"]
 mod mls_keypackage_upload;
 
@@ -920,6 +922,31 @@ async fn upload_keypackage(
 async fn peer_claim_keypackage(
     depot: &mut Depot,
     req: &mut Request,
+) -> coland_http::result::GuardedJsonResult<PeerKeyPackagesClaimQueryOutcome> {
+    let Json(outcome) = peer_claim_keypackage_inner(depot, req).await?;
+    let command = req
+        .parse_json::<PeerKeyPackagesClaimRequestBody>()
+        .await
+        .map_err(|_| peer_claim_failed())?;
+    let state = depot.get_typed::<AppState>().expect("state injected");
+    let guard = if let Some(claim) = &outcome.claim_outcome {
+        mls_keypackage_native::delivery_guard(
+            state,
+            claim,
+            None,
+            mls_keypackage_native::peer_deadline(req)?,
+            Some(&command),
+        )
+        .await?
+    } else {
+        None
+    };
+    coland_http::result::guarded_json_ok(outcome, guard)
+}
+
+async fn peer_claim_keypackage_inner(
+    depot: &mut Depot,
+    req: &mut Request,
 ) -> JsonResult<PeerKeyPackagesClaimQueryOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let (body, authorization) = verify_peer_claim_source_attestation(state, req).await?;
@@ -944,7 +971,7 @@ async fn peer_claim_keypackage(
     {
         return query_claim_ledger(state, query, source_id).await;
     }
-    let execution = claim_keypackage_at_destination(state, &body, authorization).await;
+    let execution = claim_keypackage_at_destination(state, &body, authorization, None).await;
     match execution {
         Ok(_) => query_claim_ledger(state, query, source_id).await,
         Err(error) => {
@@ -967,6 +994,7 @@ async fn claim_keypackage_at_destination(
     state: &AppState,
     body: &PeerKeyPackagesClaimRequestBody,
     authorization: VerifiedClaimAuthorization,
+    native_requester: Option<&(coland_storage::AppletManagedDeviceScopeGuard, DateTime<Utc>)>,
 ) -> JsonResult<PeerKeyPackagesClaimOutcome> {
     let target_principal_id = body
         .unsigned_request()
@@ -1015,7 +1043,9 @@ async fn claim_keypackage_at_destination(
         return Err(peer_claim_failed());
     }
 
-    let policy_authorized = peer_claim_policy_authorized(state, body, &source_id).await?;
+    let native_targets = mls_keypackage_native::targets(state, body).await?;
+    let policy_authorized =
+        peer_claim_policy_authorized(state, body, &source_id, !native_targets.is_empty()).await?;
     if !policy_authorized {
         tracing::warn!(
             %source_id,
@@ -1044,15 +1074,36 @@ async fn claim_keypackage_at_destination(
         .target_keypackage_ref
         .as_ref()
         .map(|reference| reference.as_str());
-    let trust_selector = current_keypackage_claim_trust_selector(
-        state,
-        &arkret_wire::DidCoreId::new(target_principal_id.to_owned())
-            .map_err(|_| peer_claim_schema_violation("claim target identity is invalid"))?,
-        &target_device_ids,
-        Some(body.intended_realm_id.as_str()),
-    )
-    .await
-    .map_err(|_| peer_claim_failed())?;
+    let trust_selector = if !native_targets.is_empty() {
+        KeyPackageTrustSelector::PerDevice(
+            native_targets
+                .iter()
+                .map(|(device, guard)| {
+                    (
+                        device.clone(),
+                        KeyPackageTrustBinding::device_authorize(
+                            guard
+                                .authority
+                                .selector
+                                .authorization_ref
+                                .event_id
+                                .to_string(),
+                        ),
+                    )
+                })
+                .collect(),
+        )
+    } else {
+        current_keypackage_claim_trust_selector(
+            state,
+            &arkret_wire::DidCoreId::new(target_principal_id.to_owned())
+                .map_err(|_| peer_claim_schema_violation("claim target identity is invalid"))?,
+            &target_device_ids,
+            Some(body.intended_realm_id.as_str()),
+        )
+        .await
+        .map_err(|_| peer_claim_failed())?
+    };
     let now_unix_ms = now().timestamp_millis();
     let now_secs = now_unix_ms.div_euclid(1000);
     let candidate_ids = {
@@ -1112,9 +1163,17 @@ async fn claim_keypackage_at_destination(
         else {
             continue;
         };
-        if ensure_keypackage_owner_account_active(state, &predicted.owner_account_id)
-            .await
-            .is_err()
+        let native_target = predicted
+            .device_id
+            .as_ref()
+            .and_then(|id| native_targets.get(id));
+        if predicted.effective_scope.is_some() != native_target.is_some() {
+            continue;
+        }
+        if native_target.is_none()
+            && ensure_keypackage_owner_account_active(state, &predicted.owner_account_id)
+                .await
+                .is_err()
         {
             continue;
         }
@@ -1167,28 +1226,33 @@ async fn claim_keypackage_at_destination(
             expires_at: (body.expires_at + chrono::Duration::minutes(10)).timestamp(),
             updated_at: now_secs,
         };
-        let device_revocation_gate = if binding.device_authorize_event_id.is_some() {
-            let Some(predicted_device_id) = predicted.device_id.as_deref() else {
-                continue;
+        let device_revocation_gate =
+            if native_target.is_none() && binding.device_authorize_event_id.is_some() {
+                let Some(predicted_device_id) = predicted.device_id.as_deref() else {
+                    continue;
+                };
+                match keypackage_device_revocation_gate(
+                    state,
+                    &predicted.actor_id,
+                    predicted_device_id,
+                    binding.device_authorize_event_id.as_deref(),
+                )
+                .await
+                {
+                    Ok(selector) => selector,
+                    Err(_) => continue,
+                }
+            } else {
+                None
             };
-            match keypackage_device_revocation_gate(
-                state,
-                &predicted.actor_id,
-                predicted_device_id,
-                binding.device_authorize_event_id.as_deref(),
-            )
-            .await
-            {
-                Ok(selector) => selector,
-                Err(_) => continue,
-            }
-        } else {
-            None
-        };
         match state
             .mls_key_packages()
             .claim_peer_key_package(PeerKeyPackageClaimAttempt {
-                applet_device_scope_guard: None,
+                admission: Some(&coland_storage::MlsKeyPackageClaimAdmission {
+                    request: body.clone(),
+                    requester: native_requester.cloned(),
+                }),
+                applet_device_scope_guard: native_target,
                 keypackage_id: &candidate_id,
                 mls_group_id: body.mls_group_id.as_str(),
                 device_authorize_event_id: binding.device_authorize_event_id.as_deref(),
@@ -1199,18 +1263,11 @@ async fn claim_keypackage_at_destination(
                 ledger: &ledger,
             })
             .await
-            .map_err(|error| AppError::internal(format!("peer KeyPackage CAS: {error}")))?
+            .map_err(mls_keypackage_native::claim_error)?
         {
             PeerKeyPackageClaimAttemptResult::Claimed(claimed) => {
-                if !is_last_resort {
-                    state.projections().mark_key_package_claimed(
-                        &candidate_id,
-                        body.mls_group_id.as_str().to_owned(),
-                        now_secs,
-                        Some(body.expires_at.timestamp_millis()),
-                    );
-                }
                 debug_assert_eq!(claimed.id, candidate_id);
+                state.projections().retain_mls_key_package(*claimed);
                 return json_ok(outcome);
             }
             PeerKeyPackageClaimAttemptResult::Existing(existing) => {
@@ -1227,6 +1284,27 @@ async fn claim_keypackage_at_destination(
 #[salvo::oapi::endpoint(operation_id = "ak.peer.keys.keypackages.read.claim", tags("mls.rs"))]
 #[tracing::instrument(skip_all, fields(op = "ak.peer.keys.keypackages.read.claim.v1"))]
 async fn peer_query_keypackage_claim(
+    depot: &mut Depot,
+    req: &mut Request,
+) -> coland_http::result::GuardedJsonResult<PeerKeyPackagesClaimQueryOutcome> {
+    let Json(outcome) = peer_query_keypackage_claim_inner(depot, req).await?;
+    let state = depot.get_typed::<AppState>().expect("state injected");
+    let guard = if let Some(claim) = &outcome.claim_outcome {
+        mls_keypackage_native::delivery_guard(
+            state,
+            claim,
+            None,
+            mls_keypackage_native::peer_deadline(req)?,
+            None,
+        )
+        .await?
+    } else {
+        None
+    };
+    coland_http::result::guarded_json_ok(outcome, guard)
+}
+
+async fn peer_query_keypackage_claim_inner(
     depot: &mut Depot,
     req: &mut Request,
 ) -> JsonResult<PeerKeyPackagesClaimQueryOutcome> {
@@ -1706,12 +1784,15 @@ async fn peer_claim_policy_authorized(
     state: &AppState,
     body: &PeerKeyPackagesClaimRequestBody,
     source_id: &str,
+    native_target_current: bool,
 ) -> Result<bool, AppError> {
     let requester_id = body
         .unsigned_request()
         .requester_principal_id(&body.requester_authorization)
         .ok_or_else(|| peer_claim_schema_violation("claim requester identity is incomplete"))?;
-    let target_authority_current = if let (Some(agent_id), Some(method), Some(event_id)) = (
+    let target_authority_current = if native_target_current {
+        true
+    } else if let (Some(agent_id), Some(method), Some(event_id)) = (
         &body.target_agent_id,
         &body.target_agent_verification_method,
         &body.target_agent_key_authorize_event_id,
@@ -2066,11 +2147,80 @@ async fn claim_keypackage(
     body: JsonBody<KeyPackagesClaimRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<KeyPackagesClaimOutcome> {
+) -> coland_http::result::GuardedJsonResult<KeyPackagesClaimOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
-
     let body = body.into_inner();
+    let original_command = PeerKeyPackagesClaimRequestBody::from(&body);
+    let native = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>()
+        .ok();
+    let session = if native.is_none() {
+        Some(crate::boxed_future(|| aa.authenticated_session(state, req)).await?)
+    } else {
+        None
+    };
+    {
+        let header_values = req.headers().get_all("idempotency-key");
+        let mut header_values = header_values.iter();
+        if header_values.next().and_then(|value| value.to_str().ok())
+            != Some(body.claim_request_id.as_str())
+            || header_values.next().is_some()
+        {
+            return Err(peer_claim_failed());
+        }
+    }
+    let source = if let Some(native) = native {
+        Some(mls_keypackage_native::requester(state, native, &body).await?)
+    } else {
+        None
+    };
+    let (Json(outcome), credential_deadline) = if let Some(source) = &source {
+        let peer = PeerKeyPackagesClaimRequestBody::from(&body);
+        if body.service_binding.destination_id != state.service_core_id() {
+            return Err(crate::app_error!(
+                TemporarilyUnavailable,
+                "native claim requires a current governing delivery barrier"
+            ));
+        }
+        let authorization = VerifiedClaimAuthorization::for_verified_request(&peer)?;
+        (
+            crate::boxed_future(|| {
+                claim_keypackage_at_destination(state, &peer, authorization, Some(source))
+            })
+            .await
+            .map(|Json(outcome)| Json(outcome.into()))?,
+            source.1,
+        )
+    } else {
+        let session = session.expect("the non-native branch authenticated its real session above");
+        let deadline = session.expires_at;
+        (
+            crate::boxed_future(|| claim_keypackage_session(state, session, body, req)).await?,
+            deadline,
+        )
+    };
+    let peer_outcome = PeerKeyPackagesClaimOutcome {
+        claim_request_id: outcome.claim_request_id.clone(),
+        claims: outcome.claims.clone(),
+        claim_receipt: outcome.claim_receipt.clone(),
+    };
+    let guard = mls_keypackage_native::delivery_guard(
+        state,
+        &peer_outcome,
+        source.as_ref(),
+        credential_deadline,
+        Some(&original_command),
+    )
+    .await?;
+    coland_http::result::guarded_json_ok(outcome, guard)
+}
+
+async fn claim_keypackage_session(
+    state: &AppState,
+    session: SessionRecord,
+    body: KeyPackagesClaimRequestBody,
+    req: &Request,
+) -> JsonResult<KeyPackagesClaimOutcome> {
     if session.agent_session().is_some()
         != matches!(
             &body.requester_authorization,
@@ -2218,7 +2368,7 @@ async fn claim_keypackage(
         )
         .with_internal_reason("dependency_unavailable"));
     }
-    claim_keypackage_at_destination(state, &peer_body, authorization)
+    claim_keypackage_at_destination(state, &peer_body, authorization, None)
         .await
         .map(|Json(outcome)| Json(outcome.into()))
 }

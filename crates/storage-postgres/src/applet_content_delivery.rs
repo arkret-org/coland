@@ -251,12 +251,17 @@ impl ReadProof {
 struct NativeDeliveryGuard {
     held: Box<crate::account_content_delivery::DeliveryGuard>,
     proofs: Vec<ReadProof>,
+    endpoint_windows: Vec<crate::mls_keypackage_claim_endpoints::EndpointWindow>,
 }
 #[async_trait::async_trait]
 impl AccountContentDeliveryGuard for NativeDeliveryGuard {
     fn permits_handoff(&self) -> bool {
         let at = chrono::Utc::now();
         self.proofs.iter().all(|proof| proof.permits_at(at))
+            && self
+                .endpoint_windows
+                .iter()
+                .all(|window| window.permits_at(at))
     }
     async fn finish(self: Box<Self>) -> PersistenceResult<()> {
         self.held.finish().await
@@ -277,8 +282,12 @@ pub(crate) async fn acquire(
             ScopeRef::Realm { .. } | ScopeRef::Circle { .. }
         )
         || input.stream_scans.len() > 1
-        || (input.stream_scans.is_empty()
+        || input.keypackage_claims.len() > 1
+        || (input.keypackage_claims.is_empty()
+            && input.stream_scans.is_empty()
             && (input.committed_events.is_empty() || input.committed_events.len() > 64))
+        || (!input.keypackage_claims.is_empty()
+            && (!input.stream_scans.is_empty() || !input.committed_events.is_empty()))
         || (!input.stream_scans.is_empty() && !input.committed_events.is_empty())
         || !input.current_views.is_empty()
         || !input.projection_lists.is_empty()
@@ -318,6 +327,33 @@ pub(crate) async fn acquire(
         endpoint.authority.pcr_realm_id.clone(),
         endpoint.effective_scope.realm_id().clone(),
     ];
+    let counterparts = if let Some(claim) = input.keypackage_claims.as_slice().first() {
+        crate::boxed_future(|| {
+            crate::mls_keypackage_claim_endpoints::prepare(
+                held.connection(),
+                &claim.outcome,
+                claim.command.as_ref(),
+                station,
+            )
+        })
+        .await?
+    } else {
+        Vec::new()
+    };
+    realms.extend(counterparts.iter().map(|endpoint| endpoint.realm().clone()));
+    if let Some(claim) = input.keypackage_claims.as_slice().first() {
+        let endpoints = &claim.endpoints;
+        if !endpoints.contains(endpoint) {
+            return Err(refused("claim delivery omits its actual endpoint"));
+        }
+        for endpoint in endpoints {
+            if endpoint.authority.account_id.station_id != *station {
+                return Err(refused("native claim lacks local current authority"));
+            }
+            realms.push(endpoint.authority.pcr_realm_id.clone());
+            realms.push(endpoint.effective_scope.realm_id().clone());
+        }
+    }
     realms.sort();
     realms.dedup();
     for realm in realms {
@@ -341,6 +377,57 @@ pub(crate) async fn acquire(
     .ok_or_else(|| refused("native read Device is unavailable"))?;
     if current != endpoint.authority {
         return Err(refused("native read Device instance changed"));
+    }
+    if let Some(claim) = input.keypackage_claims.as_slice().first() {
+        let outcome = &claim.outcome;
+        let endpoints = &claim.endpoints;
+        for endpoint in &counterparts {
+            crate::boxed_future(|| endpoint.require_current(held.connection())).await?;
+        }
+
+        crate::mls_keypackage_claim_admission::require_stored_outcome(
+            held.connection(),
+            outcome,
+            endpoints,
+        )
+        .await?;
+        let mut proofs = Vec::new();
+        for endpoint in endpoints {
+            if endpoint.effective_scope.realm_id()
+                != &outcome.claim_receipt.request.intended_realm_id
+                || endpoint
+                    .effective_scope
+                    .canonical_mls_group_id()
+                    .map_err(PersistenceError::database)?
+                    != outcome.claim_receipt.request.mls_group_id
+            {
+                return Err(refused(
+                    "claim delivery differs from its exact signed scope",
+                ));
+            }
+            proofs.push(
+                crate::boxed_future(|| {
+                    mls_scope_read_proof(
+                        held.connection(),
+                        endpoint,
+                        credential_expiry,
+                        outcome.claim_receipt.request.strand_id.as_ref(),
+                    )
+                })
+                .await?,
+            );
+        }
+        if proofs.is_empty() || !proofs.iter().all(|p| p.permits_at(chrono::Utc::now())) {
+            return Err(refused("claim delivery expired"));
+        }
+        return Ok(Some(Box::new(NativeDeliveryGuard {
+            held,
+            proofs,
+            endpoint_windows: counterparts
+                .iter()
+                .map(|endpoint| endpoint.window())
+                .collect(),
+        })));
     }
     let mut events = input.committed_events.as_slice();
     if let Some((request, page)) = input.stream_scans.as_slice().first() {
@@ -415,7 +502,14 @@ pub(crate) async fn acquire(
             "native read has no current unreserved Applet content source",
         ));
     }
-    Ok(Some(Box::new(NativeDeliveryGuard { held, proofs })))
+    Ok(Some(Box::new(NativeDeliveryGuard {
+        held,
+        proofs,
+        endpoint_windows: counterparts
+            .iter()
+            .map(|endpoint| endpoint.window())
+            .collect(),
+    })))
 }
 
 async fn read_context(
@@ -679,4 +773,91 @@ async fn event_proof(
         operations,
         complete_resources: true,
     })
+}
+
+/// Admission-time scope reading for existing MLS material. The caller holds
+/// the real PCR/business cuts in its own transaction, not a parallel lease.
+async fn mls_scope_read_proof(
+    conn: &mut diesel_async::AsyncPgConnection,
+    endpoint: &AppletManagedDeviceScopeGuard,
+    expires_at: chrono::DateTime<chrono::Utc>,
+    strand: Option<&arkret_wire::StrandId>,
+) -> PersistenceResult<ReadProof> {
+    let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    if at >= expires_at {
+        return Err(refused("native MLS read request expired"));
+    }
+    let current = crate::pcr_applet_device_authority::current_in_connection(
+        conn,
+        &endpoint.authority.account_id,
+        &endpoint.authority.device_id,
+        at,
+    )
+    .await
+    .map_err(crate::PgTransactionError::into_persistence)?
+    .ok_or_else(|| refused("native MLS reader is unavailable"))?;
+    if current != endpoint.authority {
+        return Err(refused("native MLS reader authorization changed"));
+    }
+    let context = Arc::new(
+        crate::boxed_future(|| read_context(conn, endpoint, &current, at, expires_at)).await?,
+    );
+    if !context.cut.actor_is_joined() {
+        return Err(refused("native MLS reader is not a Realm member"));
+    }
+    if let ScopeRef::Circle {
+        realm_id,
+        circle_id,
+    } = &endpoint.effective_scope
+    {
+        let basis =
+            crate::circle_current_results::locked_circle_basis(conn, realm_id, circle_id).await?;
+        if basis["value"]["state"] != "active"
+            || !crate::circle_current_results::effective_member_in_connection(
+                conn,
+                realm_id,
+                circle_id,
+                &ActorId::account(endpoint.authority.account_id.clone()),
+            )
+            .await?
+        {
+            return Err(refused("native MLS reader has no active Circle membership"));
+        }
+    }
+    let mut proof = stream_proof(context);
+    if let Some(strand) = strand {
+        let actual = crate::strand_current_results::locked_active_strand_scope(
+            conn,
+            endpoint.effective_scope.realm_id(),
+            strand,
+        )
+        .await?;
+        if actual != endpoint.effective_scope {
+            return Err(refused("native MLS Strand has another actual scope"));
+        }
+        proof.resources.push(PolicyResourceSelector {
+            kind: PolicyResourceKind::Strand,
+            realm_id: Some(actual.realm_id().clone()),
+            resource_ref: Some(strand.to_string()),
+        });
+        let mut target = WireResourceSelector::realm(actual.realm_id().clone());
+        target.kind = arkret_wire::ResourceSelectorKind::Strand;
+        target.strand_id = Some(strand.clone());
+        proof.operations[0].targets.push(target);
+    }
+    if !proof.permits_at(chrono::Utc::now()) {
+        return Err(refused("native MLS read has no current complete source"));
+    }
+    Ok(proof)
+}
+
+pub(crate) async fn require_mls_scope_read(
+    conn: &mut diesel_async::AsyncPgConnection,
+    endpoint: &AppletManagedDeviceScopeGuard,
+    expires_at: chrono::DateTime<chrono::Utc>,
+    strand: Option<&arkret_wire::StrandId>,
+) -> PersistenceResult<()> {
+    crate::boxed_future(|| mls_scope_read_proof(conn, endpoint, expires_at, strand))
+        .await
+        .map(|_| ())
 }

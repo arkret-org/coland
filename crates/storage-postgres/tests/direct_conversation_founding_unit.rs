@@ -4933,6 +4933,7 @@ async fn claim_human_peer_package(
     let group = scope.canonical_mls_group_id().unwrap();
     let result = store
         .try_claim_peer(coland_storage::PeerKeyPackageClaimAttempt {
+            admission: None,
             applet_device_scope_guard: None,
             keypackage_id: &package.keypackage_id,
             mls_group_id: group.as_str(),

@@ -164,18 +164,19 @@ async fn foreign_request(
         producer_agent_evidence: None,
         mls_genesis_material: None,
     };
-    let body_digest =
-        arkret_models_collaboration::authority_commit::authority_forward_body_digest(&unsigned)
-            .unwrap();
-    let evidence = super::fresh_producer_device_evidence(
+    let mut forward = PeerAuthoritySubmitRequest::AuthorityForwardEvent(unsigned);
+    super::fresh_device_request(
         origin,
-        &request.authority_commit.event,
         &governor.pcr.history.account.station_id,
-        &body_digest,
+        &mut forward,
     )
     .await
-    .unwrap()
     .unwrap();
+    let PeerAuthoritySubmitRequest::AuthorityForwardEvent(forward) = forward else {
+        unreachable!("constructed an Event forward");
+    };
+    assert!(forward.producer_managed_provenance.is_none());
+    let evidence = forward.producer_device_evidence.unwrap();
     let core = &evidence.device_projection_attestation.attestation;
     let fact = arkret_identity::account_device_signer_evidence::verify_forwarded_account_device_signer_fact(
         &evidence,

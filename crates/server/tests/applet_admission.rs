@@ -4602,9 +4602,16 @@ impl Fixture {
             if let Some(key) = idempotency {
                 request = request.add_header("Idempotency-Key", key, true);
             }
-            let mut response = request.send(&service(self.state.clone())).await;
-            let status = response.status_code.unwrap();
-            (status, response.take_json().await.unwrap())
+            // Poll the real router on its own default-stack task, as a server
+            // connection does. JoinSet cancels that task if its caller drops.
+            let state = self.state.clone();
+            let mut tasks = tokio::task::JoinSet::new();
+            tasks.spawn(async move {
+                let mut response = request.send(&service(state)).await;
+                let status = response.status_code.unwrap();
+                (status, response.take_json().await.unwrap())
+            });
+            tasks.join_next().await.unwrap().unwrap()
         })
     }
 

@@ -1520,7 +1520,7 @@ async fn postgres_relation_current_result_is_exact_commit_cas_and_atomic() {
 
 #[tokio::test]
 async fn postgres_franking_nonce_ledger_is_bounded_atomic_and_restart_stable() {
-    Box::pin(postgres_franking_nonce_ledger_case()).await;
+    ordinary_realm::case_future(postgres_franking_nonce_ledger_case).await;
 }
 
 async fn postgres_franking_nonce_ledger_case() {
@@ -3176,7 +3176,11 @@ async fn postgres_adapter_satisfies_invite_new_source_ledger_contract() {
     let pool = database.pool();
     let _db_guard = DB_GUARD.lock().await;
     let ledger = PgInviteNewSourceLedgerStore { pool: pool.clone() };
-    let accounts = PgAccountStore { pool };
     let namespace = format!("postgres-invite-new-source-{}", uuid::Uuid::now_v7());
-    assert_invite_new_source_ledger_contract(&ledger, &accounts, &namespace).await;
+    let station = arkret_wire::DidCoreId::new("ak:did_core:web:coland.example").unwrap();
+    let holder = ordinary_realm::case_future(|| {
+        ordinary_realm::human_profile::admit(&pool, &station, &namespace)
+    })
+    .await;
+    assert_invite_new_source_ledger_contract(&ledger, &holder, &namespace).await;
 }

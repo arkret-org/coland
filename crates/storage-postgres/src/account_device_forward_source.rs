@@ -16,6 +16,18 @@ fn denied(detail: &str) -> PersistenceError {
     PersistenceError::Conflict(format!("device_unauthorized: {detail}"))
 }
 
+pub(crate) async fn current_cut(
+    conn: &mut AsyncPgConnection,
+    account: &arkret_wire::AccountId,
+    device: &arkret_wire::DeviceId,
+) -> Result<Option<crate::pcr_device_status_reader::ConfirmedPcrDeviceStatusCut>, PgTransactionError>
+{
+    confirmed_pcr_device_status_cut_in_connection(conn, account, device, chrono::Utc::now()).await.map_err(|error| match error {
+        PgTransactionError::Storage(PersistenceError::SchemaViolation(detail)) => PersistenceError::Conflict(format!("temporarily_unavailable: forward current Device material is incomplete: {detail}")).into(),
+        other => other,
+    })
+}
+
 /// Caller holds the actual PCR authority writer lock. The complete original
 /// source verifier proves role, lineage, Event bytes and the real Device key.
 pub(super) async fn prepare_in_connection(
@@ -29,14 +41,9 @@ pub(super) async fn prepare_in_connection(
         .account_device_producer()
         .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?
         .ok_or_else(|| denied("forward source has no Account Device producer"))?;
-    let cut = confirmed_pcr_device_status_cut_in_connection(
-        conn,
-        &producer.account_id,
-        &producer.device_id,
-        chrono::Utc::now(),
-    )
-    .await?
-    .ok_or_else(|| denied("forward source lost its locked native cut"))?;
+    let cut = current_cut(conn, &producer.account_id, &producer.device_id)
+        .await?
+        .ok_or_else(|| denied("forward source lost its locked native cut"))?;
     if let Some(code) = cut.admission().error_code() {
         return Err(PersistenceError::Conflict(format!(
             "{}: forward source is not currently admitted",

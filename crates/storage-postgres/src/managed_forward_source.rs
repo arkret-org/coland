@@ -56,14 +56,17 @@ pub(super) async fn lock_source(
     let Some(producer) = event.account_device_producer().map_err(invalid)? else {
         return Ok(());
     };
-    let cut = crate::pcr_device_status_reader::confirmed_pcr_device_status_cut_in_connection(
+    let cut = crate::account_device_signer_evidence::forward_source::current_cut(
         conn,
         &producer.account_id,
         &producer.device_id,
-        chrono::Utc::now(),
     )
     .await?
-    .ok_or_else(|| invalid("Device PCR is unavailable"))?;
+    .ok_or_else(|| {
+        PersistenceError::Conflict(
+            "temporarily_unavailable: forward Device PCR is unavailable".into(),
+        )
+    })?;
     let mut realms = std::collections::BTreeSet::from([cut.authority.realm_id]);
     let rows=sql_query("SELECT e.envelope AS value,c.commit_json AS commit FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.kind='ak.applet.managed_actor.provision' AND e.state='committed' AND e.envelope#>'{payload,actor_id}'=$1")
         .bind::<Jsonb,_>(json!(ActorId::account(producer.account_id))).load::<Row>(&mut *conn).await?;

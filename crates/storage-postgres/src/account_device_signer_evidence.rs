@@ -22,7 +22,7 @@ use crate::{
 };
 
 #[path = "account_device_forward_source.rs"]
-mod forward_source;
+pub(crate) mod forward_source;
 
 fn retention_transaction_error(error: PgTransactionError) -> PersistenceError {
     match error {

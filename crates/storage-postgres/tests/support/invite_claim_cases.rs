@@ -445,6 +445,10 @@ async fn prepared_claim_racing_verifier_withdrawal_preserves_the_accepting_cut()
 
 #[tokio::test]
 async fn third_party_claim_verifies_signatures_at_cut_and_accepts_exact_claimant() {
+    ordinary_realm::case_future(third_party_claim_case).await;
+}
+
+async fn third_party_claim_case() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     human_profile::admit(

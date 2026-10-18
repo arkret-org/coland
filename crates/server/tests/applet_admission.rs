@@ -6457,7 +6457,7 @@ fn business_without_reviews(mut snapshot: Value) -> Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn creation_reviews_use_original_targets_and_consume_with_real_bot_ghost_and_mapping_outcomes()
  {
-    tokio::spawn(Box::pin(creation_review_atomic_scenario()))
+    tokio::spawn(ordinary_realm::case_future(creation_review_atomic_scenario))
         .await
         .unwrap();
 }
@@ -7461,6 +7461,19 @@ async fn creation_action_approval_qualification(
     assert_creation_approval_missing(status, &error);
     assert_eq!(before, authority_snapshot(&fixture.pool).await);
     let administrator_grant = grant_creation_vote_administrator(fixture, scope).await;
+    let grant_vote = creation_operation_vote(
+        fixture,
+        target,
+        arkret_wire::ApprovalContext::Grant {
+            grant_id: grant_id.clone(),
+        },
+    );
+    let realm_vote = creation_operation_vote(
+        fixture,
+        target,
+        arkret_wire::ApprovalContext::RealmGovernance {},
+    );
+    body["approval_signatures"] = json!([grant_vote, realm_vote]);
     let before = authority_snapshot(&fixture.pool).await;
     let (status, error) = fixture
         .service_post(

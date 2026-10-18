@@ -103,6 +103,11 @@ async fn exact_current_results(req: &mut Request, depot: &Depot, res: &mut Respo
     let Some(state) = app_state(depot, res) else {
         return;
     };
+    if let Ok(device) = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>(
+    ) {
+        return native_exact_current_results(state, device, req, res).await;
+    }
     let Some((session, account)) = authenticated_reader(
         state,
         req,
@@ -156,6 +161,72 @@ async fn exact_current_results(req: &mut Request, depot: &Depot, res: &mut Respo
             reason,
         ),
         Err(error) => render_service_error(res, error),
+    }
+}
+
+async fn native_exact_current_results(
+    state: &AppState,
+    device: &crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice,
+    req: &mut Request,
+    res: &mut Response,
+) {
+    if device.operation != ServiceOperationId::SelfCurrentResultsReadExactV1
+        || device.authority.account_id.station_id != state.service_core_id()
+    {
+        return not_found(res);
+    }
+    let Some(request) = parse_closed_body::<ExactCurrentResultsReadRequestBody>(req, res).await
+    else {
+        return;
+    };
+    if let Err(error) = request.validate() {
+        return crate::error::render_error_code(
+            ErrorCode::SchemaViolation,
+            res,
+            &error.to_string(),
+        );
+    }
+    if &request.realm_id != device.metadata.effective_scope.realm_id()
+        || matches!(request.selector,
+            arkret_models_collaboration::exact_current_results::ExactCurrentResultSelector::CapabilityGrant(_))
+    { return not_found(res); }
+    let result = state
+        .authority_commits()
+        .exact_current_result_for_account(
+            &request,
+            &device.authority.account_id,
+            &state.service_core_id(),
+        )
+        .await;
+    let outcome = match result {
+        Ok(SelfExactCurrentRead::Answer(outcome)) => outcome,
+        // Until an exact actual scope is proved, absence and an unresolved
+        // selector cannot disclose another scope through different errors.
+        Ok(SelfExactCurrentRead::NotFound | SelfExactCurrentRead::Unresolved(_)) => {
+            return not_found(res);
+        }
+        Err(error) => {
+            tracing::debug!(error=%error, "native exact current scope is unavailable");
+            return not_found(res);
+        }
+    };
+    let input = coland_storage::AccountContentDeliveryInput {
+        realms: vec![request.realm_id.clone()],
+        exact_reads: vec![(request, outcome.clone())],
+        ..Default::default()
+    };
+    let guard =
+        match crate::routing::identity::applet_managed_device::content_delivery_guard_for_input(
+            state, device, input,
+        )
+        .await
+        {
+            Ok(guard) => guard,
+            Err(_) => return not_found(res),
+        };
+    no_store(res);
+    if let Ok(response) = coland_http::result::guarded_json_ok(outcome, Some(guard)) {
+        salvo::Scribe::render(response, res);
     }
 }
 

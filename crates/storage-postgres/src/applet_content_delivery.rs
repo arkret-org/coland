@@ -26,6 +26,8 @@ use crate::capability_grant_current_results::{
     decode_authority_root, decode_row,
 };
 
+#[path = "applet_exact_current_delivery.rs"]
+mod exact_current;
 #[path = "applet_mls_material_delivery.rs"]
 mod mls_material;
 
@@ -293,6 +295,7 @@ pub(crate) async fn acquire(
         !input.keypackage_claims.is_empty(),
         !input.mls_group_material_reads.is_empty(),
         !input.mls_roster_reads.is_empty(),
+        !input.exact_reads.is_empty(),
     ]
     .into_iter()
     .filter(|active| *active)
@@ -307,6 +310,7 @@ pub(crate) async fn acquire(
         || input.keypackage_claims.len() > 1
         || input.mls_group_material_reads.len() > 1
         || input.mls_roster_reads.len() > 1
+        || input.exact_reads.len() > 1
         || input.committed_events.len() > 64
         || lanes != 1
         || !input.current_views.is_empty()
@@ -319,7 +323,6 @@ pub(crate) async fn acquire(
         || !input.snapshots.is_empty()
         || !input.future_materials.is_empty()
         || !input.notifications.is_empty()
-        || !input.exact_reads.is_empty()
         || !input.watch_reads.is_empty()
         || input.remote_watch_read.is_some()
         || input.audited_watch_read.is_some()
@@ -420,6 +423,20 @@ pub(crate) async fn acquire(
                     endpoint,
                     credential_expiry,
                     request,
+                )
+            })
+            .await?,
+        )
+    } else if let Some((request, outcome)) = input.exact_reads.as_slice().first() {
+        Some(
+            crate::boxed_future(|| {
+                exact_current::prepare(
+                    held.connection(),
+                    station,
+                    endpoint,
+                    credential_expiry,
+                    request,
+                    outcome,
                 )
             })
             .await?,
@@ -778,14 +795,6 @@ async fn event_proof(
     if &full.commit != original.commit() {
         return Err(refused("native full source differs from its exact Commit"));
     }
-    let mut resources = crate::agent_management_admission::event_content_resources(&full.event)?;
-    if let ScopeRef::Circle { circle_id, .. } = scope {
-        resources.push(PolicyResourceSelector {
-            kind: PolicyResourceKind::Object,
-            realm_id: Some(scope.realm_id().clone()),
-            resource_ref: Some(circle_id.to_string()),
-        });
-    }
     let mut actions = vec![CapabilityActionId::EventRead];
     if matches!(original, CommittedEventView::Full(_))
         && matches!(
@@ -798,9 +807,25 @@ async fn event_proof(
     {
         actions.push(CapabilityActionId::ObjectReadContent);
     }
+    source_read_proof(context, &full.event, &actions, &[])
+}
+
+fn source_read_proof(
+    context: Arc<ReadContext>,
+    source: &arkret_wire::Event,
+    actions: &[CapabilityActionId],
+    extra_resources: &[PolicyResourceSelector],
+) -> PersistenceResult<ReadProof> {
+    let scope = &context.endpoint.effective_scope;
+    let mut resources = crate::agent_management_admission::event_content_resources(source)?;
+    for resource in scope_resources(scope).iter().chain(extra_resources) {
+        if !resources.contains(resource) {
+            resources.push(resource.clone());
+        }
+    }
     let mut operations = Vec::new();
-    for action in actions {
-        let (target, mut facts) = context.cut.content_scope_facts(&full.event, action)?;
+    for &action in actions {
+        let (target, mut facts) = context.cut.content_scope_facts(source, action)?;
         facts.circle_id = scope.circle_id().map(ToString::to_string);
         facts.applet_id = Some(context.registration.applet_id.to_string());
         facts.registration_epoch = Some(context.registration.registration_epoch.to_string());

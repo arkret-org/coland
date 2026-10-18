@@ -9,6 +9,8 @@ use coland_storage::MlsGroupCurrentStore as _;
 
 use super::*;
 
+#[path = "exact_current_read.rs"]
+mod current_read;
 #[path = "e2ee_mls_material_read.rs"]
 mod material_read;
 
@@ -130,6 +132,7 @@ async fn bot_and_ghost_originate_real_genesis_and_typed_self_update_commit_witho
 enum Case {
     Accepted,
     MaterialReads,
+    ExactCurrentReads,
     QualifiedRefusal,
     MissingPair,
     ClosedParent,
@@ -229,6 +232,11 @@ async fn originate(ghost: bool, case: Case, circle: bool) {
         scope
     } else {
         realm_scope.clone()
+    };
+    let current_source = if case == Case::ExactCurrentReads {
+        Some(native_phase(|| current_read::prepare_source(&fixture, &scope)).await)
+    } else {
+        None
     };
     let device_expiry = (case == Case::DeviceExpiry).then(|| {
         arkret_canonical::normalize_timestamp_canonical(
@@ -335,6 +343,13 @@ async fn originate(ghost: bool, case: Case, circle: bool) {
             StatusCode::OK,
             "native MLS creator's exact Circle membership: {outcome}"
         );
+    }
+    if let Some(source) = current_source {
+        native_phase(|| {
+            current_read::exercise(&fixture, &install, &authority, &key, &scope, source)
+        })
+        .await;
+        return;
     }
     let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
         actor.clone(),

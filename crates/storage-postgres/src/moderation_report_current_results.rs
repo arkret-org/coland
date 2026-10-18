@@ -253,6 +253,33 @@ pub(crate) async fn scope_member_in_connection(
     scope: &arkret_wire::ScopeRef,
     actor: &arkret_wire::ActorId,
 ) -> PersistenceResult<bool> {
+    scope_member_at_cut(conn, realm, scope, actor, true).await
+}
+
+/// Current readers retain one snapshot instead of taking writer locks.
+pub(crate) async fn ensure_scope_member_snapshot(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    scope: &arkret_wire::ScopeRef,
+    actor: &arkret_wire::ActorId,
+) -> PersistenceResult<()> {
+    if scope_member_at_cut(conn, realm, scope, actor, false).await? {
+        Ok(())
+    } else {
+        Err(target_not_found())
+    }
+}
+
+async fn scope_member_at_cut(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    scope: &arkret_wire::ScopeRef,
+    actor: &arkret_wire::ActorId,
+    lock_parent: bool,
+) -> PersistenceResult<bool> {
+    if scope.realm_id_opt() != Some(realm) {
+        return Ok(false);
+    }
     if let arkret_wire::ScopeRef::Sidecar {
         realm_id,
         sidecar_id,
@@ -264,7 +291,12 @@ pub(crate) async fn scope_member_in_connection(
         return crate::sidecar_access::participant_in_connection(conn, realm, sidecar_id, actor)
             .await;
     }
-    if crate::member_state_admission::locked_membership(conn, realm, actor).await? != "join" {
+    let membership = if lock_parent {
+        crate::member_state_admission::locked_membership(conn, realm, actor).await?
+    } else {
+        crate::member_state_admission::snapshot_membership(conn, realm, actor).await?
+    };
+    if membership != "join" {
         return Ok(false);
     }
     if let arkret_wire::ScopeRef::Circle { circle_id, .. } = scope {

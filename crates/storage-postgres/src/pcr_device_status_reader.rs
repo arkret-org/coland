@@ -108,7 +108,7 @@ pub(crate) async fn confirmed_pcr_device_status_from_authority(
                   ON t.revoke_proposal->>'proposal_event_id'=r.event_id \
                  AND t.revoke_proposal->>'covering_commit_id'=r.commit_id \
                  AND t.kind='security_rotation' AND t.principal_id=$3 AND t.station_id=$4 \
-                 AND t.prepared_plan->'revoke_unit'->'request'->'events'->0->>'event_id'=r.event_id \
+                 AND t.prepared_plan->'revoke_unit'->'request'->'events'->0->'event'->>'event_id'=r.event_id \
                 WHERE r.realm_id=$1 AND r.device_id=$2) AS bound_transaction_count, \
                (SELECT coalesce(jsonb_agg(jsonb_build_object( \
                     'event_id',r.event_id,'commit_id',r.commit_id,'tag_id',r.tag_id, \
@@ -120,7 +120,7 @@ pub(crate) async fn confirmed_pcr_device_status_from_authority(
                     ON t.revoke_proposal->>'proposal_event_id'=r.event_id \
                    AND t.revoke_proposal->>'covering_commit_id'=r.commit_id \
                    AND t.kind='security_rotation' AND t.principal_id=$3 AND t.station_id=$4 \
-                   AND t.prepared_plan->'revoke_unit'->'request'->'events'->0->>'event_id'=r.event_id \
+                   AND t.prepared_plan->'revoke_unit'->'request'->'events'->0->'event'->>'event_id'=r.event_id \
                  WHERE r.realm_id=$1 AND r.device_id=$2) AS transaction_rows",
         )
         .bind::<Text, _>(authority.realm_id.as_str())
@@ -179,7 +179,7 @@ pub(crate) async fn confirmed_pcr_device_status_from_authority(
             .events
             .as_slice()
             .first()
-            .is_none_or(|event| Some(event.event_id.as_str()) != event_id)
+            .is_none_or(|slot| Some(slot.event.event_id.as_str()) != event_id)
         {
             return Err(incomplete("PCR revoke typed transaction changed its proposal").into());
         }

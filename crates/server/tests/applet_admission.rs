@@ -2312,8 +2312,11 @@ async fn revoke_original_admin_device(fixture: &Fixture) {
         at + chrono::Duration::hours(1),
         PreparedEventUnit::new(
             arkret_canonical::DigestSuite::Sha256,
-            PreparedEventBatchRequest {
-                events: vec![revoke.clone()],
+            arkret_wire::EventsSubmitBatchRequestBody {
+                events: (vec![revoke.clone()])
+                    .into_iter()
+                    .map(arkret_wire::EventAdmissionSubmission::new)
+                    .collect(),
             },
         )
         .unwrap(),
@@ -2339,8 +2342,11 @@ async fn revoke_original_admin_device(fixture: &Fixture) {
             new_backup_envelopes: vec![new],
             active_series_unit: PreparedEventUnit::new(
                 arkret_canonical::DigestSuite::Sha256,
-                PreparedEventBatchRequest {
-                    events: vec![active],
+                arkret_wire::EventsSubmitBatchRequestBody {
+                    events: (vec![active])
+                        .into_iter()
+                        .map(arkret_wire::EventAdmissionSubmission::new)
+                        .collect(),
                 },
             )
             .unwrap(),

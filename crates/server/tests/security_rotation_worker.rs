@@ -3,7 +3,7 @@ use arkret_models_collaboration::events_payloads::{
 };
 use arkret_models_crypto::{
     AcceptedSecurityTransactionStep as AcceptedStep, BackupObjectRef, BackupRotationBinding,
-    BackupRotationKind, BackupRotationPlan, PreparedEventBatchRequest, PreparedEventUnit,
+    BackupRotationKind, BackupRotationPlan, PreparedEventUnit,
     SecurityRotationRevokeCommandDecision, SecurityRotationRevokeCommandOutcome,
     SecurityRotationRevokeProposal, SecurityRotationTransactionCreateRequest,
     SecurityTransactionAcceptor, SecurityTransactionCreateRequest, SecurityTransactionPreparedPlan,
@@ -216,8 +216,11 @@ async fn erase_fixture() -> EraseFixture {
         chrono::Utc::now() + chrono::TimeDelta::hours(1),
         PreparedEventUnit::new(
             arkret_canonical::DigestSuite::Sha256,
-            PreparedEventBatchRequest {
-                events: vec![revoke.clone()],
+            arkret_wire::EventsSubmitBatchRequestBody {
+                events: (vec![revoke.clone()])
+                    .into_iter()
+                    .map(arkret_wire::EventAdmissionSubmission::new)
+                    .collect(),
             },
         )
         .unwrap(),
@@ -227,8 +230,11 @@ async fn erase_fixture() -> EraseFixture {
             new_backup_envelopes: vec![new_backup],
             active_series_unit: PreparedEventUnit::new(
                 arkret_canonical::DigestSuite::Sha256,
-                PreparedEventBatchRequest {
-                    events: vec![pointer_event],
+                arkret_wire::EventsSubmitBatchRequestBody {
+                    events: (vec![pointer_event])
+                        .into_iter()
+                        .map(arkret_wire::EventAdmissionSubmission::new)
+                        .collect(),
                 },
             )
             .unwrap(),
@@ -381,8 +387,11 @@ async fn propose_authorizer_revocation(fixture: &mut EraseFixture) -> SecurityTr
         covering.committed_at + chrono::TimeDelta::hours(1),
         PreparedEventUnit::new(
             arkret_canonical::DigestSuite::Sha256,
-            PreparedEventBatchRequest {
-                events: vec![revoke.clone()],
+            arkret_wire::EventsSubmitBatchRequestBody {
+                events: (vec![revoke.clone()])
+                    .into_iter()
+                    .map(arkret_wire::EventAdmissionSubmission::new)
+                    .collect(),
             },
         )
         .unwrap(),
@@ -402,8 +411,11 @@ async fn propose_authorizer_revocation(fixture: &mut EraseFixture) -> SecurityTr
             new_backup_envelopes: vec![replacement],
             active_series_unit: PreparedEventUnit::new(
                 arkret_canonical::DigestSuite::Sha256,
-                PreparedEventBatchRequest {
-                    events: vec![replacement_pointer_event],
+                arkret_wire::EventsSubmitBatchRequestBody {
+                    events: (vec![replacement_pointer_event])
+                        .into_iter()
+                        .map(arkret_wire::EventAdmissionSubmission::new)
+                        .collect(),
                 },
             )
             .unwrap(),

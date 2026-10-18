@@ -20,8 +20,8 @@ use arkret_models_collaboration::events_payloads::{
 use arkret_models_collaboration::principal_operations::PcrGenesisAdmissionInput;
 use arkret_models_crypto::{
     AcceptedSecurityTransactionStep, BackupActiveSeriesPointer, BackupObjectRef,
-    BackupRotationBinding, BackupRotationKind, BackupRotationPlan, PreparedEventBatchRequest,
-    PreparedEventUnit, SecurityRotationRevokeCommandDecision, SecurityRotationRevokeCommandOutcome,
+    BackupRotationBinding, BackupRotationKind, BackupRotationPlan, PreparedEventUnit,
+    SecurityRotationRevokeCommandDecision, SecurityRotationRevokeCommandOutcome,
     SecurityRotationRevokeProposal, SecurityRotationTransactionCreateRequest,
     SecurityTransactionAcceptor, SecurityTransactionCreateRequest, SecurityTransactionPreparedPlan,
     SecurityTransactionStep, SecurityTransactionTerminalOutcome,
@@ -1090,15 +1090,21 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
 
     let revoke_unit = PreparedEventUnit::new(
         arkret_canonical::DigestSuite::Sha256,
-        PreparedEventBatchRequest {
-            events: vec![revoke.clone()],
+        arkret_wire::EventsSubmitBatchRequestBody {
+            events: (vec![revoke.clone()])
+                .into_iter()
+                .map(arkret_wire::EventAdmissionSubmission::new)
+                .collect(),
         },
     )
     .unwrap();
     let active_unit = PreparedEventUnit::new(
         arkret_canonical::DigestSuite::Sha256,
-        PreparedEventBatchRequest {
-            events: vec![active_series.clone()],
+        arkret_wire::EventsSubmitBatchRequestBody {
+            events: (vec![active_series.clone()])
+                .into_iter()
+                .map(arkret_wire::EventAdmissionSubmission::new)
+                .collect(),
         },
     )
     .unwrap();
@@ -1458,8 +1464,11 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
         at + chrono::TimeDelta::hours(1),
         PreparedEventUnit::new(
             arkret_canonical::DigestSuite::Sha256,
-            PreparedEventBatchRequest {
-                events: vec![reject_event.clone()],
+            arkret_wire::EventsSubmitBatchRequestBody {
+                events: (vec![reject_event.clone()])
+                    .into_iter()
+                    .map(arkret_wire::EventAdmissionSubmission::new)
+                    .collect(),
             },
         )
         .unwrap(),
@@ -2675,8 +2684,11 @@ async fn accepted_revoke_terminal_stops_only_the_target_of_two_active_devices() 
         now + chrono::TimeDelta::hours(1),
         PreparedEventUnit::new(
             arkret_canonical::DigestSuite::Sha256,
-            PreparedEventBatchRequest {
-                events: vec![revoke.clone()],
+            arkret_wire::EventsSubmitBatchRequestBody {
+                events: (vec![revoke.clone()])
+                    .into_iter()
+                    .map(arkret_wire::EventAdmissionSubmission::new)
+                    .collect(),
             },
         )
         .unwrap(),
@@ -2700,8 +2712,11 @@ async fn accepted_revoke_terminal_stops_only_the_target_of_two_active_devices() 
             new_backup_envelopes: vec![envelope],
             active_series_unit: PreparedEventUnit::new(
                 arkret_canonical::DigestSuite::Sha256,
-                PreparedEventBatchRequest {
-                    events: vec![rotation_pointer.clone()],
+                arkret_wire::EventsSubmitBatchRequestBody {
+                    events: (vec![rotation_pointer.clone()])
+                        .into_iter()
+                        .map(arkret_wire::EventAdmissionSubmission::new)
+                        .collect(),
                 },
             )
             .unwrap(),
@@ -3325,8 +3340,11 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
             now + chrono::TimeDelta::hours(1),
             PreparedEventUnit::new(
                 arkret_canonical::DigestSuite::Sha256,
-                PreparedEventBatchRequest {
-                    events: vec![revoke.clone()],
+                arkret_wire::EventsSubmitBatchRequestBody {
+                    events: (vec![revoke.clone()])
+                        .into_iter()
+                        .map(arkret_wire::EventAdmissionSubmission::new)
+                        .collect(),
                 },
             )
             .unwrap(),
@@ -3346,8 +3364,11 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
                 new_backup_envelopes: envelopes,
                 active_series_unit: PreparedEventUnit::new(
                     arkret_canonical::DigestSuite::Sha256,
-                    PreparedEventBatchRequest {
-                        events: vec![pointer.clone()],
+                    arkret_wire::EventsSubmitBatchRequestBody {
+                        events: (vec![pointer.clone()])
+                            .into_iter()
+                            .map(arkret_wire::EventAdmissionSubmission::new)
+                            .collect(),
                     },
                 )
                 .unwrap(),

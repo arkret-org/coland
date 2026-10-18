@@ -556,9 +556,10 @@ async fn try_advance_rotation_revoke(
     if resource.expires_at <= now {
         return expire_rotation_revoke(state, transaction).await;
     }
-    let [event] = plan.revoke_unit.request.events.as_slice() else {
+    let [submission] = plan.revoke_unit.request.events.as_slice() else {
         return abort_rotation_revoke(state, transaction, None).await;
     };
+    let event = &submission.event;
 
     let proposed = match &resource.revoke_proposal {
         Some(_) => transaction,
@@ -905,7 +906,7 @@ async fn try_advance_rotation_switch(
         )
         .await;
     };
-    let [event] = rotation.active_series_unit.request.events.as_slice() else {
+    let [submission] = rotation.active_series_unit.request.events.as_slice() else {
         return stop_rotation(
             state,
             transaction,
@@ -913,6 +914,7 @@ async fn try_advance_rotation_switch(
         )
         .await;
     };
+    let event = &submission.event;
     let method = DidUrl::new(
         crate::routing::federation::federation_service_signature_key_id(
             state.service_did().as_str(),
@@ -1647,11 +1649,14 @@ async fn continue_commit_recovery_unit(
     let (binding, plan) = pcr_policy_parts(&transaction.resource)?;
     let binding = binding.clone();
     let plan = plan.clone();
-    let [reanchor_event, authorize_event] = plan.reanchor_unit.request.events.as_slice() else {
+    let [reanchor_submission, authorize_submission] = plan.reanchor_unit.request.events.as_slice()
+    else {
         return Err(AppError::internal(
             "prepared recovery Event pair is malformed",
         ));
     };
+    let (reanchor_event, authorize_event) =
+        (&reanchor_submission.event, &authorize_submission.event);
     if session.require_human_device_id() != binding.replacement_device_id.as_str()
         || receipt.receipt_id != binding.terminal_receipt_id
         || receipt.transaction_id != transaction.resource.transaction_id
@@ -1973,11 +1978,15 @@ async fn prepare_recovery_plan(
             "recovery commit intent predecessor_ref is not the session-frozen PCR stream head",
         ));
     }
-    let [reanchor_event, authorize_event] = intent.reanchor_unit.request.events.as_slice() else {
+    let [reanchor_submission, authorize_submission] =
+        intent.reanchor_unit.request.events.as_slice()
+    else {
         return Err(AppError::schema_violation(
             "recovery unit must contain exactly the ordered re-anchor and authorize Events",
         ));
     };
+    let (reanchor_event, authorize_event) =
+        (&reanchor_submission.event, &authorize_submission.event);
     let reanchor_event_id = reanchor_event.event_id.clone();
     let authorize_event_id = authorize_event.event_id.clone();
     let digest_suite = arkret_canonical::DigestSuite::Sha256;

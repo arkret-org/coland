@@ -258,8 +258,11 @@ async fn fixture() -> Fixture {
     );
     let unit = PreparedEventUnit::new(
         arkret_canonical::DigestSuite::Sha256,
-        PreparedEventBatchRequest {
-            events: vec![reanchor.clone(), authorize.clone()],
+        arkret_wire::EventsSubmitBatchRequestBody {
+            events: (vec![reanchor.clone(), authorize.clone()])
+                .into_iter()
+                .map(arkret_wire::EventAdmissionSubmission::new)
+                .collect(),
         },
     )
     .unwrap();

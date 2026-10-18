@@ -7,7 +7,7 @@ use arkret_bridge_runtime::{
 use arkret_models_collaboration::authority_commit::{
     SelfAuthoritySubmitOutcome, SelfAuthoritySubmitRequest,
 };
-use arkret_signatures::{PublicKeyMaterial, SignEventOptions};
+use arkret_signatures::{EventSigner as _, PublicKeyMaterial, SignEventOptions};
 use arkret_wire::{AuthoritySubmitOutcome, ServiceOperationId};
 
 use super::*;
@@ -751,6 +751,20 @@ fn recover(
             let request = SelfAuthoritySubmitRequest::Event(
                 arkret_wire::EventAdmissionSubmission::new(join.event().clone()),
             );
+            let producer_context = arkret::ProducerVerificationContext {
+                actor: ActorId::account(device.account_id.clone()),
+                verification_method: arkret::DidUrl::new(
+                    device.signer().verification_method().to_owned(),
+                )
+                .unwrap(),
+                public_key: PublicKeyMaterial::Ed25519Raw {
+                    bytes: device.signer().verifying_key().to_bytes().to_vec(),
+                },
+                digest_suite: arkret::DigestSuite::Sha256,
+            };
+            let request =
+                arkret::VerifiedSubmission::verify(request, |_| Ok(producer_context.clone()))
+                    .unwrap();
             let options = arkret_http_client::ClientRequestOptions::new()
                 .idempotency_key(join.event_id().as_str());
             context.lost.attempts.lock().unwrap().clear();

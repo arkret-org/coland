@@ -113,7 +113,7 @@ pub(super) async fn commit_revoke_command_terminal_in_connection(
         || accepted.commit_json["commit_id"].as_str() != Some(proposal.covering_commit_id.as_str())
         || accepted.commit_json["event_ref"].as_str() != Some(proposal.proposal_event_id.as_str())
         || accepted.envelope
-            != serde_json::to_value(&plan.revoke_unit.request.events[0])
+            != serde_json::to_value(&plan.revoke_unit.request.events[0].event)
                 .map_err(PersistenceError::database)?
     {
         return Err(rejected(

@@ -101,6 +101,7 @@ async fn enforce_session_pop(state: &AppState, req: &mut Request) -> Result<(), 
     if req.headers().contains_key("source-service-id")
         && [
             arkret_wire::ServiceOperationId::SelfEventsCommandSubmitV1,
+            arkret_wire::ServiceOperationId::SelfAgentResourceGetV1,
             arkret_wire::ServiceOperationId::SelfManagementReviewCommandRequestV1,
             arkret_wire::ServiceOperationId::SelfManagementReviewReadStatusV1,
             arkret_wire::ServiceOperationId::SelfManagementReviewCommandDecideV1,
@@ -379,6 +380,63 @@ mod tests {
     const RFC8037_X: &str = "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo";
     // RFC 8037 §A.3 thumbprint of the key above.
     const RFC8037_THUMBPRINT: &str = "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k";
+
+    #[tokio::test]
+    async fn agent_authority_projection_reaches_its_service_authenticator_without_a_session() {
+        let state = AppState::new(
+            crate::config::AppConfig::test_default(),
+            coland_storage_postgres::Db { pool: None },
+        );
+        let mut request = salvo::test::TestClient::get(
+            "http://localhost/_arkret/self/agents/ak:did_core:web:agent.example",
+        )
+        .build();
+        request
+            .headers_mut()
+            .insert("source-service-id", "unverified-service".parse().unwrap());
+        // This only dispatches to the handler; its mandatory service verifier
+        // still rejects missing, partial, or unauthorized signatures.
+        assert!(enforce_session_pop(&state, &mut request).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn agent_service_dispatch_does_not_exempt_sessions_or_unregistered_routes() {
+        let state = AppState::new(
+            crate::config::AppConfig::test_default(),
+            coland_storage_postgres::Db { pool: None },
+        );
+        for (method, path, source) in [
+            (
+                "GET",
+                "/_arkret/self/agents/ak:did_core:web:agent.example",
+                false,
+            ),
+            ("GET", "/_arkret/self/agents", true),
+            ("GET", "/_arkret/self/agents/agent/extra", true),
+            (
+                "POST",
+                "/_arkret/self/agents/ak:did_core:web:agent.example",
+                true,
+            ),
+            ("GET", "/_arkret/self/account/viewer", true),
+        ] {
+            let mut request =
+                salvo::test::TestClient::get(format!("http://localhost{path}")).build();
+            *request.method_mut() = method.parse().unwrap();
+            request
+                .headers_mut()
+                .insert("signature-input", "sig1=()".parse().unwrap());
+            if source {
+                request
+                    .headers_mut()
+                    .insert("source-service-id", "unverified-service".parse().unwrap());
+            }
+            assert!(
+                enforce_session_pop(&state, &mut request).await.is_err(),
+                "{method} {path}"
+            );
+        }
+    }
 
     #[test]
     fn thumbprint_matches_rfc8037_vector() {

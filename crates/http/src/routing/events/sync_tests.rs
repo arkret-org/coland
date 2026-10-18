@@ -1269,7 +1269,7 @@ async fn admit_sync_revoke_terminal(
     };
     use arkret_models_crypto::{
         AcceptedSecurityTransactionStep, BackupObjectRef, BackupRotationBinding,
-        BackupRotationKind, BackupRotationPlan, PreparedEventBatchRequest, PreparedEventUnit,
+        BackupRotationKind, BackupRotationPlan, PreparedEventUnit,
         SecurityRotationRevokeCommandDecision, SecurityRotationRevokeCommandOutcome,
         SecurityRotationRevokeProposal, SecurityRotationTransactionCreateRequest,
         SecurityTransactionAcceptor, SecurityTransactionCreateRequest,
@@ -1361,8 +1361,11 @@ async fn admit_sync_revoke_terminal(
         at + chrono::TimeDelta::hours(1),
         PreparedEventUnit::new(
             arkret_canonical::DigestSuite::Sha256,
-            PreparedEventBatchRequest {
-                events: vec![revoke.clone()],
+            arkret_wire::EventsSubmitBatchRequestBody {
+                events: (vec![revoke.clone()])
+                    .into_iter()
+                    .map(arkret_wire::EventAdmissionSubmission::new)
+                    .collect(),
             },
         )
         .unwrap(),
@@ -1386,8 +1389,11 @@ async fn admit_sync_revoke_terminal(
             new_backup_envelopes: vec![backup],
             active_series_unit: PreparedEventUnit::new(
                 arkret_canonical::DigestSuite::Sha256,
-                PreparedEventBatchRequest {
-                    events: vec![pointer_event],
+                arkret_wire::EventsSubmitBatchRequestBody {
+                    events: (vec![pointer_event])
+                        .into_iter()
+                        .map(arkret_wire::EventAdmissionSubmission::new)
+                        .collect(),
                 },
             )
             .unwrap(),

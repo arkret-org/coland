@@ -112,7 +112,7 @@ impl RevokeProposalCommitWrite {
         if resource.revoke_command_outcome.is_some()
             || resource.terminal_outcome.is_some()
             || !resource.accepted_steps.is_empty()
-            || plan.revoke_unit.request.events.as_slice() != [self.commit.event.clone()]
+            || !matches!(plan.revoke_unit.request.events.as_slice(), [slot] if slot.event == self.commit.event)
             || proposal.proposal_event_id != self.commit.event.event_id
             || proposal.covering_commit_id != self.commit.commit.commit_id
             || self.commit.event.actor_id
@@ -326,7 +326,7 @@ impl RotationPointerSwitchWrite {
             )
         })?;
         let rotation = single_backup_rotation(plan)?;
-        if rotation.active_series_unit.request.events.as_slice() != [self.commit.event.clone()]
+        if !matches!(rotation.active_series_unit.request.events.as_slice(), [slot] if slot.event == self.commit.event)
             || self.commit.event.event_id != rotation.binding.active_series_event_id
             || self.commit.event.kind != arkret_wire::EventKind::KeyBackupActiveSeries
             || self.commit.event.actor_id
@@ -360,12 +360,17 @@ impl RecoveryUnitCommitWrite {
             )
         })?;
         let intent = &plan.reanchor_commit_intent;
-        let [planned_reanchor, planned_authorize] = plan.reanchor_unit.request.events.as_slice()
+        let [planned_reanchor_submission, planned_authorize_submission] =
+            plan.reanchor_unit.request.events.as_slice()
         else {
             return Err(PersistenceError::SchemaViolation(
                 "recovery plan must contain exactly two ordered Events".to_owned(),
             ));
         };
+        let (planned_reanchor, planned_authorize) = (
+            &planned_reanchor_submission.event,
+            &planned_authorize_submission.event,
+        );
         let [reanchor, authorize] = &self.commits;
         let reanchor_payload: arkret_models_collaboration::events_payloads::DeviceReanchorPayload =
             serde_json::from_value(

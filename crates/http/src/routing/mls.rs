@@ -2327,9 +2327,9 @@ async fn claim_keypackage_session(
             .await
             .map_err(|error| AppError::internal(format!("claim membership read: {error}")))?
     {
-        return Err(AppError::capability_denied(
-            "requester identity has no current source-side Realm membership",
-        ));
+        // This is a claim policy refusal after requester authentication,
+        // covered by the target_private_claim outward bucket.
+        return Err(peer_claim_failed());
     }
     if body.service_binding.destination_id.as_str() != local_service_id {
         let destination = body.service_binding.destination_id.as_str();

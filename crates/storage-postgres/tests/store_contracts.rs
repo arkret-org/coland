@@ -3172,6 +3172,7 @@ async fn postgres_retention_policy_preserves_full_actor_after_reopen() {
 
 #[tokio::test]
 async fn postgres_adapter_satisfies_invite_new_source_ledger_contract() {
+    use coland_storage::AccountStore;
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     let pool = database.pool();
     let _db_guard = DB_GUARD.lock().await;
@@ -3182,5 +3183,18 @@ async fn postgres_adapter_satisfies_invite_new_source_ledger_contract() {
         ordinary_realm::human_profile::admit(&pool, &station, &namespace)
     })
     .await;
+    PgAccountStore { pool: pool.clone() }
+        .put(&coland_storage::AccountRecord {
+            pk: coland_storage::AccountPk(0),
+            principal_id: holder.principal_id.clone(),
+            station_id: holder.station_id.clone(),
+            localpart: String::new(),
+            display_name: None,
+            bio: None,
+            avatar_blob_ref: None,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
     assert_invite_new_source_ledger_contract(&ledger, &holder, &namespace).await;
 }

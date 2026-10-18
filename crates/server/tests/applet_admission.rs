@@ -24,7 +24,6 @@ use arkret_signatures::http_signature::{
 use arkret_wire::{ActorId, Event, EventKind, ScopeRef};
 use base64::Engine as _;
 use coland_http::config::AppConfig;
-use coland_http::service;
 use coland_http::state::AppState;
 use coland_storage::AuthorityCommitStore;
 use coland_storage_postgres::{PgAuthorityCommitStore, PgPool};
@@ -38,6 +37,24 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::Url;
+
+// TestClient otherwise polls the server inside the scenario's own poll stack.
+// Each real connection gets its own default-stack task; dropping the caller
+// aborts that task, and response-body handoff guards remain owned by Response.
+struct FixtureService(AppState);
+
+fn service(state: AppState) -> FixtureService {
+    FixtureService(state)
+}
+
+impl salvo::test::SendTarget for &FixtureService {
+    async fn call(self, request: salvo::Request) -> salvo::Response {
+        let state = self.0.clone();
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(async move { coland_http::service(state).handle(request).await });
+        tasks.join_next().await.unwrap().unwrap()
+    }
+}
 
 #[tokio::test]
 async fn controller_cannot_directly_grant_business_authority_to_managed_bot() {
@@ -4307,13 +4324,6 @@ impl Fixture {
         config.account_authority_trust_domain = Some(config.trust_domain.clone());
         config.register_test_internal_authority_channel("applet-http-standard-grant".to_owned());
         let (state, pool) = coland_test_support::app_state_with_pool(config);
-        // A process abort can leave this fixture's fault trigger in its leased
-        // slot. Remove only the named test object before accepted prerequisites.
-        {
-            use diesel_async::SimpleAsyncConnection as _;
-            let mut conn = pool.get().await.unwrap();
-            conn.batch_execute("DROP TRIGGER IF EXISTS fail_native_membership ON member_state_current_results; DROP FUNCTION IF EXISTS fail_native_membership();").await.unwrap();
-        }
         if public_fixture {
             eprintln!("[managed forward] origin Station initialized");
         }
@@ -4602,16 +4612,9 @@ impl Fixture {
             if let Some(key) = idempotency {
                 request = request.add_header("Idempotency-Key", key, true);
             }
-            // Poll the real router on its own default-stack task, as a server
-            // connection does. JoinSet cancels that task if its caller drops.
-            let state = self.state.clone();
-            let mut tasks = tokio::task::JoinSet::new();
-            tasks.spawn(async move {
-                let mut response = request.send(&service(state)).await;
-                let status = response.status_code.unwrap();
-                (status, response.take_json().await.unwrap())
-            });
-            tasks.join_next().await.unwrap().unwrap()
+            let mut response = request.send(&service(self.state.clone())).await;
+            let status = response.status_code.unwrap();
+            (status, response.take_json().await.unwrap())
         })
     }
 

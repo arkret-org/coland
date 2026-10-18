@@ -220,7 +220,7 @@ fn setup_with_mls(
         let server = tokio::spawn(async move {
             server
                 .serve(
-                    service(state)
+                    coland_http::service(state)
                         .hoop(salvo::affix_state::inject(injected))
                         .hoop(lose_native_reply),
                 )

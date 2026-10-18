@@ -12,6 +12,9 @@ use arkret_wire::{AuthoritySubmitOutcome, ServiceOperationId};
 
 use super::*;
 
+#[path = "managed_runtime_mls.rs"]
+mod mls;
+
 #[derive(Default)]
 struct LostNativeReply {
     armed: std::sync::atomic::AtomicBool,
@@ -34,10 +37,8 @@ async fn lose_native_reply(
         let idempotency = req
             .headers()
             .get("Idempotency-Key")
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_owned();
+            .map(|value| value.to_str().unwrap().to_owned())
+            .unwrap_or_default();
         let body = req.payload().await.unwrap().to_vec();
         state
             .attempts
@@ -89,6 +90,14 @@ impl AuthoringStore for FailOutcomeStore {
 }
 
 fn host(config: Config, store: Arc<dyn AuthoringStore>) -> Arc<ArkretEdge> {
+    host_with_retry(config, store, arkret_http_client::RetryConfig::standard(1))
+}
+
+fn host_with_retry(
+    config: Config,
+    store: Arc<dyn AuthoringStore>,
+    retry: arkret_http_client::RetryConfig,
+) -> Arc<ArkretEdge> {
     let http = reqwest::Client::builder()
         .tls_backend_rustls()
         .no_proxy()
@@ -100,7 +109,7 @@ fn host(config: Config, store: Arc<dyn AuthoringStore>) -> Arc<ArkretEdge> {
         .unwrap();
     let client = arkret_http_client::Client::builder(config.arkret.server_url.parse().unwrap())
         .http_client(http)
-        .retry(arkret_http_client::RetryConfig::standard(1))
+        .retry(retry)
         .build()
         .unwrap();
     let signer = Ed25519PayloadSigner::from_did_key_seed(
@@ -140,7 +149,13 @@ struct RuntimeContext {
 // Separate construction avoids placing the creation and recovery phase frames
 // in the same default-stack test driver.
 fn setup() -> std::pin::Pin<Box<dyn std::future::Future<Output = RuntimeContext> + Send>> {
-    Box::pin(async {
+    setup_with_mls(false)
+}
+
+fn setup_with_mls(
+    mls: bool,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = RuntimeContext> + Send>> {
+    Box::pin(async move {
         use salvo::Listener as _;
         arkret_bridge_runtime::install_default_crypto_provider();
         let pem = |label: &str, bytes: &[u8]| {
@@ -180,6 +195,14 @@ fn setup() -> std::pin::Pin<Box<dyn std::future::Future<Output = RuntimeContext>
             &namespace,
             &fixture.state.service_core_id(),
         );
+        if mls {
+            native.package.e2ee_policy.enabled = true;
+            native.package.e2ee_policy.mls_join_requested = Some(true);
+            native
+                .package
+                .claimed_profiles
+                .push(arkret_wire::ProfileId::APPLET_E2EE_JOIN_V1.to_owned());
+        }
         let endpoint = native.package.base_url.clone();
         let authority = Url::parse(&endpoint)
             .unwrap()
@@ -797,6 +820,8 @@ fn retained(
                     arkret_wire::CapabilityActionId::from_wire("ak.message.create").unwrap(),
                 ],
                 lifetime_seconds: 7200,
+                mls: false,
+                key_package_inventory_target: 20,
             });
         let store = FileAuthoringStore::shared(context.store_path.clone()).unwrap();
         let edge = host(config.clone(), store.clone());

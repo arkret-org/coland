@@ -21,6 +21,9 @@ use crate::{
     AsyncPgConnection, PersistenceError, PersistenceResult, PgPool, PgTransactionError, pg_conn,
 };
 
+#[path = "account_device_forward_source.rs"]
+mod forward_source;
+
 fn retention_transaction_error(error: PgTransactionError) -> PersistenceError {
     match error {
         PgTransactionError::Diesel(diesel::result::Error::DatabaseError(
@@ -78,7 +81,53 @@ pub struct PgAccountDeviceSignerEvidenceArchive {
 
 #[async_trait::async_trait]
 impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
-    async fn forwarded_bound_human_signer_fact(
+    async fn prepare_forward_current(
+        &self,
+        event: &arkret_wire::Event,
+        destination: &arkret_wire::DidCoreId,
+        body_digest: &arkret_wire::Hash,
+    ) -> PersistenceResult<Option<arkret_models_crypto::ForwardDeviceProjectionAttestationCore>>
+    {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            let Some(producer) = event
+                .account_device_producer()
+                .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?
+            else {
+                return Ok(None);
+            };
+            let first = confirmed_pcr_device_status_cut_in_connection(
+                conn,
+                &producer.account_id,
+                &producer.device_id,
+                chrono::Utc::now(),
+            )
+            .await?
+            .ok_or_else(|| {
+                PersistenceError::Conflict(
+                    "device_unauthorized: forward origin PCR cut is unavailable".into(),
+                )
+            })?;
+            crate::realm_authorization_cut::lock_realm_authorization_cut(
+                conn,
+                &first.authority.realm_id,
+            )
+            .await?;
+            // Capture attested_at after the actual writer wait, never before it.
+            forward_source::prepare_in_connection(
+                conn,
+                event,
+                destination,
+                body_digest,
+                forward_source::now(),
+            )
+            .await
+        })
+        .await
+        .map_err(retention_transaction_error)
+    }
+
+    async fn forwarded_bound_account_device_signer_fact(
         &self,
         event: &arkret_wire::Event,
         commit: &arkret_wire::RealmCommit,
@@ -98,7 +147,7 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
             return Ok(None);
         }
         let Some(producer) = event
-            .human_device_producer()
+            .account_device_producer()
             .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?
         else {
             return Ok(None);
@@ -129,7 +178,7 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
             }
             // Verify at the retained issuance time, never with today's device key.
             // The verified governing Commit pins the exact accepted source digest.
-            let fact = arkret_identity::account_device_signer_evidence::verify_forwarded_human_signer_fact(
+            let fact = arkret_identity::account_device_signer_evidence::verify_forwarded_account_device_signer_fact(
                 &evidence, event, &producer.account_id.station_id, governance,
                 &core.event_authorization.forward_body_digest,
                 event.realm_id.digest_suite_code().digest_suite(), core.attested_at,
@@ -190,7 +239,7 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
         let source = &core.event_authorization;
         let suite = event.realm_id.digest_suite_code().digest_suite();
         let verified =
-            arkret_identity::account_device_signer_evidence::verify_forwarded_human_signer_fact(
+            arkret_identity::account_device_signer_evidence::verify_forwarded_account_device_signer_fact(
                 evidence,
                 event,
                 &core.account_id.station_id,
@@ -205,23 +254,16 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
         let body = serde_json::to_value(evidence).map_err(PersistenceError::database)?;
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            let prepared = crate::agent_producer_signer_keys::prepare_local_account_device_source_in_connection(conn, event, core.attested_at).await?;
-            if prepared.as_ref() != Some(&fact) {
+            let arkret_wire::CommitStreamRef::Realm { realm_id } = &source.authorization_ref.stream_ref else {
+                return Err(PersistenceError::SchemaViolation("forward source has no original PCR Realm stream".into()).into());
+            };
+            crate::realm_authorization_cut::lock_realm_authorization_cut(conn, realm_id).await?;
+
+            let prepared = forward_source::prepare_in_connection(
+                conn, event, &source.destination_service_id, &source.forward_body_digest, core.attested_at,
+            ).await?;
+            if prepared.as_ref() != Some(core) {
                 return Err(PersistenceError::Conflict("forward origin source changed before issuance".into()).into());
-            }
-            let cut = confirmed_pcr_device_status_cut_in_connection(conn, &core.account_id, &core.device_id, core.attested_at).await?
-                .ok_or_else(|| PersistenceError::Conflict("forward origin locked PCR cut missing".into()))?;
-            let authorization = cut.authority.authorization.as_ref()
-                .ok_or_else(|| PersistenceError::Conflict("forward origin authorization missing".into()))?;
-            let payload = &authorization.payload;
-            if cut.admission().error_code().is_some()
-                || cut.authority.current_generation != Some(core.authorized_generation_ref)
-                || payload.authorized_generation_ref != core.authorized_generation_ref
-                || payload.device_public_key_did.as_str() != core.device_signing_key_did.as_str()
-                || payload.hpke_key != core.hpke_key
-                || payload.not_before != core.authorization_window.not_before
-                || payload.expires_at.flatten() != core.authorization_window.expires_at {
-                return Err(PersistenceError::Conflict("forward origin projection differs from locked authorization".into()).into());
             }
             sql_query("INSERT INTO account_device_signer_evidence(evidence_ref,principal_id,station_id,device_id,authorization_event_id,authorization_commit_id,attested_at,evidence_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(evidence_ref) DO NOTHING")
                 .bind::<Text,_>(reference.as_ref()).bind::<Text,_>(core.account_id.principal_id.as_str())
@@ -232,6 +274,13 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
                 .bind::<Text,_>(reference.as_ref()).get_result::<ArchiveRow>(&mut *conn).await?;
             if stored.evidence_json != body || stored.authorization_commit_id != fact.key.authorization_ref.commit_id.as_str() {
                 return Err(PersistenceError::Conflict("forward origin immutable root collision".into()).into());
+            }
+            // Writer waits and physical expiry cannot publish a stale source.
+            let final_source = forward_source::prepare_in_connection(
+                conn, event, &source.destination_service_id, &source.forward_body_digest, core.attested_at,
+            ).await?;
+            if final_source.as_ref() != Some(core) {
+                return Err(PersistenceError::Conflict("forward origin source changed at its final writer".into()).into());
             }
             Ok(())
         }).await.map_err(retention_transaction_error)?;
@@ -525,7 +574,7 @@ impl PgAccountDeviceSignerEvidenceArchive {
 }
 
 /// Retain the verified `producer_device_evidence` of a cross-Station
-/// human-device producer in the transaction that writes the Event's first
+/// Account Device producer in the transaction that writes the Event's first
 /// `RealmCommit`. The row is audit material only; the object is re-bound to
 /// the exact producer and its content address before it is written.
 pub(crate) async fn retain_forwarded_producer_evidence_in_connection(
@@ -536,9 +585,11 @@ pub(crate) async fn retain_forwarded_producer_evidence_in_connection(
 ) -> PersistenceResult<()> {
     let invalid = |message: &str| PersistenceError::SchemaViolation(message.to_owned());
     let producer = event
-        .human_device_producer()
+        .account_device_producer()
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?
-        .ok_or_else(|| invalid("forwarded producer evidence requires a human-device producer"))?;
+        .ok_or_else(|| {
+            invalid("forwarded producer evidence requires an Account Device producer")
+        })?;
     let core = &retained.evidence.device_projection_attestation.attestation;
     if core.account_id != producer.account_id || core.device_id != producer.device_id {
         return Err(invalid(

@@ -487,7 +487,7 @@ async fn self_invites_dispatch(
         .await
         .map_err(receipt_refusal)?;
     if invite_event
-        .human_device_producer()
+        .account_device_producer()
         .map_err(|e| AppError::param_invalid(e.to_string()))?
         .is_some()
         && producer_signer_fact.is_none()
@@ -1177,7 +1177,7 @@ async fn verify_invite_commit(
         Some(fact) => arkret_identity::account_device_signer_evidence::verify_historical_account_device_event_signature(
             &delivery.invite_event,fact,state.projections().realm_digest_suite(delivery.invite_event.realm_id.as_str())
         ).map_err(|e| AppError::from_rejection(coland_http::error::ErrorCode::SignatureInvalid,e.to_string()))?,
-        None if delivery.invite_event.human_device_producer().map_err(|e| AppError::param_invalid(e.to_string()))?.is_some() =>
+        None if delivery.invite_event.account_device_producer().map_err(|e| AppError::param_invalid(e.to_string()))?.is_some() =>
             return Err(AppError::from_rejection(coland_http::error::ErrorCode::TemporarilyUnavailable,"original Invite Human source is unavailable")),
         None => {},
     }

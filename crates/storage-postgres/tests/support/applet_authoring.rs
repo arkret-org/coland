@@ -937,7 +937,7 @@ async fn admin_domain_request(
     event: Event,
 ) -> coland_storage::EventCommitRequest {
     let producer = event
-        .human_device_producer()
+        .account_device_producer()
         .unwrap()
         .expect("admin Event has a Human Device producer");
     // Explicit directory issuance is a fixture prerequisite. Local

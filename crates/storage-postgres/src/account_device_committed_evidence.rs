@@ -42,7 +42,7 @@ pub(crate) async fn prepare_core(
     station: &DidCoreId,
 ) -> PersistenceResult<DeviceProjectionAttestationCore> {
     let producer = event
-        .human_device_producer()
+        .account_device_producer()
         .map_err(rejected)?
         .ok_or_else(|| rejected("not an Account Device producer"))?;
     if &producer.account_id.station_id != station {
@@ -88,9 +88,9 @@ pub(crate) fn validate(
     fact: Option<&AccountDeviceHistoricalSignerFact>,
     evidence: Option<&AccountDeviceSignerEvidence>,
 ) -> PersistenceResult<()> {
-    let producer = event.human_device_producer().map_err(rejected)?;
+    let producer = event.account_device_producer().map_err(rejected)?;
     let (Some(producer), Some(fact), Some(evidence)) = (producer, fact, evidence) else {
-        if event.human_device_producer().map_err(rejected)?.is_none()
+        if event.account_device_producer().map_err(rejected)?.is_none()
             && fact.is_none()
             && evidence.is_none()
         {

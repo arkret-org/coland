@@ -8314,7 +8314,7 @@ fn owned_consumer_signed_request(
         [0x61; 32],
     );
     assert!(event.executed_by.is_none());
-    assert!(event.human_device_producer().unwrap().is_none());
+    assert!(event.account_device_producer().unwrap().is_none());
     // Real Agent proof verification, independently of the store's native
     // accepted-current recheck. No Human/Device fixture signer is substituted.
     let envelope = arkret_signatures::EventProofBuilder::new()

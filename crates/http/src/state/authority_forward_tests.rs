@@ -5,8 +5,8 @@ use crate::routing::federation::outbox::PeerSubmitResponse;
 
 fn forwarded_request(seed: u8) -> PeerAuthoritySubmitRequest {
     use arkret_models_crypto::{
-        DeviceAuthorizationWindow, DeviceStatus, ForwardDeviceProjectionAttestationCore,
-        HumanEventAuthorization,
+        AccountDeviceEventAuthorization, DeviceAuthorizationWindow, DeviceStatus,
+        ForwardDeviceProjectionAttestationCore,
     };
     use arkret_models_identity::service_identity::{CanonicalServiceUrl, ServiceRegistrationKey};
     use arkret_signatures::webvh::{
@@ -64,7 +64,7 @@ fn forwarded_request(seed: u8) -> PeerAuthoritySubmitRequest {
         device.as_str(),
         [0x71; 32],
     );
-    let producer = event.human_device_producer().unwrap().unwrap();
+    let producer = event.account_device_producer().unwrap().unwrap();
     let draft = PeerAuthorityForwardEventRequest {
         branch:
             arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,
@@ -101,7 +101,7 @@ fn forwarded_request(seed: u8) -> PeerAuthoritySubmitRequest {
         },
         attested_at: at,
         expires_at: at + chrono::Duration::minutes(5),
-        event_authorization: HumanEventAuthorization {
+        event_authorization: AccountDeviceEventAuthorization {
             event_id: event.event_id.clone(),
             verification_method: event
                 .producer_proof

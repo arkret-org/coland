@@ -141,7 +141,7 @@ pub(crate) async fn submit_self(
         .await
         .map_err(|e| unavailable(e.to_string()))?;
     let producer = event
-        .human_device_producer()
+        .account_device_producer()
         .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?
         .ok_or_else(|| {
             ServiceError::SchemaViolation(

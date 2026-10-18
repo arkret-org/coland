@@ -431,7 +431,7 @@ pub(crate) async fn controller_device_ready_in_connection(
     if genesis.scope_ref == scope
         && genesis.actor_id == actor
         && genesis
-            .human_device_producer()
+            .account_device_producer()
             .map_err(PersistenceError::database)?
             .is_some_and(|producer| producer.device_id == *device)
     {

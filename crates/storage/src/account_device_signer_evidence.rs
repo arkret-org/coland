@@ -52,9 +52,19 @@ pub fn forwarded_producer_device_evidence_ref(
 /// historical reads require the caller to authorize disclosure separately.
 #[async_trait]
 pub trait AccountDeviceSignerEvidenceStore: Send + Sync {
+    /// Prepare the existing forward-only unsigned core from a locked native
+    /// authorization cut. This grants neither directory disclosure nor business
+    /// authority; retaining its signed wrapper rechecks the same source.
+    async fn prepare_forward_current(
+        &self,
+        event: &arkret_wire::Event,
+        destination: &arkret_wire::DidCoreId,
+        body_digest: &arkret_wire::Hash,
+    ) -> PersistenceResult<Option<arkret_models_crypto::ForwardDeviceProjectionAttestationCore>>;
+
     /// Resolve only an immutable origin source already bound by this Commit.
     /// This neither authorizes current admission nor installs a stream replica.
-    async fn forwarded_bound_human_signer_fact(
+    async fn forwarded_bound_account_device_signer_fact(
         &self,
         event: &arkret_wire::Event,
         commit: &arkret_wire::RealmCommit,

@@ -387,7 +387,7 @@ async fn prepare_local_account_device_source_inner(
     Option<arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact>,
 > {
     let Some(producer) = event
-        .human_device_producer()
+        .account_device_producer()
         .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?
     else {
         return Ok(None);
@@ -923,7 +923,7 @@ pub(crate) async fn read(
     let commit: arkret_wire::RealmCommit =
         serde_json::from_value(row.commit_json).map_err(PersistenceError::database)?;
     if (event
-        .human_device_producer()
+        .account_device_producer()
         .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?
         .is_some()
         || (event.applet_id.is_some()

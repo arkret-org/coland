@@ -3878,7 +3878,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             || commit.stream_ref != stream
             || commit.realm_id != event.realm_id
             || commit.event_ref != event.event_id
-            || event.human_device_producer().map_err(invalid)?.is_none()
+            || event.account_device_producer().map_err(invalid)?.is_none()
         {
             return Ok(false);
         }

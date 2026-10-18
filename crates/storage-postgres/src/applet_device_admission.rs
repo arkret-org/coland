@@ -102,6 +102,15 @@ pub(crate) fn action(event: &Event) -> PersistenceResult<CapabilityActionId> {
     Ok(CapabilityActionId::AppletJoin)
 }
 
+pub(crate) fn device_actions(event: &Event) -> PersistenceResult<Vec<CapabilityActionId>> {
+    let actual = action(event)?;
+    let mut actions = vec![actual];
+    if event.kind == EventKind::CircleMemberState && actual == CapabilityActionId::AppletJoin {
+        actions.push(CapabilityActionId::CircleMemberAdd);
+    }
+    Ok(actions)
+}
+
 pub(crate) async fn installation(
     conn: &mut AsyncPgConnection,
     event: &Event,
@@ -124,11 +133,7 @@ pub(crate) async fn installation(
     {
         return Err(denied("native Event differs from its authenticated scope"));
     }
-    let mut actions = vec![actual_action];
-    if event.kind == EventKind::CircleMemberState && actual_action == CapabilityActionId::AppletJoin
-    {
-        actions.push(CapabilityActionId::CircleMemberAdd);
-    }
+    let actions = device_actions(event)?;
     let installed = installation_for_device(
         conn,
         authority,

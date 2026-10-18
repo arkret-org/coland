@@ -2599,7 +2599,7 @@ async fn commit_one_inner(
                 )
                 .into());
             }
-            let verified = arkret_identity::account_device_signer_evidence::verify_forwarded_human_signer_fact(
+            let verified = arkret_identity::account_device_signer_evidence::verify_forwarded_account_device_signer_fact(
                 &retained.evidence, event, &core.account_id.station_id,
                 &request.authority_commit.expected_authority.service_id, &source.forward_body_digest,
                 event.realm_id.digest_suite_code().digest_suite(), request.authority_commit.commit.committed_at,

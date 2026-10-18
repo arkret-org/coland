@@ -364,6 +364,19 @@ impl PersistenceHandle {
             .read_cut(holder, peer, scope, device)
             .await
     }
+    pub async fn prepare_forward_current_signer_evidence(
+        &self,
+        event: &arkret_wire::Event,
+        destination: &arkret_wire::DidCoreId,
+        body_digest: &arkret_wire::Hash,
+    ) -> PersistenceResult<Option<arkret_models_crypto::ForwardDeviceProjectionAttestationCore>>
+    {
+        self.persistence
+            .account_device_signer_evidence()
+            .prepare_forward_current(event, destination, body_digest)
+            .await
+    }
+
     pub async fn retain_forward_current_signer_evidence(
         &self,
         event: &arkret_wire::Event,
@@ -375,7 +388,7 @@ impl PersistenceHandle {
             .await
     }
 
-    pub async fn forwarded_bound_human_signer_fact(
+    pub async fn forwarded_bound_account_device_signer_fact(
         &self,
         event: &arkret_wire::Event,
         commit: &arkret_wire::RealmCommit,
@@ -385,7 +398,7 @@ impl PersistenceHandle {
     > {
         self.persistence
             .account_device_signer_evidence()
-            .forwarded_bound_human_signer_fact(event, commit, governance)
+            .forwarded_bound_account_device_signer_fact(event, commit, governance)
             .await
     }
 

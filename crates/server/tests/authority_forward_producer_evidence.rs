@@ -137,7 +137,7 @@ fn core(station: &Station, now: DateTime<Utc>) -> ForwardDeviceProjectionAttesta
         .unwrap(),
         // Signed source coordinates are negative-test claims, not an accepted
         // PCR fixture. The production Origin regression below uses real PCR rows.
-        event_authorization: arkret_models_crypto::HumanEventAuthorization {
+        event_authorization: arkret_models_crypto::AccountDeviceEventAuthorization {
             event_id: EventId::new("ak:event:AfAnsJqSlM9bHVI7P1QBMOEW3p5P1PNQu7BBMpiSnD_e")
                 .unwrap(),
             verification_method: DidUrl::new(format!("{PRINCIPAL_DID}#{DEVICE}")).unwrap(),

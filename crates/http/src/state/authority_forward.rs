@@ -1,6 +1,6 @@
 //! `authority_forward` on both Stations of device-lifecycle §8.2.2.
 //!
-//! A human-device producer is resolved by one rule for every Event kind. When
+//! A real Account Device producer is resolved by one rule for every Event kind. When
 //! the producer's Account lives on another Station, the forwarding Station
 //! (the Account Station, "A") signs a fresh `account_device_signer_evidence`
 //! from its own live PCR gate for every forwarding attempt and persists it
@@ -46,10 +46,10 @@ fn wire_refusal(error: arkret_wire::WireError) -> ServiceError {
     )
 }
 
-/// Governance Station check of one forwarded human-device producer.
+/// Governance Station check of one forwarded Account Device producer.
 ///
 /// `evidence` has already passed the Event-decided presence rule, so `None`
-/// means the producer is not a human Account device.
+/// means the producer is not an Account Device producer.
 fn verify_forwarded_producer(
     state: &AppState,
     peer: &AuthenticatedPeerContext,
@@ -70,7 +70,7 @@ fn verify_forwarded_producer(
         return Ok(None);
     };
     let verified =
-        arkret_identity::account_device_signer_evidence::verify_forwarded_human_signer_fact(
+        arkret_identity::account_device_signer_evidence::verify_forwarded_account_device_signer_fact(
             evidence,
             event,
             &peer.source_service_id,
@@ -326,25 +326,13 @@ fn forwarded_producer_key(
     })
 }
 
-/// A: sign and persist fresh `producer_device_evidence` for this attempt.
-///
-/// `None` when the Event's producer is not a human Account device. The live
-/// PCR gate refuses a revoked, revocation-pending, fenced or out-of-window
-/// device with its registered code before anything is signed, and the
-/// retention transaction re-proves the same cut at `attested_at`.
-pub(super) async fn fresh_directory_device_evidence(
-    state: &AppState,
-    event: &Event,
-) -> ServiceResult<Option<AccountDeviceSignerEvidence>> {
-    prepare_directory_device_evidence(state, event, true).await
-}
-
+/// Human controller dependency for the independently registered native Agent unit.
 async fn prepare_directory_device_evidence(
     state: &AppState,
     event: &Event,
     retain: bool,
 ) -> ServiceResult<Option<AccountDeviceSignerEvidence>> {
-    let Some(producer) = event.human_device_producer().map_err(wire_refusal)? else {
+    let Some(producer) = event.account_device_producer().map_err(wire_refusal)? else {
         return Ok(None);
     };
     if producer.account_id.station_id != state.service_core_id() {
@@ -411,37 +399,40 @@ pub(crate) async fn fresh_producer_device_evidence(
     destination: &DidCoreId,
     body_digest: &arkret_wire::Hash,
 ) -> ServiceResult<Option<ForwardAccountDeviceSignerEvidence>> {
-    let Some(directory) = fresh_directory_device_evidence(state, event).await? else {
+    let Some(producer) = event.account_device_producer().map_err(wire_refusal)? else {
         return Ok(None);
     };
-    let core = directory.device_projection_attestation.attestation;
-    let fact = state
-        .authority_commits()
-        .prepare_account_device_signer_fact(event, core.attested_at)
+    if producer.account_id.station_id != state.service_core_id() {
+        return Err(ServiceError::SchemaViolation(
+            "only the producer's Account Station may issue its forward source".into(),
+        ));
+    }
+    let admission = state
+        .persistence()
+        .pcr_device_admission(
+            &producer.account_id,
+            &producer.device_id,
+            crate::wire::now(),
+        )
+        .await
+        .map_err(|error| temporarily_unavailable(format!("PCR Device status: {error}")))?;
+    if let Some(refusal) = ServiceError::device_admission_refusal(
+        admission,
+        "producer Device is not active at its origin Station",
+    ) {
+        return Err(refusal);
+    }
+    let Some(forward_core) = state
+        .persistence()
+        .prepare_forward_current_signer_evidence(event, destination, body_digest)
         .await?
-        .ok_or_else(|| temporarily_unavailable("forward origin immutable source is unavailable"))?;
-    let forward_core = arkret_models_crypto::ForwardDeviceProjectionAttestationCore {
-        account_id: core.account_id,
-        device_id: core.device_id,
-        device_signing_key_did: core.device_signing_key_did,
-        hpke_key: core.hpke_key,
-        device_authorize_event_id: core.device_authorize_event_id,
-        authorized_generation_ref: core.authorized_generation_ref,
-        device_status: core.device_status,
-        authorization_window: core.authorization_window,
-        attested_at: core.attested_at,
-        expires_at: core.expires_at,
-        event_authorization: arkret_models_crypto::HumanEventAuthorization {
-            event_id: fact.event_id,
-            verification_method: fact.verification_method,
-            destination_service_id: destination.clone(),
-            forward_body_digest: body_digest.clone(),
-            authorization_ref: fact.key.authorization_ref,
-            revision: fact.key.revision,
-            governance_generation: fact.key.governance_generation,
-            accepted_at: fact.accepted_at,
-        },
+    else {
+        return Ok(None);
     };
+    let service_resolution =
+        crate::routing::system::service_resolution::current_authenticated_service_resolution(state)
+            .await
+            .map_err(|error| temporarily_unavailable(error.message))?;
     let attestation =
         arkret_signatures::device_projection::sign_forward_device_projection_attestation(
             forward_core,
@@ -453,7 +444,7 @@ pub(crate) async fn fresh_producer_device_evidence(
         .map_err(wire_refusal)?;
     let evidence = ForwardAccountDeviceSignerEvidence {
         device_projection_attestation: attestation,
-        service_resolution: directory.service_resolution,
+        service_resolution,
     };
     // Same original PCR lock re-prepares every immutable field and checks the
     // fresh projection before retaining the complete signed origin root.
@@ -552,7 +543,7 @@ pub(crate) async fn fresh_producer_agent_evidence(
     event: &Event,
 ) -> ServiceResult<Option<arkret_models_identity::AgentProducerEvidence>> {
     if event
-        .human_device_producer()
+        .account_device_producer()
         .map_err(wire_refusal)?
         .is_some()
         || event.actual_signer().as_account_id().is_none()
@@ -1163,7 +1154,7 @@ async fn verify_bound_invite_claim(
     }
     let fact = state
         .persistence()
-        .forwarded_bound_human_signer_fact(event, commit, governance)
+        .forwarded_bound_account_device_signer_fact(event, commit, governance)
         .await
         .map_err(temporarily_unavailable)?
         .ok_or_else(|| {

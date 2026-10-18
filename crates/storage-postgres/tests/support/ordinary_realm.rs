@@ -67,7 +67,7 @@ pub fn bind_structural_human_device(event: &mut arkret_wire::Event) {
     let proof = event.producer_proof.as_mut().unwrap();
     let (did, _) = proof.verification_method.as_str().split_once('#').unwrap();
     proof.verification_method = arkret_wire::DidUrl::new(format!("{did}#{device}")).unwrap();
-    assert!(event.human_device_producer().unwrap().is_some());
+    assert!(event.account_device_producer().unwrap().is_some());
     reseal(event);
 }
 
@@ -664,7 +664,7 @@ pub async fn source_request(pool: &PgPool, mut request: EventCommitRequest) -> E
         .await
         .unwrap()
         .map(Into::into);
-    if tx.event.human_device_producer().unwrap().is_some() {
+    if tx.event.account_device_producer().unwrap().is_some() {
         assert!(tx.producer_signer_fact.is_some());
     } else {
         assert!(tx.producer_signer_fact.is_none());

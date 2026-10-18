@@ -1641,7 +1641,11 @@ async fn peer_founding_missing_contact_dependency_writes_nothing() {
     };
     assert_eq!(exact_founder_join.event, founder_join.event);
     assert_eq!(exact_founder_join.commit, founder_join.commit);
-    let human = founder_join.event.human_device_producer().unwrap().unwrap();
+    let human = founder_join
+        .event
+        .account_device_producer()
+        .unwrap()
+        .unwrap();
     let historical_selector = arkret_models_identity::SignerKeyQuerySelector::HistoricalEvent {
         sender: arkret_models_identity::HistoricalSignerKeyQuerySender::AccountDevice {
             actor: founder_join.event.actual_signer().clone(),
@@ -2924,7 +2928,7 @@ async fn sourced_cited_at(
     if request
         .authority_commit
         .event
-        .human_device_producer()
+        .account_device_producer()
         .unwrap()
         .is_some()
     {

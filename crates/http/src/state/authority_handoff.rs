@@ -165,7 +165,7 @@ async fn verify_uninventoried_producer(
             stream_ref: full.commit.stream_ref.clone(),
             stream_position: full.commit.stream_position,
         };
-        let sender = match event.human_device_producer().map_err(refused)? {
+        let sender = match event.account_device_producer().map_err(refused)? {
             Some(human) => HistoricalSignerKeyQuerySender::AccountDevice {
                 actor: event.actual_signer().clone(),
                 device_id: human.device_id,
@@ -341,7 +341,7 @@ async fn native_genesis_key(
     } else {
         let human = full
             .event
-            .human_device_producer()
+            .account_device_producer()
             .map_err(signature_refused)?
             .ok_or_else(|| signature_refused("founding authorization has no device producer"))?;
         if human.device_id != descriptor.device_id || full.event.actor_id != create.event.actor_id {

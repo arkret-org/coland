@@ -420,7 +420,7 @@ async fn full_actor_roster_refresh_rejects_other_station_old_leg_kick_and_leave(
     let device = call
         .authority_commit
         .event
-        .human_device_producer()
+        .account_device_producer()
         .unwrap()
         .unwrap()
         .device_id;

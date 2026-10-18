@@ -161,7 +161,7 @@ async fn foreign_request(
     .unwrap()
     .unwrap();
     let core = &evidence.device_projection_attestation.attestation;
-    let fact = arkret_identity::account_device_signer_evidence::verify_forwarded_human_signer_fact(
+    let fact = arkret_identity::account_device_signer_evidence::verify_forwarded_account_device_signer_fact(
         &evidence,
         &request.authority_commit.event,
         &joining.pcr.history.account.station_id,
@@ -1455,7 +1455,9 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
     let mut strand = historical_human::request_for_event(&governor, previous, strand_event, at);
     seal_service_commit(&mut strand.authority_commit.commit, &governor_state);
     let uow = PgEventCommitUnitOfWork::new(governor_pool.clone());
-    Box::pin(uow.commit_event(strand.clone())).await.unwrap();
+    scenario_future(|| async { uow.commit_event(strand.clone()).await })
+        .await
+        .unwrap();
     // Membership is not an action grant. Read the actual accepted root cut,
     // then admit the owner's narrow Grant before the foreign member joins. The
     // Grant grants no membership; MessageCreate still runs after the real join.
@@ -1523,12 +1525,16 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
     grant.authority_commit.commit.producer_signer_fact_digest = Some(grant_fact.digest().unwrap());
     grant.authority_commit.producer_signer_fact = Some(grant_fact.into());
     seal_service_commit(&mut grant.authority_commit.commit, &governor_state);
-    Box::pin(uow.commit_event(grant.clone())).await.unwrap();
+    scenario_future(|| async { uow.commit_event(grant.clone()).await })
+        .await
+        .unwrap();
     let previous = &grant.authority_commit;
-    let mut join = Box::pin(foreign_request(&origin, &human, &governor, previous, EventKind::MemberState,
-        serde_json::json!({"realm_id":previous.event.realm_id,"member_id":actor,"membership":"join","reason":"real forward recovery membership"}))).await;
+    let mut join = scenario_future(|| async { foreign_request(&origin, &human, &governor, previous, EventKind::MemberState,
+        serde_json::json!({"realm_id":previous.event.realm_id,"member_id":actor,"membership":"join","reason":"real forward recovery membership"})).await }).await;
     seal_service_commit(&mut join.authority_commit.commit, &governor_state);
-    Box::pin(uow.commit_event(join.clone())).await.unwrap();
+    scenario_future(|| async { uow.commit_event(join.clone()).await })
+        .await
+        .unwrap();
     let source = PgAuthorityCommitStore {
         pool: governor_pool.clone(),
     };
@@ -1632,28 +1638,34 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
     let no_write = opening_footprint(&origin_pool, realm).await;
     // A bare original or the wrong authenticated Account never starts a scan.
     assert!(
-        Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-            &origin,
-            &governor_state.service_core_id(),
-            event,
-            None,
-            &mut located,
-            &session,
-        ))
+        scenario_future(|| async {
+            super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
+                event,
+                None,
+                &mut located,
+                &session,
+            )
+            .await
+        })
         .await
         .is_err()
     );
     let mut other_session = session.clone();
     other_session.session_grant.as_mut().unwrap().account_id = governor.pcr.history.account.clone();
     assert!(
-        Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-            &origin,
-            &governor_state.service_core_id(),
-            event,
-            Some(commit),
-            &mut located,
-            &other_session,
-        ))
+        scenario_future(|| async {
+            super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
+                event,
+                Some(commit),
+                &mut located,
+                &other_session,
+            )
+            .await
+        })
         .await
         .is_err()
     );
@@ -1715,14 +1727,17 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
         governor_state.service_core_id(),
     ));
     assert!(
-        Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-            &origin,
-            &governor_state.service_core_id(),
-            event,
-            Some(commit),
-            &mut located,
-            &session,
-        ))
+        scenario_future(|| async {
+            super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
+                event,
+                Some(commit),
+                &mut located,
+                &session,
+            )
+            .await
+        })
         .await
         .is_err()
     );
@@ -1738,14 +1753,17 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
         governor_state.service_core_id(),
     ));
     assert!(
-        Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-            &origin,
-            &governor_state.service_core_id(),
-            event,
-            Some(commit),
-            &mut located,
-            &session,
-        ))
+        scenario_future(|| async {
+            super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
+                event,
+                Some(commit),
+                &mut located,
+                &session,
+            )
+            .await
+        })
         .await
         .is_err()
     );
@@ -1784,14 +1802,17 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
         );
         2
     });
-    let original = Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-        &origin,
-        &governor_state.service_core_id(),
-        event,
-        Some(commit),
-        &mut located,
-        &session,
-    ))
+    let original = scenario_future(|| async {
+        super::super::replica_anchor::ensure_forwarded_target(
+            &origin,
+            &governor_state.service_core_id(),
+            event,
+            Some(commit),
+            &mut located,
+            &session,
+        )
+        .await
+    })
     .await;
     history_stop.store(true, std::sync::atomic::Ordering::SeqCst);
     let original = original.unwrap().unwrap();
@@ -1817,14 +1838,17 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
     assert_eq!(anchor.join_commit, *commit);
     let before_replay = opening_footprint(&origin_pool, realm).await;
     assert_eq!(
-        Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-            &origin,
-            &governor_state.service_core_id(),
-            event,
-            Some(commit),
-            &mut located,
-            &session,
-        ))
+        scenario_future(|| async {
+            super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
+                event,
+                Some(commit),
+                &mut located,
+                &session,
+            )
+            .await
+        })
         .await
         .unwrap(),
         Some(commit.clone())
@@ -1851,13 +1875,17 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
     gap.realm_fanout_source = Some(EventAdmissionSubmission::new(
         gap.authority_commit.event.clone(),
     ));
-    Box::pin(uow.commit_event(gap.clone())).await.unwrap();
-    let mut bob_join = Box::pin(foreign_request(
+    scenario_future(|| async { uow.commit_event(gap.clone()).await })
+        .await
+        .unwrap();
+    let mut bob_join = scenario_future(|| async { foreign_request(
         &origin, &bob, &governor, &gap.authority_commit, EventKind::MemberState,
         serde_json::json!({"realm_id":realm,"member_id":bob_actor,"membership":"join","reason":"second hosted member"}),
-    )).await;
+    ).await }).await;
     seal_service_commit(&mut bob_join.authority_commit.commit, &governor_state);
-    Box::pin(uow.commit_event(bob_join.clone())).await.unwrap();
+    scenario_future(|| async { uow.commit_event(bob_join.clone()).await })
+        .await
+        .unwrap();
     let bob_event = &bob_join.authority_commit.event;
     let bob_commit = &bob_join.authority_commit.commit;
     let bob_session = authenticated_context(&origin_pool, &bob).await;
@@ -1952,14 +1980,17 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
         assert!(registered_history_until_stop(reply_listener, reply_stop).await > 0);
         2
     });
-    let outcome = Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-        &origin,
-        &governor_state.service_core_id(),
-        bob_event,
-        Some(bob_commit),
-        &mut located,
-        &bob_session,
-    ))
+    let outcome = scenario_future(|| async {
+        super::super::replica_anchor::ensure_forwarded_target(
+            &origin,
+            &governor_state.service_core_id(),
+            bob_event,
+            Some(bob_commit),
+            &mut located,
+            &bob_session,
+        )
+        .await
+    })
     .await;
     continuous_stop.store(true, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(outcome.unwrap(), Some(bob_commit.clone()));
@@ -1996,10 +2027,10 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
 
     // A different, properly signed own join cannot replace the original
     // while its anchor is pending. It must not start a peer read or write.
-    let replacement = Box::pin(foreign_request(
+    let replacement = scenario_future(|| async { foreign_request(
         &origin, &human, &governor, &join.authority_commit, EventKind::MemberState,
         serde_json::json!({"realm_id":realm,"member_id":actor,"membership":"join","reason":"pending anchor replacement candidate"}),
-    )).await;
+    ).await }).await;
     {
         let mut connection = origin_pool.get().await.unwrap();
         diesel::sql_query("UPDATE replica_stream_anchors SET anchor_commit_id=NULL, anchor_stream_position=NULL, anchored_at=NULL WHERE realm_id=$1")
@@ -2007,14 +2038,17 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
             .execute(&mut *connection).await.unwrap();
     }
     let pending_before = opening_footprint(&origin_pool, realm).await;
-    let replacement_error = Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-        &origin,
-        &governor_state.service_core_id(),
-        &replacement.authority_commit.event,
-        Some(&replacement.authority_commit.commit),
-        &mut located,
-        &session,
-    ))
+    let replacement_error = scenario_future(|| async {
+        super::super::replica_anchor::ensure_forwarded_target(
+            &origin,
+            &governor_state.service_core_id(),
+            &replacement.authority_commit.event,
+            Some(&replacement.authority_commit.commit),
+            &mut located,
+            &session,
+        )
+        .await
+    })
     .await
     .unwrap_err();
     assert_eq!(
@@ -2152,7 +2186,9 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
         let mut strand = historical_human::request_for_event(&governor, previous, strand_event, at);
         seal_service_commit(&mut strand.authority_commit.commit, &governor_state);
         let uow = PgEventCommitUnitOfWork::new(governor_pool.clone());
-        Box::pin(uow.commit_event(strand.clone())).await.unwrap();
+        scenario_future(|| async { uow.commit_event(strand.clone()).await })
+            .await
+            .unwrap();
         let create_at = strand.authority_commit.commit.committed_at + Duration::seconds(1);
         let create_event = historical_human::signed_ordinary_event(
             &governor,
@@ -2173,7 +2209,7 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             create_at,
         );
         seal_service_commit(&mut circle_create.authority_commit.commit, &governor_state);
-        Box::pin(uow.commit_event(circle_create.clone()))
+        scenario_future(|| async { uow.commit_event(circle_create.clone()).await })
             .await
             .unwrap();
         let circle_id =
@@ -2248,12 +2284,16 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             Some(grant_fact.digest().unwrap());
         grant.authority_commit.producer_signer_fact = Some(grant_fact.into());
         seal_service_commit(&mut grant.authority_commit.commit, &governor_state);
-        Box::pin(uow.commit_event(grant.clone())).await.unwrap();
+        scenario_future(|| async { uow.commit_event(grant.clone()).await })
+            .await
+            .unwrap();
         let previous = &grant.authority_commit;
-        let mut join = Box::pin(foreign_request(&origin, &human, &governor, previous, EventKind::MemberState,
-        serde_json::json!({"realm_id":previous.event.realm_id,"member_id":actor,"membership":"join","reason":"real forward recovery membership"}))).await;
+        let mut join = scenario_future(|| async { foreign_request(&origin, &human, &governor, previous, EventKind::MemberState,
+        serde_json::json!({"realm_id":previous.event.realm_id,"member_id":actor,"membership":"join","reason":"real forward recovery membership"})).await }).await;
         seal_service_commit(&mut join.authority_commit.commit, &governor_state);
-        Box::pin(uow.commit_event(join.clone())).await.unwrap();
+        scenario_future(|| async { uow.commit_event(join.clone()).await })
+            .await
+            .unwrap();
         let source = PgAuthorityCommitStore {
             pool: governor_pool.clone(),
         };
@@ -2360,14 +2400,17 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
         let no_write = opening_footprint(&origin_pool, realm).await;
         // A bare original or the wrong authenticated Account never starts a scan.
         assert!(
-            Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-                &origin,
-                &governor_state.service_core_id(),
-                event,
-                None,
-                &mut located,
-                &session,
-            ))
+            scenario_future(|| async {
+                super::super::replica_anchor::ensure_forwarded_target(
+                    &origin,
+                    &governor_state.service_core_id(),
+                    event,
+                    None,
+                    &mut located,
+                    &session,
+                )
+                .await
+            })
             .await
             .is_err()
         );
@@ -2375,14 +2418,17 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
         other_session.session_grant.as_mut().unwrap().account_id =
             governor.pcr.history.account.clone();
         assert!(
-            Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-                &origin,
-                &governor_state.service_core_id(),
-                event,
-                Some(commit),
-                &mut located,
-                &other_session,
-            ))
+            scenario_future(|| async {
+                super::super::replica_anchor::ensure_forwarded_target(
+                    &origin,
+                    &governor_state.service_core_id(),
+                    event,
+                    Some(commit),
+                    &mut located,
+                    &other_session,
+                )
+                .await
+            })
             .await
             .is_err()
         );
@@ -2444,14 +2490,17 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             governor_state.service_core_id(),
         ));
         assert!(
-            Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-                &origin,
-                &governor_state.service_core_id(),
-                event,
-                Some(commit),
-                &mut located,
-                &session,
-            ))
+            scenario_future(|| async {
+                super::super::replica_anchor::ensure_forwarded_target(
+                    &origin,
+                    &governor_state.service_core_id(),
+                    event,
+                    Some(commit),
+                    &mut located,
+                    &session,
+                )
+                .await
+            })
             .await
             .is_err()
         );
@@ -2467,14 +2516,17 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             governor_state.service_core_id(),
         ));
         assert!(
-            Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-                &origin,
-                &governor_state.service_core_id(),
-                event,
-                Some(commit),
-                &mut located,
-                &session,
-            ))
+            scenario_future(|| async {
+                super::super::replica_anchor::ensure_forwarded_target(
+                    &origin,
+                    &governor_state.service_core_id(),
+                    event,
+                    Some(commit),
+                    &mut located,
+                    &session,
+                )
+                .await
+            })
             .await
             .is_err()
         );
@@ -2513,14 +2565,17 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             );
             2
         });
-        let original = Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-            &origin,
-            &governor_state.service_core_id(),
-            event,
-            Some(commit),
-            &mut located,
-            &session,
-        ))
+        let original = scenario_future(|| async {
+            super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
+                event,
+                Some(commit),
+                &mut located,
+                &session,
+            )
+            .await
+        })
         .await;
         history_stop.store(true, std::sync::atomic::Ordering::SeqCst);
         let original = original.unwrap().unwrap();
@@ -2546,14 +2601,17 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
         assert_eq!(anchor.join_commit, *commit);
         let before_replay = opening_footprint(&origin_pool, realm).await;
         assert_eq!(
-            Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-                &origin,
-                &governor_state.service_core_id(),
-                event,
-                Some(commit),
-                &mut located,
-                &session,
-            ))
+            scenario_future(|| async {
+                super::super::replica_anchor::ensure_forwarded_target(
+                    &origin,
+                    &governor_state.service_core_id(),
+                    event,
+                    Some(commit),
+                    &mut located,
+                    &session,
+                )
+                .await
+            })
             .await
             .unwrap(),
             Some(commit.clone())
@@ -2577,10 +2635,12 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
         .await;
         // Author, sign and admit the real own leave on Gov; Origin keeps its frozen
         // request and the authentic original acceptance without yet installing it.
-        let mut leave = Box::pin(foreign_request(&origin, &human, &governor, &final_parent,
-        EventKind::MemberState, serde_json::json!({"realm_id":realm,"member_id":actor,"membership":"leave","reason":"original own leave recovery"}))).await;
+        let mut leave = scenario_future(|| async { foreign_request(&origin, &human, &governor, &final_parent,
+        EventKind::MemberState, serde_json::json!({"realm_id":realm,"member_id":actor,"membership":"leave","reason":"original own leave recovery"})).await }).await;
         seal_service_commit(&mut leave.authority_commit.commit, &governor_state);
-        Box::pin(uow.commit_event(leave.clone())).await.unwrap();
+        scenario_future(|| async { uow.commit_event(leave.clone()).await })
+            .await
+            .unwrap();
         let le = &leave.authority_commit.event;
         let lc = &leave.authority_commit.commit;
         let original_fact = source.producer_signer_fact(le, lc).await.unwrap().unwrap();
@@ -2640,14 +2700,17 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             tcp_original_service_history_once(rl, rg, rp).await
         });
         assert_eq!(
-            Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-                &origin,
-                &governor_state.service_core_id(),
-                le,
-                Some(lc),
-                &mut located,
-                &session
-            ))
+            scenario_future(|| async {
+                super::super::replica_anchor::ensure_forwarded_target(
+                    &origin,
+                    &governor_state.service_core_id(),
+                    le,
+                    Some(lc),
+                    &mut located,
+                    &session,
+                )
+                .await
+            })
             .await
             .unwrap(),
             Some(lc.clone())
@@ -2728,7 +2791,9 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             Some(future_fact.digest().unwrap());
         future.authority_commit.producer_signer_fact = Some(future_fact.into());
         seal_service_commit(&mut future.authority_commit.commit, &governor_state);
-        Box::pin(uow.commit_event(future.clone())).await.unwrap();
+        scenario_future(|| async { uow.commit_event(future.clone()).await })
+            .await
+            .unwrap();
         let future_read = StreamScanRequest {
             realm_id: realm.clone(),
             stream_ref: lc.stream_ref.clone(),
@@ -2756,40 +2821,49 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
         );
         let before = opening_footprint(&origin_pool, realm).await;
         assert_eq!(
-            Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-                &origin,
-                &governor_state.service_core_id(),
-                le,
-                Some(lc),
-                &mut located,
-                &session
-            ))
+            scenario_future(|| async {
+                super::super::replica_anchor::ensure_forwarded_target(
+                    &origin,
+                    &governor_state.service_core_id(),
+                    le,
+                    Some(lc),
+                    &mut located,
+                    &session,
+                )
+                .await
+            })
             .await
             .unwrap(),
             Some(lc.clone())
         );
         assert_eq!(opening_footprint(&origin_pool, realm).await, before);
         assert!(
-            Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-                &origin,
-                &governor_state.service_core_id(),
-                le,
-                None,
-                &mut located,
-                &session
-            ))
+            scenario_future(|| async {
+                super::super::replica_anchor::ensure_forwarded_target(
+                    &origin,
+                    &governor_state.service_core_id(),
+                    le,
+                    None,
+                    &mut located,
+                    &session,
+                )
+                .await
+            })
             .await
             .is_err()
         );
         assert!(
-            Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-                &origin,
-                &governor_state.service_core_id(),
-                le,
-                Some(lc),
-                &mut located,
-                &other_session
-            ))
+            scenario_future(|| async {
+                super::super::replica_anchor::ensure_forwarded_target(
+                    &origin,
+                    &governor_state.service_core_id(),
+                    le,
+                    Some(lc),
+                    &mut located,
+                    &other_session,
+                )
+                .await
+            })
             .await
             .is_err()
         );
@@ -2846,14 +2920,17 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
                 .unwrap()
         );
         assert!(
-            Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-                &origin,
-                &governor_state.service_core_id(),
-                le,
-                Some(lc),
-                &mut located,
-                &session
-            ))
+            scenario_future(|| async {
+                super::super::replica_anchor::ensure_forwarded_target(
+                    &origin,
+                    &governor_state.service_core_id(),
+                    le,
+                    Some(lc),
+                    &mut located,
+                    &session,
+                )
+                .await
+            })
             .await
             .is_err()
         );
@@ -2891,14 +2968,17 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
                 .unwrap()
         );
         assert!(
-            Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-                &origin,
-                &governor_state.service_core_id(),
-                le,
-                Some(lc),
-                &mut located,
-                &session
-            ))
+            scenario_future(|| async {
+                super::super::replica_anchor::ensure_forwarded_target(
+                    &origin,
+                    &governor_state.service_core_id(),
+                    le,
+                    Some(lc),
+                    &mut located,
+                    &session,
+                )
+                .await
+            })
             .await
             .is_err()
         );

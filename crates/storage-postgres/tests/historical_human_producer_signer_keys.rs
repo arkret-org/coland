@@ -590,7 +590,7 @@ async fn withheld_full_upgrade_atomically_retains_original_human_fact_without_he
     .unwrap()
     .unwrap();
     let core = &evidence.device_projection_attestation.attestation;
-    let fact = arkret_identity::account_device_signer_evidence::verify_forwarded_human_signer_fact(
+    let fact = arkret_identity::account_device_signer_evidence::verify_forwarded_account_device_signer_fact(
         &evidence,
         &join.authority_commit.event,
         &member_account.station_id,

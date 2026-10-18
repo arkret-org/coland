@@ -11,7 +11,9 @@ use arkret_canonical::DigestSuite;
 use arkret_identity::{
     RealmAuthorityChainError, RealmAuthorityKeyDirectory, VerifiedRealmAuthority,
 };
-use arkret_wire::{CommitStreamRef, DidCoreId, ErrorCode, Event, HumanDeviceProducer, RealmCommit};
+use arkret_wire::{
+    AccountDeviceProducer, CommitStreamRef, DidCoreId, ErrorCode, Event, RealmCommit,
+};
 use coland_storage::DeviceRevocationStore;
 
 use crate::{ServiceError, ServiceResult};
@@ -38,7 +40,7 @@ pub enum ReceivedProducer {
     GovernanceCommittedHumanDevice,
     /// A human device of an Account this Station hosts; its producer proof
     /// verifies under the original frozen fact, independently of current PCR.
-    HostedHumanDevice(HumanDeviceProducer),
+    HostedHumanDevice(AccountDeviceProducer),
     /// An Applet Service whose original installation and producer key were
     /// verified through the immutable source bound by the governance Commit.
     GovernanceCommittedService,

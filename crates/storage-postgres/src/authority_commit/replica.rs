@@ -1583,7 +1583,7 @@ async fn accepted_own_circle_cleanup_in_connection(
         || event.executed_by.is_some()
         || realm_id != &event.realm_id
         || member_account_id.station_id != replica.local_service_id
-        || event.human_device_producer().map_err(invalid)?.is_none()
+        || event.account_device_producer().map_err(invalid)?.is_none()
         || replica
             .producer_signer_fact
             .as_ref()

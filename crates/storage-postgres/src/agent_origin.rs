@@ -226,7 +226,7 @@ fn validate_control_source(
             ..
         } => {
             let producer = event
-                .human_device_producer()
+                .account_device_producer()
                 .map_err(invalid)?
                 .ok_or_else(|| invalid("control source is not a Human device"))?;
             arkret_identity::account_device_signer_evidence::verify_historical_account_device_signer_evidence(

@@ -102,7 +102,7 @@ pub(crate) async fn require_current(
         }
     };
     if event
-        .human_device_producer()
+        .account_device_producer()
         .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?
         .is_some()
     {

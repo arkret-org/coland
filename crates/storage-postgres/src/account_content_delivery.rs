@@ -1464,7 +1464,11 @@ pub(crate) async fn acquire(
         })
         .await;
     }
-    if !input.stream_scans.is_empty() || !input.keypackage_claims.is_empty() {
+    if !input.stream_scans.is_empty()
+        || !input.keypackage_claims.is_empty()
+        || !input.mls_group_material_reads.is_empty()
+        || !input.mls_roster_reads.is_empty()
+    {
         return Err(PersistenceError::Conflict(
             "capability_denied: stream delivery requires its exact native consumer".into(),
         ));

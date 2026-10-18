@@ -47,7 +47,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, TimeZone, Utc};
 use coland_domain::reducer::mls::KeyPackageTrustBinding;
 use coland_http::error::AppError;
-use coland_http::result::{JsonResult, json_ok};
+use coland_http::result::{GuardedJsonResult, JsonResult, guarded_json_ok, json_ok};
 use coland_services::events::{
     ClaimMlsKeyPackageCommand, ClaimMlsKeyPackageTarget, MlsKeyPackageState as MlsKeyPackageRow,
     PeerKeyPackageClaimCommand as PeerKeyPackageClaimAttempt,
@@ -383,7 +383,7 @@ fn mls_group_state_material_revision_unavailable() -> AppError {
     )
 }
 
-/// A member's Account Station checks the exact session Actor and the current
+/// A member's Account Station checks the exact authenticated Actor and the current
 /// and target membership cut before asking governance for the public bytes.
 /// Governance independently repeats that check for the signed peer request.
 #[salvo::oapi::endpoint(operation_id = "ak.self.mls.read.group_state_material", tags("mls.rs"))]
@@ -393,20 +393,46 @@ async fn resolve_self_mls_group_state_material(
     body: JsonBody<arkret_models_collaboration::mls_group_state_material::MlsMemberGroupStateMaterialReadRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialOutcome>
-{
+) -> GuardedJsonResult<
+    arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialOutcome,
+> {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
-    let caller =
-        crate::routing::identity::session_actor::validated_session_actor(state, &session).await?;
     let request = body.into_inner();
     request
         .validate()
         .map_err(|error| mls_group_state_material_schema_violation(error.to_string()))?;
-    if request.caller_actor_id != caller || caller.route_service_id() != &state.service_core_id() {
-        return Err(mls_group_state_material_not_found());
-    }
-    json_ok(read_member_group_state_material(state, &request).await?)
+    let guard = if let Ok(device) = depot.get_typed::<
+        crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice,
+    >() {
+        if device.operation != arkret_wire::ServiceOperationId::SelfMlsReadGroupStateMaterialV1
+            || request.caller_actor_id != arkret_wire::ActorId::account(device.authority.account_id.clone())
+            || request.caller_actor_id.route_service_id() != &state.service_core_id()
+            || request.effective_scope != device.metadata.effective_scope
+            || request.effective_scope.realm_id() != &request.realm_id
+        {
+            return Err(mls_group_state_material_not_found());
+        }
+        Some(crate::routing::identity::applet_managed_device::content_delivery_guard_for_input(
+            state,
+            device,
+            coland_storage::AccountContentDeliveryInput {
+                realms: vec![request.realm_id.clone()],
+                mls_group_material_reads: vec![request.clone()],
+                ..Default::default()
+            },
+        ).await?)
+    } else {
+        let session = aa.authenticated_session(state, req).await?;
+        let caller = crate::routing::identity::session_actor::validated_session_actor(state, &session).await?;
+        if request.caller_actor_id != caller || caller.route_service_id() != &state.service_core_id() {
+            return Err(mls_group_state_material_not_found());
+        }
+        None
+    };
+    guarded_json_ok(
+        read_member_group_state_material(state, &request).await?,
+        guard,
+    )
 }
 
 pub(crate) async fn read_member_group_state_material(

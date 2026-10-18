@@ -1502,6 +1502,13 @@ pub struct AccountContentDeliveryInput {
     /// Exact immutable claim response and the real native endpoints whose
     /// current material permission must remain held through this handoff.
     pub keypackage_claims: Vec<crate::MlsKeyPackageClaimDelivery>,
+    /// Exact member selectors for public MLS material at the native handoff cut.
+    pub mls_group_material_reads: Vec<
+        arkret_models_collaboration::mls_group_state_material::MlsMemberGroupStateMaterialReadRequestBody,
+    >,
+    pub mls_roster_reads: Vec<
+        arkret_models_collaboration::mls_roster_authority::MlsMemberRosterAuthorityReadRequestBody,
+    >,
     /// Exact prepared scan and original SDK response, re-read on the held cut.
     pub stream_scans: Vec<(
         arkret_wire::StreamScanRequest,

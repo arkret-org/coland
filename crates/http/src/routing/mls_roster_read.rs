@@ -100,7 +100,8 @@ fn self_json_page(
     request: &MlsRosterAuthorityReadRequestBody,
     authority: &DidCoreId,
     resolution: &arkret_models_identity::AuthenticatedServiceResolution,
-) -> JsonResult<serde_json::Value> {
+    guard: Option<Box<dyn coland_storage::AccountContentDeliveryGuard>>,
+) -> GuardedJsonResult<serde_json::Value> {
     for record in &page.records {
         if let arkret_models_collaboration::mls_roster_authority::MlsRosterRecord::Add {
             proposal_wire_b64u,
@@ -124,7 +125,10 @@ fn self_json_page(
     let projected =
         arkret::project_mls_self_roster_authority_page(page, request, authority, &head, resolution)
             .map_err(|_| unavailable())?;
-    json_ok(serde_json::to_value(projected).map_err(|_| unavailable())?)
+    guarded_json_ok(
+        serde_json::to_value(projected).map_err(|_| unavailable())?,
+        guard,
+    )
 }
 
 async fn recheck_self_cut(
@@ -169,11 +173,8 @@ pub(super) async fn resolve_self_mls_roster_authority(
     aa: AuthArgs,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<serde_json::Value> {
+) -> GuardedJsonResult<serde_json::Value> {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
-    let caller =
-        crate::routing::identity::session_actor::validated_session_actor(state, &session).await?;
     let member_request = req
         .parse_json::<MlsMemberRosterAuthorityReadRequestBody>()
         .await
@@ -181,11 +182,36 @@ pub(super) async fn resolve_self_mls_roster_authority(
     member_request
         .validate()
         .map_err(|_| crate::app_error!(SchemaViolation, "invalid MLS member roster selector",))?;
-    if member_request.caller_actor_id != caller
-        || caller.route_service_id() != &state.service_core_id()
-    {
-        return Err(not_found());
-    }
+    let guard = if let Ok(device) = depot.get_typed::<
+        crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice,
+    >() {
+        if device.operation != arkret_wire::ServiceOperationId::SelfMlsReadRosterAuthorityV1
+            || member_request.caller_actor_id != arkret_wire::ActorId::account(device.authority.account_id.clone())
+            || member_request.caller_actor_id.route_service_id() != &state.service_core_id()
+            || member_request.effective_scope != device.metadata.effective_scope
+            || member_request.effective_scope.realm_id() != &member_request.realm_id
+        {
+            return Err(not_found());
+        }
+        Some(crate::routing::identity::applet_managed_device::content_delivery_guard_for_input(
+            state,
+            device,
+            coland_storage::AccountContentDeliveryInput {
+                realms: vec![member_request.realm_id.clone()],
+                mls_roster_reads: vec![member_request.clone()],
+                ..Default::default()
+            },
+        ).await?)
+    } else {
+        let session = aa.authenticated_session(state, req).await?;
+        let caller = crate::routing::identity::session_actor::validated_session_actor(state, &session).await?;
+        if member_request.caller_actor_id != caller
+            || caller.route_service_id() != &state.service_core_id()
+        {
+            return Err(not_found());
+        }
+        None
+    };
     let local = state.service_core_id();
     let (request, selected_governance) = match state
         .authority_commits()
@@ -230,7 +256,7 @@ pub(super) async fn resolve_self_mls_roster_authority(
             .await
             .map_err(|_| unavailable())?;
         recheck_self_cut(state, &member_request, &request, &authority).await?;
-        return self_json_page(page, &request, &authority.service_id, &resolution);
+        return self_json_page(page, &request, &authority.service_id, &resolution, guard);
     }
     if !matches!(authorized, Preflight::ForwardRequired) {
         return Err(unavailable());
@@ -284,7 +310,7 @@ pub(super) async fn resolve_self_mls_roster_authority(
         return Err(unavailable());
     }
     recheck_self_cut(state, &member_request, &request, &authority).await?;
-    self_json_page(page, &request, &authority.service_id, &resolution)
+    self_json_page(page, &request, &authority.service_id, &resolution, guard)
 }
 
 #[salvo::oapi::endpoint(

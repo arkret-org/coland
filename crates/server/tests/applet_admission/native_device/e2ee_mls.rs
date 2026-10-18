@@ -9,6 +9,9 @@ use coland_storage::MlsGroupCurrentStore as _;
 
 use super::*;
 
+#[path = "e2ee_mls_material_read.rs"]
+mod material_read;
+
 async fn public_material(fixture: &Fixture, bytes: Vec<u8>) -> arkret_wire::BlobRef {
     // Existing public objects are prerequisites here. Blob HTTP ingress is a
     // separate consumer; this test never seeds an accepted Genesis or group.
@@ -126,6 +129,7 @@ async fn bot_and_ghost_originate_real_genesis_and_typed_self_update_commit_witho
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Case {
     Accepted,
+    MaterialReads,
     QualifiedRefusal,
     MissingPair,
     ClosedParent,
@@ -401,6 +405,14 @@ async fn originate(ghost: bool, case: Case, circle: bool) {
         .unwrap()
         .unwrap();
     assert_eq!(current.value.epoch, 0);
+    if case == Case::MaterialReads {
+        native_phase(|| {
+            material_read::exercise(&fixture, &install, &authority, &key, &scope, &genesis)
+        })
+        .await;
+        return;
+    }
+
     let next_binding = MlsGovernanceBindingPayload::new(
         scope.clone(),
         Some(genesis.event_id.clone()),

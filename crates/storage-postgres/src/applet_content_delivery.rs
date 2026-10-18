@@ -26,6 +26,9 @@ use crate::capability_grant_current_results::{
     decode_authority_root, decode_row,
 };
 
+#[path = "applet_mls_material_delivery.rs"]
+mod mls_material;
+
 #[derive(QueryableByName)]
 struct JsonRow {
     #[diesel(sql_type=Jsonb)]
@@ -284,6 +287,16 @@ pub(crate) async fn acquire(
     endpoint: &AppletManagedDeviceScopeGuard,
     input: &AccountContentDeliveryInput,
 ) -> PersistenceResult<Option<Box<dyn AccountContentDeliveryGuard>>> {
+    let lanes = [
+        !input.committed_events.is_empty(),
+        !input.stream_scans.is_empty(),
+        !input.keypackage_claims.is_empty(),
+        !input.mls_group_material_reads.is_empty(),
+        !input.mls_roster_reads.is_empty(),
+    ]
+    .into_iter()
+    .filter(|active| *active)
+    .count();
     if &endpoint.authority.account_id != account
         || &account.station_id != station
         || !matches!(
@@ -292,12 +305,10 @@ pub(crate) async fn acquire(
         )
         || input.stream_scans.len() > 1
         || input.keypackage_claims.len() > 1
-        || (input.keypackage_claims.is_empty()
-            && input.stream_scans.is_empty()
-            && (input.committed_events.is_empty() || input.committed_events.len() > 64))
-        || (!input.keypackage_claims.is_empty()
-            && (!input.stream_scans.is_empty() || !input.committed_events.is_empty()))
-        || (!input.stream_scans.is_empty() && !input.committed_events.is_empty())
+        || input.mls_group_material_reads.len() > 1
+        || input.mls_roster_reads.len() > 1
+        || input.committed_events.len() > 64
+        || lanes != 1
         || !input.current_views.is_empty()
         || !input.projection_lists.is_empty()
         || !input.morph_lists.is_empty()
@@ -386,6 +397,45 @@ pub(crate) async fn acquire(
     .ok_or_else(|| refused("native read Device is unavailable"))?;
     if current != endpoint.authority {
         return Err(refused("native read Device instance changed"));
+    }
+    let material_proof = if let Some(request) = input.mls_group_material_reads.as_slice().first() {
+        Some(
+            crate::boxed_future(|| {
+                mls_material::group_state(
+                    held.connection(),
+                    station,
+                    endpoint,
+                    credential_expiry,
+                    request,
+                )
+            })
+            .await?,
+        )
+    } else if let Some(request) = input.mls_roster_reads.as_slice().first() {
+        Some(
+            crate::boxed_future(|| {
+                mls_material::roster(
+                    held.connection(),
+                    station,
+                    endpoint,
+                    credential_expiry,
+                    request,
+                )
+            })
+            .await?,
+        )
+    } else {
+        None
+    };
+    if let Some(proof) = material_proof {
+        if !proof.permits_at(chrono::Utc::now()) {
+            return Err(refused("native MLS material permission expired"));
+        }
+        return Ok(Some(Box::new(NativeDeliveryGuard {
+            held,
+            proofs: vec![proof],
+            endpoint_windows: Vec::new(),
+        })));
     }
     if let Some(claim) = input.keypackage_claims.as_slice().first() {
         let outcome = &claim.outcome;

@@ -466,7 +466,7 @@ pub(crate) async fn exact_current_result_in_connection(
             };
             let value: arkret_wire::CalendarScheduleSourceValue =
                 serde_json::from_value(row.value).map_err(PersistenceError::database)?;
-            match crate::moderation_report_current_results::ensure_scope_member(
+            match crate::moderation_report_current_results::ensure_scope_member_snapshot(
                 conn,
                 &request.realm_id,
                 &value.effective_scope,
@@ -872,7 +872,7 @@ async fn moderation_state_read(
                 realm_id: realm_id.clone(),
                 circle_id: circle_id.clone(),
             };
-            match crate::moderation_report_current_results::ensure_scope_member(
+            match crate::moderation_report_current_results::ensure_scope_member_snapshot(
                 conn, realm_id, &scope, caller,
             )
             .await

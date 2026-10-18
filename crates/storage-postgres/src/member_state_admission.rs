@@ -273,21 +273,43 @@ pub(crate) async fn locked_membership(
         ),
     )
     .await?;
-    Ok(sql_query(
-        "SELECT m.membership FROM member_state_current_results m \
+    membership_at_cut(conn, realm_id, member, true).await
+}
+
+/// Membership from the caller's existing repeatable-read snapshot, without
+/// admission locks. The same accepted Commit binding remains mandatory.
+pub(crate) async fn snapshot_membership(
+    conn: &mut AsyncPgConnection,
+    realm_id: &arkret_wire::RealmId,
+    member: &arkret_wire::ActorId,
+) -> PersistenceResult<String> {
+    membership_at_cut(conn, realm_id, member, false).await
+}
+
+async fn membership_at_cut(
+    conn: &mut AsyncPgConnection,
+    realm_id: &arkret_wire::RealmId,
+    member: &arkret_wire::ActorId,
+    lock: bool,
+) -> PersistenceResult<String> {
+    let base = "SELECT m.membership FROM member_state_current_results m \
          JOIN realm_commits c ON c.commit_id=m.current_commit_id \
          WHERE m.realm_id=$1 AND m.member_id=$2 \
            AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position \
-           AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=m.realm_id \
-         FOR UPDATE OF m",
-    )
-    .bind::<Text, _>(realm_id.as_str())
-    .bind::<Text, _>(&member_key)
-    .get_result::<MembershipRow>(&mut *conn)
-    .await
-    .optional()
-    .map_err(PersistenceError::database)?
-    .map_or_else(|| "leave".to_owned(), |row| row.membership))
+           AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=m.realm_id";
+    let query = if lock {
+        format!("{base} FOR UPDATE OF m")
+    } else {
+        base.to_owned()
+    };
+    Ok(sql_query(query)
+        .bind::<Text, _>(realm_id.as_str())
+        .bind::<Text, _>(member.to_string())
+        .get_result::<MembershipRow>(&mut *conn)
+        .await
+        .optional()
+        .map_err(PersistenceError::database)?
+        .map_or_else(|| "leave".to_owned(), |row| row.membership))
 }
 
 #[derive(diesel::QueryableByName)]

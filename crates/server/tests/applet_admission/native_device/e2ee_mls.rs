@@ -13,6 +13,8 @@ use super::*;
 mod current_read;
 #[path = "e2ee_mls_material_read.rs"]
 mod material_read;
+#[path = "e2ee_native_committer.rs"]
+mod native_committer;
 
 async fn public_material(fixture: &Fixture, bytes: Vec<u8>) -> arkret_wire::BlobRef {
     // Existing public objects are prerequisites here. Blob HTTP ingress is a
@@ -133,6 +135,7 @@ enum Case {
     Accepted,
     MaterialReads,
     ExactCurrentReads,
+    AddWelcome,
     QualifiedRefusal,
     MissingPair,
     ClosedParent,
@@ -420,6 +423,15 @@ async fn originate(ghost: bool, case: Case, circle: bool) {
         .unwrap()
         .unwrap();
     assert_eq!(current.value.epoch, 0);
+    if case == Case::AddWelcome {
+        native_phase(|| {
+            native_committer::exercise(
+                &fixture, &install, &authority, &key, &scope, &child, &mut group,
+            )
+        })
+        .await;
+        return;
+    }
     if case == Case::MaterialReads {
         native_phase(|| {
             material_read::exercise(&fixture, &install, &authority, &key, &scope, &genesis)

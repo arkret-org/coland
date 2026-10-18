@@ -10,7 +10,7 @@ mod targets;
 mod input;
 
 #[path = "e2ee_keypackage_claim.rs"]
-mod claim;
+pub(super) mod claim;
 #[path = "e2ee_keypackage_revoke.rs"]
 mod revoke;
 
@@ -245,7 +245,7 @@ fn sign_upload(
     body
 }
 
-fn fresh_upload(
+pub(super) fn fresh_upload(
     identity: &arkret_mls::ArkretMlsIdentity,
     method: &str,
     key: &SigningKey,

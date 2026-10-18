@@ -22,7 +22,7 @@ use crate::{
 };
 
 #[path = "account_device_forward_source.rs"]
-mod forward_source;
+pub(crate) mod forward_source;
 
 fn retention_transaction_error(error: PgTransactionError) -> PersistenceError {
     match error {
@@ -81,7 +81,7 @@ pub struct PgAccountDeviceSignerEvidenceArchive {
 
 #[async_trait::async_trait]
 impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
-    async fn prepare_forward_current(
+    async fn prepare_non_managed_forward_current(
         &self,
         event: &arkret_wire::Event,
         destination: &arkret_wire::DidCoreId,
@@ -113,6 +113,19 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
                 &first.authority.realm_id,
             )
             .await?;
+            if crate::pcr_applet_device_authority::for_event_in_connection(
+                conn,
+                event,
+                chrono::Utc::now(),
+            )
+            .await?
+            .is_some()
+            {
+                return Err(PersistenceError::Conflict(
+                    "invalid_request: this branch forbids managed producer provenance".into(),
+                )
+                .into());
+            }
             // Capture attested_at after the actual writer wait, never before it.
             forward_source::prepare_in_connection(
                 conn,
@@ -125,6 +138,95 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
         })
         .await
         .map_err(retention_transaction_error)
+    }
+
+    async fn prepare_forward_request(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+        destination: &arkret_wire::DidCoreId,
+        managed_service: Option<&arkret_models_identity::AuthenticatedServiceResolution>,
+    ) -> PersistenceResult<Option<coland_storage::PreparedAccountDeviceForwardSource>> {
+        let event = crate::managed_forward_source::event(request)?;
+        if event
+            .account_device_producer()
+            .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::managed_forward_source::lock_source(conn, event).await?;
+            let at = forward_source::now();
+            let managed =
+                crate::managed_forward_source::prepare(conn, event, managed_service, at).await?;
+            let bound = crate::managed_forward_source::bind(request, managed.clone());
+            let digest = crate::managed_forward_source::digest(&bound)?;
+            let device =
+                forward_source::prepare_in_connection(conn, event, destination, &digest, at)
+                    .await?;
+            Ok(device.map(
+                |device| coland_storage::PreparedAccountDeviceForwardSource { device, managed },
+            ))
+        })
+        .await
+        .map_err(retention_transaction_error)
+    }
+
+    async fn retain_forward_request(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+    ) -> PersistenceResult<SignerEvidenceRef> {
+        request.validate().map_err(|error| {
+            PersistenceError::Conflict(format!(
+                "{}: {error}",
+                error
+                    .error_code()
+                    .unwrap_or(arkret_wire::ErrorCode::SchemaViolation)
+            ))
+        })?;
+        let event = crate::managed_forward_source::event(request)?;
+        let evidence = crate::managed_forward_source::device(request)?;
+        let managed = crate::managed_forward_source::managed(request);
+        let digest = crate::managed_forward_source::digest(request)?;
+        let core = &evidence.device_projection_attestation.attestation;
+        let source = &core.event_authorization;
+        let fact=arkret_identity::account_device_signer_evidence::verify_forwarded_account_device_signer_fact(
+            evidence,event,&core.account_id.station_id,&source.destination_service_id,&digest,
+            event.realm_id.digest_suite_code().digest_suite(),core.attested_at,
+        ).map_err(|e|PersistenceError::SchemaViolation(e.to_string()))?.into_fact();
+        let reference = coland_storage::forwarded_producer_device_evidence_ref(evidence)?;
+        let body = serde_json::to_value(evidence).map_err(PersistenceError::database)?;
+        let provenance = managed
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(PersistenceError::database)?;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_,PgTransactionError,_>(async |conn| {
+            crate::managed_forward_source::lock_source(conn,event).await?;
+            for final_check in [false,true] {
+                let prepared=crate::managed_forward_source::prepare(conn,event,managed.map(|v|&v.service_resolution),core.attested_at).await?;
+                let current=forward_source::prepare_in_connection(conn,event,&source.destination_service_id,&digest,core.attested_at).await?;
+                if prepared.as_ref()!=managed || current.as_ref()!=Some(core) {
+                    return Err(PersistenceError::Conflict("device_unauthorized: origin Device or managed current changed before durable publication".into()).into());
+                }
+                if !final_check {
+                    sql_query("INSERT INTO account_device_signer_evidence(evidence_ref,principal_id,station_id,device_id,authorization_event_id,authorization_commit_id,attested_at,evidence_json,managed_provenance_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(evidence_ref) DO NOTHING")
+                        .bind::<Text,_>(reference.as_ref()).bind::<Text,_>(core.account_id.principal_id.as_str()).bind::<Text,_>(core.account_id.station_id.as_str())
+                        .bind::<Text,_>(core.device_id.as_str()).bind::<Text,_>(fact.key.authorization_ref.event_id.as_str()).bind::<Text,_>(fact.key.authorization_ref.commit_id.as_str())
+                        .bind::<Timestamptz,_>(core.attested_at).bind::<Jsonb,_>(&body).bind::<diesel::sql_types::Nullable<Jsonb>,_>(&provenance).execute(&mut *conn).await?;
+                    #[derive(QueryableByName)]
+                    struct Stored { #[diesel(sql_type=Jsonb)] value:Value }
+                    let stored=sql_query("SELECT jsonb_build_object('evidence',evidence_json,'managed',managed_provenance_json) AS value FROM account_device_signer_evidence WHERE evidence_ref=$1 FOR SHARE")
+                        .bind::<Text,_>(reference.as_ref()).get_result::<Stored>(&mut *conn).await?;
+                    if stored.value!=serde_json::json!({"evidence":body,"managed":provenance}) {
+                        return Err(PersistenceError::Conflict("duplicate_conflict: origin forward source archive collision".into()).into());
+                    }
+                }
+            }
+            Ok(())
+        }).await.map_err(retention_transaction_error)?;
+        Ok(reference)
     }
 
     async fn forwarded_bound_account_device_signer_fact(
@@ -258,6 +360,10 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
                 return Err(PersistenceError::SchemaViolation("forward source has no original PCR Realm stream".into()).into());
             };
             crate::realm_authorization_cut::lock_realm_authorization_cut(conn, realm_id).await?;
+
+            if crate::pcr_applet_device_authority::for_event_in_connection(conn, event, chrono::Utc::now()).await?.is_some() {
+                return Err(PersistenceError::Conflict("invalid_request: this branch forbids managed producer provenance".into()).into());
+            }
 
             let prepared = forward_source::prepare_in_connection(
                 conn, event, &source.destination_service_id, &source.forward_body_digest, core.attested_at,
@@ -610,10 +716,16 @@ pub(crate) async fn retain_forwarded_producer_evidence_in_connection(
         .as_str()
         .ok_or_else(|| invalid("signer evidence ref is not a string"))?;
     let body = serde_json::to_value(&retained.evidence).map_err(PersistenceError::database)?;
+    let managed = retained
+        .managed
+        .as_ref()
+        .map(|s| serde_json::to_value(s.verified().original()))
+        .transpose()
+        .map_err(PersistenceError::database)?;
     sql_query(
         "INSERT INTO forwarded_producer_device_evidence \
-         (commit_id,evidence_ref,principal_id,station_id,device_id,attested_at,evidence_json) \
-         VALUES($1,$2,$3,$4,$5,$6,$7)",
+         (commit_id,evidence_ref,principal_id,station_id,device_id,attested_at,evidence_json,managed_provenance_json) \
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
     )
     .bind::<Text, _>(commit.commit_id.as_str())
     .bind::<Text, _>(reference_text)
@@ -622,6 +734,7 @@ pub(crate) async fn retain_forwarded_producer_evidence_in_connection(
     .bind::<Text, _>(core.device_id.as_str())
     .bind::<Timestamptz, _>(core.attested_at)
     .bind::<Jsonb, _>(&body)
+    .bind::<diesel::sql_types::Nullable<Jsonb>, _>(&managed)
     .execute(&mut *conn)
     .await
     .map_err(PersistenceError::database)?;

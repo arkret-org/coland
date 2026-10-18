@@ -784,6 +784,7 @@ pub(crate) async fn admit_member_state_in_connection(
     commit: &arkret_wire::RealmCommit,
     review: Option<&crate::agent_management_review::ReviewAdmission>,
     prepared: Option<&coland_storage::EventApprovalCommit>,
+    forwarded: Option<&coland_storage::ForwardedManagedActorSource>,
 ) -> PersistenceResult<()> {
     if event.kind != arkret_wire::EventKind::MemberState {
         return Ok(());
@@ -791,14 +792,16 @@ pub(crate) async fn admit_member_state_in_connection(
     require_realm_stream_carrier(event, commit)?;
     lock_realm_authorization_cut(conn, &event.realm_id).await?;
     if event.applet_id.is_some() {
-        crate::managed_message_actor::require_managed_actor_in_connection(
+        crate::managed_message_actor::require_managed_actor_with_source(
             conn,
             event,
             commit.committed_at,
+            forwarded,
         )
         .await?;
         RealmAuthorizationCut::read(conn, &event.realm_id, &event.actor_id)
             .await?
+            .with_forwarded_managed(forwarded)
             .require_managed_self_action_in_connection(conn, event, commit, prepared)
             .await?;
     }

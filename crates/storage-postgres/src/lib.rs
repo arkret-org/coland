@@ -115,6 +115,8 @@ mod issued_realm_snapshots;
 mod key_backup;
 mod key_backup_current_results;
 mod key_backup_unlock;
+mod managed_forward_admission;
+mod managed_forward_source;
 mod managed_message_actor;
 mod member_identity;
 mod member_identity_current_results;

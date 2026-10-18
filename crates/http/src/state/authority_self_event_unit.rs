@@ -92,6 +92,19 @@ pub(super) enum AdmittedProducer {
     ForwardedAgent(Box<arkret_identity::agent_authority_evidence::VerifiedAgentProducer>),
 }
 
+impl AdmittedProducer {
+    pub(super) fn is_managed_device(&self) -> bool {
+        match self {
+            Self::Local(guard) => matches!(
+                guard.as_ref(),
+                SelfProducerCommitGuard::AppletManagedDevice(_)
+            ),
+            Self::Forwarded(evidence) => evidence.managed.is_some(),
+            _ => false,
+        }
+    }
+}
+
 /// Kind-specific durable effects committed atomically with the Event.
 #[derive(Default)]
 pub(super) struct SelfEventUnitEffects {
@@ -388,7 +401,7 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             || decided_at_commit_cut(&event.kind)
             || poll_at_cut
             || (event.kind == arkret_wire::EventKind::MessageCreate
-                && matches!(&producer,AdmittedProducer::Local(guard) if matches!(guard.as_ref(),coland_storage::SelfProducerCommitGuard::AppletManagedDevice(_))));
+                && producer.is_managed_device());
         if !decided_at_cut {
             Box::pin(
                 crate::routing::events::operations::validate_operation_policy(

@@ -250,6 +250,41 @@ impl ColandDidResolver {
         &self,
         did: &Did,
     ) -> Result<arkret_identity::VerifiedDidWebvhLog, String> {
+        let (log_body, witness_body) = self.fetch_webvh_material(did).await?;
+        verify_did_webvh_v1_chain_and_witness_bytes(did, &log_body, witness_body.as_deref())
+            .map(|verified| verified.log)
+            .map_err(|error| format!("did:webvh history verification failed: {error}"))
+    }
+
+    /// Preserve native witness proofs when forwarding authenticated Service history.
+    pub(crate) async fn fetch_authenticated_service_resolution(
+        &self,
+        did: &Did,
+        service_id: arkret_wire::DidCoreId,
+        service_kind: arkret_wire::ServiceKind,
+    ) -> Result<arkret_models_identity::AuthenticatedServiceResolution, String> {
+        let (log_body, witness_body) = self.fetch_webvh_material(did).await?;
+        let verified =
+            verify_did_webvh_v1_chain_and_witness_bytes(did, &log_body, witness_body.as_deref())
+                .map_err(|error| error.to_string())?;
+        let witnesses = witness_body
+            .as_deref()
+            .map(serde_json::from_slice::<Vec<Value>>)
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .unwrap_or_default();
+        arkret_identity::build_authenticated_webvh_service_resolution(
+            service_id,
+            service_kind.as_str().to_owned(),
+            serde_json::from_value(verified.log.head_state).map_err(|error| error.to_string())?,
+            verified.log.raw_entries,
+            witnesses,
+            crate::wire::now(),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    async fn fetch_webvh_material(&self, did: &Did) -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
         if !self.method_allowed("webvh") {
             return Err("did:webvh method is disabled by resolver policy".to_owned());
         }
@@ -294,9 +329,7 @@ impl ColandDidResolver {
         } else {
             None
         };
-        verify_did_webvh_v1_chain_and_witness_bytes(did, &log_body, witness_body.as_deref())
-            .map(|verified| verified.log)
-            .map_err(|error| format!("did:webvh history verification failed: {error}"))
+        Ok((log_body, witness_body))
     }
 
     fn webvh_url_for_environment(&self, raw_url: String) -> Result<String, String> {

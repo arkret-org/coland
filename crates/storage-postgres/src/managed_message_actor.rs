@@ -755,6 +755,28 @@ fn exact_ref(event: &Event, role: &str) -> PersistenceResult<EventId> {
     refs[0].id.as_str().parse().map_err(denied)
 }
 
+pub(crate) async fn require_managed_actor_with_source(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    at: chrono::DateTime<chrono::Utc>,
+    source: Option<&coland_storage::ForwardedManagedActorSource>,
+) -> PersistenceResult<()> {
+    let Some(source) = source else {
+        return require_managed_actor_in_connection(conn, event, at).await;
+    };
+    source.ensure_event(event, at)?;
+    let registration = registration(conn, event).await?;
+    if source.provision().applet_id != registration.applet_id
+        || source.provision().service_id != registration.service_id
+        || event.payload.contains_key("agent_context")
+    {
+        return Err(denied(
+            "verified managed provenance differs from current registration",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn require_managed_actor_in_connection(
     conn: &mut AsyncPgConnection,
     event: &Event,

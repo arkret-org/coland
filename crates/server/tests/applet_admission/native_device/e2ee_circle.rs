@@ -221,7 +221,7 @@ async fn circle_actor(
             &key,
             &event,
             "Circle pair lacks domain action",
-            Some("capability_denied"),
+            Some("device_unauthorized"),
         )
     })
     .await;

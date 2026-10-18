@@ -61,6 +61,13 @@ async fn historical_method_key(
     if document.id != did {
         return Err(unavailable("historical authority DID document id mismatch"));
     }
+    arkret_identity::validate_verification_method_relationship(
+        &document,
+        method,
+        &did,
+        arkret_identity::DidVerificationRelationship::AssertionMethod,
+    )
+    .map_err(unavailable)?;
     let multibase = document
         .verification_methods
         .get(method.as_str())

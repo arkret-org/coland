@@ -4438,32 +4438,13 @@ pub async fn assert_member_identity_store_contract(
 /// Shared behaviour every `InviteNewSourceLedgerStore` backend must reproduce
 /// (`identity/consent-model.md` sections 6.1.1.3 and 6.1.1.4).
 ///
-/// The two backends have completely different concurrency stories -- one lock
-/// versus one PostgreSQL transaction -- so the ledger contract has to be proved
-/// on both rather than on the in-memory one alone.
+/// The caller supplies a holder with real accepted private authority; a bare
+/// account row cannot authorize retention of another principal's contact source.
 pub async fn assert_invite_new_source_ledger_contract(
     ledger: &dyn super::InviteNewSourceLedgerStore,
-    accounts: &dyn super::AccountStore,
+    holder: &arkret_wire::AccountId,
     namespace: &str,
 ) {
-    let holder = arkret_wire::AccountId::new(
-        DidCoreId::new(format!("ak:did_core:web:{namespace}.example")).unwrap(),
-        DidCoreId::new("ak:did_core:web:coland.example").unwrap(),
-    );
-    accounts
-        .put(&super::AccountRecord {
-            pk: AccountPk(0),
-            principal_id: holder.principal_id.clone(),
-            station_id: holder.station_id.clone(),
-            localpart: String::new(),
-            display_name: None,
-            bio: None,
-            avatar_blob_ref: None,
-            created_at: database_timestamp_now(),
-        })
-        .await
-        .expect("register new-source ledger holder");
-
     let now = database_timestamp_now();
     let quota = arkret_wire::receive_policy::EffectiveNewSourceQuota {
         window_seconds: 3_600,

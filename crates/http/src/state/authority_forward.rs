@@ -39,7 +39,7 @@ fn temporarily_unavailable(detail: impl std::fmt::Display) -> ServiceError {
     ))
 }
 
-fn wire_refusal(error: arkret_wire::WireError) -> ServiceError {
+pub(super) fn wire_refusal(error: arkret_wire::WireError) -> ServiceError {
     ServiceError::protocol(
         error.error_code().unwrap_or(ErrorCode::SchemaViolation),
         error,
@@ -202,6 +202,38 @@ pub(super) fn resolve_service_producer(
     Ok(None)
 }
 
+fn is_native_device(event: &arkret_wire::Event) -> bool {
+    event.applet_id.is_some()
+        && event.executed_by.is_none()
+        && event.actor_id.as_account_id().is_some()
+}
+
+fn require_native_origin(
+    peer: &AuthenticatedPeerContext,
+    event: &arkret_wire::Event,
+) -> ServiceResult<()> {
+    if is_native_device(event)
+        && event
+            .actor_id
+            .as_account_id()
+            .is_some_and(|account| account.station_id != peer.source_service_id)
+    {
+        return Err(ServiceError::Conflict(
+            "capability_denied: native forwarding peer is not the producer Account Station".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn refuse_bare_native_mls(event: &arkret_wire::Event) -> ServiceResult<()> {
+    if is_native_device(event) && event.kind == arkret_wire::EventKind::MlsCommit {
+        return Err(ServiceError::SchemaViolation(
+            "native MLS requires the complete MlsCommitSubmission".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// B: admit one forwarded ordinary Event at `now`.
 pub(crate) async fn admit_forwarded_event(
     state: &AppState,
@@ -210,6 +242,8 @@ pub(crate) async fn admit_forwarded_event(
     now: DateTime<Utc>,
 ) -> ServiceResult<AuthoritySubmitOutcome> {
     let event = &request.event_submission.event;
+    require_native_origin(peer, event)?;
+    refuse_bare_native_mls(event)?;
     super::authority_port::refuse_actor_private_event(&event.kind)?;
     if request.is_native_pcr_candidate()
         && state
@@ -224,16 +258,46 @@ pub(crate) async fn admit_forwarded_event(
         return Ok(outcome);
     }
     request.validate().map_err(wire_refusal)?;
-    let (producer, key) = resolve_forwarded_producer(
+    let managed = super::authority_forward_managed::verify(
         state,
         peer,
-        event,
-        request.producer_device_evidence.as_ref(),
-        request.producer_agent_evidence.as_ref(),
-        &arkret_models_collaboration::authority_commit::authority_forward_body_digest(&request)
-            .map_err(wire_refusal)?,
+        &PeerAuthoritySubmitRequest::AuthorityForwardEvent(request.clone()),
         now,
-    )?;
+    )
+    .await?;
+    let (producer, key) = if let Some(retained) = managed {
+        let key = forwarded_producer_key(Some(&retained.evidence))?;
+        (
+            super::authority_self_event_unit::AdmittedProducer::Forwarded(Box::new(retained)),
+            key,
+        )
+    } else {
+        resolve_forwarded_producer(
+            state,
+            peer,
+            event,
+            request.producer_device_evidence.as_ref(),
+            request.producer_agent_evidence.as_ref(),
+            &arkret_models_collaboration::authority_commit::authority_forward_body_digest(&request)
+                .map_err(wire_refusal)?,
+            now,
+        )?
+    };
+
+    if producer.is_managed_device()
+        && matches!(
+            event.kind,
+            arkret_wire::EventKind::ProfileCreate | arkret_wire::EventKind::ProfileUpdate
+        )
+    {
+        return super::authority_self_event_unit::commit_event_unit(
+            state,
+            &request.event_submission,
+            producer,
+            super::authority_self_event_unit::SelfEventUnitEffects::default(),
+        )
+        .await;
+    }
     if let Some(outcome) = super::authority_port::refuse_unrouted_event(state, event).await? {
         return Ok(outcome);
     }
@@ -269,36 +333,87 @@ pub(crate) async fn admit_forwarded_event(
 /// B: admit one forwarded MLS Commit submission at `now`. The Commit Event's
 /// producer is verified exactly like an ordinary Event, then the Commit and
 /// every Welcome enter the same MLS unit as a self submission.
-pub(super) async fn admit_forwarded_mls(
+pub(crate) async fn admit_forwarded_mls(
     state: &AppState,
     peer: &AuthenticatedPeerContext,
     request: PeerAuthorityForwardMlsRequest,
     now: DateTime<Utc>,
 ) -> ServiceResult<AuthoritySubmitOutcome> {
     let event = &request.mls_submission.commit_event;
+    require_native_origin(peer, event)?;
+    let native = event.applet_id.is_some()
+        && event.executed_by.is_none()
+        && event.actor_id.as_account_id().is_some();
+    let native_request = if native {
+        super::authority_managed_device::mls::NativeMlsRequest::from_request(
+            &SelfAuthoritySubmitRequest::MlsCommit(request.mls_submission.clone()),
+        )?
+    } else {
+        None
+    };
+    if let Some(context) = native_request.as_ref() {
+        if let Some(original) = context.replay(state).await? {
+            return match original {arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::Ordinary(outcome)=>Ok(outcome),_=>Err(ServiceError::internal("native MLS stored an incompatible outcome"))};
+        }
+    }
     if let Some(outcome) = super::authority_self_event_unit::exact_replay(state, event).await? {
+        if native {
+            return Err(ServiceError::Conflict(
+                "duplicate_conflict: native forwarded MLS differs from its accepted complete unit"
+                    .into(),
+            ));
+        }
         return Ok(outcome);
     }
     request.validate().map_err(wire_refusal)?;
-    let (producer, key) = resolve_forwarded_producer(
+    let managed = super::authority_forward_managed::verify(
         state,
         peer,
-        event,
-        request.producer_device_evidence.as_ref(),
-        request.producer_agent_evidence.as_ref(),
-        &arkret_models_collaboration::authority_commit::authority_forward_body_digest(&request)
-            .map_err(wire_refusal)?,
+        &PeerAuthoritySubmitRequest::AuthorityForwardMls(request.clone()),
         now,
-    )?;
-    super::authority_mls_unit::admit_mls_event(
-        state,
-        event,
-        &request.mls_submission.welcomes,
-        None,
-        producer,
-        &key,
     )
-    .await
+    .await?;
+    let (producer, key) = if let Some(retained) = managed {
+        let key = forwarded_producer_key(Some(&retained.evidence))?;
+        (
+            super::authority_self_event_unit::AdmittedProducer::Forwarded(Box::new(retained)),
+            key,
+        )
+    } else {
+        resolve_forwarded_producer(
+            state,
+            peer,
+            event,
+            request.producer_device_evidence.as_ref(),
+            request.producer_agent_evidence.as_ref(),
+            &arkret_models_collaboration::authority_commit::authority_forward_body_digest(&request)
+                .map_err(wire_refusal)?,
+            now,
+        )?
+    };
+
+    if native {
+        super::authority_mls_unit::admit_native_mls_event(
+            state,
+            event,
+            &request.mls_submission.welcomes,
+            None,
+            producer,
+            &key,
+            native_request,
+        )
+        .await
+    } else {
+        super::authority_mls_unit::admit_mls_event(
+            state,
+            event,
+            &request.mls_submission.welcomes,
+            None,
+            producer,
+            &key,
+        )
+        .await
+    }
 }
 
 /// The attested device key a verified forwarded producer proof verified
@@ -392,8 +507,117 @@ async fn prepare_directory_device_evidence(
     Ok(Some(evidence))
 }
 
-/// Fresh registered forward sibling, independently signed over the complete wrapper.
-pub(crate) async fn fresh_producer_device_evidence(
+/// Freeze managed originals and Device authorization together before signing the full body.
+pub(crate) fn fresh_device_request<'a>(
+    state: &'a AppState,
+    destination: &'a DidCoreId,
+    request: &'a mut PeerAuthoritySubmitRequest,
+) -> impl std::future::Future<Output = ServiceResult<()>> + Send + 'a {
+    crate::boxed_future(move || fresh_device_request_inner(state, destination, request))
+}
+
+async fn fresh_device_request_inner(
+    state: &AppState,
+    destination: &DidCoreId,
+    request: &mut PeerAuthoritySubmitRequest,
+) -> ServiceResult<()> {
+    let event = match request {
+        PeerAuthoritySubmitRequest::AuthorityForwardEvent(v) => &v.event_submission.event,
+        PeerAuthoritySubmitRequest::AuthorityForwardMls(v) => &v.mls_submission.commit_event,
+        _ => {
+            return Err(ServiceError::SchemaViolation(
+                "Device source requires authority_forward".into(),
+            ));
+        }
+    };
+    let Some(producer) = event.account_device_producer().map_err(wire_refusal)? else {
+        return Ok(());
+    };
+    if producer.account_id.station_id != state.service_core_id() {
+        return Err(ServiceError::SchemaViolation(
+            "only the producer's Account Station may issue its forward source".into(),
+        ));
+    }
+    let history = match state
+        .persistence()
+        .applet_managed_event_producer(event, chrono::Utc::now())
+        .await?
+    {
+        Some(authority) => {
+            // This immutable local identity locates the original Service history.
+            // The foreign business installation belongs to the governor's cut.
+            let identity = crate::routing::extensions::applet_bridge::record::applet_identity(
+                state,
+                authority.applet_id.as_str(),
+                state.service_id(),
+            )
+            .await
+            .map_err(|e| temporarily_unavailable(e.message))?
+            .ok_or_else(|| temporarily_unavailable("original Applet identity is unavailable"))?;
+            if identity.initial_package.service_id != authority.source_service_id {
+                return Err(temporarily_unavailable(
+                    "original Applet Service identity differs",
+                ));
+            }
+            let epoch =
+                crate::routing::extensions::applet_bridge::registration_epoch_evidence_from_event(
+                    &identity.initial_registration_event,
+                )
+                .map_err(temporarily_unavailable)?;
+            let resolver = super::did_resolver_chain::build_coland_did_resolver(state.config());
+            Some(
+                resolver
+                    .fetch_authenticated_service_resolution(
+                        &epoch.did,
+                        authority.source_service_id,
+                        arkret_wire::ServiceKind::AppletService,
+                    )
+                    .await
+                    .map_err(temporarily_unavailable)?,
+            )
+        }
+        None => None,
+    };
+    let prepared = state
+        .persistence()
+        .prepare_forward_request(request, destination, history.as_ref())
+        .await?
+        .ok_or_else(|| temporarily_unavailable("locked origin source is unavailable"))?;
+    let service_resolution =
+        crate::routing::system::service_resolution::current_authenticated_service_resolution(state)
+            .await
+            .map_err(|e| temporarily_unavailable(e.message))?;
+    let attestation =
+        arkret_signatures::device_projection::sign_forward_device_projection_attestation(
+            prepared.device,
+            state
+                .service_verification_method("notary-key")
+                .map_err(ServiceError::internal)?,
+            state.notary_signing_key().as_ref(),
+        )
+        .map_err(wire_refusal)?;
+    let evidence = ForwardAccountDeviceSignerEvidence {
+        device_projection_attestation: attestation,
+        service_resolution,
+    };
+    match request {
+        PeerAuthoritySubmitRequest::AuthorityForwardEvent(v) => {
+            v.producer_managed_provenance = prepared.managed;
+            v.producer_device_evidence = Some(evidence);
+            v.validate().map_err(wire_refusal)?;
+        }
+        PeerAuthoritySubmitRequest::AuthorityForwardMls(v) => {
+            v.producer_managed_provenance = prepared.managed;
+            v.producer_device_evidence = Some(evidence);
+            v.validate().map_err(wire_refusal)?;
+        }
+        _ => unreachable!("checked forward branch"),
+    }
+    state.persistence().retain_forward_request(request).await?;
+    Ok(())
+}
+
+pub(crate) async fn fresh_non_managed_device_evidence(
     state: &AppState,
     event: &Event,
     destination: &DidCoreId,
@@ -424,7 +648,7 @@ pub(crate) async fn fresh_producer_device_evidence(
     }
     let Some(forward_core) = state
         .persistence()
-        .prepare_forward_current_signer_evidence(event, destination, body_digest)
+        .prepare_non_managed_forward_current_signer_evidence(event, destination, body_digest)
         .await?
     else {
         return Ok(None);
@@ -700,7 +924,7 @@ pub(crate) async fn forward_self_event(
     governance: &DidCoreId,
     submission: EventAdmissionSubmission,
 ) -> ServiceResult<AuthoritySubmitOutcome> {
-    forward_self_event_inner(state, governance, submission, None).await
+    crate::boxed_future(|| forward_self_event_inner(state, governance, submission, None)).await
 }
 
 pub(crate) async fn forward_self_event_with_session(
@@ -709,7 +933,8 @@ pub(crate) async fn forward_self_event_with_session(
     submission: EventAdmissionSubmission,
     session: &coland_services::identity::SessionIdentityState,
 ) -> ServiceResult<AuthoritySubmitOutcome> {
-    forward_self_event_inner(state, governance, submission, Some(session)).await
+    crate::boxed_future(|| forward_self_event_inner(state, governance, submission, Some(session)))
+        .await
 }
 
 async fn require_live_forward(state: &AppState, event: &arkret_wire::Event) -> ServiceResult<()> {
@@ -785,12 +1010,8 @@ async fn forward_self_event_inner(
     };
     request.producer_agent_evidence =
         fresh_producer_agent_evidence(state, &submission.event).await?;
-    let body_digest =
-        arkret_models_collaboration::authority_commit::authority_forward_body_digest(&request)
-            .map_err(wire_refusal)?;
-    request.producer_device_evidence =
-        fresh_producer_device_evidence(state, &submission.event, governance, &body_digest).await?;
-    request.validate().map_err(wire_refusal)?;
+    let mut request = PeerAuthoritySubmitRequest::AuthorityForwardEvent(request);
+    fresh_device_request(state, governance, &mut request).await?;
     let session = session.ok_or_else(|| {
         ServiceError::protocol(
             ErrorCode::Unauthenticated,
@@ -804,7 +1025,7 @@ async fn forward_self_event_inner(
     // later committed replica; neither path makes it visible as accepted.
     state
         .authority_commits()
-        .queue_event(&request.event_submission.event, crate::wire::now())
+        .queue_event(&submission.event, crate::wire::now())
         .await?;
 
     state
@@ -815,13 +1036,7 @@ async fn forward_self_event_inner(
             crate::wire::now(),
         )
         .await?;
-    send_forward(
-        state,
-        governance,
-        PeerAuthoritySubmitRequest::AuthorityForwardEvent(request),
-        session,
-    )
-    .await
+    send_forward(state, governance, request, session).await
 }
 
 /// A: forward one self-submitted MLS Commit; the Commit Event's producer
@@ -845,13 +1060,8 @@ pub(super) async fn forward_self_mls(
     };
     request.producer_agent_evidence =
         fresh_producer_agent_evidence(state, &submission.commit_event).await?;
-    let body_digest =
-        arkret_models_collaboration::authority_commit::authority_forward_body_digest(&request)
-            .map_err(wire_refusal)?;
-    request.producer_device_evidence =
-        fresh_producer_device_evidence(state, &submission.commit_event, governance, &body_digest)
-            .await?;
-    request.validate().map_err(wire_refusal)?;
+    let mut request = PeerAuthoritySubmitRequest::AuthorityForwardMls(request);
+    fresh_device_request(state, governance, &mut request).await?;
     require_live_forward(state, &submission.commit_event).await?;
     state
         .authority_commits()
@@ -866,13 +1076,150 @@ pub(super) async fn forward_self_mls(
             crate::wire::now(),
         )
         .await?;
-    send_forward(
-        state,
-        governance,
-        PeerAuthoritySubmitRequest::AuthorityForwardMls(request),
-        session,
-    )
-    .await
+    send_forward(state, governance, request, session).await
+}
+
+/// Assemble the same complete native unit for origin admission and transport.
+pub(crate) fn prepare_native_forward_request<'a>(
+    state: &'a AppState,
+    governance: &'a DidCoreId,
+    submission: &'a SelfAuthoritySubmitRequest,
+) -> impl std::future::Future<Output = ServiceResult<PeerAuthoritySubmitRequest>> + Send + 'a {
+    crate::boxed_future(move || prepare_native_forward_request_inner(state, governance, submission))
+}
+
+async fn prepare_native_forward_request_inner(
+    state: &AppState,
+    governance: &DidCoreId,
+    submission: &SelfAuthoritySubmitRequest,
+) -> ServiceResult<PeerAuthoritySubmitRequest> {
+    let event = match submission {
+        SelfAuthoritySubmitRequest::Event(v) => &v.event,
+        SelfAuthoritySubmitRequest::MlsCommit(v) => &v.commit_event,
+        _ => {
+            return Err(ServiceError::SchemaViolation(
+                "native forward requires an Event or complete MLS unit".into(),
+            ));
+        }
+    };
+    if matches!(submission, SelfAuthoritySubmitRequest::Event(_)) {
+        refuse_bare_native_mls(event)?;
+    }
+    let mut request=match submission {
+        SelfAuthoritySubmitRequest::Event(v)=>PeerAuthoritySubmitRequest::AuthorityForwardEvent(PeerAuthorityForwardEventRequest{
+            branch:arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,event_submission:v.clone(),
+            mls_genesis_material:forwarded_genesis_material(state,event).await?,producer_device_evidence:None,producer_managed_provenance:None,producer_agent_evidence:None,
+        }),
+        SelfAuthoritySubmitRequest::MlsCommit(v)=>PeerAuthoritySubmitRequest::AuthorityForwardMls(PeerAuthorityForwardMlsRequest{
+            branch:arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,mls_submission:v.clone(),
+            producer_device_evidence:None,producer_managed_provenance:None,producer_agent_evidence:None,
+        }),_=>unreachable!("checked native forward branch"),
+    };
+    fresh_device_request(state, governance, &mut request).await?;
+    Ok(request)
+}
+
+/// Session-free native ingress still sends the original Device-signed request.
+pub(super) async fn forward_managed(
+    state: &AppState,
+    governance: &DidCoreId,
+    submission: &SelfAuthoritySubmitRequest,
+) -> ServiceResult<AuthoritySubmitOutcome> {
+    let event = match submission {
+        SelfAuthoritySubmitRequest::Event(v) => &v.event,
+        SelfAuthoritySubmitRequest::MlsCommit(v) => &v.commit_event,
+        _ => {
+            return Err(ServiceError::SchemaViolation(
+                "native forward requires an ordinary Event or full MLS submission".into(),
+            ));
+        }
+    };
+    if let Some(queued) = state
+        .authority_commits()
+        .queued_event(&event.event_id)
+        .await?
+    {
+        if let Some(attempt) = queued.forward_attempt {
+            if attempt.original_submission.as_ref() != Some(submission) || queued.event != *event {
+                return Err(ServiceError::Conflict(
+                    "duplicate_conflict: native forward differs from its complete original".into(),
+                ));
+            }
+            if let Some(commit) = attempt.accepted_commit {
+                verify_forwarded_acknowledgement(state, governance, event, &commit).await?;
+                return Ok(AuthoritySubmitOutcome::Accepted {
+                    status: arkret_wire::AuthorityCommitStatus::Duplicate,
+                    commit,
+                });
+            }
+            if attempt.status != ForwardAttemptStatus::Rejected {
+                if let Some(request) = attempt.peer_request {
+                    return crate::boxed_future(|| {
+                        send_native_frozen(state, governance, event, &request)
+                    })
+                    .await;
+                }
+            }
+        }
+    }
+    require_live_forward(state, event).await?;
+    let request = prepare_native_forward_request(state, governance, submission).await?;
+    state
+        .authority_commits()
+        .queue_event(event, crate::wire::now())
+        .await?;
+    state
+        .authority_commits()
+        .retain_forwarded_submission(event, submission, crate::wire::now())
+        .await?;
+    require_live_forward(state, event).await?;
+    state.persistence().retain_forward_request(&request).await?;
+    let frozen = state
+        .authority_commits()
+        .freeze_forwarded_peer_request(event, &request, crate::wire::now())
+        .await?;
+    if frozen.as_ref() == &request {
+        if let Err(error) = state.persistence().retain_forward_request(&frozen).await {
+            let result = Err(ServiceError::from(error));
+            record_forward_result(state, event, &result, false).await?;
+            return result;
+        }
+    }
+    crate::boxed_future(|| send_native_frozen(state, governance, event, &frozen)).await
+}
+
+async fn send_native_frozen(
+    state: &AppState,
+    governance: &DidCoreId,
+    event: &Event,
+    request: &PeerAuthoritySubmitRequest,
+) -> ServiceResult<AuthoritySubmitOutcome> {
+    let mut accepted = false;
+    let result = async {
+        request.validate().map_err(wire_refusal)?;
+        let body =
+            arkret_canonical::canonical_json_bytes(request).map_err(temporarily_unavailable)?;
+        let response = crate::routing::federation::outbox::submit_authority_forward(
+            state,
+            governance.as_str(),
+            &body,
+        )
+        .await
+        .map_err(temporarily_unavailable)?;
+        let outcome = relay_governance_response(request, response)?;
+        if let AuthoritySubmitOutcome::Accepted { commit, .. } = &outcome {
+            accepted = true;
+            verify_forwarded_acknowledgement(state, governance, event, commit).await?;
+            state
+                .authority_commits()
+                .retain_forwarded_acceptance(event, commit, crate::wire::now())
+                .await?;
+        }
+        Ok(outcome)
+    }
+    .await;
+    record_forward_result(state, event, &result, accepted).await?;
+    result
 }
 
 /// Recover an exact frozen remote submission before today's producer admission.
@@ -1033,6 +1380,16 @@ pub(super) async fn validate_recovery_caller(
     Ok(())
 }
 
+fn forwarded_device(
+    request: &PeerAuthoritySubmitRequest,
+) -> Option<&ForwardAccountDeviceSignerEvidence> {
+    match request {
+        PeerAuthoritySubmitRequest::AuthorityForwardEvent(v) => v.producer_device_evidence.as_ref(),
+        PeerAuthoritySubmitRequest::AuthorityForwardMls(v) => v.producer_device_evidence.as_ref(),
+        _ => None,
+    }
+}
+
 async fn send_forward(
     state: &AppState,
     governance: &DidCoreId,
@@ -1054,6 +1411,9 @@ async fn send_forward(
             .map_err(|error| ServiceError::internal(error.to_string()))?;
         validate_recovery_caller(state, session, event).await?;
         require_live_forward(state, event).await?;
+        if forwarded_device(&request).is_some() {
+            state.persistence().retain_forward_request(&request).await?;
+        }
         let response = crate::routing::federation::outbox::submit_authority_forward(
             state,
             governance.as_str(),
@@ -1092,11 +1452,21 @@ async fn send_forward(
         Ok::<_, ServiceError>(outcome)
     }
     .await;
+    record_forward_result(state, event, &result, governing_accepted).await?;
+    result
+}
+
+async fn record_forward_result(
+    state: &AppState,
+    event: &Event,
+    result: &ServiceResult<AuthoritySubmitOutcome>,
+    governing_accepted: bool,
+) -> ServiceResult<()> {
     let (status, reason_code) = if governing_accepted {
         // Materialization failure is operation availability, not an admission rejection.
         (ForwardAttemptStatus::Forwarding, None)
     } else {
-        match &result {
+        match result {
             Ok(AuthoritySubmitOutcome::Accepted { .. }) => (ForwardAttemptStatus::Forwarding, None),
             Ok(AuthoritySubmitOutcome::Rejected { reason_code, .. }) => {
                 (ForwardAttemptStatus::Rejected, Some(reason_code.as_str()))
@@ -1121,7 +1491,7 @@ async fn send_forward(
         .authority_commits()
         .record_forward_attempt(&event.event_id, status, reason_code, crate::wire::now())
         .await?;
-    result
+    Ok(())
 }
 
 /// A claim is not a join: its bound self result needs no member scan or replica.

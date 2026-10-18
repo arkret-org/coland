@@ -88,6 +88,10 @@ uuid = { workspace = true, features = ["v4", "v7", "serde"] }
 zeroize = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
+arkret-bridge-runtime = { version = "0.3.0", path = "../../../bridges/crates/runtime", default-features = false, features = ["edge", "managed-authoring"] }
+garth = { version = "0.3.0", path = "../../../garth", default-features = false }
+rand_chacha = "0.10.0"
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 diesel.workspace = true
 diesel-async.workspace = true
 arkret-mls = { workspace = true, features = ["test-utils"] }
@@ -109,3 +113,14 @@ workspace = true
 [[test]]
 name = "development_boundary"
 required-features = ["test-support"]
+
+# Exercise Station admission independently of the server's embedded runtime.
+[[test]]
+name = "applet_admission"
+path = "../server/tests/applet_admission.rs"
+required-features = ["test-support", "conformance-harness"]
+
+[[test]]
+name = "authority_forward_producer_evidence"
+path = "../server/tests/authority_forward_producer_evidence.rs"
+required-features = ["test-support", "conformance-harness"]

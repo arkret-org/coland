@@ -361,6 +361,7 @@ pub(crate) async fn admit_with_audit_in_connection(
     _authority_station: &arkret_wire::DidCoreId,
     audit_unit: Option<&coland_storage::RegisteredAuditCommit>,
     prepared: Option<&coland_storage::EventApprovalCommit>,
+    forwarded: Option<&coland_storage::ForwardedManagedActorSource>,
 ) -> PersistenceResult<()> {
     let paired = audit_unit.is_some_and(|unit| unit.pair_for(event));
     match &event.kind {
@@ -553,10 +554,11 @@ pub(crate) async fn admit_with_audit_in_connection(
                             "managed Circle join requires its original self Device consent",
                         ));
                     }
-                    crate::managed_message_actor::require_managed_actor_in_connection(
+                    crate::managed_message_actor::require_managed_actor_with_source(
                         conn,
                         event,
                         commit.committed_at,
+                        forwarded,
                     )
                     .await?;
                     let cut =
@@ -564,6 +566,7 @@ pub(crate) async fn admit_with_audit_in_connection(
                             conn, event,
                         )
                         .await?;
+                    let cut = cut.with_forwarded_managed(forwarded);
                     cut.require_managed_self_action_in_connection(conn, event, commit, prepared)
                         .await?;
                 }

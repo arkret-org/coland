@@ -648,9 +648,18 @@ pub(crate) struct RealmAuthorizationCut {
     /// Narrow delegated Service admission to the signed authorization_ref.
     selected_grant: Option<GrantId>,
     native_operation: Option<(CapabilityActionId, WireResourceSelector)>,
+    forwarded_managed: Option<Box<coland_storage::ForwardedManagedActorSource>>,
 }
 
 impl RealmAuthorizationCut {
+    pub(crate) fn with_forwarded_managed(
+        mut self,
+        source: Option<&coland_storage::ForwardedManagedActorSource>,
+    ) -> Self {
+        self.forwarded_managed = source.map(|source| Box::new(source.clone()));
+        self
+    }
+
     /// Read-only consumers may use a complete verified member-Station cut.
     /// Event admission continues to use the local authority's native rows.
     pub(crate) async fn read_accepted(
@@ -810,6 +819,7 @@ impl RealmAuthorizationCut {
             direct_conversation: None,
             selected_grant: None,
             native_operation: None,
+            forwarded_managed: None,
         })
     }
 
@@ -3328,22 +3338,36 @@ impl RealmAuthorizationCut {
             facts.applet_id = Some(registration.applet_id.to_string());
             facts.executed_by = Some(
                 if event.executed_by.is_none() && event.actor_id.as_account_id().is_some() {
-                    let authority = crate::pcr_applet_device_authority::for_event_in_connection(
-                        conn,
-                        event,
-                        chrono::Utc::now(),
-                    )
-                    .await
-                    .map_err(crate::PgTransactionError::into_persistence)?
-                    .ok_or_else(|| {
-                        capability_denied("native Applet executor has no accepted Device producer")
-                    })?;
-                    if authority.source_service_id != registration.service_id
-                        || authority.applet_id != registration.applet_id
-                    {
-                        return Err(capability_denied(
-                            "native Applet executor provenance differs",
-                        ));
+                    if let Some(source) = self.forwarded_managed.as_ref() {
+                        source.ensure_event(event, chrono::Utc::now())?;
+                        if source.provision().service_id != registration.service_id
+                            || source.provision().applet_id != registration.applet_id
+                        {
+                            return Err(capability_denied(
+                                "forwarded managed executor differs from actual registration",
+                            ));
+                        }
+                    } else {
+                        let authority =
+                            crate::pcr_applet_device_authority::for_event_in_connection(
+                                conn,
+                                event,
+                                chrono::Utc::now(),
+                            )
+                            .await
+                            .map_err(crate::PgTransactionError::into_persistence)?
+                            .ok_or_else(|| {
+                                capability_denied(
+                                    "native Applet executor has no accepted Device producer",
+                                )
+                            })?;
+                        if authority.source_service_id != registration.service_id
+                            || authority.applet_id != registration.applet_id
+                        {
+                            return Err(capability_denied(
+                                "native Applet executor provenance differs",
+                            ));
+                        }
                     }
                     event.actor_id.clone()
                 } else {
@@ -3856,9 +3880,23 @@ pub(crate) fn authorize_capability_gated_event_with_approvals<'a>(
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = PersistenceResult<RealmAuthorizationCut>> + Send + 'a>,
 > {
+    authorize_capability_gated_event_with_source(conn, event, commit, prepared, None)
+}
+
+pub(crate) fn authorize_capability_gated_event_with_source<'a>(
+    conn: &'a mut AsyncPgConnection,
+    event: &'a arkret_wire::Event,
+    commit: &'a arkret_wire::RealmCommit,
+    prepared: Option<&'a coland_storage::EventApprovalCommit>,
+    forwarded: Option<&'a coland_storage::ForwardedManagedActorSource>,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = PersistenceResult<RealmAuthorizationCut>> + Send + 'a>,
+> {
     Box::pin(async move {
         lock_realm_authorization_cut(conn, &event.realm_id).await?;
-        let cut = RealmAuthorizationCut::read_for_event(conn, event).await?;
+        let cut = RealmAuthorizationCut::read_for_event(conn, event)
+            .await?
+            .with_forwarded_managed(forwarded);
         let approved =
             Box::pin(cut.require_event_with_approvals(conn, event, commit, prepared)).await?;
         crate::approval_admission::consume_and_audit(
@@ -3891,10 +3929,13 @@ pub(crate) fn authorize_message_create_in_connection<'a>(
     attributed: &'a arkret_wire::Event,
     commit: &'a arkret_wire::RealmCommit,
     prepared: Option<&'a coland_storage::EventApprovalCommit>,
+    forwarded: Option<&'a coland_storage::ForwardedManagedActorSource>,
 ) -> MessageCreateAuthorizationFuture<'a> {
     Box::pin(async move {
         lock_realm_authorization_cut(conn, &event.realm_id).await?;
-        let cut = RealmAuthorizationCut::read_for_event(conn, attributed).await?;
+        let cut = RealmAuthorizationCut::read_for_event(conn, attributed)
+            .await?
+            .with_forwarded_managed(forwarded);
         let approved = Box::pin(
             cut.require_message_create_with_approvals(conn, event, attributed, commit, prepared),
         )
@@ -3967,6 +4008,7 @@ mod operation_fact_tests {
             direct_conversation: None,
             selected_grant: Some(child_id),
             native_operation: Some((CapabilityActionId::MessageCreate, target.clone())),
+            forwarded_managed: None,
         };
         assert_eq!(cut.effective_grants(at).count(), 1);
         assert!(matches!(
@@ -4082,6 +4124,7 @@ mod operation_fact_tests {
             direct_conversation: None,
             selected_grant: None,
             native_operation: None,
+            forwarded_managed: None,
         };
         let before = "2026-09-21T01:00:00Z".parse().unwrap();
         let after = "2026-09-21T09:30:00Z".parse().unwrap();
@@ -4128,6 +4171,7 @@ mod operation_fact_tests {
             direct_conversation: None,
             selected_grant: None,
             native_operation: None,
+            forwarded_managed: None,
         };
         let (target, facts) = cut.event_operation(&event);
         assert_eq!(
@@ -4198,6 +4242,7 @@ mod operation_fact_tests {
             direct_conversation: None,
             selected_grant: None,
             native_operation: None,
+            forwarded_managed: None,
         };
         let (target, facts) = cut.event_operation(&event);
         assert_eq!(target, WireResourceSelector::realm(realm_id));

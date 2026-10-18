@@ -145,11 +145,22 @@ pub struct ForwardAttemptRecord {
     /// Exact original submission; this is transport intent, never current state.
     pub original_submission:
         Option<arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest>,
+    /// Frozen signed source siblings and complete peer unit, only for exact transport retry.
+    pub peer_request:
+        Option<Box<arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest>>,
     /// Verified governing acceptance witness, not an installed replica.
     pub accepted_commit: Option<RealmCommit>,
     pub status: ForwardAttemptStatus,
     pub reason_code: Option<String>,
     pub attempted_at: DateTime<Utc>,
+}
+
+/// Per-request verified identity for the native MLS refusal transaction; never wire or current
+/// state.
+#[derive(Clone, Copy)]
+pub enum ManagedMlsRefusalSource<'a> {
+    Local(&'a crate::AppletManagedDeviceScopeGuard),
+    Forwarded(&'a crate::ForwardedManagedActorSource),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2311,6 +2322,21 @@ pub trait AuthorityCommitStore: Send + Sync {
         ))
     }
 
+    /// Freeze one complete peer body; concurrent or uncertain retries keep the original.
+    async fn freeze_forwarded_peer_request(
+        &self,
+        event: &Event,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+        at: DateTime<Utc>,
+    ) -> PersistenceResult<
+        Box<arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest>,
+    > {
+        let _ = (event, request, at);
+        Err(crate::PersistenceError::Conflict(
+            "dependency_missing: frozen peer request retention is not implemented".into(),
+        ))
+    }
+
     /// CAS-retain a verified governing acknowledgement against the queued original.
     /// It is not chain continuity, disclosure, or an installed RealmCommit.
     async fn retain_forwarded_acceptance(
@@ -2347,10 +2373,7 @@ pub trait AuthorityCommitStore: Send + Sync {
         event: &Event,
         authority: &CurrentRealmAuthority,
         reason_code: &str,
-        native: Option<(
-            &crate::AppletManagedDeviceScopeGuard,
-            &crate::IdempotencyRecord,
-        )>,
+        native: Option<(ManagedMlsRefusalSource<'_>, &crate::IdempotencyRecord)>,
     ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
         let _ = (event, authority, reason_code, native);
         Err(crate::PersistenceError::Conflict(

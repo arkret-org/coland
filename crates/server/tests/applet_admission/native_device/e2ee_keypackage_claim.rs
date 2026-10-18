@@ -174,7 +174,7 @@ async fn exercise(ghost: bool) {
     assert_eq!(fenced, native_phase(|| snapshot(&fixture)).await);
 }
 
-fn request(
+pub(in crate::native_device::e2ee) fn request(
     authority: &coland_storage::AppletManagedDeviceAuthority,
     key: &SigningKey,
     scope: &ScopeRef,
@@ -230,7 +230,10 @@ fn request(
     body
 }
 
-fn resign(body: &mut arkret_models_crypto::KeyPackagesClaimRequestBody, key: &SigningKey) {
+pub(in crate::native_device::e2ee) fn resign(
+    body: &mut arkret_models_crypto::KeyPackagesClaimRequestBody,
+    key: &SigningKey,
+) {
     let method = match &body.requester_authorization {
         arkret_models_crypto::PeerKeyPackageRequesterAuthorization::Device {
             verification_method,
@@ -256,7 +259,7 @@ fn resign(body: &mut arkret_models_crypto::KeyPackagesClaimRequestBody, key: &Si
     .unwrap();
 }
 
-async fn claim(
+pub(in crate::native_device::e2ee) async fn claim(
     fixture: &Fixture,
     authority: &coland_storage::AppletManagedDeviceAuthority,
     key: &SigningKey,

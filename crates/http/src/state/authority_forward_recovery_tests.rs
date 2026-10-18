@@ -160,6 +160,7 @@ async fn foreign_request(
         branch: arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,
         event_submission: EventAdmissionSubmission::new(request.authority_commit.event.clone()),
         producer_device_evidence: None,
+        producer_managed_provenance: None,
         producer_agent_evidence: None,
         mls_genesis_material: None,
     };

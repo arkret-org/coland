@@ -100,6 +100,7 @@ async fn peer_forwarded_destroy_reaches_the_shared_cut_and_leaves_zero_writes() 
                 .evidence
                 .clone(),
         ),
+        producer_managed_provenance: None,
         producer_agent_evidence: None,
         mls_genesis_material: None,
     };

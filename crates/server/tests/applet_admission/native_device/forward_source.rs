@@ -95,6 +95,7 @@ async fn native_forward_origin_retains_actual_sources_and_refuses_pair_signature
                 event_submission: arkret_wire::EventAdmissionSubmission::new(event.clone()),
                 mls_genesis_material: None,
                 producer_device_evidence: None,
+                producer_managed_provenance: None,
                 producer_agent_evidence: None,
             };
             let digest = arkret_models_collaboration::authority_commit::authority_forward_body_digest(&request).unwrap();

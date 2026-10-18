@@ -780,6 +780,7 @@ async fn forward_self_event_inner(
         event_submission: submission.clone(),
         mls_genesis_material: material,
         producer_device_evidence: None,
+        producer_managed_provenance: None,
         producer_agent_evidence: None,
     };
     request.producer_agent_evidence =
@@ -839,6 +840,7 @@ pub(super) async fn forward_self_mls(
             arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,
         mls_submission: submission.clone(),
         producer_device_evidence: None,
+        producer_managed_provenance: None,
         producer_agent_evidence: None,
     };
     request.producer_agent_evidence =

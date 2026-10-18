@@ -41,6 +41,7 @@ async fn submit_inner(
         .validate()
         .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
     let native_mls = mls::NativeMlsRequest::from_request(&request)?;
+    let original_request = request.clone();
     let (submission, welcomes, typed_mls) = match request {
         SelfAuthoritySubmitRequest::Event(submission) => (submission, Vec::new(), false),
         SelfAuthoritySubmitRequest::MlsCommit(submission) => (
@@ -117,6 +118,20 @@ async fn submit_inner(
             "native Event kind has no accepting domain unit".into(),
         ));
     }
+    if let Some(governance) =
+        super::authority_port::remote_governance(state, &event.realm_id).await?
+    {
+        let outcome = SelfAuthoritySubmitOutcome::Ordinary(
+            crate::boxed_future(|| {
+                super::authority_forward::forward_managed(state, &governance, &original_request)
+            })
+            .await?,
+        );
+        return match native_mls.as_ref() {
+            Some(context) => context.retain_outcome(state, outcome).await,
+            None => Ok(outcome),
+        };
+    }
     let current = state
         .persistence()
         .applet_managed_event_producer(event, chrono::Utc::now())
@@ -125,15 +140,6 @@ async fn submit_inner(
     if &current != authority {
         return Err(denied(
             "native Device authority changed after transport authentication",
-        ));
-    }
-    if super::authority_port::remote_governance(state, &event.realm_id)
-        .await?
-        .is_some()
-    {
-        return Err(ServiceError::Conflict(
-            "temporarily_unavailable: native forwarded submission has no verified source consumer"
-                .into(),
         ));
     }
     let record = crate::routing::extensions::applet_bridge::record::applet_record(

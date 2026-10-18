@@ -71,6 +71,7 @@ fn forwarded_request(seed: u8) -> PeerAuthoritySubmitRequest {
         event_submission: EventAdmissionSubmission::new(event.clone()),
         mls_genesis_material: None,
         producer_device_evidence: None,
+        producer_managed_provenance: None,
         producer_agent_evidence: None,
     };
     let body_digest =

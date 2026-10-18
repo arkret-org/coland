@@ -16,6 +16,7 @@ use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::{Value, json};
 
 use crate::capability_grant_current_results::{CapabilityGrantCurrentResultReadRow, decode_row};
+use crate::managed_forward_admission::Source;
 
 fn denied(detail: &str) -> PersistenceError {
     PersistenceError::Conflict(format!("capability_denied: {detail}"))
@@ -212,13 +213,39 @@ async fn installation_at_scope(
     at: chrono::DateTime<chrono::Utc>,
     writer: bool,
 ) -> PersistenceResult<(arkret_models_integration::AppletRegistrationPayload, Value)> {
-    let registration = crate::managed_message_actor::registration_for_scope(
+    installation_identity(
         conn,
-        scope.realm_id(),
+        &authority.account_id,
         &authority.applet_id,
+        &authority.source_service_id,
+        scope,
+        service_did_document,
+        at,
+        writer,
+        None,
     )
-    .await?;
-    if registration.service_id != authority.source_service_id {
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The same installation cut accepts a local PCR or one verified remote identity, without synthesizing Device scopes."
+)]
+async fn installation_identity(
+    conn: &mut AsyncPgConnection,
+    account: &arkret_wire::AccountId,
+    applet: &arkret_wire::AppletId,
+    service: &arkret_wire::DidCoreId,
+    scope: &ScopeRef,
+    service_did_document: &arkret_identity::DidDocument,
+    at: chrono::DateTime<chrono::Utc>,
+    writer: bool,
+    forwarded: Option<&coland_storage::ForwardedManagedActorSource>,
+) -> PersistenceResult<(arkret_models_integration::AppletRegistrationPayload, Value)> {
+    let registration =
+        crate::managed_message_actor::registration_for_scope(conn, scope.realm_id(), applet)
+            .await?;
+    if &registration.service_id != service {
         return Err(denied(
             "native provision Service differs from current registration",
         ));
@@ -237,13 +264,15 @@ async fn installation_at_scope(
         "FOR SHARE OF i,m NOWAIT"
     };
     let query = format!(
-        "SELECT i.record AS value,(m.record->>'globally_fenced_at' IS NOT NULL) AS globally_fenced FROM applet_installations i JOIN applet_registration_current_results r ON r.realm_id=$3 AND r.applet_id=i.applet_id JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref AND a.registration_event_ref=i.record#>>'{{registration_event,event_id}}' JOIN applet_managed_identities m ON m.applet_id=i.applet_id AND m.target_station_id=$4 WHERE i.applet_id=$1 AND i.effective_scope_key=$2 {locking}"
+        "SELECT i.record AS value,(m.record->>'globally_fenced_at' IS NOT NULL) AS globally_fenced FROM applet_installations i JOIN applet_registration_current_results r ON r.realm_id=$3 AND r.applet_id=i.applet_id JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref AND a.registration_event_ref=i.record#>>'{{registration_event,event_id}}' JOIN applet_managed_identities m ON m.applet_id=i.applet_id AND m.target_station_id=i.record->>'target_station_id' WHERE i.applet_id=$1 AND i.effective_scope_key=$2 AND ($4::text IS NULL OR m.target_station_id=$4) {locking}"
     );
     let row = sql_query(query)
-        .bind::<Text, _>(authority.applet_id.as_str())
+        .bind::<Text, _>(applet.as_str())
         .bind::<Text, _>(key)
         .bind::<Text, _>(scope.realm_id().as_str())
-        .bind::<Text, _>(authority.account_id.station_id.as_str())
+        .bind::<diesel::sql_types::Nullable<Text>, _>(
+            forwarded.is_none().then_some(account.station_id.as_str()),
+        )
         .get_result::<InstallationRow>(&mut *conn)
         .await
         .optional()
@@ -267,15 +296,78 @@ async fn installation_at_scope(
     {
         return Err(denied("native Applet exact installation is inactive"));
     }
-    crate::managed_message_actor::require_managed_identity_in_connection(
-        conn,
-        &ActorId::account(authority.account_id.clone()),
-        &authority.applet_id,
-        &registration,
-        at,
-    )
-    .await?;
+    if let Some(source) = forwarded {
+        source
+            .verified()
+            .ensure_live(at)
+            .map_err(|e| denied(&e.to_string()))?;
+        if source.verified().account() != account
+            || &source.provision().applet_id != applet
+            || &source.provision().service_id != service
+        {
+            return Err(denied(
+                "forwarded managed identity differs from the actual registration",
+            ));
+        }
+    } else {
+        crate::managed_message_actor::require_managed_identity_in_connection(
+            conn,
+            &ActorId::account(account.clone()),
+            applet,
+            &registration,
+            at,
+        )
+        .await?;
+    }
     Ok((registration, row.value))
+}
+
+pub(crate) async fn installation_source(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    source: Source<'_>,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<(arkret_models_integration::AppletRegistrationPayload, Value)> {
+    source.ensure_event(event, at)?;
+    match source {
+        Source::Local(guard) => installation(conn, event, guard, at).await,
+        Source::Forwarded(_) => {
+            let installed = installation_identity(
+                conn,
+                source.account(),
+                source.applet(),
+                source.service(),
+                &event.scope_ref,
+                source.document(),
+                at,
+                true,
+                source.forwarded(),
+            )
+            .await?;
+            if matches!(event.kind, EventKind::MlsGenesis | EventKind::MlsCommit)
+                || (matches!(
+                    event.kind,
+                    EventKind::MemberState | EventKind::CircleMemberState
+                ) && action(event)? == CapabilityActionId::AppletJoin)
+            {
+                let encrypted=sql_query("SELECT to_jsonb(EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.mls.genesis' AND c.realm_id=$1 AND e.envelope->'scope_ref'=$2)) AS value")
+                    .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(json!(event.scope_ref)).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+                if encrypted.value.as_bool() != Some(false)
+                    || matches!(event.kind, EventKind::MlsGenesis | EventKind::MlsCommit)
+                {
+                    crate::applet_e2ee::require_current_consent(
+                        conn,
+                        &installed.0,
+                        &installed.1,
+                        &event.scope_ref,
+                        at,
+                    )
+                    .await?;
+                }
+            }
+            Ok(installed)
+        }
+    }
 }
 
 /// Subject-only metadata binds an active accepted installation grant. It never
@@ -286,7 +378,16 @@ pub(crate) async fn require_installation_binding(
     guard: &AppletManagedDeviceScopeGuard,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
-    let (registration, installation) = installation(conn, event, guard, at).await?;
+    require_installation_source(conn, event, Source::Local(guard), at).await
+}
+
+pub(crate) async fn require_installation_source(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    source: Source<'_>,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<()> {
+    let (registration, installation) = installation_source(conn, event, source, at).await?;
     let service = ActorId::service(registration.service_id.clone());
     let id: GrantId = event
         .authorization_ref
@@ -466,17 +567,27 @@ async fn business_basis(
     guard: &AppletManagedDeviceScopeGuard,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<BusinessBasis> {
+    business_basis_source(conn, event, Source::Local(guard), at).await
+}
+
+async fn business_basis_source(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    source: Source<'_>,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<BusinessBasis> {
     use arkret_models_collaboration::events_payloads::CapabilityGrantCreateBody;
     use arkret_models_collaboration::governance::grant_constraint::{
         IssuerAuthorityRef, ManagedActorRole,
     };
     let action = business_action(event)?;
-    let (registration, _) = installation(conn, event, guard, at).await?;
+    let (registration, _) = installation_source(conn, event, source, at).await?;
     let service = ActorId::service(registration.service_id.clone());
     let cut = crate::boxed_future(|| {
         crate::realm_authorization_cut::RealmAuthorizationCut::read_for_event(conn, event)
     })
     .await?;
+    let cut = cut.with_forwarded_managed(source.forwarded());
     cut.require_open_lifecycle(event)?;
     cut.require_governed_member(&event.kind)?;
     let (target, mut facts) = cut.event_operation(event);
@@ -521,14 +632,19 @@ async fn business_basis(
             )),
         })
         .collect::<PersistenceResult<Vec<_>>>()?;
-    let sources=sql_query("SELECT e.envelope->'payload' AS value FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.applet.managed_actor.provision' AND e.envelope#>'{payload,actor_id}'=$1")
+    let provision = if let Some(source) = source.forwarded() {
+        source.provision().clone()
+    } else {
+        let sources=sql_query("SELECT e.envelope->'payload' AS value FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.applet.managed_actor.provision' AND e.envelope#>'{payload,actor_id}'=$1")
         .bind::<Jsonb,_>(json!(event.actor_id)).load::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    if sources.len() != 1 {
-        return Err(denied("native business has no unique accepted provision"));
-    }
-    let provision: arkret_models_integration::AppletManagedActorProvisionPayload =
-        serde_json::from_value(sources.into_iter().next().unwrap().value)
-            .map_err(PersistenceError::database)?;
+        if sources.len() != 1 {
+            return Err(denied("native business has no unique accepted provision"));
+        }
+        let provision: arkret_models_integration::AppletManagedActorProvisionPayload =
+            serde_json::from_value(sources.into_iter().next().unwrap().value)
+                .map_err(PersistenceError::database)?;
+        provision
+    };
     if provision.actor_id != event.actor_id
         || provision.applet_id != registration.applet_id
         || provision.service_id != registration.service_id
@@ -590,10 +706,10 @@ pub(crate) async fn require_business_binding(
 }
 
 /// Spend the original Service ancestor paths alongside the ordinary domain unit.
-pub(crate) async fn require_business_in_connection(
+pub(crate) async fn require_business_source(
     conn: &mut AsyncPgConnection,
     event: &Event,
-    guard: &AppletManagedDeviceScopeGuard,
+    source: Source<'_>,
     commit: &arkret_wire::RealmCommit,
     prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<Vec<crate::approval_admission::QualifiedApproval>> {
@@ -607,7 +723,7 @@ pub(crate) async fn require_business_in_connection(
         grants,
         root,
         sources,
-    } = business_basis(conn, event, guard, at).await?;
+    } = business_basis_source(conn, event, source, at).await?;
     let actions = [action.as_str()];
 
     let mut accepted = Vec::new();
@@ -694,6 +810,16 @@ pub(crate) async fn require_mls_permission_in_connection(
     at: chrono::DateTime<chrono::Utc>,
     probe_quota: bool,
 ) -> PersistenceResult<()> {
+    require_mls_permission_source(conn, event, Source::Local(guard), at, probe_quota).await
+}
+
+pub(crate) async fn require_mls_permission_source(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    source: Source<'_>,
+    at: chrono::DateTime<chrono::Utc>,
+    probe_quota: bool,
+) -> PersistenceResult<()> {
     use arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef;
     if !matches!(event.kind, EventKind::MlsGenesis | EventKind::MlsCommit) {
         return Err(denied("native MLS permission requires an actual MLS Event"));
@@ -710,11 +836,16 @@ pub(crate) async fn require_mls_permission_in_connection(
             "native MLS author is not a current member of its exact scope",
         ));
     }
-    let producer =
-        coland_storage::SelfProducerCommitGuard::AppletManagedDevice(Box::new(guard.clone()));
-    crate::authority_commit::check_self_producer_guard_in_connection(conn, event, &producer, at)
+    source.ensure_event(event, at)?;
+    if let Source::Local(guard) = source {
+        let producer =
+            coland_storage::SelfProducerCommitGuard::AppletManagedDevice(Box::new(guard.clone()));
+        crate::authority_commit::check_self_producer_guard_in_connection(
+            conn, event, &producer, at,
+        )
         .await?;
-    let (registration, _) = installation(conn, event, guard, at).await?;
+    }
+    let (registration, _) = installation_source(conn, event, source, at).await?;
     let (_, decision) = select_management(conn, event, &registration, at).await?;
     if !decision.review_requirements.is_empty() {
         return Err(PersistenceError::Conflict(
@@ -729,11 +860,12 @@ pub(crate) async fn require_mls_permission_in_connection(
         grants,
         root,
         sources,
-    } = business_basis(conn, event, guard, at).await?;
+    } = business_basis_source(conn, event, source, at).await?;
     let cut = crate::boxed_future(|| {
         crate::realm_authorization_cut::RealmAuthorizationCut::read_for_event(conn, event)
     })
     .await?;
+    let cut = cut.with_forwarded_managed(source.forwarded());
     let mut reservations = cut.native_mls_reservations(event, action, &target, &facts, at)?;
     if crate::policy_action_admission::current_quorum(conn, event, action, &target, &facts, at)
         .await?

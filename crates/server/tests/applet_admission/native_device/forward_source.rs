@@ -81,22 +81,18 @@ async fn native_forward_origin_retains_actual_sources_and_refuses_pair_signature
         for (index, (authority, key, grant)) in context.actors.iter().enumerate() {
             let event = native_message(fixture, &context.install, authority, key, grant, &context.strand, "original native forward source");
             let before = native_phase(|| business(fixture)).await;
-            let evidence = native_phase(|| coland_http::test_fresh_producer_device_evidence(
-                &fixture.state, &event, &destination,
-            )).await.unwrap().expect("actual managed Device source");
+            let request=native_phase(||coland_http::test_fresh_producer_forward_request(&fixture.state,&event,&destination)).await.unwrap();
+            let evidence=request.producer_device_evidence.clone().expect("actual managed Device source");
+            let provenance=request.producer_managed_provenance.as_ref().expect("complete original managed source");
+            assert_eq!(provenance.creation.entries().len(),4);
+            assert_eq!(provenance.creation.provision.event.kind,EventKind::AppletManagedActorProvision);
+            assert_eq!(provenance.current.profile.result.value.principal_id,authority.account_id.principal_id);
             assert_eq!(before, native_phase(|| business(fixture)).await);
             let core = &evidence.device_projection_attestation.attestation;
             assert_eq!(core.account_id, authority.account_id);
             assert_eq!(core.device_id, authority.device_id);
             assert_eq!(core.device_authorize_event_id, authority.selector.authorization_ref.event_id);
             assert_eq!(core.event_authorization.authorization_ref, authority.selector.authorization_ref);
-            let request = arkret_models_collaboration::authority_commit::PeerAuthorityForwardEventRequest {
-                branch: arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,
-                event_submission: arkret_wire::EventAdmissionSubmission::new(event.clone()),
-                mls_genesis_material: None,
-                producer_device_evidence: None,
-                producer_agent_evidence: None,
-            };
             let digest = arkret_models_collaboration::authority_commit::authority_forward_body_digest(&request).unwrap();
             let verified = arkret_identity::account_device_signer_evidence::verify_forwarded_account_device_signer_fact(
                 &evidence, &event, &fixture.state.service_core_id(), &destination, &digest,

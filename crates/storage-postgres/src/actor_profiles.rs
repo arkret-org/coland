@@ -592,6 +592,16 @@ pub(crate) async fn materialize_profile_at(
     at: chrono::DateTime<chrono::Utc>,
     subject: &AccountId,
 ) -> Result<ActorProfile, PgTransactionError> {
+    materialize_profile_at_with_source(conn, event, at, subject, None).await
+}
+
+pub(crate) async fn materialize_profile_at_with_source(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    at: chrono::DateTime<chrono::Utc>,
+    subject: &AccountId,
+    forwarded: Option<&coland_storage::ForwardedManagedActorSource>,
+) -> Result<ActorProfile, PgTransactionError> {
     const WHAT: &str = "Actor Profile";
     let current = locked_profile(conn, event).await?;
     let next = match event.kind {
@@ -667,18 +677,30 @@ pub(crate) async fn materialize_profile_at(
             next
         }
     };
-    if !accountability_holds_in_connection(
-        conn,
-        &next.accountable_principal_ids,
-        &next.principal_id,
-        at,
-    )
-    .await?
-    {
-        return Err(rejected(
-            ConflictCode::AccountabilityGrantMissing,
-            "an accountable principal has no active accountability record at the Commit",
-        ));
+    if let Some(source) = forwarded {
+        source.ensure_event(event, at)?;
+        if next.accountable_principal_ids.as_slice() != [source.provision().service_id.clone()]
+            || next.principal_id != source.verified().account().principal_id
+        {
+            return Err(rejected(
+                ConflictCode::AccountabilityGrantMissing,
+                "Profile differs from its verified current accountability",
+            ));
+        }
+    } else {
+        if !accountability_holds_in_connection(
+            conn,
+            &next.accountable_principal_ids,
+            &next.principal_id,
+            at,
+        )
+        .await?
+        {
+            return Err(rejected(
+                ConflictCode::AccountabilityGrantMissing,
+                "an accountable principal has no active accountability record at the Commit",
+            ));
+        }
     }
 
     Ok(next)

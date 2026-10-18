@@ -183,6 +183,7 @@ pub(crate) async fn commit_mls_group_current_result_in_connection(
     conn: &mut AsyncPgConnection,
     transaction: &AuthorityCommitTransaction,
     prepared: Option<&coland_storage::EventApprovalCommit>,
+    forwarded: Option<&coland_storage::ForwardedManagedActorSource>,
 ) -> PersistenceResult<()> {
     let event = &transaction.event;
     if !matches!(event.kind, EventKind::MlsGenesis | EventKind::MlsCommit) {
@@ -221,8 +222,8 @@ pub(crate) async fn commit_mls_group_current_result_in_connection(
         false
     };
     if !controller_reconciliation {
-        crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
-            conn, event, commit, prepared,
+        crate::realm_authorization_cut::authorize_capability_gated_event_with_source(
+            conn, event, commit, prepared, forwarded,
         )
         .await?;
     }

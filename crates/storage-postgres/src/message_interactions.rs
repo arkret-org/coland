@@ -26,6 +26,26 @@ struct AcceptedRow {
 /// Profile classification is optional display data, never authorization proof.
 /// The ingress producer guard independently authenticates and classifies the
 /// principal; closed Applet authoring retains its dedicated accepted-fact cut.
+pub(crate) async fn require_message_actor_with_source(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    at: chrono::DateTime<chrono::Utc>,
+    source: Option<&coland_storage::ForwardedManagedActorSource>,
+) -> PersistenceResult<()> {
+    if event.applet_id.is_some() {
+        return crate::managed_message_actor::require_managed_actor_with_source(
+            conn, event, at, source,
+        )
+        .await;
+    }
+    if source.is_some() {
+        return Err(rejected(
+            "managed source cannot authorize an ordinary actor",
+        ));
+    }
+    require_message_actor(conn, event, at).await
+}
+
 pub(crate) async fn require_message_actor(
     conn: &mut AsyncPgConnection,
     event: &Event,

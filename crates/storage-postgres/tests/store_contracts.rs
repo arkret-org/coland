@@ -2944,7 +2944,7 @@ async fn postgres_adapter_satisfies_last_resort_claim_ledger_contract() {
                 matches!(
                     result,
                     PeerKeyPackageClaimLedgerWriteResult::Existing(existing)
-                        if **existing == concurrent
+                        if existing.as_ref() == &concurrent
                 )
             })
             .count(),

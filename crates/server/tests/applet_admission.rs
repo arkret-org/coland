@@ -3592,7 +3592,7 @@ impl NativeAppletService {
 
         use rand_chacha::rand_core::SeedableRng as _;
         let expected = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/outbox-test-ca.pem")
+            .join("../server/tests/fixtures/outbox-test-ca.pem")
             .canonicalize()
             .expect("checked-in Applet TLS test CA");
         let configured = std::env::var_os("SSL_CERT_FILE")
@@ -4273,6 +4273,10 @@ impl Fixture {
         with_second_device: bool,
         public_base_url: Option<String>,
     ) -> Self {
+        let public_fixture = public_base_url.is_some();
+        if public_fixture {
+            eprintln!("[managed forward] origin fixture entered");
+        }
         let _ = tracing_subscriber::fmt()
             .with_env_filter("warn,coland_storage_postgres::applet_content_delivery=debug,coland_http::routing::identity::applet_managed_device=debug")
             .with_test_writer()
@@ -4310,8 +4314,14 @@ impl Fixture {
             let mut conn = pool.get().await.unwrap();
             conn.batch_execute("DROP TRIGGER IF EXISTS fail_native_membership ON member_state_current_results; DROP FUNCTION IF EXISTS fail_native_membership();").await.unwrap();
         }
+        if public_fixture {
+            eprintln!("[managed forward] origin Station initialized");
+        }
         let mut pcr = PcrGenesisFixture::new(state.service_did());
         Box::pin(pcr.admit(&state)).await.unwrap();
+        if public_fixture {
+            eprintln!("[managed forward] origin Human PCR accepted");
+        }
         let other_device = if with_second_device {
             Some(
                 pcr.admit_accepted_device(state.test_persistence().as_ref(), [89; 32])
@@ -4425,6 +4435,9 @@ impl Fixture {
         });
         let profile = fixture.admin_event(EventKind::ProfileCreate,ScopeRef::Realm {realm_id:fixture.pcr.unit.transactions[0].event.realm_id.clone()},
             json!({"object":{"principal_id":fixture.pcr.history.account.principal_id,"actor_kind":"user","display_name":"Applet admin"}}));
+        if public_fixture {
+            eprintln!("[managed forward] submitting origin Human Profile");
+        }
         let (status, body) = fixture
             .admin_post(
                 "/_arkret/self/account/profile",
@@ -4434,7 +4447,13 @@ impl Fixture {
             )
             .await;
         assert_eq!(status, StatusCode::OK, "Human Profile: {body}");
-        fixture.new_realm().await;
+        if public_fixture {
+            eprintln!("[managed forward] origin Human Profile accepted");
+        }
+        ordinary_realm::case_future(|| fixture.new_realm()).await;
+        if public_fixture {
+            eprintln!("[managed forward] origin Realm accepted");
+        }
         *fixture
     }
 
@@ -4482,7 +4501,7 @@ impl Fixture {
                 .as_ref()
                 .map(|fact| fact.digest().unwrap());
             tx.commit.previous_commit_ref = previous_commit;
-            ordinary_realm::seal_final_commit(&mut tx.commit);
+            self.seal_commit(&mut tx.commit);
             previous_commit = Some(tx.commit.commit_id.clone());
         }
         for (submission, tx) in unit.submission.events.iter_mut().zip(&unit.transactions) {
@@ -4496,6 +4515,26 @@ impl Fixture {
         .await
         .unwrap();
         self.authority_event_ref = Some(unit.transactions[0].event.event_id.clone());
+    }
+
+    fn seal_commit(&self, commit: &mut arkret_wire::RealmCommit) {
+        commit.commit_id = arkret_wire::RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
+            arkret_canonical::canonical_json_bytes(
+                &arkret_canonical::unsigned_value(commit, &["commit_id", "signature"]).unwrap(),
+            )
+            .unwrap(),
+        ));
+        commit.signature = arkret_signatures::detached_object::sign_detached_object(
+            &arkret_canonical::unsigned_value(commit, &["signature"]).unwrap(),
+            arkret_wire::DetachedSignatureContext::RealmCommit,
+            self.state
+                .service_verification_method("notary-key")
+                .unwrap(),
+            commit.committed_at,
+            self.state.notary_signing_key().as_ref(),
+        )
+        .unwrap();
+        commit.verify_commit_id_matches_content().unwrap();
     }
 
     fn sign_admin(&self, mut event: Event) -> Event {
@@ -5197,6 +5236,7 @@ async fn admin_domain_request(
         .map_or(0, |head| head.stream_position + 1);
     request.authority_commit.commit.previous_commit_ref = stream_head.map(|head| head.commit_id);
     let mut request = ordinary_realm::source_request(&fixture.pool, request).await;
+    fixture.seal_commit(&mut request.authority_commit.commit);
     if let Some(fact) = request
         .authority_commit
         .producer_signer_fact

@@ -69,18 +69,41 @@ pub(crate) async fn prepare(
     guard: &AppletManagedDeviceScopeGuard,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<Admission> {
+    prepare_source(
+        conn,
+        event,
+        crate::managed_forward_admission::Source::Local(guard),
+        at,
+    )
+    .await
+}
+
+pub(crate) async fn prepare_source(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    source: crate::managed_forward_admission::Source<'_>,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<Admission> {
     use arkret_models_collaboration::events_payloads::realm::RealmPurpose;
-    let authority = &guard.authority;
+    source.ensure_event(event, at)?;
+    let pcr = match source {
+        crate::managed_forward_admission::Source::Local(guard) => &guard.authority.pcr_realm_id,
+        crate::managed_forward_admission::Source::Forwarded(source) => {
+            &source
+                .verified()
+                .original()
+                .creation
+                .pcr_genesis
+                .event
+                .realm_id
+        }
+    };
     if !is_profile(event)
-        || event.actor_id != ActorId::account(authority.account_id.clone())
+        || event.actor_id != ActorId::account(source.account().clone())
         || event.executed_by.is_some()
-        || event.applet_id.as_ref() != Some(&authority.applet_id)
-        || event.scope_ref != guard.effective_scope
-        || event.realm_id == authority.pcr_realm_id
-        || !authority.scopes.permits(
-            &event.scope_ref,
-            &[arkret_wire::CapabilityActionId::AppletPublish],
-        )
+        || event.applet_id.as_ref() != Some(source.applet())
+        || event.scope_ref.realm_id() != &event.realm_id
+        || &event.realm_id == pcr
         || !matches!(
             crate::account_stream_scan::realm_purpose(conn, &event.realm_id).await?,
             Some(RealmPurpose::Collaboration)
@@ -94,6 +117,7 @@ pub(crate) async fn prepare(
         crate::realm_authorization_cut::RealmAuthorizationCut::read_for_event(conn, event)
     })
     .await?;
+    let cut = cut.with_forwarded_managed(source.forwarded());
     cut.require_open_lifecycle(event)?;
     cut.require_governed_member(&event.kind)?;
     match &event.scope_ref {
@@ -124,17 +148,35 @@ pub(crate) async fn prepare(
             ));
         }
     }
-    let identity=sql_query("SELECT value FROM actor_profile_current_results WHERE realm_id=$1 AND actor_id=$2 AND scope_ref=$3 FOR SHARE")
-        .bind::<Text,_>(authority.pcr_realm_id.as_str()).bind::<Jsonb,_>(json!(event.actor_id))
-        .bind::<Jsonb,_>(json!(ScopeRef::Realm{realm_id:authority.pcr_realm_id.clone()}))
+    let identity = if let Some(source) = source.forwarded() {
+        source
+            .verified()
+            .original()
+            .current
+            .profile
+            .result
+            .value
+            .clone()
+    } else {
+        let identity=sql_query("SELECT value FROM actor_profile_current_results WHERE realm_id=$1 AND actor_id=$2 AND scope_ref=$3 FOR SHARE")
+        .bind::<Text,_>(pcr.as_str()).bind::<Jsonb,_>(json!(event.actor_id))
+        .bind::<Jsonb,_>(json!(ScopeRef::Realm{realm_id:pcr.clone()}))
         .get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(||denied("native PCR identity Profile is unavailable"))?;
-    let identity: ActorProfile = serde_json::from_value(identity.value).map_err(invalid)?;
+        let identity: ActorProfile = serde_json::from_value(identity.value).map_err(invalid)?;
+        identity
+    };
     let previous=sql_query("SELECT to_jsonb(p) AS value FROM actor_profile_current_results p WHERE realm_id=$1 AND actor_id=$2 AND scope_ref=$3 FOR UPDATE")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(json!(event.actor_id)).bind::<Jsonb,_>(json!(event.scope_ref))
         .get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.map(|r|r.value);
     let profile = crate::boxed_future(|| {
-        crate::actor_profiles::materialize_profile_at(conn, event, at, &authority.account_id)
+        crate::actor_profiles::materialize_profile_at_with_source(
+            conn,
+            event,
+            at,
+            source.account(),
+            source.forwarded(),
+        )
     })
     .await
     .map_err(crate::PgTransactionError::into_persistence)?;

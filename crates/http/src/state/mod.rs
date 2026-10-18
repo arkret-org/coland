@@ -18,6 +18,7 @@ pub(crate) mod authority_consent;
 mod authority_contact;
 mod authority_direct_conversation;
 mod authority_forward;
+mod authority_forward_managed;
 mod authority_franking;
 mod authority_handoff;
 mod authority_key_backup_pointer;
@@ -52,10 +53,12 @@ pub use applet_completion::{
 pub(crate) use authority_contact::{commit_contact_event_unit, verify_contact_producer};
 #[cfg(feature = "test-support")]
 pub(crate) use authority_forward::{
-    admit_forwarded_event, forward_self_event, fresh_producer_agent_evidence,
-    fresh_producer_device_evidence,
+    admit_forwarded_event, admit_forwarded_mls, forward_self_event, fresh_device_request,
+    fresh_producer_agent_evidence, prepare_native_forward_request,
 };
 pub use authority_franking::spawn_pending_franking_sweeper;
+#[cfg(feature = "test-support")]
+pub(crate) use authority_handoff::install as install_test_handoff;
 pub(crate) use authority_producer_validation::{
     verify_account_device_payload_proof, verify_account_device_producer,
     verify_mimi_binding_producer, verify_self_event_producer,

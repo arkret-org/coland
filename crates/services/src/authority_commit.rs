@@ -761,6 +761,19 @@ impl AuthorityCommitApplication {
         Ok(())
     }
 
+    pub async fn freeze_forwarded_peer_request(
+        &self,
+        event: &Event,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+        at: DateTime<Utc>,
+    ) -> ServiceResult<Box<arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest>>
+    {
+        Ok(self
+            .store()
+            .freeze_forwarded_peer_request(event, request, at)
+            .await?)
+    }
+
     pub async fn record_forward_attempt(
         &self,
         event_id: &arkret_wire::EventId,
@@ -780,7 +793,7 @@ impl AuthorityCommitApplication {
         authority: &CurrentRealmAuthority,
         reason_code: &str,
         native: Option<(
-            &coland_storage::AppletManagedDeviceScopeGuard,
+            coland_storage::ManagedMlsRefusalSource<'_>,
             &coland_storage::IdempotencyRecord,
         )>,
     ) -> ServiceResult<AuthoritySubmitOutcome> {

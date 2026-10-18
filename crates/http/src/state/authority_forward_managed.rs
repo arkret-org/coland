@@ -21,6 +21,25 @@ fn unavailable(error: impl std::fmt::Display) -> ServiceError {
     ServiceError::Conflict(format!("temporarily_unavailable: {error}"))
 }
 
+async fn require_non_managed_branch(
+    state: &AppState,
+    event: &arkret_wire::Event,
+    now: chrono::DateTime<chrono::Utc>,
+) -> ServiceResult<()> {
+    // A known native PCR cannot be reclassified as Human when its sibling is absent.
+    if state
+        .persistence()
+        .applet_managed_event_producer(event, now)
+        .await?
+        .is_some()
+    {
+        return Err(invalid(
+            "managed producer is missing producer_managed_provenance",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn verify<'a>(
     state: &'a AppState,
     peer: &'a AuthenticatedPeerContext,
@@ -42,7 +61,10 @@ async fn verify_inner(
     let (source, device, event, digest) = match request {
         PeerAuthoritySubmitRequest::AuthorityForwardEvent(v) => {
             match &v.producer_managed_provenance {
-                None => return Ok(None),
+                None => {
+                    require_non_managed_branch(state, &v.event_submission.event, now).await?;
+                    return Ok(None);
+                }
                 Some(source) => (
                     source,
                     v.producer_device_evidence.as_ref(),
@@ -54,7 +76,10 @@ async fn verify_inner(
         }
         PeerAuthoritySubmitRequest::AuthorityForwardMls(v) => {
             match &v.producer_managed_provenance {
-                None => return Ok(None),
+                None => {
+                    require_non_managed_branch(state, &v.mls_submission.commit_event, now).await?;
+                    return Ok(None);
+                }
                 Some(source) => (
                     source,
                     v.producer_device_evidence.as_ref(),
@@ -76,8 +101,20 @@ async fn verify_inner(
     ).map_err(identity_refusal)?.into_fact();
     // The Device source supplies a native identity carrier, never a Realm role.
     // Resolve current history and Describe through the existing verified route contract.
-    let carrier = arkret_models_identity::ServiceResolutionCarrier::Inline {
-        inline: device.service_resolution.clone(),
+    let projection = device.service_resolution.projection().map_err(invalid)?;
+    let base = arkret_models_identity::service_identity::CanonicalServiceUrl::canonicalize(
+        &projection.base_url,
+    )
+    .map_err(invalid)?;
+    // Historical proof remains bound to the carried history. Fetch the current route
+    // separately so a later legal Service rotation does not replace that historical proof.
+    let carrier = arkret_models_identity::ServiceResolutionCarrier::ResolutionUrl {
+        resolution_url: format!(
+            "{}{}",
+            base,
+            arkret_models_identity::canonical_service_resolution_path(&peer.source_service_id)
+                .trim_start_matches('/')
+        ),
     };
     state
         .service_route_resolver()

@@ -455,6 +455,14 @@ async fn exercise(creator: usize) {
             .is_err()
         );
     }
+    use coland_storage::MlsGroupCurrentStore as _;
+    let groups = coland_storage_postgres::PgMlsGroupCurrentStore {
+        pool: ready.pool.clone(),
+    };
+    let scope = ScopeRef::Realm {
+        realm_id: ready.context.fixture.realm.clone(),
+    };
+    let base_current = groups.current(&scope).await.unwrap().unwrap().value;
     let submission = native_phase(|| handoff::commit(&mut ready, creator)).await;
     let original = S::MlsCommit(submission.clone());
     let request = native_phase(|| {
@@ -536,6 +544,23 @@ async fn exercise(creator: usize) {
     );
     eprintln!("[managed forward] forwarding complete native MLS through real HTTP");
     native_phase(|| submit_origin_mls(&ready, creator, &submission, &original)).await;
+    let accepted = PgAuthorityCommitStore {
+        pool: ready.pool.clone(),
+    }
+    .committed_event(&submission.commit_event.event_id)
+    .await
+    .unwrap()
+    .unwrap();
+    ready
+        .group
+        .install_accepted_commit(
+            &arkret_wire::CommittedEventFullView {
+                event: accepted.event,
+                commit: accepted.commit,
+            },
+            &base_current,
+        )
+        .unwrap();
     let after = domain(&ready.pool).await;
     let after_private = private_sources(&ready.pool, &ready.context.fixture.realm).await;
     let wrong_peer = coland_services::authority_commit::AuthenticatedPeerContext {

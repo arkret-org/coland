@@ -4,6 +4,14 @@ use async_trait::async_trait;
 
 use crate::{PersistenceError, PersistenceResult};
 
+/// Internal issuance result, never a transport model. The body already contains
+/// the original managed source before its Device attestation digest is formed.
+#[derive(Clone, Debug)]
+pub struct PreparedManagedForward {
+    pub request: arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+    pub core: arkret_models_crypto::ForwardDeviceProjectionAttestationCore,
+}
+
 /// The complete `producer_device_evidence` a governance Station verified for
 /// a cross-Station human-device producer, with its content address.
 ///
@@ -52,6 +60,32 @@ pub fn forwarded_producer_device_evidence_ref(
 /// historical reads require the caller to authorize disclosure separately.
 #[async_trait]
 pub trait AccountDeviceSignerEvidenceStore: Send + Sync {
+    /// Freeze the complete managed source and native Device core under one
+    /// confirmed PCR cut. Only ordinary Event and MLS forward branches apply.
+    async fn prepare_managed_forward(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+        destination: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<PreparedManagedForward>;
+
+    /// Recheck the entire signed body at its original issuance cut and retain
+    /// its exact private bytes before the first network attempt.
+    async fn retain_managed_forward(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+    ) -> PersistenceResult<SignerEvidenceRef>;
+
+    /// Private immutable read for recovery of this exact original request.
+    /// Callers still authenticate its Account/Device and authorize forwarding.
+    async fn get_managed_forward(
+        &self,
+        account: &AccountId,
+        device: &DeviceId,
+        reference: &SignerEvidenceRef,
+    ) -> PersistenceResult<
+        Option<arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest>,
+    >;
+
     /// Prepare the existing forward-only unsigned core from a locked native
     /// authorization cut. This grants neither directory disclosure nor business
     /// authority; retaining its signed wrapper rechecks the same source.

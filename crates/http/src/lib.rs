@@ -275,6 +275,20 @@ pub async fn test_fresh_producer_device_evidence(
 /// same function used by the self Event route.
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
+pub async fn test_fresh_forward_request(
+    state: &crate::state::AppState,
+    request: arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+    destination: &arkret_wire::DidCoreId,
+) -> coland_services::ServiceResult<
+    arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+> {
+    crate::state::fresh_forward_request(state, request, destination).await
+}
+
+/// Exercise the forwarding-Station preflight and queue boundary through the
+/// same function used by the self Event route.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
 pub async fn test_forward_self_event(
     state: &crate::state::AppState,
     governance: &arkret_wire::DidCoreId,

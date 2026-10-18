@@ -237,6 +237,16 @@ impl Fixture {
                 .map(|fact| fact.digest().unwrap());
             tx.commit.previous_commit_ref = previous_commit;
             ordinary_realm::seal_final_commit(&mut tx.commit);
+            tx.commit.signature = arkret_signatures::detached_object::sign_detached_object(
+                &arkret_canonical::unsigned_value(&tx.commit, &["signature"]).unwrap(),
+                arkret_wire::DetachedSignatureContext::RealmCommit,
+                self.state
+                    .service_verification_method("notary-key")
+                    .unwrap(),
+                tx.commit.committed_at,
+                self.state.notary_signing_key().as_ref(),
+            )
+            .unwrap();
             previous_commit = Some(tx.commit.commit_id.clone());
         }
         for (submission, tx) in unit.submission.events.iter_mut().zip(&unit.transactions) {
@@ -662,7 +672,9 @@ fn content_digest_header(bytes: &[u8]) -> String {
 }
 
 fn applet_service_signing_key(verification_method: &str) -> SigningKey {
-    if verification_method.ends_with("#applet-native-key") {
+    if verification_method.ends_with("#applet-native-key")
+        || verification_method.ends_with("#applet-service-key")
+    {
         return SigningKey::from_bytes(&[42; 32]);
     }
     if verification_method.ends_with("#applet-native-key-new") {
@@ -688,12 +700,9 @@ fn signed_applet_package(
     let controller_principal_id = arkret_wire::project_did_to_core_id(&controller_did).unwrap();
     // Registration epoch evidence admits only did:webvh / did:key; the Service
     // keeps its own SCID, distinct from every managed actor it provisions.
-    let service_did = Did::new(format!(
-        "did:webvh:zsvc{}:{}.applet.example",
-        namespace.replace(|ch: char| !ch.is_ascii_alphanumeric(), ""),
-        safe_did_token(namespace)
-    ))
-    .unwrap();
+    let authority = format!("{}.applet.example", safe_did_token(namespace));
+    let native = fixture_applet_service_inception(&authority);
+    let service_did = Did::new(native.did.clone()).unwrap();
     let service_id = arkret_wire::project_did_to_core_id(&service_did).unwrap();
     let mut package = AppletPackage::new(
         format!("package:{applet_id}"),
@@ -722,7 +731,7 @@ fn signed_applet_package(
     let registration_epoch_evidence =
         arkret_models_integration::applet::AppletRegistrationEpochEvidence::from_did_document(
             &service_document,
-            service_method_version_evidence(),
+            service_method_version_evidence(&package),
         )
         .unwrap();
     package.requested_scopes = vec![
@@ -797,31 +806,73 @@ fn applet_service_did(package: &AppletPackage) -> Did {
     did
 }
 
+fn fixture_applet_service_inception(
+    authority: &str,
+) -> arkret_signatures::webvh::PreparedInception {
+    use rand_chacha::rand_core::SeedableRng as _;
+    let endpoint: Url = format!("https://{authority}/").parse().unwrap();
+    let mut rng =
+        rand_chacha::ChaCha20Rng::from_seed(arkret_canonical::sha256_bytes(authority.as_bytes()));
+    arkret_signatures::webvh::prepare_service_inception_with_did_key_seed(
+        &mut rng,
+        &arkret_signatures::webvh::ServiceInceptionInput {
+            principal_endpoint: &endpoint,
+            local_id: "service",
+            also_known_as: &[],
+            version_time: "2026-01-01T00:00:00Z".parse().unwrap(),
+            did_key_fragment: Some("applet-service-key"),
+        },
+        &[42; 32],
+    )
+    .unwrap()
+}
+
+fn fixture_applet_service_history(
+    package: &AppletPackage,
+) -> arkret_models_identity::AuthenticatedServiceResolution {
+    let did = applet_service_did(package);
+    let authority = did
+        .as_str()
+        .strip_prefix("did:webvh:")
+        .unwrap()
+        .split(':')
+        .nth(1)
+        .unwrap()
+        .replace("%3A", ":")
+        .replace("%3a", ":");
+    let native = fixture_applet_service_inception(&authority);
+    assert_eq!(native.did, did.as_str());
+    arkret_identity::build_authenticated_webvh_service_resolution(
+        package.service_id.clone(),
+        "applet_service".to_owned(),
+        serde_json::from_value(native.log_entry["state"].clone()).unwrap(),
+        vec![native.log_entry.clone()],
+        Vec::new(),
+        chrono::Utc::now(),
+    )
+    .unwrap()
+}
+
 fn applet_service_id_document(package: &AppletPackage) -> arkret_identity::DidDocument {
-    let applet_signing_key = applet_service_signing_key(&package.webhook_auth.key_ref);
-    arkret_identity::DidDocument {
-        id: applet_service_did(package),
-        verification_methods: BTreeMap::from([(
-            package.webhook_auth.key_ref.to_string(),
-            arkret_canonical::ed25519_pubkey_to_did_key_multibase(
-                applet_signing_key.verifying_key().as_bytes(),
-            ),
-        )]),
-        also_known_as: Vec::new(),
-        updated_at: Some(package.created_at),
-        raw_properties: BTreeMap::new(),
-    }
+    fixture_applet_service_history(package).normalized_did_document
 }
 
 async fn ingest_applet_service_id_document(state: &AppState, package: &AppletPackage) {
     let now = chrono::Utc::now();
-    let document = applet_service_id_document(package);
+    let source = fixture_applet_service_history(package);
+    let document = source.normalized_did_document.clone();
     let record = coland_storage::WebvhDocumentRecord {
         did: document.id.to_string(),
         did_document: serde_json::to_value(document).unwrap(),
-        key_log_head: None,
-        seq: 0,
-        method_evidence: serde_json::to_value(service_method_version_evidence()).unwrap(),
+        key_log_head: Some(
+            source
+                .method_history_evidence
+                .boundary()
+                .to_method_history_head
+                .clone(),
+        ),
+        seq: 1,
+        method_evidence: serde_json::to_value(&source.method_history_evidence).unwrap(),
         fetched_at: now,
         expires_at: now + chrono::Duration::minutes(15),
         updated_at: now,
@@ -846,10 +897,16 @@ async fn ingest_applet_service_id_document(state: &AppState, package: &AppletPac
         .unwrap();
 }
 
-fn service_method_version_evidence() -> AppletDidMethodVersionEvidence {
+fn service_method_version_evidence(package: &AppletPackage) -> AppletDidMethodVersionEvidence {
     AppletDidMethodVersionEvidence::versioned(
         "did:webvh",
-        Some("1-QmFixtureAppletServiceVersion".to_owned()),
+        Some(
+            fixture_applet_service_history(package)
+                .method_history_evidence
+                .boundary()
+                .to_version_id
+                .clone(),
+        ),
         None,
     )
     .unwrap()
@@ -860,7 +917,7 @@ fn applet_registration_epoch_evidence(
 ) -> arkret_models_integration::AppletRegistrationEpochEvidence {
     arkret_models_integration::AppletRegistrationEpochEvidence::from_did_document(
         &applet_service_id_document(package),
-        service_method_version_evidence(),
+        service_method_version_evidence(&package),
     )
     .unwrap()
 }
@@ -1221,6 +1278,14 @@ impl AppletAuthoringFactory {
             _ => panic!("contract authoring factory has only Service install/Ghost branches"),
         };
         let digest = Hash::new(arkret_canonical::canonical_sha256(&request).unwrap()).unwrap();
+        let creation_service_resolution = match &request {
+            coland_storage::AppletAdmissionRequest::Managed(
+                AppletManagedActorCommittedRequest::Ghost(body),
+            ) if body.managed_actor_bundle.is_some() => {
+                Some(fixture_applet_service_history(package))
+            }
+            _ => None,
+        };
         coland_storage::AppletAuthoringUnitWrite {
             candidate: coland_storage::AppletAuthoringCandidate {
                 request,
@@ -1247,6 +1312,7 @@ impl AppletAuthoringFactory {
                 prior_service_signer_evidence: None,
                 accepted_at: arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()),
             },
+            creation_service_resolution,
             expected_identity: identity,
             expected_installation: installation,
             preview_subject_key: preview,

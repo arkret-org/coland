@@ -3,6 +3,8 @@
 mod e2ee;
 #[path = "native_device/forward_source.rs"]
 mod forward_source;
+#[path = "native_device/managed_forward_source.rs"]
+mod managed_forward_source;
 use arkret_models_integration::management_review::*;
 use arkret_wire::{DeviceId, ManagementOperation, ServiceOperationId};
 use coland_storage::DeviceRevocationStore as _;
@@ -830,7 +832,7 @@ struct NativeSourcesContext {
     )>,
 }
 async fn native_sources_setup() -> Box<NativeSourcesContext> {
-    native_sources_setup_for_history(None).await
+    native_phase(|| native_sources_setup_for_history(None)).await
 }
 
 async fn native_sources_setup_for_history(history: Option<&str>) -> Box<NativeSourcesContext> {
@@ -851,12 +853,10 @@ async fn native_sources_setup_for_history(history: Option<&str>) -> Box<NativeSo
     let install = Box::new(
         native_phase(|| fixture.install_package(true, native.package.clone(), &namespace)).await,
     );
-    let ghost = fixture
-        .ghost_body(&install, &namespace, "multi-parent-ghost")
-        .await;
+    let ghost =
+        native_phase(|| fixture.ghost_body(&install, &namespace, "multi-parent-ghost")).await;
     assert_eq!(
-        fixture
-            .ghost_commit(&install, &ghost, "multi-parent-ghost")
+        native_phase(|| fixture.ghost_commit(&install, &ghost, "multi-parent-ghost"))
             .await
             .0,
         StatusCode::CREATED

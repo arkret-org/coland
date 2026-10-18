@@ -32,6 +32,18 @@ use coland_storage::{ConflictCode, ForwardAttemptStatus, ForwardedProducerDevice
 
 use super::AppState;
 
+#[path = "authority_forward_sources.rs"]
+mod sources;
+
+#[cfg(feature = "test-support")]
+pub(crate) async fn fresh_forward_request(
+    state: &AppState,
+    request: PeerAuthoritySubmitRequest,
+    destination: &DidCoreId,
+) -> ServiceResult<PeerAuthoritySubmitRequest> {
+    sources::fresh_request(state, request, destination).await
+}
+
 fn temporarily_unavailable(detail: impl std::fmt::Display) -> ServiceError {
     ServiceError::Conflict(format!(
         "{}: {detail}",
@@ -774,7 +786,7 @@ async fn forward_self_event_inner(
     // particular, a revoked/pending/fenced producer must leave no queued
     // Event behind at the forwarding Station.
     let material = forwarded_genesis_material(state, &submission.event).await?;
-    let mut request = PeerAuthorityForwardEventRequest {
+    let request = PeerAuthorityForwardEventRequest {
         branch:
             arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,
         event_submission: submission.clone(),
@@ -783,14 +795,12 @@ async fn forward_self_event_inner(
         producer_managed_provenance: None,
         producer_agent_evidence: None,
     };
-    request.producer_agent_evidence =
-        fresh_producer_agent_evidence(state, &submission.event).await?;
-    let body_digest =
-        arkret_models_collaboration::authority_commit::authority_forward_body_digest(&request)
-            .map_err(wire_refusal)?;
-    request.producer_device_evidence =
-        fresh_producer_device_evidence(state, &submission.event, governance, &body_digest).await?;
-    request.validate().map_err(wire_refusal)?;
+    let request = sources::fresh_request(
+        state,
+        PeerAuthoritySubmitRequest::AuthorityForwardEvent(request),
+        governance,
+    )
+    .await?;
     let session = session.ok_or_else(|| {
         ServiceError::protocol(
             ErrorCode::Unauthenticated,
@@ -804,7 +814,7 @@ async fn forward_self_event_inner(
     // later committed replica; neither path makes it visible as accepted.
     state
         .authority_commits()
-        .queue_event(&request.event_submission.event, crate::wire::now())
+        .queue_event(&submission.event, crate::wire::now())
         .await?;
 
     state
@@ -815,13 +825,7 @@ async fn forward_self_event_inner(
             crate::wire::now(),
         )
         .await?;
-    send_forward(
-        state,
-        governance,
-        PeerAuthoritySubmitRequest::AuthorityForwardEvent(request),
-        session,
-    )
-    .await
+    send_forward(state, governance, request, session).await
 }
 
 /// A: forward one self-submitted MLS Commit; the Commit Event's producer
@@ -835,7 +839,7 @@ pub(super) async fn forward_self_mls(
     require_live_forward(state, &submission.commit_event).await?;
     // Match ordinary forwarding: the live device gate precedes every durable
     // forwarding effect, including the local queued Event.
-    let mut request = PeerAuthorityForwardMlsRequest {
+    let request = PeerAuthorityForwardMlsRequest {
         branch:
             arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,
         mls_submission: submission.clone(),
@@ -843,15 +847,12 @@ pub(super) async fn forward_self_mls(
         producer_managed_provenance: None,
         producer_agent_evidence: None,
     };
-    request.producer_agent_evidence =
-        fresh_producer_agent_evidence(state, &submission.commit_event).await?;
-    let body_digest =
-        arkret_models_collaboration::authority_commit::authority_forward_body_digest(&request)
-            .map_err(wire_refusal)?;
-    request.producer_device_evidence =
-        fresh_producer_device_evidence(state, &submission.commit_event, governance, &body_digest)
-            .await?;
-    request.validate().map_err(wire_refusal)?;
+    let request = sources::fresh_request(
+        state,
+        PeerAuthoritySubmitRequest::AuthorityForwardMls(request),
+        governance,
+    )
+    .await?;
     require_live_forward(state, &submission.commit_event).await?;
     state
         .authority_commits()
@@ -866,13 +867,7 @@ pub(super) async fn forward_self_mls(
             crate::wire::now(),
         )
         .await?;
-    send_forward(
-        state,
-        governance,
-        PeerAuthoritySubmitRequest::AuthorityForwardMls(request),
-        session,
-    )
-    .await
+    send_forward(state, governance, request, session).await
 }
 
 /// Recover an exact frozen remote submission before today's producer admission.

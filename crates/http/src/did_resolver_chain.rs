@@ -250,6 +250,15 @@ impl ColandDidResolver {
         &self,
         did: &Did,
     ) -> Result<arkret_identity::VerifiedDidWebvhLog, String> {
+        self.fetch_retained_webvh_history(did)
+            .await
+            .map(|(history, _)| history)
+    }
+
+    async fn fetch_retained_webvh_history(
+        &self,
+        did: &Did,
+    ) -> Result<(arkret_identity::VerifiedDidWebvhLog, Vec<Value>), String> {
         if !self.method_allowed("webvh") {
             return Err("did:webvh method is disabled by resolver policy".to_owned());
         }
@@ -294,9 +303,16 @@ impl ColandDidResolver {
         } else {
             None
         };
-        verify_did_webvh_v1_chain_and_witness_bytes(did, &log_body, witness_body.as_deref())
-            .map(|verified| verified.log)
-            .map_err(|error| format!("did:webvh history verification failed: {error}"))
+        let verified =
+            verify_did_webvh_v1_chain_and_witness_bytes(did, &log_body, witness_body.as_deref())
+                .map_err(|error| format!("did:webvh history verification failed: {error}"))?;
+        let witness_records = witness_body
+            .as_deref()
+            .map(serde_json::from_slice::<Vec<Value>>)
+            .transpose()
+            .map_err(|error| format!("did:webvh witness records are invalid: {error}"))?
+            .unwrap_or_default();
+        Ok((verified.log, witness_records))
     }
 
     fn webvh_url_for_environment(&self, raw_url: String) -> Result<String, String> {
@@ -402,6 +418,62 @@ impl DidResolver for ColandDidResolver {
 
 #[async_trait::async_trait]
 impl coland_services::identity::DidResolverPort for ColandDidResolver {
+    async fn resolve_retained_service_resolution(
+        &self,
+        did: &Did,
+        service_kind: arkret_wire::ServiceKind,
+        retained: Option<arkret_models_identity::AuthenticatedServiceResolution>,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<
+        arkret_models_identity::AuthenticatedServiceResolution,
+        coland_services::identity::PinnedDidResolutionError,
+    > {
+        use coland_services::identity::PinnedDidResolutionError;
+        let invalid = |error: String| PinnedDidResolutionError::HistoryUnverifiable(error);
+        if !self.method_allowed(did.method()) {
+            return Err(PinnedDidResolutionError::MethodNotAllowed);
+        }
+        let service =
+            arkret_wire::project_did_to_core_id(did).map_err(|e| invalid(e.to_string()))?;
+        if let Some(source) = retained {
+            arkret_identity::verify_authenticated_service_resolution_history(&source, &service, at)
+                .map_err(|e| invalid(e.to_string()))?;
+            return Ok(source);
+        }
+        if did.method() == "key" {
+            return arkret_identity::build_authenticated_did_key_service_resolution(
+                service,
+                service_kind.as_str().to_owned(),
+                did.clone(),
+                at,
+            )
+            .map_err(|e| invalid(e.to_string()));
+        }
+        if did.method() != "webvh" {
+            return Err(PinnedDidResolutionError::UnsupportedMethod);
+        }
+        let (history, witness_records) = self
+            .fetch_retained_webvh_history(did)
+            .await
+            .map_err(invalid)?;
+        let entries = history.raw_entries;
+        let head = entries
+            .last()
+            .and_then(|entry| entry.get("state"))
+            .ok_or_else(|| invalid("retained service history has no head state".to_owned()))?;
+        let document = serde_json::from_value(head.clone())
+            .map_err(|e| invalid(format!("retained service DID document is invalid: {e}")))?;
+        arkret_identity::build_authenticated_webvh_service_resolution(
+            service,
+            service_kind.as_str().to_owned(),
+            document,
+            entries,
+            witness_records,
+            at,
+        )
+        .map_err(|e| invalid(e.to_string()))
+    }
+
     fn discard_cached_document(&self, did: &Did) {
         self.local_snapshot.write().remove(did);
     }

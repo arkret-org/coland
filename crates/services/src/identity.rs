@@ -2583,6 +2583,34 @@ pub trait DidDocumentPort: Send + Sync {
 #[async_trait]
 pub trait DidResolverPort: arkret_identity::DidResolver + Send + Sync {
     async fn resolve_did_async(&self, did: &Did) -> Result<arkret_identity::DidDocument, String>;
+    /// Preserve the complete method-native source for an immutable creation.
+    /// Local entries, when present, must never fall back to an external head.
+    async fn resolve_retained_service_resolution(
+        &self,
+        did: &Did,
+        service_kind: arkret_wire::ServiceKind,
+        retained: Option<arkret_models_identity::AuthenticatedServiceResolution>,
+        at: DateTime<Utc>,
+    ) -> Result<arkret_models_identity::AuthenticatedServiceResolution, PinnedDidResolutionError>
+    {
+        let service = arkret_wire::project_did_to_core_id(did)
+            .map_err(|e| PinnedDidResolutionError::HistoryUnverifiable(e.to_string()))?;
+        if let Some(source) = retained {
+            arkret_identity::verify_authenticated_service_resolution_history(&source, &service, at)
+                .map_err(|e| PinnedDidResolutionError::HistoryUnverifiable(e.to_string()))?;
+            return Ok(source);
+        }
+        if did.method() != "key" {
+            return Err(PinnedDidResolutionError::HistoryUnavailable);
+        }
+        arkret_identity::build_authenticated_did_key_service_resolution(
+            service,
+            service_kind.as_str().to_owned(),
+            did.clone(),
+            at,
+        )
+        .map_err(|e| PinnedDidResolutionError::HistoryUnverifiable(e.to_string()))
+    }
     async fn resolve_verified_external_webvh_history(
         &self,
         _did: &Did,
@@ -2692,6 +2720,80 @@ impl DidService {
 
     pub fn resolver(&self) -> &dyn arkret_identity::DidResolver {
         self.resolver.as_ref()
+    }
+
+    /// Complete portable signer history, with the same local-first policy as
+    /// native identity resolution. A projection or current DID document alone
+    /// cannot stand in for missing history or witness records.
+    pub async fn retained_service_resolution(
+        &self,
+        did: &Did,
+        service_kind: arkret_wire::ServiceKind,
+        at: DateTime<Utc>,
+    ) -> Result<arkret_models_identity::AuthenticatedServiceResolution, PinnedDidResolutionError>
+    {
+        let invalid = |error: String| PinnedDidResolutionError::HistoryUnverifiable(error);
+        let service =
+            arkret_wire::project_did_to_core_id(did).map_err(|e| invalid(e.to_string()))?;
+        let retained = match did.method() {
+            "webvh" => {
+                let entries = self.verified_local_webvh_history(did).await?;
+                if entries.is_empty() {
+                    let record = self
+                        .documents
+                        .document(did.as_str())
+                        .await
+                        .map_err(|e| invalid(e.to_string()))?;
+                    if let Some(record) = record
+                        && record.expires_at > at
+                        && record
+                            .method_evidence
+                            .get("evidence_kind")
+                            .and_then(Value::as_str)
+                            == Some("webvh_log")
+                    {
+                        // Only the complete closed SDK method-evidence carrier
+                        // is eligible; compact receipts and projections miss.
+                        let method_history_evidence =
+                            serde_json::from_value(record.method_evidence)
+                                .map_err(|e| invalid(e.to_string()))?;
+                        let normalized_did_document = serde_json::from_value(record.did_document)
+                            .map_err(|e| invalid(e.to_string()))?;
+                        Some(arkret_models_identity::AuthenticatedServiceResolution {
+                            service_id: service,
+                            service_kind: service_kind.as_str().to_owned(),
+                            method_history_evidence,
+                            normalized_did_document,
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    let head = entries
+                        .last()
+                        .and_then(|entry| entry.get("state"))
+                        .ok_or_else(|| invalid("local service history has no head".to_owned()))?;
+                    let document =
+                        serde_json::from_value(head.clone()).map_err(|e| invalid(e.to_string()))?;
+                    Some(
+                        arkret_identity::build_authenticated_webvh_service_resolution(
+                            service,
+                            service_kind.as_str().to_owned(),
+                            document,
+                            entries,
+                            Vec::new(),
+                            at,
+                        )
+                        .map_err(|e| invalid(e.to_string()))?,
+                    )
+                }
+            }
+            "key" => None,
+            _ => return Err(PinnedDidResolutionError::UnsupportedMethod),
+        };
+        self.resolver
+            .resolve_retained_service_resolution(did, service_kind, retained, at)
+            .await
     }
 
     /// Return one fully verified native snapshot for consumers that must

@@ -2076,6 +2076,13 @@ async fn provision_ghost_actor_endpoint(
             prior_service_signer_evidence: None,
             accepted_at: now,
         },
+        creation_service_resolution: Some(
+            super::install::managed_creation_service_resolution(
+                state,
+                &registration_epoch_evidence,
+            )
+            .await?,
+        ),
         expected_identity: Some(identity_value.clone()),
         expected_installation: Some(expected_applet_record.clone()),
         preview_subject_key: applet_authoring_preview_subject_key(&provision.authoring_request)?,

@@ -3,7 +3,7 @@ use diesel_async::SimpleAsyncConnection as _;
 
 use super::*;
 
-fn destination() -> arkret_wire::DidCoreId {
+pub(super) fn destination() -> arkret_wire::DidCoreId {
     use arkret_models_identity::service_identity::{CanonicalServiceUrl, ServiceRegistrationKey};
     use arkret_signatures::webvh::{
         ServiceRegistrationInceptionInput, prepare_service_registration_inception,

@@ -56,6 +56,7 @@ mod applet_action_approval;
 mod applet_admission;
 mod applet_authority_material;
 mod applet_current_results;
+mod applet_managed_provenance;
 mod applet_widget_tokens;
 mod applets;
 mod audit;

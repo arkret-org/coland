@@ -24,6 +24,9 @@ use crate::{
 #[path = "account_device_forward_source.rs"]
 mod forward_source;
 
+#[path = "account_device_managed_forward.rs"]
+mod managed_forward;
+
 fn retention_transaction_error(error: PgTransactionError) -> PersistenceError {
     match error {
         PgTransactionError::Diesel(diesel::result::Error::DatabaseError(
@@ -81,6 +84,74 @@ pub struct PgAccountDeviceSignerEvidenceArchive {
 
 #[async_trait::async_trait]
 impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
+    async fn prepare_managed_forward(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+        destination: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<coland_storage::PreparedManagedForward> {
+        let (event, evidence, managed) = managed_forward::parts(request)?;
+        if evidence.is_some() || managed.is_some() {
+            return Err(PersistenceError::SchemaViolation(
+                "fresh managed forward cannot replace an already frozen source".into(),
+            ));
+        }
+        let producer = event
+            .account_device_producer()
+            .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?
+            .ok_or_else(|| {
+                PersistenceError::SchemaViolation(
+                    "managed forward has no native Device producer".into(),
+                )
+            })?;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            let cut = confirmed_pcr_device_status_cut_in_connection(
+                conn,
+                &producer.account_id,
+                &producer.device_id,
+                chrono::Utc::now(),
+            )
+            .await?
+            .ok_or_else(|| {
+                PersistenceError::Conflict(
+                    "device_unauthorized: managed forward origin PCR cut is unavailable".into(),
+                )
+            })?;
+            crate::realm_authorization_cut::lock_realm_authorization_cut(
+                conn,
+                &cut.authority.realm_id,
+            )
+            .await?;
+            managed_forward::prepare_in_connection(
+                conn,
+                request,
+                destination,
+                forward_source::now(),
+            )
+            .await
+        })
+        .await
+        .map_err(retention_transaction_error)
+    }
+
+    async fn retain_managed_forward(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+    ) -> PersistenceResult<SignerEvidenceRef> {
+        managed_forward::retain(&self.pool, request).await
+    }
+
+    async fn get_managed_forward(
+        &self,
+        account: &AccountId,
+        device: &DeviceId,
+        reference: &SignerEvidenceRef,
+    ) -> PersistenceResult<
+        Option<arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest>,
+    > {
+        managed_forward::get(&self.pool, account, device, reference).await
+    }
+
     async fn prepare_forward_current(
         &self,
         event: &arkret_wire::Event,

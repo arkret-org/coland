@@ -1253,6 +1253,32 @@ async fn require_signal_content_mapping(
 ) -> Result<(), AppError> {
     // The encrypted Signal rail has no registered durable content-action
     // mapping. Independent Direct/control authority keeps its own contract.
+    if session.agent_session().is_some() {
+        let actor =
+            crate::routing::identity::session_actor::validated_session_actor(state, session)
+                .await?;
+        if let Some(account) = actor.as_account_id()
+            && let Some(agent) =
+                crate::routing::identity::agent_pcr::agent_record_for_actor(state, &actor)
+                    .await
+                    .map_err(|_| signal_rail_unavailable("resolve Signal independent scope"))?
+        {
+            let controller =
+                crate::routing::identity::agent_pcr::agent_controller_account(state, &agent)
+                    .await?;
+            if state
+                .authority_commits()
+                .agent_owner_direct_scope(realm, account, &controller)
+                .await
+                .map_err(|_| signal_rail_unavailable("resolve Signal independent scope"))?
+            {
+                // This selects the existing participant rail, not a durable
+                // content read. Every caller still checks current scope, MLS,
+                // runtime key, lifecycle, proof and TTL at its Signal boundary.
+                return Ok(());
+            }
+        }
+    }
     let input = coland_storage::AccountContentDeliveryInput {
         realms: vec![realm.clone()],
         unresolved_content_realms: vec![realm.clone()],

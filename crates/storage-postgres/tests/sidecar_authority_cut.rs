@@ -205,6 +205,43 @@ fn fixture_realm_export_step(
     })
 }
 
+fn fixture_snapshot_step(
+    pool: &coland_storage_postgres::PgPool,
+    realm_id: &arkret_wire::RealmId,
+    account: &AccountId,
+    station: &arkret_wire::DidCoreId,
+    method: arkret_wire::DidUrl,
+) -> Pin<
+    Box<
+        dyn Future<
+                Output = coland_storage::PersistenceResult<Option<arkret_wire::RealmStateSnapshot>>,
+            > + Send,
+    >,
+> {
+    let pool = pool.clone();
+    let realm_id = realm_id.clone();
+    let account = account.clone();
+    let station = station.clone();
+    fixture_future(|| async move {
+        fixture_step(fixture_future(|| async move {
+            let key = ed25519_dalek::SigningKey::from_bytes(&[83; 32]);
+            let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
+                coland_services::authority_commit::build_signed_realm_state_snapshot(
+                    material,
+                    method.clone(),
+                    &key,
+                    chrono::Utc::now(),
+                )
+                .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
+            };
+            PgAuthorityCommitStore { pool }
+                .issue_realm_state_snapshot_for_account(&realm_id, &account, &station, &sign)
+                .await
+        }))
+        .await
+    })
+}
+
 fn fixture_strand_watch_current_step(
     pool: &coland_storage_postgres::PgPool,
     request: &arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentRequestBody,
@@ -2529,12 +2566,11 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
                 sig: arkret_wire::Base64UrlString::new("AA").unwrap(),
             },
         };
-        use ed25519_dalek::Signer;
-        receipt.signature.sig = arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
-            ed25519_dalek::SigningKey::from_bytes(&[83; 32])
-                .sign(&receipt.canonical_signing_bytes().unwrap())
-                .to_bytes(),
-        ))
+        receipt.signature = arkret_signatures::keypackages::sign_keypackage_signing_input(
+            &[83; 32],
+            &format!("{station_did}#authority"),
+            &receipt.canonical_signing_bytes().unwrap(),
+        )
         .unwrap();
         assert_ne!(receipt.request_digest.as_str(), ledger.request_digest);
         let mut changed_command = consume.clone();
@@ -2544,6 +2580,11 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
             Some(coland_storage::MlsKeyPackageConsumeEvidence { request:&changed_command,receipt:&receipt }),
         ).await.is_err(), "changing only the outer signature must not reuse a consume receipt");
         assert!(packages.get(&package.keypackage_id).await.unwrap().unwrap().consumed_at.is_none());
+        assert_ne!(
+            receipt.request_digest.as_str(),
+            arkret_canonical::canonical_sha256(&consume.unsigned()).unwrap(),
+            "the consume identity includes its outer signature"
+        );
         let receipt_json = serde_json::to_value(&receipt).unwrap();
         packages
             .consume_claim(
@@ -2586,15 +2627,28 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
                 .await
                 .unwrap();
         }
+        for digest in [
+            ledger.request_digest.clone(),
+            arkret_canonical::canonical_sha256(&consume.unsigned()).unwrap(),
+            format!("sha256:{}", "f".repeat(64)),
+        ] {
         let mut wrong_digest = receipt_json.clone();
-        wrong_digest["request_digest"] = serde_json::json!(ledger.request_digest);
+        wrong_digest["request_digest"] = serde_json::json!(digest);
         diesel::sql_query("UPDATE peer_keypackage_claims SET consume_receipt=$1 WHERE source_id=$2 AND claim_request_id=$3")
             .bind::<Jsonb,_>(wrong_digest).bind::<Text,_>(&ledger.source_id).bind::<Text,_>(&ledger.claim_request_id).execute(&mut conn).await.unwrap();
         drop(conn);
         assert!(
             status().await.unwrap().unwrap().1.is_empty(),
-            "claim digest cannot stand in for consume digest"
+            "a mutated claim, unsigned or arbitrary digest cannot stand in for the signed consume fact"
         );
+        conn = pool.get().await.unwrap();
+        }
+        let mut wrong_signer = receipt_json.clone();
+        wrong_signer["signature"]["kid"] = serde_json::json!("did:web:another-station.example#notary-key");
+        diesel::sql_query("UPDATE peer_keypackage_claims SET consume_receipt=$1 WHERE source_id=$2 AND claim_request_id=$3")
+            .bind::<Jsonb,_>(wrong_signer).bind::<Text,_>(&ledger.source_id).bind::<Text,_>(&ledger.claim_request_id).execute(&mut conn).await.unwrap();
+        drop(conn);
+        assert!(status().await.unwrap().unwrap().1.is_empty(), "another Station cannot attest consumption");
         let mut conn = pool.get().await.unwrap();
         diesel::sql_query("UPDATE peer_keypackage_claims SET consume_receipt=$1 WHERE source_id=$2 AND claim_request_id=$3")
             .bind::<Jsonb,_>(receipt_json).bind::<Text,_>(&ledger.source_id).bind::<Text,_>(&ledger.claim_request_id).execute(&mut conn).await.unwrap();
@@ -5364,6 +5418,17 @@ async fn owned_agent_delivery_cut_scenario(expiry_case: DeliveryExpiryCase) {
     );
     let mut delivery_parent = agent_join.authority_commit.clone();
     if matches!(expiry_case, DeliveryExpiryCase::NoExpiry) {
+        let snapshot = fixture_snapshot_step(
+            &pool,
+            &delivery_parent.event.realm_id,
+            &agent,
+            &agent.station_id,
+            arkret_wire::DidUrl::new(format!("{}#notary-key", station.did)).unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        input.snapshots.push(snapshot);
         let created_at = delivery_parent.commit.committed_at + chrono::TimeDelta::milliseconds(1);
         let strand = ordinary_realm::next_request_for_actor(
             &delivery_parent,
@@ -5511,6 +5576,62 @@ async fn owned_agent_delivery_cut_scenario(expiry_case: DeliveryExpiryCase) {
             "credential delivery requires the issuer's complete scope"
         );
         input.agent_session_scope = Some((content_scope.actions.clone(), scope_details));
+        let snapshot_guard = fixture_delivery_step(&pool, &agent, &agent.station_id, &input)
+            .await
+            .expect("a disclosable signed Snapshot survives later accepted structure")
+            .expect("historical Snapshot delivery retains the current permission cut");
+        assert!(snapshot_guard.permits_handoff());
+        snapshot_guard.finish().await.unwrap();
+        let mut forged_snapshot = input.clone();
+        forged_snapshot.snapshots[0].visible_stream_heads[0].commit_id =
+            arkret_wire::RealmCommitId::from_digest([0xed; 32]);
+        assert!(
+            fixture_delivery_step(&pool, &agent, &agent.station_id, &forged_snapshot)
+                .await
+                .is_err(),
+            "an unaccepted head cannot inherit a signed Snapshot's disclosure proof"
+        );
+        let mut widened_floor = input.clone();
+        let floor = widened_floor.snapshots[0]
+            .retention_and_history_floor
+            .stream_floors
+            .iter_mut()
+            .find(|floor| floor.stream_ref.realm_id() == realm_id)
+            .unwrap();
+        assert!(
+            floor.oldest_position > 0,
+            "the Agent joined after Realm genesis"
+        );
+        floor.oldest_position -= 1;
+        assert!(
+            fixture_delivery_step(&pool, &agent, &agent.station_id, &widened_floor)
+                .await
+                .is_err(),
+            "a signed Snapshot cannot disclose a floor below current readable history"
+        );
+        let mut missing_genesis = input.clone();
+        let original_rows = missing_genesis.snapshots[0].current_state_entries.len();
+        missing_genesis.snapshots[0]
+            .current_state_entries
+            .retain(|row| {
+                !matches!(
+                    row,
+                    arkret_wire::TypedCurrentRow::Value {
+                        selector: arkret_wire::CurrentSelector::RealmGenesis,
+                        ..
+                    }
+                )
+            });
+        assert_eq!(
+            missing_genesis.snapshots[0].current_state_entries.len() + 1,
+            original_rows
+        );
+        assert!(
+            fixture_delivery_step(&pool, &agent, &agent.station_id, &missing_genesis)
+                .await
+                .is_err(),
+            "a subset of disclosed rows must still retain its required genesis"
+        );
         let mut operation_only = input.clone();
         operation_only
             .agent_session_scope
@@ -5609,19 +5730,34 @@ async fn owned_agent_delivery_cut_scenario(expiry_case: DeliveryExpiryCase) {
         assert_eq!(agent_mode_footprint(&pool, realm_id).await, before);
         return;
     }
+    let acquisition_started = std::time::Instant::now();
     let cancelled = fixture_delivery_step(&pool, &agent, &agent.station_id, &input)
         .await
         .unwrap()
         .unwrap();
+    eprintln!(
+        "owned delivery cancellation phase=baseline_acquired elapsed_ms={} at={}",
+        acquisition_started.elapsed().as_millis(),
+        chrono::Utc::now().to_rfc3339(),
+    );
     drop(cancelled);
-    let guard = tokio::time::timeout(
+    let reacquisition_started = std::time::Instant::now();
+    eprintln!(
+        "owned delivery cancellation phase=guard_dropped at={}",
+        chrono::Utc::now().to_rfc3339(),
+    );
+    let reacquired = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         fixture_delivery_step(&pool, &agent, &agent.station_id, &input),
     )
-    .await
-    .unwrap()
-    .unwrap()
-    .unwrap();
+    .await;
+    eprintln!(
+        "owned delivery cancellation phase=reacquire_finished elapsed_ms={} completed={} at={}",
+        reacquisition_started.elapsed().as_millis(),
+        reacquired.is_ok(),
+        chrono::Utc::now().to_rfc3339(),
+    );
+    let guard = reacquired.unwrap().unwrap().unwrap();
     guard.finish().await.unwrap();
     assert_eq!(agent_mode_footprint(&pool, realm_id).await, before);
     let leave = ordinary_realm::next_request_for_actor(
@@ -7270,7 +7406,7 @@ async fn management_review_atomic_join_scenario(
 /// mock issuer over the original introspection transport and real DPoP. The
 /// production resource-server gates run; this is not normal Coauth issuance.
 struct ManagementReviewHttpFixture {
-    service: salvo::Service,
+    service: std::sync::Arc<salvo::Service>,
     public_base_url: String,
     requester_token: String,
     approver_token: String,
@@ -7506,7 +7642,7 @@ async fn management_review_http_fixture(
         }
     });
     ManagementReviewHttpFixture {
-        service: coland_http::service(state),
+        service: std::sync::Arc::new(coland_http::service(state)),
         public_base_url,
         requester_token: tokens[0].clone(),
         approver_token: tokens[1].clone(),
@@ -7527,33 +7663,37 @@ async fn management_review_http_response<T: serde::Serialize>(
     use salvo::test::TestClient;
     let bytes = arkret_canonical::canonical_json_bytes(body).unwrap();
     let token = if approver {
-        &fixture.approver_token
+        fixture.approver_token.clone()
     } else {
-        &fixture.requester_token
+        fixture.requester_token.clone()
     };
     let path = format!("/_arkret/self/management-reviews/{suffix}");
     let key = if approver {
-        &fixture.approver_key
+        fixture.approver_key.clone()
     } else {
-        &fixture.requester_key
+        fixture.requester_key.clone()
     };
-    let dpop = arkret_signatures::dpop::build_dpop_proof(
-        &arkret_signatures::dpop::DpopProofRequest::new(
-            "POST",
-            format!("{}{path}", fixture.public_base_url),
+    let base_url = fixture.public_base_url.clone();
+    let service = fixture.service.clone();
+    let operation = operation.to_owned();
+    // Poll the original router without the large parent scenario's poll frame.
+    fixture_step(async move {
+        let dpop = arkret_signatures::dpop::build_dpop_proof(
+            &arkret_signatures::dpop::DpopProofRequest::new("POST", format!("{base_url}{path}"))
+                .access_token(token.clone()),
+            &key,
         )
-        .access_token(token.clone()),
-        key,
-    )
-    .unwrap();
-    TestClient::post(format!("http://server{path}"))
-        .add_header("Authorization", format!("DPoP {token}"), true)
-        .add_header("DPoP", dpop.header_value, true)
-        .add_header("Arkret-Operation", operation, true)
-        .add_header("Content-Type", "application/json", true)
-        .body(bytes)
-        .send(&fixture.service)
-        .await
+        .unwrap();
+        TestClient::post(format!("http://server{path}"))
+            .add_header("Authorization", format!("DPoP {token}"), true)
+            .add_header("DPoP", dpop.header_value, true)
+            .add_header("Arkret-Operation", operation, true)
+            .add_header("Content-Type", "application/json", true)
+            .body(bytes)
+            .send(service.as_ref())
+            .await
+    })
+    .await
 }
 
 async fn management_review_http_refusal<T: serde::Serialize>(
@@ -8062,6 +8202,7 @@ async fn case_management_review_aa_consumed_exact_replay_survives_later_terminal
 // encrypted verifier custody through the original production owners.
 struct OwnedConsumerCandidate {
     account: AccountId,
+    genesis: coland_storage::AuthorityCommitTransaction,
     endpoint: coland_storage::AgentEndpointGuard,
     join: coland_storage::AuthorityCommitTransaction,
     _vault: DeliveryScopeVault,
@@ -8282,6 +8423,7 @@ async fn owned_consumer_fixture(count: usize) -> OwnedConsumerFixture {
         head = public.authority_commit;
         agents.push(OwnedConsumerCandidate {
             account,
+            genesis,
             endpoint,
             join: agent_join.authority_commit,
             _vault: vault,
@@ -10486,27 +10628,83 @@ async fn owned_consumer_ws_connect(http: &OwnedConsumerHttpFixture) -> OwnedWebS
     let directory = OwnedCertificateDirectory(directory);
     let certificate = directory.0.join("certificate.pem");
     let private_key = directory.0.join("private-key.pem");
-    let config = directory.0.join("certificate.cnf");
-    std::fs::write(&config,format!("[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=ext\n[dn]\nCN={host}\n[ext]\nsubjectAltName=DNS:{host}\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment,keyCertSign\nextendedKeyUsage=serverAuth\n")).unwrap();
-    protect_owned_test_path(&config, 0o600);
-    let generated = std::process::Command::new("openssl")
-        .args([
-            "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-config",
-        ])
-        .arg(&config)
-        .arg("-keyout")
-        .arg(&private_key)
-        .arg("-out")
-        .arg(&certificate)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .unwrap();
-    assert!(
-        generated.success(),
-        "temporary pinned test certificate creation"
-    );
-    for path in [&certificate, &private_key] {
+    let ca_config = directory.0.join("ca.cnf");
+    let ca_certificate = directory.0.join("ca.pem");
+    let ca_key = directory.0.join("ca-key.pem");
+    let request = directory.0.join("server.csr");
+    let extensions = directory.0.join("server.ext");
+    std::fs::write(&ca_config, "[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=ext\n[dn]\nCN=Owned socket test CA\n[ext]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n").unwrap();
+    std::fs::write(&extensions, format!("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:{host}\n")).unwrap();
+    let commands = [
+        vec![
+            "req".to_owned(),
+            "-x509".into(),
+            "-newkey".into(),
+            "rsa:2048".into(),
+            "-nodes".into(),
+            "-sha256".into(),
+            "-days".into(),
+            "1".into(),
+            "-config".into(),
+            ca_config.to_str().unwrap().into(),
+            "-keyout".into(),
+            ca_key.to_str().unwrap().into(),
+            "-out".into(),
+            ca_certificate.to_str().unwrap().into(),
+        ],
+        vec![
+            "req".to_owned(),
+            "-new".into(),
+            "-newkey".into(),
+            "rsa:2048".into(),
+            "-nodes".into(),
+            "-keyout".into(),
+            private_key.to_str().unwrap().into(),
+            "-out".into(),
+            request.to_str().unwrap().into(),
+            "-subj".into(),
+            format!("/CN={host}"),
+        ],
+        vec![
+            "x509".to_owned(),
+            "-req".into(),
+            "-in".into(),
+            request.to_str().unwrap().into(),
+            "-CA".into(),
+            ca_certificate.to_str().unwrap().into(),
+            "-CAkey".into(),
+            ca_key.to_str().unwrap().into(),
+            "-CAcreateserial".into(),
+            "-out".into(),
+            certificate.to_str().unwrap().into(),
+            "-days".into(),
+            "1".into(),
+            "-sha256".into(),
+            "-extfile".into(),
+            extensions.to_str().unwrap().into(),
+        ],
+    ];
+    for args in commands {
+        assert!(
+            std::process::Command::new("openssl")
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success(),
+            "temporary test CA and server certificate creation"
+        );
+    }
+    for path in [
+        &certificate,
+        &private_key,
+        &ca_certificate,
+        &ca_key,
+        &request,
+        &ca_config,
+        &extensions,
+    ] {
         protect_owned_test_path(path, 0o600);
     }
     let acceptor = TcpListener::new("127.0.0.1:0")
@@ -10536,9 +10734,9 @@ async fn owned_consumer_ws_connect(http: &OwnedConsumerHttpFixture) -> OwnedWebS
     };
     use rustls::pki_types::pem::PemObject;
     let mut roots = rustls::RootCertStore::empty();
-    roots
-        .add(rustls::pki_types::CertificateDer::from_pem_file(&certificate).unwrap())
-        .unwrap();
+    for certificate in rustls::pki_types::CertificateDer::pem_file_iter(&ca_certificate).unwrap() {
+        roots.add(certificate.unwrap()).unwrap();
+    }
     let tls = rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
@@ -10730,14 +10928,18 @@ async fn owned_consumer_ws_non_ping(
     ws: &mut OwnedWebSocketFixture,
 ) -> arkret_models_collaboration::sync_frames::websocket::WebSocketServerFrame {
     use arkret_models_collaboration::sync_frames::websocket::*;
-    loop {
-        let frame = owned_consumer_ws_read(ws).await;
-        if let WebSocketServerFrame::Ping { ping_id, .. } = frame {
-            owned_consumer_ws_send(ws, WebSocketClientFrame::Pong { ping_id }).await;
-        } else {
-            return frame;
+    tokio::time::timeout(std::time::Duration::from_secs(40), async {
+        loop {
+            let frame = owned_consumer_ws_read(ws).await;
+            if let WebSocketServerFrame::Ping { ping_id, .. } = frame {
+                owned_consumer_ws_send(ws, WebSocketClientFrame::Pong { ping_id }).await;
+            } else {
+                return frame;
+            }
         }
-    }
+    })
+    .await
+    .expect("original socket produced no non-Ping frame within the 40-second stage budget")
 }
 async fn owned_consumer_websocket_scenario(policy_deny: bool) {
     use arkret_models_collaboration::sync_frames::committed_event_subscribe::CommittedEventSubscribeFrameKind as Kind;
@@ -13273,4 +13475,355 @@ async fn agent_content_session_owned_grant_requires_current_source_and_never_rev
         fixture_commit_step(pool, rejoin).await.unwrap();
         expect_content_session_current_denial(pool, &request).await;
     })).await;
+}
+
+// Attach the production-verified private ceiling before exercising grant
+// current reducers. Tampered source projections must still fail in the UOW.
+async fn owned_current_signed_request(
+    fixture: &OwnedConsumerFixture,
+    request: coland_storage::EventCommitRequest,
+    evidence: &coland_storage::VerifiedAgentScopeEvidence,
+) -> coland_storage::EventCommitRequest {
+    let mut request = Box::pin(ordinary_realm::source_request(&fixture.pool, request)).await;
+    if request.authority_commit.event.kind == EventKind::CapabilityGrant {
+        request.agent_grant_scope_evidence = Some(evidence.clone());
+    }
+    request
+}
+
+#[tokio::test]
+async fn owned_agent_signed_current_source_is_terminal_and_issuer_can_revoke_after_leave() {
+    Box::pin(owned_agent_signed_current_source_journey()).await;
+}
+
+async fn owned_agent_signed_current_source_journey() {
+    use arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef;
+    use arkret_wire::{ActorId, CapabilityActionId};
+    use coland_storage::{CapabilityGrantCurrentResultStore, CapabilityGrantCurrentStatus};
+    use coland_storage_postgres::PgCapabilityGrantCurrentResultStore;
+    use diesel::sql_types::{Jsonb, Text};
+    use diesel_async::RunQueryDsl;
+    let fixture = boxed_owned_consumer_fixture(1).await;
+    let pool = &fixture.pool;
+    let controller = &fixture.controller.history.account;
+    let agent = &fixture.agents[0];
+    let authority = PgAuthorityCommitStore { pool: pool.clone() };
+    let realm = &fixture.head.event.realm_id;
+    let evidence =
+        owned_consumer_grant_scope_step(agent._vault.state.clone(), agent.endpoint.clone()).await;
+    let at = fixture
+        .head
+        .commit
+        .committed_at
+        .max(arkret_canonical::normalize_timestamp_canonical(
+            chrono::Utc::now(),
+        ));
+    let source = IssuerAuthorityRef::OwnedAgent {
+        realm_id: realm.clone(),
+        controller_account_id: controller.clone(),
+        controller_join_event_id: fixture.controller_join.event.event_id.clone(),
+        agent_join_event_id: agent.join.event.event_id.clone(),
+    };
+    let body = serde_json::json!({"schema":"ak.schema.capability.v1","realm_id":realm,
+        "issuer_id":ActorId::account(controller.clone()),"subject":ActorId::account(agent.account.clone()),
+        "actions":[CapabilityActionId::EventRead],"resources":[{"kind":"realm","realm_id":realm}],
+        "constraints":[{"constraint_kind":"authority_control","effect":"allow",
+            "max_authority_depth":0,"authority_regrant_allowed":false}],
+        "issuer_authority_refs":[source],
+        "issued_at":arkret_canonical::format_timestamp_canonical(at + chrono::TimeDelta::seconds(2))});
+    let currents = PgCapabilityGrantCurrentResultStore { pool: pool.clone() };
+    // A wrong immutable generation and an unsupported admin action cannot
+    // turn the current principal projection into an issuance source.
+    for (name, invalid_body) in [
+        ("stale_join", {
+            let mut value = body.clone();
+            value["issuer_authority_refs"][0]["agent_join_event_id"] = serde_json::json!(
+                arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [92; 32])
+            );
+            value
+        }),
+        ("admin_action", {
+            let mut value = body.clone();
+            value["actions"] = serde_json::json!(["ak.capability.grant"]);
+            value
+        }),
+    ] {
+        let candidate = ordinary_realm::next_request_for_actor(
+            &fixture.head,
+            EventKind::CapabilityGrant,
+            ActorId::account(controller.clone()),
+            serde_json::json!({"grant":invalid_body}),
+            at + chrono::TimeDelta::seconds(2),
+        );
+        let candidate = owned_current_signed_request(&fixture, candidate, &evidence).await;
+        assert!(
+            fixture_commit_step(pool, candidate.clone()).await.is_err(),
+            "{name}"
+        );
+        assert!(
+            authority
+                .queued_event(&candidate.authority_commit.event.event_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            currents
+                .get(
+                    realm,
+                    &arkret_wire::GrantId::from_event_id(
+                        &candidate.authority_commit.event.event_id
+                    )
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            authority
+                .stream_head(&fixture.head.commit.stream_ref)
+                .await
+                .unwrap()
+                .unwrap()
+                .commit_id,
+            fixture.head.commit.commit_id
+        );
+    }
+    #[derive(diesel::QueryableByName)]
+    struct CurrentValue {
+        #[diesel(sql_type=Jsonb)]
+        value: serde_json::Value,
+    }
+    // Corrupt only the fixture's private current projection. Its actual
+    // canonical signed source stays intact, so liveness cannot use raw rows.
+    for (name, read, update, broken) in [
+        (
+            "provision_whole_value",
+            "SELECT value FROM agent_provisioning_current_results WHERE agent_id=$1",
+            "UPDATE agent_provisioning_current_results SET value=$2 WHERE agent_id=$1",
+            "provision",
+        ),
+        (
+            "status_whole_value",
+            "SELECT value FROM agent_status_current_results WHERE agent_id=$1",
+            "UPDATE agent_status_current_results SET value=$2 WHERE agent_id=$1",
+            "status",
+        ),
+        (
+            "accountability_whole_value",
+            "SELECT value FROM identity_accountability_current_results WHERE subject_id=$1",
+            "UPDATE identity_accountability_current_results SET value=$2 WHERE subject_id=$1",
+            "accountability",
+        ),
+    ] {
+        let mut conn = pool.get().await.unwrap();
+        let original = diesel::sql_query(read)
+            .bind::<Text, _>(agent.account.principal_id.as_str())
+            .get_result::<CurrentValue>(&mut *conn)
+            .await
+            .unwrap()
+            .value;
+        let mut forged = original.clone();
+        match broken {
+            "provision" => {
+                forged["requested_scope_digest"] =
+                    serde_json::json!(format!("sha256:{}", "e".repeat(64)))
+            }
+            "status" => forged = serde_json::json!("paused"),
+            "accountability" => {
+                forged["not_before"] = serde_json::json!("2099-01-01T00:00:00.000Z")
+            }
+            _ => unreachable!(),
+        }
+        diesel::sql_query(update)
+            .bind::<Text, _>(agent.account.principal_id.as_str())
+            .bind::<Jsonb, _>(&forged)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        drop(conn);
+        let candidate = ordinary_realm::next_request_for_actor(
+            &fixture.head,
+            EventKind::CapabilityGrant,
+            ActorId::account(controller.clone()),
+            serde_json::json!({"grant":body}),
+            at + chrono::TimeDelta::seconds(2),
+        );
+        let candidate = owned_current_signed_request(&fixture, candidate, &evidence).await;
+        assert!(
+            fixture_commit_step(pool, candidate.clone()).await.is_err(),
+            "{name}"
+        );
+        assert!(
+            authority
+                .queued_event(&candidate.authority_commit.event.event_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "{name}"
+        );
+        assert!(
+            currents
+                .get(
+                    realm,
+                    &arkret_wire::GrantId::from_event_id(
+                        &candidate.authority_commit.event.event_id
+                    )
+                )
+                .await
+                .unwrap()
+                .is_none(),
+            "{name}"
+        );
+        assert_eq!(
+            authority
+                .stream_head(&fixture.head.commit.stream_ref)
+                .await
+                .unwrap()
+                .unwrap()
+                .commit_id,
+            fixture.head.commit.commit_id,
+            "{name}"
+        );
+        let mut conn = pool.get().await.unwrap();
+        diesel::sql_query(update)
+            .bind::<Text, _>(agent.account.principal_id.as_str())
+            .bind::<Jsonb, _>(&original)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    // Even an otherwise identical projection cannot prove acceptance when its
+    // original native signer witness was lost.
+    let mut conn = pool.get().await.unwrap();
+    let original=diesel::sql_query("SELECT self_admission_provenance AS value FROM agent_producer_signer_keys WHERE commit_id=$1")
+        .bind::<Text,_>(agent.genesis.commit.commit_id.as_str()).get_result::<CurrentValue>(&mut *conn).await.unwrap().value;
+    diesel::sql_query(
+        "UPDATE agent_producer_signer_keys SET self_admission_provenance='{}'::jsonb WHERE commit_id=$1",
+    )
+    .bind::<Text, _>(agent.genesis.commit.commit_id.as_str())
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+    let missing = ordinary_realm::next_request_for_actor(
+        &fixture.head,
+        EventKind::CapabilityGrant,
+        ActorId::account(controller.clone()),
+        serde_json::json!({"grant":body}),
+        at + chrono::TimeDelta::seconds(2),
+    );
+    let missing = owned_current_signed_request(&fixture, missing, &evidence).await;
+    assert!(fixture_commit_step(pool, missing.clone()).await.is_err());
+    assert!(
+        authority
+            .queued_event(&missing.authority_commit.event.event_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        currents
+            .get(
+                realm,
+                &arkret_wire::GrantId::from_event_id(&missing.authority_commit.event.event_id)
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        authority
+            .stream_head(&fixture.head.commit.stream_ref)
+            .await
+            .unwrap()
+            .unwrap()
+            .commit_id,
+        fixture.head.commit.commit_id
+    );
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query(
+        "UPDATE agent_producer_signer_keys SET self_admission_provenance=$2 WHERE commit_id=$1",
+    )
+    .bind::<Text, _>(agent.genesis.commit.commit_id.as_str())
+    .bind::<Jsonb, _>(original)
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+    let create = ordinary_realm::next_request_for_actor(
+        &fixture.head,
+        EventKind::CapabilityGrant,
+        ActorId::account(controller.clone()),
+        serde_json::json!({"grant":body}),
+        at + chrono::TimeDelta::seconds(2),
+    );
+    let create = owned_current_signed_request(&fixture, create, &evidence).await;
+    fixture_commit_step(pool, create.clone()).await.unwrap();
+    let grant_id = arkret_wire::GrantId::from_event_id(&create.authority_commit.event.event_id);
+    let current = currents.get(realm, &grant_id).await.unwrap().unwrap();
+    assert_eq!(current.value.authority_depth, 1);
+    assert_eq!(
+        serde_json::to_value(&current.value.authority_root_refs).unwrap(),
+        serde_json::json!([source])
+    );
+    assert_eq!(
+        current.source.event_id,
+        create.authority_commit.event.event_id
+    );
+    assert_eq!(
+        current.revision.commit_id,
+        create.authority_commit.commit.commit_id
+    );
+    assert_eq!(
+        current.value.issuer_id,
+        ActorId::account(controller.clone())
+    );
+    let leave = ordinary_realm::next_request_for_actor(
+        &create.authority_commit,
+        EventKind::MemberState,
+        ActorId::account(controller.clone()),
+        serde_json::json!({"member_id":ActorId::account(controller.clone()),"membership":"leave"}),
+        at + chrono::TimeDelta::seconds(3),
+    );
+    let leave = owned_current_signed_request(&fixture, leave, &evidence).await;
+    fixture_commit_step(pool, leave.clone()).await.unwrap();
+    let revoke = ordinary_realm::next_request_for_actor(
+        &leave.authority_commit,
+        EventKind::CapabilityRevoke,
+        ActorId::account(controller.clone()),
+        serde_json::json!({"grant_id":grant_id,"expected_revision":current.revision}),
+        at + chrono::TimeDelta::seconds(4),
+    );
+    let revoke = owned_current_signed_request(&fixture, revoke, &evidence).await;
+    fixture_commit_step(pool, revoke.clone()).await.unwrap();
+    let terminal = currents.get(realm, &grant_id).await.unwrap().unwrap();
+    assert_eq!(terminal.status, CapabilityGrantCurrentStatus::Revoked);
+    assert_eq!(
+        terminal.source.event_id,
+        revoke.authority_commit.event.event_id
+    );
+    assert_eq!(
+        terminal.revision.commit_id,
+        revoke.authority_commit.commit.commit_id
+    );
+    let _ = fixture_commit_step(pool, create).await;
+    assert_eq!(
+        currents
+            .get(realm, &grant_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .revision,
+        terminal.revision
+    );
+    assert_eq!(
+        currents
+            .get(realm, &grant_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        CapabilityGrantCurrentStatus::Revoked
+    );
 }

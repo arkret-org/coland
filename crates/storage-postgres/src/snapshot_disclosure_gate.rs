@@ -819,8 +819,33 @@ pub(crate) async fn account_snapshot_candidate_in_connection(
     conn: &mut AsyncPgConnection,
     realm_id: &RealmId,
     account: &AccountId,
-    mut candidate: Option<coland_storage::RealmStateSnapshotMaterial>,
+    candidate: Option<coland_storage::RealmStateSnapshotMaterial>,
 ) -> PersistenceResult<Option<coland_storage::RealmStateSnapshotMaterial>> {
+    let materials = crate::boxed_future(|| {
+        account_snapshot_candidates_in_connection(conn, realm_id, account, vec![candidate])
+    })
+    .await?;
+    match materials {
+        None => Ok(None),
+        Some(mut materials) if materials.len() == 1 => Ok(materials.pop()),
+        Some(_) => Err(rejected(
+            "the disclosure cut returned an unexpected candidate count",
+        )),
+    }
+}
+
+/// Prove related candidates at one transaction cut. Immutable authority,
+/// controller and per-source content facts are shared within this call only;
+/// each candidate still proves its complete rows, streams and readable floors.
+pub(crate) async fn account_snapshot_candidates_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm_id: &RealmId,
+    account: &AccountId,
+    candidates: Vec<Option<coland_storage::RealmStateSnapshotMaterial>>,
+) -> PersistenceResult<Option<Vec<coland_storage::RealmStateSnapshotMaterial>>> {
+    if candidates.is_empty() {
+        return Err(rejected("a disclosure cut requires at least one candidate"));
+    }
     crate::agent_management_admission::read_controller_in_connection(
         conn,
         realm_id,
@@ -847,20 +872,10 @@ pub(crate) async fn account_snapshot_candidate_in_connection(
     {
         return Err(rejected("an unaudited typed-current family is installed"));
     }
-    if let Some(candidate) = &mut candidate {
-        if candidate.realm_id != *realm_id {
-            return Err(rejected("candidate rows belong to another Realm"));
-        }
-        candidate.visible_stream_heads = authority_material.visible_stream_heads.clone();
-    }
-    let material = candidate.as_ref().unwrap_or(&authority_material);
-    let mut facts =
-        disclosure_facts_in_connection(conn, realm_id, account, &authority_material, material)
-            .await?;
     let caller = ActorId::account(account.clone());
-    if crate::committed_disclosure::ordinary_agent_read_ceiling(
+    let controller = if crate::committed_disclosure::ordinary_agent_read_ceiling(
         crate::account_stream_scan::realm_purpose(conn, realm_id).await?,
-    ) && let Some(controller) =
+    ) {
         crate::realm_authorization_cut::owned_controller_snapshot_in_connection(
             conn,
             realm_id,
@@ -868,20 +883,135 @@ pub(crate) async fn account_snapshot_candidate_in_connection(
             chrono::Utc::now(),
         )
         .await?
-    {
-        let controller_account = controller
-            .as_account_id()
-            .ok_or_else(|| rejected("the Agent controller is not an Account"))?;
+        .map(|controller| {
+            controller
+                .as_account_id()
+                .cloned()
+                .ok_or_else(|| rejected("the Agent controller is not an Account"))
+        })
+        .transpose()?
+    } else {
+        None
+    };
+    let mut materials = Vec::with_capacity(candidates.len());
+    let mut sources = Vec::new();
+    let mut source_ids = std::collections::BTreeSet::new();
+    let mut cached_disclosure: Option<(Vec<TypedCurrentRow>, SnapshotCandidateDisclosureFacts)> =
+        None;
+    for mut candidate in candidates {
+        if let Some(candidate) = &mut candidate {
+            if candidate.realm_id != *realm_id {
+                return Err(rejected("candidate rows belong to another Realm"));
+            }
+            candidate.visible_stream_heads = authority_material.visible_stream_heads.clone();
+        }
+        // Exact row equality includes selector, source stream, revision and
+        // complete value. Facts proved for these rows at this same cut cover
+        // their subset; changed or newly requested rows require fresh facts.
+        let reusable = cached_disclosure.as_ref().filter(|(rows, _)| {
+            candidate.as_ref().is_some_and(|candidate| {
+                candidate
+                    .current_state_entries
+                    .iter()
+                    .all(|row| rows.contains(row))
+            })
+        });
+        let (material, fresh_facts) = if let Some((_, facts)) = reusable {
+            (
+                disclose_snapshot_candidate_at_facts(
+                    account,
+                    &authority_material,
+                    candidate,
+                    facts,
+                )?,
+                None,
+            )
+        } else {
+            let facts = crate::boxed_future(|| {
+                snapshot_candidate_disclosure_facts_in_connection(
+                    conn,
+                    realm_id,
+                    account,
+                    &authority_material,
+                    candidate.as_ref().unwrap_or(&authority_material),
+                    controller.as_ref(),
+                )
+            })
+            .await?;
+            let material = disclose_snapshot_candidate_at_facts(
+                account,
+                &authority_material,
+                candidate,
+                &facts,
+            )?;
+            (material, Some(facts))
+        };
+        if cached_disclosure.is_none() {
+            cached_disclosure = Some((
+                material.current_state_entries.clone(),
+                fresh_facts.expect("first candidate reads its disclosure facts"),
+            ));
+        }
+        if controller.is_some() {
+            for row in &material.current_state_entries {
+                let TypedCurrentRow::Value {
+                    source_stream_ref,
+                    revision,
+                    ..
+                } = row;
+                let event = crate::account_content_delivery::current_source_in_connection(
+                    conn,
+                    realm_id,
+                    source_stream_ref,
+                    revision,
+                )
+                .await?;
+                if source_ids.insert(event.event_id.clone()) {
+                    sources.push(event);
+                }
+            }
+        }
+        materials.push(material);
+    }
+    if let Some(controller) = controller.as_ref() {
+        crate::account_content_delivery::require_owned_content_sources_in_connection(
+            conn,
+            &sources,
+            controller,
+            account,
+            chrono::Utc::now(),
+            arkret_wire::CapabilityActionId::ObjectRead,
+        )
+        .await?;
+    }
+    Ok(Some(materials))
+}
+
+struct SnapshotCandidateDisclosureFacts {
+    caller: DisclosureFacts,
+    owner: Option<(AccountId, DisclosureFacts)>,
+}
+
+async fn snapshot_candidate_disclosure_facts_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm_id: &RealmId,
+    account: &AccountId,
+    authority_material: &coland_storage::RealmStateSnapshotMaterial,
+    material: &coland_storage::RealmStateSnapshotMaterial,
+    controller_account: Option<&AccountId>,
+) -> PersistenceResult<SnapshotCandidateDisclosureFacts> {
+    let mut facts =
+        disclosure_facts_in_connection(conn, realm_id, account, authority_material, material)
+            .await?;
+    let owner = if let Some(controller_account) = controller_account {
         let owner_facts = disclosure_facts_in_connection(
             conn,
             realm_id,
             controller_account,
-            &authority_material,
+            authority_material,
             material,
         )
         .await?;
-        let owner_material =
-            disclose_to_account(material.clone(), controller_account, &owner_facts)?;
         let Some(owner_floor) = owner_facts.caller_floor.as_ref() else {
             return Err(rejected(
                 "the Agent controller has no current readable floor",
@@ -922,41 +1052,38 @@ pub(crate) async fn account_snapshot_candidate_in_connection(
                 true
             });
         }
-        let mut agent_material =
-            disclose_to_account(candidate.unwrap_or(authority_material), account, &facts)?;
+        Some((controller_account.clone(), owner_facts))
+    } else {
+        None
+    };
+    Ok(SnapshotCandidateDisclosureFacts {
+        caller: facts,
+        owner,
+    })
+}
+
+fn disclose_snapshot_candidate_at_facts(
+    account: &AccountId,
+    authority_material: &coland_storage::RealmStateSnapshotMaterial,
+    candidate: Option<coland_storage::RealmStateSnapshotMaterial>,
+    facts: &SnapshotCandidateDisclosureFacts,
+) -> PersistenceResult<coland_storage::RealmStateSnapshotMaterial> {
+    let material = candidate.unwrap_or_else(|| authority_material.clone());
+    if let Some((controller_account, owner_facts)) = &facts.owner {
+        let owner_material =
+            disclose_to_account(material.clone(), controller_account, owner_facts)?;
+        let mut agent_material = disclose_to_account(material, account, &facts.caller)?;
         agent_material
             .visible_stream_heads
             .retain(|head| owner_material.visible_stream_heads.contains(head));
         agent_material
             .current_state_entries
             .retain(|row| owner_material.current_state_entries.contains(row));
-        for row in &agent_material.current_state_entries {
-            let TypedCurrentRow::Value {
-                source_stream_ref,
-                revision,
-                ..
-            } = row;
-            let event = crate::account_content_delivery::current_source_in_connection(
-                conn,
-                realm_id,
-                source_stream_ref,
-                revision,
-            )
-            .await?;
-            crate::account_content_delivery::require_owned_current_source_in_connection(
-                conn,
-                &event,
-                controller_account,
-                account,
-                chrono::Utc::now(),
-            )
-            .await?;
-        }
-        // Validate the required current-family closure again after intersecting
-        // complete bytes. A missing pair/anchor is unavailable, never fabricated.
-        return disclose_to_account(agent_material, account, &facts).map(Some);
+        // Even an exact row subset must independently retain its required
+        // genesis, membership, subjects and complete current-family closure.
+        return disclose_to_account(agent_material, account, &facts.caller);
     }
-    disclose_to_account(candidate.unwrap_or(authority_material), account, &facts).map(Some)
+    disclose_to_account(material, account, &facts.caller)
 }
 
 async fn disclosure_facts_in_connection(

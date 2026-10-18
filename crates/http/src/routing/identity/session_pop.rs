@@ -96,6 +96,17 @@ pub(crate) async fn enforce_native_reply_session_pop(
 }
 
 async fn enforce_session_pop(state: &AppState, req: &mut Request) -> Result<(), AppError> {
+    if request_matches_operation(req, arkret_wire::ServiceOperationId::SelfAgentResourceGetV1)
+        && super::agents::agent_projection_service_authorized(
+            state,
+            req,
+            arkret_wire::ServiceOperationId::SELF_AGENT_RESOURCE_GET_V1,
+            false,
+        )
+        .await?
+    {
+        return Ok(());
+    }
     // This registered Service branch is authenticated in the handler with
     // its own current assertion key, never with a session or a Device key.
     if req.headers().contains_key("source-service-id")
@@ -500,5 +511,57 @@ mod tests {
         let policy = arkret_schema::UNAUTHENTICATED_PUBLIC_PROJECTION_OPERATIONS;
         assert!(policy.contains(&arkret_wire::ServiceOperationId::SelfAccountReadDescribeV1));
         assert!(!policy.contains(&arkret_wire::ServiceOperationId::SelfCommittedEventReadScanV1));
+    }
+
+    #[tokio::test]
+    async fn agent_service_claims_are_verified_before_session_pop() {
+        let state = AppState::new(
+            crate::config::AppConfig::test_default(),
+            coland_storage_postgres::Db { pool: None },
+        );
+        let mut request = Request::new();
+        *request.uri_mut() = "/_arkret/self/agents/agent".parse().unwrap();
+        request
+            .headers_mut()
+            .insert("source-service-id", "untrusted".parse().unwrap());
+        request
+            .headers_mut()
+            .insert("signature-input", "sig1=()".parse().unwrap());
+        let error = enforce_session_pop(&state, &mut request).await.unwrap_err();
+        assert_eq!(error.wire_code(), "unauthenticated");
+        assert_eq!(
+            error.message.as_ref(),
+            "Agent service authentication failed"
+        );
+
+        // Trust headers on a different self operation cannot select this branch.
+        *request.uri_mut() = "/_arkret/self/agents".parse().unwrap();
+        let error = enforce_session_pop(&state, &mut request).await.unwrap_err();
+        assert_eq!(
+            error.message.as_ref(),
+            "PoP presentation requires a session token"
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_agent_user_read_still_requires_its_session_key() {
+        let state = AppState::new(
+            crate::config::AppConfig::test_default(),
+            coland_storage_postgres::Db { pool: None },
+        );
+        let mut request = Request::new();
+        *request.uri_mut() = "/_arkret/self/agents/agent".parse().unwrap();
+        request
+            .headers_mut()
+            .insert("authorization", "Bearer missing-session".parse().unwrap());
+        request
+            .headers_mut()
+            .insert("signature-input", "sig1=()".parse().unwrap());
+        let error = enforce_session_pop(&state, &mut request).await.unwrap_err();
+        assert_eq!(error.wire_code(), "unauthenticated");
+        assert_eq!(
+            error.message.as_ref(),
+            "session not found for PoP presentation"
+        );
     }
 }

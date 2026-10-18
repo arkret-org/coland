@@ -16,6 +16,56 @@ struct Evidence {
     claim_request_id: String,
     #[diesel(sql_type = Text)]
     keypackage_ref: String,
+    #[diesel(sql_type = Binary)]
+    attestor_resolution_canonical_json: Vec<u8>,
+}
+
+fn verify_consume_receipt_issuer(
+    receipt: &arkret_models_crypto::KeyPackageConsumeReceipt,
+    resolution_bytes: &[u8],
+) -> coland_storage::PersistenceResult<()> {
+    use coland_storage::PersistenceError;
+    let resolution: arkret_models_identity::AuthenticatedServiceResolution =
+        serde_json::from_slice(resolution_bytes).map_err(PersistenceError::database)?;
+    if resolution.service_id != receipt.recipient_durable_receipt.recipient_id
+        || resolution.service_kind != "station"
+        || arkret_canonical::canonical_json_bytes(&resolution)
+            .map_err(PersistenceError::database)?
+            != resolution_bytes
+    {
+        return Err(PersistenceError::SchemaViolation(
+            "consume receipt has no exact retained recipient Station history".into(),
+        ));
+    }
+    let document = arkret_identity::authenticated_service_document_at(
+        &resolution,
+        &receipt.recipient_durable_receipt.recipient_id,
+        receipt.consumed_at,
+    )
+    .map_err(PersistenceError::database)?;
+    let method = arkret_wire::DidUrl::new(receipt.signature.kid.as_str())
+        .map_err(PersistenceError::database)?;
+    arkret_identity::validate_verification_method_relationship(
+        &document,
+        &method,
+        &document.id,
+        arkret_identity::DidVerificationRelationship::AssertionMethod,
+    )
+    .map_err(PersistenceError::database)?;
+    let material = arkret_identity::public_key_material_from_document(&document, &method)
+        .map_err(PersistenceError::database)?;
+    let key = material
+        .ed25519_bytes()
+        .map_err(PersistenceError::database)?;
+    arkret_signatures::keypackages::verify_keypackage_signing_input(
+        &key,
+        method.as_str(),
+        &receipt
+            .canonical_signing_bytes()
+            .map_err(PersistenceError::database)?,
+        &receipt.signature,
+    )
+    .map_err(PersistenceError::database)
 }
 
 #[derive(QueryableByName)]
@@ -516,11 +566,13 @@ pub(crate) async fn consumed_endpoint_in_connection(
         } => ("", verification_method.as_str()),
     };
     let evidence = diesel::sql_query("SELECT convert_from(w.delivery_canonical_json,'UTF8')::jsonb AS delivery, \
-        p.consume_receipt AS receipt,p.consume_request_digest,p.claim_request_id,k.keypackage_ref \
+        p.consume_receipt AS receipt,p.consume_request_digest,p.claim_request_id,k.keypackage_ref,attestor.attestor_resolution_canonical_json \
         FROM mls_key_packages k JOIN accounts a ON a.principal_id=k.owner_account_id->>'principal_id' AND a.station_id=k.owner_account_id->>'station_id' \
         JOIN peer_keypackage_claims p ON p.keypackage_id=k.id \
         JOIN keypackage_claim_welcome_bindings b ON b.source_id=p.source_id AND b.claim_request_id=p.claim_request_id \
         JOIN mls_welcome_provenance w ON w.claim_id=b.claim_id AND w.welcome_id=b.welcome_id AND w.commit_event_ref=b.commit_event_ref \
+        JOIN mls_add_authority_attestations attestor ON attestor.welcome_id=w.welcome_id AND attestor.claim_id=w.claim_id \
+            AND attestor.scope_key=w.scope_key AND attestor.commit_event_ref=w.commit_event_ref AND attestor.attestor_station_id=w.recipient_station_id \
         JOIN canonical_events e ON e.envelope->>'event_id'=w.commit_event_ref AND e.state='committed' \
         JOIN realm_commits c ON c.event_pk=e.pk \
         JOIN mls_group_current_results g ON g.scope_key=w.scope_key \
@@ -548,6 +600,15 @@ pub(crate) async fn consumed_endpoint_in_connection(
         let durable = &receipt.recipient_durable_receipt;
         // The destination recorded this digest from the complete verified
         // signed request in the same transaction as its terminal receipt.
+        // The signed terminal receipt attests the complete signed command's
+        // digest. Its outer request signature cannot be reconstructed from
+        // the nested receipt. Authenticate the retained issuer at consume
+        // time, then bind the accepted fact to the exact delivery below.
+        if verify_consume_receipt_issuer(&receipt, &evidence.attestor_resolution_canonical_json)
+            .is_err()
+        {
+            continue;
+        }
         let signer_matches = match (&durable.recipient, endpoint) {
             (
                 RecipientMlsDurableSigner::Device {

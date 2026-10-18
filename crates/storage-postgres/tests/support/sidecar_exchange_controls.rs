@@ -6,10 +6,10 @@ use arkret_wire::{
     ActorId, CommitStreamRef, CurrentSelector, EncryptedPayloadScheme, EventKind, ScopeRef,
     SemanticRef, SidecarId, TypedCurrentRow,
 };
-use coland_storage::{AuthorityCommitStore, EventCommitUnitOfWork, MlsGroupCurrentStore};
-use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
+use coland_storage::{AuthorityCommitStore, MlsGroupCurrentStore};
+use coland_storage_postgres::{PgAuthorityCommitStore, PgPool};
 
-use super::{device_authorization_history, ordinary_realm, pcr_genesis};
+use super::{device_authorization_history, fixture_commit_step, ordinary_realm, pcr_genesis};
 
 pub(super) async fn assert_current(
     pool: &PgPool,
@@ -123,7 +123,6 @@ pub(super) async fn assert_current(
         serde_json::json!({"strand_id":strand_id,"track_name":"discussion","encrypted_content":content,"encrypted_metadata":metadata}),
         Vec::new(),
     ).await;
-    let uow = PgEventCommitUnitOfWork::new(pool.clone());
     for plaintext in [true, false] {
         let mut refused_payload =
             serde_json::to_value(&request.authority_commit.event.payload).unwrap();
@@ -144,7 +143,8 @@ pub(super) async fn assert_current(
             .unwrap();
         }
         assert!(
-            uow.commit_event(
+            fixture_commit_step(
+                pool,
                 make(head, EventKind::MessageCreate, refused_payload, Vec::new()).await
             )
             .await
@@ -158,7 +158,7 @@ pub(super) async fn assert_current(
         assert_eq!(after.visible_stream_heads, before.visible_stream_heads);
         assert_eq!(after.current_state_entries, before.current_state_entries);
     }
-    uow.commit_event(request.clone()).await.unwrap();
+    fixture_commit_step(pool, request.clone()).await.unwrap();
     let messages = store
         .realm_state_snapshot_material_for_account(realm, controller)
         .await
@@ -202,8 +202,8 @@ pub(super) async fn assert_current(
         )],
     )
     .await;
-    uow.commit_event(accepted.clone()).await.unwrap();
-    uow.commit_event(accepted.clone()).await.unwrap();
+    fixture_commit_step(pool, accepted.clone()).await.unwrap();
+    fixture_commit_step(pool, accepted.clone()).await.unwrap();
     let material = store
         .realm_state_snapshot_material_for_account(realm, controller)
         .await
@@ -262,7 +262,7 @@ pub(super) async fn assert_current(
             )],
         )
         .await;
-        assert!(uow.commit_event(refused).await.is_err());
+        assert!(fixture_commit_step(pool, refused).await.is_err());
         let after = store
             .realm_state_snapshot_material_for_account(realm, controller)
             .await

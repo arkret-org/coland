@@ -292,10 +292,12 @@ fn device_authorization_invalid(message: impl Into<String>) -> EventValidationEr
     event_validation_error(StatusCode::CONFLICT, "failed_precondition", message)
 }
 
+#[cfg(test)]
 mod applet_managed_delegation_tests {
     use arkret_models_collaboration::events_payloads::SignatureMaterial;
     use arkret_models_collaboration::events_payloads::device_identity::{
-        DeviceAuthorizationBindingKind, DeviceAuthorizePayload, DeviceOrPrincipalRef,
+        AppletManagedDeviceScope, AppletManagedDeviceScopes, DeviceAuthorizationBindingKind,
+        DeviceAuthorizationScopes, DeviceAuthorizePayload, DeviceOrPrincipalRef,
     };
     use ed25519_dalek::{Signer as _, SigningKey};
 
@@ -334,10 +336,20 @@ mod applet_managed_delegation_tests {
             ],
             device_key_algorithm: arkret_wire::NonEmptyString::new("Ed25519").unwrap(),
             authorized_by: DeviceOrPrincipalRef::Principal(authorized_by.clone()),
-            scopes: Some(serde_json::from_value(serde_json::json!([{
-                "effective_scope":{"kind":"realm","realm_id":"ak:realm:AUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFB"},
-                "actions":["ak.event.read"]
-            }])).unwrap()),
+            scopes: Some(DeviceAuthorizationScopes::AppletManaged(
+                AppletManagedDeviceScopes::new(vec![AppletManagedDeviceScope {
+                    effective_scope: arkret_wire::ScopeRef::Realm {
+                        realm_id: arkret_wire::RealmId::from_event_id(
+                            &arkret_identifiers::EventId::from_digest(
+                                arkret_canonical::DigestSuite::Sha256,
+                                [0x71; 32],
+                            ),
+                        ),
+                    },
+                    actions: vec![arkret_wire::CapabilityActionId::EventRead],
+                }])
+                .unwrap(),
+            )),
             not_before: "2026-09-15T00:00:00.000Z".parse().unwrap(),
             expires_at: Some(Some("2026-12-15T00:00:00.000Z".parse().unwrap())),
             authorization_binding_kind: DeviceAuthorizationBindingKind::AppletManagedDelegation,

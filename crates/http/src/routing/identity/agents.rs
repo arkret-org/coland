@@ -100,8 +100,21 @@ const PAIR_AGENT_KEY_SERVICE_OPERATION: &str =
     arkret_wire::ServiceOperationId::GATE_ACCOUNT_COMMAND_PAIR_AGENT_KEY_V1;
 
 fn agent_service_signature_present(req: &Request) -> bool {
-    req.headers().contains_key("signature-input") || req.headers().contains_key("signature")
+    [
+        "source-service-id",
+        "destination-service-id",
+        "source-trust-domain",
+        "destination-trust-domain",
+    ]
+    .into_iter()
+    .any(|header| req.headers().contains_key(header))
+        || (!req.headers().contains_key("authorization")
+            && (req.headers().contains_key("signature-input")
+                || req.headers().contains_key("signature")))
 }
+
+#[derive(Clone, Copy)]
+struct VerifiedAgentServiceOperation(&'static str);
 
 fn required_agent_service_header<'a>(req: &'a Request, name: &str) -> Result<&'a str, AppError> {
     req.headers()
@@ -140,16 +153,35 @@ fn validate_agent_service_claims(
     Ok(())
 }
 
-async fn agent_projection_service_authorized(
+pub(super) async fn agent_projection_service_authorized(
     state: &AppState,
     req: &mut Request,
-    expected_operation: &str,
+    expected_operation: &'static str,
     has_body: bool,
 ) -> Result<bool, AppError> {
-    // No signature headers means the ordinary user-session path. A partial or
-    // invalid signature attempt never falls back to that path.
+    // The self-surface hoop verifies Service requests before session PoP.
+    // Only a successful full verification can install this request-local mark.
+    if let Some(verified) = req.extensions().get::<VerifiedAgentServiceOperation>() {
+        return if verified.0 == expected_operation {
+            Ok(true)
+        } else {
+            Err(AppError::unauthenticated(
+                "Agent service authentication failed",
+            ))
+        };
+    }
+    // Session PoP also uses Signature headers. Service trust headers select
+    // the Service branch; partial attempts never fall back to a user session.
     if !agent_service_signature_present(req) {
         return Ok(false);
+    }
+    if ["authorization", "dpop", "arkret-managed-device"]
+        .into_iter()
+        .any(|header| req.headers().contains_key(header))
+    {
+        return Err(AppError::unauthenticated(
+            "Agent service authentication failed",
+        ));
     }
     let channel = state
         .config()
@@ -172,6 +204,8 @@ async fn agent_projection_service_authorized(
         &signature_input.key_id,
     )?;
     crate::routing::federation::verify_inbound_peer_http_signature(state, req, has_body).await?;
+    req.extensions_mut()
+        .insert(VerifiedAgentServiceOperation(expected_operation));
     Ok(true)
 }
 

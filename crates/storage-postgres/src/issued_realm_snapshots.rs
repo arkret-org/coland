@@ -697,7 +697,7 @@ pub(crate) async fn served_current_snapshot(
 /// retention, and redaction. Ordinary state changes do not replace or invalidate
 /// an otherwise disclosable signed object; its original heads and tenure stay
 /// bound by its signature and accepted Commit coordinates.
-async fn recheck_disclosure_in_connection(
+pub(crate) async fn recheck_disclosure_in_connection(
     conn: &mut AsyncPgConnection,
     account: &arkret_wire::AccountId,
     issuer: &arkret_wire::DidCoreId,
@@ -732,15 +732,26 @@ async fn recheck_disclosure_in_connection(
     // historical object is still readable only while every one of its streams
     // and rows remains disclosed to this Account. New visible streams may have
     // appeared since issuance; they do not invalidate the older exact slice.
-    let current_material = crate::boxed_future(|| {
-        crate::snapshot_disclosure_gate::account_snapshot_material_in_connection(
+    let original = coland_storage::RealmStateSnapshotMaterial {
+        realm_id: snapshot.realm_id.clone(),
+        governance_generation: snapshot.governance_generation,
+        visible_stream_heads: snapshot.visible_stream_heads.clone(),
+        current_state_entries: snapshot.current_state_entries.clone(),
+        retention_and_history_floor: snapshot.retention_and_history_floor.clone(),
+    };
+    let materials = crate::boxed_future(|| {
+        crate::snapshot_disclosure_gate::account_snapshot_candidates_in_connection(
             conn,
             &snapshot.realm_id,
             account,
+            vec![None, Some(original)],
         )
     })
     .await?
     .ok_or_else(|| undisclosable("the Account has no current disclosed cut"))?;
+    let [current_material, disclosed]: [coland_storage::RealmStateSnapshotMaterial; 2] = materials
+        .try_into()
+        .map_err(|_| undisclosable("the disclosure cut returned an unexpected candidate count"))?;
     require_snapshot_serving_cut(conn, account, issuer, &tenure.service_id, &current_material)
         .await?;
     let signer =
@@ -766,23 +777,19 @@ async fn recheck_disclosure_in_connection(
             return Err(undisclosable("a signed stream is no longer disclosed"));
         }
     }
-    let original = coland_storage::RealmStateSnapshotMaterial {
-        realm_id: snapshot.realm_id.clone(),
-        governance_generation: snapshot.governance_generation,
-        visible_stream_heads: snapshot.visible_stream_heads.clone(),
-        current_state_entries: snapshot.current_state_entries.clone(),
-        retention_and_history_floor: snapshot.retention_and_history_floor.clone(),
-    };
-    let disclosed = crate::boxed_future(|| {
-        crate::snapshot_disclosure_gate::account_snapshot_candidate_in_connection(
-            conn,
-            &snapshot.realm_id,
-            account,
-            Some(original),
-        )
-    })
-    .await?
-    .ok_or_else(|| undisclosable("the Account has no current disclosure"))?;
+    for floor in &snapshot.retention_and_history_floor.stream_floors {
+        if !current_material
+            .retention_and_history_floor
+            .stream_floors
+            .iter()
+            .any(|current| {
+                current.stream_ref == floor.stream_ref
+                    && current.oldest_position <= floor.oldest_position
+            })
+        {
+            return Err(undisclosable("a signed floor is no longer disclosed"));
+        }
+    }
     if disclosed.current_state_entries != snapshot.current_state_entries {
         return Err(undisclosable("a signed row is no longer disclosed"));
     }

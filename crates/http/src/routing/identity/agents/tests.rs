@@ -106,7 +106,70 @@ fn deployment_bearer_does_not_select_agent_service_auth() {
     request
         .headers_mut()
         .insert("signature-input", "sig1=()".parse().unwrap());
+    assert!(!agent_service_signature_present(&request));
+
+    request.headers_mut().remove("authorization");
     assert!(agent_service_signature_present(&request));
+}
+
+#[tokio::test]
+async fn partial_service_claims_cannot_fall_back_to_a_session() {
+    let state = service_pairing_test_state();
+    for header in [
+        "source-service-id",
+        "destination-service-id",
+        "source-trust-domain",
+        "destination-trust-domain",
+    ] {
+        let mut request = Request::new();
+        request
+            .headers_mut()
+            .insert(header, "untrusted".parse().unwrap());
+        request
+            .headers_mut()
+            .insert("authorization", "Bearer session".parse().unwrap());
+        assert!(
+            agent_projection_service_authorized(
+                &state,
+                &mut request,
+                GET_AGENT_SERVICE_OPERATION,
+                false,
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            request
+                .extensions()
+                .get::<VerifiedAgentServiceOperation>()
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
+async fn session_pop_is_not_an_account_authority_signature() {
+    let state = service_pairing_test_state();
+    let mut request = Request::new();
+    request
+        .headers_mut()
+        .insert("authorization", "DPoP session".parse().unwrap());
+    request
+        .headers_mut()
+        .insert("signature-input", "sig1=()".parse().unwrap());
+    request
+        .headers_mut()
+        .insert("signature", "sig1=:AA==:".parse().unwrap());
+    assert!(
+        !agent_projection_service_authorized(
+            &state,
+            &mut request,
+            GET_AGENT_SERVICE_OPERATION,
+            false,
+        )
+        .await
+        .unwrap()
+    );
 }
 
 #[test]

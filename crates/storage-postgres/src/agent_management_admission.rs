@@ -527,8 +527,25 @@ pub(crate) async fn require_content_snapshot_in_connection(
             conn, realm, circle,
         )
         .await?;
+    require_content_policy(
+        &policies, realm, controller, agent, operation, action, resources, at,
+    )
+}
+
+/// Evaluate each concrete source against policy facts proved at the caller's
+/// transaction cut. This does not load or retain authority across requests.
+pub(crate) fn require_content_policy(
+    policies: &[Policy],
+    realm: &RealmId,
+    controller: &AccountId,
+    agent: &AccountId,
+    operation: AgentPolicyOperation,
+    action: CapabilityActionId,
+    resources: &[PolicyResourceSelector],
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<()> {
     let effect = evaluate_agent_management(
-        Some(&policies),
+        Some(policies),
         &AgentManagementContext {
             realm_id: realm,
             ownership: Some((controller, agent)),

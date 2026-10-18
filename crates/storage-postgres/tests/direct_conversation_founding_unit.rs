@@ -2361,6 +2361,29 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
         basis.authorization_basis
     );
 
+    // A known Agent cannot fall back to a Human delivery branch merely by
+    // omitting its endpoint and session witnesses on an independent Direct.
+    let accepted = store
+        .committed_event(&unit.transactions[3].event.event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let input = coland_storage::AccountContentDeliveryInput::committed(&[
+        arkret_wire::CommittedEventView::Full(arkret_wire::CommittedEventFullView {
+            commit: accepted.commit,
+            event: accepted.event,
+        }),
+    ]);
+    let error =
+        match Box::pin(store.acquire_committed_content_delivery(&agent, &agent.station_id, &input))
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("Direct Agent delivery omitted its current endpoint witness"),
+        };
+    assert!(matches!(error, PersistenceError::Conflict(ref detail)
+        if detail == "revision_unavailable: Agent delivery has no current endpoint binding"));
+
     // An owned Agent never needs a Contact round. Its provisional Message
     // and peer Add use the current controller/provision branch at the cut.
     let realm_id = realm_of(&unit);

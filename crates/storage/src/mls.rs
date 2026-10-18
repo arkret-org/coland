@@ -727,6 +727,36 @@ pub struct MlsKeyPackageConsumption {
     pub record: MlsKeyPackageRow,
 }
 
+/// Serving-layer verified original command and its issued terminal receipt.
+/// The destination retains their exact digest in the consuming transaction.
+#[derive(Clone, Copy)]
+pub struct MlsKeyPackageConsumeEvidence<'a> {
+    pub request: &'a arkret_models_crypto::KeyPackagesConsumeRequestBody,
+    pub receipt: &'a arkret_models_crypto::KeyPackageConsumeReceipt,
+}
+
+impl MlsKeyPackageConsumeEvidence<'_> {
+    pub fn request_digest(&self) -> PersistenceResult<String> {
+        let invalid = |error: &str| super::PersistenceError::SchemaViolation(error.to_owned());
+        self.request.validate_shape().map_err(invalid)?;
+        self.receipt.validate_shape().map_err(invalid)?;
+        let digest = arkret_models_crypto::keypackages_consume_request_digest(self.request)
+            .map_err(super::PersistenceError::database)?;
+        if self.receipt.claim_id != self.request.claim_id
+            || arkret_canonical::canonical_json_bytes(&self.receipt.recipient_durable_receipt)
+                .map_err(super::PersistenceError::database)?
+                != arkret_canonical::canonical_json_bytes(&self.request.recipient_durable_receipt)
+                    .map_err(super::PersistenceError::database)?
+            || self.receipt.request_digest.as_str() != digest
+        {
+            return Err(invalid(
+                "consume receipt differs from its complete signed request",
+            ));
+        }
+        Ok(digest)
+    }
+}
+
 /// G3.S1 — KeyPackage store. The `try_claim` CAS path is what
 /// guarantees at-most-one Welcome per published KeyPackage.
 #[async_trait]
@@ -792,7 +822,7 @@ pub trait MlsKeyPackageStore: Send + Sync {
         id: &str,
         mls_group_id: &str,
         now_unix_ms: i64,
-        peer_consume_receipt: Option<&Value>,
+        consumption: Option<MlsKeyPackageConsumeEvidence<'_>>,
     ) -> PersistenceResult<Option<MlsKeyPackageRow>>;
     /// Charge an already authenticated original SDK command against the
     /// shared closed requester, target and source/target budgets. Exact

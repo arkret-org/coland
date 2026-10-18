@@ -1143,26 +1143,29 @@ async fn disclosure_facts_in_connection(
         if circle.id.as_ref() != Some(circle_id) || &circle.realm_id != realm_id {
             return Err(rejected("Circle object differs from its typed subject"));
         }
-        let page = crate::authority_commit::stream_page_in_connection(
-            conn,
-            &arkret_wire::StreamScanRequest {
-                realm_id: realm_id.clone(),
-                stream_ref: stream.clone(),
-                direction: arkret_wire::StreamScanDirection::After(None),
-                limit: 1,
-            },
-        )
-        .await?;
-        let Some(mut floor) = page.readable_floor else {
-            return Err(rejected("joined Circle stream has no provable floor"));
-        };
-        if circle.history_access == arkret_wire::HistoryAccess::SinceJoin {
-            floor = ReadableFloor {
+        let mut floor = if circle.history_access == arkret_wire::HistoryAccess::SinceJoin {
+            // The verified effective join is this caller's exact lower bound.
+            // A member replica must not need the private pre-join position zero
+            // merely to disclose its already proved current cut.
+            ReadableFloor {
                 oldest_position: revision.stream_position,
                 floor_commit_id: revision.commit_id.clone(),
                 floor_reason: arkret_wire::ReadableFloorReason::MembershipJoin,
-            };
-        }
+            }
+        } else {
+            let page = crate::authority_commit::stream_page_in_connection(
+                conn,
+                &arkret_wire::StreamScanRequest {
+                    realm_id: realm_id.clone(),
+                    stream_ref: stream.clone(),
+                    direction: arkret_wire::StreamScanDirection::After(None),
+                    limit: 1,
+                },
+            )
+            .await?;
+            page.readable_floor
+                .ok_or_else(|| rejected("joined Circle stream has no provable floor"))?
+        };
         let Some(current_floor) = crate::account_stream_scan::caller_circle_floor_in_connection(
             conn, realm_id, circle_id, &caller,
         )

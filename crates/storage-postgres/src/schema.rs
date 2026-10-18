@@ -921,6 +921,7 @@ diesel::table! {
         outcome -> Nullable<Jsonb>,
         terminal_receipt -> Nullable<Jsonb>,
         consume_receipt -> Nullable<Jsonb>,
+        consume_request_digest -> Nullable<Text>,
         claim_expires_at_unix_ms -> Nullable<Int8>,
         expires_at -> Int8,
         state -> Text,

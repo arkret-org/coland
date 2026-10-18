@@ -1970,6 +1970,50 @@ pub async fn registered_service_pair(pool: PgPool) {
             Some(HistoricalProducerSignerFact::Service(_))
         ));
     }
+    let scan = arkret_wire::StreamScanRequest {
+        realm_id: factory.fixture.realm.clone(),
+        stream_ref: stream.clone(),
+        direction: arkret_wire::StreamScanDirection::Before(Some(
+            outcome.commits.last().unwrap().stream_position + 1,
+        )),
+        limit: 2,
+    };
+    let coland_storage::PeerStreamScan::Page(page) = source
+        .scan_stream_for_peer(
+            &scan,
+            &factory.fixture.state.service_core_id(),
+            &factory.fixture.state.service_core_id(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("the member-hosting Station must receive its Service-produced tail");
+    };
+    page.validate_for_request(&scan).unwrap();
+    assert_eq!(page.committed_events.len(), 2);
+    assert!(
+        !page.producer_signer_facts.is_empty(),
+        "the positive scan must disclose an actual Service Full row"
+    );
+    for entry in &page.producer_signer_facts {
+        assert!(matches!(
+            entry.producer_signer_fact,
+            HistoricalProducerSignerFact::Service(_)
+        ));
+        assert!(
+            outcome
+                .commits
+                .iter()
+                .any(|commit| commit.commit_id == entry.target.commit_id
+                    && commit.event_ref == entry.target.event_id
+                    && commit.stream_ref == entry.target.stream_ref
+                    && commit.stream_position == entry.target.stream_position)
+        );
+    }
+    eprintln!(
+        "[2133-service-scan] signed_service_pair=1 peer_tail_rows=2 exact_service_facts={}",
+        page.producer_signer_facts.len()
+    );
     let PeerAuthoritySubmitRequest::AuthorityForwardAtomic(peer) = &request else {
         unreachable!()
     };

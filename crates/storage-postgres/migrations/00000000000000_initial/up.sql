@@ -1941,6 +1941,7 @@ CREATE TABLE public.peer_keypackage_claims (
     outcome jsonb,
     terminal_receipt jsonb,
     consume_receipt jsonb,
+    consume_request_digest text CHECK (consume_request_digest IS NULL OR consume_request_digest ~ '^sha256:[0-9a-f]{64}$'),
     claim_expires_at_unix_ms bigint,
     expires_at bigint NOT NULL,
     state text NOT NULL,

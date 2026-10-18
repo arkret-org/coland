@@ -18,6 +18,7 @@ use crate::capability_grant_current_results::{
     commit_realm_authority_root_current_result_in_connection,
 };
 
+mod handoff_replica;
 pub(crate) mod replica;
 
 #[derive(Clone)]
@@ -5513,9 +5514,10 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         account: &arkret_wire::AccountId,
         issuer: &arkret_wire::DidCoreId,
         snapshot: &arkret_wire::RealmStateSnapshot,
-    ) -> PersistenceResult<()> {
+        minimum: &coland_storage::RealmStateSnapshotMaterial,
+    ) -> PersistenceResult<arkret_wire::RealmStateSnapshot> {
         crate::issued_realm_snapshots::install_verified_account_snapshot(
-            &self.pool, account, issuer, snapshot,
+            &self.pool, account, issuer, snapshot, minimum,
         )
         .await
     }
@@ -6065,6 +6067,7 @@ impl PgAuthorityCommitStore {
                     .bind::<Text,_>(handoff.handoff_id.as_str()).bind::<Text,_>(handoff.realm_id.as_str())
                     .bind::<Jsonb,_>(serde_json::to_value(manifest).map_err(invalid)?).execute(&mut *conn).await?;
             }
+            handoff_replica::retain_outgoing_cut(conn, handoff, snapshot, &originals).await?;
             sql_query(
                 "UPDATE realm_authorities SET generation = $2, service_id = $3, \
                  authority_ref = $4, last_handoff_ref = $5, updated_at = now() WHERE realm_id = $1",

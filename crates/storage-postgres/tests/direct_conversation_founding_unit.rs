@@ -1748,16 +1748,101 @@ async fn peer_founding_missing_contact_dependency_writes_nothing() {
         original.visible_stream_heads[0].commit_id,
         unit.transactions[3].commit.commit_id
     );
-    peer_store
-        .install_verified_account_snapshot(&pair.peer, &peer_station, &original)
+    let issued_original = peer_store
+        .install_verified_account_snapshot(&pair.peer, &peer_station, &original, &origin_bootstrap)
         .await
         .unwrap();
+    assert_eq!(issued_original, original);
+    let original_count = count(
+        &peer_pool,
+        "SELECT COUNT(*) AS count FROM realm_state_snapshots WHERE realm_id=$1",
+        &realm_id,
+    )
+    .await;
+    // A fresh peer bootstrap signs a new original even when its material is
+    // unchanged. Emit the archived same-cut original selected by the store.
+    let refreshed = coland_services::authority_commit::build_signed_realm_state_snapshot(
+        &origin_bootstrap,
+        original.signature.verification_method.clone(),
+        &snapshot_key,
+        original.created_at + chrono::Duration::milliseconds(1),
+    )
+    .unwrap();
+    assert_ne!(refreshed.snapshot_id, original.snapshot_id);
+    assert!(coland_storage::signed_snapshot_matches_material(
+        &refreshed,
+        &origin_bootstrap
+    ));
+    arkret_signatures::detached_object::verify_detached_object_signature(
+        &refreshed.signature,
+        &arkret_canonical::unsigned_value(&refreshed, &["signature"]).unwrap(),
+        arkret_wire::DetachedSignatureContext::RealmSnapshot,
+        &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+            bytes: snapshot_key.verifying_key().to_bytes().to_vec(),
+        },
+    )
+    .unwrap();
+    let issued_refreshed = peer_store
+        .install_verified_account_snapshot(&pair.peer, &peer_station, &refreshed, &origin_bootstrap)
+        .await
+        .unwrap();
+    assert_eq!(issued_refreshed, issued_original);
+    for expected in [&issued_original, &issued_refreshed] {
+        let retained = peer_store
+            .issued_realm_state_snapshot(
+                &realm_id,
+                &pair.peer,
+                &expected.snapshot_id,
+                &peer_station,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            retained.as_ref(),
+            Some(expected),
+            "every emitted original must retain its exact reference"
+        );
+    }
     let archived_before = count(
         &peer_pool,
         "SELECT COUNT(*) AS count FROM realm_state_snapshots WHERE realm_id=$1",
         &realm_id,
     )
     .await;
+    assert_eq!(
+        archived_before, original_count,
+        "same-cut reuse adds no object"
+    );
+    eprintln!(
+        "[2133-snapshot-ref] signed_distinct_input=1 archived_same_cut_reused=1 exact_roundtrips=2"
+    );
+    let mut later_known_head = origin_bootstrap.clone();
+    later_known_head.visible_stream_heads[0].stream_position += 1;
+    assert!(
+        peer_store
+            .install_verified_account_snapshot(
+                &pair.peer,
+                &peer_station,
+                &original,
+                &later_known_head,
+            )
+            .await
+            .is_err()
+    );
+    let mut forked_known_head = origin_bootstrap.clone();
+    forked_known_head.visible_stream_heads[0].commit_id =
+        unit.transactions[0].commit.commit_id.clone();
+    assert!(
+        peer_store
+            .install_verified_account_snapshot(
+                &pair.peer,
+                &peer_station,
+                &original,
+                &forked_known_head,
+            )
+            .await
+            .is_err()
+    );
     let mut mismatched_material = origin_bootstrap.clone();
     mismatched_material
         .retention_and_history_floor
@@ -1775,7 +1860,12 @@ async fn peer_founding_missing_contact_dependency_writes_nothing() {
     ));
     assert!(
         peer_store
-            .install_verified_account_snapshot(&pair.peer, &peer_station, &changed)
+            .install_verified_account_snapshot(
+                &pair.peer,
+                &peer_station,
+                &changed,
+                &origin_bootstrap
+            )
             .await
             .is_err()
     );

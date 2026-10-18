@@ -395,8 +395,23 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
         id: &str,
         mls_group_id: &str,
         now_unix_ms: i64,
-        peer_consume_receipt: Option<&Value>,
+        consumption: Option<coland_storage::MlsKeyPackageConsumeEvidence<'_>>,
     ) -> PersistenceResult<Option<MlsKeyPackageRow>> {
+        let consume_digest = consumption
+            .map(|evidence| evidence.request_digest())
+            .transpose()?;
+        if consumption.is_some_and(|evidence| {
+            evidence
+                .request
+                .recipient_durable_receipt
+                .mls_group_id
+                .as_str()
+                != mls_group_id
+        }) {
+            return Err(PersistenceError::SchemaViolation(
+                "consume group differs from its original command".into(),
+            ));
+        }
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
@@ -458,21 +473,29 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
                 }
                 return Ok(None);
             };
-            if let Some(receipt) = peer_consume_receipt {
+            if let Some(consumption) = consumption {
+                let receipt = serde_json::to_value(consumption.receipt).map_err(PersistenceError::database)?;
                 let updated = sql_query(
-                    "UPDATE peer_keypackage_claims \
-                     SET state = 'consumed', consume_receipt = $2, updated_at = $3 / 1000 \
-                     WHERE key_package_use = 'single_use' AND keypackage_id = $1 AND state = 'claimed'",
+                    "UPDATE peer_keypackage_claims p \
+                     SET state = 'consumed', consume_receipt = $2, consume_request_digest = $4, updated_at = $3 / 1000 \
+                     WHERE key_package_use = 'single_use' AND keypackage_id = $1 AND state = 'claimed' \
+                     AND EXISTS (SELECT 1 FROM keypackage_claim_welcome_bindings b \
+                         WHERE b.source_id=p.source_id AND b.claim_request_id=p.claim_request_id \
+                         AND b.claim_id=$5 AND b.welcome_id=$6 AND b.welcome_digest=$7)",
                 )
                 .bind::<Text, _>(id)
-                .bind::<Jsonb, _>(receipt)
+                .bind::<Jsonb, _>(&receipt)
                 .bind::<BigInt, _>(now_unix_ms)
+                .bind::<Text, _>(consume_digest.as_ref().unwrap())
+                .bind::<Text, _>(consumption.request.claim_id.as_str())
+                .bind::<Text, _>(consumption.request.recipient_durable_receipt.welcome_ref.as_str())
+                .bind::<Text, _>(consumption.request.recipient_durable_receipt.welcome_digest.as_str())
                 .execute(conn)
                 .await
                 .map_err(PersistenceError::database)?;
-                if updated > 1 {
-                    return Err(PersistenceError::Internal(
-                        "multiple peer claim ledgers reference one KeyPackage".to_owned(),
+                if updated != 1 {
+                    return Err(PersistenceError::Conflict(
+                        "consume has no unique original claim and Welcome binding".to_owned(),
                     )
                     .into());
                 }

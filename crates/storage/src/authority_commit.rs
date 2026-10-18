@@ -2867,13 +2867,16 @@ pub trait AuthorityCommitStore: Send + Sync {
     /// Archive an original governing Snapshot whose authority and signature
     /// the receiving layer verified. The store independently proves its exact
     /// Account disclosure against the member Station's durable replica cut.
+    /// Return the actual archived original, including same-cut reuse, so the
+    /// receiving layer can verify and emit only a retained exact reference.
     async fn install_verified_account_snapshot(
         &self,
         account: &arkret_wire::AccountId,
         issuer: &arkret_wire::DidCoreId,
         snapshot: &RealmStateSnapshot,
-    ) -> PersistenceResult<()> {
-        let _ = (account, issuer, snapshot);
+        minimum: &RealmStateSnapshotMaterial,
+    ) -> PersistenceResult<RealmStateSnapshot> {
+        let _ = (account, issuer, snapshot, minimum);
         Err(crate::PersistenceError::Internal(
             "verified Account Snapshot installation is unavailable".to_owned(),
         ))

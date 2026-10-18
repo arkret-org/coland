@@ -229,9 +229,9 @@ pub(crate) async fn consume(
             return Err(conflict("consume issuer changed the original request").into());
         }
         let value=serde_json::to_value(&signed).map_err(PersistenceError::database)?;
-        let count=sql_query("UPDATE peer_keypackage_claims SET state='consumed',consume_receipt=$3,updated_at=$4 WHERE source_id=$1 AND claim_request_id=$2 AND state=$5 AND claim_expires_at_unix_ms>$6")
+        let count=sql_query("UPDATE peer_keypackage_claims SET state='consumed',consume_receipt=$3,consume_request_digest=$7,updated_at=$4 WHERE source_id=$1 AND claim_request_id=$2 AND state=$5 AND claim_expires_at_unix_ms>$6")
             .bind::<Text,_>(&binding.source_id).bind::<Text,_>(&binding.claim_request_id).bind::<Jsonb,_>(value).bind::<BigInt,_>(at.timestamp())
-            .bind::<Text,_>(if reusable {"last_resort_claimed"}else{"claimed"}).bind::<BigInt,_>(at.timestamp_millis()).execute(&mut *conn).await?;
+            .bind::<Text,_>(if reusable {"last_resort_claimed"}else{"claimed"}).bind::<BigInt,_>(at.timestamp_millis()).bind::<Text,_>(&digest).execute(&mut *conn).await?;
         if count!=1 {return Err(conflict("consume ledger CAS changed").into());}
         let final_at=clock(conn).await?;
         if final_at>=transport_expires_at || final_at>=authority.expires_at || ledger.claim_expires_at_unix_ms.is_none_or(|end|final_at.timestamp_millis()>=end) {

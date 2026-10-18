@@ -15,8 +15,8 @@
 //! retry of that replica is stored. Nothing here admits, re-signs or fans
 //! out; a failed attempt leaves the stream as it was for the next one.
 
-use std::collections::BTreeSet;
-use std::sync::{LazyLock, Mutex};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use arkret_models_collaboration::governance::realm_join_bootstrap::RealmJoinBootstrapAssembly;
 use arkret_models_collaboration::governance::realm_join_intake::{
@@ -49,6 +49,34 @@ const PENDING_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_se
 
 static IN_FLIGHT: LazyLock<Mutex<BTreeSet<(String, String)>>> =
     LazyLock::new(|| Mutex::new(BTreeSet::new()));
+type ConvergenceGate = tokio::sync::Mutex<()>;
+static REALM_CONVERGENCE: LazyLock<Mutex<BTreeMap<(String, String), Weak<ConvergenceGate>>>> =
+    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+fn realm_convergence_gate(
+    state: &AppState,
+    stream: &CommitStreamRef,
+) -> Option<Arc<ConvergenceGate>> {
+    let mut gates = REALM_CONVERGENCE.lock().ok()?;
+    gates.retain(|_, gate| gate.strong_count() > 0);
+    let key = (state.service_id().to_owned(), stream.realm_id().to_string());
+    if let Some(gate) = gates.get(&key).and_then(Weak::upgrade) {
+        return Some(gate);
+    }
+    let gate = Arc::new(tokio::sync::Mutex::new(()));
+    gates.insert(key, Arc::downgrade(&gate));
+    Some(gate)
+}
+
+struct ConvergenceInFlight((String, String));
+
+impl Drop for ConvergenceInFlight {
+    fn drop(&mut self) {
+        if let Ok(mut in_flight) = IN_FLIGHT.lock() {
+            in_flight.remove(&self.0);
+        }
+    }
+}
 
 pub(crate) fn spawn_converge_stream(state: &AppState, stream: CommitStreamRef) {
     let key = (
@@ -63,13 +91,12 @@ pub(crate) fn spawn_converge_stream(state: &AppState, stream: CommitStreamRef) {
             return;
         }
     }
+    let in_flight = ConvergenceInFlight(key);
     let state = state.clone();
     tokio::spawn(async move {
+        let _in_flight = in_flight;
         if let Err(reason) = converge(&state, &stream).await {
             tracing::warn!(?stream, %reason, "held replica did not converge");
-        }
-        if let Ok(mut in_flight) = IN_FLIGHT.lock() {
-            in_flight.remove(&key);
         }
     });
 }
@@ -147,7 +174,7 @@ async fn converge(state: &AppState, stream: &CommitStreamRef) -> Result<(), Stri
         Some(head) => head.clone(),
         None => anchor_stream(state, &anchor, &governance, &mut located).await?,
     };
-    fill_to_head(state, realm_id, &governance, &anchored, &mut located).await?;
+    fill_to_head(state, realm_id, &governance, &anchored, &mut located, None).await?;
     // Grant and policy replicas invalidate the previous authorization cut.
     // Holding their Commit chain cannot reconstruct the governing inputs
     // deliberately omitted from a member bootstrap. Refresh the signed cut
@@ -176,8 +203,15 @@ async fn converge(state: &AppState, stream: &CommitStreamRef) -> Result<(), Stri
             };
             match anchor_stream(state, &reader, &governance, &mut located).await {
                 Ok(refreshed) => {
-                    return fill_to_head(state, realm_id, &governance, &refreshed, &mut located)
-                        .await;
+                    return fill_to_head(
+                        state,
+                        realm_id,
+                        &governance,
+                        &refreshed,
+                        &mut located,
+                        None,
+                    )
+                    .await;
                 }
                 Err(error) => failure = Some(error),
             }
@@ -194,28 +228,84 @@ fn temporary(detail: impl std::fmt::Display) -> String {
 }
 
 /// Refresh a hosted Account's exact original governing Snapshot. Native
-/// replica folding remains the only source of local current state: this read
-/// archives no object until that complete cut already matches the peer.
+/// replica folding remains the only source of local current state. The read
+/// binds its known heads before the network round trip, then rechecks the
+/// original disclosure against the current durable replica cut.
 pub(crate) async fn refresh_account_snapshot(
     state: &AppState,
     realm_id: &RealmId,
     account: &arkret_wire::AccountId,
 ) -> Result<arkret_wire::RealmStateSnapshot, String> {
-    let (snapshot, ..) = verified_account_snapshot(state, realm_id, account).await?;
-    if let Err(error) = state
-        .authority_commits()
-        .install_verified_account_snapshot(account, &state.service_core_id(), &snapshot)
-        .await
-    {
-        spawn_converge_stream(
-            state,
-            CommitStreamRef::Realm {
-                realm_id: realm_id.clone(),
-            },
-        );
-        return Err(temporary(error));
+    let (snapshot, mut located, material) =
+        verified_account_snapshot(state, realm_id, account).await?;
+    let refresh = async {
+        complete_snapshot_tails(state, &snapshot, &material, &mut located).await?;
+        state
+            .authority_commits()
+            .install_verified_account_snapshot(
+                account,
+                &state.service_core_id(),
+                &snapshot,
+                &material,
+            )
+            .await
+            .map_err(temporary)
     }
-    Ok(snapshot)
+    .await;
+    let issued = match refresh {
+        Ok(issued) => issued,
+        Err(error) => {
+            for head in &snapshot.visible_stream_heads {
+                if matches!(head.stream_ref, CommitStreamRef::Realm { .. })
+                    || !material.visible_stream_heads.contains(head)
+                {
+                    spawn_converge_stream(state, head.stream_ref.clone());
+                }
+            }
+            return Err(temporary(error));
+        }
+    };
+    // Same-cut issuance may retain an earlier signed original. Verify that
+    // actual object under this read's fresh authority before emitting its ID.
+    verify_snapshot(state, &mut located, &issued).await?;
+    Ok(issued)
+}
+
+/// Pull only the missing tails of this already verified original. Re-fetching
+/// a newer Snapshot after every replica lag can starve a continuously busy
+/// stream. This retains real authenticated chain nodes, never invented heads.
+#[inline(never)]
+fn complete_snapshot_tails<'a>(
+    state: &'a AppState,
+    snapshot: &'a arkret_wire::RealmStateSnapshot,
+    minimum: &'a coland_storage::RealmStateSnapshotMaterial,
+    located: &'a mut LocatedRealmAuthority,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+    Box::pin(async move {
+        let governance = located.authority.current_service_id().clone();
+        for target in &snapshot.visible_stream_heads {
+            if minimum.visible_stream_heads.contains(target) {
+                continue;
+            }
+            let anchor = state
+                .authority_commits()
+                .replica_anchor_for_stream(&target.stream_ref)
+                .await
+                .map_err(temporary)?
+                .and_then(|anchor| anchor.anchored_head)
+                .ok_or("the disclosed stream has no installed replica anchor")?;
+            fill_to_head(
+                state,
+                &snapshot.realm_id,
+                &governance,
+                &anchor,
+                located,
+                Some(target),
+            )
+            .await?;
+        }
+        Ok(())
+    })
 }
 
 /// Verify the current disclosure without archiving or installing its cut.
@@ -630,6 +720,12 @@ async fn anchor_stream(
     governance: &DidCoreId,
     located: &mut LocatedRealmAuthority,
 ) -> Result<CommitStreamHead, String> {
+    // Only bootstrap replaces a Realm's complete current cut. Queue those
+    // background operations before acquiring a database connection, while
+    // independent stream tails and ordinary command writers remain free.
+    let gate = realm_convergence_gate(state, &anchor.join_commit.stream_ref)
+        .ok_or("the Realm bootstrap queue is unavailable")?;
+    let _serial = gate.lock().await;
     anchor_stream_with_forward_source(state, anchor, governance, located, None).await
 }
 
@@ -744,6 +840,7 @@ async fn fill_to_head(
     governance: &DidCoreId,
     anchored: &CommitStreamHead,
     located: &mut LocatedRealmAuthority,
+    target: Option<&CommitStreamHead>,
 ) -> Result<(), String> {
     let realm_stream = anchored.stream_ref.clone();
     loop {
@@ -753,6 +850,19 @@ async fn fill_to_head(
             .await
             .map_err(temporary)?
             .ok_or("the held Realm stream has no head")?;
+        if let Some(target) = target {
+            if target.stream_ref != realm_stream {
+                return Err("the signed target belongs to another stream".into());
+            }
+            if held.stream_position >= target.stream_position {
+                if held.stream_position == target.stream_position
+                    && held.commit_id != target.commit_id
+                {
+                    return Err("the signed target conflicts with the held stream head".into());
+                }
+                return Ok(());
+            }
+        }
         let request = StreamScanRequest {
             realm_id: realm_id.clone(),
             stream_ref: realm_stream.clone(),
@@ -764,8 +874,13 @@ async fn fill_to_head(
             serde_json::from_slice(&body).map_err(temporary)?;
         page.validate_for_request(&request).map_err(temporary)?;
         if page.committed_events.is_empty() {
+            if target.is_some() {
+                return Err("the peer scan ended before the signed Snapshot head".into());
+            }
             return Ok(());
         }
+        verify_scanned_page(state, realm_id, located, &held, &page).await?;
+        require_scanned_snapshot_target(&page, target)?;
         let mut index = 0;
         while index < page.committed_events.len() {
             let item = &page.committed_events[index];
@@ -787,6 +902,8 @@ async fn fill_to_head(
                     >(&body)
                     .map_err(temporary)?;
                     boundary.validate_for_request(&request).map_err(temporary)?;
+                    verify_scanned_page(state, realm_id, located, &held, &boundary).await?;
+                    require_scanned_snapshot_target(&boundary, target)?;
                     if boundary.committed_events.first() != Some(item) {
                         return Err("revision_unavailable: paired scan boundary changed".into());
                     }
@@ -824,10 +941,39 @@ async fn fill_to_head(
                 index += 1;
             }
         }
+        // Fold the complete authenticated page, including any observed
+        // revocation after the target, before rechecking Account disclosure.
+        if target.is_some_and(|target| held.stream_position >= target.stream_position) {
+            return Ok(());
+        }
         if !page.truncated {
+            if target.is_some() {
+                return Err("the peer scan omitted the signed Snapshot head".into());
+            }
             return Ok(());
         }
     }
+}
+
+fn require_scanned_snapshot_target(
+    page: &arkret_models_collaboration::authority_commit::PeerStreamScanOutcome,
+    target: Option<&CommitStreamHead>,
+) -> Result<(), String> {
+    let Some(target) = target else {
+        return Ok(());
+    };
+    for item in &page.committed_events {
+        let commit = item.commit();
+        if commit.stream_position == target.stream_position {
+            if commit.commit_id != target.commit_id {
+                return Err("the peer scan conflicts with the signed Snapshot head".into());
+            }
+            if is_pair_business(item)? {
+                return Err("the signed Snapshot head bisects a registered atomic pair".into());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Resolve only one frozen submission through an already authorized held stream.
@@ -1001,6 +1147,10 @@ pub(crate) async fn ensure_forwarded_target(
         let page: arkret_models_collaboration::authority_commit::PeerStreamScanOutcome =
             serde_json::from_slice(&body).map_err(temporary)?;
         page.validate_for_request(&request).map_err(temporary)?;
+        verify_scanned_page(state, &event.realm_id, located, &held, &page).await?;
+        for item in &page.committed_events {
+            validate_forward_scan_target(item, event, expected)?;
+        }
         for item in &page.committed_events {
             let commit = item.commit();
             if expected.is_some_and(|target| commit.stream_position > target.stream_position) {
@@ -1575,6 +1725,51 @@ struct ScannedItemEvidence<'a> {
     producer_signer_fact:
         Option<&'a arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact>,
     exact_self_result_account: Option<&'a arkret_wire::AccountId>,
+}
+
+/// Authenticate the complete physical page before retaining its first row.
+/// Later source, ownership and locked installer checks still fence each write.
+#[inline(never)]
+fn verify_scanned_page<'a>(
+    state: &'a AppState,
+    realm_id: &'a RealmId,
+    located: &'a mut LocatedRealmAuthority,
+    held: &'a RealmCommit,
+    page: &'a arkret_models_collaboration::authority_commit::PeerStreamScanOutcome,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+    Box::pin(async move {
+        let mut previous = held;
+        for item in &page.committed_events {
+            let commit = item.commit();
+            ensure_historical_method_key(state, located, &commit.signature).await?;
+            match item {
+                CommittedEventView::Full(full) => {
+                    verify_committed_event_receipt_with_source(
+                        state.persistence(),
+                        &full.event,
+                        commit,
+                        CommitContinuity::After(previous),
+                        &located.authority,
+                        &located.keys,
+                        &state.service_core_id(),
+                        state.projections().realm_digest_suite(realm_id.as_str()),
+                        scan_fact(page, commit),
+                    )
+                    .await
+                    .map_err(temporary)?;
+                }
+                CommittedEventView::Withheld(_) => {
+                    located
+                        .authority
+                        .verify_commit(commit, &located.keys)
+                        .map_err(temporary)?;
+                    commit.validate_successor_of(previous).map_err(temporary)?;
+                }
+            }
+            previous = commit;
+        }
+        Ok(())
+    })
 }
 
 async fn store_scanned(

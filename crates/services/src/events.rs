@@ -1227,7 +1227,7 @@ pub trait MlsKeyPackageMaintenancePort: Send + Sync {
         id: &str,
         mls_group_id: &str,
         now_unix_ms: i64,
-        peer_consume_receipt: Option<&Value>,
+        consumption: Option<coland_storage::MlsKeyPackageConsumeEvidence<'_>>,
     ) -> ServiceResult<Option<MlsKeyPackageState>>;
     async fn record_peer_claim_attempt(
         &self,
@@ -1372,10 +1372,10 @@ impl MlsKeyPackageService {
         id: &str,
         mls_group_id: &str,
         now_unix_ms: i64,
-        peer_consume_receipt: Option<&Value>,
+        consumption: Option<coland_storage::MlsKeyPackageConsumeEvidence<'_>>,
     ) -> ServiceResult<Option<MlsKeyPackageState>> {
         self.key_packages
-            .consume_key_package_claim(id, mls_group_id, now_unix_ms, peer_consume_receipt)
+            .consume_key_package_claim(id, mls_group_id, now_unix_ms, consumption)
             .await
     }
     pub async fn record_peer_claim_attempt(

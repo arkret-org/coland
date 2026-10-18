@@ -234,6 +234,7 @@ async fn every_stream_checks_genesis_successors_and_cross_stream_predecessors() 
 
 #[tokio::test]
 async fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
+    eprintln!("[2133-handoff] starting complete PG fixture");
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let fixture = Box::pin(HumanFixture::new(
@@ -242,6 +243,7 @@ async fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
     ))
     .await;
     Box::pin(fixture.admit(&pool)).await;
+    eprintln!("[2133-handoff] accepted founder fixture");
     let store = PgAuthorityCommitStore { pool: pool.clone() };
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let mut watch_tail = fixture.unit.transactions.last().unwrap().clone();
@@ -293,6 +295,7 @@ async fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
         .await
         .unwrap()
         .unwrap();
+    eprintln!("[2133-handoff] issued original Snapshot");
     for payload in [
         serde_json::json!({"expected_governance_generation":1,"expected_realm_stream_commit_id":tail.commit.commit_id,"new_governance_station_id":next}),
         serde_json::json!({"expected_governance_generation":0,"expected_realm_stream_commit_id":arkret_wire::RealmCommitId::from_digest([7;32]),"new_governance_station_id":next}),
@@ -404,14 +407,39 @@ async fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
         .install_handoff(&handoff, &heads, &snapshot)
         .await
         .unwrap();
+    eprintln!("[2133-handoff] activated complete handoff");
     store
         .install_handoff(&handoff, &heads, &snapshot)
         .await
         .unwrap();
+    eprintln!("[2133-handoff] replayed complete handoff");
     assert!(Box::pin(uow.commit_event(later)).await.is_err());
+    eprintln!("[2133-handoff] refused old authority write");
     let installed = store.current_authority(&realm).await.unwrap().unwrap();
     assert_eq!(installed.generation, 1);
     assert_eq!(installed.service_id, next);
+    let scan = arkret_wire::StreamScanRequest {
+        realm_id: realm.clone(),
+        stream_ref: arkret_wire::CommitStreamRef::Realm {
+            realm_id: realm.clone(),
+        },
+        direction: arkret_wire::StreamScanDirection::After(None),
+        limit: 500,
+    };
+    let coland_storage::AccountStreamScan::Page(old_station_page) = store
+        .scan_stream_for_account(&scan, &account, &account.station_id)
+        .await
+        .unwrap()
+    else {
+        panic!("the outgoing governor must retain its hosted Account's proved history");
+    };
+    old_station_page.validate_for_request(&scan).unwrap();
+    eprintln!("[2133-handoff] outgoing self scan retained");
+    assert_eq!(
+        old_station_page.committed_events.last().unwrap().commit(),
+        &change.authority_commit.commit
+    );
+
     for (index, strand) in strands.iter().enumerate() {
         let query =
             arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentRequestBody {
@@ -444,6 +472,31 @@ async fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
         .unwrap()
         .unwrap();
     assert_eq!(new_snapshot.governance_generation, 1);
+    eprintln!("[2133-handoff] issued successor Snapshot");
+    let minimum = store
+        .realm_state_snapshot_material_for_account(&realm, &account)
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .install_verified_account_snapshot(&account, &account.station_id, &new_snapshot, &minimum)
+        .await
+        .unwrap();
+    eprintln!("[2133-handoff] retained verified successor Snapshot");
+    assert_eq!(
+        store
+            .issued_realm_state_snapshot(
+                &realm,
+                &account,
+                &new_snapshot.snapshot_id,
+                &account.station_id
+            )
+            .await
+            .unwrap(),
+        Some(new_snapshot.clone())
+    );
+    eprintln!("[2133-handoff] outgoing exact successor Snapshot retained");
+
     assert_eq!(
         new_snapshot.current_state_entries,
         old_snapshot.current_state_entries
@@ -455,6 +508,7 @@ async fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
             .unwrap(),
         Some(old_snapshot)
     );
+    eprintln!("[2133-handoff] exact original old Snapshot retained");
     let mut replay = handoff.clone();
     replay.new_authority_acceptance_signature.sig =
         arkret_wire::Base64UrlString::new("YmFk").unwrap();
@@ -464,6 +518,7 @@ async fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
             .await
             .is_err()
     );
+    eprintln!("[2133-handoff] refused changed handoff replay");
     // A new tenure extends the imported predecessor; it never restarts position.
     let mut next_tail = change.authority_commit.clone();
     next_tail.expected_authority = installed;
@@ -482,7 +537,20 @@ async fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
         &mut fresh.authority_commit.commit,
         &"did:web:handoff-new.example".parse().unwrap(),
     );
-    Box::pin(uow.commit_event(fresh.clone())).await.unwrap();
+    // The successor accepts an independent HTTP command. Keep this real
+    // admission on its own default-runtime task, with cancellation tied to
+    // the fixture, rather than nesting its poll stack in the whole lifecycle.
+    let mut admissions = tokio::task::JoinSet::new();
+    let successor_pool = pool.clone();
+    let successor_request = Box::new(fresh.clone());
+    admissions.spawn(async move {
+        PgEventCommitUnitOfWork::new(successor_pool)
+            .commit_event(*successor_request)
+            .await
+            .unwrap();
+    });
+    admissions.join_next().await.unwrap().unwrap();
+    eprintln!("[2133-handoff] successor extended original chain");
     assert_eq!(
         fresh.authority_commit.commit.previous_commit_ref,
         Some(change.authority_commit.commit.commit_id)

@@ -3109,15 +3109,16 @@ async fn consume_keypackages(
     let consumed_at_unix_ms = consumed_at_datetime.timestamp_millis();
     let prepared_consume_receipt =
         build_keypackage_consume_receipt(state, &body, consumed_at_datetime)?;
-    let prepared_consume_receipt_value = serde_json::to_value(&prepared_consume_receipt)
-        .map_err(|error| AppError::internal(format!("consume receipt serialize: {error}")))?;
     let Some(consumed) = state
         .mls_key_packages()
         .consume_key_package_claim(
             &record.id,
             &group_id,
             consumed_at_unix_ms,
-            Some(&prepared_consume_receipt_value),
+            Some(coland_storage::MlsKeyPackageConsumeEvidence {
+                request: &body,
+                receipt: &prepared_consume_receipt,
+            }),
         )
         .await
         .map_err(|error| AppError::internal(format!("KeyPackage consume CAS failed: {error}")))?

@@ -10,6 +10,8 @@ struct Evidence {
     delivery: serde_json::Value,
     #[diesel(sql_type = Jsonb)]
     receipt: serde_json::Value,
+    #[diesel(sql_type = diesel::sql_types::Nullable<Text>)]
+    consume_request_digest: Option<String>,
     #[diesel(sql_type = Text)]
     claim_request_id: String,
     #[diesel(sql_type = Text)]
@@ -514,7 +516,7 @@ pub(crate) async fn consumed_endpoint_in_connection(
         } => ("", verification_method.as_str()),
     };
     let evidence = diesel::sql_query("SELECT convert_from(w.delivery_canonical_json,'UTF8')::jsonb AS delivery, \
-        p.consume_receipt AS receipt,p.claim_request_id,k.keypackage_ref \
+        p.consume_receipt AS receipt,p.consume_request_digest,p.claim_request_id,k.keypackage_ref \
         FROM mls_key_packages k JOIN accounts a ON a.principal_id=k.owner_account_id->>'principal_id' AND a.station_id=k.owner_account_id->>'station_id' \
         JOIN peer_keypackage_claims p ON p.keypackage_id=k.id \
         JOIN keypackage_claim_welcome_bindings b ON b.source_id=p.source_id AND b.claim_request_id=p.claim_request_id \
@@ -544,14 +546,8 @@ pub(crate) async fn consumed_endpoint_in_connection(
             .map_err(PersistenceError::database)?;
         receipt.validate_shape().map_err(invalid)?;
         let durable = &receipt.recipient_durable_receipt;
-        // The terminal receipt addresses the consume command, not the
-        // original peer claim command retained by the claim ledger.
-        let consume = arkret_models_crypto::KeyPackagesConsumeUnsignedRequest {
-            claim_id: receipt.claim_id.clone(),
-            recipient_durable_receipt: durable.clone(),
-        };
-        let consume_digest =
-            arkret_canonical::canonical_sha256(&consume).map_err(PersistenceError::database)?;
+        // The destination recorded this digest from the complete verified
+        // signed request in the same transaction as its terminal receipt.
         let signer_matches = match (&durable.recipient, endpoint) {
             (
                 RecipientMlsDurableSigner::Device {
@@ -587,7 +583,7 @@ pub(crate) async fn consumed_endpoint_in_connection(
                     .durable_receipt_digest()
                     .map_err(PersistenceError::database)?
             && durable.claim_request_id.as_str() == evidence.claim_request_id
-            && receipt.request_digest.as_str() == consume_digest
+            && evidence.consume_request_digest.as_deref() == Some(receipt.request_digest.as_str())
             && durable.key_package_ref.as_str() == evidence.keypackage_ref
             && durable.recipient_id == account.station_id
             && durable.realm_id == *scope.realm_id()

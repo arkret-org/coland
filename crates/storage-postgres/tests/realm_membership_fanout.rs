@@ -3235,6 +3235,32 @@ async fn member_account_snapshot_preserves_governance_and_exact_replica_cut() {
             .await
             .is_err()
     );
+    // The request began at the earlier complete cut. A later accepted local
+    // row does not invalidate that original, and archiving it changes no
+    // native result or checkpoint. The next fresh request must cover the new cut.
+    let advanced = member
+        .realm_state_snapshot_material_for_account(&realm, account)
+        .await
+        .unwrap()
+        .unwrap();
+    member
+        .install_verified_account_snapshot(account, &issuer, &snapshot, &material)
+        .await
+        .unwrap();
+    assert_eq!(
+        member
+            .realm_state_snapshot_material_for_account(&realm, account)
+            .await
+            .unwrap()
+            .unwrap(),
+        advanced
+    );
+    assert!(
+        member
+            .install_verified_account_snapshot(account, &issuer, &snapshot, &advanced)
+            .await
+            .is_err()
+    );
     let next_material = governor
         .member_station_bootstrap_material(&realm, account, &join.authority_commit.commit.commit_id)
         .await
@@ -3254,7 +3280,12 @@ async fn member_account_snapshot_preserves_governance_and_exact_replica_cut() {
     incomplete.current_state_entries.pop().unwrap();
     assert!(
         member
-            .install_verified_account_snapshot(account, &issuer, &sign(&incomplete).unwrap())
+            .install_verified_account_snapshot(
+                account,
+                &issuer,
+                &sign(&incomplete).unwrap(),
+                &next_material
+            )
             .await
             .is_err()
     );
@@ -3263,7 +3294,8 @@ async fn member_account_snapshot_preserves_governance_and_exact_replica_cut() {
             .install_verified_account_snapshot(
                 foreign.as_account_id().unwrap(),
                 &issuer,
-                &next_snapshot
+                &next_snapshot,
+                &next_material,
             )
             .await
             .is_err()
@@ -3278,7 +3310,7 @@ async fn member_account_snapshot_preserves_governance_and_exact_replica_cut() {
     .unwrap();
     assert!(
         member
-            .install_verified_account_snapshot(account, &issuer, &wrong_signer)
+            .install_verified_account_snapshot(account, &issuer, &wrong_signer, &next_material)
             .await
             .is_err()
     );
@@ -3288,7 +3320,7 @@ async fn member_account_snapshot_preserves_governance_and_exact_replica_cut() {
         "rejected objects issue nothing"
     );
     member
-        .install_verified_account_snapshot(account, &issuer, &next_snapshot)
+        .install_verified_account_snapshot(account, &issuer, &next_snapshot, &next_material)
         .await
         .unwrap();
     assert_eq!(

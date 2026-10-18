@@ -432,14 +432,129 @@ fn undisclosable(reason: &str) -> PersistenceError {
     ))
 }
 
-/// Preserve a verified original object only when every disclosed stream and
-/// current row equals the hosted Account's complete durable replica cut.
+/// Compare rows by their complete typed subject within their source stream.
+fn indexed_cut_rows(
+    entries: &[arkret_wire::TypedCurrentRow],
+) -> PersistenceResult<std::collections::BTreeMap<String, &arkret_wire::TypedCurrentRow>> {
+    entries
+        .iter()
+        .map(|row| {
+            let arkret_wire::TypedCurrentRow::Value {
+                selector,
+                source_stream_ref,
+                ..
+            } = row;
+            arkret_canonical::canonical_json_string(&(selector, source_stream_ref))
+                .map(|key| (key, row))
+                .map_err(PersistenceError::database)
+        })
+        .collect()
+}
+
+/// A network read may overlap local replica advancement. All rows already
+/// covered by the signed heads must match, and every still-visible subject
+/// known before the request must remain present without revision regression.
+fn require_observed_cut(
+    snapshot: &arkret_wire::RealmStateSnapshot,
+    minimum: &coland_storage::RealmStateSnapshotMaterial,
+    current: &coland_storage::RealmStateSnapshotMaterial,
+) -> PersistenceResult<()> {
+    use arkret_wire::TypedCurrentRow::Value;
+    if minimum.realm_id != snapshot.realm_id
+        || minimum.governance_generation != snapshot.governance_generation
+    {
+        return Err(undisclosable("the request's known Realm or tenure changed"));
+    }
+    if snapshot.retention_and_history_floor != current.retention_and_history_floor {
+        return Err(undisclosable(
+            "the signed floors differ from the current disclosure",
+        ));
+    }
+    if snapshot.visible_stream_heads.len() != current.visible_stream_heads.len() {
+        return Err(undisclosable(
+            "the signed stream inventory differs from the current disclosure",
+        ));
+    }
+    for minimum in &minimum.visible_stream_heads {
+        if !snapshot.visible_stream_heads.iter().any(|head| {
+            head.stream_ref == minimum.stream_ref
+                && (head.stream_position > minimum.stream_position
+                    || (head.stream_position == minimum.stream_position
+                        && head.commit_id == minimum.commit_id))
+        }) {
+            return Err(undisclosable(&format!(
+                "the signed cut does not cover the known head {minimum:?}"
+            )));
+        }
+    }
+    let signed_rows = indexed_cut_rows(&snapshot.current_state_entries)?;
+    let current_rows = indexed_cut_rows(&current.current_state_entries)?;
+    let known_rows = indexed_cut_rows(&minimum.current_state_entries)?;
+    for (key, row) in &current_rows {
+        let Value {
+            source_stream_ref,
+            revision,
+            ..
+        } = *row;
+        let Some(head) = snapshot
+            .visible_stream_heads
+            .iter()
+            .find(|head| &head.stream_ref == source_stream_ref)
+        else {
+            return Err(undisclosable("a current row has no signed stream head"));
+        };
+        if revision.stream_position <= head.stream_position
+            && signed_rows.get(key).copied() != Some(*row)
+        {
+            return Err(undisclosable(&format!(
+                "a covered current row differs: subject={key}, revision={revision:?}, signed_head={head:?}"
+            )));
+        }
+    }
+    for (key, row) in &signed_rows {
+        if !current_rows.contains_key(key) {
+            return Err(undisclosable(&format!(
+                "a signed subject is not currently disclosed: {key}"
+            )));
+        }
+        let Value {
+            revision, value, ..
+        } = *row;
+        if let Some(Value {
+            revision: known,
+            value: known_value,
+            ..
+        }) = known_rows.get(key).copied()
+            && (revision.stream_position < known.stream_position
+                || (revision.stream_position == known.stream_position
+                    && (revision.commit_id != known.commit_id || value != known_value)))
+        {
+            return Err(undisclosable(&format!(
+                "a signed row regresses the known revision: {key}"
+            )));
+        }
+    }
+    if known_rows
+        .keys()
+        .any(|key| current_rows.contains_key(key) && !signed_rows.contains_key(key))
+    {
+        return Err(undisclosable(
+            "a known current subject is missing from the signed cut",
+        ));
+    }
+    Ok(())
+}
+
+/// Preserve a verified original from this read's governing cut. The local
+/// replica can advance during the network round trip; that does not rewrite
+/// the signed object or regress any installed current state.
 pub(crate) async fn install_verified_account_snapshot(
     pool: &PgPool,
     account: &arkret_wire::AccountId,
     issuer: &arkret_wire::DidCoreId,
     snapshot: &arkret_wire::RealmStateSnapshot,
-) -> PersistenceResult<()> {
+    minimum: &coland_storage::RealmStateSnapshotMaterial,
+) -> PersistenceResult<arkret_wire::RealmStateSnapshot> {
     let mut conn = SnapshotIssuanceConnection::acquire(pool, &snapshot.realm_id).await?;
     let result = conn
         .transaction::<_, PgTransactionError, _>(async move |conn| {
@@ -466,14 +581,14 @@ pub(crate) async fn install_verified_account_snapshot(
             require_snapshot_serving_cut(conn, account, issuer, &tenure.service_id, &material)
                 .await?;
             if i64::try_from(snapshot.governance_generation).ok() != Some(tenure.generation)
-                || !coland_storage::signed_snapshot_matches_material(snapshot, &material)
                 || derived_snapshot_id(snapshot)? != snapshot.snapshot_id
             {
                 return Err(undisclosable(
-                    "the governing Snapshot differs from the complete current cut",
+                    "the governing Snapshot does not cover this read's complete known cut",
                 )
                 .into());
             }
+            require_observed_cut(snapshot, minimum, &material)?;
             let signer = arkret_identity::verification_method_did(
                 snapshot.signature.verification_method.as_str(),
             )
@@ -490,8 +605,21 @@ pub(crate) async fn install_verified_account_snapshot(
                 );
             }
             coland_storage::enforce_inline_realm_state_snapshot_capacity(snapshot)?;
-            issue_head_in_connection(conn, account, &material, snapshot.clone()).await?;
-            Ok(())
+            crate::replica_authorization::guard_current_rows(
+                conn,
+                &snapshot.realm_id,
+                &snapshot.current_state_entries,
+            )
+            .await?;
+            recheck_disclosure_in_connection(conn, account, issuer, snapshot).await?;
+            let original = coland_storage::RealmStateSnapshotMaterial {
+                realm_id: snapshot.realm_id.clone(),
+                governance_generation: snapshot.governance_generation,
+                visible_stream_heads: snapshot.visible_stream_heads.clone(),
+                current_state_entries: snapshot.current_state_entries.clone(),
+                retention_and_history_floor: snapshot.retention_and_history_floor.clone(),
+            };
+            Ok(issue_head_in_connection(conn, account, &original, snapshot.clone()).await?)
         })
         .await
         .map_err(snapshot_transaction_error);

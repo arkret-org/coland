@@ -2537,13 +2537,20 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
         ))
         .unwrap();
         assert_ne!(receipt.request_digest.as_str(), ledger.request_digest);
+        let mut changed_command = consume.clone();
+        changed_command.signature.sig = arkret_wire::Base64UrlString::new("AQ").unwrap();
+        assert!(packages.consume_claim(
+            &package.keypackage_id, group_id.as_str(), now.timestamp_millis(),
+            Some(coland_storage::MlsKeyPackageConsumeEvidence { request:&changed_command,receipt:&receipt }),
+        ).await.is_err(), "changing only the outer signature must not reuse a consume receipt");
+        assert!(packages.get(&package.keypackage_id).await.unwrap().unwrap().consumed_at.is_none());
         let receipt_json = serde_json::to_value(&receipt).unwrap();
         packages
             .consume_claim(
                 &package.keypackage_id,
                 group_id.as_str(),
                 now.timestamp_millis(),
-                Some(&receipt_json),
+                Some(coland_storage::MlsKeyPackageConsumeEvidence { request:&consume,receipt:&receipt }),
             )
             .await
             .unwrap()

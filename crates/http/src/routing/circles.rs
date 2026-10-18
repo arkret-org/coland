@@ -372,18 +372,28 @@ async fn submit_caller_signed_circle_event(
         .submit_self_event(session, submission)
         .await
         .map(|_| ())
-        .map_err(|error| match error.kind() {
-            coland_services::ServiceErrorKind::Conflict => AppError::conflict(error.detail()),
-            coland_services::ServiceErrorKind::NotFound => AppError::not_found(error.detail()),
-            coland_services::ServiceErrorKind::SchemaViolation => {
-                AppError::schema_violation(error.detail())
-            }
-            coland_services::ServiceErrorKind::UnsupportedEventKind => {
-                crate::app_error!(UnsupportedEventKind, error.detail())
-            }
-            coland_services::ServiceErrorKind::Database
-            | coland_services::ServiceErrorKind::Internal => AppError::internal(error.detail()),
-        })
+        .map_err(circle_submission_error)
+}
+
+fn circle_submission_error(error: coland_services::ServiceError) -> AppError {
+    if let Some(code) = error
+        .conflict_code()
+        .and_then(|code| arkret_wire::ErrorCode::from_wire(code.as_str()))
+    {
+        return AppError::from_rejection(code, error.detail());
+    }
+    match error.kind() {
+        coland_services::ServiceErrorKind::Conflict => AppError::conflict(error.detail()),
+        coland_services::ServiceErrorKind::NotFound => AppError::not_found(error.detail()),
+        coland_services::ServiceErrorKind::SchemaViolation => {
+            AppError::schema_violation(error.detail())
+        }
+        coland_services::ServiceErrorKind::UnsupportedEventKind => {
+            crate::app_error!(UnsupportedEventKind, error.detail())
+        }
+        coland_services::ServiceErrorKind::Database
+        | coland_services::ServiceErrorKind::Internal => AppError::internal(error.detail()),
+    }
 }
 
 #[endpoint(
@@ -631,6 +641,26 @@ mod tests {
     use coland_http::error::ErrorCode;
 
     use super::*;
+
+    #[test]
+    fn circle_submission_preserves_registered_temporary_and_terminal_errors() {
+        for (code, expected_status) in [
+            (coland_storage::ConflictCode::TemporarilyUnavailable, 503),
+            (coland_storage::ConflictCode::CapabilityDenied, 403),
+            (coland_storage::ConflictCode::FailedPrecondition, 409),
+        ] {
+            let mapped = circle_submission_error(coland_services::ServiceError::Conflict(format!(
+                "{code}: refusal"
+            )));
+            assert_eq!(mapped.http_status().as_u16(), expected_status);
+            assert_eq!(mapped.wire_code(), code.as_str());
+        }
+        let opaque = circle_submission_error(coland_services::ServiceError::Conflict(
+            "opaque temporarily_unavailable diagnostic".into(),
+        ));
+        assert_eq!(opaque.http_status().as_u16(), 409);
+        assert_eq!(opaque.wire_code(), "conflict");
+    }
 
     const ACTOR: &str = "ak:did_core:web:alice.example";
     const BOB: &str = "ak:did_core:web:bob.example";

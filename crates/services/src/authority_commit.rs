@@ -2189,16 +2189,18 @@ impl AuthorityCommitApplication {
 
     /// Archive the original governing object after peer authority and
     /// cryptographic verification, without granting local signing authority.
+    /// Return the retained original selected by the store's same-cut policy.
     pub async fn install_verified_account_snapshot(
         &self,
         account: &arkret_wire::AccountId,
         issuer: &DidCoreId,
         snapshot: &RealmStateSnapshot,
-    ) -> ServiceResult<()> {
+        minimum: &coland_storage::RealmStateSnapshotMaterial,
+    ) -> ServiceResult<RealmStateSnapshot> {
         coland_storage::enforce_inline_realm_state_snapshot_capacity(snapshot)?;
         Ok(self
             .store()
-            .install_verified_account_snapshot(account, issuer, snapshot)
+            .install_verified_account_snapshot(account, issuer, snapshot, minimum)
             .await?)
     }
 

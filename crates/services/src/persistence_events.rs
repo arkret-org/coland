@@ -722,12 +722,12 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
         id: &str,
         mls_group_id: &str,
         now_unix_ms: i64,
-        peer_consume_receipt: Option<&Value>,
+        consumption: Option<coland_storage::MlsKeyPackageConsumeEvidence<'_>>,
     ) -> crate::ServiceResult<Option<crate::events::MlsKeyPackageState>> {
         Ok(self
             .0
             .mls_key_packages()
-            .consume_claim(id, mls_group_id, now_unix_ms, peer_consume_receipt)
+            .consume_claim(id, mls_group_id, now_unix_ms, consumption)
             .await?)
     }
     async fn record_peer_claim_attempt(

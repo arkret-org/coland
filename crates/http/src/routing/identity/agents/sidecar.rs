@@ -101,7 +101,19 @@ async fn authorize_sidecar_ensure(
         }
         _ => {}
     }
-    if realm_member_joined(state, realm_id, &controller_actor.to_string()) {
+    let realm = arkret_wire::RealmId::new(realm_id)
+        .map_err(|error| AppError::param_invalid(error.to_string()))?;
+    if state
+        .authority_commits()
+        .accepted_current_member_joined(&realm, &controller_actor)
+        .await
+        .map_err(|_| {
+            crate::app_error!(
+                ServiceUnavailable,
+                "Sidecar controller membership is unavailable"
+            )
+        })?
+    {
         return Ok(());
     }
     Err(sidecar_create_denied(

@@ -604,6 +604,34 @@ cosign attest-blob \
 Downgrades are **not** supported once a migration has run; restore from the
 pre-upgrade backup if you need to roll back.
 
+### Registered audit units and planned handoff
+
+A database recovery must restore the complete frozen private state, including
+canonical Event/Commit originals and signer facts, `registered_audit_units`,
+`watch_audit_read_results`, `event_approval_private_audit`,
+`registered_audit_forward_units`, `registered_audit_replica_units`, current
+projections, nonce fences and outbox. A member Snapshot or a readable scan suffix
+is not a private backup. Restore into an isolated database before serving it;
+keep Station identity and key custody under the destination deployment's own
+configuration rather than deriving identity from imported Realm rows.
+
+For a planned Realm handoff, first accept the governance change to freeze the
+outgoing streams, then privately import the consistent frozen state. The
+registered handoff HTTP operation activates that pre-imported state; it is not
+an alternative bulk-data carrier. Activation checks complete originals, final
+heads, signer inventory, pair request/outcome fences, frozen Watch observations
+and their private approval digests. Missing or changed audit material returns
+`revision_unavailable` without activation. Exact handoff replay repeats the
+private archive checks.
+
+An origin retains the complete signed pair before forwarding and its verified
+original acknowledgement afterwards. After response loss, retry the same unit;
+refresh only transport producer evidence. Never recreate either Event or accept
+a surviving fragment separately. Historical pair acknowledgements remain
+original acceptance facts after a verified handoff; an old frozen audited Watch
+read cannot establish the new generation's current state and needs a new audit
+Event for a new observation.
+
 ## 10. Hardening checklist
 
 - `COLAND_DEVELOPMENT_MODE` is unset (or explicitly `false`).

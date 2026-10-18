@@ -270,6 +270,16 @@ impl ActorRealmAuthorization {
         target: &'a arkret_wire::WireResourceSelector,
         facts: &'a crate::OperationFacts,
     ) -> crate::GrantEvaluation<'a> {
+        self.evaluate_with_approvals(actions, target, facts, &[])
+    }
+
+    pub fn evaluate_with_approvals<'a>(
+        &'a self,
+        actions: &'a [&'a str],
+        target: &'a arkret_wire::WireResourceSelector,
+        facts: &'a crate::OperationFacts,
+        approvals: &[crate::VerifiedGrantApproval],
+    ) -> crate::GrantEvaluation<'a> {
         let operation = crate::AuthorizationOperation {
             actor: &self.actor,
             actions,
@@ -278,9 +288,10 @@ impl ActorRealmAuthorization {
             facts,
         };
         let Some(ceiling) = &self.agent_ceiling else {
-            return crate::evaluate_grants(
+            return crate::evaluate_grants_with_verified_approvals(
                 &operation,
                 self.grants.iter().map(|effective| &effective.grant),
+                approvals,
             );
         };
         let controller = &ceiling.controller;
@@ -306,7 +317,7 @@ impl ActorRealmAuthorization {
             &agent_grants,
             &controller.actor,
             &controller_grants,
-            &[],
+            approvals,
             owner_covers,
         );
         if matches!(
@@ -345,7 +356,7 @@ impl ActorRealmAuthorization {
             &agent_grants,
             &controller.actor,
             &controller_grants,
-            &[],
+            approvals,
             managed_owner_covers,
         )
     }
@@ -382,76 +393,6 @@ impl ActorRealmAuthorization {
     }
 }
 
-/// The instant a grant's temporal constraints close it: the earliest
-/// `expires_at` among them, or `None` when no temporal constraint bounds it.
-pub fn capability_grant_expires_at(
-    grant: &arkret_models_collaboration::governance::grant_constraint::CapabilityGrant,
-) -> Option<chrono::DateTime<chrono::Utc>> {
-    use arkret_models_collaboration::governance::grant_constraint::GrantConstraintKind;
-    grant
-        .constraints
-        .iter()
-        .filter(|constraint| constraint.constraint_kind == GrantConstraintKind::Temporal)
-        .filter_map(|constraint| constraint.expires_at)
-        .min()
-}
-
-/// Whether resource selector `parent` covers `child`: the same kind with every
-/// identifying member of `parent` equal in `child`, or a Realm selector over a
-/// Realm-contained resource of the same Realm. The `*` selector covers nothing.
-pub fn resource_selector_covers(
-    parent: &arkret_wire::WireResourceSelector,
-    child: &arkret_wire::WireResourceSelector,
-) -> bool {
-    use arkret_wire::ResourceSelectorKind;
-    if parent.kind == ResourceSelectorKind::All {
-        return false;
-    }
-    let parent_value = match serde_json::to_value(parent) {
-        Ok(Value::Object(value)) => value,
-        _ => return false,
-    };
-    let child_value = match serde_json::to_value(child) {
-        Ok(Value::Object(value)) => value,
-        _ => return false,
-    };
-    let same_kind = parent.kind == child.kind;
-    let realm_parent = parent.kind == ResourceSelectorKind::Realm
-        && matches!(
-            child.kind,
-            ResourceSelectorKind::Realm
-                | ResourceSelectorKind::Space
-                | ResourceSelectorKind::Circle
-                | ResourceSelectorKind::Strand
-                | ResourceSelectorKind::Message
-                | ResourceSelectorKind::Morph
-                | ResourceSelectorKind::Object
-                | ResourceSelectorKind::Relation
-                | ResourceSelectorKind::View
-                | ResourceSelectorKind::Event
-                | ResourceSelectorKind::Policy
-                | ResourceSelectorKind::Invite
-                | ResourceSelectorKind::Notification
-                | ResourceSelectorKind::ReadCursor
-                | ResourceSelectorKind::Blob
-        );
-    if !same_kind && !realm_parent {
-        return false;
-    }
-    if let Some(parent_realm) = parent_value.get("realm_id")
-        && child_value.get("realm_id") != Some(parent_realm)
-    {
-        return false;
-    }
-    if realm_parent {
-        return true;
-    }
-    parent_value.iter().all(|(key, value)| {
-        matches!(key.as_str(), "kind" | "match_scope" | "realm_id")
-            || child_value.get(key) == Some(value)
-    })
-}
-
 impl From<EffectiveActorGrant>
     for arkret_models_collaboration::governance::authorization::EffectiveCapabilityGrantRow
 {
@@ -475,6 +416,17 @@ pub fn effective_capability_grant_state_digest(
 
 #[async_trait]
 pub trait CapabilityGrantCurrentResultStore: Send + Sync {
+    /// Deployment-private issuer source supply from one durable current cut.
+    async fn agent_session_authority(
+        &self,
+        _request: &crate::AgentSessionAuthorityRequest,
+        _at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<crate::AgentSessionAuthorityOutcome> {
+        Err(crate::PersistenceError::Database(
+            "Agent session authority source is unavailable".to_owned(),
+        ))
+    }
+
     async fn get(
         &self,
         realm_id: &arkret_wire::RealmId,

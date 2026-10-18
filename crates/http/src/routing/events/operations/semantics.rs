@@ -17,14 +17,8 @@ pub fn validate_operation_semantics(
         let Some(kind) = kinds::canonical_kind_for_operation(operation) else {
             return Err("unregistered operation kind");
         };
-        // `call-state.md` §4.1 / `media-service-binding.md` §3 / §7 — full
-        // cryptographic verification of every `participant_binding`. This is
-        // the state-aware pass (issuer anchoring against the current
-        // media_service epoch + Ed25519 signature verification); the stateless
-        // wire-shape pre-filter still runs inside `validate_operation_kind`.
-        if kind == arkret_wire::EventKind::CallState {
-            participant_binding::verify_call_state_participant_bindings(state, operation)?;
-        }
+        // Call participant cryptography and issuer/focus policy are verified
+        // inside the guarded accepting transaction, against durable current.
         // Spec B1.13 / B1.14 — typed payload validators for the
         // new wire-broken shapes. These run BEFORE the per-kind schema
         // check so a removed `target_ref` payload is rejected with the

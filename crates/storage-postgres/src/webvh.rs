@@ -199,6 +199,15 @@ impl WebvhStore for PgWebvhStore {
         .map_err(PersistenceError::database)
     }
 
+    async fn ingest_verified_history(
+        &self,
+        expected_current_head: Option<String>,
+        document: WebvhDocumentRecord,
+    ) -> PersistenceResult<WebvhLogCommitOutcome> {
+        self.ingest_complete_history(expected_current_head, document)
+            .await
+    }
+
     async fn commit_log_operation(
         &self,
         expected_current_head: Option<String>,
@@ -569,5 +578,106 @@ impl WebvhStore for PgWebvhStore {
         )
         .await
         .map_err(PgTransactionError::into_persistence)
+    }
+}
+
+impl PgWebvhStore {
+    async fn ingest_complete_history(
+        &self,
+        expected_current_head: Option<String>,
+        document: WebvhDocumentRecord,
+    ) -> PersistenceResult<WebvhLogCommitOutcome> {
+        let invalid = |error: String| PersistenceError::SchemaViolation(error);
+        let did = arkret_wire::Did::new(&document.did).map_err(|e| invalid(e.to_string()))?;
+        let core = arkret_wire::project_did_to_core_id(&did).map_err(|e| invalid(e.to_string()))?;
+        let evidence: arkret_models_identity::ResolutionMethodHistoryEvidence =
+            serde_json::from_value(document.method_evidence.clone())
+                .map_err(|e| invalid(e.to_string()))?;
+        evidence
+            .validate_shape()
+            .map_err(|e| invalid(e.to_string()))?;
+        let arkret_models_identity::ResolutionMethodHistoryEvidence::WebvhLog {
+            log_entries,
+            witness_records,
+            ..
+        } = evidence
+        else {
+            return Err(invalid(
+                "native history ingestion requires WebVH log evidence".into(),
+            ));
+        };
+        let mut bytes = Vec::new();
+        for entry in &log_entries {
+            bytes.extend(
+                arkret_canonical::canonical_json_bytes(entry)
+                    .map_err(|e| invalid(e.to_string()))?,
+            );
+            bytes.push(b'\n');
+        }
+        let verified = arkret_identity::verify_did_webvh_v1_chain_and_witness_bytes(
+            &did,
+            &bytes,
+            Some(&serde_json::to_vec(&witness_records).map_err(|e| invalid(e.to_string()))?),
+        )
+        .map_err(|e| invalid(e.to_string()))?;
+        let mut events = Vec::new();
+        for (index, (raw, entry)) in verified
+            .log
+            .raw_entries
+            .iter()
+            .zip(&verified.log.entries)
+            .enumerate()
+        {
+            events.push(WebvhLogRecord {
+                event_digest: arkret_canonical::canonical_sha256(raw)
+                    .map_err(|e| invalid(e.to_string()))?,
+                did: document.did.clone(),
+                seq: index as u64 + 1,
+                operation: raw.clone(),
+                created_at: entry.version_time,
+            });
+        }
+        if events.is_empty()
+            || document.seq != events.len() as u64
+            || document.key_log_head.as_deref() != events.last().map(|e| e.event_digest.as_str())
+            || document.did_document != verified.log.head_state
+        {
+            return Err(invalid(
+                "native ingestion document differs from verified complete history".into(),
+            ));
+        }
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        conn.transaction::<WebvhLogCommitOutcome, PgTransactionError, _>(async move |conn| {
+            let lock = sql_query("SELECT 1 AS ok FROM (SELECT pg_advisory_xact_lock(hashtextextended($1, 0))) AS held")
+                .bind::<Text,_>(core.as_str()).get_result::<WebvhCommitLockRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+            let _ = lock.ok;
+            let current = sql_query("SELECT id AS did,did_document,key_log_head,seq,method_evidence,fetched_at,expires_at,updated_at FROM webvh_documents WHERE (id=$1 OR (id LIKE 'did:webvh:%' AND split_part(id, ':', 3)=split_part($1, ':', 3))) ORDER BY seq DESC LIMIT 1 FOR UPDATE")
+                .bind::<Text,_>(&document.did).get_result::<WebvhDocumentRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+            if current.as_ref().and_then(|row|row.key_log_head.as_ref()) != expected_current_head.as_ref()
+                || current.as_ref().is_some_and(|row| {
+                    let prior = usize::try_from(row.seq).ok().and_then(|seq|seq.checked_sub(1)).and_then(|index|events.get(index));
+                    row.did != document.did || !prior.is_some_and(|prior|prior.event_digest.as_str()==row.key_log_head.as_deref().unwrap_or_default() && prior.operation.get("state")==Some(&row.did_document))
+                }) {
+                return Ok(WebvhLogCommitOutcome::Conflict);
+            }
+            let existing = sql_query("SELECT id AS event_digest,did,seq,operation,created_at FROM webvh_log_events WHERE did=$1 ORDER BY seq ASC,id ASC FOR UPDATE")
+                .bind::<Text,_>(&document.did).load::<WebvhLogRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+            if existing.len() > events.len() || existing.iter().zip(&events).any(|(old,new)|old.seq != new.seq as i64 || old.event_digest != new.event_digest || old.operation != new.operation) {
+                return Ok(WebvhLogCommitOutcome::Conflict);
+            }
+            for event in events.iter().skip(existing.len()) {
+                let count = sql_query("INSERT INTO webvh_log_events(id,did,seq,operation,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO UPDATE SET id=EXCLUDED.id WHERE webvh_log_events.did=EXCLUDED.did AND webvh_log_events.seq=EXCLUDED.seq AND webvh_log_events.operation=EXCLUDED.operation")
+                    .bind::<Text,_>(&event.event_digest).bind::<Text,_>(&event.did).bind::<BigInt,_>(event.seq as i64).bind::<Jsonb,_>(&event.operation).bind::<Timestamptz,_>(event.created_at)
+                    .execute(&mut *conn).await.map_err(PersistenceError::database)?;
+                if count != 1 { return Err(PersistenceError::Conflict("native history ingestion collided with another original".into()).into()); }
+            }
+            let (fetched_at,expires_at) = webvh_freshness_on_put();
+            sql_query("INSERT INTO webvh_documents(id,did_document,key_log_head,seq,method_evidence,fetched_at,expires_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(id) DO UPDATE SET did_document=EXCLUDED.did_document,key_log_head=EXCLUDED.key_log_head,seq=EXCLUDED.seq,method_evidence=EXCLUDED.method_evidence,fetched_at=EXCLUDED.fetched_at,expires_at=EXCLUDED.expires_at,updated_at=EXCLUDED.updated_at")
+                .bind::<Text,_>(&document.did).bind::<Jsonb,_>(&document.did_document).bind::<Nullable<Text>,_>(&document.key_log_head).bind::<BigInt,_>(document.seq as i64).bind::<Jsonb,_>(&document.method_evidence).bind::<Timestamptz,_>(fetched_at).bind::<Timestamptz,_>(expires_at).bind::<Timestamptz,_>(fetched_at)
+                .execute(&mut *conn).await.map_err(PersistenceError::database)?;
+            Ok(WebvhLogCommitOutcome::Accepted)
+        }).await.map_err(PgTransactionError::into_persistence)
     }
 }

@@ -89,11 +89,23 @@ pub(crate) async fn current_quorum(
     facts: &coland_storage::OperationFacts,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<Option<u64>> {
+    current_operation_quorum(conn, &event.realm_id, action, target, facts, at).await
+}
+
+/// Governance approval for a real non-Event operation at its locked Realm cut.
+pub(crate) async fn current_operation_quorum(
+    conn: &mut diesel_async::AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    action: CapabilityActionId,
+    target: &arkret_wire::WireResourceSelector,
+    facts: &coland_storage::OperationFacts,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<Option<u64>> {
     use diesel::OptionalExtension;
     use diesel::sql_types::Text;
     use diesel_async::RunQueryDsl;
     let rows=diesel::sql_query("SELECT subject_kind,subject_id,value FROM policy_action_current_results WHERE realm_id=$1 ORDER BY subject_kind,subject_id,action_key")
-        .bind::<Text,_>(event.realm_id.as_str()).load::<ConfigRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+        .bind::<Text,_>(realm.as_str()).load::<ConfigRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let mut matched = Vec::new();
     for row in rows {
         let config: PolicyActionDocument = serde_json::from_value(row.value).map_err(|_| {
@@ -111,20 +123,16 @@ pub(crate) async fn current_quorum(
         if config.action.as_str() != action.as_str() {
             continue;
         }
-        let scope = crate::policy_current_results::resolve_scope(
-            conn,
-            &event.realm_id,
-            &config.policy_scope,
-        )
-        .await?;
-        if !scope_contains(conn, &event.realm_id, &scope, target, facts).await? {
+        let scope =
+            crate::policy_current_results::resolve_scope(conn, realm, &config.policy_scope).await?;
+        if !scope_contains(conn, realm, &scope, target, facts).await? {
             continue;
         }
         if row.subject_kind == "policy_ref" {
             let Some(policy) = diesel::sql_query(
                 "SELECT value FROM policy_current_results WHERE realm_id=$1 AND policy_id=$2",
             )
-            .bind::<Text, _>(event.realm_id.as_str())
+            .bind::<Text, _>(realm.as_str())
             .bind::<Text, _>(&row.subject_id)
             .get_result::<DocumentRow>(&mut *conn)
             .await
@@ -158,7 +166,7 @@ pub(crate) async fn current_quorum(
             if policy
                 .realm_id
                 .as_ref()
-                .is_some_and(|realm| realm != &event.realm_id)
+                .is_some_and(|configured_realm| configured_realm != realm)
                 || policy.id.as_str() != row.subject_id
             {
                 return Err(PersistenceError::Conflict(

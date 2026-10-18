@@ -1843,6 +1843,10 @@ async fn direct_conversation_resolve(
     )
     .await?;
     if agent_basis.is_none() && accepted_contact.is_none() {
+        tracing::warn!(
+            diagnostic = "accepted_contact",
+            "Direct founding resolution is unavailable"
+        );
         return json_ok(DirectConversationResolveOutcome::TemporarilyUnavailable {
             retry_after_ms: None,
         });
@@ -1904,6 +1908,10 @@ async fn direct_conversation_resolve(
             let Some(contact_round_evidence) =
                 social::direct::fresh_direct_contact_evidence(state, contact).await?
             else {
+                tracing::warn!(
+                    diagnostic = "fresh_contact_evidence",
+                    "Direct founding resolution is unavailable"
+                );
                 return json_ok(DirectConversationResolveOutcome::TemporarilyUnavailable {
                     retry_after_ms: None,
                 });
@@ -1924,9 +1932,15 @@ async fn direct_conversation_resolve(
             retry_after_ms: None,
         }),
         // The basis is not verifiable right now, so we cannot safely classify the pair.
-        None => json_ok(DirectConversationResolveOutcome::TemporarilyUnavailable {
-            retry_after_ms: None,
-        }),
+        None => {
+            tracing::warn!(
+                diagnostic = "founder",
+                "Direct founding resolution is unavailable"
+            );
+            json_ok(DirectConversationResolveOutcome::TemporarilyUnavailable {
+                retry_after_ms: None,
+            })
+        }
     }
 }
 

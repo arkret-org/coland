@@ -114,6 +114,7 @@ pub(crate) async fn commit_moderation_state_current_result_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     let lift = match event.kind {
         arkret_wire::EventKind::ModerationDecision => false,
@@ -140,20 +141,22 @@ pub(crate) async fn commit_moderation_state_current_result_in_connection(
     } else {
         arkret_wire::CapabilityActionId::MODERATION_DECISION
     };
-    if !crate::moderation_report_current_results::scope_moderator(
+    crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &event.realm_id).await?;
+    let cut =
+        crate::realm_authorization_cut::RealmAuthorizationCut::read_for_event(conn, event).await?;
+    let actions = [arkret_wire::CapabilityActionId::POLICY_MANAGE, action];
+    let approved = crate::boxed_future(|| {
+        cut.require_moderation_with_approvals(conn, event, commit, prepared, &actions)
+    })
+    .await?;
+    crate::approval_admission::consume_and_audit(
         conn,
-        &event.realm_id,
-        &event.scope_ref,
-        &event.actor_id,
-        &[arkret_wire::CapabilityActionId::POLICY_MANAGE, action],
-        commit.committed_at,
+        event,
+        commit,
+        &approved,
+        &json!({"moderation_admission":true,"scope_ref":event.scope_ref}),
     )
-    .await?
-    {
-        return Err(conflict(
-            "missing_capability: the moderation issuer holds no same-cut moderation capability",
-        ));
-    }
+    .await?;
     let payload = serde_json::to_value(&event.payload).map_err(PersistenceError::database)?;
     let realm_id = event.realm_id.as_str();
     let target_ref = if lift {

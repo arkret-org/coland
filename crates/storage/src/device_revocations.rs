@@ -145,8 +145,68 @@ pub struct PcrDeviceGeneration {
     pub current_device_generation_ref: u64,
 }
 
+/// Receiver-derived identity at one confirmed PCR cut. This is transport
+/// authority, not permission to act on any business resource. Consumers must
+/// still check the actual resource scope and all current business gates.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AppletManagedDeviceAuthority {
+    pub account_id: arkret_wire::AccountId,
+    pub device_id: arkret_wire::DeviceId,
+    pub selector: DeviceRevocationGateSelector,
+    pub applet_id: arkret_wire::AppletId,
+    pub source_service_id: arkret_wire::DidCoreId,
+    pub native_did: arkret_wire::Did,
+    pub pcr_realm_id: arkret_wire::RealmId,
+    pub current_device_generation_ref: u64,
+    pub public_key: [u8; 32],
+    pub scopes: arkret_models_collaboration::events_payloads::AppletManagedDeviceScopes,
+    pub not_before: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
 #[async_trait]
 pub trait DeviceRevocationStore: Send + Sync {
+    /// Verify the original Event against one accepted managed Device cut.
+    /// `None` identifies a different producer branch, never a successful proof.
+    /// This selects signer identity only; it grants no business permission.
+    async fn applet_managed_event_producer(
+        &self,
+        _event: &arkret_wire::Event,
+        _now: DateTime<Utc>,
+    ) -> PersistenceResult<Option<AppletManagedDeviceAuthority>> {
+        Err(PersistenceError::SchemaViolation(
+            "managed Device Event producer provider is unavailable".to_owned(),
+        ))
+    }
+
+    /// After cryptographic verification, re-read the exact Device instance
+    /// under its PCR writer lock and durably consume the HTTP nonce. This does
+    /// not consume business approvals or grant permission to a resource.
+    async fn consume_applet_managed_device_nonce(
+        &self,
+        _expected: &AppletManagedDeviceAuthority,
+        _metadata: &arkret_models_integration::AppletManagedDeviceMetadata,
+        _retain_until: DateTime<Utc>,
+    ) -> PersistenceResult<AppletManagedDeviceAuthority> {
+        Err(PersistenceError::SchemaViolation(
+            "managed Device nonce provider is unavailable".to_owned(),
+        ))
+    }
+
+    /// Return only a currently active, accepted managed Device. Ordinary
+    /// Devices and absent authorizations return `None`; incomplete authority
+    /// and known inactive devices fail closed. No Human Account row is needed.
+    async fn applet_managed_device_authority(
+        &self,
+        _account: &arkret_wire::AccountId,
+        _device_id: &arkret_wire::DeviceId,
+        _now: DateTime<Utc>,
+    ) -> PersistenceResult<Option<AppletManagedDeviceAuthority>> {
+        Err(PersistenceError::SchemaViolation(
+            "managed Device authority provider is unavailable".to_owned(),
+        ))
+    }
+
     /// The accepted `device_generation` of the Account's PCR at one confirmed
     /// cut whose projection matches its latest writer Commit. `None` when this
     /// Station holds no PCR for the Account.

@@ -43,8 +43,16 @@ pub(crate) async fn registration(
         .applet_id
         .as_ref()
         .ok_or_else(|| denied("Applet producer has no applet_id"))?;
+    registration_for_scope(conn, &event.realm_id, applet).await
+}
+
+pub(crate) async fn registration_for_scope(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    applet: &arkret_wire::AppletId,
+) -> PersistenceResult<AppletRegistrationPayload> {
     let row=sql_query("SELECT r.value FROM applet_registration_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND r.applet_id=$2 AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position AND e.kind='ak.applet.registration' AND e.state='committed' FOR SHARE OF r")
-        .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(applet.as_str()).get_result::<ValueRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(applet.as_str()).get_result::<ValueRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(||denied("Applet has no accepted current registration"))?;
     serde_json::from_value(row.value).map_err(PersistenceError::database)
 }
@@ -69,7 +77,7 @@ pub(crate) fn registered_executor(
 
 /// The caller supplies a fresh DID document, not a verified flag. The current
 /// registration evidence re-binds its whole material and producer method here.
-pub(crate) fn require_applet_producer_in_connection<'a>(
+pub(crate) fn prepare_applet_producer_in_connection<'a>(
     conn: &'a mut AsyncPgConnection,
     event: &'a Event,
     guard: &'a AppletEventProducerGuard,
@@ -84,8 +92,40 @@ pub(crate) fn require_applet_producer_in_connection<'a>(
             + 'a,
     >,
 > {
-    // Ordinary Human commits must not inherit the Service admission frame.
-    Box::pin(require_applet_producer_inner(conn, event, guard, at))
+    crate::boxed_future(|| async move {
+        // Preparation resolves the producer's immutable signing fact. The
+        // accepting transaction checks business grants with its prepared votes.
+        let (fact, _) = require_applet_producer_inner(conn, event, guard, at, None).await?;
+        Ok(fact)
+    })
+}
+
+pub(crate) fn require_applet_producer_in_connection<'a>(
+    conn: &'a mut AsyncPgConnection,
+    event: &'a Event,
+    guard: &'a AppletEventProducerGuard,
+    commit: &'a arkret_wire::RealmCommit,
+    prepared: Option<&'a coland_storage::EventApprovalCommit>,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = PersistenceResult<(
+                    arkret_models_collaboration::authority_commit::ServiceHistoricalSignerFact,
+                    Vec<crate::approval_admission::QualifiedApproval>,
+                )>,
+            > + Send
+            + 'a,
+    >,
+> {
+    crate::boxed_future(|| {
+        require_applet_producer_inner(
+            conn,
+            event,
+            guard,
+            commit.committed_at,
+            Some((commit, prepared)),
+        )
+    })
 }
 
 async fn require_applet_producer_inner(
@@ -93,7 +133,15 @@ async fn require_applet_producer_inner(
     event: &Event,
     guard: &AppletEventProducerGuard,
     at: chrono::DateTime<chrono::Utc>,
-) -> PersistenceResult<arkret_models_collaboration::authority_commit::ServiceHistoricalSignerFact> {
+    acceptance: Option<(
+        &arkret_wire::RealmCommit,
+        Option<&coland_storage::EventApprovalCommit>,
+    )>,
+) -> PersistenceResult<(
+    arkret_models_collaboration::authority_commit::ServiceHistoricalSignerFact,
+    Vec<crate::approval_admission::QualifiedApproval>,
+)> {
+    let mut accepted = Vec::new();
     let registration = registration(conn, event).await?;
     let service = ActorId::service(registration.service_id.clone());
     if let Some(account) = event.actor_id.as_account_id() {
@@ -236,9 +284,11 @@ async fn require_applet_producer_inner(
             .map_err(denied)?;
         if let Some(target) = grants.get(&payload.grant_id) {
             target.issuer_id == service
-                && matches!(target.issuer_authority_refs.as_slice(),
-                    [arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::Grant {grant_id:parent}]
-                        if parent==&grant_id)
+                && target.issuer_authority_refs.iter().all(|source| matches!(source,
+                    arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::Grant { .. }))
+                && target.issuer_authority_refs.iter().any(|source| matches!(source,
+                    arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::Grant {grant_id:parent}
+                        if parent==&grant_id))
                 && crate::capability_grant_current_results::managed_subject_role(
                     conn,
                     event,
@@ -299,7 +349,7 @@ async fn require_applet_producer_inner(
     if !grant
         .resources
         .iter()
-        .any(|candidate| candidate == &resource)
+        .any(|candidate| candidate.is_exact_scope(&event.scope_ref))
     {
         return Err(denied(
             "Applet authorization grant does not name its exact installation scope",
@@ -350,23 +400,34 @@ async fn require_applet_producer_inner(
             object_kind: (event.kind == EventKind::MessageCreate).then(|| "message".to_owned()),
             ..Default::default()
         };
-        let evaluation = coland_storage::evaluate_grants(
-            &coland_storage::AuthorizationOperation {
-                actor: grant_actor,
-                actions: &actions,
-                target: &resource,
-                at,
-                facts: &facts,
-            },
-            std::iter::once(grant),
-        );
-        if evaluation.unreserved().is_empty() {
-            return Err(denied(
-                "referenced Applet grant constraints are not satisfied without unresolved quota",
-            ));
+        if let Some((commit, prepared)) = acceptance {
+            accepted.extend(
+                crate::boxed_future(|| {
+                    require_producer_grant(
+                        conn,
+                        event,
+                        commit,
+                        prepared,
+                        grant,
+                        grant_actor,
+                        &actions,
+                        &resource,
+                        &facts,
+                    )
+                })
+                .await?,
+            );
         }
     }
-    if !native_service {
+    let delegated_audit = !native_service
+        && event.actor_id.as_account_id().is_some()
+        && arkret_models_collaboration::authority_commit::is_audit_paired_event_slot(event)
+            .map_err(denied)?
+        && grant.issuer_id == event.actor_id;
+    // A native Account's explicit delegation to the exact registered Service
+    // is not a managed Account terminal child. Its scoped business grant and
+    // approvals are rechecked independently by the registered unit's cut.
+    if !native_service && !delegated_audit {
         let [
             arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::Grant {
                 grant_id: parent_id,
@@ -390,22 +451,16 @@ async fn require_applet_producer_inner(
             ..Default::default()
         };
         let actions = grant.actions.iter().map(String::as_str).collect::<Vec<_>>();
-        if coland_storage::evaluate_grants(
-            &coland_storage::AuthorizationOperation {
-                actor: &service,
-                actions: &actions,
-                target: &resource,
-                at,
-                facts: &facts,
-            },
-            std::iter::once(parent),
-        )
-        .unreserved()
-        .is_empty()
-        {
-            return Err(denied(
-                "managed Actor parent current constraints unavailable",
-            ));
+        if let Some((commit, prepared)) = acceptance {
+            accepted.extend(
+                crate::boxed_future(|| {
+                    require_producer_grant(
+                        conn, event, commit, prepared, parent, &service, &actions, &resource,
+                        &facts,
+                    )
+                })
+                .await?,
+            );
         }
     }
     let root=sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1")
@@ -465,7 +520,219 @@ async fn require_applet_producer_inner(
         accepted_at: arkret_canonical::normalize_timestamp_canonical(at),
     };
     fact.validate_event_binding(event, suite).map_err(denied)?;
-    Ok(fact)
+    Ok((fact, accepted))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The exact producer grant is evaluated on the accepting Event cut."
+)]
+pub(crate) async fn require_producer_grant(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
+    grant: &arkret_models_collaboration::governance::grant_constraint::CapabilityGrant,
+    actor: &ActorId,
+    actions: &[&str],
+    target: &arkret_wire::WireResourceSelector,
+    facts: &coland_storage::OperationFacts,
+) -> PersistenceResult<Vec<crate::approval_admission::QualifiedApproval>> {
+    let (accepted, reservations) = crate::boxed_future(|| {
+        evaluate_producer_grant(
+            conn, event, commit, prepared, grant, actor, actions, target, facts, false,
+        )
+    })
+    .await?;
+    if !reservations.is_empty() && grant.issuer_authority_refs.iter().any(|source|
+        !matches!(source,arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::RealmRoot { .. })) {
+        return Err(denied("source quota needs its complete ancestor authority consumer"));
+    }
+    if !crate::capability_quota::try_reserve_in_connection(
+        conn,
+        &reservations,
+        event.event_id.as_str(),
+    )
+    .await?
+    {
+        return Err(PersistenceError::Conflict(
+            "rate_limited: Applet source quota is exhausted".into(),
+        ));
+    }
+    Ok(accepted)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The original grant, actual source subject and operation stay bound to one accepting cut."
+)]
+pub(crate) async fn evaluate_producer_grant(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
+    grant: &arkret_models_collaboration::governance::grant_constraint::CapabilityGrant,
+    actor: &ActorId,
+    actions: &[&str],
+    target: &arkret_wire::WireResourceSelector,
+    facts: &coland_storage::OperationFacts,
+    authority_source: bool,
+) -> PersistenceResult<(
+    Vec<crate::approval_admission::QualifiedApproval>,
+    Vec<coland_storage::QuotaReservation>,
+)> {
+    let (markers, accepted, missing) = crate::boxed_future(|| {
+        prepare_producer_grant_approvals(
+            conn, event, commit, prepared, grant, actions, target, facts,
+        )
+    })
+    .await?;
+    let operation = coland_storage::AuthorizationOperation {
+        actor,
+        actions,
+        target,
+        at: commit.committed_at,
+        facts,
+    };
+    let evaluation = if authority_source {
+        coland_storage::evaluate_authority_sources_with_verified_approvals(
+            &operation,
+            std::iter::once(grant),
+            &markers,
+        )
+    } else {
+        coland_storage::evaluate_grants_with_verified_approvals(
+            &operation,
+            std::iter::once(grant),
+            &markers,
+        )
+    };
+    if matches!(evaluation, coland_storage::GrantEvaluation::RequiresReview) && missing {
+        return Err(PersistenceError::Conflict(
+            "approval_required: Applet producer grant approval is not satisfied".into(),
+        ));
+    }
+    if let coland_storage::GrantEvaluation::Allowed(mut satisfied) = evaluation {
+        if let Some(satisfied) = satisfied.pop() {
+            return Ok((accepted, satisfied.reservations));
+        }
+    }
+    Err(denied(
+        "Applet producer grant constraints do not permit this action",
+    ))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Detached evidence remains bound to its original grant and actual operation."
+)]
+async fn prepare_producer_grant_approvals(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
+    grant: &arkret_models_collaboration::governance::grant_constraint::CapabilityGrant,
+    actions: &[&str],
+    target: &arkret_wire::WireResourceSelector,
+    facts: &coland_storage::OperationFacts,
+) -> PersistenceResult<(
+    Vec<coland_storage::VerifiedGrantApproval>,
+    Vec<crate::approval_admission::QualifiedApproval>,
+    bool,
+)> {
+    let mut markers = Vec::new();
+    let mut accepted = Vec::new();
+    let mut missing = false;
+    for action in actions
+        .iter()
+        .filter_map(|action| arkret_wire::CapabilityActionId::from_wire(action))
+    {
+        match crate::grant_approval_admission::require_grant_approvals(
+            conn, event, commit, prepared, grant, action, target, facts,
+        )
+        .await
+        {
+            Ok(requirements) => {
+                for requirement in requirements {
+                    markers.push(coland_storage::VerifiedGrantApproval {
+                        grant_id: requirement.grant_id,
+                        constraint_digest: requirement.constraint_digest,
+                        action,
+                    });
+                    accepted.extend(requirement.accepted);
+                }
+            }
+            Err(PersistenceError::Conflict(detail)) if detail.starts_with("approval_required:") => {
+                missing = true;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok((markers, accepted, missing))
+}
+
+/// A referenced source cannot bypass another effective grant's global refusal.
+/// This check counts no positive allow path and reserves no quota.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Global source refusals preserve their own immutable proof and actual holder."
+)]
+pub(crate) async fn require_source_global_refusals(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
+    grants: &[&arkret_models_collaboration::governance::grant_constraint::CapabilityGrant],
+    actor: &ActorId,
+    actions: &[&str],
+    target: &arkret_wire::WireResourceSelector,
+    facts: &coland_storage::OperationFacts,
+) -> PersistenceResult<Vec<crate::approval_admission::QualifiedApproval>> {
+    let mut markers = Vec::new();
+    let mut accepted = Vec::new();
+    let mut missing = false;
+    for grant in grants {
+        let (proved, qualified, unproved) = crate::boxed_future(|| {
+            prepare_producer_grant_approvals(
+                conn, event, commit, prepared, grant, actions, target, facts,
+            )
+        })
+        .await?;
+        markers.extend(proved);
+        accepted.extend(qualified);
+        missing |= unproved;
+    }
+    let evaluation = coland_storage::evaluate_authority_sources_with_verified_approvals(
+        &coland_storage::AuthorizationOperation {
+            actor,
+            actions,
+            target,
+            at: commit.committed_at,
+            facts,
+        },
+        grants.iter().copied(),
+        &markers,
+    );
+    if matches!(evaluation, coland_storage::GrantEvaluation::RequiresReview) && missing {
+        return Err(PersistenceError::Conflict(
+            "approval_required: an effective source grant requires review".into(),
+        ));
+    }
+    match evaluation {
+        coland_storage::GrantEvaluation::Denied => {
+            return Err(PersistenceError::Conflict(
+                "capability_denied: an effective source grant has a global deny".into(),
+            ));
+        }
+        coland_storage::GrantEvaluation::Quarantined
+        | coland_storage::GrantEvaluation::RequiresReview => {
+            return Err(denied(
+                "an effective source grant requires quarantine or review",
+            ));
+        }
+        _ => {}
+    }
+    Ok(accepted)
 }
 
 async fn accepted_event(conn: &mut AsyncPgConnection, id: &EventId) -> PersistenceResult<Event> {
@@ -494,8 +761,48 @@ pub(crate) async fn require_managed_actor_in_connection(
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
     let registration = registration(conn, event).await?;
-    let account = event
-        .actor_id
+    let service = ActorId::service(registration.service_id.clone());
+    if event.executed_by.is_none() {
+        let authority =
+            crate::pcr_applet_device_authority::for_event_in_connection(conn, event, at)
+                .await
+                .map_err(crate::PgTransactionError::into_persistence)?
+                .ok_or_else(|| denied("managed Account has no accepted native Device producer"))?;
+        if authority.source_service_id != registration.service_id
+            || event.applet_id.as_ref() != Some(&authority.applet_id)
+            || event.payload.contains_key("agent_context")
+        {
+            return Err(denied(
+                "native managed identity differs from its Applet Service",
+            ));
+        }
+    } else if event.executed_by.as_ref() != Some(&service)
+        || event.payload.contains_key("agent_context")
+    {
+        return Err(denied(
+            "managed Message executor is not its accepted Service",
+        ));
+    }
+    let applet = event
+        .applet_id
+        .as_ref()
+        .ok_or_else(|| denied("managed identity has no Applet"))?;
+    crate::boxed_future(|| {
+        require_managed_identity_in_connection(conn, &event.actor_id, applet, &registration, at)
+    })
+    .await
+}
+
+/// Accepted native identity only. This does not authenticate an Event producer
+/// or confer membership, Device scopes, grant authority or public serving.
+pub(crate) async fn require_managed_identity_in_connection(
+    conn: &mut AsyncPgConnection,
+    actor_id: &ActorId,
+    applet_id: &arkret_wire::AppletId,
+    registration: &AppletRegistrationPayload,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<()> {
+    let account = actor_id
         .as_account_id()
         .ok_or_else(|| denied("managed Message actor is not an Account"))?;
     let inactive=sql_query("SELECT to_jsonb(EXISTS(SELECT 1 FROM account_lifecycle l JOIN accounts a ON a.pk=l.account_pk WHERE a.principal_id=$1 AND a.station_id=$2 AND l.state<>'active')) AS value")
@@ -504,13 +811,8 @@ pub(crate) async fn require_managed_actor_in_connection(
         return Err(denied("managed Account lifecycle is not active"));
     }
     let service = ActorId::service(registration.service_id.clone());
-    if event.executed_by.as_ref() != Some(&service) || event.payload.contains_key("agent_context") {
-        return Err(denied(
-            "managed Message executor is not its accepted Service",
-        ));
-    }
-    let profiles=sql_query("SELECT p.value FROM actor_profile_current_results p JOIN realm_commits c ON c.commit_id=p.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk JOIN realm_authorities a ON a.realm_id=p.realm_id WHERE p.value->>'principal_id'=$1 AND e.envelope->'actor_id'=$2 AND a.service_id=$3 AND c.realm_id=p.realm_id AND c.stream_position=p.current_stream_position AND e.state='committed' FOR SHARE OF p")
-        .bind::<Text,_>(account.principal_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(&event.actor_id).map_err(PersistenceError::database)?)
+    let profiles=sql_query("SELECT p.value FROM actor_profile_current_results p JOIN realm_commits c ON c.commit_id=p.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk JOIN realm_authorities a ON a.realm_id=p.realm_id WHERE p.value->>'principal_id'=$1 AND e.envelope->'actor_id'=$2 AND a.service_id=$3 AND p.realm_id=(SELECT pcr_realm_id FROM principal_resolutions WHERE principal_id=$1 AND station_id=$3) AND c.realm_id=p.realm_id AND c.stream_position=p.current_stream_position AND e.state='committed' FOR SHARE OF p")
+        .bind::<Text,_>(account.principal_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(actor_id).map_err(PersistenceError::database)?)
         .bind::<Text,_>(account.station_id.as_str()).load::<ValueRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     if profiles.len() != 1 {
         return Err(denied(
@@ -544,8 +846,8 @@ pub(crate) async fn require_managed_actor_in_connection(
     .await?;
     let accountability = accepted_event(conn, &exact_ref(&created, "accountability")?).await?;
     if created.kind != EventKind::ProfileCreate
-        || created.actor_id != event.actor_id
-        || created.applet_id != event.applet_id
+        || created.actor_id != *actor_id
+        || created.applet_id != Some(applet_id.clone())
         || accountability.kind != EventKind::IdentityAccountabilityGrant
     {
         return Err(denied("managed Profile accountability anchors differ"));
@@ -582,7 +884,7 @@ pub(crate) async fn require_managed_actor_in_connection(
         AppletManagedActorRole::Ghost => profile.actor_kind == arkret_wire::ActorKind::Integration,
     };
     if provision_event.kind != EventKind::AppletManagedActorProvision
-        || provision.actor_id != event.actor_id
+        || provision.actor_id != *actor_id
         || provision.applet_id != registration.applet_id
         || provision.service_id != registration.service_id
         || !profile_kind_matches_role
@@ -592,8 +894,8 @@ pub(crate) async fn require_managed_actor_in_connection(
         ));
     }
     if provision.actor_role == AppletManagedActorRole::Ghost {
-        let fields: arkret_models_integration::GhostActorProfileFields = serde_json::from_value(
-            serde_json::to_value(&profile.profile_fields).map_err(PersistenceError::database)?,
+        let fields = arkret_models_integration::GhostActorProfileFields::from_profile_fields(
+            &profile.profile_fields,
         )
         .map_err(denied)?;
         if provision.external_ref.as_ref() != Some(&fields.external_ref)
@@ -610,8 +912,8 @@ pub(crate) async fn require_managed_actor_in_connection(
     let genesis: Event =
         serde_json::from_value(genesis.envelope).map_err(PersistenceError::database)?;
     if genesis.kind != EventKind::RealmCreate
-        || genesis.actor_id != event.actor_id
-        || genesis.applet_id != event.applet_id
+        || genesis.actor_id != *actor_id
+        || genesis.applet_id != Some(applet_id.clone())
         || genesis.executed_by.as_ref() != Some(&service)
         || exact_ref(&genesis, "applet_managed_actor_provision")? != provision_event.event_id
     {

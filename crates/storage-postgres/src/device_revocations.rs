@@ -88,6 +88,38 @@ fn target(row: TargetRow) -> PersistenceResult<DeviceRevocationTargetRecord> {
 
 #[async_trait]
 impl DeviceRevocationStore for PgDeviceRevocationStore {
+    async fn applet_managed_event_producer(
+        &self,
+        event: &arkret_wire::Event,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<Option<coland_storage::AppletManagedDeviceAuthority>> {
+        crate::pcr_applet_device_authority::for_event(&self.pool, event, now).await
+    }
+
+    async fn consume_applet_managed_device_nonce(
+        &self,
+        expected: &coland_storage::AppletManagedDeviceAuthority,
+        metadata: &arkret_models_integration::AppletManagedDeviceMetadata,
+        retain_until: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<coland_storage::AppletManagedDeviceAuthority> {
+        crate::pcr_applet_device_authority::consume_nonce(
+            &self.pool,
+            expected,
+            metadata,
+            retain_until,
+        )
+        .await
+    }
+
+    async fn applet_managed_device_authority(
+        &self,
+        account: &arkret_wire::AccountId,
+        device_id: &arkret_wire::DeviceId,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<Option<coland_storage::AppletManagedDeviceAuthority>> {
+        crate::pcr_applet_device_authority::current(&self.pool, account, device_id, now).await
+    }
+
     async fn pcr_device_generation(
         &self,
         account: &arkret_wire::AccountId,

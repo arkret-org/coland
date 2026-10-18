@@ -87,6 +87,20 @@ pub(crate) async fn confirmed_pcr_device_status_cut_in_connection(
     else {
         return Ok(None);
     };
+    confirmed_pcr_device_status_from_authority(conn, account, device_id, authority, now)
+        .await
+        .map(Some)
+}
+
+/// Fold a cut already read on this connection, without querying a second
+/// authorization. The caller must preserve the same snapshot or writer lock.
+pub(crate) async fn confirmed_pcr_device_status_from_authority(
+    conn: &mut AsyncPgConnection,
+    account: &AccountId,
+    device_id: &DeviceId,
+    authority: ConfirmedPcrDeviceCut,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<ConfirmedPcrDeviceStatusCut, PgTransactionError> {
     let row = sql_query(
             "SELECT \
                (SELECT count(*) FROM pcr_device_revocation_proposals r WHERE r.realm_id=$1 AND r.device_id=$2) AS proposal_count, \
@@ -94,7 +108,7 @@ pub(crate) async fn confirmed_pcr_device_status_cut_in_connection(
                   ON t.revoke_proposal->>'proposal_event_id'=r.event_id \
                  AND t.revoke_proposal->>'covering_commit_id'=r.commit_id \
                  AND t.kind='security_rotation' AND t.principal_id=$3 AND t.station_id=$4 \
-                 AND t.prepared_plan->'revoke_unit'->'request'->'events'->0->>'event_id'=r.event_id \
+                 AND t.prepared_plan->'revoke_unit'->'request'->'events'->0->'event'->>'event_id'=r.event_id \
                 WHERE r.realm_id=$1 AND r.device_id=$2) AS bound_transaction_count, \
                (SELECT coalesce(jsonb_agg(jsonb_build_object( \
                     'event_id',r.event_id,'commit_id',r.commit_id,'tag_id',r.tag_id, \
@@ -106,7 +120,7 @@ pub(crate) async fn confirmed_pcr_device_status_cut_in_connection(
                     ON t.revoke_proposal->>'proposal_event_id'=r.event_id \
                    AND t.revoke_proposal->>'covering_commit_id'=r.commit_id \
                    AND t.kind='security_rotation' AND t.principal_id=$3 AND t.station_id=$4 \
-                   AND t.prepared_plan->'revoke_unit'->'request'->'events'->0->>'event_id'=r.event_id \
+                   AND t.prepared_plan->'revoke_unit'->'request'->'events'->0->'event'->>'event_id'=r.event_id \
                  WHERE r.realm_id=$1 AND r.device_id=$2) AS transaction_rows",
         )
         .bind::<Text, _>(authority.realm_id.as_str())
@@ -165,7 +179,7 @@ pub(crate) async fn confirmed_pcr_device_status_cut_in_connection(
             .events
             .as_slice()
             .first()
-            .is_none_or(|event| Some(event.event_id.as_str()) != event_id)
+            .is_none_or(|slot| Some(slot.event.event_id.as_str()) != event_id)
         {
             return Err(incomplete("PCR revoke typed transaction changed its proposal").into());
         }
@@ -207,27 +221,31 @@ pub(crate) async fn confirmed_pcr_device_status_cut_in_connection(
         .ok_or_else(|| incomplete("PCR device has no current generation"))?;
     let lifecycle =
         fold_confirmed_device_status(&authorization.payload, generation, &decisions, now);
-    Ok(Some(ConfirmedPcrDeviceStatusCut {
+    Ok(ConfirmedPcrDeviceStatusCut {
         authority,
         lifecycle,
-    }))
+    })
 }
 
 #[derive(QueryableByName)]
 struct GenerationCutRow {
     #[diesel(sql_type = diesel::sql_types::Nullable<Text>)]
     generation_commit_id: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<BigInt>)]
+    generation_stream_position: Option<i64>,
     #[diesel(sql_type = diesel::sql_types::Nullable<Jsonb>)]
     generation_value: Option<Value>,
     #[diesel(sql_type = diesel::sql_types::Nullable<Text>)]
     latest_generation_commit_id: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<BigInt>)]
+    latest_generation_stream_position: Option<i64>,
     #[diesel(sql_type = diesel::sql_types::Nullable<Jsonb>)]
     expected_generation_value: Option<Value>,
 }
 
 /// The PCR `device_generation` typed current from one REPEATABLE READ
 /// snapshot of an accepted PCR head. The projection must equal what its latest
-/// accepted writer (the registration anchor or a reanchor) derives, or the
+/// accepted writer (a registration anchor, managed PCR genesis or reanchor) derives, or the
 /// read fails closed.
 pub(crate) async fn confirmed_pcr_generation(
     pool: &PgPool,
@@ -240,22 +258,39 @@ pub(crate) async fn confirmed_pcr_generation(
             .await?;
         let row = sql_query(
             "SELECT \
-               g.current_commit_id AS generation_commit_id, g.value AS generation_value, \
+               g.current_commit_id AS generation_commit_id, \
+               g.current_stream_position AS generation_stream_position, g.value AS generation_value, \
                (SELECT c.commit_id FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
                 WHERE c.realm_id=p.pcr_realm_id AND \
                   (e.kind='ak.device.reanchor' OR \
                    (e.kind='ak.device.authorize' AND \
-                    e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor')) \
+                    e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor') OR \
+                   (e.kind='ak.realm.create' AND c.stream_position=0 AND \
+                    e.envelope->>'event_id'=p.genesis_event_id AND \
+                    e.envelope#>>'{payload,object,purpose}'='applet_managed_control')) \
                 ORDER BY c.stream_position DESC LIMIT 1) AS latest_generation_commit_id, \
+               (SELECT c.stream_position FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
+                WHERE c.realm_id=p.pcr_realm_id AND \
+                  (e.kind='ak.device.reanchor' OR \
+                   (e.kind='ak.device.authorize' AND \
+                    e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor') OR \
+                   (e.kind='ak.realm.create' AND c.stream_position=0 AND \
+                    e.envelope->>'event_id'=p.genesis_event_id AND \
+                    e.envelope#>>'{payload,object,purpose}'='applet_managed_control')) \
+                ORDER BY c.stream_position DESC LIMIT 1) AS latest_generation_stream_position, \
                (SELECT jsonb_build_object('current_device_generation_ref', \
                         CASE WHEN e.kind='ak.device.reanchor' \
                           THEN e.envelope->'payload'->'new_device_generation' \
+                          WHEN e.kind='ak.realm.create' THEN '1'::jsonb \
                           ELSE e.envelope->'payload'->'authorized_generation_ref' END) \
                 FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
                 WHERE c.realm_id=p.pcr_realm_id AND \
                   (e.kind='ak.device.reanchor' OR \
                    (e.kind='ak.device.authorize' AND \
-                    e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor')) \
+                    e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor') OR \
+                   (e.kind='ak.realm.create' AND c.stream_position=0 AND \
+                    e.envelope->>'event_id'=p.genesis_event_id AND \
+                    e.envelope#>>'{payload,object,purpose}'='applet_managed_control')) \
                 ORDER BY c.stream_position DESC LIMIT 1) AS expected_generation_value \
              FROM principal_resolutions p \
              JOIN LATERAL (SELECT commit_id FROM realm_commits \
@@ -273,6 +308,7 @@ pub(crate) async fn confirmed_pcr_generation(
         let Some(row) = row else { return Ok(None) };
         if row.generation_commit_id.is_none()
             || row.generation_commit_id != row.latest_generation_commit_id
+            || row.generation_stream_position != row.latest_generation_stream_position
             || row.generation_value != row.expected_generation_value
         {
             return Err(incomplete("PCR device generation projection is behind accepted Commit").into());

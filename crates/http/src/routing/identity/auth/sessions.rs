@@ -198,6 +198,23 @@ pub(crate) async fn revalidate_stream_session(
     original: &SessionRecord,
     grant_jwt: Option<&str>,
 ) -> Result<(), (StatusCode, &'static str, &'static str)> {
+    revalidate_session(state, original, grant_jwt, false).await
+}
+
+pub(crate) async fn revalidate_current_read_session(
+    state: &AppState,
+    original: &SessionRecord,
+    grant_jwt: Option<&str>,
+) -> Result<(), (StatusCode, &'static str, &'static str)> {
+    revalidate_session(state, original, grant_jwt, true).await
+}
+
+async fn revalidate_session(
+    state: &AppState,
+    original: &SessionRecord,
+    grant_jwt: Option<&str>,
+    force_fresh: bool,
+) -> Result<(), (StatusCode, &'static str, &'static str)> {
     let rejected = (
         StatusCode::UNAUTHORIZED,
         "unauthenticated",
@@ -208,9 +225,12 @@ pub(crate) async fn revalidate_stream_session(
     }
     let mut current = if let Some(context) = original.session_grant.as_ref() {
         let grant_jwt = grant_jwt.ok_or(rejected)?;
-        let grant =
-            super::super::auth_grant_dpop::introspect_session_grant_cached(state, grant_jwt, false)
-                .await?;
+        let grant = super::super::auth_grant_dpop::introspect_session_grant_cached(
+            state,
+            grant_jwt,
+            force_fresh,
+        )
+        .await?;
         if grant.id != context.grant_id
             || grant.account_id != context.account_id
             || grant.issuer_id != context.issuer_id
@@ -468,6 +488,13 @@ fn agent_recipient_operation(method: &str, path: &str) -> Option<&'static str> {
         return Some(operation.as_str());
     }
     match (method, path) {
+        ("GET", "/_arkret/self/contacts") => Some(ServiceOperationId::SELF_CONTACT_READ_LIST_V1),
+        ("POST", "/_arkret/self/contacts/respond") => {
+            Some(ServiceOperationId::SELF_CONTACT_COMMAND_RESPOND_V1)
+        }
+        ("POST", "/_arkret/self/direct-conversations/resolve") => {
+            Some(ServiceOperationId::SELF_DIRECT_CONVERSATION_READ_RESOLVE_V1)
+        }
         ("POST", "/_arkret/self/signer-keys/query") => {
             Some(ServiceOperationId::SELF_SIGNER_KEYS_READ_RESOLVE_V1)
         }
@@ -479,6 +506,12 @@ fn agent_recipient_operation(method: &str, path: &str) -> Option<&'static str> {
             Some(ServiceOperationId::SELF_CURRENT_RESULTS_READ_EXACT_V1)
         }
         ("POST", "/_arkret/self/events") => Some(ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1),
+        ("POST", "/_arkret/self/strands/watch/audit-read") => {
+            Some(ServiceOperationId::SELF_STRAND_WATCH_COMMAND_AUDIT_READ_V1)
+        }
+        ("POST", "/_arkret/self/strands/watch/current") => {
+            Some(ServiceOperationId::SELF_STRAND_WATCH_READ_CURRENT_V1)
+        }
         ("POST", "/_arkret/self/signal") => Some(ServiceOperationId::SELF_SIGNAL_COMMAND_SEND_V1),
         ("GET", "/_arkret/self/device_messages") => {
             Some(ServiceOperationId::SELF_DEVICE_MESSAGES_READ_LIST_V1)
@@ -1057,6 +1090,57 @@ mod tests {
         assert!(classify_agent_marker(false, Some(true)).is_err());
         assert!(classify_agent_marker(true, Some(false)).is_err());
         assert!(classify_agent_marker(true, None).is_err());
+    }
+
+    #[test]
+    fn agent_contact_operations_keep_exact_scope_and_http_boundaries() {
+        use arkret_wire::ServiceOperationId;
+        for (method, path, operation) in [
+            (
+                "GET",
+                "/_arkret/self/contacts",
+                ServiceOperationId::SELF_CONTACT_READ_LIST_V1,
+            ),
+            (
+                "POST",
+                "/_arkret/self/contacts/respond",
+                ServiceOperationId::SELF_CONTACT_COMMAND_RESPOND_V1,
+            ),
+            (
+                "POST",
+                "/_arkret/self/direct-conversations/resolve",
+                ServiceOperationId::SELF_DIRECT_CONVERSATION_READ_RESOLVE_V1,
+            ),
+        ] {
+            let exact = [operation.to_owned()];
+            assert_eq!(
+                require_agent_operation_scope(method, path, Some(&exact)),
+                Ok(())
+            );
+            let queue = [ServiceOperationId::SELF_DEVICE_MESSAGES_READ_LIST_V1.to_owned()];
+            assert!(require_agent_operation_scope(method, path, Some(&queue)).is_err());
+            assert!(require_agent_operation_scope(method, path, None).is_err());
+            assert!(
+                require_agent_operation_scope(method, &format!("{path}/extra"), Some(&exact))
+                    .is_err()
+            );
+            assert!(
+                require_agent_operation_scope(
+                    if method == "GET" { "POST" } else { "GET" },
+                    path,
+                    Some(&exact)
+                )
+                .is_err()
+            );
+            assert!(
+                require_agent_operation_scope(
+                    method,
+                    &path.replace("/_arkret/", "/_coland/"),
+                    Some(&exact)
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]

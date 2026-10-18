@@ -149,6 +149,23 @@ pub trait SignalRelayPort: Send + Sync {
 
 #[async_trait]
 pub trait DeviceMessagePort: Send + Sync {
+    async fn applet_device_queue(
+        &self,
+        _input: coland_storage::AppletDeviceQueueRead<'_>,
+    ) -> ServiceResult<coland_storage::AppletDeviceQueuePage> {
+        Err(crate::ServiceError::Internal(
+            "native recipient queue is unavailable".into(),
+        ))
+    }
+    async fn ack_applet_device_queue(
+        &self,
+        _input: coland_storage::AppletDeviceQueueAck<'_>,
+    ) -> ServiceResult<Option<usize>> {
+        Err(crate::ServiceError::Internal(
+            "native recipient ACK is unavailable".into(),
+        ))
+    }
+
     async fn append(
         &self,
         device_revocation_gate: Option<&coland_storage::DeviceRevocationGateSelector>,
@@ -418,6 +435,19 @@ impl DeliveryService {
         self.device_messages
             .messages_after(recipient, device_id, queue_position, limit)
             .await
+    }
+
+    pub async fn applet_device_queue(
+        &self,
+        input: coland_storage::AppletDeviceQueueRead<'_>,
+    ) -> ServiceResult<coland_storage::AppletDeviceQueuePage> {
+        self.device_messages.applet_device_queue(input).await
+    }
+    pub async fn ack_applet_device_queue(
+        &self,
+        input: coland_storage::AppletDeviceQueueAck<'_>,
+    ) -> ServiceResult<Option<usize>> {
+        self.device_messages.ack_applet_device_queue(input).await
     }
 
     pub async fn recipient_deliveries_after(

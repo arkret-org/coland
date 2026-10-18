@@ -206,6 +206,29 @@ pub(crate) mod test_event {
     }
 }
 
+/// Exercise only the mounted managed Device authentication hoop with an echo.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn test_applet_managed_device_authentication_service(state: AppState) -> salvo::Service {
+    crate::routing::identity::applet_managed_device::test_service(state)
+}
+
+/// Rebuild the production accepted PCR history without creating a Device.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub async fn test_accepted_device_generation_commit_head(
+    state: &crate::state::AppState,
+    principal_id: &str,
+    realm_id: &arkret_wire::RealmId,
+) -> coland_services::ServiceResult<Option<arkret_wire::CommitStreamHead>> {
+    crate::routing::identity::device_generation::accepted_device_generation_commit_head(
+        state,
+        principal_id,
+        realm_id,
+    )
+    .await
+}
+
 /// Exercise the production current-device selector after a committed PCR unit.
 #[cfg(feature = "test-support")]
 #[doc(hidden)]

@@ -282,7 +282,7 @@ impl AgentStore for PgAgentStore {
         &self,
         caller: &arkret_wire::ActorId,
         request: &arkret_models_integration::management_review::ManagementReviewRequestBody,
-        producer: &coland_storage::SelfProducerCommitGuard,
+        producer: Option<&coland_storage::SelfProducerCommitGuard>,
         current: &coland_storage::ManagementReviewCurrent,
         _at: chrono::DateTime<Utc>,
     ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>
@@ -318,6 +318,26 @@ impl AgentStore for PgAgentStore {
                 current,
             )
             .await?)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+    async fn management_review_event_material(
+        &self,
+        event: &arkret_wire::Event,
+        id: &str,
+        signatures: &[arkret_wire::ApprovalSignature],
+    ) -> PersistenceResult<coland_storage::ManagementReviewMaterial> {
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            Ok(
+                crate::agent_management_review::event_material_in_connection(
+                    conn, event, id, signatures,
+                )
+                .await?,
+            )
         })
         .await
         .map_err(PgTransactionError::into_persistence)

@@ -468,7 +468,7 @@ async fn snapshot_forwarded_request(
     .unwrap()
     .unwrap();
     let core = &evidence.device_projection_attestation.attestation;
-    let fact = arkret_identity::account_device_signer_evidence::verify_forwarded_human_signer_fact(
+    let fact = arkret_identity::account_device_signer_evidence::verify_forwarded_account_device_signer_fact(
         &evidence,
         &request.authority_commit.event,
         &request

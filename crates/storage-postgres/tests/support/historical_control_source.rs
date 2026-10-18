@@ -282,7 +282,7 @@ pub fn register_device(account: &AccountId, device: &DeviceId, authorization: &E
 pub async fn stage_registered(pool: &PgPool, tx: &coland_storage::AuthorityCommitTransaction) {
     let producer = tx
         .event
-        .human_device_producer()
+        .account_device_producer()
         .unwrap()
         .expect("native controller fixture is a real Human device");
     let authorization = descriptors()
@@ -362,7 +362,7 @@ pub async fn stage_registered_signed_candidate(
     pool: &PgPool,
     tx: &coland_storage::AuthorityCommitTransaction,
 ) {
-    let Ok(Some(producer)) = tx.event.human_device_producer() else {
+    let Ok(Some(producer)) = tx.event.account_device_producer() else {
         return;
     };
     let Some(auth) = descriptors()

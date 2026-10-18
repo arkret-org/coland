@@ -489,34 +489,28 @@ pub(super) async fn admin_query_audit(
 // Capabilities
 // ---------------------------------------------------------------------------
 
-/// The operator row of one durable Capability Grant current result. A grant
-/// whose subject is a claim condition names no single principal and has no
-/// row in this principal-keyed summary.
+/// Preserve every accepted subject branch and its exact durable revision.
 fn capability_summary(
     record: &coland_storage::CapabilityGrantCurrentResultRecord,
-) -> Option<CapabilitySummary> {
-    use arkret_models_collaboration::governance::grant_constraint::CapabilitySubject;
-    let grant = &record.value;
-    let CapabilitySubject::Actor(subject) = &grant.subject else {
-        return None;
+) -> CapabilitySummary {
+    use arkret_models_collaboration::exact_current_results::{
+        CapabilityGrantExactCurrentSelector, CapabilityGrantExactCurrentSelectorKind,
     };
-    let resource = (!grant.resources.is_empty())
-        .then(|| arkret_canonical::canonical_json_bytes(&grant.resources).ok())
-        .flatten()
-        .and_then(|bytes| String::from_utf8(bytes).ok());
-    Some(CapabilitySummary {
-        grant_id: record.grant_id.to_string(),
-        realm_id: Some(record.realm_id.to_string()),
-        issuer_id: grant.issuer_id.signing_principal_id().clone(),
-        subject_id: subject.signing_principal_id().clone(),
-        resource,
-        actions: grant.actions.clone(),
-        constraints: grant.constraints.clone(),
-        revoked: record.status != coland_storage::CapabilityGrantCurrentStatus::Active,
-        created_at: Some(grant.issued_at),
-        issuer_authority_refs: grant.issuer_authority_refs.clone(),
-        expires_at: coland_storage::capability_grant_expires_at(grant),
-    })
+    CapabilitySummary {
+        selector: CapabilityGrantExactCurrentSelector {
+            kind: CapabilityGrantExactCurrentSelectorKind::CapabilityGrant,
+            grant_id: record.grant_id.clone(),
+        },
+        source_stream_ref: record.source.stream_ref.clone(),
+        revision: record.revision.clone(),
+        value: record.value.clone(),
+    }
+}
+
+fn capability_subject_matches(row: &CapabilitySummary, actor: &arkret_wire::ActorId) -> bool {
+    matches!(&row.value.subject,
+        arkret_models_collaboration::governance::grant_constraint::CapabilitySubject::Actor(subject)
+        if subject == actor)
 }
 
 #[salvo::oapi::endpoint(
@@ -534,25 +528,49 @@ pub(super) async fn admin_list_capabilities(
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = admin.session()?;
     let session = require_admin_principal(state, session)?;
+    let operator_actor =
+        crate::routing::identity::session_actor::session_actor_from_credential(state, &session)?;
     let limit = clamp_limit(state, limit.into_inner());
     let cursor = cursor.into_inner();
 
     let mut filters = BTreeMap::new();
-    let realm_filter =
-        query_param(req, "filter[realm_id]").filter(|value| !value.trim().is_empty());
+    let realm_filter = query_param(req, "filter[realm_id]")
+        .map(|raw| {
+            arkret_wire::RealmId::new(raw)
+                .map_err(|_| AppError::param_invalid("realm filter requires a complete RealmId"))
+        })
+        .transpose()?;
     if let Some(realm) = &realm_filter {
-        filters.insert("realm_id".to_owned(), realm.clone());
+        filters.insert("realm_id".to_owned(), realm.to_string());
     }
-    let subject_filter =
-        query_param(req, "filter[subject]").filter(|value| !value.trim().is_empty());
+    if query_param(req, "filter[subject]").is_some() {
+        return Err(AppError::param_invalid(
+            "use filter[subject_actor_id] with a complete ActorId; principal-only subject filters are invalid",
+        ));
+    }
+    let subject_filter = query_param(req, "filter[subject_actor_id]")
+        .map(|raw| {
+            let actor: arkret_wire::ActorId = serde_json::from_str(&raw).map_err(|_| {
+                AppError::param_invalid("subject filter requires a complete ActorId")
+            })?;
+            actor
+                .validate()
+                .map_err(|_| AppError::param_invalid("subject ActorId is invalid"))?;
+            Ok::<_, AppError>(actor)
+        })
+        .transpose()?;
     if let Some(subject) = &subject_filter {
-        filters.insert("subject".to_owned(), subject.clone());
+        filters.insert(
+            "subject_actor_id".to_owned(),
+            arkret_canonical::canonical_json_string(subject)
+                .map_err(|error| AppError::internal(format!("ActorId encoding failed: {error}")))?,
+        );
     }
     let state_filter = match query_param(req, "filter[state]") {
         Some(raw) => {
             let parsed = CapabilityGrantState::from_wire(&raw).ok_or_else(|| {
                 AppError::param_invalid(format!(
-                    "unknown capability state filter: {raw} (expected active|revoked|all)"
+                    "unknown capability state filter: {raw} (expected active|revoked|relinquished|all)"
                 ))
             })?;
             filters.insert("state".to_owned(), raw);
@@ -569,17 +587,18 @@ pub(super) async fn admin_list_capabilities(
         .await
         .map_err(|error| AppError::internal(format!("capability grant read failed: {error}")))?
         .iter()
-        .filter_map(capability_summary)
+        .map(capability_summary)
         .collect();
     if let Some(realm) = &realm_filter {
-        rows.retain(|summary| summary.realm_id.as_deref() == Some(realm.as_str()));
+        rows.retain(|summary| summary.source_stream_ref.realm_id() == realm);
     }
     if let Some(subject) = &subject_filter {
-        rows.retain(|summary| summary.subject_id.as_str() == subject);
+        rows.retain(|summary| capability_subject_matches(summary, subject));
     }
     match state_filter {
-        CapabilityGrantState::Active => rows.retain(|summary| !summary.revoked),
-        CapabilityGrantState::Revoked => rows.retain(|summary| summary.revoked),
+        CapabilityGrantState::Active => rows.retain(|summary| summary.value.status == arkret_models_collaboration::governance::grant_constraint::CapabilityGrantStatus::Active),
+        CapabilityGrantState::Revoked => rows.retain(|summary| summary.value.status == arkret_models_collaboration::governance::grant_constraint::CapabilityGrantStatus::Revoked),
+        CapabilityGrantState::Relinquished => rows.retain(|summary| summary.value.status == arkret_models_collaboration::governance::grant_constraint::CapabilityGrantStatus::Relinquished),
         CapabilityGrantState::All => {}
         // `CapabilityGrantState` is #[non_exhaustive]; fail closed on any
         // future variant instead of silently widening visibility.
@@ -589,19 +608,21 @@ pub(super) async fn admin_list_capabilities(
             ));
         }
     }
-    rows.sort_by(|left, right| left.grant_id.cmp(&right.grant_id));
+    rows.sort_by(|left, right| left.selector.grant_id.cmp(&right.selector.grant_id));
     let total = rows.len() as u64;
     let (capabilities, next_cursor, has_more) =
         paginate_by_id(rows, cursor.as_deref(), limit, |summary| {
-            summary.grant_id.as_str()
+            summary.selector.grant_id.as_str()
         })?;
 
-    query_audit_trail(
+    append_audit_log(
         state,
-        &session,
+        Some(&session.actor),
         "admin.capabilities.query",
-        &filters,
-        capabilities.len(),
+        json!({"operator_actor_id": operator_actor,
+            "device_id": session.require_human_device_id(),
+            "filters": filters, "count": capabilities.len()}),
+        "accepted",
     )
     .await;
     json_ok(AdminCapabilityList {
@@ -857,5 +878,35 @@ mod tests {
 
         super::require_admin_principal(&state, session("ak:did_core:web:op.example"))
             .expect("listed admin principal must be admitted");
+    }
+
+    #[test]
+    fn capability_operator_identity_keeps_station_and_denies_foreign_audience() {
+        use crate::routing::identity::session_actor::session_actor_from_credential;
+        let state = AppState::new(
+            crate::config::AppConfig::test_default(),
+            coland_storage_postgres::Db { pool: None },
+        );
+        let mut session = coland_services::identity::SessionIdentityState {
+            account_pk: None,
+            token_hash: "verified-fixture".to_owned(),
+            actor: "ak:did_core:web:operator.example".to_owned(),
+            audience: state.service_core_id().to_string(),
+            endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
+                device_id: "operator-device".to_owned(),
+            },
+            session_public_key: None,
+            session_grant: None,
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            created_at: chrono::Utc::now(),
+            revoked_at: None,
+        };
+        let actor = session_actor_from_credential(&state, &session).unwrap();
+        assert_eq!(
+            actor.as_account_id().unwrap().station_id,
+            state.service_core_id()
+        );
+        session.audience = "ak:did_core:web:foreign-station.example".to_owned();
+        assert!(session_actor_from_credential(&state, &session).is_err());
     }
 }

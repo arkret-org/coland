@@ -29,9 +29,13 @@ async fn request_review(
 ) -> AppResult<ManagementReviewResponse> {
     super::authority_commit::no_store(res);
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
-    let caller =
-        crate::routing::identity::session_actor::validated_session_actor(state, &session).await?;
+    let (caller, session) = review_caller(
+        &aa,
+        state,
+        req,
+        arkret_wire::ServiceOperationId::SelfManagementReviewCommandRequestV1,
+    )
+    .await?;
     let body = read_closed::<ManagementReviewRequestBody>(req).await?;
     body.validate()
         .map_err(|_| AppError::schema_violation("invalid management review request"))?;
@@ -42,16 +46,11 @@ async fn request_review(
     }
     // Preserve an exact accepted outcome before current producer/Policy gates.
     // This authenticated material is Station-private and never caller authority.
-    let mut accounts = std::collections::BTreeSet::from([
-        caller
-            .as_account_id()
-            .ok_or_else(|| AppError::capability_denied("human review caller required"))?
-            .clone(),
-        body.requester_actor_id
-            .as_account_id()
-            .ok_or_else(|| AppError::capability_denied("human controller required"))?
-            .clone(),
-    ]);
+    let mut accounts = caller
+        .as_account_id()
+        .cloned()
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
     match state
         .persistence()
         .management_review_material(&caller, &body.request_id, &[])
@@ -60,9 +59,11 @@ async fn request_review(
         Ok(material) if material.outcome.status == ManagementReviewStatus::Consumed => {
             let original = material.request;
             let outcome = material.outcome;
-            if arkret_canonical::canonical_sha256(&original)
+            if original
+                .canonical_intent_digest()
                 .map_err(|_| AppError::schema_violation("invalid retained review"))?
-                != arkret_canonical::canonical_sha256(&body)
+                != body
+                    .canonical_intent_digest()
                     .map_err(|_| AppError::schema_violation("invalid review request"))?
             {
                 return Err(crate::app_error!(
@@ -76,19 +77,48 @@ async fn request_review(
         Err(coland_storage::PersistenceError::NotFound(_)) => {}
         Err(error) => return Ok(ManagementReviewResponse::Refusal(error.into())),
     }
-    let ManagementReviewTarget::Event { event } = &body.target else {
-        return Err(AppError::unsupported_feature(
-            "managed creation review is not implemented",
-        ));
-    };
     // This verifies the original producer. It neither authors nor queues the Event.
     let outcome = async {
-        let current =
+        let mut current =
             crate::approval_admission::observe_management_accounts(state, accounts).await?;
-        let producer = crate::state::verify_self_event_producer(state, &session, event).await?;
+        current.applet_candidate = prepare_candidate(state, &body.target).await?;
+        current.applet_event = super::extensions::applet_bridge::prepare_event_current(state,&body.target).await?;
+        let producer = match (&body.target, &session) {
+            (ManagementReviewTarget::Event { event }, None) if event.applet_id.is_some() => {
+                let authority=state.persistence().applet_managed_event_producer(event,chrono::Utc::now()).await?
+                    .ok_or_else(||coland_services::ServiceError::Conflict("capability_denied: management target has no native Device producer".into()))?;
+                if caller!=arkret_wire::ActorId::service(authority.source_service_id.clone()) {
+                    return Err(coland_services::ServiceError::Conflict("capability_denied: management requester is not the native Account's Service".into()));
+                }
+                let material=current.applet_event.as_ref().ok_or_else(||coland_services::ServiceError::Conflict("revision_unavailable: native management resolver material is absent".into()))?;
+                Some(coland_storage::SelfProducerCommitGuard::AppletManagedDevice(Box::new(coland_storage::AppletManagedDeviceScopeGuard {
+                    authority,effective_scope:event.scope_ref.clone(),service_did_document:material.service_did_document.clone(),
+                })))
+            }
+            (ManagementReviewTarget::Event { event }, Some(session)) => {
+                Some(crate::state::verify_self_event_producer(state, session, event).await?)
+            }
+            (
+                ManagementReviewTarget::BotCreation { .. }
+                | ManagementReviewTarget::GhostCreation { .. },
+                None,
+            ) => None,
+            _ => {
+                return Err(coland_services::ServiceError::protocol(
+                    arkret_wire::ErrorCode::CapabilityDenied,
+                    "review caller does not match target authority",
+                ));
+            }
+        };
         state
             .persistence()
-            .management_review_request(&caller, &body, &producer, &current, chrono::Utc::now())
+            .management_review_request(
+                &caller,
+                &body,
+                producer.as_ref(),
+                &current,
+                chrono::Utc::now(),
+            )
             .await
             .map_err(coland_services::ServiceError::from)
     }
@@ -110,9 +140,13 @@ async fn review_status(
 ) -> AppResult<ManagementReviewResponse> {
     super::authority_commit::no_store(res);
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
-    let caller =
-        crate::routing::identity::session_actor::validated_session_actor(state, &session).await?;
+    let (caller, _) = review_caller(
+        &aa,
+        state,
+        req,
+        arkret_wire::ServiceOperationId::SelfManagementReviewReadStatusV1,
+    )
+    .await?;
     let body = read_closed::<ManagementReviewLookupRequestBody>(req).await?;
     let outcome = async {
         let material = state
@@ -120,11 +154,23 @@ async fn review_status(
             .management_review_material(&caller, &body.request_id, &[])
             .await
             .map_err(coland_services::ServiceError::from)?;
-        let current = crate::approval_admission::observe_management_accounts(
+        let mut current = crate::approval_admission::observe_management_accounts(
             state,
             material.accounts.into_iter().collect(),
         )
         .await?;
+        if matches!(
+            material.outcome.status,
+            ManagementReviewStatus::Pending | ManagementReviewStatus::Approved
+        ) && chrono::Utc::now() < material.outcome.expires_at
+        {
+            current.applet_candidate = prepare_candidate(state, &material.request.target).await?;
+            current.applet_event = super::extensions::applet_bridge::prepare_event_current(
+                state,
+                &material.request.target,
+            )
+            .await?;
+        }
         state
             .persistence()
             .management_review_status(&caller, &body, &current, chrono::Utc::now())
@@ -149,56 +195,59 @@ async fn decide_review(
 ) -> AppResult<ManagementReviewResponse> {
     super::authority_commit::no_store(res);
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
-    let caller =
-        crate::routing::identity::session_actor::validated_session_actor(state, &session).await?;
+    let (caller, _) = review_caller(
+        &aa,
+        state,
+        req,
+        arkret_wire::ServiceOperationId::SelfManagementReviewCommandDecideV1,
+    )
+    .await?;
     let body = read_closed::<ManagementReviewDecisionRequestBody>(req).await?;
     body.validate()
         .map_err(|_| AppError::schema_violation("invalid management review decision"))?;
+    if caller.as_account_id().is_none() && body.decision != ManagementReviewDecision::Cancel {
+        return Err(AppError::capability_denied(
+            "a Service may only cancel its own review",
+        ));
+    }
     let outcome = async {
         let material = state
             .persistence()
             .management_review_material(&caller, &body.request_id, &body.approval_signatures)
             .await
             .map_err(coland_services::ServiceError::from)?;
-        let current_accounts = crate::approval_admission::observe_management_accounts(
+        let mut current_accounts = crate::approval_admission::observe_management_accounts(
             state,
             material.accounts.into_iter().collect(),
         )
         .await?;
+        if matches!(
+            material.outcome.status,
+            ManagementReviewStatus::Pending | ManagementReviewStatus::Approved
+        ) && chrono::Utc::now() < material.outcome.expires_at
+        {
+            current_accounts.applet_candidate =
+                prepare_candidate(state, &material.request.target).await?;
+            current_accounts.applet_event =
+                super::extensions::applet_bridge::prepare_event_current(
+                    state,
+                    &material.request.target,
+                )
+                .await?;
+        }
         let methods = if body.decision == ManagementReviewDecision::Approve {
-            let original = material.request;
-            let current = material.outcome;
-            let ManagementReviewTarget::Event { event } = original.target else {
-                return Err(coland_services::ServiceError::protocol(
-                    arkret_wire::ErrorCode::UnsupportedFeature,
-                    "managed creation review is not implemented",
-                ));
-            };
-            let mut signatures = current.approval_signatures;
+            let mut signatures = material.outcome.approval_signatures;
             for signature in &body.approval_signatures {
                 if !signatures.contains(signature) {
                     signatures.push(signature.clone());
                 }
             }
-            let submission = arkret_wire::EventAdmissionSubmission {
-                event: *event,
-                approval_signatures: Some(signatures),
-            };
-            crate::approval_admission::prepare_event_approvals_with_management_current(
+            crate::approval_admission::prepare_approval_methods(
                 state,
-                &submission,
+                &signatures,
                 chrono::Utc::now(),
-                Some(&current_accounts),
             )
             .await?
-            .ok_or_else(|| {
-                coland_services::ServiceError::protocol(
-                    arkret_wire::ErrorCode::SignatureInvalid,
-                    "management approval history is unavailable",
-                )
-            })?
-            .methods
         } else {
             Vec::new()
         };
@@ -216,6 +265,58 @@ async fn decide_review(
     }
     .await;
     Ok(ManagementReviewResponse::from(outcome))
+}
+
+async fn prepare_candidate(
+    state: &AppState,
+    target: &ManagementReviewTarget,
+) -> coland_services::ServiceResult<Option<Box<coland_storage::AppletAuthoringCandidate>>> {
+    crate::routing::extensions::applet_bridge::prepare_management_candidate(state, target)
+        .await
+        .map_err(|error| {
+            coland_services::ServiceError::protocol(
+                arkret_wire::ErrorCode::from_wire(error.wire_code())
+                    .unwrap_or(arkret_wire::ErrorCode::FailedPrecondition),
+                error.to_string(),
+            )
+        })
+}
+
+async fn review_caller(
+    aa: &AuthArgs,
+    state: &AppState,
+    req: &mut Request,
+    operation: arkret_wire::ServiceOperationId,
+) -> Result<
+    (
+        arkret_wire::ActorId,
+        Option<coland_services::identity::SessionIdentityState>,
+    ),
+    AppError,
+> {
+    if req.headers().get_all("arkret-operation").iter().count() != 1
+        || req
+            .headers()
+            .get("arkret-operation")
+            .and_then(|value| value.to_str().ok())
+            != Some(operation.as_str())
+    {
+        return Err(AppError::capability_denied(
+            "management operation does not match this route",
+        ));
+    }
+    if req.headers().contains_key("source-service-id") {
+        let carrier =
+            crate::routing::extensions::applet_bridge::verify_self_control_service(state, req)
+                .await?;
+        Ok((arkret_wire::ActorId::service(carrier.service_id), None))
+    } else {
+        let session = aa.authenticated_session(state, req).await?;
+        let caller =
+            crate::routing::identity::session_actor::validated_session_actor(state, &session)
+                .await?;
+        Ok((caller, Some(session)))
+    }
 }
 
 async fn read_closed<T: serde::de::DeserializeOwned>(req: &mut Request) -> Result<T, AppError> {

@@ -37,11 +37,30 @@ pub struct PersistenceHandle {
 }
 
 impl PersistenceHandle {
+    pub async fn applet_creation_approval_accounts(
+        &self,
+        candidate: &coland_storage::AppletAuthoringCandidate,
+    ) -> PersistenceResult<Vec<arkret_wire::AccountId>> {
+        self.persistence
+            .applets()
+            .creation_approval_accounts(candidate)
+            .await
+    }
+    pub async fn managed_pcr_creation_context(
+        &self,
+        genesis: &arkret_wire::EventId,
+    ) -> PersistenceResult<Option<arkret_models_integration::AppletManagedActorAuthoringContext>>
+    {
+        self.persistence
+            .applets()
+            .managed_pcr_creation_context(genesis)
+            .await
+    }
     pub async fn management_review_request(
         &self,
         caller: &arkret_wire::ActorId,
         request: &arkret_models_integration::management_review::ManagementReviewRequestBody,
-        producer: &coland_storage::SelfProducerCommitGuard,
+        producer: Option<&coland_storage::SelfProducerCommitGuard>,
         current: &coland_storage::ManagementReviewCurrent,
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>
@@ -62,6 +81,17 @@ impl PersistenceHandle {
         self.persistence
             .agents()
             .management_review_status(caller, request, current, at)
+            .await
+    }
+    pub async fn management_review_event_material(
+        &self,
+        event: &arkret_wire::Event,
+        id: &str,
+        signatures: &[arkret_wire::ApprovalSignature],
+    ) -> PersistenceResult<coland_storage::ManagementReviewMaterial> {
+        self.persistence
+            .agents()
+            .management_review_event_material(event, id, signatures)
             .await
     }
     pub async fn management_review_material(
@@ -203,6 +233,102 @@ impl PersistenceHandle {
             .await
     }
 
+    pub async fn consent_historical_basis(
+        &self,
+        holder: &arkret_wire::AccountId,
+        id: &arkret_wire::ConsentId,
+        revision: &arkret_wire::CurrentRevision,
+    ) -> PersistenceResult<Option<coland_storage::CommittedEventRecord>> {
+        self.persistence
+            .consent_current()
+            .historical_basis(holder, id, revision)
+            .await
+    }
+    pub async fn pending_consent_effect_holders(
+        &self,
+        issuer: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Vec<arkret_wire::AccountId>> {
+        self.persistence
+            .consent_current()
+            .pending_effect_holders(issuer)
+            .await
+    }
+    pub async fn prepare_consent_effect_publication(
+        &self,
+        holder: &arkret_wire::AccountId,
+        issuer: &arkret_wire::DidCoreId,
+        nonce: String,
+    ) -> PersistenceResult<Option<coland_storage::PrivateEffectsPublication>> {
+        self.persistence
+            .consent_current()
+            .prepare_effect_publication(holder, issuer, nonce)
+            .await
+    }
+    pub async fn acknowledge_consent_effect_publication(
+        &self,
+        holder: &arkret_wire::AccountId,
+        issuer: &arkret_wire::DidCoreId,
+        sequence: u64,
+    ) -> PersistenceResult<()> {
+        self.persistence
+            .consent_current()
+            .acknowledge_effect_publication(holder, issuer, sequence)
+            .await
+    }
+    pub async fn project_consent_effect_publication(
+        &self,
+        request: &arkret_models_collaboration::consent_private::ConsentPrivateEffectsPublishRequest,
+        source: &arkret_wire::DidCoreId,
+        receiver: &arkret_wire::DidCoreId,
+        authority: &coland_storage::CurrentRealmAuthority,
+        known_head: &arkret_wire::CommitStreamHead,
+    ) -> PersistenceResult<coland_storage::PrivateEffectsProjection> {
+        self.persistence
+            .consent_current()
+            .project_effect_publication(request, source, receiver, authority, known_head)
+            .await
+    }
+
+    pub async fn observe_consent_private_cut(
+        &self,
+        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,
+        outcome: &arkret_models_collaboration::consent_private::ConsentPrivateProxyOutcome,
+    ) -> PersistenceResult<()> {
+        self.persistence
+            .consent_current()
+            .observe_private_cut(request, outcome)
+            .await
+    }
+
+    pub async fn consent_private_command_prepared(
+        &self,
+        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,
+        source: &arkret_wire::DidCoreId,
+        acceptor: &arkret_wire::DidCoreId,
+        quota: &arkret_wire::NewSourceQuotaConstraints,
+        prepared: Option<&coland_storage::PreparedPrivateInviteDelivery>,
+    ) -> PersistenceResult<arkret_models_collaboration::consent_private::ConsentPrivateProxyOutcome>
+    {
+        self.persistence
+            .consent_current()
+            .private_command_prepared(request, source, acceptor, quota, prepared)
+            .await
+    }
+
+    pub async fn consent_private_command(
+        &self,
+        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,
+        source: &arkret_wire::DidCoreId,
+        acceptor: &arkret_wire::DidCoreId,
+        quota: &arkret_wire::NewSourceQuotaConstraints,
+    ) -> PersistenceResult<arkret_models_collaboration::consent_private::ConsentPrivateProxyOutcome>
+    {
+        self.persistence
+            .consent_current()
+            .private_command(request, source, acceptor, quota)
+            .await
+    }
+
     pub async fn admit_consent(
         &self,
         write: coland_storage::ConsentAdmissionWrite,
@@ -226,6 +352,31 @@ impl PersistenceHandle {
     ) -> PersistenceResult<Vec<coland_storage::ConsentCurrentRecord>> {
         self.persistence.consent_current().list(holder).await
     }
+    pub async fn consent_current_cut(
+        &self,
+        holder: &arkret_wire::AccountId,
+        peer: &arkret_models_collaboration::events_payloads::consent::ConsentPeer,
+        scope: arkret_wire::ConsentScope,
+        device: Option<&arkret_wire::DeviceId>,
+    ) -> PersistenceResult<coland_storage::ConsentCurrentCut> {
+        self.persistence
+            .consent_current()
+            .read_cut(holder, peer, scope, device)
+            .await
+    }
+    pub async fn prepare_forward_current_signer_evidence(
+        &self,
+        event: &arkret_wire::Event,
+        destination: &arkret_wire::DidCoreId,
+        body_digest: &arkret_wire::Hash,
+    ) -> PersistenceResult<Option<arkret_models_crypto::ForwardDeviceProjectionAttestationCore>>
+    {
+        self.persistence
+            .account_device_signer_evidence()
+            .prepare_forward_current(event, destination, body_digest)
+            .await
+    }
+
     pub async fn retain_forward_current_signer_evidence(
         &self,
         event: &arkret_wire::Event,
@@ -237,17 +388,17 @@ impl PersistenceHandle {
             .await
     }
 
-    pub async fn forwarded_bound_human_signer_fact(
+    pub async fn forwarded_bound_account_device_signer_fact(
         &self,
         event: &arkret_wire::Event,
         commit: &arkret_wire::RealmCommit,
         governance: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<
-        Option<arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact>,
+        Option<arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact>,
     > {
         self.persistence
             .account_device_signer_evidence()
-            .forwarded_bound_human_signer_fact(event, commit, governance)
+            .forwarded_bound_account_device_signer_fact(event, commit, governance)
             .await
     }
 
@@ -357,6 +508,18 @@ impl PersistenceHandle {
         self.persistence
             .actor_profiles()
             .admit_agent_control_event(write)
+            .await
+    }
+
+    /// Admit a same-key replacement without bypassing fresh-key pairing.
+    pub async fn admit_agent_same_key_renewal(
+        &self,
+        write: coland_storage::AgentControlAdmissionWrite,
+        origin: Option<coland_storage::AgentControlOriginSource>,
+    ) -> PersistenceResult<coland_storage::AgentControlAdmissionOutcome> {
+        self.persistence
+            .actor_profiles()
+            .admit_agent_same_key_renewal(write, origin)
             .await
     }
 
@@ -518,8 +681,19 @@ impl PersistenceHandle {
             .await
     }
 
-    /// The authorization inputs of `actor` in `realm_id`, read from one
-    /// snapshot and evaluated at `at`.
+    /// Deployment-private Agent content ceilings from one current snapshot.
+    pub async fn agent_session_authority(
+        &self,
+        request: &coland_storage::AgentSessionAuthorityRequest,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<coland_storage::AgentSessionAuthorityOutcome> {
+        self.persistence
+            .capability_grant_current_results()
+            .agent_session_authority(request, at)
+            .await
+    }
+
+    /// The authorization inputs of `actor` in `realm_id`, read at one cut.
     pub async fn actor_realm_authorization(
         &self,
         realm_id: &arkret_wire::RealmId,
@@ -788,6 +962,42 @@ impl PersistenceHandle {
             .device_revocations()
             .gate_status(selector)
             .await?)
+    }
+
+    pub async fn applet_managed_device_authority(
+        &self,
+        account: &arkret_wire::AccountId,
+        device_id: &arkret_wire::DeviceId,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> crate::ServiceResult<Option<coland_storage::AppletManagedDeviceAuthority>> {
+        Ok(self
+            .persistence
+            .device_revocations()
+            .applet_managed_device_authority(account, device_id, now)
+            .await?)
+    }
+
+    pub async fn applet_managed_event_producer(
+        &self,
+        event: &arkret_wire::Event,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<Option<coland_storage::AppletManagedDeviceAuthority>> {
+        self.persistence
+            .device_revocations()
+            .applet_managed_event_producer(event, now)
+            .await
+    }
+
+    pub async fn consume_applet_managed_device_nonce(
+        &self,
+        expected: &coland_storage::AppletManagedDeviceAuthority,
+        metadata: &arkret_models_integration::AppletManagedDeviceMetadata,
+        retain_until: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<coland_storage::AppletManagedDeviceAuthority> {
+        self.persistence
+            .device_revocations()
+            .consume_applet_managed_device_nonce(expected, metadata, retain_until)
+            .await
     }
 
     pub async fn pcr_device_generation(
@@ -1544,6 +1754,41 @@ impl PersistenceHandle {
 
 #[async_trait::async_trait]
 impl coland_storage::DeviceRevocationStore for PersistenceHandle {
+    async fn applet_managed_event_producer(
+        &self,
+        event: &arkret_wire::Event,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<Option<coland_storage::AppletManagedDeviceAuthority>> {
+        self.persistence
+            .device_revocations()
+            .applet_managed_event_producer(event, now)
+            .await
+    }
+
+    async fn consume_applet_managed_device_nonce(
+        &self,
+        expected: &coland_storage::AppletManagedDeviceAuthority,
+        metadata: &arkret_models_integration::AppletManagedDeviceMetadata,
+        retain_until: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<coland_storage::AppletManagedDeviceAuthority> {
+        self.persistence
+            .device_revocations()
+            .consume_applet_managed_device_nonce(expected, metadata, retain_until)
+            .await
+    }
+
+    async fn applet_managed_device_authority(
+        &self,
+        account: &arkret_wire::AccountId,
+        device_id: &arkret_wire::DeviceId,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<Option<coland_storage::AppletManagedDeviceAuthority>> {
+        self.persistence
+            .device_revocations()
+            .applet_managed_device_authority(account, device_id, now)
+            .await
+    }
+
     async fn pcr_device_generation(
         &self,
         account: &arkret_wire::AccountId,

@@ -4,6 +4,7 @@ pub(crate) mod account;
 pub(crate) mod account_authority_client;
 pub(crate) mod account_data;
 pub(crate) mod agents;
+pub(crate) mod applet_managed_device;
 pub(crate) mod auth;
 // api-conventions.md §3.3 — `/_arkret/self/*` inbound credential: a
 // `ak.session.grant` presented directly with a DPoP (RFC 9449) holder proof,
@@ -97,6 +98,7 @@ pub fn protocol_router() -> Router {
         .push(Router::with_path("root").push(recovery::protocol_router()))
         .push(
             Router::with_path("self")
+                .hoop(session_pop::verify_session_pop)
                 .push(account::protocol_router())
                 // Spec `account_data` group (`ak.self.account_data.*`).
                 .push(account_data::router())

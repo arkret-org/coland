@@ -14,6 +14,7 @@ default = []
 test-support = ["arkret-event-draft/test-support", "arkret-wire/test-support"]
 
 [dependencies]
+arkret-signatures = { workspace = true, features = ["collaboration"] }
 arkret.workspace = true
 arkret-canonical.workspace = true
 arkret-event-draft.workspace = true
@@ -34,6 +35,7 @@ chrono-tz = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 coland-domain = { workspace = true }
+coland-contracts = { workspace = true }
 subtle = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }

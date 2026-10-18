@@ -112,6 +112,14 @@ pub struct AppState {
     account_data: AccountDataService,
     key_material: KeyMaterialService,
     consents: ConsentService,
+    pub(crate) call_invitations: Arc<
+        Mutex<
+            BTreeMap<
+                String,
+                arkret_models_collaboration::call_invitation::CallInvitationSendRequestBody,
+            >,
+        >,
+    >,
     contacts: ContactService,
     agent_pairings: AgentPairingService,
     account_authority_device_pairing: Arc<dyn AccountAuthorityDevicePairingPort>,
@@ -1209,6 +1217,7 @@ impl AppState {
             jobs,
             projections,
             device_history_cache: Default::default(),
+            call_invitations: Default::default(),
             realm_directory,
             account_registration_policy: Arc::new(Mutex::new(AccountRegistrationPolicy::default())),
             runtime_guards: RuntimeGuardService::default(),
@@ -1778,18 +1787,6 @@ impl AppState {
         } else {
             set.remove(did);
         }
-    }
-
-    /// Record a new peer KeyPackage claim attempt. Duplicate deliveries are
-    /// checked against the durable idempotency ledger before this method is
-    /// called and therefore do not consume quota.
-    pub fn peer_keypackage_claim_rate_limited(
-        &self,
-        source_id: &str,
-        target_identity_key: &str,
-    ) -> bool {
-        self.runtime_guards
-            .peer_keypackage_claim_rate_limited(source_id, target_identity_key)
     }
 
     /// Layered quota for the two authenticated device-pairing handoff

@@ -705,7 +705,11 @@ pub(crate) async fn put_invite_receive_policy(
         "INSERT INTO invite_receive_policies (account_pk, policy_payload, updated_at) \
          SELECT pk, $3, NOW() FROM accounts WHERE principal_id = $1 AND station_id = $2 \
          ON CONFLICT (account_pk) DO UPDATE SET \
-         policy_payload = EXCLUDED.policy_payload, updated_at = NOW()",
+         revision = CASE WHEN invite_receive_policies.policy_payload IS DISTINCT FROM EXCLUDED.policy_payload \
+             THEN invite_receive_policies.revision + 1 ELSE invite_receive_policies.revision END, \
+         policy_payload = EXCLUDED.policy_payload, \
+         updated_at = CASE WHEN invite_receive_policies.policy_payload IS DISTINCT FROM EXCLUDED.policy_payload \
+             THEN NOW() ELSE invite_receive_policies.updated_at END",
     )
     .bind::<Text, _>(account_id.principal_id.as_str())
     .bind::<Text, _>(account_id.station_id.as_str())

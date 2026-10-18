@@ -163,6 +163,15 @@ fn validate_candidate_with_operation_digest<'a>(
             "approval history does not bind this accepting cut",
         ));
     }
+    let operation = prepared.carrier_binding.as_ref().map_or(
+        arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+        coland_storage::ApprovalCarrierBinding::operation,
+    );
+    let operation_digest = prepared
+        .carrier_binding
+        .as_ref()
+        .map(|binding| binding.request_digest())
+        .or(operation_digest);
     for method in &prepared.methods {
         let signature = &method.signature;
         let crypt_code = if matches!(
@@ -176,66 +185,13 @@ fn validate_candidate_with_operation_digest<'a>(
         signature
             .validate()
             .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
-        if signature.input.operation
-            != arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1
-        {
+        if signature.input.operation != operation {
             return Err(error(
                 "schema_violation",
                 "approval operation has no registered Event carrier",
             ));
         }
-        let did =
-            arkret_identity::verification_method_did(signature.proof.verification_method.as_str())
-                .map_err(|e| error("schema_violation", e))?;
-        if let Some(control) = method.native_control.as_ref() {
-            if control.principal()
-                != &arkret_wire::project_did_to_core_id(&signature.input.approver_did)
-                    .map_err(|e| error(crypt_code, e))?
-                || control.method() != &signature.proof.verification_method
-                || control.public_key() != &method.public_key
-                || method
-                    .control_history
-                    .as_ref()
-                    .and_then(|basis| basis.get("verified_at"))
-                    .and_then(serde_json::Value::as_str)
-                    != Some(
-                        arkret_canonical::format_timestamp_canonical(signature.input.approved_at)
-                            .as_str(),
-                    )
-            {
-                return Err(error(
-                    crypt_code,
-                    "approval native control differs from its signing-time history",
-                ));
-            }
-        } else if did != signature.input.approver_did {
-            return Err(error(crypt_code, "approval method controller differs"));
-        }
-        if did.method() == "key" {
-            use arkret_identity::DidResolver as _;
-            let document = arkret_identity::DidKeyResolver::new()
-                .resolve_did_document(&did)
-                .map_err(|e| error(crypt_code, e))?;
-            let resolved = arkret_identity::jws::resolve_ed25519_pubkey_from_document(
-                &document,
-                signature.proof.verification_method.as_str(),
-            )
-            .map_err(|e| error(crypt_code, e))?;
-            if resolved.to_bytes() != method.public_key {
-                return Err(error(
-                    crypt_code,
-                    "approval key differs from immutable DID authority",
-                ));
-            }
-        } else if did.method() != "webvh" {
-            return Err(error(
-                crypt_code,
-                "approval method has no authenticated history",
-            ));
-        }
-        let key = arkret_signatures::PublicKeyMaterial::Ed25519Raw {
-            bytes: method.public_key.to_vec(),
-        };
+        let key = historical_key(method, crypt_code)?;
         match signature.input.approval_target {
             arkret_wire::ApprovalTarget::Event { .. } => {
                 if let Some(control) = method.native_control.as_ref() {
@@ -243,7 +199,7 @@ fn validate_candidate_with_operation_digest<'a>(
                         control,
                         signature,
                         event,
-                        arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                        operation,
                         signature.input.action,
                         commit.committed_at,
                     )
@@ -252,7 +208,7 @@ fn validate_candidate_with_operation_digest<'a>(
                     arkret_signatures::approval_signature::verify_event_approval_signature(
                         signature,
                         event,
-                        arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                        operation,
                         signature.input.action,
                         commit.committed_at,
                         &key,
@@ -303,6 +259,131 @@ fn validate_candidate_with_operation_digest<'a>(
     Ok(&prepared.methods)
 }
 
+/// Historical method qualification is shared by Event and operation targets.
+fn historical_key(
+    method: &coland_storage::ApprovalHistoricalMethod,
+    crypt_code: &str,
+) -> PersistenceResult<arkret_signatures::PublicKeyMaterial> {
+    let signature = &method.signature;
+    let did =
+        arkret_identity::verification_method_did(signature.proof.verification_method.as_str())
+            .map_err(|e| error("schema_violation", e))?;
+    if let Some(control) = method.native_control.as_ref() {
+        if control.principal()
+            != &arkret_wire::project_did_to_core_id(&signature.input.approver_did)
+                .map_err(|e| error(crypt_code, e))?
+            || control.method() != &signature.proof.verification_method
+            || control.public_key() != &method.public_key
+            || method
+                .control_history
+                .as_ref()
+                .and_then(|basis| basis.get("verified_at"))
+                .and_then(serde_json::Value::as_str)
+                != Some(
+                    arkret_canonical::format_timestamp_canonical(signature.input.approved_at)
+                        .as_str(),
+                )
+        {
+            return Err(error(
+                crypt_code,
+                "approval native control differs from its signing-time history",
+            ));
+        }
+    } else if did != signature.input.approver_did {
+        return Err(error(crypt_code, "approval method controller differs"));
+    }
+    if did.method() == "key" {
+        use arkret_identity::DidResolver as _;
+        let document = arkret_identity::DidKeyResolver::new()
+            .resolve_did_document(&did)
+            .map_err(|e| error(crypt_code, e))?;
+        let resolved = arkret_identity::jws::resolve_ed25519_pubkey_from_document(
+            &document,
+            signature.proof.verification_method.as_str(),
+        )
+        .map_err(|e| error(crypt_code, e))?;
+        if resolved.to_bytes() != method.public_key {
+            return Err(error(
+                crypt_code,
+                "approval key differs from immutable DID authority",
+            ));
+        }
+    } else if did.method() != "webvh" {
+        return Err(error(
+            crypt_code,
+            "approval method has no authenticated history",
+        ));
+    }
+    Ok(arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+        bytes: method.public_key.to_vec(),
+    })
+}
+
+/// Validate every original vote against the registered creation operation.
+/// This proves no voting eligibility, approval requirement or consumed nonce.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_operation_candidate(
+    methods: &[coland_storage::ApprovalHistoricalMethod],
+    digest: &arkret_wire::Hash,
+    operation: &str,
+    action: CapabilityActionId,
+    realm: &arkret_wire::RealmId,
+    initiator: &ActorId,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<()> {
+    for method in methods {
+        let vote = &method.signature;
+        vote.validate()
+            .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+        if matches!(
+            vote.input.approval_context,
+            arkret_wire::ApprovalContext::ListWip { .. }
+        ) {
+            return Err(error(
+                "signature_invalid",
+                "creation has no List WIP carrier",
+            ));
+        }
+        let key = historical_key(method, "signature_invalid")?;
+        if let Some(control) = method.native_control.as_ref() {
+            arkret_identity::principal_control::verify_native_control_operation_approval(
+                control, vote, digest, operation, action, realm, initiator, at,
+            )
+        } else {
+            arkret_signatures::approval_signature::verify_operation_approval_signature(
+                vote, digest, operation, action, realm, initiator, at, &key,
+            )
+        }
+        .map_err(|detail| error("signature_invalid", detail))?;
+    }
+    Ok(())
+}
+
+// The predicate describes the original managed target, not the approving
+// Account. Trusted native/current facts are prepared at the accepting cut.
+// Keep this structural proof work out of the generic async qualification poll
+// frame, including creation paths that never exercise this predicate.
+#[inline(never)]
+fn rejects_managed_self_join_context(event: Option<&Event>, facts: &OperationFacts) -> bool {
+    event.is_none_or(|event| {
+        event.actor_id.as_account_id().is_none()
+            || event.executed_by.is_some()
+            || event.applet_id.is_none()
+            || event
+                .verify_producer_proof_self_consistency(
+                    event.realm_id.digest_suite_code().digest_suite(),
+                )
+                .ok()
+                .flatten()
+                .is_none()
+            || facts.applet_id.as_deref() != event.applet_id.as_ref().map(|id| id.as_str())
+            || facts.executed_by.as_ref() != Some(&event.actor_id)
+            || facts.registration_epoch.is_none()
+            || crate::applet_device_admission::action(event).ok()
+                != Some(CapabilityActionId::AppletJoin)
+    })
+}
+
 /// A DID earns one vote only through a joined complete Actor's current grant,
 /// with the full shared constraint evaluator on the exact action and target.
 /// Governance requires an actual grant; List WIP also recognizes the registry
@@ -320,6 +401,7 @@ pub(crate) async fn approver_qualifies(
     facts: &OperationFacts,
     at: chrono::DateTime<chrono::Utc>,
     allow_owner: bool,
+    registered_pair: bool,
 ) -> PersistenceResult<Option<serde_json::Value>> {
     let principal = arkret_wire::project_did_to_core_id(&vote.input.approver_did)
         .map_err(|e| error("schema_violation", e))?;
@@ -332,6 +414,7 @@ pub(crate) async fn approver_qualifies(
         facts,
         at,
         allow_owner,
+        registered_pair,
     )
     .await
 }
@@ -349,47 +432,103 @@ pub(crate) async fn qualify_principal(
     facts: &OperationFacts,
     at: chrono::DateTime<chrono::Utc>,
     allow_owner: bool,
+    registered_pair: bool,
 ) -> PersistenceResult<Option<serde_json::Value>> {
-    qualify_principal_or_actor(
-        conn,
-        event,
-        principal,
-        action,
-        target,
-        facts,
-        at,
-        allow_owner,
-        None,
-    )
+    crate::boxed_future(|| {
+        qualify_principal_or_actor(
+            conn,
+            Some(event),
+            &event.realm_id,
+            principal,
+            action,
+            target,
+            facts,
+            at,
+            allow_owner,
+            None,
+            registered_pair,
+            None,
+        )
+    })
     .await
 }
 
-/// Management reviews select the designated complete Actor, not the first
-/// SQL membership row sharing one signing principal across Stations.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Exact Actor qualification retains the original complete authority inputs."
-)]
-pub(crate) async fn qualify_actor(
+/// Registered creation approval qualification never grants creation authority.
+pub(crate) async fn qualify_creation_principal(
     conn: &mut AsyncPgConnection,
-    event: &Event,
-    actor: &ActorId,
-    action: CapabilityActionId,
-    target: &WireResourceSelector,
-    facts: &OperationFacts,
-    at: chrono::DateTime<chrono::Utc>,
-    allow_owner: bool,
+    creation: &crate::applet_action_approval::CreationAuthority<'_>,
+    principal: &arkret_wire::DidCoreId,
+    current: &coland_storage::ManagementReviewCurrent,
 ) -> PersistenceResult<Option<serde_json::Value>> {
+    let descriptor = arkret_schema::capability_action_descriptor(creation.action);
+    if descriptor
+        .required_evaluator_checks
+        .iter()
+        .any(|check| !creation.satisfies_evaluator_check(check))
+    {
+        return Err(error(
+            "capability_denied",
+            "creation operation invariant is not satisfied",
+        ));
+    }
+    let action = descriptor
+        .approver_capability_action
+        .unwrap_or(creation.action);
+    let administrator_facts = OperationFacts::default();
+    let facts = if descriptor.approver_capability_action.is_some() {
+        &administrator_facts
+    } else {
+        &creation.facts
+    };
+    let mut qualified = qualify_principal_or_actor(
+        conn,
+        None,
+        &creation.unit.portal_realm,
+        principal,
+        action,
+        &creation.target,
+        facts,
+        creation.input.accepted_at,
+        false,
+        None,
+        false,
+        Some((creation, current)),
+    )
+    .await?;
+    if let Some(basis) = &mut qualified {
+        basis["approved_creation_action"] = serde_json::json!(creation.action);
+    }
+    Ok(qualified)
+}
+
+/// Exact scope administrator qualification for an operation with no Event.
+pub(crate) async fn qualify_management_administrator(
+    conn: &mut AsyncPgConnection,
+    scope: &arkret_wire::ScopeRef,
+    actor: &ActorId,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<Option<serde_json::Value>> {
+    let target = match scope {
+        arkret_wire::ScopeRef::Realm { realm_id } => WireResourceSelector::realm(realm_id.clone()),
+        arkret_wire::ScopeRef::Circle {
+            realm_id,
+            circle_id,
+        } => WireResourceSelector::circle(realm_id.clone(), circle_id.clone()),
+        _ => return Err(error("capability_denied", "unsupported management scope")),
+    };
     qualify_principal_or_actor(
         conn,
-        event,
+        None,
+        scope.realm_id(),
         actor.signing_principal_id(),
-        action,
-        target,
-        facts,
+        CapabilityActionId::RealmAdmin,
+        &target,
+        &OperationFacts::default(),
         at,
-        allow_owner,
+        true,
         Some(actor),
+        false,
+        None,
     )
     .await
 }
@@ -400,7 +539,8 @@ pub(crate) async fn qualify_actor(
 )]
 async fn qualify_principal_or_actor(
     conn: &mut AsyncPgConnection,
-    event: &Event,
+    event: Option<&Event>,
+    realm: &arkret_wire::RealmId,
     principal: &arkret_wire::DidCoreId,
     action: CapabilityActionId,
     target: &WireResourceSelector,
@@ -408,12 +548,21 @@ async fn qualify_principal_or_actor(
     at: chrono::DateTime<chrono::Utc>,
     allow_owner: bool,
     exact_actor: Option<&ActorId>,
+    registered_pair: bool,
+    creation: Option<(
+        &crate::applet_action_approval::CreationAuthority<'_>,
+        &coland_storage::ManagementReviewCurrent,
+    )>,
 ) -> PersistenceResult<Option<serde_json::Value>> {
-    if principal == event.actor_id.signing_principal_id() {
+    if event.is_some_and(|event| principal == event.actor_id.signing_principal_id())
+        || creation.is_some_and(|(creation, _)| {
+            principal == creation.input.admin_actor_id.signing_principal_id()
+        })
+    {
         return Ok(None);
     }
     let members = sql_query("SELECT member_id,jsonb_build_object('commit_id',current_commit_id,'stream_position',current_stream_position) AS membership_revision FROM member_state_current_results WHERE realm_id=$1 AND membership='join'")
-        .bind::<Text,_>(event.realm_id.as_str()).load::<Member>(&mut *conn).await.map_err(PersistenceError::database)?;
+        .bind::<Text,_>(realm.as_str()).load::<Member>(&mut *conn).await.map_err(PersistenceError::database)?;
     for member in members {
         let actor: ActorId = serde_json::from_str(&member.member_id).map_err(|e| {
             PersistenceError::Database(format!("stored membership ActorId is invalid: {e}"))
@@ -423,17 +572,49 @@ async fn qualify_principal_or_actor(
         {
             continue;
         }
+        if let Some((_, current)) = creation
+            && let Some(account) = actor.as_account_id()
+        {
+            let mut records = current
+                .observations
+                .iter()
+                .filter(|observation| &observation.record().account_id == account);
+            let observation = records.next().ok_or_else(|| {
+                error(
+                    "revision_unavailable",
+                    "creation approver changed after current preparation",
+                )
+            })?;
+            if records.next().is_some() {
+                return Err(error(
+                    "revision_unavailable",
+                    "creation approver observation is ambiguous",
+                ));
+            }
+            if observation.record().status
+                != arkret_models_collaboration::objects::account_status::AccountStatus::Active
+            {
+                continue;
+            }
+        }
         let checks = arkret_schema::capability_action_descriptor(action).required_evaluator_checks;
         if checks.iter().any(|check| match *check {
+            "applet_managed_self_join" => rejects_managed_self_join_context(event, facts),
             "actor_eq_target_author" => facts.target_owner.as_ref() != Some(&actor),
-            _ => true,
+            "actor_ne_watcher_actor" => event
+                .and_then(|event| serde_json::to_value(&event.payload).ok())
+                .and_then(|p| p.get("watcher_actor_id").cloned())
+                .and_then(|v| serde_json::from_value::<ActorId>(v).ok())
+                .is_none_or(|watcher| event.is_none_or(|event| watcher == event.actor_id)),
+            "audit_pair_required" => !registered_pair,
+            _ => creation.is_none_or(|(creation, _)| !creation.satisfies_evaluator_check(check)),
         }) {
             continue;
         }
-        let cut = RealmAuthorizationCut::read(conn, &event.realm_id, &actor).await?;
-        let authorization = cut
-            .enforcing_actor_authorization_in_connection(conn, at)
-            .await?;
+        let cut = RealmAuthorizationCut::read(conn, realm, &actor).await?;
+        let authorization =
+            crate::boxed_future(|| cut.enforcing_actor_authorization_in_connection(conn, at))
+                .await?;
         let actions = [action.as_str()];
         let owner_covers = allow_owner
             && authorization.agent_ceiling.is_none()
@@ -446,7 +627,18 @@ async fn qualify_principal_or_actor(
                         .any(|row| row.action == CapabilityActionId::RealmOwner)
                 });
         let qualified = match authorization.evaluate(&actions, target, facts) {
-            GrantEvaluation::Allowed(ref satisfied) => !satisfied.is_empty() || owner_covers,
+            GrantEvaluation::Allowed(ref satisfied) => {
+                if creation.is_some()
+                    && !satisfied.is_empty()
+                    && satisfied.iter().all(|grant| !grant.reservations.is_empty())
+                {
+                    return Err(error(
+                        "revision_unavailable",
+                        "creation approver quota eligibility is unresolved",
+                    ));
+                }
+                !satisfied.is_empty() || owner_covers
+            }
             GrantEvaluation::Unnamed | GrantEvaluation::Unsatisfied => owner_covers,
             _ => false,
         };
@@ -457,7 +649,7 @@ async fn qualify_principal_or_actor(
                 value: serde_json::Value,
             }
             let root_basis=sql_query("SELECT to_jsonb(r) AS value FROM realm_authority_root_current_results r WHERE realm_id=$1")
-                .bind::<Text,_>(event.realm_id.as_str()).get_result::<RootBasis>(&mut *conn).await.map_err(PersistenceError::database)?;
+                .bind::<Text,_>(realm.as_str()).get_result::<RootBasis>(&mut *conn).await.map_err(PersistenceError::database)?;
             let grants = authorization
                 .grants
                 .iter()
@@ -467,11 +659,21 @@ async fn qualify_principal_or_actor(
                     })
                 })
                 .collect::<Vec<_>>();
-            return Ok(Some(
-                serde_json::json!({"actor_id":actor,"membership":"join","membership_revision":member.membership_revision,
+            let mut basis = serde_json::json!({"actor_id":actor,"membership":"join","membership_revision":member.membership_revision,
                 "evaluated_at":arkret_canonical::format_timestamp_canonical(at),
-                "action":action,"target":target,"effective_grants":grants,"owner_aggregate":owner_covers,"realm_authority_root":root_basis.value}),
-            ));
+                "action":action,"target":target,"effective_grants":grants,"owner_aggregate":owner_covers,"realm_authority_root":root_basis.value});
+            if let Some((_, current)) = creation
+                && let Some(account) = actor.as_account_id()
+                && let Some(observation) = current
+                    .observations
+                    .iter()
+                    .find(|observation| &observation.record().account_id == account)
+            {
+                // Retain the original signed historical record, never the
+                // process-local freshness observation or its Instant.
+                basis["account_status_record"] = serde_json::json!(observation.record());
+            }
+            return Ok(Some(basis));
         }
     }
     Ok(None)
@@ -488,6 +690,8 @@ pub(crate) async fn consume_and_audit(
 ) -> PersistenceResult<()> {
     // The same grant-context evidence can satisfy independent grant and
     // governance requirements. Consume its nonce once and retain both bases.
+    // Separate consumers may extend the same row only in this transaction;
+    // an older transaction or another Event cannot reuse the nonce.
     let mut grouped = std::collections::BTreeMap::new();
     for qualified in methods {
         let vote = &qualified.method.signature;
@@ -509,8 +713,18 @@ pub(crate) async fn consume_and_audit(
                 "distinct evidence shares one approval nonce",
             ));
         }
-        if !entry.1.contains(&qualified.qualification_basis) {
-            entry.1.push(qualified.qualification_basis.clone());
+        let mut qualification = qualified.qualification_basis.clone();
+        qualification
+            .as_object_mut()
+            .ok_or_else(|| {
+                error(
+                    "schema_violation",
+                    "approval qualification must be an object",
+                )
+            })?
+            .insert("consumer_authority_cut".to_owned(), accepted_basis.clone());
+        if !entry.1.contains(&qualification) {
+            entry.1.push(qualification);
         }
     }
     let event_digest =
@@ -523,7 +737,7 @@ pub(crate) async fn consume_and_audit(
             "verified_at":arkret_canonical::format_timestamp_canonical(vote.input.approved_at),
             "public_key":arkret_canonical::ed25519_pubkey_to_did_key_multibase(&method.public_key),
             "authority_cut":accepted_basis,"qualifications":qualifications,"native_control_history":method.control_history});
-        let inserted = sql_query("INSERT INTO event_approval_private_audit (approval_context,approver_did,nonce,event_id,event_digest,realm_id,accepted_commit_id,evidence,accepted_basis,accepted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(approval_context,approver_did,nonce) DO NOTHING")
+        let inserted = sql_query("INSERT INTO event_approval_private_audit (approval_context,approver_did,nonce,event_id,event_digest,realm_id,accepted_commit_id,evidence,accepted_basis,accepted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(approval_context,approver_did,nonce) DO UPDATE SET accepted_basis=jsonb_set(event_approval_private_audit.accepted_basis,'{qualifications}',(SELECT jsonb_agg(DISTINCT q) FROM jsonb_array_elements((event_approval_private_audit.accepted_basis->'qualifications') || (EXCLUDED.accepted_basis->'qualifications')) AS q)) WHERE event_approval_private_audit.xmin=pg_current_xact_id()::xid AND event_approval_private_audit.event_id=EXCLUDED.event_id AND event_approval_private_audit.event_digest=EXCLUDED.event_digest AND event_approval_private_audit.accepted_commit_id=EXCLUDED.accepted_commit_id AND event_approval_private_audit.evidence=EXCLUDED.evidence AND event_approval_private_audit.accepted_basis->'public_key'=EXCLUDED.accepted_basis->'public_key' AND event_approval_private_audit.accepted_basis->'native_control_history'=EXCLUDED.accepted_basis->'native_control_history' ")
             .bind::<Text,_>(&context).bind::<Text,_>(vote.input.approver_did.as_str())
             .bind::<Text,_>(&vote.input.nonce).bind::<Text,_>(event.event_id.as_str())
             .bind::<Text,_>(&event_digest).bind::<Text,_>(event.realm_id.as_str())
@@ -584,6 +798,7 @@ pub(crate) async fn require_list_wip(
             &facts,
             commit.committed_at,
             true,
+            false,
         )
         .await?
             && counted.insert(
@@ -649,7 +864,7 @@ pub(crate) async fn require_governance(
             }
             _ => continue,
         }
-        if let Some(basis) = approver_qualifies(
+        if let Some(mut basis) = approver_qualifies(
             conn,
             event,
             vote,
@@ -658,6 +873,12 @@ pub(crate) async fn require_governance(
             facts,
             commit.committed_at,
             false,
+            prepared.is_some_and(|p| {
+                matches!(
+                    p.carrier_binding,
+                    Some(coland_storage::ApprovalCarrierBinding::AuditPair { .. })
+                )
+            }),
         )
         .await?
             && counted.insert(
@@ -665,6 +886,11 @@ pub(crate) async fn require_governance(
                     .map_err(|e| error("schema_violation", e))?,
             )
         {
+            basis.as_object_mut().ok_or_else(|| error("schema_violation", "governance qualification must be an object"))?
+                .insert("governance_requirement".to_owned(), serde_json::json!({
+                    "action":action,"target":target,"effective_approval_quorum":quorum,
+                    "evaluated_at":arkret_canonical::format_timestamp_canonical(commit.committed_at),
+                }));
             accepted.push(QualifiedApproval {
                 method: method.clone(),
                 qualification_basis: basis,

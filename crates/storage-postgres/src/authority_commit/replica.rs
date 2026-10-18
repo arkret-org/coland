@@ -223,14 +223,23 @@ async fn require_current_replica_authority(
     conn: &mut AsyncPgConnection,
     authority: &CurrentRealmAuthority,
     commit: &arkret_wire::RealmCommit,
+    historical: Option<&arkret_identity::VerifiedHistoricalRealmCommit>,
 ) -> Result<(), PgTransactionError> {
     let current = locked_authority(conn, &authority.realm_id)
         .await?
         .ok_or_else(|| PersistenceError::Internal("remote authority row disappeared".into()))?;
-    if !same_authority(&current, authority)
-        || commit.governance_generation != authority.generation
-        || commit.authority_ref != authority.authority_ref
-    {
+    let current_tenure = commit.governance_generation == current.generation
+        && commit.authority_ref == current.authority_ref;
+    let verified_history = historical.is_some_and(|proof| {
+        proof.binds(
+            &current.realm_id,
+            current.generation,
+            &current.service_id,
+            &current.authority_ref,
+            commit,
+        )
+    });
+    if !same_authority(&current, authority) || (!current_tenure && !verified_history) {
         return Err(conflict(
             ConflictCode::ForkQuarantine,
             "replica Commit is outside the current governance tenure",
@@ -348,7 +357,7 @@ pub(crate) async fn materialize_founding_in_connection(
         if event.kind == arkret_wire::EventKind::StrandCreate {
             crate::strand_current_results::commit_direct_conversation_founding_strand_in_connection(
                 conn, event, commit,
-            )
+             None)
             .await?;
         }
     }
@@ -974,6 +983,18 @@ pub(super) async fn install_committed_replica_in_connection(
     conn: &mut AsyncPgConnection,
     replica: &CommittedReplica,
 ) -> Result<CommittedReplicaOutcome, PgTransactionError> {
+    if arkret_models_collaboration::authority_commit::is_audit_paired_event_slot(&replica.event)
+        .map_err(PersistenceError::database)?
+    {
+        return Err(PersistenceError::Conflict("revision_unavailable: paired source slot requires complete registered atomic replication".to_owned()).into());
+    }
+    install_registered_replica_in_connection(conn, replica).await
+}
+
+pub(super) async fn install_registered_replica_in_connection(
+    conn: &mut AsyncPgConnection,
+    replica: &CommittedReplica,
+) -> Result<CommittedReplicaOutcome, PgTransactionError> {
     crate::agent_producer_signer_keys::validate_producer_fact_binding(
         &replica.event,
         &replica.commit,
@@ -1129,7 +1150,13 @@ pub(super) async fn install_committed_peer_replica_in_connection(
     }
     record_remote_authority_in_connection(conn, &replica.authority, &replica.local_service_id)
         .await?;
-    require_current_replica_authority(conn, &replica.authority, &replica.commit).await?;
+    require_current_replica_authority(
+        conn,
+        &replica.authority,
+        &replica.commit,
+        replica.historical_commit.as_ref(),
+    )
+    .await?;
     let opening = matches!(&replica.role, CommittedReplicaRole::OpeningJoin { member_account_id }
         if member_account_id.station_id == replica.local_service_id);
     if !opening
@@ -1349,7 +1376,13 @@ async fn install_replica_commit_in_connection(
     if let Some(upgraded) = upgrade_held_full_in_connection(conn, replica).await? {
         return Ok(upgraded);
     }
-    require_current_replica_authority(conn, &replica.authority, commit).await?;
+    require_current_replica_authority(
+        conn,
+        &replica.authority,
+        commit,
+        replica.historical_commit.as_ref(),
+    )
+    .await?;
     let key = stream_key(&commit.stream_ref)?;
     let head = locked_head(conn, &key).await?;
     let anchor = locked_anchor(conn, &key).await?;
@@ -1550,11 +1583,11 @@ async fn accepted_own_circle_cleanup_in_connection(
         || event.executed_by.is_some()
         || realm_id != &event.realm_id
         || member_account_id.station_id != replica.local_service_id
-        || event.human_device_producer().map_err(invalid)?.is_none()
+        || event.account_device_producer().map_err(invalid)?.is_none()
         || replica
             .producer_signer_fact
             .as_ref()
-            .and_then(|fact| fact.as_human())
+            .and_then(|fact| fact.as_account_device())
             .is_none()
     {
         return Ok(false);
@@ -1680,7 +1713,13 @@ pub(super) async fn install_committed_chain_node_in_connection(
     if let Some(outcome) = held_duplicate(conn, commit, None).await? {
         return Ok(outcome);
     }
-    require_current_replica_authority(conn, &node.authority, commit).await?;
+    require_current_replica_authority(
+        conn,
+        &node.authority,
+        commit,
+        node.historical_commit.as_ref(),
+    )
+    .await?;
     let key = stream_key(&commit.stream_ref)?;
     let head = locked_head(conn, &key).await?;
     anchored_head(locked_anchor(conn, &key).await?)?;

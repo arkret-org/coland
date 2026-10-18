@@ -12,6 +12,13 @@ pub trait WebvhStore: Send + Sync {
     ) -> PersistenceResult<Option<WebvhDocumentRecord>>;
     async fn put_document(&self, record: WebvhDocumentRecord) -> PersistenceResult<()>;
     async fn append_log_event(&self, event: WebvhLogRecord) -> PersistenceResult<()>;
+    /// Atomically retain a freshly resolved, complete native history and its
+    /// current document. The expected head prevents concurrent rollback.
+    async fn ingest_verified_history(
+        &self,
+        expected_current_head: Option<String>,
+        document: WebvhDocumentRecord,
+    ) -> PersistenceResult<WebvhLogCommitOutcome>;
     async fn list_log_events(&self, did: &str) -> PersistenceResult<Vec<WebvhLogRecord>>;
     async fn commit_log_operation(
         &self,

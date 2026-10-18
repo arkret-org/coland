@@ -73,7 +73,7 @@ async fn forwarded_evidence_is_retained_with_the_first_commit_or_not_at_all() {
     .unwrap()
     .unwrap();
     let core = &evidence.device_projection_attestation.attestation;
-    let fact = arkret_identity::account_device_signer_evidence::verify_forwarded_human_signer_fact(
+    let fact = arkret_identity::account_device_signer_evidence::verify_forwarded_account_device_signer_fact(
         &evidence,
         &request.authority_commit.event,
         &origin.pcr.history.account.station_id,
@@ -100,7 +100,7 @@ async fn forwarded_evidence_is_retained_with_the_first_commit_or_not_at_all() {
     let origin_store = PgPersistenceStore::new(origin_pool.clone());
     let source = origin_store
         .account_device_signer_evidence()
-        .forwarded_bound_human_signer_fact(
+        .forwarded_bound_account_device_signer_fact(
             &request.authority_commit.event,
             &request.authority_commit.commit,
             &governing.pcr.history.account.station_id,
@@ -113,7 +113,7 @@ async fn forwarded_evidence_is_retained_with_the_first_commit_or_not_at_all() {
     assert!(
         origin_store
             .account_device_signer_evidence()
-            .forwarded_bound_human_signer_fact(
+            .forwarded_bound_account_device_signer_fact(
                 &request.authority_commit.event,
                 &wrong,
                 &governing.pcr.history.account.station_id,
@@ -127,7 +127,7 @@ async fn forwarded_evidence_is_retained_with_the_first_commit_or_not_at_all() {
     assert!(
         origin_store
             .account_device_signer_evidence()
-            .forwarded_bound_human_signer_fact(
+            .forwarded_bound_account_device_signer_fact(
                 &request.authority_commit.event,
                 &wrong,
                 &governing.pcr.history.account.station_id,
@@ -139,7 +139,7 @@ async fn forwarded_evidence_is_retained_with_the_first_commit_or_not_at_all() {
     assert!(
         origin_store
             .account_device_signer_evidence()
-            .forwarded_bound_human_signer_fact(
+            .forwarded_bound_account_device_signer_fact(
                 &request.authority_commit.event,
                 &request.authority_commit.commit,
                 &origin.pcr.history.account.station_id,

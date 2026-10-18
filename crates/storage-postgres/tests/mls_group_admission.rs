@@ -546,6 +546,7 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
             &stale.authority_commit.event,
             &authority,
             "governance_binding_mismatch",
+            None,
         )
         .await
         .unwrap();
@@ -561,7 +562,8 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
             .finalize_mls_rejection(
                 &stale.authority_commit.event,
                 &authority,
-                "different_late_reason"
+                "different_late_reason",
+                None,
             )
             .await
             .unwrap(),
@@ -576,6 +578,7 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
             &commit.authority_commit.event,
             &stale_authority,
             "governance_binding_mismatch",
+            None,
         )
         .await
         .unwrap();
@@ -1404,6 +1407,7 @@ async fn mls_commit_welcome_queue_is_atomic_exact_endpoint_and_revocation_gated(
     commit.authority_commit.welcomes = vec![VerifiedMlsWelcome {
         delivery: welcome(&commit, &recipient, &first_claim),
         claim: Some(first_key.clone()),
+        applet_device_scope_guard: None,
         roster_witness: None,
     }];
     commit.authority_commit.recipient_queue_capacity = 1;
@@ -1445,6 +1449,7 @@ async fn mls_commit_welcome_queue_is_atomic_exact_endpoint_and_revocation_gated(
     full.authority_commit.welcomes = vec![VerifiedMlsWelcome {
         delivery: welcome(&full, &recipient, &second_claim),
         claim: Some(second_key),
+        applet_device_scope_guard: None,
         roster_witness: None,
     }];
     full.authority_commit.recipient_queue_capacity = 1;
@@ -1464,6 +1469,7 @@ async fn mls_commit_welcome_queue_is_atomic_exact_endpoint_and_revocation_gated(
     reused.authority_commit.welcomes = vec![VerifiedMlsWelcome {
         delivery: welcome(&reused, &recipient, &first_claim),
         claim: Some(first_key),
+        applet_device_scope_guard: None,
         roster_witness: None,
     }];
     reused.authority_commit.recipient_queue_capacity = 10;
@@ -1854,6 +1860,7 @@ fn remote_welcome(
     VerifiedMlsWelcome {
         delivery: welcome(commit, &recipient, &claim_id()),
         claim: None,
+        applet_device_scope_guard: None,
         roster_witness: None,
     }
 }
@@ -2269,6 +2276,7 @@ async fn same_station_add_installs_signed_history_atomically() {
     let mut local = VerifiedMlsWelcome {
         delivery,
         claim: None,
+        applet_device_scope_guard: None,
         roster_witness: None,
     };
     let proof = signed_remote_add_attestation(

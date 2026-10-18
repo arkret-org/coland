@@ -87,10 +87,12 @@ fn persistence_event_commit_request(
     command: crate::events::CommitAcceptedEventCommand,
 ) -> coland_storage::EventCommitRequest {
     coland_storage::EventCommitRequest {
+        verified_media_participant: command.verified_media_participant,
         authority_commit: command.authority_commit,
         self_producer_guard: command.self_producer_guard,
         applet_producer_guard: command.applet_producer_guard,
         widget_token_gate: command.widget_token_gate,
+        agent_grant_scope_evidence: command.agent_grant_scope_evidence,
         forwarded_producer_evidence: command.forwarded_producer_evidence,
         forwarded_agent_producer: command.forwarded_agent_producer,
         agent_deployment_ceiling: command.agent_deployment_ceiling,
@@ -621,11 +623,47 @@ fn encode_mls_contract<T: serde::Serialize>(
 
 #[async_trait::async_trait]
 impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMaintenance {
+    async fn consume_for_applet_device(
+        &self,
+        command: coland_storage::AppletDeviceKeyPackageConsume<'_>,
+    ) -> crate::ServiceResult<coland_storage::MlsKeyPackageConsumption> {
+        Ok(self
+            .0
+            .mls_key_packages()
+            .consume_for_applet_device(command)
+            .await?)
+    }
     async fn store_key_package(
         &self,
         record: &crate::events::MlsKeyPackageState,
     ) -> crate::ServiceResult<bool> {
         Ok(self.0.mls_key_packages().put(record).await?)
+    }
+    async fn store_key_package_for_applet_device(
+        &self,
+        record: &crate::events::MlsKeyPackageState,
+        guard: &coland_storage::AppletManagedDeviceScopeGuard,
+        expires_at: chrono::DateTime<chrono::Utc>,
+        body: &arkret_models_crypto::KeyPackagesUploadRequestBody,
+    ) -> crate::ServiceResult<bool> {
+        Ok(self
+            .0
+            .mls_key_packages()
+            .put_for_applet_device(record, guard, expires_at, body)
+            .await?)
+    }
+    async fn revoke_for_applet_device(
+        &self,
+        body: &arkret_models_crypto::KeyPackagesRevokeRequestBody,
+        authority: &coland_storage::AppletManagedDeviceAuthority,
+        scope: &arkret_wire::ScopeRef,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::ServiceResult<coland_storage::MlsKeyPackageRevocation> {
+        Ok(self
+            .0
+            .mls_key_packages()
+            .revoke_for_applet_device(body, authority, scope, expires_at)
+            .await?)
     }
     async fn key_package(
         &self,
@@ -639,6 +677,16 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
     ) -> crate::ServiceResult<Option<crate::events::MlsKeyPackageState>> {
         Ok(self.0.mls_key_packages().get_by_ref(keypackage_ref).await?)
     }
+    async fn peer_claim_candidates(
+        &self,
+        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    ) -> crate::ServiceResult<Vec<crate::events::MlsKeyPackageState>> {
+        Ok(self
+            .0
+            .mls_key_packages()
+            .peer_claim_candidates(body)
+            .await?)
+    }
     async fn claim_key_package(
         &self,
         command: crate::events::ClaimMlsKeyPackageCommand<'_>,
@@ -647,6 +695,7 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
             .0
             .mls_key_packages()
             .try_claim(coland_storage::MlsKeyPackageClaim {
+                applet_device_scope_guard: command.applet_device_scope_guard.cloned(),
                 id: command.id,
                 target: match command.target {
                     crate::events::ClaimMlsKeyPackageTarget::Group(group_id) => {
@@ -673,12 +722,29 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
         id: &str,
         mls_group_id: &str,
         now_unix_ms: i64,
-        peer_consume_receipt: Option<&Value>,
+        consumption: Option<coland_storage::MlsKeyPackageConsumeEvidence<'_>>,
     ) -> crate::ServiceResult<Option<crate::events::MlsKeyPackageState>> {
         Ok(self
             .0
             .mls_key_packages()
-            .consume_claim(id, mls_group_id, now_unix_ms, peer_consume_receipt)
+            .consume_claim(id, mls_group_id, now_unix_ms, consumption)
+            .await?)
+    }
+    async fn record_peer_claim_attempt(
+        &self,
+        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    ) -> crate::ServiceResult<coland_storage::PeerKeyPackageClaimRateDecision> {
+        Ok(self
+            .0
+            .mls_key_packages()
+            .record_peer_claim_attempt(body)
+            .await?)
+    }
+    async fn prune_peer_claim_attempts(&self) -> crate::ServiceResult<usize> {
+        Ok(self
+            .0
+            .mls_key_packages()
+            .prune_peer_claim_attempts()
             .await?)
     }
     async fn peer_claim(
@@ -730,6 +796,8 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
             .0
             .mls_key_packages()
             .try_claim_peer(coland_storage::PeerKeyPackageClaimAttempt {
+                admission: attempt.admission.cloned().map(std::sync::Arc::new),
+                applet_device_scope_guard: attempt.applet_device_scope_guard.cloned(),
                 keypackage_id: attempt.keypackage_id,
                 mls_group_id: attempt.mls_group_id,
                 device_authorize_event_id: attempt.device_authorize_event_id,
@@ -857,13 +925,13 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
 
     async fn retire_owner_account_keypackages(
         &self,
-        owner_account_pk: coland_storage::AccountPk,
+        owner_account_id: arkret_wire::AccountId,
         retired_at: i64,
     ) -> crate::ServiceResult<usize> {
         let rows = self.0.mls_key_packages().snapshot_all().await?;
         let mut retired = 0;
         for row in rows.into_iter().filter(|row| {
-            row.owner_account_pk == owner_account_pk
+            row.owner_account_id == owner_account_id
                 && row.claimed_by_mls_group_id.is_none()
                 && row.consumed_at.is_none()
         }) {
@@ -871,6 +939,7 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
                 .0
                 .mls_key_packages()
                 .try_claim(coland_storage::MlsKeyPackageClaim {
+                    applet_device_scope_guard: None,
                     id: &row.id,
                     target: coland_storage::MlsKeyPackageClaimTarget::Retire,
                     intended_realm_id: None,
@@ -986,6 +1055,7 @@ impl crate::events::EventCommitPort for PersistenceEventCommitter {
             .commit_event(persistence_event_commit_request(command))
             .await?;
         Ok(crate::events::CommitAcceptedEventResult {
+            audit_outcome: outcome.audit_outcome,
             projections_inserted: outcome.projections_inserted,
             deliveries_inserted: outcome.outbox_inserted,
         })
@@ -998,6 +1068,7 @@ impl crate::events::EventCommitPort for PersistenceEventCommitter {
         let outcome = self
             .0
             .commit_event_batch(coland_storage::EventBatchCommitRequest {
+                audit_unit: command.audit_unit,
                 events: command
                     .events
                     .into_iter()
@@ -1013,6 +1084,7 @@ impl crate::events::EventCommitPort for PersistenceEventCommitter {
             })
             .await?;
         Ok(crate::events::CommitAcceptedEventResult {
+            audit_outcome: outcome.audit_outcome,
             projections_inserted: outcome.projections_inserted,
             deliveries_inserted: outcome.outbox_inserted,
         })

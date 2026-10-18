@@ -181,6 +181,7 @@ pub(crate) async fn authorize_relation_write_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     let expected_stream =
         arkret_wire::CommitStreamRef::from_scope(&event.scope_ref, Some(event.realm_id.clone()))
@@ -190,10 +191,8 @@ pub(crate) async fn authorize_relation_write_in_connection(
             "Relation write differs from its accepting source stream",
         ));
     }
-    crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-        conn,
-        event,
-        commit.committed_at,
+    crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+        conn, event, commit, prepared,
     )
     .await?;
     if signed_scope_circle(event).is_some() {

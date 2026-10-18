@@ -60,7 +60,8 @@ fn event_digest_for_frozen_claim(event: &Event, claim: &Hash) -> Result<Hash, Ap
 /// The source-signed receipt freezes the exact producer method and public key
 /// that passed its authority admission. The receiving Station must still
 /// verify the original Event proof with that key before projecting the fact.
-fn verify_peer_contact_event_producer(
+async fn verify_peer_contact_event_producer(
+    state: &AppState,
     delivery: &PeerContactSubmitRequestBody,
     event: &Event,
     source_id: &str,
@@ -92,7 +93,32 @@ fn verify_peer_contact_event_producer(
             ));
         }
     };
-    verify_exact_contact_event_producer(event, holder, signer, source_id)
+    let history = if matches!(holder, ContactPeer::Agent { .. }) {
+        let did = arkret_identity::contact_producer_identity::agent_contact_identity_did(
+            event, holder, signer,
+        )
+        .map_err(|error| super::super::events::peer::schema_violation(error.to_string()))?;
+        Some(
+            state
+                .dids()
+                .verified_webvh_history(&did)
+                .await
+                .map_err(|error| match error {
+                    coland_services::identity::PinnedDidResolutionError::HistoryUnverifiable(_) => {
+                        super::super::events::peer::schema_violation(format!(
+                            "Contact Agent native history invalid: {error}"
+                        ))
+                    }
+                    _ => crate::app_error!(
+                        TemporarilyUnavailable,
+                        format!("Contact Agent native history unavailable: {error}")
+                    ),
+                })?,
+        )
+    } else {
+        None
+    };
+    verify_exact_contact_event_producer(event, holder, signer, source_id, history.as_ref())
 }
 
 fn verify_exact_contact_event_producer(
@@ -100,6 +126,7 @@ fn verify_exact_contact_event_producer(
     holder: &ContactPeer,
     signer: &ContactProducerSigner,
     source_id: &str,
+    agent_history: Option<&arkret_identity::VerifiedDidWebvhLog>,
 ) -> Result<(), AppError> {
     signer.validate_for_event(event, holder).map_err(|error| {
         super::super::events::peer::schema_violation(format!(
@@ -113,14 +140,17 @@ fn verify_exact_contact_event_producer(
             "Contact producer holder is hosted by another Station",
         ));
     }
-    // Agent native identity/controller history needs the registered delegated
-    // holder verifier. Until that branch is wired, it cannot inherit the human
-    // key path merely because a source Station asserted a key in a receipt.
     if matches!(holder, ContactPeer::Agent { .. }) {
-        return Err(crate::app_error!(
-            FailedPrecondition,
-            "Agent Contact producer history is unavailable",
-        ));
+        let history = agent_history.ok_or_else(|| {
+            crate::app_error!(
+                FailedPrecondition,
+                "Agent Contact producer history is unavailable",
+            )
+        })?;
+        arkret_identity::contact_producer_identity::validate_agent_contact_native_history(
+            event, holder, signer, history,
+        )
+        .map_err(|error| super::super::events::peer::schema_violation(error.to_string()))?;
     }
     event
         .validate_for_contact_history_structural()
@@ -547,7 +577,7 @@ async fn peer_contacts_submit(
             "Contact carrier issuer does not match signed_event.actor_id",
         ));
     }
-    verify_peer_contact_event_producer(&delivery, signed_event, &source_id)?;
+    verify_peer_contact_event_producer(state, &delivery, signed_event, &source_id).await?;
     let issuer = issuer_core_id.signing_principal_id().to_string();
     let recipient_id = contact_address.delivery_station_id().as_str();
     if recipient_id != state.service_id() {
@@ -4537,7 +4567,7 @@ mod tests {
         )
         .unwrap();
         event.producer_proof = Some(proof);
-        verify_exact_contact_event_producer(&event, &holder, &signer, ALICE_SERVICE).unwrap();
+        verify_exact_contact_event_producer(&event, &holder, &signer, ALICE_SERVICE, None).unwrap();
 
         let wrong_key = ContactProducerSigner::direct(
             signer.verification_method().clone(),
@@ -4550,16 +4580,17 @@ mod tests {
         )
         .unwrap();
         assert!(
-            verify_exact_contact_event_producer(&event, &holder, &wrong_key, ALICE_SERVICE)
+            verify_exact_contact_event_producer(&event, &holder, &wrong_key, ALICE_SERVICE, None)
                 .is_err()
         );
         assert!(
-            verify_exact_contact_event_producer(&event, &holder, &signer, BOB_SERVICE).is_err()
+            verify_exact_contact_event_producer(&event, &holder, &signer, BOB_SERVICE, None)
+                .is_err()
         );
         let mut tampered = event;
         tampered.producer_proof.as_mut().unwrap().jws.push('x');
         assert!(
-            verify_exact_contact_event_producer(&tampered, &holder, &signer, ALICE_SERVICE)
+            verify_exact_contact_event_producer(&tampered, &holder, &signer, ALICE_SERVICE, None)
                 .is_err()
         );
     }

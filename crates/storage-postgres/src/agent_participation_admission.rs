@@ -44,6 +44,46 @@ pub(crate) async fn lock_selection(
     Ok(())
 }
 
+/// Read the most specific private selection at the caller's authority cut.
+pub(crate) async fn selection_snapshot(
+    conn: &mut AsyncPgConnection,
+    agent: &str,
+    scopes: &[String],
+) -> PersistenceResult<Option<ParticipationBits>> {
+    selection_at_cut(conn, agent, scopes, false).await
+}
+
+async fn selection_at_cut(
+    conn: &mut AsyncPgConnection,
+    agent: &str,
+    scopes: &[String],
+    locked: bool,
+) -> PersistenceResult<Option<ParticipationBits>> {
+    let mut query = "SELECT jsonb_build_object('target_scope',scope,'selection',jsonb_build_object('reply_message',reply_message,'reaction_add',reaction_add,'reaction_remove',reaction_remove,'accept_third_party_mention',accept_third_party_mention,'act_on_behalf',act_on_behalf),'version',version,'next_replace_input',jsonb_build_object('expected_version',version)) AS value FROM agent_participation WHERE agent_id=$1 AND scope_key=ANY($2)".to_owned();
+    if locked {
+        query.push_str(" FOR SHARE");
+    }
+    let rows = sql_query(query)
+        .bind::<Text, _>(agent)
+        .bind::<Array<Text>, _>(scopes)
+        .load::<ValueRow>(&mut *conn)
+        .await
+        .map_err(PersistenceError::database)?
+        .into_iter()
+        .map(|row| {
+            let entry: AgentParticipationEntry =
+                serde_json::from_value(row.value).map_err(|_| unresolved())?;
+            entry.validate().map_err(|_| unresolved())?;
+            Ok(entry)
+        })
+        .collect::<PersistenceResult<Vec<_>>>()?;
+    Ok(scopes
+        .iter()
+        .rev()
+        .find_map(|key| rows.iter().find(|entry| entry.scope.scope_key() == *key))
+        .map(|entry| entry.selection))
+}
+
 pub(crate) async fn require_current(
     conn: &mut AsyncPgConnection,
     event: &Event,
@@ -62,7 +102,7 @@ pub(crate) async fn require_current(
         }
     };
     if event
-        .human_device_producer()
+        .account_device_producer()
         .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?
         .is_some()
     {
@@ -74,7 +114,7 @@ pub(crate) async fn require_current(
     if &agent.station_id != target_station {
         return Err(unresolved());
     }
-    require_owner_current(conn, agent).await?;
+    Box::pin(require_owner_current(conn, agent)).await?;
     lock_selection(conn, agent.principal_id.as_str(), true).await?;
 
     let mut scopes = vec![format!("realm:{}", event.realm_id)];
@@ -154,21 +194,10 @@ pub(crate) async fn require_current(
         }
         scopes.push(format!("strand:{}:{strand}", event.realm_id));
     }
-    let selections = sql_query("SELECT jsonb_build_object('target_scope',scope,'selection',jsonb_build_object('reply_message',reply_message,'reaction_add',reaction_add,'reaction_remove',reaction_remove,'accept_third_party_mention',accept_third_party_mention,'act_on_behalf',act_on_behalf),'version',version,'next_replace_input',jsonb_build_object('expected_version',version)) AS value FROM agent_participation WHERE agent_id=$1 AND scope_key=ANY($2) FOR SHARE")
-        .bind::<Text,_>(agent.principal_id.as_str()).bind::<Array<Text>,_>(&scopes)
-        .load::<ValueRow>(&mut *conn).await.map_err(PersistenceError::database)?
-        .into_iter().map(|row| serde_json::from_value::<AgentParticipationEntry>(row.value).map_err(|_| unresolved()))
-        .collect::<PersistenceResult<Vec<_>>>()?;
-    let selected = scopes
-        .iter()
-        .rev()
-        .find_map(|key| {
-            selections
-                .iter()
-                .find(|entry| entry.scope.scope_key() == *key)
-        })
+    let selected = selection_at_cut(conn, agent.principal_id.as_str(), &scopes, true)
+        .await?
         .ok_or_else(unresolved)?;
-    let mut effective = deployment.intersect(selected.selection);
+    let mut effective = deployment.intersect(selected);
     for scope in &scopes {
         if let Some(ceiling) = governance_component(conn, event.realm_id.as_str(), scope).await? {
             effective = effective.intersect(ceiling);
@@ -219,17 +248,10 @@ pub(crate) async fn require_native_reply_current(
         _ => return Err(unresolved()),
     }
     scopes.push(format!("strand:{realm}:{strand}"));
-    let rows = sql_query("SELECT jsonb_build_object('target_scope',scope,'selection',jsonb_build_object('reply_message',reply_message,'reaction_add',reaction_add,'reaction_remove',reaction_remove,'accept_third_party_mention',accept_third_party_mention,'act_on_behalf',act_on_behalf),'version',version,'next_replace_input',jsonb_build_object('expected_version',version)) AS value FROM agent_participation WHERE agent_id=$1 AND scope_key=ANY($2) FOR SHARE")
-        .bind::<Text,_>(agent.principal_id.as_str()).bind::<Array<Text>,_>(&scopes)
-        .load::<ValueRow>(&mut *conn).await.map_err(PersistenceError::database)?
-        .into_iter().map(|row| serde_json::from_value::<AgentParticipationEntry>(row.value).map_err(|_| unresolved()))
-        .collect::<PersistenceResult<Vec<_>>>()?;
-    let selected = scopes
-        .iter()
-        .rev()
-        .find_map(|key| rows.iter().find(|entry| entry.scope.scope_key() == *key))
+    let selected = selection_at_cut(conn, agent.principal_id.as_str(), &scopes, true)
+        .await?
         .ok_or_else(unresolved)?;
-    let mut effective = deployment.intersect(selected.selection);
+    let mut effective = deployment.intersect(selected);
     for scope in &scopes {
         if let Some(ceiling) = governance_component(conn, realm.as_str(), scope).await? {
             effective = effective.intersect(ceiling);
@@ -277,22 +299,42 @@ pub(crate) async fn governance_component(
     realm: &str,
     scope: &str,
 ) -> PersistenceResult<Option<ParticipationBits>> {
+    governance_component_at_cut(conn, realm, scope, true).await
+}
+
+pub(crate) async fn governance_component_snapshot(
+    conn: &mut AsyncPgConnection,
+    realm: &str,
+    scope: &str,
+) -> PersistenceResult<Option<ParticipationBits>> {
+    governance_component_at_cut(conn, realm, scope, false).await
+}
+
+async fn governance_component_at_cut(
+    conn: &mut AsyncPgConnection,
+    realm: &str,
+    scope: &str,
+    lock: bool,
+) -> PersistenceResult<Option<ParticipationBits>> {
     let query = if scope.starts_with("realm:") {
-        "SELECT s.value FROM realm_policy_bundle_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND 'realm:'||s.realm_id=$2 FOR SHARE OF s"
+        "SELECT s.value FROM realm_policy_bundle_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND 'realm:'||s.realm_id=$2"
     } else if scope.starts_with("circle:") {
-        "SELECT s.value FROM circle_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND 'circle:'||s.realm_id||':'||s.circle_id=$2 FOR SHARE OF s"
+        "SELECT s.value FROM circle_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND 'circle:'||s.realm_id||':'||s.circle_id=$2"
     } else if scope.starts_with("strand:") {
-        "SELECT s.value FROM strand_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND 'strand:'||s.realm_id||':'||s.strand_id=$2 FOR SHARE OF s"
+        "SELECT s.value FROM strand_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND 'strand:'||s.realm_id||':'||s.strand_id=$2"
     } else {
         return Err(unresolved());
     };
-    let row = sql_query(query)
-        .bind::<Text, _>(realm)
-        .bind::<Text, _>(scope)
-        .get_result::<ValueRow>(&mut *conn)
-        .await
-        .optional()
-        .map_err(PersistenceError::database)?;
+    let row = sql_query(format!(
+        "{query}{}",
+        if lock { " FOR SHARE OF s" } else { "" }
+    ))
+    .bind::<Text, _>(realm)
+    .bind::<Text, _>(scope)
+    .get_result::<ValueRow>(&mut *conn)
+    .await
+    .optional()
+    .map_err(PersistenceError::database)?;
     if let Some(row) = row {
         return component(&row.value);
     }
@@ -302,7 +344,7 @@ pub(crate) async fn governance_component(
     // The source is the accepted profile-fixed genesis, not a guessed default
     // for a missing ordinary policy bundle. Require the exact four-Commit unit
     // and the genesis current's covering Commit before interpreting omission.
-    let row = sql_query(
+    let row = sql_query(format!(
         "SELECT s.value FROM realm_bootstrap_current_results s \
          JOIN realm_commits c ON c.commit_id=s.current_commit_id \
            AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position \
@@ -315,8 +357,9 @@ pub(crate) async fn governance_component(
              WHERE NOT EXISTS (SELECT 1 FROM realm_commits u \
                WHERE u.realm_id=s.realm_id AND u.stream_position=e.position-1 \
                  AND u.commit_json->>'event_ref'=e.id)) \
-         FOR SHARE OF s,c,f",
-    )
+         {}",
+        if lock { " FOR SHARE OF s,c,f" } else { "" },
+    ))
     .bind::<Text, _>(realm)
     .get_result::<ValueRow>(&mut *conn)
     .await

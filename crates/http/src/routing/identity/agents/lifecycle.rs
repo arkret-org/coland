@@ -1134,7 +1134,7 @@ pub(super) async fn lifecycle_transition(
     // helper is entered. A DPoP proof is single-use, so passing `AuthArgs` and
     // `Request` through here would verify the same proof twice and reject the
     // lifecycle command as a replay.
-    let record = require_agent_controller(state, session, &agent_id).await?;
+    let mut record = require_agent_controller(state, session, &agent_id).await?;
     let terminal_notification = (event_kind == arkret_wire::event_kind_str::SELF_AGENT_DEACTIVATE)
         .then(|| account_notification_context(&record))
         .flatten();
@@ -1153,6 +1153,46 @@ pub(super) async fn lifecycle_transition(
         )
         .with_internal_reason("agent_lifecycle_fanout_unavailable"));
     };
+    if state
+        .authority_commits()
+        .committed_event(&lifecycle_event.event.event_id)
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))?
+        .is_some()
+    {
+        let original_previous_status = lifecycle_event
+            .event
+            .payload
+            .get("previous_status")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AppError::param_invalid("lifecycle_event has no previous_status"))?
+            .to_owned();
+        submit_durable_agent_lifecycle(
+            state,
+            session,
+            &record.principal_control_realm_id,
+            &agent_id,
+            &record.controller_authorization_ref,
+            event_kind,
+            &original_previous_status,
+            reason.as_deref(),
+            lifecycle_event,
+        )
+        .await?;
+        return Ok(AgentLifecycleOutcome { status: new_state });
+    }
+    let (_, _, lifecycle) = accepted_agent_key_authorization_snapshot(state, &record).await?;
+    record.state = projected_agent_lifecycle(record.state, lifecycle)?;
+    if record.state == AgentLifecycleState::Deactivated {
+        return Err(
+            pairing_failed_precondition("agent is deactivated; deactivation is terminal")
+                .with_reason_code(arkret_wire::ReasonCode::AGENT_DEACTIVATED),
+        );
+    }
+    if record.state == AgentLifecycleState::Paused && new_state == AgentLifecycleState::Paused {
+        return Err(pairing_failed_precondition("agent is already paused")
+            .with_reason_code(arkret_wire::ReasonCode::AGENT_PAUSED));
+    }
     // Resume is a pure lifecycle-intent write and MUST NOT interlock with an
     // open pairing handle (key-management.md §3.6.1): an in-flight replacement
     // handle keeps running across resume and closes only on consumption or
@@ -1305,20 +1345,7 @@ pub(super) async fn deactivate_agent(
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let agent_id = agent_id.into_inner();
-    let record = require_agent_controller(state, &session, &agent_id).await?;
     let body = body.into_inner();
-    let reason = body.reason.as_deref();
-
-    validate_durable_agent_lifecycle(
-        &session,
-        &record.principal_control_realm_id,
-        &agent_id,
-        &record.controller_authorization_ref,
-        arkret_wire::event_kind_str::SELF_AGENT_DEACTIVATE,
-        record.state.as_wire_str(),
-        reason,
-        &body.lifecycle_event.event,
-    )?;
 
     // The final contract makes the accepted terminal lifecycle Event the
     // single atomic cascade boundary.  Key and grant invalidation is reducer

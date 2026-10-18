@@ -156,6 +156,7 @@ fn approvals(unit: &mut OrdinaryRealmBootstrapCommitUnit, slot: usize) {
     );
     unit.event_approvals.resize(unit.transactions.len(), None);
     unit.event_approvals[slot] = Some(coland_storage::EventApprovalCommit {
+        carrier_binding: None,
         management_current: None,
         event_id: event.event_id.clone(),
         event_digest: digest,

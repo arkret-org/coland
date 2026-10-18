@@ -59,6 +59,12 @@ struct ProfileRow {
     actor_profile_id: String,
     #[diesel(sql_type = Jsonb)]
     value: Value,
+    #[diesel(sql_type = Nullable<Jsonb>)]
+    envelope: Option<Value>,
+    #[diesel(sql_type = Nullable<Jsonb>)]
+    commit_json: Option<Value>,
+    #[diesel(sql_type = Nullable<Jsonb>)]
+    accepted_value: Option<Value>,
 }
 
 #[derive(QueryableByName)]
@@ -408,24 +414,66 @@ async fn commit_verified(
 
 async fn locked_profile(
     conn: &mut AsyncPgConnection,
-    realm_id: &arkret_wire::RealmId,
+    event: &Event,
 ) -> Result<Option<ActorProfile>, PgTransactionError> {
-    sql_query(
-        "SELECT actor_profile_id,value FROM actor_profile_current_results \
-         WHERE realm_id=$1 FOR UPDATE",
+    let row=sql_query(
+        "SELECT p.actor_profile_id,p.value,e.envelope,c.commit_json,v.value AS accepted_value FROM actor_profile_current_results p \
+         LEFT JOIN realm_commits c ON c.commit_id=p.current_commit_id AND c.realm_id=p.realm_id AND c.stream_position=p.current_stream_position \
+         LEFT JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' AND e.envelope->'actor_id'=p.actor_id AND e.envelope->'scope_ref'=p.scope_ref \
+         LEFT JOIN actor_profile_result_versions v ON v.commit_id=p.current_commit_id AND v.actor_profile_id=p.actor_profile_id \
+         WHERE p.realm_id=$1 AND p.actor_id=$2 AND p.scope_ref=$3 FOR UPDATE OF p",
     )
-    .bind::<Text, _>(realm_id.as_str())
+    .bind::<Text, _>(event.realm_id.as_str())
+    .bind::<Jsonb, _>(serde_json::json!(event.actor_id))
+    .bind::<Jsonb, _>(serde_json::json!(event.scope_ref))
     .get_result::<ProfileRow>(&mut *conn)
     .await
-    .optional()?
-    .map(|row| {
+    .optional()?;
+    let Some(row) = row else {
+        #[derive(QueryableByName)]
+        struct Known {
+            #[diesel(sql_type=diesel::sql_types::Bool)]
+            present: bool,
+        }
+        let known=sql_query("SELECT EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE c.realm_id=$1 AND e.state='committed' AND e.kind='ak.profile.create' AND e.envelope->'actor_id'=$2 AND e.envelope->'scope_ref'=$3) AS present")
+            .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(serde_json::json!(event.actor_id)).bind::<Jsonb,_>(serde_json::json!(event.scope_ref)).get_result::<Known>(&mut *conn).await?;
+        if known.present {
+            return Err(PersistenceError::Conflict(
+                "revision_unavailable: accepted Profile current is absent".into(),
+            )
+            .into());
+        }
+        return Ok(None);
+    };
+    let source: Event = serde_json::from_value(
+        row.envelope
+            .ok_or_else(|| corrupt("Profile has no exact accepted Event"))?,
+    )
+    .map_err(corrupt)?;
+    let commit: RealmCommit = serde_json::from_value(
+        row.commit_json
+            .ok_or_else(|| corrupt("Profile has no exact covering Commit"))?,
+    )
+    .map_err(corrupt)?;
+    if source.scope_ref != event.scope_ref
+        || source.actor_id != event.actor_id
+        || commit.event_ref != source.event_id
+        || commit.stream_ref
+            != CommitStreamRef::from_scope(&event.scope_ref, None).map_err(corrupt)?
+        || row.accepted_value.as_ref() != Some(&row.value)
+    {
+        return Err(PersistenceError::Conflict(
+            "revision_unavailable: Profile current differs from its accepted result".into(),
+        )
+        .into());
+    }
+    {
         let profile: ActorProfile = serde_json::from_value(row.value).map_err(corrupt)?;
         if profile.id.as_ref().map(|id| id.as_str()) != Some(row.actor_profile_id.as_str()) {
             return Err(corrupt("actor profile row id differs from its value"));
         }
-        Ok(profile)
-    })
-    .transpose()
+        Ok(Some(profile))
+    }
 }
 
 async fn profile_result_at(
@@ -535,14 +583,23 @@ pub(crate) async fn materialize_profile_in_connection(
     commit: &RealmCommit,
     subject: &arkret_wire::AccountId,
 ) -> Result<ActorProfile, PgTransactionError> {
+    materialize_profile_at(conn, event, commit.committed_at, subject).await
+}
+
+pub(crate) async fn materialize_profile_at(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    at: chrono::DateTime<chrono::Utc>,
+    subject: &AccountId,
+) -> Result<ActorProfile, PgTransactionError> {
     const WHAT: &str = "Actor Profile";
-    let current = locked_profile(conn, &event.realm_id).await?;
+    let current = locked_profile(conn, event).await?;
     let next = match event.kind {
         EventKind::ProfileCreate => {
             if current.is_some() {
                 return Err(rejected(
                     ConflictCode::FailedPrecondition,
-                    "the PCR already has an accepted Actor Profile; submit ak.profile.update",
+                    "the Account and scope already have an accepted Actor Profile; submit ak.profile.update",
                 ));
             }
             let create: ActorProfileCreatePayload = payload(event, WHAT)?;
@@ -567,13 +624,13 @@ pub(crate) async fn materialize_profile_in_connection(
             let current = current.ok_or_else(|| {
                 rejected(
                     ConflictCode::FailedPrecondition,
-                    "the PCR has no accepted Actor Profile to update",
+                    "the Account and scope have no accepted Actor Profile to update",
                 )
             })?;
             if current.id.as_ref() != Some(&update.target_ref) {
                 return Err(rejected(
                     ConflictCode::FailedPrecondition,
-                    "ak.profile.update target_ref is not the PCR's accepted Actor Profile",
+                    "ak.profile.update target_ref is not the Account and scope accepted Actor Profile",
                 ));
             }
             if current.principal_id != subject.principal_id {
@@ -614,7 +671,7 @@ pub(crate) async fn materialize_profile_in_connection(
         conn,
         &next.accountable_principal_ids,
         &next.principal_id,
-        commit.committed_at,
+        at,
     )
     .await?
     {
@@ -645,13 +702,15 @@ pub(crate) async fn write_profile_current_in_connection(
         .map_err(|_| corrupt("Commit stream position is out of range"))?;
     let advanced = sql_query(
         "INSERT INTO actor_profile_current_results \
-         (realm_id,actor_profile_id,current_commit_id,current_stream_position,value,updated_at) \
-         VALUES ($1,$2,$3,$4,$5,$6) \
+         (realm_id,actor_profile_id,current_commit_id,current_stream_position,value,updated_at,actor_id,scope_ref) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) \
          ON CONFLICT (actor_profile_id) DO UPDATE SET \
            current_commit_id=EXCLUDED.current_commit_id, \
            current_stream_position=EXCLUDED.current_stream_position, \
            value=EXCLUDED.value, updated_at=EXCLUDED.updated_at \
          WHERE actor_profile_current_results.realm_id=EXCLUDED.realm_id \
+           AND actor_profile_current_results.actor_id=EXCLUDED.actor_id \
+           AND actor_profile_current_results.scope_ref=EXCLUDED.scope_ref \
            AND actor_profile_current_results.current_stream_position<EXCLUDED.current_stream_position",
     )
     .bind::<Text, _>(event.realm_id.as_str())
@@ -660,6 +719,8 @@ pub(crate) async fn write_profile_current_in_connection(
     .bind::<BigInt, _>(position)
     .bind::<Jsonb, _>(&value)
     .bind::<Timestamptz, _>(commit.committed_at)
+    .bind::<Jsonb, _>(serde_json::json!(event.actor_id))
+    .bind::<Jsonb, _>(serde_json::json!(event.scope_ref))
     .execute(&mut *conn)
     .await?;
     if advanced != 1 {
@@ -931,6 +992,30 @@ impl coland_storage::ActorProfileStore for PgActorProfileStore {
             .map_err(PersistenceError::database)?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             crate::agent_control::admit_agent_control_event_in_connection(
+                conn,
+                &write,
+                origin.as_ref(),
+            )
+            .await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn admit_agent_same_key_renewal(
+        &self,
+        write: coland_storage::AgentControlAdmissionWrite,
+        origin: Option<coland_storage::AgentControlOriginSource>,
+    ) -> PersistenceResult<coland_storage::AgentControlAdmissionOutcome> {
+        write
+            .commit
+            .validate()
+            .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            crate::agent_control::admit_agent_same_key_renewal_in_connection(
                 conn,
                 &write,
                 origin.as_ref(),

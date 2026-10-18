@@ -303,6 +303,7 @@ pub(crate) async fn commit_message_create_current_result_in_connection(
     // which the profile table already decided at this cut.
     if !cut.is_direct_conversation()
         && event.applet_id.is_none()
+        && event.executed_by.is_none()
         && event.authorization_ref.as_ref().is_some_and(|reference| {
             controller != event.actor_id || reference.as_str() != root.authority_event_ref.as_str()
         })
@@ -842,6 +843,7 @@ pub(crate) async fn commit_message_revise_current_result_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if event.kind != arkret_wire::EventKind::MessageRevise {
         return Ok(());
@@ -890,7 +892,8 @@ pub(crate) async fn commit_message_revise_current_result_in_connection(
             created_at: target.created_at,
             strand_id: &target.strand_id,
         },
-        commit.committed_at,
+        commit,
+        prepared,
     )
     .await?;
     crate::message_interactions::require_message_actor(conn, event, commit.committed_at).await?;

@@ -825,7 +825,7 @@ impl MediaIssuerConfig {
 }
 
 /// Load the media issuer configuration. `issuer_kid` defaults to
-/// `<service DID>#media-1` at request time when unset, so a single-key
+/// `<service DID>#notary-key` at request time when unset, so a single-key
 /// deployment needs no extra environment variable.
 fn load_media_issuer_config(values: &BTreeMap<String, String>) -> MediaIssuerConfig {
     MediaIssuerConfig {

@@ -101,13 +101,16 @@ pub enum SelfExactCurrentRead<T> {
 
 /// Anchor state behind `ak.self.media_service_binding.read.resolve.v1` for one
 /// authenticated Account at one governing read cut.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MediaServiceAnchorRead {
     /// Invisible Realm, non-member caller, or no accepted media service
     /// assignment in the Realm.
     NotFound,
     /// A media service assignment was accepted in the visible Realm.
-    Anchored,
+    Anchored {
+        value: arkret_models_collaboration::events_payloads::realm::RealmMediaServiceValue,
+        revision: arkret_wire::CurrentRevision,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -246,8 +249,9 @@ pub struct AccountRealmWindowRequest {
     pub window_cursor: String,
     pub expires_at_ms: i64,
     pub now_ms: i64,
-    /// Canonical bytes the delivered rows may occupy. The window is atomic:
-    /// rows that do not fit fail the freeze instead of being truncated.
+    /// Canonical bytes available for all windows, committed rows, typed current
+    /// and coverage heads. The caller reserves the remaining frame envelope.
+    /// A payload that does not fit fails the entire freeze without truncation.
     pub byte_budget: usize,
     /// The Realm-stream head the Account cursor last delivered. When it is
     /// still an accepted ancestor of the head within `window_limit`, the
@@ -352,6 +356,15 @@ pub struct AuthorityCommitTransaction {
     pub recipient_queue_capacity: usize,
 }
 
+/// Actual RFC 9421 carrier key authenticated by the HTTP boundary. It is
+/// transport identity material, never Principal or Device signing authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppletControlCarrier {
+    pub service_id: arkret_wire::DidCoreId,
+    pub verification_method: arkret_wire::DidUrl,
+    pub public_key: [u8; 32],
+}
+
 /// Current producer authorization pinned by the self submit preflight and
 /// rechecked inside the same transaction that commits the Event. This is an
 /// internal persistence guard, never a caller-supplied protocol claim.
@@ -371,6 +384,9 @@ pub enum SelfProducerCommitGuard {
         mapping_receipt: Option<serde_json::Value>,
         reporter_device_guard: Option<Box<crate::DeviceRevocationGateSelector>>,
     },
+    /// Native managed Device identity and exact signed business scope. Current
+    /// permission and source provenance are rechecked in the accepting unit.
+    AppletManagedDevice(Box<AppletManagedDeviceScopeGuard>),
     HumanDevice(crate::DeviceRevocationGateSelector),
     /// Original native regular root frozen with the accepting Event Commit.
     HumanDeviceEvidence {
@@ -383,6 +399,15 @@ pub enum SelfProducerCommitGuard {
         authorization_ref: arkret_wire::CommittedEventRef,
         verification_method: arkret_wire::DidUrl,
     },
+}
+
+/// Process-local evidence prepared from authenticated transport and a fresh
+/// Service resolver. This is never a wire credential or an allow verdict.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AppletManagedDeviceScopeGuard {
+    pub authority: crate::AppletManagedDeviceAuthority,
+    pub effective_scope: arkret_wire::ScopeRef,
+    pub service_did_document: arkret_identity::DidDocument,
 }
 
 impl SelfProducerCommitGuard {
@@ -915,10 +940,13 @@ pub struct MlsInstalledBase {
 /// local claim: its Welcome rides the Commit's committed-replication intent
 /// to that Station, which re-verifies the claim (encryption-and-audit.md
 /// §2.2).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct VerifiedMlsWelcome {
     pub delivery: MlsWelcomeDelivery,
     pub claim: Option<MlsWelcomeClaimLedgerKey>,
+    /// Required for a locally hosted native package; storage checks the original
+    /// package and current PCR/scope facts inside the accepting transaction.
+    pub applet_device_scope_guard: Option<crate::AppletManagedDeviceScopeGuard>,
     /// Absent until the immutable Genesis selector is verified from the
     /// accepted committed-replication carrier.
     pub roster_witness: Option<VerifiedMlsRecipientRosterWitness>,
@@ -1309,6 +1337,8 @@ pub struct CommittedReplica {
     pub local_service_id: arkret_wire::DidCoreId,
     /// The verified remote current authority the source Commit verified under.
     pub authority: CurrentRealmAuthority,
+    /// Required for a verified older-tenure Full received under a newer cut.
+    pub historical_commit: Option<arkret_identity::VerifiedHistoricalRealmCommit>,
     pub event: arkret_wire::Event,
     pub commit: arkret_wire::RealmCommit,
     pub producer_signer_fact:
@@ -1332,6 +1362,8 @@ pub struct CommittedReplica {
 pub struct CommittedChainNode {
     pub local_service_id: arkret_wire::DidCoreId,
     pub authority: CurrentRealmAuthority,
+    /// The same proof is required for continuity-only older-tenure nodes.
+    pub historical_commit: Option<arkret_identity::VerifiedHistoricalRealmCommit>,
     pub commit: arkret_wire::RealmCommit,
 }
 
@@ -1381,6 +1413,11 @@ pub struct SignalScopeAuthorityQuery<'a> {
     pub signal_class: arkret_wire::SignalClass,
     pub sent_at: DateTime<Utc>,
     pub at: DateTime<Utc>,
+    pub include_product_authority: bool,
+    pub product_agent: Option<(
+        &'a arkret_wire::AccountId,
+        &'a arkret_models_collaboration::events_payloads::agent::AgentKeyScope,
+    )>,
 }
 
 /// Internal read-only eligibility at the Signal's signed and current cuts.
@@ -1390,6 +1427,28 @@ pub struct SignalScopeAuthority {
     pub historical_mls_event_ref: arkret_wire::EventId,
     pub current_mls: arkret_wire::MlsGroupCurrent,
     pub cipher_suite: String,
+    pub current_realm_head: arkret_wire::CommitStreamHead,
+    pub current_scope_head: arkret_wire::CommitStreamHead,
+    pub product_authority: Option<Box<arkret_models_collaboration::SignalProductAuthority>>,
+}
+
+/// Accepted Call state and complete-ActorId roster at one held stream head.
+#[derive(Clone, Debug)]
+pub struct CallCurrentCut {
+    pub scope_ref: arkret_wire::ScopeRef,
+    pub head: arkret_wire::CommitStreamHead,
+    pub generation: u64,
+    pub lifecycle: arkret_models_collaboration::events_payloads::call::CallLifecycleState,
+    pub focus: Option<arkret_models_collaboration::events_payloads::call::CallFocus>,
+    pub participants: Vec<(
+        arkret_models_collaboration::events_payloads::call::CallParticipant,
+        arkret_wire::RealmCommit,
+    )>,
+    pub roster_revision: Option<arkret_wire::CurrentRevision>,
+    pub moderation_revision: Option<arkret_wire::CurrentRevision>,
+    pub moderation_history:
+        Option<arkret_models_collaboration::events_payloads::call::CallModerationCurrentValue>,
+    pub moderation: Vec<arkret_models_collaboration::events_payloads::call::CallParticipantRemoval>,
 }
 
 /// One atomic read cut for a member's MLS Genesis material request. A member
@@ -1440,6 +1499,21 @@ impl AccountStatusCurrentObservation {
 pub struct AccountContentDeliveryInput {
     pub realms: Vec<arkret_wire::RealmId>,
     pub committed_events: Vec<arkret_wire::CommittedEventView>,
+    /// Exact immutable claim response and the real native endpoints whose
+    /// current material permission must remain held through this handoff.
+    pub keypackage_claims: Vec<crate::MlsKeyPackageClaimDelivery>,
+    /// Exact member selectors for public MLS material at the native handoff cut.
+    pub mls_group_material_reads: Vec<
+        arkret_models_collaboration::mls_group_state_material::MlsMemberGroupStateMaterialReadRequestBody,
+    >,
+    pub mls_roster_reads: Vec<
+        arkret_models_collaboration::mls_roster_authority::MlsMemberRosterAuthorityReadRequestBody,
+    >,
+    /// Exact prepared scan and original SDK response, re-read on the held cut.
+    pub stream_scans: Vec<(
+        arkret_wire::StreamScanRequest,
+        arkret_wire::StreamScanOutcome,
+    )>,
     pub current_views:
         Vec<arkret_models_collaboration::sync_frames::current_results::AccountCurrentView>,
     pub projection_lists: Vec<(
@@ -1473,6 +1547,23 @@ pub struct AccountContentDeliveryInput {
         arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentRequestBody,
         arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome,
     )>,
+    /// Trusted in-process witness from a fresh authenticated governing peer.
+    /// It is only consumed by this one response's local delivery guard.
+    pub remote_watch_read: Option<(
+        arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentRequestBody,
+        arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome,
+        CurrentRealmAuthority,
+    )>,
+    /// A fresh governing audited-read response or its durable local freeze.
+    pub audited_watch_read: Option<(
+        arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
+        arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+        CurrentRealmAuthority,
+    )>,
+    pub watch_delivery_device: Option<crate::DeviceRevocationGateSelector>,
+    /// Local bearer sessions retain their exact stored Account through handoff.
+    /// Request-scoped signed grants are freshly introspected at the HTTP cut.
+    pub watch_local_session: Option<(String, crate::AccountPk)>,
     pub blobs: Vec<(
         arkret_wire::BlobRef,
         crate::BlobRecord,
@@ -1481,6 +1572,7 @@ pub struct AccountContentDeliveryInput {
     pub credential_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub agent_session_scope: Option<(Vec<String>, serde_json::Map<String, serde_json::Value>)>,
     pub agent_endpoint: Option<crate::AgentEndpointGuard>,
+    pub applet_endpoint: Option<AppletManagedDeviceScopeGuard>,
     pub qualified_agent_scope_evidence: Option<crate::VerifiedAgentScopeEvidence>,
     pub unresolved_content_realms: Vec<arkret_wire::RealmId>,
 }
@@ -1558,6 +1650,11 @@ pub trait AccountContentDeliveryGuard: Send {
     fn permits_handoff(&self) -> bool {
         false
     }
+    /// Finish any asynchronous validation at the physical frame boundary.
+    /// The implementation retains its original cut and rechecks its clock.
+    async fn prepare_handoff(&mut self) -> bool {
+        self.permits_handoff()
+    }
     async fn finish(self: Box<Self>) -> PersistenceResult<()>;
 }
 
@@ -1575,6 +1672,35 @@ pub struct NativeMessageReplyPreparation<'a> {
 
 #[async_trait]
 pub trait AuthorityCommitStore: Send + Sync {
+    async fn call_current_cut(
+        &self,
+        _realm: &arkret_wire::RealmId,
+        _call: &arkret_wire::CallId,
+        _actor: &arkret_wire::ActorId,
+    ) -> PersistenceResult<Option<CallCurrentCut>> {
+        Err(PersistenceError::Conflict(
+            "temporarily_unavailable: Call current cut is not available".to_owned(),
+        ))
+    }
+    async fn check_call_media_release(
+        &self,
+        _request: &arkret_models_collaboration::objects::media::CallMediaTokenExchangeRequestBody,
+        _issuer: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<bool> {
+        Err(PersistenceError::Conflict(
+            "temporarily_unavailable: media release cut is unavailable".to_owned(),
+        ))
+    }
+    async fn realm_media_service_current(
+        &self,
+        _realm: &arkret_wire::RealmId,
+    ) -> PersistenceResult<
+        Option<arkret_models_collaboration::events_payloads::RealmMediaServiceValue>,
+    > {
+        Err(PersistenceError::Conflict(
+            "temporarily_unavailable: media service current is not available".to_owned(),
+        ))
+    }
     /// Governing capability/management preflight for self or the exact verified
     /// controller of an owned Agent. This does not issue a runtime/session grant.
     async fn owned_agent_authorization_check(
@@ -1669,20 +1795,20 @@ pub trait AuthorityCommitStore: Send + Sync {
     }
 
     /// Exact retained source; never read current authority to fill a missing historical row.
-    async fn human_signer_fact(
+    async fn account_device_signer_fact(
         &self,
         event: &Event,
         commit: &RealmCommit,
     ) -> PersistenceResult<
-        Option<arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact>,
+        Option<arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact>,
     >;
     /// Read an immutable source-only candidate. Admission repeats this at the locked cut.
-    async fn prepare_human_signer_fact(
+    async fn prepare_account_device_signer_fact(
         &self,
         event: &Event,
         admitted_at: DateTime<Utc>,
     ) -> PersistenceResult<
-        Option<arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact>,
+        Option<arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact>,
     >;
 
     async fn producer_signer_fact(
@@ -1692,7 +1818,10 @@ pub trait AuthorityCommitStore: Send + Sync {
     ) -> PersistenceResult<
         Option<arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact>,
     > {
-        Ok(self.human_signer_fact(event, commit).await?.map(Into::into))
+        Ok(self
+            .account_device_signer_fact(event, commit)
+            .await?
+            .map(Into::into))
     }
     async fn prepare_service_signer_fact(
         &self,
@@ -1911,6 +2040,17 @@ pub trait AuthorityCommitStore: Send + Sync {
     /// Store one verified committed replica with its held-stream continuity,
     /// anchor state, hosted-member basis and projected typed current in one
     /// transaction.
+    async fn install_committed_audit_pair(
+        &self,
+        _request: &arkret_models_collaboration::authority_commit::AuditPairedEventFederationSubmission,
+        _replicas: &[CommittedReplica; 2],
+    ) -> PersistenceResult<arkret_models_collaboration::authority_commit::AggregateAcceptanceStatus>
+    {
+        Err(PersistenceError::Conflict(
+            "revision_unavailable: atomic audit replication unavailable".to_owned(),
+        ))
+    }
+
     async fn install_committed_replica(
         &self,
         replica: &CommittedReplica,
@@ -2207,8 +2347,12 @@ pub trait AuthorityCommitStore: Send + Sync {
         event: &Event,
         authority: &CurrentRealmAuthority,
         reason_code: &str,
+        native: Option<(
+            &crate::AppletManagedDeviceScopeGuard,
+            &crate::IdempotencyRecord,
+        )>,
     ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
-        let _ = (event, authority, reason_code);
+        let _ = (event, authority, reason_code, native);
         Err(crate::PersistenceError::Conflict(
             "temporarily_unavailable: durable MLS refusal is unavailable".into(),
         ))
@@ -2245,6 +2389,52 @@ pub trait AuthorityCommitStore: Send + Sync {
         submission: &arkret_models_collaboration::authority_commit::OrdinaryRealmBootstrapUnitSubmission,
         exact_request_body: &[u8],
     ) -> PersistenceResult<Option<Vec<arkret_wire::RealmCommit>>>;
+
+    async fn watch_audit_read_delivery_guard(
+        &self,
+        _request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
+        _outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+        _issuer: &arkret_wire::DidCoreId,
+        _expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<Box<dyn AccountContentDeliveryGuard>> {
+        Err(PersistenceError::Conflict(
+            "revision_unavailable: governing audit delivery unavailable".to_owned(),
+        ))
+    }
+
+    async fn watch_audit_read_disclosure(
+        &self,
+        _request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
+        _outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+        _issuer: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<()> {
+        Err(PersistenceError::Conflict(
+            "revision_unavailable: audit disclosure unavailable".to_owned(),
+        ))
+    }
+
+    /// Freeze the complete origin unit before I/O; retain only a verified
+    /// original acknowledgement, never an independently accepted slot.
+    async fn retain_registered_pair_forward(
+        &self,
+        _request: &arkret_models_collaboration::authority_commit::AuditPairedEventUnitSubmission,
+        _outcome: Option<
+            &arkret_models_collaboration::authority_commit::AuditPairedEventAcceptanceOutcome,
+        >,
+    ) -> PersistenceResult<()> {
+        Err(PersistenceError::Conflict(
+            "revision_unavailable: registered forward archive unavailable".into(),
+        ))
+    }
+
+    async fn registered_audit_result(
+        &self,
+        _event_id: &arkret_wire::EventId,
+    ) -> PersistenceResult<Option<crate::RegisteredAuditResult>> {
+        Err(PersistenceError::Conflict(
+            "unsupported_feature: registered audit archive unavailable".to_owned(),
+        ))
+    }
 
     /// Install the entire registered ordinary Realm bootstrap in one DB
     /// transaction, including genesis authority, every Event/Commit and all
@@ -2327,6 +2517,20 @@ pub trait AuthorityCommitStore: Send + Sync {
         transaction: &AuthorityCommitTransaction,
         queued_at: DateTime<Utc>,
     ) -> PersistenceResult<AcceptedDeviceAuthorizationOutcome>;
+
+    /// One ordinary managed PCR successor, relayed by its exact Service.
+    /// Rechecks accepted provenance, resolution, generation, scope installs,
+    /// possession and producer proof under the PCR and installation locks.
+    async fn admit_applet_managed_device_authorization(
+        &self,
+        transaction: &AuthorityCommitTransaction,
+        carrier: &AppletControlCarrier,
+    ) -> PersistenceResult<AcceptedDeviceAuthorizationOutcome> {
+        let _ = (transaction, carrier);
+        Err(PersistenceError::Conflict(
+            "temporarily_unavailable: managed device admission unavailable".into(),
+        ))
+    }
 
     /// Read the first durable PCR genesis receipt before freshness checks on an
     /// exact retry. Reusing either the Realm or idempotency key with different
@@ -2663,13 +2867,16 @@ pub trait AuthorityCommitStore: Send + Sync {
     /// Archive an original governing Snapshot whose authority and signature
     /// the receiving layer verified. The store independently proves its exact
     /// Account disclosure against the member Station's durable replica cut.
+    /// Return the actual archived original, including same-cut reuse, so the
+    /// receiving layer can verify and emit only a retained exact reference.
     async fn install_verified_account_snapshot(
         &self,
         account: &arkret_wire::AccountId,
         issuer: &arkret_wire::DidCoreId,
         snapshot: &RealmStateSnapshot,
-    ) -> PersistenceResult<()> {
-        let _ = (account, issuer, snapshot);
+        minimum: &RealmStateSnapshotMaterial,
+    ) -> PersistenceResult<RealmStateSnapshot> {
+        let _ = (account, issuer, snapshot, minimum);
         Err(crate::PersistenceError::Internal(
             "verified Account Snapshot installation is unavailable".to_owned(),
         ))
@@ -2847,12 +3054,47 @@ pub trait AuthorityCommitStore: Send + Sync {
         issuer: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<MediaServiceAnchorRead>;
 
+    /// Native PCR planned change: original device/root verification and freeze
+    /// preparation belong to one authority transaction, without ordinary facts.
+    async fn admit_pcr_governance_change(
+        &self,
+        _transaction: &AuthorityCommitTransaction,
+    ) -> PersistenceResult<AuthorityCommitWriteOutcome> {
+        Err(PersistenceError::Conflict(
+            "temporarily_unavailable: native PCR planned change is unavailable".into(),
+        ))
+    }
+
+    async fn install_handoff_with_private_state(
+        &self,
+        handoff: &RealmAuthorityHandoff,
+        final_stream_heads: &[CommitStreamHead],
+        snapshot: &RealmStateSnapshot,
+        manifest: Option<&arkret_models_collaboration::authority_commit::PcrPrivateHandoffManifest>,
+    ) -> PersistenceResult<()> {
+        if manifest.is_some() || handoff.pcr_private_state_digest.is_some() {
+            return Err(PersistenceError::Conflict(
+                "temporarily_unavailable: durable PCR private import verification is unavailable"
+                    .into(),
+            ));
+        }
+        self.install_handoff(handoff, final_stream_heads, snapshot)
+            .await
+    }
+
     async fn install_handoff(
         &self,
         handoff: &RealmAuthorityHandoff,
         final_stream_heads: &[CommitStreamHead],
         snapshot: &RealmStateSnapshot,
     ) -> PersistenceResult<()>;
+
+    /// Full originals at the outgoing frozen cut, including private streams.
+    /// This is an internal migration verification read, never a member scan.
+    async fn handoff_originals(
+        &self,
+        realm_id: &arkret_wire::RealmId,
+    ) -> PersistenceResult<Vec<arkret_wire::CommittedEventFullView>>;
 
     /// Returns the consecutive, durable handoff chain used to verify the
     /// current Station from the Realm's genesis authority.

@@ -77,6 +77,7 @@ fn batch(
     proof: coland_storage::RealmOrganizationProofCommit,
 ) -> coland_storage::EventBatchCommitRequest {
     coland_storage::EventBatchCommitRequest {
+        audit_unit: None,
         events: vec![request],
         realm_organization_proof: Some(proof),
         invite_claim_proof: None,
@@ -110,197 +111,188 @@ async fn snapshot(pool: &PgPool) -> serde_json::Value {
 // the independent organization consent is an immutable-DID Ed25519 signature.
 #[tokio::test]
 async fn accepted_organization_scope_refuses_real_member_and_invite_join_with_zero_writes() {
-    organization_scope_scenario().await;
-}
-
-#[inline(never)]
-fn organization_scope_scenario() -> std::pin::Pin<Box<impl std::future::Future<Output = ()>>> {
-    Box::pin(async move {
-        let station = ordinary_realm::station();
-        let database = TestDatabase::lease().await;
-        let pool = database.pool();
-        let founder_account = scenario_future(|| {
-            ordinary_realm::human_profile::admit(&pool, &station, "organization-founder")
-        })
-        .await;
-        let bootstrap = ordinary_realm::bootstrap_unit_for_account(
-            &uuid::Uuid::now_v7().to_string(),
-            &founder_account,
-            &ordinary_realm::human_profile::station_did(&station),
-        );
-        let bootstrap =
-            scenario_future(|| ordinary_realm::source_bootstrap(&pool, bootstrap)).await;
-        let authority = PgAuthorityCommitStore { pool: pool.clone() };
-        let at = bootstrap.transactions[0].commit.committed_at;
-        authority
-            .admit_ordinary_realm_bootstrap_unit(&bootstrap, at)
-            .await
-            .unwrap();
-        let head = bootstrap.transactions.last().unwrap();
-        let uow = PgEventCommitUnitOfWork::new(pool.clone());
-        let events = PgAuthorityCommitStore { pool: pool.clone() };
-        let founder = head.event.actor_id.clone();
-        let invitee = scenario_future(|| {
-            ordinary_realm::human_profile::admit(&pool, &station, "organization-invitee")
-        })
-        .await;
-        let invite = ordinary_realm::next_request_for_actor(
-            head,
-            arkret_wire::EventKind::InviteCreate,
-            founder.clone(),
-            serde_json::json!({"invitee_account_id":invitee,
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    ordinary_realm::case_future(|| async move {
+    let founder_account = ordinary_realm::human_profile::admit(
+        &pool,
+        &ordinary_realm::station(),
+        "organization-founder",
+    )
+    .await;
+    let bootstrap = ordinary_realm::bootstrap_unit_for_account(
+        &uuid::Uuid::now_v7().to_string(),
+        &founder_account,
+        &ordinary_realm::human_profile::station_did(&ordinary_realm::station()),
+    );
+    let bootstrap = ordinary_realm::source_bootstrap(&pool, bootstrap).await;
+    let authority = PgAuthorityCommitStore { pool: pool.clone() };
+    let at = bootstrap.transactions[0].commit.committed_at;
+    authority
+        .admit_ordinary_realm_bootstrap_unit(&bootstrap, at)
+        .await
+        .unwrap();
+    let head = bootstrap.transactions.last().unwrap();
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let events = PgAuthorityCommitStore { pool: pool.clone() };
+    let founder = head.event.actor_id.clone();
+    let invitee = ordinary_realm::human_profile::admit(
+        &pool,
+        &ordinary_realm::station(),
+        "organization-invitee",
+    )
+    .await;
+    let invite = ordinary_realm::next_request_for_actor(
+        head,
+        arkret_wire::EventKind::InviteCreate,
+        founder.clone(),
+        serde_json::json!({"invitee_account_id":invitee,
             "introduction_evidence_digest":format!("sha256:{}","a".repeat(64)),
             "expires_at":arkret_canonical::format_timestamp_canonical(at+chrono::TimeDelta::days(1))}),
-            at,
-        );
-        let invite = scenario_future(|| ordinary_realm::source_request(&pool, invite)).await;
-        uow.commit_event(invite.clone()).await.unwrap();
-        let (relationship, proof) = organization_request(
-            &invite.authority_commit,
-            "active",
-            serde_json::json!(["moderation_policy"]),
-            None,
-        );
-        let relationship =
-            scenario_future(|| ordinary_realm::source_request(&pool, relationship)).await;
-        let proof = coland_storage::RealmOrganizationProofCommit {
-            event_id: relationship.authority_commit.event.event_id.clone(),
-            ..proof
-        };
-        uow.commit_event_batch(batch(relationship.clone(), proof))
-            .await
-            .unwrap();
-        let relationships = PgRealmOrganizationStatementStore { pool: pool.clone() };
-        let list = relationships
-            .accepted_relationships(&head.event.realm_id, at)
-            .await
-            .unwrap();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].lifecycle_phase,
+        at,
+    );
+    let invite = ordinary_realm::source_request(&pool, invite).await;
+    uow.commit_event(invite.clone()).await.unwrap();
+    let (relationship, proof) = organization_request(
+        &invite.authority_commit,
+        "active",
+        serde_json::json!(["moderation_policy"]),
+        None,
+    );
+    let relationship = ordinary_realm::source_request(&pool, relationship).await;
+    let proof = coland_storage::RealmOrganizationProofCommit {
+        event_id: relationship.authority_commit.event.event_id.clone(),
+        ..proof
+    };
+    uow.commit_event_batch(batch(relationship.clone(), proof))
+        .await
+        .unwrap();
+    let relationships = PgRealmOrganizationStatementStore { pool: pool.clone() };
+    let list = relationships
+        .accepted_relationships(&head.event.realm_id, at)
+        .await
+        .unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].lifecycle_phase,
         arkret_models_collaboration::governance::realm_governance::RealmOrganizationLifecyclePhase::VerifiedActive);
-        let accepted = events
-            .committed_event(&relationship.authority_commit.event.event_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(accepted.event, relationship.authority_commit.event);
-        let statement = relationship.authority_commit.event.payload["statement_id"]
-            .as_str()
-            .unwrap();
-        let joiner = scenario_future(|| {
-            ordinary_realm::human_profile::admit(&pool, &station, "organization-public-joiner")
-        })
-        .await;
-        let joiner = arkret_wire::ActorId::account(joiner);
-        let member = ordinary_realm::next_request_for_actor(
-            &relationship.authority_commit,
-            arkret_wire::EventKind::MemberState,
-            joiner.clone(),
-            serde_json::json!({"member_id":joiner,"membership":"join"}),
-            at,
-        );
-        let member = scenario_future(|| ordinary_realm::source_request(&pool, member)).await;
-        let acceptance = ordinary_realm::next_request_for_actor(
-            &relationship.authority_commit,
-            arkret_wire::EventKind::InviteAccept,
-            arkret_wire::ActorId::account(invitee.clone()),
-            serde_json::json!({"invite_id":arkret_wire::InviteId::from_event_id(&invite.authority_commit.event.event_id),
+    let accepted = events
+        .committed_event(&relationship.authority_commit.event.event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(accepted.event, relationship.authority_commit.event);
+    let statement = relationship.authority_commit.event.payload["statement_id"]
+        .as_str()
+        .unwrap();
+    let joiner = ordinary_realm::human_profile::admit(
+        &pool,
+        &ordinary_realm::station(),
+        "organization-public-joiner",
+    )
+    .await;
+    let joiner = arkret_wire::ActorId::account(joiner);
+    let member = ordinary_realm::next_request_for_actor(
+        &relationship.authority_commit,
+        arkret_wire::EventKind::MemberState,
+        joiner.clone(),
+        serde_json::json!({"member_id":joiner,"membership":"join"}),
+        at,
+    );
+    let member = ordinary_realm::source_request(&pool, member).await;
+    let acceptance = ordinary_realm::next_request_for_actor(
+        &relationship.authority_commit,
+        arkret_wire::EventKind::InviteAccept,
+        arkret_wire::ActorId::account(invitee.clone()),
+        serde_json::json!({"invite_id":arkret_wire::InviteId::from_event_id(&invite.authority_commit.event.event_id),
             "previous_state":"pending","invitee_account_id":invitee}),
-            at,
+        at,
+    );
+    let acceptance = ordinary_realm::source_request(&pool, acceptance).await;
+    let before = snapshot(&pool).await;
+    for request in [member, acceptance.clone()] {
+        let error = uow.commit_event(request.clone()).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("organization moderation policy authority is unavailable"),
+            "{error}"
         );
-        let acceptance =
-            scenario_future(|| ordinary_realm::source_request(&pool, acceptance)).await;
-        let before = snapshot(&pool).await;
-        for request in [member, acceptance.clone()] {
-            let error = uow.commit_event(request.clone()).await.unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .contains("organization moderation policy authority is unavailable"),
-                "{error}"
-            );
-            assert_eq!(
-                snapshot(&pool).await,
-                before,
-                "failed dependency mutated the accepted cut"
-            );
-            assert!(
-                events
-                    .committed_event(&request.authority_commit.event.event_id)
-                    .await
-                    .unwrap()
-                    .is_none()
-            );
-        }
-        let (revocation, proof) = organization_request(
-            &relationship.authority_commit,
-            "revoked",
-            serde_json::json!(["moderation_policy"]),
-            Some(statement),
-        );
-        let revocation =
-            scenario_future(|| ordinary_realm::source_request(&pool, revocation)).await;
-        let proof = coland_storage::RealmOrganizationProofCommit {
-            event_id: revocation.authority_commit.event.event_id.clone(),
-            ..proof
-        };
-        uow.commit_event_batch(batch(revocation.clone(), proof))
-            .await
-            .unwrap();
-        let list = relationships
-            .accepted_relationships(&head.event.realm_id, at)
-            .await
-            .unwrap();
-        assert_eq!(list.len(), 1);
         assert_eq!(
-            list[0].statement_id.as_str(),
-            revocation.authority_commit.event.payload["statement_id"]
-                .as_str()
-                .unwrap()
+            snapshot(&pool).await,
+            before,
+            "failed dependency mutated the accepted cut"
         );
-        assert_eq!(list[0].lifecycle_phase,
-        arkret_models_collaboration::governance::realm_governance::RealmOrganizationLifecyclePhase::RevokedOrExpired);
-        let resumed = ordinary_realm::next_request_for_actor(
-            &revocation.authority_commit,
-            arkret_wire::EventKind::InviteAccept,
-            acceptance.authority_commit.event.actor_id.clone(),
-            serde_json::to_value(&acceptance.authority_commit.event.payload).unwrap(),
-            at,
-        );
-        let resumed = scenario_future(|| ordinary_realm::source_request(&pool, resumed)).await;
-        uow.commit_event(resumed.clone()).await.unwrap();
         assert!(
             events
-                .committed_event(&resumed.authority_commit.event.event_id)
+                .committed_event(&request.authority_commit.event.event_id)
                 .await
                 .unwrap()
-                .is_some()
+                .is_none()
         );
-    })
+    }
+    let (revocation, proof) = organization_request(
+        &relationship.authority_commit,
+        "revoked",
+        serde_json::json!(["moderation_policy"]),
+        Some(statement),
+    );
+    let revocation = ordinary_realm::source_request(&pool, revocation).await;
+    let proof = coland_storage::RealmOrganizationProofCommit {
+        event_id: revocation.authority_commit.event.event_id.clone(),
+        ..proof
+    };
+    uow.commit_event_batch(batch(revocation.clone(), proof))
+        .await
+        .unwrap();
+    let list = relationships
+        .accepted_relationships(&head.event.realm_id, at)
+        .await
+        .unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(
+        list[0].statement_id.as_str(),
+        revocation.authority_commit.event.payload["statement_id"]
+            .as_str()
+            .unwrap()
+    );
+    assert_eq!(list[0].lifecycle_phase,
+        arkret_models_collaboration::governance::realm_governance::RealmOrganizationLifecyclePhase::RevokedOrExpired);
+    let resumed = ordinary_realm::next_request_for_actor(
+        &revocation.authority_commit,
+        arkret_wire::EventKind::InviteAccept,
+        acceptance.authority_commit.event.actor_id.clone(),
+        serde_json::to_value(&acceptance.authority_commit.event.payload).unwrap(),
+        at,
+    );
+    let resumed = ordinary_realm::source_request(&pool, resumed).await;
+    uow.commit_event(resumed.clone()).await.unwrap();
+    assert!(
+        events
+            .committed_event(&resumed.authority_commit.event.event_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    }).await;
 }
 
 #[tokio::test]
 async fn organization_writer_refuses_missing_or_false_proof_and_wrong_statement_reference() {
-    organization_proof_scenario().await;
-}
-
-#[inline(never)]
-fn organization_proof_scenario() -> std::pin::Pin<Box<impl std::future::Future<Output = ()>>> {
-    Box::pin(async move {
-        let station = ordinary_realm::station();
-        let database = TestDatabase::lease().await;
-        let pool = database.pool();
-        let founder_account = scenario_future(|| {
-            ordinary_realm::human_profile::admit(&pool, &station, "organization-founder")
-        })
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    ordinary_realm::case_future(|| async move {
+        let founder_account = ordinary_realm::human_profile::admit(
+            &pool,
+            &ordinary_realm::station(),
+            "organization-founder",
+        )
         .await;
         let bootstrap = ordinary_realm::bootstrap_unit_for_account(
             &uuid::Uuid::now_v7().to_string(),
             &founder_account,
-            &ordinary_realm::human_profile::station_did(&station),
+            &ordinary_realm::human_profile::station_did(&ordinary_realm::station()),
         );
-        let bootstrap =
-            scenario_future(|| ordinary_realm::source_bootstrap(&pool, bootstrap)).await;
+        let bootstrap = ordinary_realm::source_bootstrap(&pool, bootstrap).await;
         let authority = PgAuthorityCommitStore { pool: pool.clone() };
         let at = bootstrap.transactions[0].commit.committed_at;
         authority
@@ -311,8 +303,7 @@ fn organization_proof_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
         let uow = PgEventCommitUnitOfWork::new(pool.clone());
         let (relationship, proof) =
             organization_request(head, "active", serde_json::json!(["official_badge"]), None);
-        let relationship =
-            scenario_future(|| ordinary_realm::source_request(&pool, relationship)).await;
+        let relationship = ordinary_realm::source_request(&pool, relationship).await;
         let proof = coland_storage::RealmOrganizationProofCommit {
             event_id: relationship.authority_commit.event.event_id.clone(),
             ..proof
@@ -339,7 +330,7 @@ fn organization_proof_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             serde_json::json!(["official_badge"]),
             Some("not-the-accepted-statement"),
         );
-        let wrong_ref = scenario_future(|| ordinary_realm::source_request(&pool, wrong_ref)).await;
+        let wrong_ref = ordinary_realm::source_request(&pool, wrong_ref).await;
         let proof = coland_storage::RealmOrganizationProofCommit {
             event_id: wrong_ref.authority_commit.event.event_id.clone(),
             ..proof
@@ -352,9 +343,11 @@ fn organization_proof_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
         );
         assert_eq!(snapshot(&pool).await, before);
         // A genuine accepted organization badge has no implicit moderation scope.
-        let joiner = scenario_future(|| {
-            ordinary_realm::human_profile::admit(&pool, &station, "organization-badge-joiner")
-        })
+        let joiner = ordinary_realm::human_profile::admit(
+            &pool,
+            &ordinary_realm::station(),
+            "organization-badge-joiner",
+        )
         .await;
         let joiner = arkret_wire::ActorId::account(joiner);
         let member = ordinary_realm::next_request_for_actor(
@@ -364,16 +357,8 @@ fn organization_proof_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             serde_json::json!({"member_id":joiner,"membership":"join"}),
             at,
         );
-        let member = scenario_future(|| ordinary_realm::source_request(&pool, member)).await;
+        let member = ordinary_realm::source_request(&pool, member).await;
         uow.commit_event(member).await.unwrap();
     })
-}
-
-#[inline(never)]
-fn scenario_future<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future,
-{
-    Box::pin(make())
+    .await;
 }

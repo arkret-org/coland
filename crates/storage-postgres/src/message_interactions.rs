@@ -22,7 +22,7 @@ struct AcceptedRow {
     commit_json: Value,
 }
 
-/// Ordinary authors must retain the complete Account and direct producer shape.
+/// Authors retain their full Account; Agent execution retains its current owner.
 /// Profile classification is optional display data, never authorization proof.
 /// The ingress producer guard independently authenticates and classifies the
 /// principal; closed Applet authoring retains its dedicated accepted-fact cut.
@@ -35,10 +35,28 @@ pub(crate) async fn require_message_actor(
         return crate::managed_message_actor::require_managed_actor_in_connection(conn, event, at)
             .await;
     }
-    if event.executed_by.is_some() || event.payload.contains_key("agent_context") {
-        return Err(rejected(
-            "ordinary Message has unsupported delegated producer fields",
-        ));
+    if event.payload.contains_key("agent_context") {
+        return Err(rejected("Agent attribution belongs to the Event envelope"));
+    }
+    if event.executed_by.is_some() {
+        let controller = crate::realm_authorization_cut::owned_controller_in_connection(
+            conn,
+            &event.realm_id,
+            event.actual_signer(),
+            at,
+        )
+        .await?;
+        if controller.as_ref() != Some(&event.actor_id) {
+            return Err(rejected(
+                "Message executor lacks its exact current controller source",
+            ));
+        }
+        let reference = event
+            .authorization_ref
+            .as_ref()
+            .ok_or_else(|| rejected("attributed Message lacks authorization_ref"))?;
+        arkret_wire::GrantId::new(reference.as_str())
+            .map_err(|_| rejected("attributed Message must select its actual capability grant"))?;
     }
     event
         .actor_id

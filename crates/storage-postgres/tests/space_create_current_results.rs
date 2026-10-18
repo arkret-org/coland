@@ -478,77 +478,262 @@ async fn space_parent_narrow_resource_cases() {
 
 #[tokio::test]
 async fn space_parent_attach_detach_cas_and_refusals_preserve_the_durable_cut() {
-    Box::pin(space_parent_attach_detach_cases()).await;
+    ordinary_realm::case_future(space_parent_attach_detach_cases).await;
 }
 
-#[inline(never)]
-fn space_parent_attach_detach_cases() -> std::pin::Pin<Box<impl std::future::Future<Output = ()>>> {
-    Box::pin(async move {
-        let station = ordinary_realm::station();
-        let database = TestDatabase::lease().await;
-        let pool = database.pool();
-        let unit = scenario_future(|| human_bootstrap(&pool, "space-parent-authority")).await;
-        PgAuthorityCommitStore { pool: pool.clone() }
-            .admit_ordinary_realm_bootstrap_unit(&unit, unit.transactions[0].commit.committed_at)
+async fn space_parent_attach_detach_cases() {
+    let station = ordinary_realm::station();
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let unit =
+        ordinary_realm::case_future(|| human_bootstrap(&pool, "space-parent-authority")).await;
+    PgAuthorityCommitStore { pool: pool.clone() }
+        .admit_ordinary_realm_bootstrap_unit(&unit, unit.transactions[0].commit.committed_at)
+        .await
+        .unwrap();
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let last = unit.transactions.last().unwrap();
+    let realm = last.event.realm_id.clone();
+    let at = last.commit.committed_at;
+    let root = next_request(
+        last,
+        arkret_wire::EventKind::SpaceCreate,
+        &founder(),
+        payload(
+            &realm,
+            &last.event.actor_id,
+            at,
+            "board",
+            "Board",
+            None,
+            None,
+        ),
+        at,
+    );
+    let root = ordinary_realm::case_future(|| ordinary_realm::source_request(&pool, root)).await;
+    let root_id = arkret_wire::SpaceId::from_event_id(&root.authority_commit.event.event_id);
+    uow.commit_event(root.clone()).await.unwrap();
+    let child = next_request(
+        &root.authority_commit,
+        arkret_wire::EventKind::SpaceCreate,
+        &founder(),
+        payload(&realm, &last.event.actor_id, at, "list", "List", None, None),
+        at,
+    );
+    let child = ordinary_realm::case_future(|| ordinary_realm::source_request(&pool, child)).await;
+    let child_id = arkret_wire::SpaceId::from_event_id(&child.authority_commit.event.event_id);
+    uow.commit_event(child.clone()).await.unwrap();
+    let metadata = current(&pool, "space_current_results", &child_id).await;
+    let policy = current(&pool, "space_child_scope_policy_current_results", &child_id).await;
+    let attached = next_request(
+        &child.authority_commit,
+        arkret_wire::EventKind::SpaceParent,
+        &founder(),
+        json!({"space_id":child_id,"parent_space_id":root_id,"expected_parent_space_id":null}),
+        at,
+    );
+    let attached =
+        ordinary_realm::case_future(|| ordinary_realm::source_request(&pool, attached)).await;
+    assert!(
+        uow.commit_event(attached.clone())
             .await
-            .unwrap();
-        let uow = PgEventCommitUnitOfWork::new(pool.clone());
-        let last = unit.transactions.last().unwrap();
-        let realm = last.event.realm_id.clone();
-        let at = last.commit.committed_at;
-        let root = next_request(
-            last,
-            arkret_wire::EventKind::SpaceCreate,
-            &founder(),
-            payload(
-                &realm,
-                &last.event.actor_id,
-                at,
-                "board",
-                "Board",
-                None,
-                None,
-            ),
-            at,
-        );
-        let root = scenario_future(|| ordinary_realm::source_request(&pool, root)).await;
-        let root_id = arkret_wire::SpaceId::from_event_id(&root.authority_commit.event.event_id);
-        uow.commit_event(root.clone()).await.unwrap();
-        let child = next_request(
-            &root.authority_commit,
-            arkret_wire::EventKind::SpaceCreate,
-            &founder(),
-            payload(&realm, &last.event.actor_id, at, "list", "List", None, None),
-            at,
-        );
-        let child = scenario_future(|| ordinary_realm::source_request(&pool, child)).await;
-        let child_id = arkret_wire::SpaceId::from_event_id(&child.authority_commit.event.event_id);
-        uow.commit_event(child.clone()).await.unwrap();
-        let metadata = current(&pool, "space_current_results", &child_id).await;
-        let policy = current(&pool, "space_child_scope_policy_current_results", &child_id).await;
-        let attached = next_request(
-            &child.authority_commit,
+            .unwrap()
+            .event_inserted
+    );
+    let parent = current(&pool, "space_parent_current_results", &child_id).await;
+    assert_eq!(parent.value, json!({"parent_space_id":root_id}));
+    assert_eq!(
+        parent.current_commit_id,
+        attached.authority_commit.commit.commit_id.as_str()
+    );
+    assert_eq!(
+        parent.current_stream_position,
+        attached.authority_commit.commit.stream_position as i64
+    );
+    assert_eq!(
+        current(&pool, "space_current_results", &child_id).await,
+        metadata
+    );
+    assert_eq!(
+        current(&pool, "space_child_scope_policy_current_results", &child_id).await,
+        policy
+    );
+    let counts = cut_counts(&pool, &realm).await;
+    assert!(
+        !uow.commit_event(attached.clone())
+            .await
+            .unwrap()
+            .event_inserted
+    );
+    assert_eq!(cut_counts(&pool, &realm).await, counts);
+    assert_eq!(
+        current(&pool, "space_parent_current_results", &child_id).await,
+        parent
+    );
+
+    let foreign_unit =
+        ordinary_realm::case_future(|| human_bootstrap(&pool, "space-parent-other-realm")).await;
+    PgAuthorityCommitStore { pool: pool.clone() }
+        .admit_ordinary_realm_bootstrap_unit(
+            &foreign_unit,
+            foreign_unit.transactions[0].commit.committed_at,
+        )
+        .await
+        .unwrap();
+    let foreign_last = foreign_unit.transactions.last().unwrap();
+    let foreign = next_request(
+        foreign_last,
+        arkret_wire::EventKind::SpaceCreate,
+        &founder(),
+        payload(
+            &foreign_last.event.realm_id,
+            &foreign_last.event.actor_id,
+            foreign_last.commit.committed_at,
+            "board",
+            "Other",
+            None,
+            None,
+        ),
+        foreign_last.commit.committed_at,
+    );
+    let foreign =
+        ordinary_realm::case_future(|| ordinary_realm::source_request(&pool, foreign)).await;
+    let foreign_id = arkret_wire::SpaceId::from_event_id(&foreign.authority_commit.event.event_id);
+    uow.commit_event(foreign).await.unwrap();
+    let foreign_current = current(&pool, "space_current_results", &foreign_id).await;
+    let visible_foreign = coland_storage_postgres::account_snapshot_material(
+        &pool,
+        &foreign_last.event.realm_id,
+        &arkret_wire::AccountId::new(founder(), ordinary_realm::station()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(visible_foreign.current_state_entries.iter().any(|entry| matches!(entry,
+    arkret_wire::TypedCurrentRow::Value {selector: arkret_wire::CurrentSelector::Space {space_id}, revision, value, ..}
+        if space_id == &foreign_id && value == &foreign_current.value
+            && revision.commit_id.as_str() == foreign_current.current_commit_id
+            && revision.stream_position as i64 == foreign_current.current_stream_position
+)));
+    let hidden_owner = ordinary_realm::case_future(|| {
+        ordinary_realm::human_profile::admit(&pool, &station, "space-parent-hidden-owner")
+    })
+    .await;
+    let hidden_unit = ordinary_realm::bootstrap_unit_for_account(
+        "space-parent-hidden-realm",
+        &hidden_owner,
+        &ordinary_realm::human_profile::station_did(&station),
+    );
+    let hidden_unit =
+        ordinary_realm::case_future(|| ordinary_realm::source_bootstrap(&pool, hidden_unit)).await;
+    PgAuthorityCommitStore { pool: pool.clone() }
+        .admit_ordinary_realm_bootstrap_unit(
+            &hidden_unit,
+            hidden_unit.transactions[0].commit.committed_at,
+        )
+        .await
+        .unwrap();
+    let hidden_last = hidden_unit.transactions.last().unwrap();
+    let hidden = next_request(
+        hidden_last,
+        arkret_wire::EventKind::SpaceCreate,
+        &hidden_owner.principal_id,
+        payload(
+            &hidden_last.event.realm_id,
+            &hidden_last.event.actor_id,
+            hidden_last.commit.committed_at,
+            "board",
+            "Hidden",
+            None,
+            None,
+        ),
+        hidden_last.commit.committed_at,
+    );
+    let hidden =
+        ordinary_realm::case_future(|| ordinary_realm::source_request(&pool, hidden)).await;
+    let hidden_id = arkret_wire::SpaceId::from_event_id(&hidden.authority_commit.event.event_id);
+    uow.commit_event(hidden).await.unwrap();
+    let hidden_read = coland_storage_postgres::account_snapshot_material(
+        &pool,
+        &hidden_last.event.realm_id,
+        &arkret_wire::AccountId::new(founder(), ordinary_realm::station()),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        hidden_read
+            .to_string()
+            .contains("not a joined member with a provable readable floor"),
+        "{hidden_read}"
+    );
+    let stranger = ordinary_realm::case_future(|| {
+        ordinary_realm::human_profile::admit(&pool, &station, "space-parent-stranger")
+    })
+    .await
+    .principal_id;
+    for (actor, body, reason) in [
+        (
+            founder(),
+            json!({"space_id":child_id,"parent_space_id":null,"expected_parent_space_id":null}),
+            "space_parent_mismatch",
+        ),
+        (
+            founder(),
+            json!({"space_id":child_id,"parent_space_id":child_id,"expected_parent_space_id":root_id}),
+            "space_parent_cycle",
+        ),
+        (
+            founder(),
+            json!({"space_id":root_id,"parent_space_id":child_id,"expected_parent_space_id":null}),
+            "space_parent_cycle",
+        ),
+        (
+            founder(),
+            json!({"space_id":child_id,"parent_space_id":foreign_id,"expected_parent_space_id":root_id}),
+            "space_realm_mismatch",
+        ),
+        (
+            founder(),
+            json!({"space_id":child_id,"parent_space_id":hidden_id,"expected_parent_space_id":root_id}),
+            "space_parent_unreadable",
+        ),
+        (
+            stranger,
+            json!({"space_id":child_id,"parent_space_id":null,"expected_parent_space_id":root_id}),
+            "capability_denied",
+        ),
+    ] {
+        let request = next_request(
+            &attached.authority_commit,
             arkret_wire::EventKind::SpaceParent,
-            &founder(),
-            json!({"space_id":child_id,"parent_space_id":root_id,"expected_parent_space_id":null}),
+            &actor,
+            body,
             at,
         );
-        let attached = scenario_future(|| ordinary_realm::source_request(&pool, attached)).await;
-        assert!(
-            uow.commit_event(attached.clone())
-                .await
-                .unwrap()
-                .event_inserted
-        );
-        let parent = current(&pool, "space_parent_current_results", &child_id).await;
-        assert_eq!(parent.value, json!({"parent_space_id":root_id}));
+        let request =
+            ordinary_realm::case_future(|| ordinary_realm::source_request(&pool, request)).await;
+        let before = cut_counts(&pool, &realm).await;
+        let root_before = current(&pool, "space_parent_current_results", &root_id).await;
+        let footprint_before = space_write_footprint(&pool, &realm).await;
+        let error = uow.commit_event(request).await.unwrap_err();
+        let expected_code = match reason {
+            "space_parent_mismatch" => Some(coland_storage::ConflictCode::SpaceParentMismatch),
+            "space_parent_unreadable" => Some(coland_storage::ConflictCode::SpaceParentUnreadable),
+            "space_realm_mismatch" => Some(coland_storage::ConflictCode::SpaceRealmMismatch),
+            "capability_denied" => Some(coland_storage::ConflictCode::CapabilityDenied),
+            _ => Some(coland_storage::ConflictCode::FailedPrecondition),
+        };
+        assert_eq!(error.conflict_code(), expected_code, "{reason}: {error}");
+        assert!(error.to_string().contains(reason), "{reason}: {error}");
+        assert_eq!(space_write_footprint(&pool, &realm).await, footprint_before);
+        assert_eq!(cut_counts(&pool, &realm).await, before);
         assert_eq!(
-            parent.current_commit_id,
-            attached.authority_commit.commit.commit_id.as_str()
+            current(&pool, "space_parent_current_results", &child_id).await,
+            parent
         );
         assert_eq!(
-            parent.current_stream_position,
-            attached.authority_commit.commit.stream_position as i64
+            current(&pool, "space_parent_current_results", &root_id).await,
+            root_before
         );
         assert_eq!(
             current(&pool, "space_current_results", &child_id).await,
@@ -558,217 +743,31 @@ fn space_parent_attach_detach_cases() -> std::pin::Pin<Box<impl std::future::Fut
             current(&pool, "space_child_scope_policy_current_results", &child_id).await,
             policy
         );
-        let counts = cut_counts(&pool, &realm).await;
-        assert!(
-            !uow.commit_event(attached.clone())
-                .await
-                .unwrap()
-                .event_inserted
-        );
-        assert_eq!(cut_counts(&pool, &realm).await, counts);
-        assert_eq!(
-            current(&pool, "space_parent_current_results", &child_id).await,
-            parent
-        );
-
-        let foreign_unit =
-            scenario_future(|| human_bootstrap(&pool, "space-parent-other-realm")).await;
-        PgAuthorityCommitStore { pool: pool.clone() }
-            .admit_ordinary_realm_bootstrap_unit(
-                &foreign_unit,
-                foreign_unit.transactions[0].commit.committed_at,
-            )
+    }
+    let detached = next_request(
+        &attached.authority_commit,
+        arkret_wire::EventKind::SpaceParent,
+        &founder(),
+        json!({"space_id":child_id,"parent_space_id":null,"expected_parent_space_id":root_id}),
+        at,
+    );
+    let detached =
+        ordinary_realm::case_future(|| ordinary_realm::source_request(&pool, detached)).await;
+    assert!(
+        uow.commit_event(detached.clone())
             .await
-            .unwrap();
-        let foreign_last = foreign_unit.transactions.last().unwrap();
-        let foreign = next_request(
-            foreign_last,
-            arkret_wire::EventKind::SpaceCreate,
-            &founder(),
-            payload(
-                &foreign_last.event.realm_id,
-                &foreign_last.event.actor_id,
-                foreign_last.commit.committed_at,
-                "board",
-                "Other",
-                None,
-                None,
-            ),
-            foreign_last.commit.committed_at,
-        );
-        let foreign = scenario_future(|| ordinary_realm::source_request(&pool, foreign)).await;
-        let foreign_id =
-            arkret_wire::SpaceId::from_event_id(&foreign.authority_commit.event.event_id);
-        uow.commit_event(foreign).await.unwrap();
-        let foreign_current = current(&pool, "space_current_results", &foreign_id).await;
-        let visible_foreign = coland_storage_postgres::account_snapshot_material(
-            &pool,
-            &foreign_last.event.realm_id,
-            &arkret_wire::AccountId::new(founder(), ordinary_realm::station()),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert!(visible_foreign.current_state_entries.iter().any(|entry| matches!(entry,
-        arkret_wire::TypedCurrentRow::Value {selector: arkret_wire::CurrentSelector::Space {space_id}, revision, value, ..}
-            if space_id == &foreign_id && value == &foreign_current.value
-                && revision.commit_id.as_str() == foreign_current.current_commit_id
-                && revision.stream_position as i64 == foreign_current.current_stream_position
-    )));
-        let hidden_owner = scenario_future(|| {
-            ordinary_realm::human_profile::admit(&pool, &station, "space-parent-hidden-owner")
-        })
-        .await;
-        let hidden_unit = ordinary_realm::bootstrap_unit_for_account(
-            "space-parent-hidden-realm",
-            &hidden_owner,
-            &ordinary_realm::human_profile::station_did(&station),
-        );
-        let hidden_unit =
-            scenario_future(|| ordinary_realm::source_bootstrap(&pool, hidden_unit)).await;
-        PgAuthorityCommitStore { pool: pool.clone() }
-            .admit_ordinary_realm_bootstrap_unit(
-                &hidden_unit,
-                hidden_unit.transactions[0].commit.committed_at,
-            )
-            .await
-            .unwrap();
-        let hidden_last = hidden_unit.transactions.last().unwrap();
-        let hidden = next_request(
-            hidden_last,
-            arkret_wire::EventKind::SpaceCreate,
-            &hidden_owner.principal_id,
-            payload(
-                &hidden_last.event.realm_id,
-                &hidden_last.event.actor_id,
-                hidden_last.commit.committed_at,
-                "board",
-                "Hidden",
-                None,
-                None,
-            ),
-            hidden_last.commit.committed_at,
-        );
-        let hidden = scenario_future(|| ordinary_realm::source_request(&pool, hidden)).await;
-        let hidden_id =
-            arkret_wire::SpaceId::from_event_id(&hidden.authority_commit.event.event_id);
-        uow.commit_event(hidden).await.unwrap();
-        let hidden_read = coland_storage_postgres::account_snapshot_material(
-            &pool,
-            &hidden_last.event.realm_id,
-            &arkret_wire::AccountId::new(founder(), ordinary_realm::station()),
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            hidden_read
-                .to_string()
-                .contains("not a joined member with a provable readable floor"),
-            "{hidden_read}"
-        );
-        let stranger = scenario_future(|| {
-            ordinary_realm::human_profile::admit(&pool, &station, "space-parent-stranger")
-        })
-        .await
-        .principal_id;
-        for (actor, body, reason) in [
-            (
-                founder(),
-                json!({"space_id":child_id,"parent_space_id":null,"expected_parent_space_id":null}),
-                "space_parent_mismatch",
-            ),
-            (
-                founder(),
-                json!({"space_id":child_id,"parent_space_id":child_id,"expected_parent_space_id":root_id}),
-                "space_parent_cycle",
-            ),
-            (
-                founder(),
-                json!({"space_id":root_id,"parent_space_id":child_id,"expected_parent_space_id":null}),
-                "space_parent_cycle",
-            ),
-            (
-                founder(),
-                json!({"space_id":child_id,"parent_space_id":foreign_id,"expected_parent_space_id":root_id}),
-                "space_realm_mismatch",
-            ),
-            (
-                founder(),
-                json!({"space_id":child_id,"parent_space_id":hidden_id,"expected_parent_space_id":root_id}),
-                "space_parent_unreadable",
-            ),
-            (
-                stranger,
-                json!({"space_id":child_id,"parent_space_id":null,"expected_parent_space_id":root_id}),
-                "capability_denied",
-            ),
-        ] {
-            let request = next_request(
-                &attached.authority_commit,
-                arkret_wire::EventKind::SpaceParent,
-                &actor,
-                body,
-                at,
-            );
-            let request = scenario_future(|| ordinary_realm::source_request(&pool, request)).await;
-            let before = cut_counts(&pool, &realm).await;
-            let root_before = current(&pool, "space_parent_current_results", &root_id).await;
-            let footprint_before = space_write_footprint(&pool, &realm).await;
-            let error = uow.commit_event(request).await.unwrap_err();
-            let expected_code = match reason {
-                "space_parent_mismatch" => Some(coland_storage::ConflictCode::SpaceParentMismatch),
-                "space_parent_unreadable" => {
-                    Some(coland_storage::ConflictCode::SpaceParentUnreadable)
-                }
-                "space_realm_mismatch" => Some(coland_storage::ConflictCode::SpaceRealmMismatch),
-                "capability_denied" => Some(coland_storage::ConflictCode::CapabilityDenied),
-                _ => Some(coland_storage::ConflictCode::FailedPrecondition),
-            };
-            assert_eq!(error.conflict_code(), expected_code, "{reason}: {error}");
-            assert!(error.to_string().contains(reason), "{reason}: {error}");
-            assert_eq!(space_write_footprint(&pool, &realm).await, footprint_before);
-            assert_eq!(cut_counts(&pool, &realm).await, before);
-            assert_eq!(
-                current(&pool, "space_parent_current_results", &child_id).await,
-                parent
-            );
-            assert_eq!(
-                current(&pool, "space_parent_current_results", &root_id).await,
-                root_before
-            );
-            assert_eq!(
-                current(&pool, "space_current_results", &child_id).await,
-                metadata
-            );
-            assert_eq!(
-                current(&pool, "space_child_scope_policy_current_results", &child_id).await,
-                policy
-            );
-        }
-        let detached = next_request(
-            &attached.authority_commit,
-            arkret_wire::EventKind::SpaceParent,
-            &founder(),
-            json!({"space_id":child_id,"parent_space_id":null,"expected_parent_space_id":root_id}),
-            at,
-        );
-        let detached = scenario_future(|| ordinary_realm::source_request(&pool, detached)).await;
-        assert!(
-            uow.commit_event(detached.clone())
-                .await
-                .unwrap()
-                .event_inserted
-        );
-        let root_parent = current(&pool, "space_parent_current_results", &child_id).await;
-        assert_eq!(root_parent.value, json!({"parent_space_id":null}));
-        let before = cut_counts(&pool, &realm).await;
-        assert!(!uow.commit_event(detached).await.unwrap().event_inserted);
-        assert_eq!(cut_counts(&pool, &realm).await, before);
-        assert_eq!(
-            current(&pool, "space_parent_current_results", &child_id).await,
-            root_parent
-        );
-    })
+            .unwrap()
+            .event_inserted
+    );
+    let root_parent = current(&pool, "space_parent_current_results", &child_id).await;
+    assert_eq!(root_parent.value, json!({"parent_space_id":null}));
+    let before = cut_counts(&pool, &realm).await;
+    assert!(!uow.commit_event(detached).await.unwrap().event_inserted);
+    assert_eq!(cut_counts(&pool, &realm).await, before);
+    assert_eq!(
+        current(&pool, "space_parent_current_results", &child_id).await,
+        root_parent
+    );
 }
 
 #[tokio::test]
@@ -1170,13 +1169,4 @@ async fn space_create_child_policy_denial_leaves_event_commit_and_all_results_un
             .value,
         json!({"kind":"require_e2ee"})
     );
-}
-
-#[inline(never)]
-fn scenario_future<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future,
-{
-    Box::pin(make())
 }

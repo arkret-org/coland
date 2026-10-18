@@ -91,6 +91,7 @@ fn validate_service_describe(
         .validate_route_projection(route)
         .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
     Ok(VerifiedServiceDescribeMetadata {
+        supported_profiles: description.supported_profiles.clone(),
         service_id: description.service_id,
         service_kind: description.service_kind.as_str().to_owned(),
         service_resolution: description.service_resolution,

@@ -112,3 +112,51 @@ async fn eight_process_equivalent_racers_allocate_and_insert_exactly_once() {
             .unwrap();
     assert_eq!(progress.next_position, 1);
 }
+
+#[tokio::test]
+async fn same_principal_at_two_stations_keeps_distinct_admitted_relay_envelopes() {
+    let database = TestDatabase::lease().await;
+    let relay = PgSignalRelayStore {
+        pool: database.pool(),
+    };
+    let first = record();
+    let mut second = first.clone();
+    let mut account = second
+        .envelope
+        .sender_actor_id
+        .as_account_id()
+        .unwrap()
+        .clone();
+    account.station_id = "ak:did_core:web:other-station.example".parse().unwrap();
+    second.envelope.sender_actor_id = ActorId::account(account);
+    second.envelope.proof.envelope_digest = second.envelope.envelope_digest().unwrap();
+    second.envelope.validate_structural().unwrap();
+    second.sender_actor_id = second.envelope.sender_actor_id.to_string();
+    second.envelope_digest = second.envelope.envelope_digest().unwrap().to_string();
+    assert_ne!(first.envelope_digest, second.envelope_digest);
+    assert!(relay.append(first.clone()).await.unwrap());
+    assert!(!relay.append(first.clone()).await.unwrap());
+    assert!(relay.append(second.clone()).await.unwrap());
+    assert!(!relay.append(second.clone()).await.unwrap());
+    let rows = relay.list_for_realm(&first.realm_id).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_ne!(rows[0].sender_actor_id, rows[1].sender_actor_id);
+    assert_eq!(
+        rows[0].envelope.sender_actor_id.signing_principal_id(),
+        rows[1].envelope.sender_actor_id.signing_principal_id()
+    );
+    assert_ne!(
+        rows[0]
+            .envelope
+            .sender_actor_id
+            .as_account_id()
+            .unwrap()
+            .station_id,
+        rows[1]
+            .envelope
+            .sender_actor_id
+            .as_account_id()
+            .unwrap()
+            .station_id
+    );
+}

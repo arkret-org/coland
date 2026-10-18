@@ -497,6 +497,7 @@ use crate::federation::FederationDeliveryRecord;
 
 #[derive(Clone, Debug)]
 pub struct CommitAcceptedEventCommand {
+    pub verified_media_participant: Option<arkret_signatures::media::VerifiedCallParticipant>,
     /// Current-authority transaction that orders this Event on its Realm,
     /// Circle or Sidecar stream. One `RealmCommit` accepts exactly one Event,
     /// so the signed commit travels with the Event it admits.
@@ -504,6 +505,8 @@ pub struct CommitAcceptedEventCommand {
     pub self_producer_guard: Option<coland_storage::SelfProducerCommitGuard>,
     pub applet_producer_guard: Option<coland_storage::AppletEventProducerGuard>,
     pub widget_token_gate: Option<coland_storage::AppletWidgetTokenGateSelector>,
+    /// Verifier-private subject evidence, rechecked inside the grant transaction.
+    pub agent_grant_scope_evidence: Option<coland_storage::VerifiedAgentScopeEvidence>,
     /// Verified `producer_device_evidence` of a cross-Station human-device
     /// producer, retained for audit with the Event's first Commit.
     pub forwarded_producer_evidence: Option<coland_storage::ForwardedProducerDeviceEvidence>,
@@ -540,6 +543,7 @@ pub use coland_storage::{
 
 #[derive(Clone, Debug)]
 pub struct CommitAcceptedEventBatchCommand {
+    pub audit_unit: Option<coland_storage::RegisteredAuditCommit>,
     pub events: Vec<CommitAcceptedEventCommand>,
     pub franking_replay_nonce: Option<coland_storage::FrankingReplayNonceCommit>,
     pub realm_organization_proof: Option<coland_storage::RealmOrganizationProofCommit>,
@@ -550,8 +554,9 @@ pub struct CommitAcceptedEventBatchCommand {
     pub agent_membership_cascade: Option<coland_storage::AgentMembershipCascadeCommit>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommitAcceptedEventResult {
+    pub audit_outcome: Option<coland_storage::RegisteredAuditOutcome>,
     pub projections_inserted: usize,
     pub deliveries_inserted: usize,
 }
@@ -1139,6 +1144,7 @@ pub struct ClaimMlsKeyPackageCommand<'a> {
     pub device_revocation_gate: Option<&'a coland_storage::DeviceRevocationGateSelector>,
     pub claimed_at: i64,
     pub claim_expires_at_unix_ms: Option<i64>,
+    pub applet_device_scope_guard: Option<&'a coland_storage::AppletManagedDeviceScopeGuard>,
 }
 
 pub enum ClaimMlsKeyPackageTarget<'a> {
@@ -1154,6 +1160,7 @@ pub use coland_storage::{
 };
 
 pub struct PeerKeyPackageClaimCommand<'a> {
+    pub admission: Option<&'a coland_storage::MlsKeyPackageClaimAdmission>,
     pub keypackage_id: &'a str,
     pub mls_group_id: &'a str,
     pub device_authorize_event_id: Option<&'a str>,
@@ -1162,6 +1169,7 @@ pub struct PeerKeyPackageClaimCommand<'a> {
     pub claimed_at_unix_ms: i64,
     pub claim_expires_at_unix_ms: i64,
     pub ledger: &'a PeerKeyPackageClaimLedgerState,
+    pub applet_device_scope_guard: Option<&'a coland_storage::AppletManagedDeviceScopeGuard>,
 }
 
 pub struct PeerClaimTerminalTransitionCommand<'a> {
@@ -1181,12 +1189,35 @@ pub use coland_storage::{
 
 #[async_trait::async_trait]
 pub trait MlsKeyPackageMaintenancePort: Send + Sync {
+    async fn consume_for_applet_device(
+        &self,
+        command: coland_storage::AppletDeviceKeyPackageConsume<'_>,
+    ) -> ServiceResult<coland_storage::MlsKeyPackageConsumption>;
     async fn store_key_package(&self, record: &MlsKeyPackageState) -> ServiceResult<bool>;
+    async fn store_key_package_for_applet_device(
+        &self,
+        record: &MlsKeyPackageState,
+        guard: &coland_storage::AppletManagedDeviceScopeGuard,
+        expires_at: chrono::DateTime<chrono::Utc>,
+        body: &arkret_models_crypto::KeyPackagesUploadRequestBody,
+    ) -> ServiceResult<bool>;
+
+    async fn revoke_for_applet_device(
+        &self,
+        body: &arkret_models_crypto::KeyPackagesRevokeRequestBody,
+        authority: &coland_storage::AppletManagedDeviceAuthority,
+        scope: &arkret_wire::ScopeRef,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> ServiceResult<coland_storage::MlsKeyPackageRevocation>;
     async fn key_package(&self, id: &str) -> ServiceResult<Option<MlsKeyPackageState>>;
     async fn key_package_by_ref(
         &self,
         keypackage_ref: &str,
     ) -> ServiceResult<Option<MlsKeyPackageState>>;
+    async fn peer_claim_candidates(
+        &self,
+        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    ) -> ServiceResult<Vec<MlsKeyPackageState>>;
     async fn claim_key_package(
         &self,
         command: ClaimMlsKeyPackageCommand<'_>,
@@ -1196,8 +1227,13 @@ pub trait MlsKeyPackageMaintenancePort: Send + Sync {
         id: &str,
         mls_group_id: &str,
         now_unix_ms: i64,
-        peer_consume_receipt: Option<&Value>,
+        consumption: Option<coland_storage::MlsKeyPackageConsumeEvidence<'_>>,
     ) -> ServiceResult<Option<MlsKeyPackageState>>;
+    async fn record_peer_claim_attempt(
+        &self,
+        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    ) -> ServiceResult<coland_storage::PeerKeyPackageClaimRateDecision>;
+    async fn prune_peer_claim_attempts(&self) -> ServiceResult<usize>;
     async fn peer_claim(
         &self,
         source_id: &str,
@@ -1260,7 +1296,7 @@ pub trait MlsKeyPackageMaintenancePort: Send + Sync {
     ) -> ServiceResult<Vec<MlsKeyPackageState>>;
     async fn retire_owner_account_keypackages(
         &self,
-        owner_account_pk: coland_storage::AccountPk,
+        owner_account_id: arkret_wire::AccountId,
         retired_at: i64,
     ) -> ServiceResult<usize>;
 }
@@ -1271,22 +1307,50 @@ pub struct MlsKeyPackageService {
 }
 
 impl MlsKeyPackageService {
+    pub async fn consume_for_applet_device(
+        &self,
+        command: coland_storage::AppletDeviceKeyPackageConsume<'_>,
+    ) -> ServiceResult<coland_storage::MlsKeyPackageConsumption> {
+        self.key_packages.consume_for_applet_device(command).await
+    }
     pub fn new(key_packages: Arc<dyn MlsKeyPackageMaintenancePort>) -> Self {
         Self { key_packages }
     }
 
     pub async fn retire_owner_account_keypackages(
         &self,
-        owner_account_pk: coland_storage::AccountPk,
+        owner_account_id: arkret_wire::AccountId,
         retired_at: i64,
     ) -> ServiceResult<usize> {
         self.key_packages
-            .retire_owner_account_keypackages(owner_account_pk, retired_at)
+            .retire_owner_account_keypackages(owner_account_id, retired_at)
             .await
     }
 
     pub async fn store_key_package(&self, record: &MlsKeyPackageState) -> ServiceResult<bool> {
         self.key_packages.store_key_package(record).await
+    }
+    pub async fn store_key_package_for_applet_device(
+        &self,
+        record: &MlsKeyPackageState,
+        guard: &coland_storage::AppletManagedDeviceScopeGuard,
+        expires_at: chrono::DateTime<chrono::Utc>,
+        body: &arkret_models_crypto::KeyPackagesUploadRequestBody,
+    ) -> ServiceResult<bool> {
+        self.key_packages
+            .store_key_package_for_applet_device(record, guard, expires_at, body)
+            .await
+    }
+    pub async fn revoke_for_applet_device(
+        &self,
+        body: &arkret_models_crypto::KeyPackagesRevokeRequestBody,
+        authority: &coland_storage::AppletManagedDeviceAuthority,
+        scope: &arkret_wire::ScopeRef,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> ServiceResult<coland_storage::MlsKeyPackageRevocation> {
+        self.key_packages
+            .revoke_for_applet_device(body, authority, scope, expires_at)
+            .await
     }
     pub async fn key_package(&self, id: &str) -> ServiceResult<Option<MlsKeyPackageState>> {
         self.key_packages.key_package(id).await
@@ -1308,11 +1372,20 @@ impl MlsKeyPackageService {
         id: &str,
         mls_group_id: &str,
         now_unix_ms: i64,
-        peer_consume_receipt: Option<&Value>,
+        consumption: Option<coland_storage::MlsKeyPackageConsumeEvidence<'_>>,
     ) -> ServiceResult<Option<MlsKeyPackageState>> {
         self.key_packages
-            .consume_key_package_claim(id, mls_group_id, now_unix_ms, peer_consume_receipt)
+            .consume_key_package_claim(id, mls_group_id, now_unix_ms, consumption)
             .await
+    }
+    pub async fn record_peer_claim_attempt(
+        &self,
+        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    ) -> ServiceResult<coland_storage::PeerKeyPackageClaimRateDecision> {
+        self.key_packages.record_peer_claim_attempt(body).await
+    }
+    pub async fn prune_peer_claim_attempts(&self) -> ServiceResult<usize> {
+        self.key_packages.prune_peer_claim_attempts().await
     }
     pub async fn peer_claim(
         &self,
@@ -1430,6 +1503,12 @@ impl MlsKeyPackageService {
     }
     pub async fn key_packages(&self) -> ServiceResult<Vec<MlsKeyPackageState>> {
         self.key_packages.key_packages().await
+    }
+    pub async fn peer_claim_candidates(
+        &self,
+        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    ) -> ServiceResult<Vec<MlsKeyPackageState>> {
+        self.key_packages.peer_claim_candidates(body).await
     }
     pub async fn key_packages_claimed_by_group(
         &self,
@@ -1593,18 +1672,20 @@ impl EventService {
         Self { commits }
     }
 
-    pub async fn commit_accepted_event(
+    pub fn commit_accepted_event(
         &self,
         command: CommitAcceptedEventCommand,
-    ) -> ServiceResult<CommitAcceptedEventResult> {
-        self.commits.commit_accepted_event(command).await
+    ) -> impl std::future::Future<Output = ServiceResult<CommitAcceptedEventResult>> + Send + '_
+    {
+        self.commits.commit_accepted_event(command)
     }
 
-    pub async fn commit_accepted_event_batch(
+    pub fn commit_accepted_event_batch(
         &self,
         command: CommitAcceptedEventBatchCommand,
-    ) -> ServiceResult<CommitAcceptedEventResult> {
-        self.commits.commit_accepted_event_batch(command).await
+    ) -> impl std::future::Future<Output = ServiceResult<CommitAcceptedEventResult>> + Send + '_
+    {
+        self.commits.commit_accepted_event_batch(command)
     }
 }
 
@@ -1626,6 +1707,7 @@ mod tests {
             assert_eq!(command.projections.len(), 1);
             assert_eq!(command.deliveries.len(), 1);
             Ok(CommitAcceptedEventResult {
+                audit_outcome: None,
                 projections_inserted: 1,
                 deliveries_inserted: 1,
             })
@@ -1638,6 +1720,7 @@ mod tests {
             assert_eq!(command.events.len(), 2);
             assert!(command.applet_record.is_some());
             Ok(CommitAcceptedEventResult {
+                audit_outcome: None,
                 projections_inserted: 2,
                 deliveries_inserted: 0,
             })
@@ -1731,10 +1814,12 @@ mod tests {
         let service = EventService::new(Arc::new(RecordingCommitter));
         let result = service
             .commit_accepted_event(CommitAcceptedEventCommand {
+                verified_media_participant: None,
                 authority_commit,
                 self_producer_guard: None,
                 applet_producer_guard: None,
                 widget_token_gate: None,
+                agent_grant_scope_evidence: None,
                 forwarded_producer_evidence: None,
                 forwarded_agent_producer: None,
                 agent_deployment_ceiling: arkret_models_collaboration::governance::agent_participation::ParticipationBits::ALL,

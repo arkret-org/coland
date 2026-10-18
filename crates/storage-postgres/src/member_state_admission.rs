@@ -82,7 +82,7 @@ async fn require_agent_membership_keypackage(
 ) -> PersistenceResult<()> {
     let candidate = sql_query(
         "SELECT e.envelope,c.commit_json,kp.endpoint_verification_method AS verification_method \
-         FROM mls_key_packages kp JOIN accounts a ON a.pk=kp.owner_account_pk \
+         FROM mls_key_packages kp JOIN accounts a ON a.principal_id=kp.owner_account_id->>'principal_id' AND a.station_id=kp.owner_account_id->>'station_id' \
          JOIN canonical_events e ON e.id=kp.agent_key_authorize_event_id AND e.state='committed' \
            AND e.kind='ak.agent.key.authorize' \
          JOIN realm_commits c ON c.event_pk=e.pk AND c.realm_id=$1 \
@@ -273,21 +273,43 @@ pub(crate) async fn locked_membership(
         ),
     )
     .await?;
-    Ok(sql_query(
-        "SELECT m.membership FROM member_state_current_results m \
+    membership_at_cut(conn, realm_id, member, true).await
+}
+
+/// Membership from the caller's existing repeatable-read snapshot, without
+/// admission locks. The same accepted Commit binding remains mandatory.
+pub(crate) async fn snapshot_membership(
+    conn: &mut AsyncPgConnection,
+    realm_id: &arkret_wire::RealmId,
+    member: &arkret_wire::ActorId,
+) -> PersistenceResult<String> {
+    membership_at_cut(conn, realm_id, member, false).await
+}
+
+async fn membership_at_cut(
+    conn: &mut AsyncPgConnection,
+    realm_id: &arkret_wire::RealmId,
+    member: &arkret_wire::ActorId,
+    lock: bool,
+) -> PersistenceResult<String> {
+    let base = "SELECT m.membership FROM member_state_current_results m \
          JOIN realm_commits c ON c.commit_id=m.current_commit_id \
          WHERE m.realm_id=$1 AND m.member_id=$2 \
            AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position \
-           AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=m.realm_id \
-         FOR UPDATE OF m",
-    )
-    .bind::<Text, _>(realm_id.as_str())
-    .bind::<Text, _>(&member_key)
-    .get_result::<MembershipRow>(&mut *conn)
-    .await
-    .optional()
-    .map_err(PersistenceError::database)?
-    .map_or_else(|| "leave".to_owned(), |row| row.membership))
+           AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=m.realm_id";
+    let query = if lock {
+        format!("{base} FOR UPDATE OF m")
+    } else {
+        base.to_owned()
+    };
+    Ok(sql_query(query)
+        .bind::<Text, _>(realm_id.as_str())
+        .bind::<Text, _>(member.to_string())
+        .get_result::<MembershipRow>(&mut *conn)
+        .await
+        .optional()
+        .map_err(PersistenceError::database)?
+        .map_or_else(|| "leave".to_owned(), |row| row.membership))
 }
 
 #[derive(diesel::QueryableByName)]
@@ -645,6 +667,7 @@ async fn admit_member_state(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     review: Option<&crate::agent_management_review::ReviewAdmission>,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     let payload: MembershipPayload = serde_json::from_value(
         serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
@@ -740,10 +763,11 @@ async fn admit_member_state(
         }
         EdgeWriter::SelfOrAdmin if self_authored => Ok(()),
         EdgeWriter::SelfOrAdmin | EdgeWriter::Admin => {
-            RealmAuthorizationCut::read(conn, &event.realm_id, &event.actor_id)
-                .await?
-                .require_event_in_connection(conn, event, commit.committed_at)
-                .await
+            crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+                conn, event, commit, prepared,
+            )
+            .await
+            .map(|_| ())
         }
     }
 }
@@ -759,6 +783,7 @@ pub(crate) async fn admit_member_state_in_connection(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     review: Option<&crate::agent_management_review::ReviewAdmission>,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if event.kind != arkret_wire::EventKind::MemberState {
         return Ok(());
@@ -774,10 +799,10 @@ pub(crate) async fn admit_member_state_in_connection(
         .await?;
         RealmAuthorizationCut::read(conn, &event.realm_id, &event.actor_id)
             .await?
-            .require_managed_self_membership_action_in_connection(conn, event, commit.committed_at)
+            .require_managed_self_action_in_connection(conn, event, commit, prepared)
             .await?;
     }
-    admit_member_state(conn, event, commit, review).await
+    admit_member_state(conn, event, commit, review, prepared).await
 }
 
 #[cfg(test)]

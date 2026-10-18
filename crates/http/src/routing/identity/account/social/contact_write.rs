@@ -608,30 +608,44 @@ async fn validate_request_acceptance_receipt(
 async fn holder_peer(state: &AppState, session: &SessionRecord) -> Result<ContactPeer, AppError> {
     let holder_principal_id = arkret_identifiers::DidCoreId::new(session.actor.clone())
         .map_err(|error| AppError::internal(format!("holder DID invalid: {error}")))?;
-    if let Some(_agent) = state
+    if let Some(agent) = state
         .agent_pairings()
         .agent(holder_principal_id.as_str())
         .await
         .map_err(|error| AppError::internal(format!("holder Agent lookup: {error}")))?
     {
-        let controller_account_pk = session
-            .account_pk
-            .ok_or_else(|| AppError::unauthenticated("Agent session has no controller account"))?;
-        let controller_account = state
-            .identities()
-            .account_by_id(controller_account_pk)
-            .await
-            .map_err(|error| AppError::internal(error.to_string()))?
-            .ok_or_else(|| AppError::unauthenticated("controller account no longer exists"))?;
+        if session.agent_session().is_none() {
+            return Err(AppError::unauthenticated(
+                "Contact Agent holder requires an Agent runtime endpoint",
+            ));
+        }
+        let controller_account_id =
+            crate::routing::identity::agent_pcr::agent_controller_account(state, &agent).await?;
         let station_id = arkret_wire::DidCoreId::new(session.audience.clone())
             .map_err(|error| AppError::internal(format!("session audience invalid: {error}")))?;
+        if station_id != controller_account_id.station_id {
+            return Err(AppError::unauthenticated(
+                "Contact Agent holder belongs to another Station",
+            ));
+        }
+        crate::routing::identity::agent_pcr::validate_agent_controller_binding(
+            state,
+            &agent,
+            now(),
+        )
+        .await?;
         return Ok(ContactPeer::Agent {
             actor_id: arkret_wire::ActorId::account(arkret_wire::AccountId::new(
                 holder_principal_id,
                 station_id,
             )),
-            controller_account_id: controller_account.account_id,
+            controller_account_id,
         });
+    }
+    if session.agent_session().is_some() {
+        return Err(AppError::unauthenticated(
+            "Contact Agent holder has no accepted identity",
+        ));
     }
     let account_pk = session
         .account_pk
@@ -1064,13 +1078,13 @@ async fn contact_authority_realm(
                 "Contact account authority pair is unavailable",
             )
         })?;
-    let holder_account_id = match holder {
-        ContactPeer::Human { account_id } => account_id,
-        ContactPeer::Agent {
-            controller_account_id,
-            ..
-        } => controller_account_id,
-    };
+    let holder_actor_id = holder.contact_actor_id();
+    let holder_account_id = holder_actor_id.as_account_id().ok_or_else(|| {
+        crate::app_error!(
+            FailedPrecondition,
+            "Contact holder is not a complete Account"
+        )
+    })?;
     if authority.account_id != *holder_account_id
         || authority.pcr_realm_id != realm_id
         || authority.account_id.station_id.as_str() != state.service_id()

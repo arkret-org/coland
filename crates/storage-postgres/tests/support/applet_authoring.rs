@@ -130,6 +130,7 @@ impl Fixture {
                 arkret_wire::ServiceOperationId::SELF_APPLET_REVOKE_COMMAND_PREVIEW_V1,
                 arkret_wire::ServiceOperationId::SELF_APPLET_COMMAND_REVOKE_V1,
                 arkret_wire::ServiceOperationId::SELF_SIGNER_KEYS_READ_RESOLVE_V1,
+                arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
             ]
             .into_iter()
             .map(str::to_owned)
@@ -225,7 +226,7 @@ impl Fixture {
             tx.event = self.sign_admin(tx.event.clone());
             tx.commit.event_ref = tx.event.event_id.clone();
             tx.producer_signer_fact = source
-                .prepare_human_signer_fact(&tx.event, tx.commit.committed_at)
+                .prepare_account_device_signer_fact(&tx.event, tx.commit.committed_at)
                 .await
                 .unwrap()
                 .map(Into::into);
@@ -350,12 +351,49 @@ impl Fixture {
             .public_base_url
             .split_once("://")
             .map_or("http", |(scheme, _)| scheme);
-        let source_service_id = package.service_id.to_string();
+        let peer_forward =
+            operation == arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1;
+        // A Station forwards the original Service-signed slots. Transport and
+        // producer have independently authenticated keys and obligations.
+        let source_service_id = if peer_forward {
+            self.state.service_core_id().to_string()
+        } else {
+            package.service_id.to_string()
+        };
+        let transport_method = if peer_forward {
+            self.state
+                .service_verification_method("notary-key")
+                .unwrap()
+                .to_string()
+        } else {
+            package.webhook_auth.key_ref.to_string()
+        };
+        let transport_key = if peer_forward {
+            self.state.notary_signing_key().as_ref().clone()
+        } else {
+            applet_service_signing_key(&package.webhook_auth.key_ref)
+        };
+
         let destination_service_id = self.state.service_id().to_owned();
-        let signed_request = SignedRequestParts {
+        let request_url = if peer_forward {
+            format!(
+                "{}{}",
+                self.state.config().public_base_url.trim_end_matches('/'),
+                path
+            )
+        } else {
+            format!("http://server{path}")
+        };
+        let target = url::Url::parse(&request_url).unwrap();
+        let authority = &target[url::Position::BeforeHost..url::Position::AfterPort];
+        let mut signed_request = SignedRequestParts {
             method: "POST".to_owned(),
-            target_uri: format!("{scheme}://server{path}"),
-            authority: "server".to_owned(),
+            target_uri: if peer_forward {
+                request_url.clone()
+            } else {
+                format!("{scheme}://server{path}")
+            },
+            authority: authority.to_owned(),
             path: path.to_owned(),
             headers: vec![
                 ("arkret-operation".to_owned(), operation.to_owned()),
@@ -370,27 +408,47 @@ impl Fixture {
             ],
             body_digest: Some(digest.clone()),
         };
+        if operation == arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1 {
+            for name in ["source-trust-domain", "destination-trust-domain"] {
+                signed_request.headers.push((
+                    name.to_owned(),
+                    self.state.config().trust_domain.to_string(),
+                ));
+            }
+        }
         let signature = sign_http_message_for_scenario(
             &signed_request,
-            if operation == arkret_wire::ServiceOperationId::SELF_APPLET_AUTHORITY_READ_MATERIAL_V1
+            if [
+                arkret_wire::ServiceOperationId::SELF_APPLET_AUTHORITY_READ_MATERIAL_V1,
+                arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
+            ]
+            .contains(&operation)
             {
                 HttpSignatureScenario::ServiceToServiceV1
             } else {
                 HttpSignatureScenario::AppletTransactionV1
             },
-            if operation == arkret_wire::ServiceOperationId::SELF_APPLET_AUTHORITY_READ_MATERIAL_V1
+            if operation == arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1 {
+                &[
+                    "content-digest",
+                    "idempotency-key",
+                    "source-trust-domain",
+                    "destination-trust-domain",
+                ]
+            } else if operation
+                == arkret_wire::ServiceOperationId::SELF_APPLET_AUTHORITY_READ_MATERIAL_V1
             {
                 &["content-digest", "idempotency-key"]
             } else {
                 &[]
             },
             "sig1",
-            &package.webhook_auth.key_ref,
+            &transport_method,
             created,
-            &applet_service_signing_key(&package.webhook_auth.key_ref),
+            &transport_key,
         )
         .unwrap();
-        let mut response = TestClient::post(format!("http://server{path}"))
+        let mut request = TestClient::post(&request_url)
             .add_header("Arkret-Operation", operation, true)
             .add_header("content-type", "application/json", true)
             .add_header("Content-Digest", digest, true)
@@ -399,9 +457,21 @@ impl Fixture {
             .add_header("Idempotency-Key", key, true)
             .add_header("Signature-Input", signature.signature_input_header, true)
             .add_header("Signature", signature.signature_header, true)
-            .body(bytes)
-            .send(&service(self.state.clone()))
-            .await;
+            .body(bytes);
+        if peer_forward {
+            request = request
+                .add_header(
+                    "Source-Trust-Domain",
+                    self.state.config().trust_domain.as_str(),
+                    true,
+                )
+                .add_header(
+                    "Destination-Trust-Domain",
+                    self.state.config().trust_domain.as_str(),
+                    true,
+                );
+        }
+        let mut response = request.send(&service(self.state.clone())).await;
         (
             response.status_code.unwrap(),
             response.take_json().await.unwrap(),
@@ -660,6 +730,12 @@ fn signed_applet_package(
         "ak.applet.bot.provision".to_owned(),
         "ak.applet.ghost.provision".to_owned(),
     ];
+    if namespace.starts_with("registered-audit-") {
+        package.requested_scopes.extend([
+            "ak.strand.watch.set.others".to_owned(),
+            "ak.audit.accessed".to_owned(),
+        ]);
+    }
     package.claimed_profiles = vec![
         "ak.profile.applet_bridge.v1".to_owned(),
         "ak.profile.applet_service.v1".to_owned(),
@@ -861,7 +937,7 @@ async fn admin_domain_request(
     event: Event,
 ) -> coland_storage::EventCommitRequest {
     let producer = event
-        .human_device_producer()
+        .account_device_producer()
         .unwrap()
         .expect("admin Event has a Human Device producer");
     // Explicit directory issuance is a fixture prerequisite. Local
@@ -947,7 +1023,7 @@ async fn admin_domain_request(
         .authority_commit
         .producer_signer_fact
         .as_ref()
-        .and_then(|fact| fact.as_human())
+        .and_then(|fact| fact.as_account_device())
     {
         let selector = coland_storage::DeviceRevocationGateSelector {
             principal_id: producer.account_id.principal_id,
@@ -1146,34 +1222,37 @@ impl AppletAuthoringFactory {
         };
         let digest = Hash::new(arkret_canonical::canonical_sha256(&request).unwrap()).unwrap();
         coland_storage::AppletAuthoringUnitWrite {
-            request,
-            package: package.clone(),
-            recomputed_install_plan: plan,
-            service_did_document: applet_service_id_document(package),
-            controller_did_document: Self::controller_document(package),
-            station_verification_method: self
-                .fixture
-                .state
-                .service_verification_method("notary-key")
-                .unwrap(),
-            station_public_key: *self
-                .fixture
-                .state
-                .notary_signing_key()
-                .verifying_key()
-                .as_bytes(),
-            admin_actor_id: actor,
-            admin_producer_guards: guards,
+            candidate: coland_storage::AppletAuthoringCandidate {
+                request,
+                package: package.clone(),
+                recomputed_install_plan: plan,
+                service_did_document: applet_service_id_document(package),
+                controller_did_document: Self::controller_document(package),
+                station_verification_method: self
+                    .fixture
+                    .state
+                    .service_verification_method("notary-key")
+                    .unwrap(),
+                station_public_key: *self
+                    .fixture
+                    .state
+                    .notary_signing_key()
+                    .verifying_key()
+                    .as_bytes(),
+                admin_actor_id: actor,
+                admin_producer_guards: guards,
+                request_digest,
+                canonical_request_hash: digest,
+                prior_managed_refs: vec![],
+                prior_service_signer_evidence: None,
+                accepted_at: arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()),
+            },
             expected_identity: identity,
             expected_installation: installation,
             preview_subject_key: preview,
-            request_digest,
-            canonical_request_hash: digest,
             operation_id: operation.to_owned(),
             idempotency_key: format!("contract-{}", uuid::Uuid::now_v7()),
-            prior_managed_refs: vec![],
-            prior_service_signer_evidence: None,
-            accepted_at: arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()),
+            operation_approvals: None,
         }
     }
 }
@@ -1251,7 +1330,15 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
         let package = packages
             .entry(applet_id.to_string())
             .or_insert_with(|| {
-                let namespace = format!("contract.{}", uuid::Uuid::now_v7().simple());
+                let namespace = format!(
+                    "{}contract.{}",
+                    if scope_label.contains("registered-audit") {
+                        "registered-audit-"
+                    } else {
+                        ""
+                    },
+                    uuid::Uuid::now_v7().simple()
+                );
                 signed_applet_package(
                     applet_id.as_str(),
                     &namespace,
@@ -1273,6 +1360,9 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
             "ak.applet.bot.provision",
             "ak.applet.ghost.provision",
         ];
+        if scope_label.contains("registered-audit") {
+            actions.extend(["ak.strand.watch.set.others", "ak.audit.accessed"]);
+        }
         // Durable capabilities are the canonical set projection of the
         // accepted grants, as in the production install finalizer.
         actions.sort_unstable();
@@ -1647,4 +1737,352 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
             effective_scope: scope.clone(),
         }
     }
+}
+
+/// Exercise Service first admission through the actual signed peer endpoint,
+/// with an accepted installation and independently signed business/audit slots.
+pub async fn registered_service_pair(pool: PgPool) {
+    use arkret_models_collaboration::authority_commit::*;
+    let factory = Box::pin(AppletAuthoringFactory::new(pool.clone())).await;
+    let id = AppletId::new(format!("ak:applet:{}", uuid::Uuid::now_v7())).unwrap();
+    let install = factory.prepare_install(&id, "registered-audit").await;
+    let applets = PgAppletStore { pool: pool.clone() };
+    install.commit(&applets).await.unwrap();
+    let record = applets
+        .get(
+            id.as_str(),
+            &coland_storage::applet_effective_scope_key(&install.effective_scope).unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let package: AppletPackage = serde_json::from_value(record["package"].clone()).unwrap();
+    let service_actor = ActorId::service(package.service_id.clone());
+    let grant = |action: &str| -> arkret_wire::GrantId {
+        let event: Event = serde_json::from_value(
+            record["capability_grant_events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|event| {
+                    event["payload"]["grant"]["actions"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|value| value == action)
+                })
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        arkret_wire::GrantId::from_event_id(&event.event_id)
+    };
+    let sign =
+        |kind: EventKind, payload: Value, action: &str, refs: Vec<arkret_wire::SemanticRef>| {
+            let mut event =
+                factory
+                    .fixture
+                    .admin_event(kind, install.effective_scope.clone(), payload);
+            event.executed_by = Some(service_actor.clone());
+            event.applet_id = Some(id.clone());
+            event.authorization_ref =
+                Some(arkret_wire::AuthorizationRef::new(grant(action).to_string()).unwrap());
+            event.semantic_refs = refs;
+            event.producer_proof = None;
+            let signer = arkret_test_kit::seeded_signer_for_seed(
+                applet_service_signing_key(&package.webhook_auth.key_ref).to_bytes(),
+                applet_service_did(&package),
+                package.webhook_auth.key_ref.clone(),
+            );
+            arkret_test_kit::sign_verifiable_event(
+                event,
+                &signer,
+                arkret_canonical::DigestSuite::Sha256,
+            )
+            .unwrap()
+            .expect_verifiable()
+        };
+    let accountable = ActorId::account(factory.fixture.pcr.history.account.clone());
+    let permission = factory.fixture.admin_event(EventKind::CapabilityGrant, install.effective_scope.clone(), json!({"grant":{
+        "schema":"ak.schema.capability.v1","realm_id":factory.fixture.realm,"issuer_id":accountable,"subject":accountable,
+        "actions":["ak.strand.watch.set.others","ak.audit.accessed"],"resources":[{"kind":"realm","realm_id":factory.fixture.realm,"match_scope":"realm_wide"}],"constraints":[],
+        "issuer_authority_refs":[{"kind":"realm_root","realm_id":factory.fixture.realm,"authority_event_ref":factory.fixture.authority_event_ref,"authority_generation":0}],
+        "issued_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())}}));
+    accepted_admin_domain_event(&factory.fixture, permission).await;
+    let mut strand = factory.fixture.admin_event(EventKind::StrandCreate, install.effective_scope.clone(), json!({"object":{
+        "schema":"ak.schema.strand.v1","realm_id":factory.fixture.realm,"tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},
+        "metadata":{"title":"Service Watch target"},"state":"active","created_by":accountable,
+        "created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())}}));
+    strand.payload.get_mut("object").unwrap()["created_at"] = json!(
+        arkret_canonical::format_timestamp_canonical(strand.created_at)
+    );
+    strand = factory.fixture.sign_admin(strand);
+    let strand_id = arkret_wire::StrandId::from_event_id(&strand.event_id);
+    accepted_admin_domain_event(&factory.fixture, strand).await;
+    let target = ActorId::account(arkret_wire::AccountId::new(
+        "ak:did_core:web:service-watch-target.example"
+            .parse()
+            .unwrap(),
+        factory.fixture.state.service_core_id(),
+    ));
+    let business = sign(
+        EventKind::StrandWatchSet,
+        json!({"strand_id":strand_id,"watcher_actor_id":target,"level":"all"}),
+        "ak.strand.watch.set.others",
+        vec![],
+    );
+    let audit = sign(
+        EventKind::AuditAccessed,
+        json!({"access_kind":"watch_set_others","writer_actor_id":accountable,
+        "target_actor_id":target,"target_ref":strand_id,"paired_event_id":business.event_id,"purpose":"Service producer admission",
+        "accessed_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())}),
+        "ak.audit.accessed",
+        vec![arkret_wire::SemanticRef {
+            role: "audit_pair".into(),
+            id: business.event_id.to_string(),
+            critical: true,
+        }],
+    );
+    let request =
+        PeerAuthoritySubmitRequest::AuthorityForwardAtomic(PeerAuthorityForwardAtomicRequest {
+            branch: AuthorityForwardBranch::AuthorityForward,
+            atomic_submission: AuditPairedEventUnitSubmission {
+                unit_kind: AuditPairedEventUnitKind::AuditPairedEvent,
+                events: [
+                    arkret_wire::EventAdmissionSubmission::new(business),
+                    arkret_wire::EventAdmissionSubmission::new(audit),
+                ],
+            },
+            atomic_producer_evidence: [
+                AtomicSlotProducerEvidence::Service {},
+                AtomicSlotProducerEvidence::Service {},
+            ],
+        });
+    request.validate().unwrap();
+    // The Account's permission cannot substitute for the Service's exact
+    // signed authorization_ref, even if the Service owns another good grant.
+    let mut wrong = request.clone();
+    let PeerAuthoritySubmitRequest::AuthorityForwardAtomic(wrong_unit) = &mut wrong else {
+        unreachable!()
+    };
+    wrong_unit.atomic_submission.events[0]
+        .event
+        .authorization_ref =
+        Some(arkret_wire::AuthorizationRef::new(grant("ak.audit.accessed").to_string()).unwrap());
+    let signer = arkret_test_kit::seeded_signer_for_seed(
+        applet_service_signing_key(&package.webhook_auth.key_ref).to_bytes(),
+        applet_service_did(&package),
+        package.webhook_auth.key_ref.clone(),
+    );
+    let mut wrong_business = wrong_unit.atomic_submission.events[0].event.clone();
+    wrong_business.producer_proof = None;
+    let wrong_business = arkret_test_kit::sign_verifiable_event(
+        wrong_business,
+        &signer,
+        arkret_canonical::DigestSuite::Sha256,
+    )
+    .unwrap()
+    .expect_verifiable();
+    let mut wrong_audit = wrong_unit.atomic_submission.events[1].event.clone();
+    wrong_audit.producer_proof = None;
+    wrong_audit
+        .payload
+        .insert("paired_event_id".into(), json!(wrong_business.event_id));
+    wrong_audit.semantic_refs = vec![arkret_wire::SemanticRef {
+        role: "audit_pair".into(),
+        id: wrong_business.event_id.to_string(),
+        critical: true,
+    }];
+    let wrong_audit = arkret_test_kit::sign_verifiable_event(
+        wrong_audit,
+        &signer,
+        arkret_canonical::DigestSuite::Sha256,
+    )
+    .unwrap()
+    .expect_verifiable();
+    wrong_unit.atomic_submission.events = [
+        arkret_wire::EventAdmissionSubmission::new(wrong_business.clone()),
+        arkret_wire::EventAdmissionSubmission::new(wrong_audit.clone()),
+    ];
+    wrong.validate().unwrap();
+    let source_before = PgAuthorityCommitStore { pool: pool.clone() };
+    let stream = arkret_wire::CommitStreamRef::Realm {
+        realm_id: factory.fixture.realm.clone(),
+    };
+    let head = source_before.stream_head(&stream).await.unwrap();
+    let (status, refusal) = factory
+        .fixture
+        .service_post(
+            &package,
+            "/_arkret/peer/events",
+            arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
+            &serde_json::to_value(&wrong).unwrap(),
+            "registered-service-wrong-ref",
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "wrong Service authorization_ref: {refusal}"
+    );
+    assert_eq!(source_before.stream_head(&stream).await.unwrap(), head);
+    for event in [wrong_business, wrong_audit] {
+        assert!(
+            source_before
+                .committed_event(&event.event_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    let body = serde_json::to_value(&request).unwrap();
+    let (status, value) = factory
+        .fixture
+        .service_post(
+            &package,
+            "/_arkret/peer/events",
+            arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
+            &body,
+            "registered-service-pair",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "Service pair: {value}");
+    let outcome: PeerAuthoritySubmitOutcome = serde_json::from_value(value).unwrap();
+    outcome.validate_for_request(&request).unwrap();
+    let PeerAuthoritySubmitOutcome::AuthorityForward(outcome) = outcome else {
+        panic!("forward outcome")
+    };
+    let PeerAuthorityForwardOutcomeValue::AuditPairedEvent(outcome) = outcome.outcome else {
+        panic!("pair outcome")
+    };
+    let source = PgAuthorityCommitStore { pool };
+    for commit in &outcome.commits {
+        let full = source
+            .committed_event(&commit.event_ref)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            source
+                .producer_signer_fact(&full.event, commit)
+                .await
+                .unwrap(),
+            Some(HistoricalProducerSignerFact::Service(_))
+        ));
+    }
+    let scan = arkret_wire::StreamScanRequest {
+        realm_id: factory.fixture.realm.clone(),
+        stream_ref: stream.clone(),
+        direction: arkret_wire::StreamScanDirection::Before(Some(
+            outcome.commits.last().unwrap().stream_position + 1,
+        )),
+        limit: 2,
+    };
+    let coland_storage::PeerStreamScan::Page(page) = source
+        .scan_stream_for_peer(
+            &scan,
+            &factory.fixture.state.service_core_id(),
+            &factory.fixture.state.service_core_id(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("the member-hosting Station must receive its Service-produced tail");
+    };
+    page.validate_for_request(&scan).unwrap();
+    assert_eq!(page.committed_events.len(), 2);
+    assert!(
+        !page.producer_signer_facts.is_empty(),
+        "the positive scan must disclose an actual Service Full row"
+    );
+    for entry in &page.producer_signer_facts {
+        assert!(matches!(
+            entry.producer_signer_fact,
+            HistoricalProducerSignerFact::Service(_)
+        ));
+        assert!(
+            outcome
+                .commits
+                .iter()
+                .any(|commit| commit.commit_id == entry.target.commit_id
+                    && commit.event_ref == entry.target.event_id
+                    && commit.stream_ref == entry.target.stream_ref
+                    && commit.stream_position == entry.target.stream_position)
+        );
+    }
+    eprintln!(
+        "[2133-service-scan] signed_service_pair=1 peer_tail_rows=2 exact_service_facts={}",
+        page.producer_signer_facts.len()
+    );
+    let PeerAuthoritySubmitRequest::AuthorityForwardAtomic(peer) = &request else {
+        unreachable!()
+    };
+    let self_request = SelfAuthoritySubmitRequest::AuditPairedEvent(peer.atomic_submission.clone());
+    let (status, self_replay) = factory
+        .fixture
+        .admin_post(
+            "/_arkret/self/events",
+            arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+            &serde_json::to_value(&self_request).unwrap(),
+            None,
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Service self exact recovery: {self_replay}"
+    );
+    let self_replay: SelfAuthoritySubmitOutcome = serde_json::from_value(self_replay).unwrap();
+    self_replay.validate_for_request(&self_request).unwrap();
+    let self_business = sign(
+        EventKind::StrandWatchSet,
+        json!({"strand_id":strand_id,"watcher_actor_id":target,"level":"participating","expected_value":{"level":"all"}}),
+        "ak.strand.watch.set.others",
+        vec![],
+    );
+    let self_audit = sign(
+        EventKind::AuditAccessed,
+        json!({"access_kind":"watch_set_others","writer_actor_id":accountable,
+        "target_actor_id":target,"target_ref":strand_id,"paired_event_id":self_business.event_id,"purpose":"Service original through authenticated self",
+        "accessed_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())}),
+        "ak.audit.accessed",
+        vec![arkret_wire::SemanticRef {
+            role: "audit_pair".into(),
+            id: self_business.event_id.to_string(),
+            critical: true,
+        }],
+    );
+    let self_first = SelfAuthoritySubmitRequest::AuditPairedEvent(AuditPairedEventUnitSubmission {
+        unit_kind: AuditPairedEventUnitKind::AuditPairedEvent,
+        events: [
+            arkret_wire::EventAdmissionSubmission::new(self_business),
+            arkret_wire::EventAdmissionSubmission::new(self_audit),
+        ],
+    });
+    self_first.validate().unwrap();
+    let (status, value) = factory
+        .fixture
+        .admin_post(
+            "/_arkret/self/events",
+            arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+            &serde_json::to_value(&self_first).unwrap(),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "Service first self pair: {value}");
+    let value: SelfAuthoritySubmitOutcome = serde_json::from_value(value).unwrap();
+    value.validate_for_request(&self_first).unwrap();
+    let (status, replay) = factory
+        .fixture
+        .service_post(
+            &package,
+            "/_arkret/peer/events",
+            arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
+            &body,
+            "registered-service-pair-retry",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "Service exact replay: {replay}");
+    let replay: PeerAuthoritySubmitOutcome = serde_json::from_value(replay).unwrap();
+    replay.validate_for_request(&request).unwrap();
 }

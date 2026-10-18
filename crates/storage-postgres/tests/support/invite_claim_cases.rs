@@ -125,6 +125,7 @@ fn claim_batch(
     proof: Option<coland_storage::InviteClaimProofCommit>,
 ) -> coland_storage::EventBatchCommitRequest {
     coland_storage::EventBatchCommitRequest {
+        audit_unit: None,
         events: vec![request],
         invite_claim_proof: proof,
         event_approvals: None,

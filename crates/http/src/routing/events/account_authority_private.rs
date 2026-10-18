@@ -10,6 +10,41 @@ use salvo::prelude::*;
 
 use crate::state::AppState;
 
+/// Only the configured deployment Account Authority can obtain this bounded
+/// source projection. It is neither public introspection nor a read grant.
+#[handler]
+pub(super) async fn read_agent_session_authority(
+    depot: &mut Depot,
+    req: &mut Request,
+) -> JsonResult<coland_storage::AgentSessionAuthorityOutcome> {
+    let state = depot.get_typed::<AppState>().expect("state injected");
+    super::peer::authenticate_account_authority_private_request(state, req)?;
+    let request = req
+        .parse_json::<coland_storage::AgentSessionAuthorityRequest>()
+        .await
+        .map_err(|_| AppError::json_invalid("invalid private Agent session binding"))?;
+    if request.agent_account_id.station_id != state.service_core_id()
+        || request.controller_account_id.station_id != state.service_core_id()
+        || request.agent_account_id == request.controller_account_id
+    {
+        return Err(crate::app_error!(
+            CapabilityDenied,
+            "Agent session source belongs to another Station"
+        ));
+    }
+    let outcome = state
+        .persistence()
+        .agent_session_authority(&request, chrono::Utc::now())
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    if !outcome.matches_request(&request) {
+        return Err(AppError::internal(
+            "Agent source response lost its exact request binding",
+        ));
+    }
+    json_ok(outcome)
+}
+
 /// The configured Account Authority reads its own Station's controller state
 /// at issuance/refresh. This is not the controller-only public GET surface.
 #[handler]

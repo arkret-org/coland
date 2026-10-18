@@ -73,7 +73,7 @@ use crate::state::AppState;
 mod dev_fanout;
 use dev_fanout::{
     require_controller_principal_control_realm, submit_durable_agent_lifecycle,
-    submit_provision_event, validate_durable_agent_lifecycle,
+    submit_provision_event,
 };
 
 mod common;

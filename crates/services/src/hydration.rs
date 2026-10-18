@@ -154,21 +154,16 @@ fn replay_hydration_record_with_commit(
             .with_committed_ref(reference)
             .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))?;
     }
-    if record.kind == arkret_wire::EventKind::CircleMemberState.as_str() {
-        let payload = operation.payload.as_object_mut().ok_or_else(|| {
-            coland_storage::PersistenceError::Internal(format!(
-                "{projection_name} projection event {} has a non-object payload",
-                record.event_id
-            ))
-        })?;
-        // This replay source was selected from confirmed command results. Restore
-        // that trusted verdict on the reducer-only DTO; the canonical Event
-        // payload remains closed and never persists this internal field.
-        payload.insert("manage_capability_verified".to_owned(), Value::Bool(true));
-    }
-    if let coland_domain::reducer::ProjectionEffect::Rejected { reason } =
-        proj.apply(&operation, hydration_hlc)
-    {
+    let effect = match operation.event_kind {
+        arkret_wire::EventKind::CircleCreate => {
+            proj.restore_accepted_circle_create(&operation, operation.created_at)
+        }
+        arkret_wire::EventKind::CircleMemberState => {
+            proj.restore_accepted_circle_membership(&operation, operation.created_at)
+        }
+        _ => proj.apply(&operation, hydration_hlc),
+    };
+    if let coland_domain::reducer::ProjectionEffect::Rejected { reason } = effect {
         return Err(coland_storage::PersistenceError::Internal(format!(
             "{projection_name} projection event {} failed deterministic hydration: {reason}",
             record.event_id
@@ -938,9 +933,8 @@ pub async fn hydrate_projections_from_persistence(
     projection_adapter: &dyn HydrationProjectionAdapter,
 ) -> coland_storage::PersistenceResult<()> {
     use coland_domain::reducer::{
-        KeyPackageLifetimeProjection, MlsKeyPackageProjection, MorphProjection,
-        ObjectLifecycleState, SpaceContainerLifecycleState, SpaceContainerProjection,
-        StrandProjection, object_stage_from_wire_value,
+        MorphProjection, ObjectLifecycleState, SpaceContainerLifecycleState,
+        SpaceContainerProjection, StrandProjection, object_stage_from_wire_value,
     };
 
     let hydration_hlc = coland_domain::hlc::ServerHlc::new("coland:projection-hydration");
@@ -1321,31 +1315,7 @@ pub async fn hydrate_projections_from_persistence(
         for row in rows {
             proj.mls_key_packages.insert(
                 row.id.clone(),
-                MlsKeyPackageProjection {
-                    id: row.id,
-                    keypackage_ref: row.keypackage_ref,
-                    keypackage_digest: row.keypackage_digest,
-                    owner_account_pk: row.owner_account_pk.get(),
-                    actor_id: row.actor_id,
-                    device_id: row.device_id,
-                    endpoint_verification_method: row.endpoint_verification_method,
-                    lifetime: KeyPackageLifetimeProjection {
-                        not_before: row.lifetime_not_before,
-                        not_after: row.lifetime_not_after,
-                    },
-                    key_package_bytes: row.key_package_bytes,
-                    capabilities: row.capabilities,
-                    capabilities_digest: row.capabilities_digest,
-                    last_resort: row.last_resort,
-                    last_resort_realm_id: row.last_resort_realm_id,
-                    claimed_by: row.claimed_by_mls_group_id,
-                    device_authorize_event_id: row.device_authorize_event_id,
-                    agent_key_authorize_event_id: row.agent_key_authorize_event_id,
-                    claimed_at: row.claimed_at,
-                    claim_expires_at_unix_ms: row.claim_expires_at_unix_ms,
-                    consumed_at: row.consumed_at,
-                    created_at: row.created_at,
-                },
+                crate::projection::key_package_projection_from_record(row),
             );
         }
     }

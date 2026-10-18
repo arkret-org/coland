@@ -47,7 +47,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, TimeZone, Utc};
 use coland_domain::reducer::mls::KeyPackageTrustBinding;
 use coland_http::error::AppError;
-use coland_http::result::{JsonResult, json_ok};
+use coland_http::result::{GuardedJsonResult, JsonResult, guarded_json_ok, json_ok};
 use coland_services::events::{
     ClaimMlsKeyPackageCommand, ClaimMlsKeyPackageTarget, MlsKeyPackageState as MlsKeyPackageRow,
     PeerKeyPackageClaimCommand as PeerKeyPackageClaimAttempt,
@@ -57,7 +57,6 @@ use coland_services::events::{
     PersistedKeyPackageReusePolicy,
 };
 use coland_services::identity::SessionIdentityState as SessionRecord;
-use coland_services::projection::{MlsProjectionEffect, ProjectionEffectView};
 use ed25519_dalek::Signer as _;
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
@@ -73,6 +72,11 @@ use crate::wire::now;
 #[path = "mls_payload_fields.rs"]
 pub(crate) mod payload_fields;
 
+#[path = "mls_keypackage_native.rs"]
+mod mls_keypackage_native;
+#[path = "mls_keypackage_upload.rs"]
+mod mls_keypackage_upload;
+
 #[path = "mls_roster_read.rs"]
 mod mls_roster_read;
 #[path = "mls_roster_signature.rs"]
@@ -82,11 +86,11 @@ const LAST_RESORT_KEYPACKAGE_MAX_LIFETIME_SECS: i64 = 30 * 24 * 60 * 60;
 
 async fn ensure_keypackage_owner_account_active(
     state: &AppState,
-    owner_account_pk: coland_storage::AccountPk,
+    owner_account_id: &arkret_wire::AccountId,
 ) -> Result<(), AppError> {
     let account = state
         .identities()
-        .account_by_id(owner_account_pk)
+        .account(owner_account_id)
         .await
         .map_err(|error| AppError::internal(format!("owner account lookup failed: {error}")))?
         .ok_or_else(|| AppError::capability_denied("owner account is unavailable"))?;
@@ -98,10 +102,10 @@ async fn ensure_keypackage_owner_account_active(
     Ok(())
 }
 
-async fn local_keypackage_owner_account_pk(
+async fn local_keypackage_owner_account_id(
     state: &AppState,
     session: &SessionRecord,
-) -> Result<coland_storage::AccountPk, AppError> {
+) -> Result<arkret_wire::AccountId, AppError> {
     if session.agent_session().is_some() {
         let principal_id = arkret_wire::DidCoreId::new(session.actor.clone())
             .map_err(|_| AppError::capability_denied("Agent principal id is invalid"))?;
@@ -124,8 +128,8 @@ async fn local_keypackage_owner_account_pk(
             .ok_or_else(|| {
                 AppError::capability_denied("Agent controller Account is unavailable")
             })?;
-        ensure_keypackage_owner_account_active(state, account.pk).await?;
-        return Ok(account.pk);
+        ensure_keypackage_owner_account_active(state, &account.account_id).await?;
+        return Ok(account.account_id);
     }
 
     let actor_id = &session.actor;
@@ -150,7 +154,7 @@ async fn local_keypackage_owner_account_pk(
     {
         return Err(AppError::capability_denied("owner account is not active"));
     }
-    Ok(account.pk)
+    Ok(account.account_id)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -379,7 +383,7 @@ fn mls_group_state_material_revision_unavailable() -> AppError {
     )
 }
 
-/// A member's Account Station checks the exact session Actor and the current
+/// A member's Account Station checks the exact authenticated Actor and the current
 /// and target membership cut before asking governance for the public bytes.
 /// Governance independently repeats that check for the signed peer request.
 #[salvo::oapi::endpoint(operation_id = "ak.self.mls.read.group_state_material", tags("mls.rs"))]
@@ -389,20 +393,46 @@ async fn resolve_self_mls_group_state_material(
     body: JsonBody<arkret_models_collaboration::mls_group_state_material::MlsMemberGroupStateMaterialReadRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialOutcome>
-{
+) -> GuardedJsonResult<
+    arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialOutcome,
+> {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
-    let caller =
-        crate::routing::identity::session_actor::validated_session_actor(state, &session).await?;
     let request = body.into_inner();
     request
         .validate()
         .map_err(|error| mls_group_state_material_schema_violation(error.to_string()))?;
-    if request.caller_actor_id != caller || caller.route_service_id() != &state.service_core_id() {
-        return Err(mls_group_state_material_not_found());
-    }
-    json_ok(read_member_group_state_material(state, &request).await?)
+    let guard = if let Ok(device) = depot.get_typed::<
+        crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice,
+    >() {
+        if device.operation != arkret_wire::ServiceOperationId::SelfMlsReadGroupStateMaterialV1
+            || request.caller_actor_id != arkret_wire::ActorId::account(device.authority.account_id.clone())
+            || request.caller_actor_id.route_service_id() != &state.service_core_id()
+            || request.effective_scope != device.metadata.effective_scope
+            || request.effective_scope.realm_id() != &request.realm_id
+        {
+            return Err(mls_group_state_material_not_found());
+        }
+        Some(crate::routing::identity::applet_managed_device::content_delivery_guard_for_input(
+            state,
+            device,
+            coland_storage::AccountContentDeliveryInput {
+                realms: vec![request.realm_id.clone()],
+                mls_group_material_reads: vec![request.clone()],
+                ..Default::default()
+            },
+        ).await?)
+    } else {
+        let session = aa.authenticated_session(state, req).await?;
+        let caller = crate::routing::identity::session_actor::validated_session_actor(state, &session).await?;
+        if request.caller_actor_id != caller || caller.route_service_id() != &state.service_core_id() {
+            return Err(mls_group_state_material_not_found());
+        }
+        None
+    };
+    guarded_json_ok(
+        read_member_group_state_material(state, &request).await?,
+        guard,
+    )
 }
 
 pub(crate) async fn read_member_group_state_material(
@@ -714,153 +744,27 @@ async fn upload_keypackage(
     req: &mut Request,
 ) -> JsonResult<KeyPackagesUploadOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
-    if session.account_pk.is_none() && session.agent_session().is_none() {
-        return Err(AppError::capability_denied(
-            "KeyPackage upload requires an account- or Agent-bound session",
-        ));
-    }
-    // `account_pk` belongs to the credential issuer (normally the
-    // Account Authority process), whereas KeyPackage rows are owned by this Station's local account
-    // id. Resolve that local id through the stable principal carried by the authenticated
-    // session; never reinterpret one service's local account id in another service's account
-    // namespace.
-    let owner_account_pk = local_keypackage_owner_account_pk(state, &session).await?;
-
     let body = body.into_inner();
-    body.validate_shape().map_err(AppError::param_invalid)?;
-    if session.agent_session().is_some()
-        != (body.device_id.is_none()
-            && body.agent_verification_method.is_some()
-            && body.agent_key_authorize_event_id.is_some())
-    {
-        return Err(AppError::capability_denied(
-            "KeyPackage signer branch must match the calling session",
-        ));
-    }
+    let verified = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>()
+        .ok();
+    let mls_keypackage_upload::UploadAuthority {
+        owner_account_id,
+        device_id,
+        trust_binding,
+        publish_trust_anchor,
+        native,
+    } = mls_keypackage_upload::resolve(state, &aa, req, &body, verified).await?;
     let principal_id = body.principal_id.clone();
-    let actor_id = body.principal_id.to_string();
-    let expected_actor = arkret_wire::ActorId::account(arkret_wire::AccountId {
-        principal_id: principal_id.clone(),
-        station_id: state.service_core_id().clone(),
-    });
-    if actor_id != session.actor || body.actor_id != expected_actor {
-        return Err(AppError::capability_denied(
-            "actor_id must match the calling session",
-        ));
-    }
-    if body.keypackages.is_empty() {
-        return Err(AppError::param_missing("keypackages is required"));
-    }
-    let (device_id, trust_binding, publish_trust_anchor) = if let Some(device_id) = &body.device_id
-    {
-        if device_id.as_str() != session.require_human_device_id() {
-            return Err(AppError::capability_denied(
-                "device_id must match the calling session",
-            ));
-        }
-        // `device-lifecycle.md` 15: an Applet-managed principal's delegated
-        // device loses new KeyPackage publication the moment its install is
-        // fenced, without waiting for an `ak.device.revoke`. The accepted
-        // authorize still standing in the PCR is explicitly not enough.
-        crate::routing::extensions::applet_bridge::ensure_delegated_device_not_fenced(
-            state,
-            &principal_id,
-        )
-        .await?;
-        let binding =
-            current_keypackage_trust_binding(state, &principal_id, device_id.as_str()).await?;
-        let anchor = match (
-            binding.device_authorize_event_id.as_ref(),
-            binding.agent_key_authorize_event_id.as_ref(),
-        ) {
-            (Some(event_id), None) => {
-                coland_domain::reducer::mls::MlsKeyPackagePublishTrustAnchor::DeviceAuthorize(
-                    event_id.clone(),
-                )
-            }
-            _ => {
-                return Err(AppError::param_invalid(
-                    "device upload has no active device authorization",
-                ));
-            }
-        };
-        (Some(device_id.as_str().to_owned()), Some(binding), anchor)
-    } else if let (Some(method), Some(event_id)) = (
-        &body.agent_verification_method,
-        &body.agent_key_authorize_event_id,
-    ) {
-        if !current_agent_key_authorization_matches_method(
-            state,
-            &principal_id,
-            event_id.as_str(),
-            method.as_str(),
-        )
-        .await
-        {
-            return Err(AppError::capability_denied(
-                "Agent KeyPackage method or authorization is not current",
-            ));
-        }
-        (
-            None,
-            Some(KeyPackageTrustBinding::agent_key_authorize(
-                event_id.as_str().to_owned(),
-            )),
-            coland_domain::reducer::mls::MlsKeyPackagePublishTrustAnchor::AgentKeyAuthorize {
-                event_id: event_id.as_str().to_owned(),
-                verification_method: method.as_str().to_owned(),
-            },
-        )
-    } else {
-        return Err(AppError::param_invalid(
-            "KeyPackage upload has no valid endpoint",
-        ));
-    };
+    let actor_id = principal_id.to_string();
     let endpoint_device_id = device_id.as_deref();
-    let unsigned_upload = body.unsigned();
-    let upload_signing_input =
-        arkret_models_crypto::http_bodies::keypackages_upload_signing_input(&unsigned_upload)
-            .map_err(|error| {
-                AppError::param_invalid(format!(
-                    "KeyPackage upload canonical input failed: {error}"
-                ))
-            })?;
-    if let Some(authorize_event_id) = trust_binding
-        .as_ref()
-        .and_then(|binding| binding.agent_key_authorize_event_id.as_deref())
-    {
-        verify_agent_keypackage_batch(
-            state,
-            &principal_id,
-            authorize_event_id,
-            &body.endpoint_signature,
-            &upload_signing_input,
-        )
-        .await
-        .map_err(AppError::param_invalid)?;
-    } else if device_id.is_some() {
-        verify_device_keypackage_signature(
-            state,
-            &principal_id,
-            endpoint_device_id.expect("validated device upload has a device id"),
-            &body.endpoint_signature,
-            &upload_signing_input,
-        )
-        .await?;
-    } else {
-        return Err(AppError::param_invalid(
-            "KeyPackage upload has no authorized signer",
-        ));
-    }
-
     let mut accepted = 0_u32;
     let mut key_package_refs = Vec::new();
     let mut rejected = Vec::new();
-    for entry in body.keypackages {
+    for entry in &body.keypackages {
         if entry.keypackage_id.is_empty() {
             rejected.push(keypackage_failure(
-                &entry,
+                entry,
                 endpoint_device_id,
                 "keypackage_id_missing",
             ));
@@ -869,7 +773,7 @@ async fn upload_keypackage(
         let keypackage_id = entry.keypackage_id.clone();
         if entry.keypackage_ref.is_empty() {
             rejected.push(keypackage_failure(
-                &entry,
+                entry,
                 endpoint_device_id,
                 "keypackage_ref_missing",
             ));
@@ -880,19 +784,19 @@ async fn upload_keypackage(
         let key_package_bytes = match decode_key_package(&key_package_bytes_b64) {
             Ok(bytes) => bytes,
             Err(reason) => {
-                rejected.push(keypackage_failure(&entry, endpoint_device_id, reason));
+                rejected.push(keypackage_failure(entry, endpoint_device_id, reason));
                 continue;
             }
         };
-        if let Err(reason) = validate_keypackage_ciphersuite(&entry, &key_package_bytes) {
-            rejected.push(keypackage_failure(&entry, endpoint_device_id, reason));
+        if let Err(reason) = validate_keypackage_ciphersuite(entry, &key_package_bytes) {
+            rejected.push(keypackage_failure(entry, endpoint_device_id, reason));
             continue;
         }
         let keypackage_digest = arkret_canonical::sha256_digest(&key_package_bytes);
         let capabilities = match validate_capabilities(&entry.capabilities) {
             Ok(value) => value,
             Err(reason) => {
-                rejected.push(keypackage_failure(&entry, endpoint_device_id, reason));
+                rejected.push(keypackage_failure(entry, endpoint_device_id, reason));
                 continue;
             }
         };
@@ -900,7 +804,7 @@ async fn upload_keypackage(
             .is_err()
         {
             rejected.push(keypackage_failure(
-                &entry,
+                entry,
                 endpoint_device_id,
                 "keypackage_capabilities_signed_binding_invalid",
             ));
@@ -917,10 +821,19 @@ async fn upload_keypackage(
             )
             .await
         {
-            rejected.push(keypackage_failure(&entry, endpoint_device_id, reason));
+            rejected.push(keypackage_failure(entry, endpoint_device_id, reason));
             continue;
         }
-        if let Some(endpoint_device_id) = endpoint_device_id
+        if let Some((guard, _)) = &native {
+            if let Err(reason) = validate_actor_keypackage_leaf(
+                &body.actor_id,
+                &guard.authority.public_key,
+                &key_package_bytes,
+            ) {
+                rejected.push(keypackage_failure(entry, endpoint_device_id, reason));
+                continue;
+            }
+        } else if let Some(endpoint_device_id) = endpoint_device_id
             && let Err(reason) = validate_device_keypackage_leaf(
                 state,
                 &principal_id,
@@ -929,7 +842,7 @@ async fn upload_keypackage(
             )
             .await
         {
-            rejected.push(keypackage_failure(&entry, Some(endpoint_device_id), reason));
+            rejected.push(keypackage_failure(entry, Some(endpoint_device_id), reason));
             continue;
         }
         let created_at = entry.created_at.timestamp();
@@ -939,7 +852,7 @@ async fn upload_keypackage(
             && expires_at.saturating_sub(created_at) > LAST_RESORT_KEYPACKAGE_MAX_LIFETIME_SECS
         {
             rejected.push(keypackage_failure(
-                &entry,
+                entry,
                 endpoint_device_id,
                 "last_resort_keypackage_lifetime_too_long",
             ));
@@ -954,7 +867,10 @@ async fn upload_keypackage(
             keypackage_id: keypackage_id.clone(),
             keypackage_ref: keypackage_ref.clone(),
             keypackage_digest,
-            owner_account_pk: owner_account_pk.get(),
+            owner_account_id: owner_account_id.clone(),
+            effective_scope: native
+                .as_ref()
+                .map(|(guard, _)| guard.effective_scope.clone()),
             actor_id: actor_id.clone(),
             device_id: device_id.clone(),
             lifetime: coland_domain::reducer::KeyPackageLifetimeProjection {
@@ -967,34 +883,50 @@ async fn upload_keypackage(
             trust_anchor,
             created_at,
         };
-        let effect = state
-            .projections()
-            .apply_mls_keypackage_publish(&projection);
-        match effect {
-            ProjectionEffectView::Mls(MlsProjectionEffect::KeyPackagePublished { .. }) => {}
-            ProjectionEffectView::Rejected { reason } => {
-                rejected.push(keypackage_failure(&entry, endpoint_device_id, reason));
-                continue;
-            }
-            other => {
-                return Err(AppError::internal(format!(
-                    "unexpected reducer effect: {other:?}"
-                )));
-            }
+        let record =
+            match coland_services::projection::ProjectionService::prepare_mls_keypackage_publish(
+                &projection,
+            ) {
+                Ok(record) => record,
+                Err(reason) => {
+                    rejected.push(keypackage_failure(entry, endpoint_device_id, reason));
+                    continue;
+                }
+            };
+        let inserted = if let Some((guard, expires_at)) = &native {
+            state
+                .mls_key_packages()
+                .store_key_package_for_applet_device(&record, guard, *expires_at, &body)
+                .await
+        } else {
+            state.mls_key_packages().store_key_package(&record).await
         }
-
-        // Mirror into the durable store. We snapshot the freshly-applied
-        // projection row instead of re-parsing the body so persistence and
-        // in-process state stay aligned.
-        let record = state
-            .projections()
-            .mls_key_package_record(&keypackage_id)
-            .expect("publish reducer landed the row");
-        let _attached = state
-            .mls_key_packages()
-            .store_key_package(&record)
-            .await
-            .map_err(|err| AppError::internal(format!("mls_key_packages.put: {err}")))?;
+        .map_err(mls_keypackage_upload::service_error)?;
+        let stored = if inserted {
+            record
+        } else {
+            let existing = state
+                .mls_key_packages()
+                .key_package(&record.id)
+                .await
+                .map_err(mls_keypackage_upload::service_error)?
+                .ok_or_else(|| {
+                    crate::app_error!(
+                        TemporarilyUnavailable,
+                        "existing KeyPackage original is unavailable"
+                    )
+                })?;
+            if !existing.same_publication(&record) {
+                return Err(crate::app_error!(
+                    DuplicateConflict,
+                    "KeyPackage id has a different original publication"
+                ));
+            }
+            existing
+        };
+        // No memory mutation precedes the durable write. An exact retry keeps
+        // the stored claim/consume state, never a freshly published projection.
+        state.projections().retain_mls_key_package(stored);
         accepted += 1;
         key_package_refs.push(keypackage_ref);
     }
@@ -1014,6 +946,32 @@ async fn upload_keypackage(
 )]
 #[tracing::instrument(skip_all, fields(op = "ak.peer.keys.keypackages.command.claim.v1"))]
 async fn peer_claim_keypackage(
+    depot: &mut Depot,
+    req: &mut Request,
+) -> coland_http::result::GuardedJsonResult<PeerKeyPackagesClaimQueryOutcome> {
+    let Json(outcome) = peer_claim_keypackage_inner(depot, req).await?;
+    let command = req
+        .parse_json::<PeerKeyPackagesClaimRequestBody>()
+        .await
+        .map_err(|_| peer_claim_failed())?;
+    let state = depot.get_typed::<AppState>().expect("state injected");
+    let guard = if let Some(claim) = &outcome.claim_outcome {
+        mls_keypackage_native::delivery_guard(
+            state,
+            arkret_wire::ServiceOperationId::PeerKeysKeypackagesCommandClaimV1,
+            claim,
+            None,
+            mls_keypackage_native::peer_deadline(req)?,
+            Some(&command),
+        )
+        .await?
+    } else {
+        None
+    };
+    coland_http::result::guarded_json_ok(outcome, guard)
+}
+
+async fn peer_claim_keypackage_inner(
     depot: &mut Depot,
     req: &mut Request,
 ) -> JsonResult<PeerKeyPackagesClaimQueryOutcome> {
@@ -1040,7 +998,7 @@ async fn peer_claim_keypackage(
     {
         return query_claim_ledger(state, query, source_id).await;
     }
-    let execution = claim_keypackage_at_destination(state, &body, authorization).await;
+    let execution = claim_keypackage_at_destination(state, &body, authorization, None).await;
     match execution {
         Ok(_) => query_claim_ledger(state, query, source_id).await,
         Err(error) => {
@@ -1063,6 +1021,7 @@ async fn claim_keypackage_at_destination(
     state: &AppState,
     body: &PeerKeyPackagesClaimRequestBody,
     authorization: VerifiedClaimAuthorization,
+    native_requester: Option<&(coland_storage::AppletManagedDeviceScopeGuard, DateTime<Utc>)>,
 ) -> JsonResult<PeerKeyPackagesClaimOutcome> {
     let target_principal_id = body
         .unsigned_request()
@@ -1072,17 +1031,6 @@ async fn claim_keypackage_at_destination(
         .unsigned_request()
         .requester_principal_id(&body.requester_authorization)
         .ok_or_else(|| peer_claim_schema_violation("claim requester identity is incomplete"))?;
-    let target_rate_limit_key = if let Some(account_id) = &body.target_account_id {
-        account_id
-            .canonical_key()
-            .map_err(|error| AppError::internal(format!("target AccountId key: {error}")))?
-    } else if let Some(agent_id) = &body.target_agent_id {
-        agent_id.as_str().to_owned()
-    } else {
-        return Err(peer_claim_schema_violation(
-            "claim target rate-limit identity is incomplete",
-        ));
-    };
     let body_value = serde_json::to_value(body)
         .map_err(|error| AppError::internal(format!("KeyPackage claim serialize: {error}")))?;
     let source_id = body.service_binding.source_id.as_str().to_owned();
@@ -1100,18 +1048,29 @@ async fn claim_keypackage_at_destination(
         return replay_peer_claim(existing, &request_digest);
     }
     validate_peer_claim_time_window(body)?;
-    if state.peer_keypackage_claim_rate_limited(&source_id, &target_rate_limit_key) {
-        tracing::warn!(
-            %source_id,
-            target_rate_limit_key,
-            reason = "keypackage_claim_rate_limited",
-            "peer KeyPackage claim rejected by protocol quota"
-        );
-        record_peer_claim_failed(state, body, &source_id, &request_digest).await?;
-        return Err(peer_claim_failed());
+    match state
+        .mls_key_packages()
+        .record_peer_claim_attempt(body)
+        .await
+        .map_err(|error| AppError::internal(format!("peer claim attempt budget: {error}")))?
+    {
+        coland_storage::PeerKeyPackageClaimRateDecision::Allowed => {}
+        coland_storage::PeerKeyPackageClaimRateDecision::DuplicateConflict => {
+            return Err(peer_claim_duplicate_conflict());
+        }
+        coland_storage::PeerKeyPackageClaimRateDecision::Unavailable => {
+            return Err(peer_claim_failed());
+        }
+        coland_storage::PeerKeyPackageClaimRateDecision::RateLimited => {
+            tracing::warn!(outward_bucket = "claim_failed", "KeyPackage claim rejected");
+            record_peer_claim_failed(state, body, &source_id, &request_digest).await?;
+            return Err(peer_claim_failed());
+        }
     }
 
-    let policy_authorized = peer_claim_policy_authorized(state, body, &source_id).await?;
+    let native_targets = mls_keypackage_native::targets(state, body).await?;
+    let policy_authorized =
+        peer_claim_policy_authorized(state, body, &source_id, !native_targets.is_empty()).await?;
     if !policy_authorized {
         tracing::warn!(
             %source_id,
@@ -1140,19 +1099,44 @@ async fn claim_keypackage_at_destination(
         .target_keypackage_ref
         .as_ref()
         .map(|reference| reference.as_str());
-    let trust_selector = current_keypackage_claim_trust_selector(
-        state,
-        &arkret_wire::DidCoreId::new(target_principal_id.to_owned())
-            .map_err(|_| peer_claim_schema_violation("claim target identity is invalid"))?,
-        &target_device_ids,
-        Some(body.intended_realm_id.as_str()),
-    )
-    .await
-    .map_err(|_| peer_claim_failed())?;
+    let trust_selector = if !native_targets.is_empty() {
+        KeyPackageTrustSelector::PerDevice(
+            native_targets
+                .iter()
+                .map(|(device, guard)| {
+                    (
+                        device.clone(),
+                        KeyPackageTrustBinding::device_authorize(
+                            guard
+                                .authority
+                                .selector
+                                .authorization_ref
+                                .event_id
+                                .to_string(),
+                        ),
+                    )
+                })
+                .collect(),
+        )
+    } else {
+        current_keypackage_claim_trust_selector(
+            state,
+            &arkret_wire::DidCoreId::new(target_principal_id.to_owned())
+                .map_err(|_| peer_claim_schema_violation("claim target identity is invalid"))?,
+            &target_device_ids,
+            Some(body.intended_realm_id.as_str()),
+        )
+        .await
+        .map_err(|_| peer_claim_failed())?
+    };
     let now_unix_ms = now().timestamp_millis();
     let now_secs = now_unix_ms.div_euclid(1000);
     let candidate_ids = {
-        let keypackages = state.projections().mls_key_package_records();
+        let keypackages = state
+            .mls_key_packages()
+            .peer_claim_candidates(body)
+            .await
+            .map_err(|error| AppError::internal(format!("peer claim candidates: {error}")))?;
         let mut candidates = keypackages
             .iter()
             .filter_map(|keypackage| {
@@ -1168,6 +1152,13 @@ async fn claim_keypackage_at_destination(
             })
             .filter(|(_, keypackage)| {
                 target_keypackage_ref.is_none_or(|expected| keypackage.keypackage_ref == expected)
+            })
+            .filter(|(_, keypackage)| {
+                keypackage.effective_scope.as_ref().is_none_or(|scope| {
+                    scope
+                        .canonical_mls_group_id()
+                        .is_ok_and(|group| group == body.mls_group_id)
+                })
             })
             .filter(|(_, keypackage)| {
                 keypackage.lifetime_not_after.saturating_mul(1000)
@@ -1208,9 +1199,17 @@ async fn claim_keypackage_at_destination(
         else {
             continue;
         };
-        if ensure_keypackage_owner_account_active(state, predicted.owner_account_pk)
-            .await
-            .is_err()
+        let native_target = predicted
+            .device_id
+            .as_ref()
+            .and_then(|id| native_targets.get(id));
+        if predicted.effective_scope.is_some() != native_target.is_some() {
+            continue;
+        }
+        if native_target.is_none()
+            && ensure_keypackage_owner_account_active(state, &predicted.owner_account_id)
+                .await
+                .is_err()
         {
             continue;
         }
@@ -1263,27 +1262,33 @@ async fn claim_keypackage_at_destination(
             expires_at: (body.expires_at + chrono::Duration::minutes(10)).timestamp(),
             updated_at: now_secs,
         };
-        let device_revocation_gate = if binding.device_authorize_event_id.is_some() {
-            let Some(predicted_device_id) = predicted.device_id.as_deref() else {
-                continue;
+        let device_revocation_gate =
+            if native_target.is_none() && binding.device_authorize_event_id.is_some() {
+                let Some(predicted_device_id) = predicted.device_id.as_deref() else {
+                    continue;
+                };
+                match keypackage_device_revocation_gate(
+                    state,
+                    &predicted.actor_id,
+                    predicted_device_id,
+                    binding.device_authorize_event_id.as_deref(),
+                )
+                .await
+                {
+                    Ok(selector) => selector,
+                    Err(_) => continue,
+                }
+            } else {
+                None
             };
-            match keypackage_device_revocation_gate(
-                state,
-                &predicted.actor_id,
-                predicted_device_id,
-                binding.device_authorize_event_id.as_deref(),
-            )
-            .await
-            {
-                Ok(selector) => selector,
-                Err(_) => continue,
-            }
-        } else {
-            None
-        };
         match state
             .mls_key_packages()
             .claim_peer_key_package(PeerKeyPackageClaimAttempt {
+                admission: Some(&coland_storage::MlsKeyPackageClaimAdmission {
+                    request: body.clone(),
+                    requester: native_requester.cloned(),
+                }),
+                applet_device_scope_guard: native_target,
                 keypackage_id: &candidate_id,
                 mls_group_id: body.mls_group_id.as_str(),
                 device_authorize_event_id: binding.device_authorize_event_id.as_deref(),
@@ -1294,18 +1299,11 @@ async fn claim_keypackage_at_destination(
                 ledger: &ledger,
             })
             .await
-            .map_err(|error| AppError::internal(format!("peer KeyPackage CAS: {error}")))?
+            .map_err(mls_keypackage_native::claim_error)?
         {
             PeerKeyPackageClaimAttemptResult::Claimed(claimed) => {
-                if !is_last_resort {
-                    state.projections().mark_key_package_claimed(
-                        &candidate_id,
-                        body.mls_group_id.as_str().to_owned(),
-                        now_secs,
-                        Some(body.expires_at.timestamp_millis()),
-                    );
-                }
                 debug_assert_eq!(claimed.id, candidate_id);
+                state.projections().retain_mls_key_package(*claimed);
                 return json_ok(outcome);
             }
             PeerKeyPackageClaimAttemptResult::Existing(existing) => {
@@ -1322,6 +1320,28 @@ async fn claim_keypackage_at_destination(
 #[salvo::oapi::endpoint(operation_id = "ak.peer.keys.keypackages.read.claim", tags("mls.rs"))]
 #[tracing::instrument(skip_all, fields(op = "ak.peer.keys.keypackages.read.claim.v1"))]
 async fn peer_query_keypackage_claim(
+    depot: &mut Depot,
+    req: &mut Request,
+) -> coland_http::result::GuardedJsonResult<PeerKeyPackagesClaimQueryOutcome> {
+    let Json(outcome) = peer_query_keypackage_claim_inner(depot, req).await?;
+    let state = depot.get_typed::<AppState>().expect("state injected");
+    let guard = if let Some(claim) = &outcome.claim_outcome {
+        mls_keypackage_native::delivery_guard(
+            state,
+            arkret_wire::ServiceOperationId::PeerKeysKeypackagesReadClaimV1,
+            claim,
+            None,
+            mls_keypackage_native::peer_deadline(req)?,
+            None,
+        )
+        .await?
+    } else {
+        None
+    };
+    coland_http::result::guarded_json_ok(outcome, guard)
+}
+
+async fn peer_query_keypackage_claim_inner(
     depot: &mut Depot,
     req: &mut Request,
 ) -> JsonResult<PeerKeyPackagesClaimQueryOutcome> {
@@ -1801,12 +1821,15 @@ async fn peer_claim_policy_authorized(
     state: &AppState,
     body: &PeerKeyPackagesClaimRequestBody,
     source_id: &str,
+    native_target_current: bool,
 ) -> Result<bool, AppError> {
     let requester_id = body
         .unsigned_request()
         .requester_principal_id(&body.requester_authorization)
         .ok_or_else(|| peer_claim_schema_violation("claim requester identity is incomplete"))?;
-    let target_authority_current = if let (Some(agent_id), Some(method), Some(event_id)) = (
+    let target_authority_current = if native_target_current {
+        true
+    } else if let (Some(agent_id), Some(method), Some(event_id)) = (
         &body.target_agent_id,
         &body.target_agent_verification_method,
         &body.target_agent_key_authorize_event_id,
@@ -2161,11 +2184,80 @@ async fn claim_keypackage(
     body: JsonBody<KeyPackagesClaimRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<KeyPackagesClaimOutcome> {
+) -> coland_http::result::GuardedJsonResult<KeyPackagesClaimOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
-
     let body = body.into_inner();
+    let original_command = PeerKeyPackagesClaimRequestBody::from(&body);
+    let native = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>()
+        .ok();
+    let session = if native.is_none() {
+        Some(crate::boxed_future(|| aa.authenticated_session(state, req)).await?)
+    } else {
+        None
+    };
+    {
+        let header_values = req.headers().get_all("idempotency-key");
+        let mut header_values = header_values.iter();
+        if header_values.next().and_then(|value| value.to_str().ok())
+            != Some(body.claim_request_id.as_str())
+            || header_values.next().is_some()
+        {
+            return Err(peer_claim_failed());
+        }
+    }
+    let source = if let Some(native) = native {
+        Some(mls_keypackage_native::requester(state, native, &body).await?)
+    } else {
+        None
+    };
+    let (Json(outcome), credential_deadline) = if let Some(source) = &source {
+        let peer = PeerKeyPackagesClaimRequestBody::from(&body);
+        if body.service_binding.destination_id != state.service_core_id() {
+            return Err(crate::app_error!(
+                TemporarilyUnavailable,
+                "native claim requires a current governing delivery barrier"
+            ));
+        }
+        let authorization = VerifiedClaimAuthorization::for_verified_request(&peer)?;
+        (
+            crate::boxed_future(|| {
+                claim_keypackage_at_destination(state, &peer, authorization, Some(source))
+            })
+            .await
+            .map(|Json(outcome)| Json(outcome.into()))?,
+            source.1,
+        )
+    } else {
+        let session = session.expect("the non-native branch authenticated its real session above");
+        let deadline = session.expires_at;
+        (
+            crate::boxed_future(|| claim_keypackage_session(state, session, body)).await?,
+            deadline,
+        )
+    };
+    let peer_outcome = PeerKeyPackagesClaimOutcome {
+        claim_request_id: outcome.claim_request_id.clone(),
+        claims: outcome.claims.clone(),
+        claim_receipt: outcome.claim_receipt.clone(),
+    };
+    let guard = mls_keypackage_native::delivery_guard(
+        state,
+        arkret_wire::ServiceOperationId::SelfKeysKeypackagesCommandClaimV1,
+        &peer_outcome,
+        source.as_ref(),
+        credential_deadline,
+        Some(&original_command),
+    )
+    .await?;
+    coland_http::result::guarded_json_ok(outcome, guard)
+}
+
+async fn claim_keypackage_session(
+    state: &AppState,
+    session: SessionRecord,
+    body: KeyPackagesClaimRequestBody,
+) -> JsonResult<KeyPackagesClaimOutcome> {
     if session.agent_session().is_some()
         != matches!(
             &body.requester_authorization,
@@ -2235,9 +2327,9 @@ async fn claim_keypackage(
             .await
             .map_err(|error| AppError::internal(format!("claim membership read: {error}")))?
     {
-        return Err(AppError::capability_denied(
-            "requester identity has no current source-side Realm membership",
-        ));
+        // This is a claim policy refusal after requester authentication,
+        // covered by the target_private_claim outward bucket.
+        return Err(peer_claim_failed());
     }
     if body.service_binding.destination_id.as_str() != local_service_id {
         let destination = body.service_binding.destination_id.as_str();
@@ -2313,7 +2405,7 @@ async fn claim_keypackage(
         )
         .with_internal_reason("dependency_unavailable"));
     }
-    claim_keypackage_at_destination(state, &peer_body, authorization)
+    claim_keypackage_at_destination(state, &peer_body, authorization, None)
         .await
         .map(|Json(outcome)| Json(outcome.into()))
 }
@@ -2322,7 +2414,7 @@ async fn claim_keypackage(
 /// (device-lifecycle.md §9 `claims/query`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ClaimReader {
-    /// A human device session: its complete AccountId and device.
+    /// A real Account Device: its complete AccountId and device.
     Device {
         actor: arkret_wire::ActorId,
         device_id: String,
@@ -2418,13 +2510,23 @@ async fn query_own_keypackage_claim(
     body: JsonBody<KeyPackagesClaimQueryRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<KeyPackagesClaimOutcome> {
+) -> coland_http::result::GuardedJsonResult<KeyPackagesClaimOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
     let body = body.into_inner();
-    let reader = claim_reader(state, &session)
-        .await
-        .ok_or_else(keypackage_claim_unknown)?;
+    let native = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>()
+        .ok();
+    let reader = if let Some(native) = native {
+        ClaimReader::Device {
+            actor: arkret_wire::ActorId::account(native.authority.account_id.clone()),
+            device_id: native.authority.device_id.to_string(),
+        }
+    } else {
+        let session = aa.authenticated_session(state, req).await?;
+        claim_reader(state, &session)
+            .await
+            .ok_or_else(keypackage_claim_unknown)?
+    };
     let row = state
         .mls_key_packages()
         .peer_claim_by_claim_id(body.claim_id.as_str())
@@ -2432,6 +2534,8 @@ async fn query_own_keypackage_claim(
         .map_err(|error| AppError::internal(format!("claim read ledger: {error}")))?
         .filter(|row| row.keypackage_id.is_some() && row.expires_at > now().timestamp())
         .ok_or_else(keypackage_claim_unknown)?;
+    let retention_deadline =
+        DateTime::from_timestamp(row.expires_at, 0).ok_or_else(keypackage_claim_unknown)?;
     let outcome = row
         .outcome
         .map(serde_json::from_value::<PeerKeyPackagesClaimOutcome>)
@@ -2447,7 +2551,46 @@ async fn query_own_keypackage_claim(
     if !owned {
         return Err(keypackage_claim_unknown());
     }
-    json_ok(outcome.into())
+    let guard = if let Some(native) = native {
+        let record = outcome
+            .claims
+            .iter()
+            .find(|record| record.claim_id == body.claim_id.as_str())
+            .ok_or_else(keypackage_claim_unknown)?;
+        if record.device_authorize_event_id.as_ref()
+            != Some(&native.authority.selector.authorization_ref.event_id)
+            || outcome.claim_receipt.request.intended_realm_id
+                != *native.metadata.effective_scope.realm_id()
+            || native
+                .metadata
+                .effective_scope
+                .canonical_mls_group_id()
+                .ok()
+                .as_ref()
+                != Some(&outcome.claim_receipt.request.mls_group_id)
+        {
+            return Err(keypackage_claim_unknown());
+        }
+        let source = (
+            crate::routing::identity::applet_managed_device::scope_guard(state, native)
+                .await
+                .map_err(|_| keypackage_claim_unknown())?,
+            native.transport_expires_at.min(retention_deadline),
+        );
+        mls_keypackage_native::delivery_guard(
+            state,
+            arkret_wire::ServiceOperationId::SelfKeysKeypackagesReadClaimV1,
+            &outcome,
+            Some(&source),
+            source.1,
+            None,
+        )
+        .await
+        .map_err(|_| keypackage_claim_unknown())?
+    } else {
+        None
+    };
+    coland_http::result::guarded_json_ok(outcome.into(), guard)
 }
 
 pub(crate) async fn capture_relayed_keypackage_claim_outcome(
@@ -2856,8 +2999,13 @@ async fn consume_keypackages(
     req: &mut Request,
 ) -> JsonResult<KeyPackagesConsumeOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
     let body = body.into_inner();
+    if let Ok(native) = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>(
+    ) {
+        return crate::boxed_future(|| mls_keypackage_native::consume(state, native, &body)).await;
+    }
+    let session = aa.authenticated_session(state, req).await?;
     let durable_receipt = &body.recipient_durable_receipt;
     let recipient_principal_id = durable_receipt
         .recipient_principal_id()
@@ -2961,15 +3109,16 @@ async fn consume_keypackages(
     let consumed_at_unix_ms = consumed_at_datetime.timestamp_millis();
     let prepared_consume_receipt =
         build_keypackage_consume_receipt(state, &body, consumed_at_datetime)?;
-    let prepared_consume_receipt_value = serde_json::to_value(&prepared_consume_receipt)
-        .map_err(|error| AppError::internal(format!("consume receipt serialize: {error}")))?;
     let Some(consumed) = state
         .mls_key_packages()
         .consume_key_package_claim(
             &record.id,
             &group_id,
             consumed_at_unix_ms,
-            Some(&prepared_consume_receipt_value),
+            Some(coland_storage::MlsKeyPackageConsumeEvidence {
+                request: &body,
+                receipt: &prepared_consume_receipt,
+            }),
         )
         .await
         .map_err(|error| AppError::internal(format!("KeyPackage consume CAS failed: {error}")))?
@@ -3291,7 +3440,7 @@ fn build_keypackage_consume_receipt(
 fn consume_request_digest(
     body: &KeyPackagesConsumeRequestBody,
 ) -> Result<arkret_wire::Hash, AppError> {
-    let digest = arkret_canonical::canonical_sha256(&body.unsigned())
+    let digest = arkret_models_crypto::keypackages_consume_request_digest(body)
         .map_err(|error| AppError::internal(format!("consume request digest failed: {error}")))?;
     arkret_wire::Hash::new(digest)
         .map_err(|error| AppError::internal(format!("consume request digest invalid: {error}")))
@@ -3359,14 +3508,51 @@ async fn revoke_keypackages(
     req: &mut Request,
 ) -> JsonResult<KeyPackagesRevokeOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
     let body = body.into_inner();
-    if session.account_pk.is_none() && session.agent_session().is_none() {
+    if let Ok(native) = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>(
+    ) {
+        if body.device_id != native.authority.device_id {
+            return Err(AppError::capability_denied(
+                "KeyPackage revoke must name the authenticated Device",
+            ));
+        }
+        let fingerprint =
+            arkret_canonical::ed25519_pubkey_to_did_key_multibase(&native.authority.public_key);
+        if !crate::routing::identity::device_signature_kid_points_to_device_key(
+            body.signature.kid.as_str(),
+            native.authority.account_id.principal_id.as_str(),
+            &format!("did:key:{fingerprint}"),
+        ) {
+            return Err(AppError::param_invalid(
+                "KeyPackage signature is not the original Device key",
+            ));
+        }
+        let result = state
+            .mls_key_packages()
+            .revoke_for_applet_device(
+                &body,
+                &native.authority,
+                &native.metadata.effective_scope,
+                native.transport_expires_at,
+            )
+            .await
+            .map_err(mls_keypackage_upload::service_error)?;
+        let ids = result
+            .records
+            .into_iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>();
+        state.projections().mark_key_packages_revoked(&ids);
+        return json_ok(result.outcome);
+    }
+    let session = aa.authenticated_session(state, req).await?;
+    if session.account_pk.is_none() || session.agent_session().is_some() {
         return Err(AppError::capability_denied(
-            "KeyPackage revoke requires an account- or Agent-bound session",
+            "KeyPackage revoke requires a real Account Device signer",
         ));
     }
-    let session_owner_account_pk = local_keypackage_owner_account_pk(state, &session).await?;
+    let session_owner_account_id = local_keypackage_owner_account_id(state, &session).await?;
     let device_id = body.device_id.to_string();
     if device_id.as_str() != session.require_human_device_id() {
         return Err(AppError::capability_denied(
@@ -3384,7 +3570,6 @@ async fn revoke_keypackages(
     verify_session_keypackage_revoke_signature(
         state,
         &session,
-        &refs,
         &body.signature,
         &revoke_signing_input,
     )
@@ -3399,8 +3584,10 @@ async fn revoke_keypackages(
             .await
         {
             Ok(Some(record))
-                if record.owner_account_pk != session_owner_account_pk
-                    || record.actor_id != session.actor =>
+                if record.owner_account_id != session_owner_account_id
+                    || record.actor_id != session.actor
+                    || record.device_id.as_deref() != Some(device_id.as_str())
+                    || record.agent_key_authorize_event_id.is_some() =>
             {
                 failures.push(keypackage_ref_failure(keypackage_ref, "not_owner"));
             }
@@ -3421,6 +3608,7 @@ async fn revoke_keypackages(
                 match state
                     .mls_key_packages()
                     .claim_key_package(coland_services::events::ClaimMlsKeyPackageCommand {
+                        applet_device_scope_guard: None,
                         id: &record.id,
                         target: coland_services::events::ClaimMlsKeyPackageTarget::Revoke,
                         intended_realm_id: None,
@@ -3751,14 +3939,14 @@ async fn verify_device_keypackage_signature(
                 FailedPrecondition,
                 "accepted device authorization is required for KeyPackage signature",
             )
-            .with_reason_code("claim_generation_mismatch")
+            .with_internal_reason("claim_generation_mismatch")
         })?;
     if device.verification_state != "verified" || device.revoked_at.is_some() {
         return Err(crate::app_error!(
             FailedPrecondition,
             "KeyPackage signature requires a verified, non-revoked device",
         )
-        .with_reason_code("claim_generation_mismatch"));
+        .with_internal_reason("claim_generation_mismatch"));
     }
     let device_public_key = device
         .payload
@@ -3832,7 +4020,7 @@ async fn verify_session_keypackage_write_signature(
                     FailedPrecondition,
                     "Agent KeyPackage write binding differs from current authorization",
                 )
-                .with_reason_code("claim_generation_mismatch"));
+                .with_internal_reason("claim_generation_mismatch"));
             }
             validate_agent_keypackage_upload(
                 state,
@@ -3864,55 +4052,11 @@ async fn verify_session_keypackage_write_signature(
 async fn verify_session_keypackage_revoke_signature(
     state: &AppState,
     session: &SessionRecord,
-    keypackage_refs: &[String],
     signature: &KeyOperationSignature,
     signing_input: &[u8],
 ) -> Result<(), AppError> {
     let principal = arkret_wire::DidCoreId::new(session.actor.clone())
         .map_err(|error| AppError::param_invalid(format!("invalid session principal: {error}")))?;
-    if session.agent_session().is_some() {
-        let binding = current_agent_keypackage_trust_binding(state, &principal)
-            .await?
-            .ok_or_else(|| AppError::capability_denied("Agent key authorization is unavailable"))?;
-        let authorize_event_id = binding
-            .agent_key_authorize_event_id
-            .as_deref()
-            .expect("Agent trust binding always carries authorization Event");
-        verify_agent_keypackage_batch(
-            state,
-            &principal,
-            authorize_event_id,
-            signature,
-            signing_input,
-        )
-        .await
-        .map_err(AppError::param_invalid)?;
-        for keypackage_ref in keypackage_refs {
-            let Some(record) = state
-                .mls_key_packages()
-                .key_package_by_ref(keypackage_ref)
-                .await
-                .map_err(|error| AppError::internal(error.to_string()))?
-            else {
-                // A locally-created package may race an asynchronous upload.
-                // The revoke outcome reports it as not_found (and therefore
-                // already unclaimable) instead of rejecting the whole signed
-                // batch before per-reference processing.
-                continue;
-            };
-            if record.actor_id != session.actor
-                || record.device_id.is_some()
-                || record.agent_key_authorize_event_id.as_deref() != Some(authorize_event_id)
-            {
-                return Err(crate::app_error!(
-                    FailedPrecondition,
-                    "Agent KeyPackage write binding differs from current authorization",
-                )
-                .with_reason_code("claim_generation_mismatch"));
-            }
-        }
-        return Ok(());
-    }
     verify_device_keypackage_signature(
         state,
         &principal,
@@ -3955,21 +4099,21 @@ async fn current_agent_keypackage_trust_binding(
             FailedPrecondition,
             "Agent must be active before publishing or claiming a KeyPackage",
         )
-        .with_reason_code("claim_generation_mismatch"));
+        .with_internal_reason("claim_generation_mismatch"));
     }
     let event_ref = agent.authorized_event_ref.as_deref().ok_or_else(|| {
         crate::app_error!(
             FailedPrecondition,
             "Agent has no accepted key authorization",
         )
-        .with_reason_code("claim_generation_mismatch")
+        .with_internal_reason("claim_generation_mismatch")
     })?;
     let verification_method = agent
         .authorized_verification_method
         .as_deref()
         .ok_or_else(|| {
             crate::app_error!(FailedPrecondition, "Agent key authorization is incomplete",)
-                .with_reason_code("claim_generation_mismatch")
+                .with_internal_reason("claim_generation_mismatch")
         })?;
     let active_event =
         crate::routing::identity::agents::accepted_active_agent_key_authorizations(state, &agent)
@@ -3981,7 +4125,7 @@ async fn current_agent_keypackage_trust_binding(
             FailedPrecondition,
             "Agent key authorization is no longer active",
         )
-        .with_reason_code("claim_generation_mismatch"));
+        .with_internal_reason("claim_generation_mismatch"));
     }
     let accepted = state
         .event_queries()
@@ -3995,7 +4139,7 @@ async fn current_agent_keypackage_trust_binding(
                 FailedPrecondition,
                 "Agent key authorization Event is unavailable",
             )
-            .with_reason_code("claim_generation_mismatch")
+            .with_internal_reason("claim_generation_mismatch")
         })?;
     let event =
         serde_json::from_value::<arkret_wire::Event>(accepted.envelope).map_err(|error| {
@@ -4020,7 +4164,7 @@ async fn current_agent_keypackage_trust_binding(
             FailedPrecondition,
             "Agent key authorization does not match current accepted state",
         )
-        .with_reason_code("claim_generation_mismatch"));
+        .with_internal_reason("claim_generation_mismatch"));
     }
     Ok(Some(KeyPackageTrustBinding::agent_key_authorize(
         event_ref.to_owned(),
@@ -4082,14 +4226,14 @@ async fn current_keypackage_trust_binding(
                 FailedPrecondition,
                 "accepted device authorization is required for KeyPackage publish",
             )
-            .with_reason_code("claim_generation_mismatch")
+            .with_internal_reason("claim_generation_mismatch")
         })?;
     device_authorize_trust_binding(&device).ok_or_else(|| {
         crate::app_error!(
             FailedPrecondition,
             "accepted device authorization is required for KeyPackage publish",
         )
-        .with_reason_code("claim_generation_mismatch")
+        .with_internal_reason("claim_generation_mismatch")
     })
 }
 
@@ -4338,6 +4482,7 @@ pub(crate) async fn claim_mimi_keypackage(
         let claimed = state
             .mls_key_packages()
             .claim_key_package(ClaimMlsKeyPackageCommand {
+                applet_device_scope_guard: None,
                 id: &candidate_id,
                 target: ClaimMlsKeyPackageTarget::Group(group_id),
                 intended_realm_id: Some(realm_id),
@@ -4430,19 +4575,14 @@ async fn keypackage_claim_record(
     }
     let principal_id = arkret_wire::DidCoreId::new(record.actor_id.clone())
         .map_err(|error| AppError::internal(format!("invalid principal_id: {error}")))?;
-    let owner = state
-        .identities()
-        .account_by_id(record.owner_account_pk)
-        .await
-        .map_err(|error| AppError::internal(format!("KeyPackage owner lookup failed: {error}")))?
-        .ok_or_else(|| AppError::internal("KeyPackage owner account is unavailable"))?;
+    let owner = &record.owner_account_id;
     if record.agent_key_authorize_event_id.is_some() {
         // Agent KeyPackages are stored under the controller's local Account
         // row; the Agent has its own principal and no Human Account row.
         // Recheck that exact controller relation before exposing the claim.
         let agent_actor = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
             principal_id.clone(),
-            owner.account_id.station_id.clone(),
+            owner.station_id.clone(),
         ));
         let agent =
             crate::routing::identity::agent_pcr::agent_record_for_actor(state, &agent_actor)
@@ -4450,7 +4590,7 @@ async fn keypackage_claim_record(
                 .ok_or_else(|| AppError::capability_denied("target Agent is unavailable"))?;
         let controller =
             crate::routing::identity::agent_pcr::agent_controller_account(state, &agent).await?;
-        if controller != owner.account_id
+        if &controller != owner
             || request.target_account_id.is_some()
             || request.target_agent_id.as_ref() != Some(&principal_id)
         {
@@ -4462,7 +4602,7 @@ async fn keypackage_claim_record(
         || request
             .target_account_id
             .as_ref()
-            .is_some_and(|target| target != &owner.account_id)
+            .is_some_and(|target| target != owner)
     {
         return Err(AppError::capability_denied(
             "KeyPackage claim target account differs from its durable owner",
@@ -4470,7 +4610,7 @@ async fn keypackage_claim_record(
     }
     let actor_id = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
         principal_id.clone(),
-        owner.account_id.station_id,
+        owner.station_id.clone(),
     ));
     let trust_binding = Some(trust_binding_from_row(record)?);
     let (device_id, agent_id, agent_verification_method) = if trust_binding
@@ -4853,7 +4993,11 @@ mod trust_binding_tests {
             id: "keypackage-fixture".into(),
             keypackage_ref: format!("sha256:{}", "1".repeat(64)),
             keypackage_digest: format!("sha256:{}", "2".repeat(64)),
-            owner_account_pk: coland_storage::AccountPk(1),
+            owner_account_id: arkret_wire::AccountId::new(
+                arkret_wire::DidCoreId::new("ak:did_core:web:controller.example").unwrap(),
+                arkret_wire::DidCoreId::new("ak:did_core:web:station.example").unwrap(),
+            ),
+            effective_scope: None,
             actor_id: "ak:did_core:web:agent.example".into(),
             device_id: None,
             endpoint_verification_method: Some("did:web:agent.example#runtime-1".into()),

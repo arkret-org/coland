@@ -84,6 +84,36 @@ pub struct PgAppletStore {
 }
 #[async_trait]
 impl AppletStore for PgAppletStore {
+    async fn managed_pcr_creation_context(
+        &self,
+        genesis: &arkret_wire::EventId,
+    ) -> PersistenceResult<Option<arkret_models_integration::AppletManagedActorAuthoringContext>>
+    {
+        let mut conn = pg_conn(&self.pool).await?;
+        let rows = sql_query(
+            "SELECT context AS record FROM applet_authoring_completions \
+             WHERE context#>>'{committed_request,managed_actor_bundle,pcr_genesis_event,event_id}'=$1 \
+             LIMIT 2",
+        )
+        .bind::<Text, _>(genesis.as_str())
+        .load::<AppletRegistrationRow>(&mut *conn)
+        .await
+        .map_err(PersistenceError::database)?;
+        if rows.len() > 1 {
+            return Err(PersistenceError::SchemaViolation(
+                "managed PCR creation evidence is ambiguous".into(),
+            ));
+        }
+        rows.into_iter()
+            .next()
+            .map(|row| {
+                let context: arkret_models_integration::AppletManagedActorAuthoringContext =
+                    serde_json::from_value(row.record).map_err(PersistenceError::database)?;
+                context.validate().map_err(PersistenceError::database)?;
+                Ok(context)
+            })
+            .transpose()
+    }
     async fn authority_material(
         &self,
         applet: &arkret_wire::AppletId,
@@ -247,8 +277,35 @@ impl AppletStore for PgAppletStore {
         attester: coland_storage::AppletResolutionAttester,
         finalize: coland_storage::AppletUnitFinalizer,
     ) -> PersistenceResult<coland_storage::AppletAuthoringUnitOutcome> {
-        crate::applet_admission::admit_authoring_unit(&self.pool, input, author, attester, finalize)
-            .await
+        // Own the aggregate independently of the HTTP middleware poll stack.
+        // A disconnected caller can recover its committed outcome by exact
+        // retry; all checks and writes still share the one SQL transaction.
+        let pool = self.pool.clone();
+        tokio::spawn(async move {
+            crate::applet_admission::admit_authoring_unit(&pool, input, author, attester, finalize)
+                .await
+        })
+        .await
+        .map_err(|error| {
+            PersistenceError::Internal(format!("Applet admission task failed: {error}"))
+        })?
+    }
+
+    async fn creation_approval_accounts(
+        &self,
+        candidate: &coland_storage::AppletAuthoringCandidate,
+    ) -> PersistenceResult<Vec<arkret_wire::AccountId>> {
+        let pool = self.pool.clone();
+        let candidate = Box::new(candidate.clone());
+        tokio::spawn(async move {
+            crate::applet_action_approval::prepare_accounts(&pool, &candidate).await
+        })
+        .await
+        .map_err(|error| {
+            PersistenceError::Internal(format!(
+                "creation approval preparation task failed: {error}"
+            ))
+        })?
     }
 
     async fn get_identity(

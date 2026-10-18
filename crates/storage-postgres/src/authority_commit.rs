@@ -18,6 +18,7 @@ use crate::capability_grant_current_results::{
     commit_realm_authority_root_current_result_in_connection,
 };
 
+mod handoff_replica;
 pub(crate) mod replica;
 
 #[derive(Clone)]
@@ -338,14 +339,13 @@ pub(crate) async fn commit_mimi_room_binding_current_result_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if event.kind != arkret_wire::EventKind::MimiRoomBinding {
         return Ok(());
     }
-    crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-        conn,
-        event,
-        commit.committed_at,
+    crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+        conn, event, commit, prepared,
     )
     .await?;
     let value = serde_json::to_value(&event.payload).map_err(PersistenceError::database)?;
@@ -778,6 +778,11 @@ pub(crate) const SNAPSHOT_CURRENT_SQL: &str = "SELECT result.*, covering.stream_
                 current_commit_id, current_stream_position, value \
            FROM policy_current_results WHERE realm_id = $1 \
          UNION ALL \
+         SELECT 'actor_profile'::text AS selector_kind, to_jsonb(actor_profile_id) AS selector_subject, \
+                current_commit_id,current_stream_position,value \
+           FROM actor_profile_current_results WHERE realm_id=$1 \
+             AND EXISTS(SELECT 1 FROM realm_bootstrap_current_results g WHERE g.realm_id=$1 AND g.result_family='realm_genesis' AND g.value->>'purpose'='collaboration') \
+         UNION ALL \
          SELECT 'member_state'::text AS selector_kind, member_id::jsonb AS selector_subject, \
                 current_commit_id, current_stream_position, value \
            FROM member_state_current_results WHERE realm_id = $1 \
@@ -826,6 +831,14 @@ pub(crate) const SNAPSHOT_CURRENT_SQL: &str = "SELECT result.*, covering.stream_
          SELECT 'call_state'::text AS selector_kind, to_jsonb(call_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
            FROM call_state_current_results WHERE realm_id = $1 \
+         UNION ALL \
+         SELECT selector->>'kind' AS selector_kind,selector AS selector_subject, \
+                current_commit_id,current_stream_position,value \
+           FROM call_component_current_results WHERE realm_id=$1 \
+         UNION ALL \
+         SELECT 'realm_media_service'::text AS selector_kind,NULL::jsonb AS selector_subject, \
+                current_commit_id,current_stream_position,value \
+           FROM realm_media_service_current_results WHERE realm_id=$1 \
          UNION ALL \
          SELECT 'strand'::text AS selector_kind, to_jsonb(strand_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
@@ -1040,6 +1053,7 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
                 },
                 ("member_identity_updates", Some(selector)) => serde_json::from_value::<arkret_wire::CurrentSelector>(selector)
                     .map_err(|error| PersistenceError::Internal(format!("stored member identity selector is invalid: {error}")))?,
+                ("actor_profile", Some(id)) => arkret_wire::CurrentSelector::ActorProfile {actor_profile_id:serde_json::from_value(id).map_err(PersistenceError::database)?},
                 ("applet_registration", Some(applet_id)) => arkret_wire::CurrentSelector::AppletRegistration {
                     applet_id: serde_json::from_value(applet_id).map_err(PersistenceError::database)?,
                 },
@@ -1050,6 +1064,8 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
                 },
                 ("circle_member_state", Some(selector)) => serde_json::from_value::<arkret_wire::CurrentSelector>(selector)
                     .map_err(|error| PersistenceError::Internal(format!("stored Circle member selector is invalid: {error}")))?,
+                ("call_focus"|"call_roster"|"call_moderation",Some(selector)) => serde_json::from_value::<arkret_wire::CurrentSelector>(selector).map_err(PersistenceError::database)?,
+                ("realm_media_service",None)=>arkret_wire::CurrentSelector::RealmMediaService,
                 ("call_state", Some(call_id)) => arkret_wire::CurrentSelector::CallState {
                     call_id: serde_json::from_value(call_id).map_err(PersistenceError::database)?,
                 },
@@ -1289,6 +1305,7 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
                 | arkret_wire::CurrentSelector::InviteLiveTarget { .. }
                 | arkret_wire::CurrentSelector::InviteDirectedInvitee { .. }
                 | arkret_wire::CurrentSelector::MlsGroup { .. }
+                | arkret_wire::CurrentSelector::ActorProfile { .. }
         ) && !current_state_entries.iter().any(|current| {
             let arkret_wire::TypedCurrentRow::Value {
                 selector: current_selector,
@@ -1373,6 +1390,67 @@ fn same_authority(left: &CurrentRealmAuthority, right: &CurrentRealmAuthority) -
         && left.last_handoff_ref == right.last_handoff_ref
 }
 
+/// A committed change freezes every stream of its outgoing tenure. The
+/// authority row is already locked, so change admission and every writer
+/// have one linearization point; an exact accepted replay remains readable.
+async fn require_planned_handoff_write_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    current: &CurrentRealmAuthority,
+) -> PersistenceResult<()> {
+    let pending = sql_query(
+        "SELECT EXISTS(SELECT 1 FROM realm_commits c \
+         JOIN canonical_events e ON e.pk=c.event_pk \
+         WHERE c.realm_id=$1 AND c.governance_generation=$2 \
+           AND e.kind='ak.realm.governance_station.change') AS present",
+    )
+    .bind::<Text, _>(current.realm_id.as_str())
+    .bind::<BigInt, _>(to_i64(current.generation, "governance generation")?)
+    .get_result::<PresenceRow>(&mut *conn)
+    .await
+    .map_err(PersistenceError::database)?;
+    if pending.present {
+        return Err(PersistenceError::Conflict(
+            "temporarily_unavailable: the outgoing authority tenure is frozen for planned handoff"
+                .into(),
+        ));
+    }
+    if event.kind != arkret_wire::EventKind::RealmGovernanceStationChange {
+        return Ok(());
+    }
+    let payload: arkret_models_collaboration::events_payloads::RealmGovernanceStationChangePayload =
+        serde_json::from_value(
+            serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
+        )
+        .map_err(invalid)?;
+    let head = sql_query(
+        "SELECT commit_json FROM realm_commits WHERE realm_id=$1 AND stream_key=$2 \
+         ORDER BY stream_position DESC LIMIT 1",
+    )
+    .bind::<Text, _>(current.realm_id.as_str())
+    .bind::<Text, _>(stream_key(&arkret_wire::CommitStreamRef::Realm {
+        realm_id: current.realm_id.clone(),
+    })?)
+    .get_result::<CommitRow>(&mut *conn)
+    .await
+    .optional()
+    .map_err(PersistenceError::database)?;
+    let head = head
+        .map(|row| decode_json::<arkret_wire::RealmCommit>(row.commit_json, "Realm stream head"))
+        .transpose()?;
+    if payload.expected_governance_generation != current.generation
+        || head.as_ref().map(|head| &head.commit_id)
+            != Some(&payload.expected_realm_stream_commit_id)
+        || payload.new_governance_station_id == current.service_id
+    {
+        return Err(PersistenceError::Conflict(
+            "failed_precondition: planned handoff does not match the current authority and Realm head"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn signature_service_id(
     signature: &arkret_wire::DetachedObjectSignature,
 ) -> PersistenceResult<arkret_wire::DidCoreId> {
@@ -1384,6 +1462,105 @@ fn signature_service_id(
         .ok_or_else(|| invalid("authority signature method has no fragment"))?;
     let did = arkret_wire::Did::new(controller.to_owned()).map_err(invalid)?;
     arkret_identifiers::project_did_to_core_id(&did).map_err(invalid)
+}
+
+async fn handoff_originals_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm_id: &arkret_wire::RealmId,
+) -> PersistenceResult<Vec<arkret_wire::CommittedEventFullView>> {
+    let rows = sql_query(
+        "SELECT c.commit_json,e.envelope FROM realm_commits c \
+         LEFT JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
+         WHERE c.realm_id=$1 ORDER BY c.stream_key,c.stream_position",
+    )
+    .bind::<Text, _>(realm_id.as_str())
+    .load::<StreamPageRow>(&mut *conn)
+    .await
+    .map_err(PersistenceError::database)?;
+    let mut fulls = Vec::with_capacity(rows.len());
+    let mut previous: Option<arkret_wire::RealmCommit> = None;
+    for row in rows {
+        let full = arkret_wire::CommittedEventFullView {
+            event: decode_json(
+                row.envelope
+                    .ok_or_else(|| invalid("handoff requires every original Event"))?,
+                "handoff Event",
+            )?,
+            commit: decode_json(row.commit_json, "handoff Commit")?,
+        };
+        full.validate_shape().map_err(invalid)?;
+        full.event
+            .verify_event_id_matches_content_with_digest_suite(
+                full.event.event_id.digest_suite_code().digest_suite(),
+            )
+            .map_err(invalid)?;
+        full.commit
+            .verify_commit_id_matches_content()
+            .map_err(invalid)?;
+        if previous
+            .as_ref()
+            .is_some_and(|previous| previous.stream_ref == full.commit.stream_ref)
+        {
+            full.commit
+                .validate_successor_of(previous.as_ref().unwrap())
+                .map_err(invalid)?;
+        } else if full.commit.stream_position != 0 || full.commit.previous_commit_ref.is_some() {
+            return Err(invalid(
+                "handoff requires a complete genesis-to-head chain for every stream",
+            ));
+        }
+        previous = Some(full.commit.clone());
+        fulls.push(full);
+    }
+    Ok(fulls)
+}
+
+async fn handoff_inventory_in_connection(
+    conn: &mut AsyncPgConnection,
+    fulls: &[arkret_wire::CommittedEventFullView],
+) -> PersistenceResult<
+    Vec<arkret_models_collaboration::authority_commit::HistoricalProducerSignerFactEntry>,
+> {
+    use arkret_models_collaboration::authority_commit::HistoricalProducerSignerFactEntry;
+    let mut entries = Vec::new();
+    for full in fulls
+        .iter()
+        .filter(|full| full.commit.producer_signer_fact_digest.is_some())
+    {
+        let fact = crate::agent_producer_signer_keys::producer_source_for_commit_in_connection(
+            conn,
+            &full.event,
+            &full.commit,
+        )
+        .await?
+        .ok_or_else(|| invalid("handoff original is missing its immutable signer fact"))?;
+        entries.push(HistoricalProducerSignerFactEntry {
+            target: arkret_wire::CommittedEventRef {
+                event_id: full.event.event_id.clone(),
+                commit_id: full.commit.commit_id.clone(),
+                stream_ref: full.commit.stream_ref.clone(),
+                stream_position: full.commit.stream_position,
+            },
+            producer_signer_fact: fact,
+        });
+    }
+    let mut keyed = entries
+        .into_iter()
+        .map(|entry| {
+            Ok((
+                (
+                    arkret_canonical::canonical_json_bytes(&entry.target.stream_ref)
+                        .map_err(PersistenceError::database)?,
+                    entry.target.stream_position,
+                    entry.target.event_id.to_string(),
+                    entry.target.commit_id.to_string(),
+                ),
+                entry,
+            ))
+        })
+        .collect::<PersistenceResult<Vec<_>>>()?;
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(keyed.into_iter().map(|(_, entry)| entry).collect())
 }
 
 /// Queue one producer Event on a caller-owned connection.
@@ -1449,8 +1626,56 @@ pub(crate) async fn commit_transaction_in_connection(
     conn: &mut AsyncPgConnection,
     transaction: &AuthorityCommitTransaction,
 ) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
-    commit_transaction_in_connection_with_device_guard(conn, transaction, VerifiedPcrUnit::None)
-        .await
+    commit_transaction_in_connection_with_device_guard(
+        conn,
+        transaction,
+        VerifiedPcrUnit::None,
+        None,
+    )
+    .await
+}
+
+/// The registered Event carrier passes verified detached evidence to lifecycle
+/// admission before the fresh Commit, with consumption in the same transaction.
+pub(crate) async fn commit_transaction_with_approvals_in_connection(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
+) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
+    commit_transaction_in_connection_with_device_guard(
+        conn,
+        transaction,
+        VerifiedPcrUnit::None,
+        prepared,
+    )
+    .await
+}
+
+/// The native scope Profile unit is the only ordinary writer of these kinds.
+pub(crate) async fn commit_managed_scope_profile_in_connection(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
+    admission: &crate::applet_scope_profiles::Admission,
+) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
+    if !admission.applies_to(&transaction.event) {
+        return Err(
+            PersistenceError::Conflict("scope Profile unit original changed".into()).into(),
+        );
+    }
+    let result = commit_transaction_in_connection_with_device_guard(
+        conn,
+        transaction,
+        VerifiedPcrUnit::ManagedScopeProfile,
+        prepared,
+    )
+    .await?;
+    if matches!(result, AuthorityCommitWriteOutcome::Committed) {
+        admission
+            .write(conn, &transaction.event, &transaction.commit)
+            .await?;
+    }
+    Ok(result)
 }
 
 /// Only the registered PCR genesis, recovery and accepted-device UoWs may
@@ -1459,8 +1684,13 @@ pub(crate) async fn commit_verified_pcr_device_transaction_in_connection(
     conn: &mut AsyncPgConnection,
     transaction: &AuthorityCommitTransaction,
 ) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
-    commit_transaction_in_connection_with_device_guard(conn, transaction, VerifiedPcrUnit::Device)
-        .await
+    commit_transaction_in_connection_with_device_guard(
+        conn,
+        transaction,
+        VerifiedPcrUnit::Device,
+        None,
+    )
+    .await
 }
 
 /// Only the SecurityRotation proposal unit may call this after rechecking the
@@ -1473,6 +1703,7 @@ pub(crate) async fn commit_verified_pcr_revoke_proposal_in_connection(
         conn,
         transaction,
         VerifiedPcrUnit::RevokeProposal,
+        None,
     )
     .await
 }
@@ -1488,6 +1719,7 @@ pub(crate) async fn commit_verified_key_backup_pointer_in_connection(
         conn,
         transaction,
         VerifiedPcrUnit::KeyBackupPointer,
+        None,
     )
     .await
 }
@@ -1503,6 +1735,7 @@ pub(crate) async fn commit_verified_recovery_policy_in_connection(
         conn,
         transaction,
         VerifiedPcrUnit::RecoveryPolicy,
+        None,
     )
     .await
 }
@@ -1518,6 +1751,7 @@ pub(crate) async fn commit_verified_agent_provision_in_connection(
         conn,
         transaction,
         VerifiedPcrUnit::AgentProvision,
+        None,
     )
     .await
 }
@@ -1532,6 +1766,7 @@ pub(crate) async fn commit_verified_agent_control_in_connection(
         conn,
         transaction,
         VerifiedPcrUnit::AgentControl,
+        None,
     )
     .await
 }
@@ -1546,6 +1781,7 @@ pub(crate) async fn commit_verified_agent_pcr_genesis_in_connection(
         conn,
         transaction,
         VerifiedPcrUnit::AgentPcrGenesis,
+        None,
     )
     .await
 }
@@ -1561,6 +1797,7 @@ pub(crate) async fn commit_verified_pcr_typed_current_in_connection(
         conn,
         transaction,
         VerifiedPcrUnit::ProfileOrAccountability,
+        None,
     )
     .await
 }
@@ -1575,10 +1812,12 @@ enum VerifiedPcrUnit {
     KeyBackupPointer,
     RecoveryPolicy,
     ProfileOrAccountability,
+    ManagedScopeProfile,
     AgentProvision,
     AgentPcrGenesis,
     AgentControl,
     Consent,
+    PcrGovernanceChange,
     Applet,
 }
 
@@ -1588,16 +1827,39 @@ pub(crate) async fn commit_verified_applet_in_connection(
     conn: &mut AsyncPgConnection,
     transaction: &AuthorityCommitTransaction,
 ) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
-    commit_transaction_in_connection_with_device_guard(conn, transaction, VerifiedPcrUnit::Applet)
-        .await
+    commit_transaction_in_connection_with_device_guard(
+        conn,
+        transaction,
+        VerifiedPcrUnit::Applet,
+        None,
+    )
+    .await
 }
 
 pub(crate) async fn commit_verified_consent_in_connection(
     conn: &mut AsyncPgConnection,
     transaction: &AuthorityCommitTransaction,
 ) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
-    commit_transaction_in_connection_with_device_guard(conn, transaction, VerifiedPcrUnit::Consent)
-        .await
+    commit_transaction_in_connection_with_device_guard(
+        conn,
+        transaction,
+        VerifiedPcrUnit::Consent,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn commit_verified_pcr_governance_change_in_connection(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
+    commit_transaction_in_connection_with_device_guard(
+        conn,
+        transaction,
+        VerifiedPcrUnit::PcrGovernanceChange,
+        None,
+    )
+    .await
 }
 
 fn is_agent_pcr_genesis(event: &arkret_wire::Event) -> bool {
@@ -1624,6 +1886,7 @@ fn commit_transaction_in_connection_with_device_guard<'a>(
     conn: &'a mut AsyncPgConnection,
     transaction: &'a AuthorityCommitTransaction,
     verified_unit: VerifiedPcrUnit,
+    prepared: Option<&'a coland_storage::EventApprovalCommit>,
 ) -> std::pin::Pin<
     Box<
         dyn std::future::Future<Output = Result<AuthorityCommitWriteOutcome, PgTransactionError>>
@@ -1631,17 +1894,16 @@ fn commit_transaction_in_connection_with_device_guard<'a>(
             + 'a,
     >,
 > {
-    Box::pin(commit_transaction_with_device_guard_inner(
-        conn,
-        transaction,
-        verified_unit,
-    ))
+    crate::boxed_future(|| {
+        commit_transaction_with_device_guard_inner(conn, transaction, verified_unit, prepared)
+    })
 }
 
 async fn commit_transaction_with_device_guard_inner(
     conn: &mut AsyncPgConnection,
     transaction: &AuthorityCommitTransaction,
     verified_unit: VerifiedPcrUnit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
     let verified_pcr_device_unit = verified_unit == VerifiedPcrUnit::Device;
     let verified_pcr_revoke_unit = verified_unit == VerifiedPcrUnit::RevokeProposal;
@@ -1674,8 +1936,8 @@ async fn commit_transaction_with_device_guard_inner(
         )
         .into());
     }
-    // Profile and accountability results are PCR typed current written only
-    // by their units, which decide the signer and the accountability cut.
+    // Only the owning PCR or native scope Profile unit may write these
+    // results after deciding the original signer and accountability cut.
     if matches!(
         transaction.event.kind,
         arkret_wire::EventKind::ProfileCreate
@@ -1683,7 +1945,9 @@ async fn commit_transaction_with_device_guard_inner(
             | arkret_wire::EventKind::IdentityAccountabilityGrant
     ) && !matches!(
         verified_unit,
-        VerifiedPcrUnit::ProfileOrAccountability | VerifiedPcrUnit::Applet
+        VerifiedPcrUnit::ProfileOrAccountability
+            | VerifiedPcrUnit::Applet
+            | VerifiedPcrUnit::ManagedScopeProfile
     ) && !(verified_unit == VerifiedPcrUnit::AgentControl
         && crate::agent_control::is_agent_control_event(&transaction.event))
     {
@@ -1786,6 +2050,13 @@ async fn commit_transaction_with_device_guard_inner(
         return Ok(AuthorityCommitWriteOutcome::StaleAuthority(current));
     }
 
+    if transaction.event.kind == arkret_wire::EventKind::RealmGovernanceStationChange
+        && crate::pcr_private_authority::native_inception(conn, &transaction.event.realm_id).await?
+        && verified_unit != VerifiedPcrUnit::PcrGovernanceChange
+    {
+        return Err(invalid("PCR governance change requires its verified native unit").into());
+    }
+
     let event_row = sql_query(
         "SELECT pk AS event_pk, state, canonical_bytes, envelope \
          FROM canonical_events WHERE id = $1 FOR UPDATE",
@@ -1819,12 +2090,17 @@ async fn commit_transaction_with_device_guard_inner(
         .into());
     }
 
-    crate::realm_authorization_cut::require_commit_lifecycle_in_connection(
-        conn,
-        &transaction.event,
-        transaction.commit.committed_at,
-    )
+    let lifecycle_approvals = crate::boxed_future(|| {
+        crate::realm_authorization_cut::prepare_commit_lifecycle_in_connection(
+            conn,
+            &transaction.event,
+            &transaction.commit,
+            prepared,
+        )
+    })
     .await?;
+
+    require_planned_handoff_write_in_connection(conn, &transaction.event, &current).await?;
 
     let previous = sql_query(
         "SELECT commit_json FROM realm_commits \
@@ -1907,6 +2183,18 @@ async fn commit_transaction_with_device_guard_inner(
     )
     .await?;
 
+    let lifecycle_basis = serde_json::json!({"lifecycle_admission":true});
+    crate::boxed_future(|| {
+        crate::approval_admission::consume_and_audit(
+            conn,
+            &transaction.event,
+            &transaction.commit,
+            &lifecycle_approvals,
+            &lifecycle_basis,
+        )
+    })
+    .await?;
+
     Ok(AuthorityCommitWriteOutcome::Committed)
 }
 
@@ -1953,7 +2241,7 @@ pub(crate) async fn check_self_producer_guard_in_connection(
         )
         .await;
     }
-    let actor = event.actor_id.as_account_id().ok_or_else(|| {
+    let actor = event.actual_signer().as_account_id().ok_or_else(|| {
         PersistenceError::Conflict("self Event producer is not an account".to_owned())
     })?;
     let method = &event
@@ -1963,13 +2251,31 @@ pub(crate) async fn check_self_producer_guard_in_connection(
             PersistenceError::Conflict("self Event producer proof is missing".to_owned())
         })?
         .verification_method;
-    if event.executed_by.is_some() {
-        return Err(PersistenceError::Conflict(
-            "self Event cannot delegate its producer".to_owned(),
-        ));
-    }
     match guard {
         SelfProducerCommitGuard::MimiFacade { .. } => unreachable!("MIMI guard dispatched above"),
+        SelfProducerCommitGuard::AppletManagedDevice(guard) => {
+            let current = crate::pcr_applet_device_authority::for_event_in_connection(
+                conn,
+                event,
+                committed_at,
+            )
+            .await
+            .map_err(PgTransactionError::into_persistence)?
+            .ok_or_else(|| {
+                PersistenceError::Conflict(
+                    "unauthenticated: native managed Device authority is absent".into(),
+                )
+            })?;
+            if current != guard.authority
+                || event.scope_ref != guard.effective_scope
+                || event.applet_id.as_ref() != Some(&current.applet_id)
+            {
+                return Err(PersistenceError::Conflict(
+                    "capability_denied: managed Device instance or exact scope changed".into(),
+                ));
+            }
+            Ok(())
+        }
         SelfProducerCommitGuard::HumanDevice(selector)
         | SelfProducerCommitGuard::HumanDeviceEvidence { selector, .. } => {
             if selector.principal_id != actor.principal_id
@@ -2264,7 +2570,7 @@ impl PgAuthorityCommitStore {
                     )
                     .await?;
                 }
-                let prepared_human = crate::agent_producer_signer_keys::validate_prepared_local_human_in_connection(conn, transaction).await?;
+                let prepared_human = crate::agent_producer_signer_keys::validate_prepared_local_account_device_in_connection(conn, transaction).await?;
                 queue_event_in_connection(conn, &transaction.event, queued_at).await?;
                 match commit_transaction_in_connection(conn, transaction).await? {
                     AuthorityCommitWriteOutcome::Committed => {}
@@ -2280,7 +2586,7 @@ impl PgAuthorityCommitStore {
                     }
                 }
                 if let Some(fact) = prepared_human.as_ref() {
-                    crate::agent_producer_signer_keys::retain_prepared_human_in_connection(conn, &transaction.event, &transaction.commit, fact).await?;
+                    crate::agent_producer_signer_keys::retain_prepared_account_device_in_connection(conn, &transaction.event, &transaction.commit, fact).await?;
                     crate::account_device_committed_evidence::retain_from_guard(conn, &transaction.event, &transaction.commit, fact, producer_guards.map(|guards| &guards[index])).await?;
                 } else if let Some(guards) = producer_guards {
                     crate::agent_producer_signer_keys::retain_in_connection(
@@ -2309,13 +2615,13 @@ impl PgAuthorityCommitStore {
                     conn,
                     &transaction.event,
                     &transaction.commit,
-                )
+                 None)
                 .await?;
                 commit_mimi_room_binding_current_result_in_connection(
                     conn,
                     &transaction.event,
                     &transaction.commit,
-                )
+                 None)
                 .await?;
                 // This closed founding unit has no pre-existing Realm grants
                 // or governance Policy. Evidence is still verified and its
@@ -2501,6 +2807,59 @@ async fn accepted_realm_roster_in_connection(
 
 #[async_trait]
 impl AuthorityCommitStore for PgAuthorityCommitStore {
+    async fn check_call_media_release(
+        &self,
+        request: &arkret_models_collaboration::objects::media::CallMediaTokenExchangeRequestBody,
+        issuer: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<bool> {
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        conn.transaction::<_,PgTransactionError,_>(async |conn| {
+            if !crate::call_state_current_results::release_in_connection(conn,request,issuer).await? {
+                return Ok(false);
+            }
+            // The release cut orders once-only voluntary intent with the
+            // current permissions and exact accepted Call.
+            if let arkret_models_collaboration::call_invitation::CallMediaJoinContext::Voluntary(intent)=&request.join_context {
+                if intent.expires_at<=chrono::Utc::now() {return Ok(false)};
+                let consumed=sql_query("INSERT INTO call_voluntary_join_nonces(subject_actor_id,subject_device_id,nonce,expires_at) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING")
+                    .bind::<Jsonb,_>(serde_json::to_value(&request.actor_id).map_err(PersistenceError::database)?)
+                    .bind::<Text,_>(request.device_id.as_str()).bind::<Text,_>(&intent.nonce)
+                    .bind::<Timestamptz,_>(intent.expires_at).execute(&mut *conn).await?;
+                if consumed!=1 {return Ok(false)};
+            }
+            Ok(true)
+        }).await.map_err(PgTransactionError::into_persistence)
+    }
+    async fn call_current_cut(
+        &self,
+        realm: &arkret_wire::RealmId,
+        call: &arkret_wire::CallId,
+        actor: &arkret_wire::ActorId,
+    ) -> PersistenceResult<Option<coland_storage::CallCurrentCut>> {
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            crate::call_state_current_results::read_in_connection(conn, realm, call, actor)
+                .await
+                .map_err(Into::into)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+    async fn realm_media_service_current(
+        &self,
+        realm: &arkret_wire::RealmId,
+    ) -> PersistenceResult<
+        Option<arkret_models_collaboration::events_payloads::RealmMediaServiceValue>,
+    > {
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        crate::call_state_current_results::media_in_connection(&mut conn, realm).await
+    }
     async fn ordinary_realm_bootstrap_replay(
         &self,
         submission: &arkret_models_collaboration::authority_commit::OrdinaryRealmBootstrapUnitSubmission,
@@ -2663,15 +3022,15 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .map_err(PgTransactionError::into_persistence)
     }
 
-    async fn human_signer_fact(
+    async fn account_device_signer_fact(
         &self,
         event: &arkret_wire::Event,
         commit: &arkret_wire::RealmCommit,
     ) -> PersistenceResult<
-        Option<arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact>,
+        Option<arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact>,
     > {
         let mut conn = pg_conn(&self.pool).await?;
-        crate::agent_producer_signer_keys::human_source_for_commit_in_connection(
+        crate::agent_producer_signer_keys::account_device_source_for_commit_in_connection(
             &mut conn, event, commit,
         )
         .await
@@ -2699,7 +3058,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            crate::managed_message_actor::require_applet_producer_in_connection(
+            crate::managed_message_actor::prepare_applet_producer_in_connection(
                 conn, event, guard, at,
             )
             .await
@@ -2709,16 +3068,16 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .map_err(PgTransactionError::into_persistence)
     }
 
-    async fn prepare_human_signer_fact(
+    async fn prepare_account_device_signer_fact(
         &self,
         event: &arkret_wire::Event,
         admitted_at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<
-        Option<arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact>,
+        Option<arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact>,
     > {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            crate::agent_producer_signer_keys::prepare_local_human_source_in_connection(
+            crate::agent_producer_signer_keys::prepare_local_account_device_source_in_connection(
                 conn,
                 event,
                 admitted_at,
@@ -2809,6 +3168,20 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         source_peer: Option<&arkret_wire::DidCoreId>,
     ) -> PersistenceResult<coland_storage::MlsMemberGroupStateMaterialRead> {
         crate::mls_group_state_material_read::read(&self.pool, request, issuer, source_peer).await
+    }
+
+    async fn admit_applet_managed_device_authorization(
+        &self,
+        transaction: &AuthorityCommitTransaction,
+        carrier: &coland_storage::AppletControlCarrier,
+    ) -> PersistenceResult<AcceptedDeviceAuthorizationOutcome> {
+        transaction.validate().map_err(invalid)?;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            crate::pcr_applet_device::admit(conn, transaction, carrier).await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
     }
 
     async fn admit_accepted_device_authorization(
@@ -2999,7 +3372,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                     }
                 }
                 commit_realm_authority_root_current_result_in_connection(conn, &transaction.event, &transaction.commit).await?;
-                commit_capability_grant_current_result_in_connection(conn, &transaction.event, &transaction.commit).await?;
+                commit_capability_grant_current_result_in_connection(conn, &transaction.event, &transaction.commit, None).await?;
                 crate::pcr_device_current_results::project_pcr_device_current_in_connection(
                     conn,
                     &transaction.event,
@@ -3286,6 +3659,59 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .map_err(PgTransactionError::into_persistence)
     }
 
+    async fn install_committed_audit_pair(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::AuditPairedEventFederationSubmission,
+        replicas: &[coland_storage::CommittedReplica; 2],
+    ) -> PersistenceResult<arkret_models_collaboration::authority_commit::AggregateAcceptanceStatus>
+    {
+        request.validate().map_err(PersistenceError::database)?;
+        for (slot, replica) in request.committed_events.iter().zip(replicas) {
+            if slot.event_submission.event != replica.event
+                || slot.source_commit != replica.commit
+                || slot.producer_signer_fact != replica.producer_signer_fact
+            {
+                return Err(PersistenceError::SchemaViolation(
+                    "audit replica differs from verified source slot".to_owned(),
+                ));
+            }
+        }
+        let canonical =
+            arkret_canonical::canonical_json_bytes(request).map_err(PersistenceError::database)?;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            #[derive(diesel::QueryableByName)]
+            struct Fence { #[diesel(sql_type=diesel::sql_types::Binary)] canonical_submission: Vec<u8> }
+            crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &replicas[0].event.realm_id).await?;
+            let original = sql_query("SELECT canonical_submission FROM registered_audit_replica_units WHERE business_event_id=$1 OR audit_event_id=$1 OR business_event_id=$2 OR audit_event_id=$2")
+                .bind::<Text,_>(replicas[0].event.event_id.as_str()).bind::<Text,_>(replicas[1].event.event_id.as_str())
+                .get_result::<Fence>(&mut *conn).await.optional()?;
+            if original.as_ref().is_some_and(|original| original.canonical_submission != canonical) {
+                return Err(PersistenceError::Conflict("duplicate_conflict: source audit pair has another complete submission".to_owned()).into());
+            }
+            if original.is_none() {
+                #[derive(diesel::QueryableByName)]
+                struct Existing { #[diesel(sql_type=diesel::sql_types::Bool)] present: bool }
+                let existing = sql_query("SELECT EXISTS(SELECT 1 FROM canonical_events WHERE envelope->>'event_id' IN ($1,$2)) AS present")
+                    .bind::<Text,_>(replicas[0].event.event_id.as_str()).bind::<Text,_>(replicas[1].event.event_id.as_str())
+                    .get_result::<Existing>(&mut *conn).await?;
+                if existing.present { return Err(PersistenceError::Conflict("revision_unavailable: existing source slot has no complete unit fence".to_owned()).into()); }
+            }
+            let first = replica::install_registered_replica_in_connection(conn, &replicas[0]).await?;
+            let second = replica::install_registered_replica_in_connection(conn, &replicas[1]).await?;
+            if matches!((first,second), (coland_storage::CommittedReplicaOutcome::Stored,coland_storage::CommittedReplicaOutcome::Duplicate) | (coland_storage::CommittedReplicaOutcome::Duplicate,coland_storage::CommittedReplicaOutcome::Stored)) {
+                return Err(PersistenceError::Conflict("revision_unavailable: audit pair has a partial source installation".to_owned()).into());
+            }
+            if original.is_none() {
+                sql_query("INSERT INTO registered_audit_replica_units(business_event_id,audit_event_id,realm_id,canonical_submission) VALUES($1,$2,$3,$4)")
+                    .bind::<Text,_>(replicas[0].event.event_id.as_str()).bind::<Text,_>(replicas[1].event.event_id.as_str())
+                    .bind::<Text,_>(replicas[0].event.realm_id.as_str()).bind::<diesel::sql_types::Binary,_>(&canonical)
+                    .execute(&mut *conn).await?;
+            }
+            Ok(if first==coland_storage::CommittedReplicaOutcome::Duplicate { arkret_models_collaboration::authority_commit::AggregateAcceptanceStatus::Duplicate } else { arkret_models_collaboration::authority_commit::AggregateAcceptanceStatus::Committed })
+        }).await.map_err(PgTransactionError::into_persistence)
+    }
+
     async fn install_committed_replica(
         &self,
         replica: &coland_storage::CommittedReplica,
@@ -3419,7 +3845,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         local_service: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<bool> {
         use arkret_models_collaboration::authority_commit::{
-            HumanHistoricalSignerFact, SelfAuthoritySubmitRequest,
+            AccountDeviceHistoricalSignerFact, SelfAuthoritySubmitRequest,
         };
         use arkret_models_collaboration::events_payloads::CircleMemberStatePayload;
         use arkret_models_collaboration::governance::circle::CircleMembership;
@@ -3453,7 +3879,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             || commit.stream_ref != stream
             || commit.realm_id != event.realm_id
             || commit.event_ref != event.event_id
-            || event.human_device_producer().map_err(invalid)?.is_none()
+            || event.account_device_producer().map_err(invalid)?.is_none()
         {
             return Ok(false);
         }
@@ -3577,7 +4003,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             let held_commit: arkret_wire::RealmCommit = decode_json(row.commit_json, "bound leave Commit")?;
             let accepted: arkret_wire::RealmCommit = decode_json(row.accepted_json, "bound leave accepted witness")?;
             let submission: SelfAuthoritySubmitRequest = decode_json(row.submission_json, "bound leave original intent")?;
-            let fact: HumanHistoricalSignerFact = decode_json(row.fact_json, "bound leave original fact")?;
+            let fact: AccountDeviceHistoricalSignerFact = decode_json(row.fact_json, "bound leave original fact")?;
             let join_event: arkret_wire::Event = decode_json(row.join_envelope, "bound leave opening Event")?;
             let join_commit: arkret_wire::RealmCommit = decode_json(row.join_commit_json, "bound leave opening Commit")?;
             let SelfAuthoritySubmitRequest::Event(submitted) = submission else { return Ok(false); };
@@ -3751,6 +4177,71 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .map_err(PersistenceError::database)?
         .map(|row| decode_json(row.commit_json, "held stream head"))
         .transpose()
+    }
+
+    async fn watch_audit_read_delivery_guard(
+        &self,
+        request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
+        outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+        issuer: &arkret_wire::DidCoreId,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<Box<dyn coland_storage::AccountContentDeliveryGuard>> {
+        crate::account_content_delivery::acquire_governor_audit_delivery(
+            &self.pool, request, outcome, issuer, expires_at,
+        )
+        .await
+    }
+
+    async fn watch_audit_read_disclosure(
+        &self,
+        request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
+        outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+        issuer: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<()> {
+        outcome
+            .validate_for_request(request, outcome.audit_commit.governance_generation)
+            .map_err(PersistenceError::database)?;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::registered_audit::read_visibility_in_connection(
+                conn,
+                request,
+                issuer,
+                Some(outcome.audit_commit.governance_generation),
+            )
+            .await?;
+            Ok(())
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn retain_registered_pair_forward(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::AuditPairedEventUnitSubmission,
+        outcome: Option<
+            &arkret_models_collaboration::authority_commit::AuditPairedEventAcceptanceOutcome,
+        >,
+    ) -> PersistenceResult<()> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::registered_audit::retain_forward_in_connection(conn, request, outcome).await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn registered_audit_result(
+        &self,
+        event_id: &arkret_wire::EventId,
+    ) -> PersistenceResult<Option<coland_storage::RegisteredAuditResult>> {
+        let mut conn = pg_conn(&self.pool).await?;
+        if let Some(original) =
+            crate::registered_audit::original_in_connection(&mut conn, event_id).await?
+        {
+            return Ok(Some(original));
+        }
+        crate::registered_audit::forward_original_in_connection(&mut conn, event_id).await
     }
 
     async fn current_authority(
@@ -4217,14 +4708,30 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         event: &arkret_wire::Event,
         authority: &CurrentRealmAuthority,
         reason_code: &str,
+        native: Option<(
+            &coland_storage::AppletManagedDeviceScopeGuard,
+            &coland_storage::IdempotencyRecord,
+        )>,
     ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
         if event.kind != arkret_wire::EventKind::MlsCommit || event.realm_id != authority.realm_id {
             return Err(invalid(
                 "only an exact ordinary MLS Commit can receive this refusal fence",
             ));
         }
+        if event.applet_id.is_some()
+            && event.actor_id.as_account_id().is_some()
+            && event.executed_by.is_none()
+            && native.is_none()
+        {
+            return Err(PersistenceError::Conflict(
+                "capability_denied: native MLS refusal requires its original permission guard"
+                    .into(),
+            ));
+        }
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            let producer = native.map(|(guard, _)| SelfProducerCommitGuard::AppletManagedDevice(Box::new(guard.clone())));
+            crate::agent_management_review::lock_candidate_current_realms_in_connection(conn, event, None, producer.as_ref(), &[]).await?;
             let current = locked_authority(conn, &event.realm_id).await?
                 .ok_or_else(|| invalid("MLS refusal has no governance authority"))?;
             queue_event_in_connection(conn, event, chrono::Utc::now()).await?;
@@ -4240,6 +4747,25 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             if !same_authority(&current, authority) {
                 return Err(PersistenceError::Conflict("temporarily_unavailable: MLS refusal authority changed".into()).into());
             }
+            if let Some((guard, _)) = native {
+                crate::boxed_future(|| crate::applet_device_admission::require_mls_permission_in_connection(conn, event, guard, chrono::Utc::now(), true)).await?;
+                // A formerly stale key-access coordinate may have caught up
+                // while this refusal waited for the exclusive authority cut.
+                // Such a request must retry, never acquire a false finality fence.
+                let key = crate::mls_group_current_results::scope_key(&event.scope_ref)?;
+                let group = crate::mls_group_current_results::locked_group(conn, &key).await?
+                    .ok_or_else(|| PersistenceError::Conflict("failed_precondition: native MLS refusal has no current group".into()))?;
+                let payload: arkret_models_crypto::MlsCommitPayload = serde_json::from_value(serde_json::to_value(&event.payload).map_err(PersistenceError::database)?).map_err(PersistenceError::database)?;
+                let binding = payload.governance_binding();
+                if payload.base_group_state_ref() == &group.value.current_mls_commit_event_ref
+                    && payload.base_epoch() == group.value.epoch
+                    && Some(payload.next_epoch()) == group.value.epoch.checked_add(1)
+                    && binding.key_access_revision() == group.value.current_key_access_revision
+                    && payload.covers_key_access_revision() == group.value.current_key_access_revision
+                {
+                    return Err(PersistenceError::Conflict("temporarily_unavailable: native MLS refusal coordinate changed".into()).into());
+                }
+            }
             #[derive(QueryableByName)]
             struct RefusalRow {
                 #[diesel(sql_type = Text)]
@@ -4250,10 +4776,17 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 .execute(&mut *conn).await?;
             let refused = sql_query("SELECT rejection_reason FROM canonical_events WHERE id=$1 AND state='rejected'")
                 .bind::<Binary,_>(token.to_vec()).get_result::<RefusalRow>(&mut *conn).await?;
-            Ok(arkret_wire::AuthoritySubmitOutcome::Rejected {
+            let outcome = arkret_wire::AuthoritySubmitOutcome::Rejected {
                 status: arkret_wire::AuthorityRejectionStatus::Rejected,
                 reason_code: refused.rejection_reason,
-            })
+            };
+            if let Some((guard, record)) = native {
+                let mut record = record.clone();
+                record.response_body = serde_json::to_value(arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::Ordinary(outcome.clone())).map_err(PersistenceError::database)?;
+                crate::idempotency::record_native_mls_idempotency_in_connection(conn, &record).await?;
+                crate::boxed_future(|| crate::applet_device_admission::require_mls_permission_in_connection(conn, event, guard, chrono::Utc::now(), false)).await?;
+            }
+            Ok(outcome)
         }).await.map_err(PgTransactionError::into_persistence)
     }
 
@@ -4353,12 +4886,14 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                     conn,
                     &transaction.event,
                     &transaction.commit,
+                    None,
                 )
                 .await?;
                 commit_mimi_room_binding_current_result_in_connection(
                     conn,
                     &transaction.event,
                     &transaction.commit,
+                    None,
                 )
                 .await?;
             }
@@ -4388,7 +4923,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 return Ok(AuthorityCommitWriteOutcome::Duplicate);
             }
             let prepared_human =
-                crate::agent_producer_signer_keys::validate_prepared_local_human_in_connection(
+                crate::agent_producer_signer_keys::validate_prepared_local_account_device_in_connection(
                     conn,
                     transaction,
                 )
@@ -4406,7 +4941,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             )?;
             if matches!(outcome, AuthorityCommitWriteOutcome::Committed) {
                 if let Some(fact) = prepared_human.as_ref() {
-                    crate::agent_producer_signer_keys::retain_prepared_human_in_connection(
+                    crate::agent_producer_signer_keys::retain_prepared_account_device_in_connection(
                         conn,
                         &transaction.event,
                         &transaction.commit,
@@ -4434,12 +4969,14 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                     conn,
                     &transaction.event,
                     &transaction.commit,
+                    None,
                 )
                 .await?;
                 commit_mimi_room_binding_current_result_in_connection(
                     conn,
                     &transaction.event,
                     &transaction.commit,
+                    None,
                 )
                 .await?;
             }
@@ -4461,12 +4998,14 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                     conn,
                     &transaction.event,
                     &transaction.commit,
+                    None,
                 )
                 .await?;
                 commit_mimi_room_binding_current_result_in_connection(
                     conn,
                     &transaction.event,
                     &transaction.commit,
+                    None,
                 )
                 .await?;
             }
@@ -4975,9 +5514,10 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         account: &arkret_wire::AccountId,
         issuer: &arkret_wire::DidCoreId,
         snapshot: &arkret_wire::RealmStateSnapshot,
-    ) -> PersistenceResult<()> {
+        minimum: &coland_storage::RealmStateSnapshotMaterial,
+    ) -> PersistenceResult<arkret_wire::RealmStateSnapshot> {
         crate::issued_realm_snapshots::install_verified_account_snapshot(
-            &self.pool, account, issuer, snapshot,
+            &self.pool, account, issuer, snapshot, minimum,
         )
         .await
     }
@@ -5140,134 +5680,52 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .await
     }
 
-    async fn install_handoff(
+    async fn handoff_originals(
         &self,
-        handoff: &arkret_wire::RealmAuthorityHandoff,
-        final_stream_heads: &[arkret_wire::CommitStreamHead],
-        snapshot: &arkret_wire::RealmStateSnapshot,
-    ) -> PersistenceResult<()> {
-        handoff.validate_shape().map_err(invalid)?;
-        verify_snapshot_content_id(snapshot)?;
-        if final_stream_heads.is_empty()
-            || !final_stream_heads
-                .windows(2)
-                .all(|pair| pair[0].stream_ref < pair[1].stream_ref)
-            || final_stream_heads
-                .iter()
-                .any(|head| head.stream_ref.realm_id() != &handoff.realm_id)
-        {
-            return Err(invalid(
-                "handoff stream heads must be non-empty, sorted, unique, and same-Realm",
-            ));
-        }
-        let heads_digest = arkret_identifiers::Hash::new(
-            arkret_canonical::canonical_sha256(&final_stream_heads)
-                .map_err(PersistenceError::database)?,
-        )
-        .map_err(invalid)?;
-        if heads_digest != handoff.final_stream_heads_digest
-            || snapshot.snapshot_id != handoff.snapshot_ref
-            || snapshot.realm_id != handoff.realm_id
-            || snapshot.governance_generation != handoff.from_generation
-            || snapshot.visible_stream_heads != final_stream_heads
-            || snapshot.signature.context != arkret_wire::DetachedSignatureContext::RealmSnapshot
-            || signature_service_id(&snapshot.signature)? != handoff.from_service_id
-        {
-            return Err(invalid("handoff snapshot or stream-head binding mismatch"));
-        }
-        let snapshot_json = serde_json::to_value(snapshot).map_err(PersistenceError::database)?;
-        let handoff_json = serde_json::to_value(handoff).map_err(PersistenceError::database)?;
+        realm_id: &arkret_wire::RealmId,
+    ) -> PersistenceResult<Vec<arkret_wire::CommittedEventFullView>> {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            let current = locked_authority(conn, &handoff.realm_id)
-                .await?
-                .ok_or_else(|| PersistenceError::NotFound("Realm authority not initialized".into()))?;
-            if current.generation == handoff.to_generation
-                && current.service_id == handoff.to_service_id
-                && current.last_handoff_ref.as_ref() == Some(&handoff.handoff_id)
-            {
-                return Ok(());
-            }
-            if current.generation != handoff.from_generation
-                || current.service_id != handoff.from_service_id
-            {
-                return Err(PersistenceError::Conflict("stale Realm authority handoff".into()).into());
-            }
-
-            let rows = sql_query(
-                REALM_STREAM_HEADS_SQL,
-            )
-            .bind::<Text, _>(handoff.realm_id.as_str())
-            .load::<HeadRow>(&mut *conn)
-            .await?;
-            let mut stored_heads = rows
-                .into_iter()
-                .map(|row| {
-                    Ok(arkret_wire::CommitStreamHead {
-                        stream_ref: decode_json(row.stream_ref, "commit stream ref")?,
-                        stream_position: to_u64(row.stream_position, "stream position")?,
-                        commit_id: decode_text(row.commit_id, "RealmCommit id")?,
-                    })
-                })
-                .collect::<PersistenceResult<Vec<_>>>()?;
-            stored_heads.sort_by(|left, right| left.stream_ref.cmp(&right.stream_ref));
-            if stored_heads != final_stream_heads {
-                return Err(PersistenceError::Conflict(
-                    "handoff final stream heads do not match durable stream tails".into(),
-                )
-                .into());
-            }
-            let realm_head = final_stream_heads.iter().find(|head| {
-                head.stream_ref
-                    == arkret_wire::CommitStreamRef::Realm {
-                        realm_id: handoff.realm_id.clone(),
-                    }
-            });
-            if realm_head.map(|head| &head.commit_id) != Some(&handoff.change_commit_id) {
-                return Err(invalid("handoff change commit is not the final Realm stream head").into());
-            }
-
-            sql_query(
-                "INSERT INTO realm_state_snapshots \
-                 (snapshot_id, realm_id, governance_generation, snapshot_json, created_at) \
-                 VALUES ($1, $2, $3, $4, $5)",
-            )
-            .bind::<Text, _>(snapshot.snapshot_id.as_str())
-            .bind::<Text, _>(snapshot.realm_id.as_str())
-            .bind::<BigInt, _>(to_i64(snapshot.governance_generation, "snapshot governance generation")?)
-            .bind::<Jsonb, _>(&snapshot_json)
-            .bind::<Timestamptz, _>(snapshot.created_at)
-            .execute(&mut *conn)
-            .await?;
-            sql_query(
-                "INSERT INTO realm_authority_handoffs \
-                 (handoff_id, realm_id, from_generation, to_generation, from_service_id, to_service_id, handoff_json) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            )
-            .bind::<Text, _>(handoff.handoff_id.as_str())
-            .bind::<Text, _>(handoff.realm_id.as_str())
-            .bind::<BigInt, _>(to_i64(handoff.from_generation, "handoff from_generation")?)
-            .bind::<BigInt, _>(to_i64(handoff.to_generation, "handoff to_generation")?)
-            .bind::<Text, _>(handoff.from_service_id.as_str())
-            .bind::<Text, _>(handoff.to_service_id.as_str())
-            .bind::<Jsonb, _>(&handoff_json)
-            .execute(&mut *conn)
-            .await?;
-            sql_query(
-                "UPDATE realm_authorities SET generation = $2, service_id = $3, \
-                 authority_ref = $4, last_handoff_ref = $5, updated_at = now() WHERE realm_id = $1",
-            )
-            .bind::<Text, _>(handoff.realm_id.as_str())
-            .bind::<BigInt, _>(to_i64(handoff.to_generation, "handoff to_generation")?)
-            .bind::<Text, _>(handoff.to_service_id.as_str())
-            .bind::<Jsonb, _>(serde_json::to_value(arkret_wire::RealmCommitAuthorityRef::Handoff(handoff.handoff_id.clone())).map_err(PersistenceError::database)?)
-            .bind::<Text, _>(handoff.handoff_id.as_str())
-            .execute(&mut *conn)
-            .await?;
-            Ok(())
+            sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *conn)
+                .await?;
+            Ok(handoff_originals_in_connection(conn, realm_id).await?)
         })
         .await
         .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn admit_pcr_governance_change(
+        &self,
+        transaction: &AuthorityCommitTransaction,
+    ) -> PersistenceResult<AuthorityCommitWriteOutcome> {
+        transaction.validate().map_err(invalid)?;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::pcr_private_authority::admit_governance_change(conn, transaction).await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn install_handoff(
+        &self,
+        handoff: &arkret_wire::RealmAuthorityHandoff,
+        heads: &[arkret_wire::CommitStreamHead],
+        snapshot: &arkret_wire::RealmStateSnapshot,
+    ) -> PersistenceResult<()> {
+        self.install_handoff_inner(handoff, heads, snapshot, None)
+            .await
+    }
+    async fn install_handoff_with_private_state(
+        &self,
+        handoff: &arkret_wire::RealmAuthorityHandoff,
+        heads: &[arkret_wire::CommitStreamHead],
+        snapshot: &arkret_wire::RealmStateSnapshot,
+        manifest: Option<&arkret_models_collaboration::authority_commit::PcrPrivateHandoffManifest>,
+    ) -> PersistenceResult<()> {
+        self.install_handoff_inner(handoff, heads, snapshot, manifest)
+            .await
     }
 
     async fn authority_handoffs(
@@ -5390,5 +5848,240 @@ mod tests {
             invalid_mimi_migration().conflict_code(),
             Some(coland_storage::ConflictCode::MimiRoomBindingMigrationProofInvalid)
         );
+    }
+}
+
+#[derive(diesel::QueryableByName)]
+struct PcrManifestRow {
+    #[diesel(sql_type=Jsonb)]
+    manifest: serde_json::Value,
+}
+
+impl PgAuthorityCommitStore {
+    async fn install_handoff_inner(
+        &self,
+        handoff: &arkret_wire::RealmAuthorityHandoff,
+        final_stream_heads: &[arkret_wire::CommitStreamHead],
+        snapshot: &arkret_wire::RealmStateSnapshot,
+        manifest: Option<&arkret_models_collaboration::authority_commit::PcrPrivateHandoffManifest>,
+    ) -> PersistenceResult<()> {
+        match (manifest, handoff.pcr_private_state_digest.as_ref()) {
+            (Some(manifest), Some(digest))
+                if manifest.realm_id == handoff.realm_id
+                    && manifest.governance_generation == handoff.from_generation
+                    && manifest.digest().map_err(invalid)?.as_str() == digest.as_str()
+                    && final_stream_heads
+                        .iter()
+                        .any(|head| head == &manifest.effective_stream_head) => {}
+            (None, None) => {}
+            _ => {
+                return Err(invalid(
+                    "private state manifest must exactly bind the signed handoff",
+                ));
+            }
+        }
+        handoff.validate_shape().map_err(invalid)?;
+        verify_snapshot_content_id(snapshot)?;
+        if final_stream_heads.is_empty()
+            || !final_stream_heads
+                .windows(2)
+                .all(|pair| pair[0].stream_ref < pair[1].stream_ref)
+            || final_stream_heads
+                .iter()
+                .any(|head| head.stream_ref.realm_id() != &handoff.realm_id)
+        {
+            return Err(invalid(
+                "handoff stream heads must be non-empty, sorted, unique, and same-Realm",
+            ));
+        }
+        let heads_digest = arkret_identifiers::Hash::new(
+            arkret_canonical::canonical_sha256(&final_stream_heads)
+                .map_err(PersistenceError::database)?,
+        )
+        .map_err(invalid)?;
+        if heads_digest != handoff.final_stream_heads_digest
+            || snapshot.snapshot_id != handoff.snapshot_ref
+            || snapshot.realm_id != handoff.realm_id
+            || snapshot.governance_generation != handoff.from_generation
+            || snapshot.visible_stream_heads != final_stream_heads
+            || snapshot.signature.context != arkret_wire::DetachedSignatureContext::RealmSnapshot
+            || signature_service_id(&snapshot.signature)? != handoff.from_service_id
+        {
+            return Err(invalid("handoff snapshot or stream-head binding mismatch"));
+        }
+        let snapshot_json = serde_json::to_value(snapshot).map_err(PersistenceError::database)?;
+        let handoff_json = serde_json::to_value(handoff).map_err(PersistenceError::database)?;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            let pcr=crate::pcr_private_authority::native_inception(conn,&handoff.realm_id).await?;
+            if pcr!=manifest.is_some() {
+                return Err(invalid("private manifest applicability differs from durable inception").into());
+            }
+            let current = locked_authority(conn, &handoff.realm_id)
+                .await?
+                .ok_or_else(|| PersistenceError::NotFound("Realm authority not initialized".into()))?;
+            if current.generation == handoff.to_generation
+                && current.service_id == handoff.to_service_id
+                && current.last_handoff_ref.as_ref() == Some(&handoff.handoff_id)
+            {
+                let held = sql_query("SELECT handoff_json FROM realm_authority_handoffs WHERE handoff_id=$1")
+                    .bind::<Text,_>(handoff.handoff_id.as_str()).get_result::<HandoffRow>(&mut *conn).await?;
+                let held_snapshot = sql_query("SELECT snapshot_json FROM realm_state_snapshots WHERE snapshot_id=$1")
+                    .bind::<Text,_>(snapshot.snapshot_id.as_str()).get_result::<SnapshotRow>(&mut *conn).await?;
+                if held.handoff_json != handoff_json || held_snapshot.snapshot_json != snapshot_json {
+                    return Err(invalid("handoff replay differs from the installed original").into());
+                }
+                let originals = handoff_originals_in_connection(conn, &handoff.realm_id).await?;
+                crate::registered_audit::verify_handoff_archive(conn, &originals).await?;
+                if let Some(manifest) = manifest {
+                    let row=sql_query("SELECT manifest FROM pcr_private_handoff_imports WHERE handoff_id=$1")
+                        .bind::<Text,_>(handoff.handoff_id.as_str()).get_result::<PcrManifestRow>(&mut *conn).await?;
+                    if row.manifest != serde_json::to_value(manifest).map_err(invalid)? {
+                        return Err(invalid("private handoff replay differs from the accepted manifest").into());
+                    }
+                }
+                return Ok(());
+            }
+            if current.generation != handoff.from_generation
+                || current.service_id != handoff.from_service_id
+            {
+                return Err(PersistenceError::Conflict("failed_precondition: stale Realm authority handoff".into()).into());
+            }
+
+            if let Some(manifest) = manifest {
+                crate::pcr_private_archive::verify_import(conn, manifest).await?;
+            }
+
+            let rows = sql_query(
+                REALM_STREAM_HEADS_SQL,
+            )
+            .bind::<Text, _>(handoff.realm_id.as_str())
+            .load::<HeadRow>(&mut *conn)
+            .await?;
+            let mut stored_heads = rows
+                .into_iter()
+                .map(|row| {
+                    Ok(arkret_wire::CommitStreamHead {
+                        stream_ref: decode_json(row.stream_ref, "commit stream ref")?,
+                        stream_position: to_u64(row.stream_position, "stream position")?,
+                        commit_id: decode_text(row.commit_id, "RealmCommit id")?,
+                    })
+                })
+                .collect::<PersistenceResult<Vec<_>>>()?;
+            stored_heads.sort_by(|left, right| left.stream_ref.cmp(&right.stream_ref));
+            if stored_heads != final_stream_heads {
+                return Err(PersistenceError::Conflict(
+                    "failed_precondition: handoff final stream heads do not match durable stream tails".into(),
+                )
+                .into());
+            }
+            let realm_head = final_stream_heads.iter().find(|head| {
+                head.stream_ref
+                    == arkret_wire::CommitStreamRef::Realm {
+                        realm_id: handoff.realm_id.clone(),
+                    }
+            });
+            if realm_head.map(|head| &head.commit_id) != Some(&handoff.change_commit_id) {
+                return Err(invalid("handoff change commit is not the final Realm stream head").into());
+            }
+
+            // The endpoint activates a pre-imported frozen state. A readable
+            // member suffix or an inline current-only snapshot is insufficient.
+            let originals = handoff_originals_in_connection(conn, &handoff.realm_id).await?;
+            crate::registered_audit::verify_handoff_archive(conn, &originals).await?;
+            let change = originals.iter().find(|full| full.commit.commit_id == handoff.change_commit_id)
+                .ok_or_else(|| invalid("handoff change original is not held"))?;
+            if change.event.event_id != handoff.change_event_ref
+                || change.event.kind != arkret_wire::EventKind::RealmGovernanceStationChange
+                || change.commit.governance_generation != handoff.from_generation {
+                return Err(invalid("handoff does not bind the outgoing committed change Event").into());
+            }
+            let payload: arkret_models_collaboration::events_payloads::RealmGovernanceStationChangePayload =
+                serde_json::from_value(serde_json::to_value(&change.event.payload).map_err(PersistenceError::database)?).map_err(invalid)?;
+            if payload.expected_governance_generation != handoff.from_generation
+                || payload.new_governance_station_id != handoff.to_service_id
+                || Some(&payload.expected_realm_stream_commit_id) != change.commit.previous_commit_ref.as_ref() {
+                return Err(invalid("handoff differs from the accepted change CAS").into());
+            }
+            let mut watch_cells = std::collections::BTreeSet::new();
+            for full in &originals {
+                if full.event.kind == arkret_wire::EventKind::StrandWatchSet {
+                    let payload: arkret_models_collaboration::events_payloads::strand::StrandWatchSetPayload = serde_json::from_value(
+                        serde_json::to_value(&full.event.payload).map_err(PersistenceError::database)?
+                    ).map_err(PersistenceError::database)?;
+                    watch_cells.insert((full.commit.stream_ref.clone(), payload.strand_id, payload.watcher_actor_id));
+                }
+            }
+            for row in &snapshot.current_state_entries {
+                let arkret_wire::TypedCurrentRow::Value { selector, source_stream_ref, .. } = row;
+                if let arkret_wire::CurrentSelector::StrandWatch { strand_id, watcher_actor_id } = selector {
+                    watch_cells.insert((source_stream_ref.clone(), strand_id.clone(), watcher_actor_id.clone()));
+                }
+            }
+            for (stream, strand, actor) in watch_cells {
+                let head = final_stream_heads.iter().find(|head| head.stream_ref == stream)
+                    .ok_or_else(|| invalid("handoff Watch namespace has no final head"))?;
+                crate::strand_watch_current_results::require_current_basis_in_connection(
+                    conn, &handoff.realm_id, head, &strand, &actor, ""
+                ).await?;
+            }
+            let inventory = handoff_inventory_in_connection(conn, &originals).await?;
+            let digest = arkret_models_collaboration::authority_commit::historical_signer_facts_digest(&inventory).map_err(invalid)?;
+            if handoff.historical_signer_facts_digest.as_ref() != Some(&digest) {
+                return Err(invalid("handoff requires the complete imported signer fact inventory").into());
+            }
+            let material = realm_state_snapshot_material_in_connection(conn, &handoff.realm_id).await?
+                .ok_or_else(|| invalid("handoff typed current is not imported"))?;
+            if !coland_storage::signed_snapshot_matches_material(snapshot, &material) {
+                return Err(invalid("handoff Snapshot differs from the complete imported current and floors").into());
+            }
+
+            sql_query(
+                "INSERT INTO realm_state_snapshots \
+                 (snapshot_id, realm_id, governance_generation, snapshot_json, created_at) \
+                 VALUES ($1, $2, $3, $4, $5) ON CONFLICT (snapshot_id) DO NOTHING",
+            )
+            .bind::<Text, _>(snapshot.snapshot_id.as_str())
+            .bind::<Text, _>(snapshot.realm_id.as_str())
+            .bind::<BigInt, _>(to_i64(snapshot.governance_generation, "snapshot governance generation")?)
+            .bind::<Jsonb, _>(&snapshot_json)
+            .bind::<Timestamptz, _>(snapshot.created_at)
+            .execute(&mut *conn)
+            .await?;
+            sql_query(
+                "INSERT INTO realm_authority_handoffs \
+                 (handoff_id, realm_id, from_generation, to_generation, from_service_id, to_service_id, handoff_json) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            )
+            .bind::<Text, _>(handoff.handoff_id.as_str())
+            .bind::<Text, _>(handoff.realm_id.as_str())
+            .bind::<BigInt, _>(to_i64(handoff.from_generation, "handoff from_generation")?)
+            .bind::<BigInt, _>(to_i64(handoff.to_generation, "handoff to_generation")?)
+            .bind::<Text, _>(handoff.from_service_id.as_str())
+            .bind::<Text, _>(handoff.to_service_id.as_str())
+            .bind::<Jsonb, _>(&handoff_json)
+            .execute(&mut *conn)
+            .await?;
+            if let Some(manifest) = manifest {
+                sql_query("INSERT INTO pcr_private_handoff_imports(handoff_id,realm_id,manifest) VALUES($1,$2,$3)")
+                    .bind::<Text,_>(handoff.handoff_id.as_str()).bind::<Text,_>(handoff.realm_id.as_str())
+                    .bind::<Jsonb,_>(serde_json::to_value(manifest).map_err(invalid)?).execute(&mut *conn).await?;
+            }
+            handoff_replica::retain_outgoing_cut(conn, handoff, snapshot, &originals).await?;
+            sql_query(
+                "UPDATE realm_authorities SET generation = $2, service_id = $3, \
+                 authority_ref = $4, last_handoff_ref = $5, updated_at = now() WHERE realm_id = $1",
+            )
+            .bind::<Text, _>(handoff.realm_id.as_str())
+            .bind::<BigInt, _>(to_i64(handoff.to_generation, "handoff to_generation")?)
+            .bind::<Text, _>(handoff.to_service_id.as_str())
+            .bind::<Jsonb, _>(serde_json::to_value(arkret_wire::RealmCommitAuthorityRef::Handoff(handoff.handoff_id.clone())).map_err(PersistenceError::database)?)
+            .bind::<Text, _>(handoff.handoff_id.as_str())
+            .execute(&mut *conn)
+            .await?;
+            Ok(())
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
     }
 }

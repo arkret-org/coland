@@ -2,8 +2,7 @@
 //!
 //! `POST /_arkret/self/events` is mounted by the events router; this module
 //! contributes the self and peer stream scans and the open authority bundle.
-//! Peer handoff has no authenticated, fenced implementation and stays
-//! unmounted.
+//! Planned handoff installs only a complete, verified frozen migration cut.
 
 use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
 use arkret_wire::{AuthorityBundleRequest, ErrorCode, StreamScanRequest};
@@ -30,12 +29,36 @@ pub(crate) fn trace_submission_refusal(
         .map(|code| code.as_str())
         .filter(|code| arkret_wire::ReasonCode::is_registered(code))
         .unwrap_or("unregistered");
+    // Local conformance diagnostics disclose only fixed implementation
+    // conditions, never request material or controller-private bindings.
+    let local_condition = match error {
+        Some(ServiceError::Conflict(detail)) => detail
+            .strip_prefix("failed_precondition: ")
+            .filter(|condition| {
+                matches!(
+                    *condition,
+                    "Agent join lacks its controller binding"
+                        | "controller is not in its bound joined generation"
+                        | "Agent has no accepted provision"
+                        | "Agent lifecycle is not active"
+                        | "Agent accountability grant is not active"
+                        | "Agent complete accepted ownership and DID binding are unavailable"
+                        | "Agent has no claimable membership KeyPackage"
+                        | "Agent accepted PCR genesis is unavailable"
+                        | "Agent accepted genesis inception is unavailable"
+                        | "Agent complete native DID history is unavailable"
+                )
+            })
+            .unwrap_or("other"),
+        _ => "other",
+    };
     tracing::warn!(
         stage,
         kind_class,
         actor_class,
         wire_code,
         reason_code,
+        local_condition,
         "self submission refusal boundary"
     );
 }
@@ -80,7 +103,17 @@ pub(super) fn self_router() -> Router {
 
 /// `ak.peer.committed_event.read.scan.v1`, under the signed `peer` tree.
 pub(super) fn peer_router() -> Router {
-    Router::with_path("streams/scan").post(peer_scan_stream)
+    Router::new()
+        .push(Router::with_path("streams/scan").post(peer_scan_stream))
+        .push(Router::with_path("realm-authority/handoff").post(peer_handoff))
+        .push(
+            Router::with_path("strands/watch/current")
+                .post(super::self_current_reads::peer_strand_watch_current),
+        )
+        .push(
+            Router::with_path("strands/watch/audit-read")
+                .post(super::self_current_reads::peer_strand_watch_audit_read),
+        )
 }
 
 /// `ak.open.realm_authority.read.bundle.v1`, under the unauthenticated `open` tree.
@@ -176,7 +209,9 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
         let (token, detail) = detail.split_once(": ").unwrap_or(("", ""));
         // encryption-and-audit.md §5.1.2: a forwarded Genesis whose carried
         // material does not address its refs.
-        if let Some(code @ ErrorCode::DigestMismatch) = ErrorCode::from_wire(token) {
+        if let Some(code @ (ErrorCode::DigestMismatch | ErrorCode::Unauthenticated)) =
+            ErrorCode::from_wire(token)
+        {
             return crate::error::render_error_code(code, res, detail);
         }
         match error.conflict_code() {
@@ -187,6 +222,16 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
                     ErrorCode::SCHEMA_VIOLATION,
                     "Event identity does not match its canonical content",
                     arkret_wire::ReasonCode::EVENT_ID_DIGEST_MISMATCH,
+                    None,
+                );
+            }
+            Some(coland_storage::ConflictCode::ApprovalNonceReused) => {
+                return crate::error::render_error_with_reason_code(
+                    res,
+                    crate::error::error_http_status(ErrorCode::FailedPrecondition),
+                    ErrorCode::FAILED_PRECONDITION,
+                    detail,
+                    arkret_wire::ReasonCode::APPROVAL_NONCE_REUSED,
                     None,
                 );
             }
@@ -355,6 +400,8 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
                 | coland_storage::ConflictCode::AuthorityCycle
                 | coland_storage::ConflictCode::AuthorityExpiryWidening
                 | coland_storage::ConflictCode::AccountabilityGrantMissing
+                | coland_storage::ConflictCode::AgentGrantExceedsRequestedScope
+                | coland_storage::ConflictCode::AgentRequestedScopeCommitmentInvalid
                 | coland_storage::ConflictCode::AgentPcrGenesisDeclarationMissing
                 | coland_storage::ConflictCode::ReducerProjectionFailed),
             ) => {
@@ -384,6 +431,12 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
                     }
                     coland_storage::ConflictCode::DeviceUnauthorized => {
                         Some(arkret_wire::ErrorCode::DeviceUnauthorized)
+                    }
+                    coland_storage::ConflictCode::AppletRevoked => {
+                        Some(arkret_wire::ErrorCode::AppletRevoked)
+                    }
+                    coland_storage::ConflictCode::AppletE2eeJoinUnauthorized => {
+                        Some(arkret_wire::ErrorCode::AppletE2eeJoinUnauthorized)
                     }
                     coland_storage::ConflictCode::SignatureInvalid => {
                         Some(arkret_wire::ErrorCode::SignatureInvalid)
@@ -431,6 +484,48 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
     crate::error::render_error(res, status, code, &detail);
 }
 
+async fn submit_managed_device(
+    app_state: &AppState,
+    req: &mut Request,
+    device: &crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice,
+    res: &mut Response,
+) {
+    no_store(res);
+    if device.operation != arkret_wire::ServiceOperationId::SelfEventsCommandSubmitV1 {
+        return crate::error::render_error_code(
+            ErrorCode::Unauthenticated,
+            res,
+            "managed operation differs from actual route",
+        );
+    }
+    let Some((request, _exact_body)) =
+        parse_exact_closed_body::<SelfAuthoritySubmitRequest>(req, res).await
+    else {
+        return;
+    };
+    if let Err(error) = request.validate() {
+        return crate::error::render_error_code(
+            ErrorCode::SchemaViolation,
+            res,
+            &validation_error(error),
+        );
+    }
+    let result = app_state
+        .authority()
+        .submit_managed_device(&device.metadata, &device.authority, request.clone())
+        .await
+        .and_then(|outcome| {
+            outcome
+                .validate_for_request(&request)
+                .map_err(invalid_application_output)?;
+            Ok(outcome)
+        });
+    match result {
+        Ok(outcome) => res.render(Json(outcome)),
+        Err(error) => render_service_error(res, error),
+    }
+}
+
 #[handler]
 pub(crate) async fn submit_self(req: &mut Request, depot: &Depot, res: &mut Response) {
     #[cfg(feature = "conformance-harness")]
@@ -444,6 +539,14 @@ pub(crate) async fn submit_self(req: &mut Request, depot: &Depot, res: &mut Resp
             return crate::error::render_error_code(ErrorCode::InternalError, res, &error);
         }
     };
+    if req.headers().contains_key("source-service-id") {
+        return submit_applet_control(app_state, req, res).await;
+    }
+    if let Ok(device) = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>(
+    ) {
+        return submit_managed_device(app_state, req, device, res).await;
+    }
     let Some(session) = crate::routing::auth_or_render(app_state, req, res).await else {
         #[cfg(feature = "conformance-harness")]
         trace_submission_refusal("authentication", "unparsed", "unresolved", None);
@@ -519,6 +622,7 @@ pub(crate) async fn submit_self(req: &mut Request, depot: &Depot, res: &mut Resp
             SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(_) => "realm_bootstrap",
             SelfAuthoritySubmitRequest::DirectConversationFounding(_) => "direct_founding",
             SelfAuthoritySubmitRequest::MembershipCompensation(_) => "membership_compensation",
+            SelfAuthoritySubmitRequest::AuditPairedEvent(_) => "audit_paired_event",
         };
         let actor_class = if session.agent_session().is_some() {
             "agent"
@@ -575,6 +679,94 @@ pub(crate) async fn submit_self(req: &mut Request, depot: &Depot, res: &mut Resp
     render_result(res, result);
 }
 
+async fn submit_applet_control(app_state: &AppState, req: &mut Request, res: &mut Response) {
+    let source = match crate::routing::extensions::applet_bridge::verify_self_control_service(
+        app_state, req,
+    )
+    .await
+    {
+        Ok(source) => source,
+        Err(error) => {
+            return crate::error::render_error(
+                res,
+                error.http_status(),
+                error.wire_code(),
+                &error.message,
+            );
+        }
+    };
+    let Some((request, _)) = parse_exact_closed_body::<SelfAuthoritySubmitRequest>(req, res).await
+    else {
+        return;
+    };
+    let result = async {
+        request
+            .validate()
+            .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
+        let SelfAuthoritySubmitRequest::Event(submission) = &request else {
+            return Err(ServiceError::SchemaViolation(
+                "Service control ingress requires one original Event submission".into(),
+            ));
+        };
+        if submission.approval_signatures.is_some()
+            || submission.event.kind != arkret_wire::EventKind::DeviceAuthorize
+        {
+            return Err(ServiceError::SchemaViolation(
+                "this Service control branch only admits managed device authorization".into(),
+            ));
+        }
+        let method = arkret_wire::DidUrl::new(
+            crate::routing::federation::federation_service_signature_key_id(
+                app_state.service_did().as_str(),
+            ),
+        )
+        .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
+        let outcome = app_state
+            .authority_commits()
+            .admit_applet_managed_device_authorization(
+                &submission.event,
+                &source,
+                &app_state.service_core_id(),
+                method,
+                app_state.notary_signing_key().as_ref(),
+            )
+            .await?;
+        use coland_services::authority_commit::AuthorityEventAdmissionOutcome;
+        let outcome = match outcome {
+            AuthorityEventAdmissionOutcome::Committed(commit) => {
+                arkret_wire::AuthoritySubmitOutcome::Accepted {
+                    status: arkret_wire::AuthorityCommitStatus::Committed,
+                    commit,
+                }
+            }
+            AuthorityEventAdmissionOutcome::Duplicate(commit) => {
+                arkret_wire::AuthoritySubmitOutcome::Accepted {
+                    status: arkret_wire::AuthorityCommitStatus::Duplicate,
+                    commit,
+                }
+            }
+            AuthorityEventAdmissionOutcome::NotCurrentAuthority => {
+                return Err(ServiceError::Conflict(
+                    "stale_realm_authority: managed PCR is not governed here".into(),
+                ));
+            }
+        };
+        let outcome =
+            arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::Ordinary(
+                outcome,
+            );
+        outcome
+            .validate_for_request(&request)
+            .map_err(invalid_application_output)?;
+        Ok(outcome)
+    }
+    .await;
+    if let Err(error @ (ServiceError::Database(_) | ServiceError::Internal(_))) = &result {
+        tracing::error!(error = %error, "managed PCR control submission failed internally");
+    }
+    render_result(res, result);
+}
+
 #[handler]
 async fn scan_stream(req: &mut Request, depot: &Depot, res: &mut Response) {
     let app_state = match state(depot) {
@@ -583,6 +775,26 @@ async fn scan_stream(req: &mut Request, depot: &Depot, res: &mut Response) {
             return crate::error::render_error_code(ErrorCode::InternalError, res, &error);
         }
     };
+    if let Ok(device) = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>(
+    ) {
+        let Some(request) = parse_closed_body::<StreamScanRequest>(req, res).await else {
+            return;
+        };
+        match native_stream_scan(app_state, device, request).await {
+            Ok(outcome) => {
+                no_store(res);
+                salvo::Scribe::render(outcome, res);
+            }
+            Err(error) => crate::routing::render_error(
+                res,
+                error.http_status(),
+                error.wire_code(),
+                &error.message,
+            ),
+        }
+        return;
+    }
     let Some(session) = crate::routing::auth_or_render(app_state, req, res).await else {
         #[cfg(feature = "conformance-harness")]
         trace_stream_read_refusal("authentication", "other", None);
@@ -659,6 +871,53 @@ async fn scan_stream(req: &mut Request, depot: &Depot, res: &mut Response) {
         stream_kind = match request.stream_ref { arkret_wire::CommitStreamRef::Realm {..} => "realm", arkret_wire::CommitStreamRef::Circle {..} => "circle", arkret_wire::CommitStreamRef::Sidecar {..} => "sidecar", _ => "unknown" },
         "authorized stream scan direction");
     render_stream_scan(res, &request, result);
+}
+
+async fn native_stream_scan(
+    state: &AppState,
+    device: &crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice,
+    request: StreamScanRequest,
+) -> coland_http::result::GuardedJsonResult<arkret_wire::StreamScanOutcome> {
+    let unavailable =
+        || coland_http::error::AppError::capability_denied("native stream content is unavailable");
+    request
+        .validate()
+        .map_err(|e| coland_http::error::AppError::schema_violation(e.to_string()))?;
+    if device.operation != arkret_wire::ServiceOperationId::SelfCommittedEventReadScanV1
+        || request.stream_ref.scope_ref() != device.metadata.effective_scope
+        || !matches!(
+            device.metadata.effective_scope,
+            arkret_wire::ScopeRef::Realm { .. } | arkret_wire::ScopeRef::Circle { .. }
+        )
+    {
+        return Err(unavailable());
+    }
+    let result = state
+        .authority()
+        .scan_stream_for_account(&device.authority.account_id, request.clone())
+        .await
+        .map_err(|_| unavailable())?;
+    let coland_storage::AccountStreamScan::Page(outcome) = result else {
+        return Err(unavailable());
+    };
+    let outcome = outcome
+        .into_effective_scope(&device.metadata.effective_scope)
+        .map_err(|_| unavailable())?
+        .ok_or_else(unavailable)?;
+    outcome
+        .validate_for_request(&request)
+        .map_err(|_| unavailable())?;
+    let input = coland_storage::AccountContentDeliveryInput {
+        realms: vec![request.realm_id.clone()],
+        stream_scans: vec![(request, outcome.clone())],
+        ..Default::default()
+    };
+    let guard = crate::routing::identity::applet_managed_device::content_delivery_guard_for_input(
+        state, device, input,
+    )
+    .await
+    .map_err(|_| unavailable())?;
+    coland_http::result::guarded_json_ok(outcome, Some(guard))
 }
 
 /// Render one caller-scoped scan decision. A refused caller receives the
@@ -809,6 +1068,42 @@ async fn peer_scan_stream(req: &mut Request, depot: &mut Depot, res: &mut Respon
 }
 
 #[handler]
+async fn peer_handoff(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let app_state = match state(depot) {
+        Ok(state) => state.clone(),
+        Err(error) => {
+            return crate::error::render_error_code(ErrorCode::InternalError, res, &error);
+        }
+    };
+    let peer = match crate::routing::events::peer::authenticated_peer_context(&app_state, req, true)
+        .await
+    {
+        Ok(peer) => peer,
+        Err(error) => return error.write(req, depot, res).await,
+    };
+    let Some(request) = parse_closed_body::<
+        arkret_models_collaboration::authority_commit::AuthorityHandoffRequest,
+    >(req, res)
+    .await
+    else {
+        return;
+    };
+    if let Err(error) = request.validate_new_handoff() {
+        return crate::error::render_error_code(
+            ErrorCode::SchemaViolation,
+            res,
+            &validation_error(error),
+        );
+    }
+    let result = app_state
+        .authority()
+        .install_authority_handoff(&peer, request)
+        .await;
+    no_store(res);
+    render_result(res, result);
+}
+
+#[handler]
 async fn authority_bundle(req: &mut Request, depot: &Depot, res: &mut Response) {
     let Some(request) = parse_closed_body::<AuthorityBundleRequest>(req, res).await else {
         return;
@@ -934,6 +1229,36 @@ mod tests {
             "https://arkret.org/problems/failed_precondition"
         );
         assert_eq!(body["reason_code"], "invalid_membership_transition");
+    }
+
+    #[tokio::test]
+    async fn recovery_actor_mismatch_retains_the_registered_authentication_error() {
+        let mut res = Response::new();
+        render_service_error(
+            &mut res,
+            ServiceError::Conflict(
+                "unauthenticated: recovery credential does not bind the exact original Account"
+                    .to_owned(),
+            ),
+        );
+        assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
+        let body: serde_json::Value = res.take_json().await.expect("problem body");
+        assert_eq!(body["type"], "https://arkret.org/problems/unauthenticated");
+    }
+
+    #[tokio::test]
+    async fn approval_nonce_rebinding_renders_registered_precondition_reason() {
+        let mut res = Response::new();
+        render_service_error(&mut res, ServiceError::Conflict(
+            "approval_nonce_reused: a controller nonce cannot bind different confirmation bytes".to_owned(),
+        ));
+        assert_eq!(res.status_code, Some(StatusCode::CONFLICT));
+        let body: serde_json::Value = res.take_json().await.expect("problem body");
+        assert_eq!(
+            body["type"],
+            "https://arkret.org/problems/failed_precondition"
+        );
+        assert_eq!(body["reason_code"], "approval_nonce_reused");
     }
 
     #[tokio::test]
@@ -1237,11 +1562,27 @@ mod tests {
             );
         }
 
-        // No legacy resolver and no unauthenticated peer handoff are mounted.
-        for path in [
-            "/_arkret/peer/streams/resolve",
+        let mut response = post(
             "/_arkret/peer/realm-authority/handoff",
-        ] {
+            arkret_wire::ServiceOperationId::PEER_REALM_AUTHORITY_COMMAND_HANDOFF_V1,
+        )
+        .json(&serde_json::json!({}))
+        .send(&service)
+        .await;
+        assert_eq!(response.status_code, Some(StatusCode::UNPROCESSABLE_ENTITY));
+        let problem: serde_json::Value = response.take_json().await.unwrap();
+        assert_eq!(
+            problem["type"],
+            "https://arkret.org/problems/schema_violation"
+        );
+        assert!(
+            problem["detail"]
+                .as_str()
+                .unwrap()
+                .contains("federation header")
+        );
+        // The retired resolver is still absent.
+        for path in ["/_arkret/peer/streams/resolve"] {
             let response = TestClient::post(format!("http://server{path}"))
                 .json(&serde_json::json!({}))
                 .send(&service)

@@ -51,6 +51,8 @@ const MEMBER_STATION_FAMILIES: &[&str] = &[
     "circle_member_state_current_results",
     "circle_current_results",
     "call_state_current_results",
+    "call_component_current_results",
+    "realm_media_service_current_results",
     "moderation_report_current_results",
     "moderation_state_current_results",
     "moderation_franking_proof_current_results",
@@ -211,7 +213,7 @@ async fn guard_snapshot_revisions(
         let incoming_position = position(revision.stream_position)?;
         match selector {
             S::Policy { policy_id } => {
-                crate::policy_current_results::validate_disclosed_agent_policy(
+                crate::policy_current_results::validate_disclosed_shared_policy(
                     realm_id,
                     policy_id,
                     source_stream_ref,
@@ -228,7 +230,7 @@ async fn guard_snapshot_revisions(
                                 || old.value != *value))
                 }) {
                     return Err(malformed(
-                        "Agent Policy snapshot revision, source or value conflicts",
+                        "shared Policy snapshot revision, source or value conflicts",
                     ));
                 }
             }
@@ -255,6 +257,39 @@ async fn guard_snapshot_revisions(
                     conn, realm_id, entry,
                 )
                 .await?;
+            }
+            S::CallFocus { call_id }
+            | S::CallRoster { call_id }
+            | S::CallModeration { call_id } => {
+                let old=diesel::sql_query("SELECT current_commit_id,current_stream_position,source_stream_ref,value FROM call_component_current_results WHERE realm_id=$1 AND call_id=$2 AND selector=$3 FOR UPDATE")
+                    .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(call_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(selector).map_err(malformed)?)
+                    .get_result::<ExistingFrankingProofCurrent>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+                if let Some(old) = old {
+                    let retained = match selector {
+                        S::CallFocus { .. } => true,
+                        _ => old
+                            .value
+                            .get("assertions")
+                            .and_then(Value::as_array)
+                            .is_some_and(|a| {
+                                value
+                                    .get("assertions")
+                                    .and_then(Value::as_array)
+                                    .is_some_and(|new| a.iter().all(|item| new.contains(item)))
+                            }),
+                    };
+                    if old.source_stream_ref != source
+                        || old.current_stream_position > incoming_position
+                        || !retained
+                        || (old.current_stream_position == incoming_position
+                            && (old.current_commit_id != revision.commit_id.as_str()
+                                || old.value != *value))
+                    {
+                        return Err(malformed(
+                            "Call snapshot regresses its source, revision or retained assertions",
+                        ));
+                    }
+                }
             }
             S::AgentSidecarExchangeControls {
                 sidecar_id,
@@ -419,8 +454,7 @@ async fn upsert_call_genesis(
     let current: CallStateCurrentValue =
         serde_json::from_value(value.clone()).map_err(malformed)?;
     current.validate().map_err(malformed)?;
-    if current.from.is_some()
-        || source.realm_id() != realm
+    if source.realm_id() != realm
         || !matches!(
             source,
             arkret_wire::CommitStreamRef::Realm { .. }
@@ -449,28 +483,53 @@ async fn upsert_call_genesis(
             serde_json::from_value(record.envelope).map_err(malformed)?;
         let commit: arkret_wire::RealmCommit =
             serde_json::from_value(record.commit_json).map_err(malformed)?;
-        let payload: CallCreatePayload =
-            serde_json::from_value(serde_json::json!(&event.payload)).map_err(malformed)?;
-        payload.validate().map_err(malformed)?;
-        if event.kind != arkret_wire::EventKind::CallCreate
-            || event.event_id != create
-            || event.realm_id != *realm
+        let expected = match event.kind {
+            arkret_wire::EventKind::CallCreate => {
+                let payload: CallCreatePayload =
+                    serde_json::from_value(serde_json::json!(&event.payload)).map_err(malformed)?;
+                payload.validate().map_err(malformed)?;
+                if event.event_id != create {
+                    return Err(malformed("Call genesis identity differs"));
+                }
+                serde_json::to_value(CallStateCurrentValue {
+                    from: None,
+                    to: payload.initial_state,
+                    failure_reason_code: None,
+                })
+                .map_err(malformed)?
+            }
+            arkret_wire::EventKind::CallState => {
+                let payload: arkret_models_collaboration::events_payloads::call::CallStatePayload =
+                    serde_json::from_value(serde_json::json!(&event.payload)).map_err(malformed)?;
+                if payload.call_id != *call {
+                    return Err(malformed("Call transition identity differs"));
+                }
+                serde_json::to_value(
+                    payload
+                        .state_transition
+                        .ok_or_else(|| malformed("Call lifecycle transition absent"))?,
+                )
+                .map_err(malformed)?
+            }
+            _ => return Err(malformed("Call lifecycle source kind differs")),
+        };
+        if event.realm_id != *realm
             || arkret_wire::CommitStreamRef::from_scope(&event.scope_ref, None)
                 .map_err(malformed)?
                 != *source
-            || commit.event_ref != create
+            || commit.event_ref != event.event_id
             || commit.realm_id != *realm
             || commit.stream_ref != *source
             || commit.commit_id.as_str() != revision.commit_id
             || position(commit.stream_position)? != revision.stream_position
-            || current.to != payload.initial_state
+            || *value != expected
         {
             return Err(malformed(
-                "Call current differs from its accepted genesis Event and Commit",
+                "Call current differs from accepted lifecycle Event and Commit",
             ));
         }
     }
-    let changed = diesel::sql_query("INSERT INTO call_state_current_results (realm_id,call_id,create_event_id,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(realm_id,call_id) DO UPDATE SET current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at WHERE call_state_current_results.create_event_id=EXCLUDED.create_event_id AND call_state_current_results.source_stream_ref=EXCLUDED.source_stream_ref AND call_state_current_results.value=EXCLUDED.value AND (call_state_current_results.current_stream_position<EXCLUDED.current_stream_position OR (call_state_current_results.current_stream_position=EXCLUDED.current_stream_position AND call_state_current_results.current_commit_id=EXCLUDED.current_commit_id))")
+    let changed = diesel::sql_query("INSERT INTO call_state_current_results (realm_id,call_id,create_event_id,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(realm_id,call_id) DO UPDATE SET current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at WHERE call_state_current_results.create_event_id=EXCLUDED.create_event_id AND call_state_current_results.source_stream_ref=EXCLUDED.source_stream_ref AND (call_state_current_results.current_stream_position<EXCLUDED.current_stream_position OR (call_state_current_results.current_stream_position=EXCLUDED.current_stream_position AND call_state_current_results.current_commit_id=EXCLUDED.current_commit_id AND call_state_current_results.value=EXCLUDED.value))")
         .bind::<Text,_>(realm.as_str()).bind::<Text,_>(call.as_str()).bind::<Text,_>(create.as_str())
         .bind::<Jsonb,_>(serde_json::to_value(source).map_err(malformed)?).bind::<Text,_>(revision.commit_id)
         .bind::<BigInt,_>(revision.stream_position).bind::<Jsonb,_>(value).bind::<Timestamptz,_>(revision.updated_at)
@@ -677,13 +736,12 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
             #[diesel(sql_type = diesel::sql_types::Bool)]
             present: bool,
         }
-        let omitted = diesel::sql_query("SELECT EXISTS(SELECT 1 FROM replica_authorization_rows r WHERE r.realm_id=$1 AND r.selector->>'kind'='policy' AND r.value->>'schema'='ak.schema.policy.v1' AND r.value->>'policy_kind'='agent' AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements($2) incoming WHERE incoming->'selector'=r.selector)) AS present")
+        let omitted = diesel::sql_query("SELECT EXISTS(SELECT 1 FROM replica_authorization_rows r WHERE r.realm_id=$1 AND r.selector->>'kind'='policy' AND r.value->>'schema'='ak.schema.policy.v1' AND r.value->>'policy_kind' IN ('access','moderation','agent') AND EXISTS(SELECT 1 FROM jsonb_array_elements($3) h WHERE h->'stream_ref'=r.source_stream_ref) AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements($2) incoming WHERE incoming->'selector'=r.selector)) AS present")
             .bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(entries).map_err(malformed)?)
+            .bind::<Jsonb,_>(serde_json::to_value(visible_heads).map_err(malformed)?)
             .get_result::<Present>(&mut *conn).await.map_err(PersistenceError::database)?.present;
         if omitted {
-            return Err(malformed(
-                "snapshot cannot erase an accepted shared Agent Policy",
-            ));
+            return Err(malformed("snapshot cannot erase an accepted shared Policy"));
         }
     }
     if replaces_realm
@@ -704,6 +762,7 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
             "failed_precondition: snapshot cannot remove an accepted binding".into(),
         ));
     }
+    crate::replica_authorization::guard_current_rows(conn, realm_id, entries).await?;
     guard_snapshot_revisions(conn, realm_id, entries).await?;
     for source_head in visible_heads {
         if source_head.stream_ref.realm_id() != realm_id {
@@ -753,7 +812,7 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
         };
         use arkret_wire::CurrentSelector as S;
         if let S::Policy { policy_id } = selector {
-            crate::policy_current_results::validate_disclosed_agent_policy(
+            crate::policy_current_results::validate_disclosed_shared_policy(
                 realm_id,
                 policy_id,
                 source_stream_ref,
@@ -806,6 +865,9 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
             continue;
         }
         match selector {
+            S::ActorProfile {actor_profile_id} => {
+                crate::applet_scope_profiles::validate_disclosed(actor_profile_id,source_stream_ref,value)?;
+            }
             S::AgentInteraction { agent_account_id } => {
                 if *source_stream_ref
                     != (arkret_wire::CommitStreamRef::Realm {
@@ -857,6 +919,23 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
             S::CallState { call_id } => {
                 upsert_call_genesis(conn, realm_id, call_id, source_stream_ref, &row, value)
                     .await?;
+            }
+            S::CallFocus{call_id} | S::CallRoster{call_id} | S::CallModeration{call_id} => {
+                match selector {
+                    S::CallRoster{..}=>serde_json::from_value::<arkret_models_collaboration::events_payloads::call::CallRosterCurrentValue>(value.clone()).map_err(malformed)?.validate_sources(source_stream_ref,revision).map_err(malformed)?,
+                    S::CallModeration{..}=>serde_json::from_value::<arkret_models_collaboration::events_payloads::call::CallModerationCurrentValue>(value.clone()).map_err(malformed)?.validate_sources(source_stream_ref,revision).map_err(malformed)?,
+                    _=>{let _:arkret_models_collaboration::events_payloads::call::CallFocus=serde_json::from_value(value.clone()).map_err(malformed)?;},
+                }
+                let changed=diesel::sql_query("INSERT INTO call_component_current_results(realm_id,call_id,selector,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(realm_id,call_id,selector) DO UPDATE SET current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at WHERE call_component_current_results.source_stream_ref=EXCLUDED.source_stream_ref AND (call_component_current_results.current_stream_position<EXCLUDED.current_stream_position OR (call_component_current_results.current_stream_position=EXCLUDED.current_stream_position AND call_component_current_results.current_commit_id=EXCLUDED.current_commit_id AND call_component_current_results.value=EXCLUDED.value))")
+                    .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(call_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(selector).map_err(malformed)?)
+                    .bind::<Jsonb,_>(serde_json::to_value(source_stream_ref).map_err(malformed)?).bind::<Text,_>(row.commit_id).bind::<BigInt,_>(row.stream_position).bind::<Jsonb,_>(value).bind::<Timestamptz,_>(row.updated_at).execute(&mut *conn).await.map_err(PersistenceError::database)?;
+                require_one_current_write(changed)?;
+            }
+            S::RealmMediaService => {
+                let _:arkret_models_collaboration::events_payloads::RealmMediaServiceValue=serde_json::from_value(value.clone()).map_err(malformed)?;
+                let changed=diesel::sql_query("INSERT INTO realm_media_service_current_results(realm_id,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(realm_id) DO UPDATE SET current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at WHERE realm_media_service_current_results.source_stream_ref=EXCLUDED.source_stream_ref AND (realm_media_service_current_results.current_stream_position<EXCLUDED.current_stream_position OR (realm_media_service_current_results.current_stream_position=EXCLUDED.current_stream_position AND realm_media_service_current_results.current_commit_id=EXCLUDED.current_commit_id AND realm_media_service_current_results.value=EXCLUDED.value))")
+                    .bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(source_stream_ref).map_err(malformed)?).bind::<Text,_>(row.commit_id).bind::<BigInt,_>(row.stream_position).bind::<Jsonb,_>(value).bind::<Timestamptz,_>(row.updated_at).execute(&mut *conn).await.map_err(PersistenceError::database)?;
+                require_one_current_write(changed)?;
             }
             S::Circle { circle_id } => {
                 let create_id = arkret_wire::EventId::new(circle_id.as_str().replacen(
@@ -1210,6 +1289,9 @@ pub(crate) async fn advance_in_connection(
             )
             .await?;
         }
+        arkret_wire::EventKind::ProfileCreate | arkret_wire::EventKind::ProfileUpdate => {
+            crate::applet_scope_profiles::project_replica(conn, event, commit).await?;
+        }
         arkret_wire::EventKind::RealmTombstone
         | arkret_wire::EventKind::RealmArchive
         | arkret_wire::EventKind::RealmRestore
@@ -1217,6 +1299,38 @@ pub(crate) async fn advance_in_connection(
         | arkret_wire::EventKind::RealmUnfreeze => {
             crate::realm_lifecycle_current_results::commit_in_connection(conn, event, commit)
                 .await?;
+        }
+        arkret_wire::EventKind::CallState => {
+            let body: arkret_models_collaboration::events_payloads::call::CallStatePayload =
+                serde_json::from_value(payload()?).map_err(malformed)?;
+            body.validate().map_err(malformed)?;
+            if event.realm_id != commit.realm_id
+                || event.event_id != commit.event_ref
+                || arkret_wire::CommitStreamRef::from_scope(&event.scope_ref, None)
+                    .map_err(malformed)?
+                    != commit.stream_ref
+            {
+                return Err(malformed("Call state replica source differs"));
+            }
+            if let Some(transition) = &body.state_transition {
+                upsert_call_genesis(
+                    conn,
+                    &event.realm_id,
+                    &body.call_id,
+                    &commit.stream_ref,
+                    &row,
+                    &serde_json::to_value(transition).map_err(malformed)?,
+                )
+                .await?;
+            }
+            crate::call_state_current_results::write_axes(conn, event, commit, &body).await?;
+        }
+        arkret_wire::EventKind::RealmMediaService => {
+            let body: arkret_models_collaboration::events_payloads::RealmMediaServicePayload =
+                serde_json::from_value(payload()?).map_err(malformed)?;
+            body.value.validate().map_err(malformed)?;
+            diesel::sql_query("INSERT INTO realm_media_service_current_results(realm_id,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(realm_id) DO UPDATE SET current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at WHERE realm_media_service_current_results.source_stream_ref=EXCLUDED.source_stream_ref AND (realm_media_service_current_results.current_stream_position<EXCLUDED.current_stream_position OR (realm_media_service_current_results.current_stream_position=EXCLUDED.current_stream_position AND realm_media_service_current_results.current_commit_id=EXCLUDED.current_commit_id AND realm_media_service_current_results.value=EXCLUDED.value))")
+            .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(&commit.stream_ref).map_err(malformed)?).bind::<Text,_>(commit.commit_id.as_str()).bind::<BigInt,_>(position(commit.stream_position)?).bind::<Jsonb,_>(serde_json::to_value(body.value).map_err(malformed)?).bind::<Timestamptz,_>(commit.committed_at).execute(&mut *conn).await.map_err(PersistenceError::database)?;
         }
         arkret_wire::EventKind::CallCreate => {
             use arkret_models_collaboration::events_payloads::call::{
@@ -1288,6 +1402,7 @@ pub(crate) async fn advance_in_connection(
                 policy_id: body.policy_id.clone(),
             };
             let value = serde_json::to_value(&body.value).map_err(malformed)?;
+            let shared = matches!(&body.value, PolicySetValue::Governance(p) if matches!(p.policy_kind, arkret_wire::PolicyKind::Access | arkret_wire::PolicyKind::Moderation | arkret_wire::PolicyKind::Agent));
             let agent = matches!(&body.value, PolicySetValue::Governance(p) if p.policy_kind == arkret_wire::PolicyKind::Agent);
             #[derive(diesel::QueryableByName)]
             struct Present {
@@ -1311,7 +1426,7 @@ pub(crate) async fn advance_in_connection(
                 },
                 value,
             };
-            if agent {
+            if shared {
                 if event.realm_id != commit.realm_id
                     || event.event_id != commit.event_ref
                     || arkret_wire::CommitStreamRef::from_scope(&event.scope_ref, None)
@@ -1321,7 +1436,7 @@ pub(crate) async fn advance_in_connection(
                     return Err(malformed("Policy replica Event and covering Commit differ"));
                 }
                 let arkret_wire::TypedCurrentRow::Value { value, .. } = &entry;
-                crate::policy_current_results::validate_disclosed_agent_policy(
+                crate::policy_current_results::validate_disclosed_shared_policy(
                     &event.realm_id,
                     &body.policy_id,
                     &commit.stream_ref,
@@ -1332,7 +1447,7 @@ pub(crate) async fn advance_in_connection(
             }
             crate::policy_current_results::commit_replica_in_connection(conn, event, commit)
                 .await?;
-            if agent {
+            if shared {
                 crate::replica_authorization::save_row(
                     conn,
                     &event.realm_id,
@@ -1431,8 +1546,10 @@ pub(crate) async fn advance_in_connection(
             .await?;
         }
         arkret_wire::EventKind::SchemaDefine => {
-            crate::unit_of_work::commit_schema_definition_in_connection(conn, event, commit, false)
-                .await?;
+            crate::unit_of_work::commit_schema_definition_in_connection(
+                conn, event, commit, false, None,
+            )
+            .await?;
         }
         arkret_wire::EventKind::MemberState
         | arkret_wire::EventKind::InviteAccept
@@ -1504,7 +1621,7 @@ pub(crate) async fn advance_in_connection(
         | arkret_wire::EventKind::StrandRestore
         | arkret_wire::EventKind::StrandStageSet => {
             crate::strand_current_results::commit_strand_transition_in_connection(
-                conn, event, commit, false,
+                conn, event, commit, false, None,
             )
             .await?;
         }
@@ -1518,13 +1635,13 @@ pub(crate) async fn advance_in_connection(
         | arkret_wire::EventKind::SpaceRestore
         | arkret_wire::EventKind::SpaceTombstone => {
             crate::space_current_results::commit_space_transition_in_connection(
-                conn, event, commit, false,
+                conn, event, commit, false, None,
             )
             .await?;
         }
         arkret_wire::EventKind::SpaceUpdate => {
             crate::space_current_results::commit_space_update_in_connection(
-                conn, event, commit, false,
+                conn, event, commit, false, None,
             )
             .await?;
         }
@@ -1546,20 +1663,20 @@ pub(crate) async fn advance_in_connection(
         | arkret_wire::EventKind::RelationUpdate
         | arkret_wire::EventKind::RelationTombstone => {
             crate::unit_of_work::commit_relation_current_result_in_connection(
-                conn, event, commit, false,
+                conn, event, commit, false, None,
             )
             .await?;
         }
         arkret_wire::EventKind::ReactionAdd | arkret_wire::EventKind::ReactionRemove => {
             crate::message_reactions_current_results::commit_reaction_current_result_in_connection(
-                conn, event, commit, false,
+                conn, event, commit, false, None,
             )
             .await?;
         }
         arkret_wire::EventKind::PinAdd
         | arkret_wire::EventKind::PinRemove
         | arkret_wire::EventKind::PinReorder => {
-            crate::pin_current_results::commit_pin_in_connection(conn, event, commit, false)
+            crate::pin_current_results::commit_pin_in_connection(conn, event, commit, false, None)
                 .await?;
         }
         arkret_wire::EventKind::SpaceCreate => {
@@ -1657,9 +1774,24 @@ pub(crate) async fn advance_in_connection(
 mod circle_revision_tests;
 
 #[cfg(test)]
+#[path = "replica_current/current_integrity_tests.rs"]
+mod current_integrity_tests;
+
+#[cfg(test)]
 mod tests {
     #[tokio::test]
     async fn agent_policy_snapshot_and_tail_keep_exact_current_without_fabricating_admission() {
+        shared_policy_snapshot_and_tail("agent").await;
+    }
+
+    #[tokio::test]
+    async fn product_policies_snapshot_and_tail_keep_exact_current_and_refuse_erasure() {
+        for kind in ["access", "moderation"] {
+            shared_policy_snapshot_and_tail(kind).await;
+        }
+    }
+
+    async fn shared_policy_snapshot_and_tail(kind: &str) {
         let database = TestDatabase::lease().await;
         let pool = database.pool();
         let mut conn = pool.get().await.unwrap();
@@ -1674,9 +1806,15 @@ mod tests {
             arkret_wire::DidCoreId::new("ak:did_core:web:policy-author.example").unwrap(),
             arkret_wire::DidCoreId::new("ak:did_core:web:policy-station.example").unwrap(),
         ));
+        let rules = if kind == "agent" {
+            json!([{"rule_id":"ban","kind":"agent","effect":"deny",
+                "agent_target":{"kind":"all"},"agent_operations":["execute"]}])
+        } else {
+            json!([{"rule_id":"ban","kind":"action","effect":"deny",
+                "actions":["ak.typing.broadcast"]}])
+        };
         let value = json!({"schema":"ak.schema.policy.v1","id":id,"realm_id":realm,
-            "policy_kind":"agent","rules":[{"rule_id":"ban","kind":"agent","effect":"deny",
-                "agent_target":{"kind":"all"},"agent_operations":["execute"]}],
+            "policy_kind":kind,"rules":rules,
             "default_effect":"allow","created_by":actor,"created_at":at});
         let head = arkret_wire::CommitStreamHead {
             stream_ref: arkret_wire::CommitStreamRef::Realm {
@@ -1726,7 +1864,11 @@ mod tests {
             value[field] = match field {
                 "id" => json!("ak:policy:0198ff00-0000-7000-8000-000000000002"),
                 "realm_id" => json!(null),
-                "policy_kind" => json!("access"),
+                "policy_kind" => json!(if kind == "agent" {
+                    "access"
+                } else {
+                    "retention"
+                }),
                 _ => json!("ak.schema.recovery_policy.v1"),
             };
             invalid.push(changed);
@@ -1785,13 +1927,17 @@ mod tests {
         // It does not exercise production signing or Agent management admission.
         let mut next_value = value.clone();
         next_value["rules"][0]["effect"] = json!("allow");
+        let mut body = json!({"policy_id":id,"value":next_value});
+        if kind == "agent" {
+            body["expected_revision"] = json!({"commit_id":head.commit_id,"stream_position":7});
+        }
         let event = arkret_wire::test_support::raw_event_for_actor_at(
             "ak.policy.set",
             arkret_wire::ScopeRef::Realm {
                 realm_id: realm.clone(),
             },
             actor,
-            json!({"policy_id":id,"expected_revision":{"commit_id":head.commit_id,"stream_position":7},"value":next_value}),
+            body,
             at,
         )
         .unwrap();
@@ -1835,6 +1981,65 @@ mod tests {
             json!(commit.commit_id)
         );
         assert_eq!(after.value["private_count"], 1);
+        if kind != "agent" {
+            // A complete Realm cut cannot erase a visible Policy, but a Circle
+            // omitted from visible heads proves no authority over that stream.
+            let current = arkret_wire::TypedCurrentRow::Value {
+                selector: arkret_wire::CurrentSelector::Policy {
+                    policy_id: id.clone(),
+                },
+                source_stream_ref: commit.stream_ref.clone(),
+                revision: arkret_wire::CurrentRevision {
+                    commit_id: commit.commit_id.clone(),
+                    stream_position: 8,
+                },
+                value: next_value.clone(),
+            };
+            let circle_source = arkret_wire::CommitStreamRef::Circle {
+                realm_id: realm.clone(),
+                circle_id: arkret_wire::CircleId::from_event_id(
+                    &arkret_wire::EventId::from_digest(
+                        arkret_canonical::DigestSuite::Sha256,
+                        [0x62; 32],
+                    ),
+                ),
+            };
+            let circle_head = arkret_wire::CommitStreamHead {
+                stream_ref: circle_source.clone(),
+                stream_position: 3,
+                commit_id: arkret_wire::RealmCommitId::from_digest([3; 32]),
+            };
+            let circle_id =
+                arkret_wire::PolicyId::new("ak:policy:0198ff00-0000-7000-8000-000000000002")
+                    .unwrap();
+            let mut circle_value = next_value;
+            circle_value["id"] = json!(circle_id);
+            let circle = arkret_wire::TypedCurrentRow::Value {
+                selector: arkret_wire::CurrentSelector::Policy {
+                    policy_id: circle_id,
+                },
+                source_stream_ref: circle_source,
+                revision: arkret_wire::CurrentRevision {
+                    commit_id: circle_head.commit_id.clone(),
+                    stream_position: 3,
+                },
+                value: circle_value,
+            };
+            install_snapshot_at_heads_in_connection(
+                &mut conn,
+                &realm,
+                &next_head,
+                &[next_head.clone(), circle_head],
+                &[current.clone(), circle],
+                at,
+            )
+            .await
+            .unwrap();
+            install_snapshot_in_connection(&mut conn, &realm, &next_head, &[current], at)
+                .await
+                .unwrap();
+            return;
+        }
         // The historical reducer never re-applies the producer's old CAS.
         let mut rebound = next_value;
         rebound["policy_kind"] = json!("access");
@@ -2697,7 +2902,7 @@ mod tests {
                 "kind":"list",
                 "title":"Replicated list",
                 "created_by":actor,
-                "created_at":at
+                "created_at":arkret_canonical::format_timestamp_canonical(at)
             }}),
             at,
         )

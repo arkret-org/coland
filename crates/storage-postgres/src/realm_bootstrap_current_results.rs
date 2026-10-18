@@ -105,14 +105,13 @@ pub(crate) async fn commit_realm_join_rule_authority_current_result_in_connectio
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if event.kind != arkret_wire::EventKind::RealmJoinRule {
         return Ok(());
     }
-    crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-        conn,
-        event,
-        commit.committed_at,
+    crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+        conn, event, commit, prepared,
     )
     .await?;
     commit_realm_join_rule_current_result_in_connection(conn, event, commit).await
@@ -183,14 +182,13 @@ pub(crate) async fn commit_realm_profile_authority_current_result_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if event.kind != arkret_wire::EventKind::RealmProfile {
         return Ok(());
     }
-    crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-        conn,
-        event,
-        commit.committed_at,
+    crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+        conn, event, commit, prepared,
     )
     .await?;
     commit_realm_profile_current_result_in_connection(conn, event, commit).await
@@ -218,14 +216,13 @@ pub(crate) async fn commit_plaintext_services_authority_current_result_in_connec
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if event.kind != arkret_wire::EventKind::RealmPlaintextVisibleServices {
         return Ok(());
     }
-    crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-        conn,
-        event,
-        commit.committed_at,
+    crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+        conn, event, commit, prepared,
     )
     .await?;
     commit_plaintext_services_current_result_in_connection(conn, event, commit).await
@@ -275,14 +272,13 @@ pub(crate) async fn commit_read_receipt_policy_authority_current_result_in_conne
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if event.kind != arkret_wire::EventKind::RealmReadReceiptPolicy {
         return Ok(());
     }
-    crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-        conn,
-        event,
-        commit.committed_at,
+    crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+        conn, event, commit, prepared,
     )
     .await?;
     commit_read_receipt_policy_current_result_in_connection(conn, event, commit).await
@@ -334,14 +330,13 @@ pub(crate) async fn commit_realm_history_access_authority_current_result_in_conn
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if event.kind != arkret_wire::EventKind::RealmHistoryAccess {
         return Ok(());
     }
-    crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-        conn,
-        event,
-        commit.committed_at,
+    crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+        conn, event, commit, prepared,
     )
     .await?;
     commit_realm_history_access_current_result_in_connection(conn, event, commit).await
@@ -404,14 +399,13 @@ pub(crate) async fn commit_preview_policy_authority_current_result_in_connection
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if event.kind != arkret_wire::EventKind::RealmPreviewPolicy {
         return Ok(());
     }
-    crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-        conn,
-        event,
-        commit.committed_at,
+    crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+        conn, event, commit, prepared,
     )
     .await?;
     commit_preview_policy_current_result_in_connection(conn, event, commit).await

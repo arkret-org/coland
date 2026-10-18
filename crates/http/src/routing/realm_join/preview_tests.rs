@@ -137,6 +137,7 @@ async fn commit_projected_invite(
     let kind = event.kind.as_str().to_owned();
     let payload = serde_json::to_value(&event.payload).unwrap();
     let request = EventCommitRequest {
+        verified_media_participant: None,
         event: CanonicalEventRecord {
             event_id: event_id.clone(),
             actor_id: event.actor_id.to_string(),
@@ -169,6 +170,7 @@ async fn commit_projected_invite(
         self_producer_guard: None,
         applet_producer_guard: None,
         widget_token_gate: None,
+        agent_grant_scope_evidence: None,
         forwarded_producer_evidence: None,
         forwarded_agent_producer: None,
         agent_deployment_ceiling:

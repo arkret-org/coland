@@ -22,7 +22,7 @@ pub struct FrankingFixture {
 /// Accept prerequisites and the target, then durably fix the exact first proof.
 /// The later Message prefix and proof are prepared but remain uncommitted.
 pub async fn prepare(pool: &PgPool, label: &str) -> FrankingFixture {
-    preparation_future(|| prepare_inner(pool, label)).await
+    ordinary_realm::case_future(|| prepare_inner(pool, label)).await
 }
 
 fn prepared(
@@ -85,7 +85,8 @@ async fn prepare_inner(pool: &PgPool, label: &str) -> FrankingFixture {
     // the principal's local ID must use the closed inception grammar.
     let station = ordinary_realm::station();
     let human_label = format!("franking-{}", &arkret_canonical::sha256_hex(label)[..16]);
-    let account = preparation_future(|| human_profile::admit(pool, &station, &human_label)).await;
+    let account =
+        ordinary_realm::case_future(|| human_profile::admit(pool, &station, &human_label)).await;
     let fixture = human_profile::fixture(&station, &human_label);
     assert_eq!(account, fixture.history.account);
     let actor = ActorId::account(account.clone());
@@ -111,7 +112,7 @@ async fn prepare_inner(pool: &PgPool, label: &str) -> FrankingFixture {
         );
     }
     let body=serde_json::to_vec(&arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(submission.clone())).unwrap();
-    let unit = preparation_future(|| {
+    let unit = ordinary_realm::case_future(|| {
         app.prepare_ordinary_realm_bootstrap_unit(
             submission,
             body,
@@ -150,7 +151,7 @@ async fn prepare_inner(pool: &PgPool, label: &str) -> FrankingFixture {
         at,
     ));
     let mut request = ordinary_realm::request_for_event(&previous, strand.clone(), at);
-    request.authority_commit = preparation_future(|| {
+    request.authority_commit = ordinary_realm::case_future(|| {
         app.prepare_self_event_transaction(&strand, &station, method.clone(), &key, at)
     })
     .await
@@ -208,7 +209,7 @@ async fn prepare_inner(pool: &PgPool, label: &str) -> FrankingFixture {
         at,
     ));
     let mut request = ordinary_realm::request_for_event(&previous, genesis.clone(), at);
-    request.authority_commit = preparation_future(|| {
+    request.authority_commit = ordinary_realm::case_future(|| {
         app.prepare_self_mls_transaction(
             &genesis,
             coland_storage::MlsStateInstallation {
@@ -263,7 +264,7 @@ async fn prepare_inner(pool: &PgPool, label: &str) -> FrankingFixture {
         at - chrono::TimeDelta::days(2),
     ));
     let mut request = ordinary_realm::request_for_event(&previous, target.clone(), received_at);
-    request.authority_commit = preparation_future(|| {
+    request.authority_commit = ordinary_realm::case_future(|| {
         app.prepare_self_event_transaction(&target, &station, method.clone(), &key, received_at)
     })
     .await
@@ -315,11 +316,11 @@ async fn prepare_inner(pool: &PgPool, label: &str) -> FrankingFixture {
         prefix_at,
     );
     prefix.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(prefix_event));
-    let prefix = preparation_future(|| ordinary_realm::source_request(pool, prefix)).await;
+    let prefix = ordinary_realm::case_future(|| ordinary_realm::source_request(pool, prefix)).await;
     let mut proof =
         ordinary_realm::request_for_event(&prefix.authority_commit, fixed.clone(), prefix_at);
     proof.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(fixed.clone()));
-    let proof = preparation_future(|| ordinary_realm::source_request(pool, proof)).await;
+    let proof = ordinary_realm::case_future(|| ordinary_realm::source_request(pool, proof)).await;
     assert_eq!(
         store.pending_franking_proofs(&station).await.unwrap()[0].prepared_event,
         Some(fixed)
@@ -331,13 +332,4 @@ async fn prepare_inner(pool: &PgPool, label: &str) -> FrankingFixture {
         proof_payload,
         service_signing_key: key,
     }
-}
-
-#[inline(never)]
-fn preparation_future<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future,
-{
-    Box::pin(make())
 }

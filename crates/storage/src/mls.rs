@@ -1,6 +1,6 @@
-use arkret_wire::{MlsGroupId, RealmId};
+use arkret_wire::{AccountId, MlsGroupId, RealmId, ScopeRef};
 
-use super::{AccountPk, DeviceRevocationGateSelector, PersistenceResult, Value, async_trait};
+use super::{DeviceRevocationGateSelector, PersistenceResult, Value, async_trait};
 /// G3.S1 — durable KeyPackage row.
 ///
 /// The Pg backend's `(actor_id, device_id, id)` composite key is what
@@ -12,9 +12,10 @@ pub struct MlsKeyPackageRow {
     pub id: String,
     pub keypackage_ref: String,
     pub keypackage_digest: String,
-    /// Service-local account that owns this KeyPackage. This is deliberately
-    /// separate from `actor_id`: one principal may have more than one account.
-    pub owner_account_pk: AccountPk,
+    /// Complete Account owner; Agent endpoints retain their real controller.
+    pub owner_account_id: AccountId,
+    /// Immutable target binding for scope-restricted Device publication.
+    pub effective_scope: Option<ScopeRef>,
     pub actor_id: String,
     pub device_id: Option<String>,
     pub endpoint_verification_method: Option<String>,
@@ -158,6 +159,19 @@ pub fn classify_key_package_lifecycle(
 }
 
 impl MlsKeyPackageRow {
+    pub fn same_publication(&self, other: &Self) -> bool {
+        fn original(row: &MlsKeyPackageRow) -> MlsKeyPackageRow {
+            let mut row = row.clone();
+            row.last_resort_realm_id = None;
+            row.claimed_by_mls_group_id = None;
+            row.claimed_at = None;
+            row.claim_expires_at_unix_ms = None;
+            row.consumed_at = None;
+            row
+        }
+        original(self) == original(other)
+    }
+
     pub fn lifecycle(&self) -> Result<PersistedKeyPackageLifecycle, String> {
         classify_key_package_lifecycle(
             self.last_resort,
@@ -303,9 +317,42 @@ pub struct MlsWelcomeClaimBinding {
     pub commit_event_ref: String,
 }
 
+/// Actual SDK command and any authenticated local native requester. Internal
+/// acceptance inputs only; the target still has its own independent guard.
+#[derive(Clone)]
+pub struct MlsKeyPackageClaimAdmission {
+    pub request: arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    pub requester: Option<(
+        crate::AppletManagedDeviceScopeGuard,
+        chrono::DateTime<chrono::Utc>,
+    )>,
+}
+
+/// Actual prepared claim response and native endpoint evidence. A fresh
+/// command is retained only when this response is to that command, never
+/// reconstructed from the historical receipt's unsigned request.
+#[derive(Clone, Debug)]
+pub struct MlsKeyPackageClaimDelivery {
+    /// Mounted consumer, never a caller-selected wire disclosure mode.
+    pub operation: arkret_wire::ServiceOperationId,
+    pub outcome: arkret_models_crypto::PeerKeyPackagesClaimOutcome,
+    pub endpoints: Vec<crate::AppletManagedDeviceScopeGuard>,
+    pub command: Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>,
+}
+
+/// Private attempt accounting, never a claim receipt or business authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeerKeyPackageClaimRateDecision {
+    Allowed,
+    RateLimited,
+    DuplicateConflict,
+    Unavailable,
+}
+
 /// One candidate CAS attempt for a peer claim. The storage adapter must make
 /// the KeyPackage transition and terminal ledger insert atomic.
 pub struct PeerKeyPackageClaimAttempt<'a> {
+    pub admission: Option<std::sync::Arc<MlsKeyPackageClaimAdmission>>,
     pub keypackage_id: &'a str,
     pub mls_group_id: &'a str,
     pub device_authorize_event_id: Option<&'a str>,
@@ -314,6 +361,7 @@ pub struct PeerKeyPackageClaimAttempt<'a> {
     pub claimed_at_unix_ms: i64,
     pub claim_expires_at_unix_ms: i64,
     pub ledger: &'a PeerKeyPackageClaimLedgerRecord,
+    pub applet_device_scope_guard: Option<crate::AppletManagedDeviceScopeGuard>,
 }
 
 pub struct PeerClaimTerminalTransition<'a> {
@@ -349,6 +397,7 @@ pub struct MlsKeyPackageClaim<'a> {
     pub device_revocation_gate: Option<DeviceRevocationGateSelector>,
     pub claimed_at: i64,
     pub claim_expires_at_unix_ms: Option<i64>,
+    pub applet_device_scope_guard: Option<crate::AppletManagedDeviceScopeGuard>,
 }
 
 /// Apply the storage-neutral acceptance rules for one KeyPackage claim.
@@ -359,7 +408,7 @@ pub fn apply_key_package_claim(
     row: &MlsKeyPackageRow,
     claim: &MlsKeyPackageClaim<'_>,
 ) -> Option<MlsKeyPackageRow> {
-    if row.id != claim.id {
+    if row.id != claim.id || row.consumed_at.is_some() {
         return None;
     }
     let (group_id, terminal_without_claim, retiring) = match claim.target {
@@ -385,10 +434,11 @@ pub fn apply_key_package_claim(
     {
         return None;
     }
-    if row
-        .claimed_by_mls_group_id
-        .as_deref()
-        .is_some_and(|claimed| claimed != group_id)
+    if !terminal_without_claim
+        && row
+            .claimed_by_mls_group_id
+            .as_deref()
+            .is_some_and(|claimed| claimed != group_id)
         && !(row.last_resort && !terminal_without_claim)
     {
         return None;
@@ -401,6 +451,24 @@ pub fn apply_key_package_claim(
             .is_some_and(|event_id| row.agent_key_authorize_event_id.as_deref() != Some(event_id))
     {
         return None;
+    }
+
+    if !terminal_without_claim && let Some(scope) = &row.effective_scope {
+        let guard = claim.applet_device_scope_guard.as_ref()?;
+        if guard.effective_scope != *scope
+            || guard.authority.account_id != row.owner_account_id
+            || row.device_id.as_deref() != Some(guard.authority.device_id.as_str())
+            || row.device_authorize_event_id.as_deref()
+                != Some(guard.authority.selector.authorization_ref.event_id.as_str())
+            || claim.device_authorize_event_id != row.device_authorize_event_id.as_deref()
+        {
+            return None;
+        }
+        if scope.canonical_mls_group_id().ok()?.as_str() != group_id
+            || claim.intended_realm_id != Some(scope.realm_id().as_str())
+        {
+            return None;
+        }
     }
 
     let mut next = row.clone();
@@ -440,7 +508,11 @@ mod key_package_claim_transition_tests {
             keypackage_ref: "ak:mls:keypackage:kp-1".to_owned(),
             keypackage_digest:
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
-            owner_account_pk: AccountPk(1),
+            owner_account_id: AccountId::new(
+                arkret_wire::DidCoreId::new("ak:did_core:web:owner.example").unwrap(),
+                arkret_wire::DidCoreId::new("ak:did_core:web:station.example").unwrap(),
+            ),
+            effective_scope: None,
             actor_id: "ak:did_core:web:agent.example".to_owned(),
             device_id: Some("ak:device:01904100-0000-7000-8000-000000000001".to_owned()),
             endpoint_verification_method: None,
@@ -464,6 +536,7 @@ mod key_package_claim_transition_tests {
 
     fn claim<'a>(target: MlsKeyPackageClaimTarget<'a>) -> MlsKeyPackageClaim<'a> {
         MlsKeyPackageClaim {
+            applet_device_scope_guard: None,
             id: "kp-1",
             target,
             intended_realm_id: None,
@@ -473,6 +546,35 @@ mod key_package_claim_transition_tests {
             claimed_at: 10,
             claim_expires_at_unix_ms: Some(20_000),
         }
+    }
+
+    #[test]
+    fn exact_publication_retry_preserves_lifecycle_and_does_not_rebind_owner_or_scope() {
+        let original = row(false);
+        let mut claimed = original.clone();
+        claimed.claimed_by_mls_group_id =
+            Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into());
+        claimed.claimed_at = Some(10);
+        claimed.claim_expires_at_unix_ms = Some(20_000);
+        assert!(claimed.same_publication(&original));
+        let mut changed = original.clone();
+        changed.owner_account_id.station_id =
+            arkret_wire::DidCoreId::new("ak:did_core:web:another-station.example").unwrap();
+        assert!(!claimed.same_publication(&changed));
+        changed = original.clone();
+        changed.effective_scope = Some(ScopeRef::Realm {
+            realm_id: arkret_wire::RealmId::from_event_id(&arkret_wire::EventId::from_digest(
+                arkret_canonical::DigestSuite::Sha256,
+                [166; 32],
+            )),
+        });
+        assert!(!claimed.same_publication(&changed));
+        changed = original.clone();
+        changed.device_authorize_event_id = Some(
+            arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [167; 32])
+                .to_string(),
+        );
+        assert!(!claimed.same_publication(&changed));
     }
 
     #[test]
@@ -508,6 +610,38 @@ mod key_package_claim_transition_tests {
         let mut wrong_event = claim(MlsKeyPackageClaimTarget::Group("group-a"));
         wrong_event.device_authorize_event_id = Some("event-2");
         assert!(apply_key_package_claim(&available, &wrong_event).is_none());
+    }
+
+    #[test]
+    fn claimed_packages_revoke_and_consumed_packages_never_rearm() {
+        let published = row(false);
+        let claimed = apply_key_package_claim(
+            &published,
+            &claim(MlsKeyPackageClaimTarget::Group("group-a")),
+        )
+        .unwrap();
+        let revoked =
+            apply_key_package_claim(&claimed, &claim(MlsKeyPackageClaimTarget::Revoke)).unwrap();
+        assert_eq!(revoked.claimed_by_mls_group_id.as_deref(), Some("revoked"));
+        assert!(revoked.claimed_at.is_none());
+        assert!(revoked.claim_expires_at_unix_ms.is_none());
+        assert!(
+            apply_key_package_claim(&revoked, &claim(MlsKeyPackageClaimTarget::Group("group-a")))
+                .is_none()
+        );
+        let mut consumed = claimed.clone();
+        consumed.consumed_at = Some(11);
+        for target in [
+            MlsKeyPackageClaimTarget::Group("group-a"),
+            MlsKeyPackageClaimTarget::Group("group-b"),
+            MlsKeyPackageClaimTarget::Revoke,
+            MlsKeyPackageClaimTarget::Retire,
+        ] {
+            assert!(apply_key_package_claim(&consumed, &claim(target)).is_none());
+        }
+        assert!(
+            apply_key_package_claim(&row(true), &claim(MlsKeyPackageClaimTarget::Revoke)).is_some()
+        );
     }
 
     #[test]
@@ -563,17 +697,115 @@ pub struct MlsGroupCurrentRecord {
     /// base the next transition is verified from. Never a wire value.
     pub public_state: Vec<u8>,
 }
+/// Internal committed result; the outcome is the shared SDK wire DTO.
+pub struct MlsKeyPackageRevocation {
+    pub outcome: arkret_models_crypto::KeyPackagesRevokeOutcome,
+    pub records: Vec<MlsKeyPackageRow>,
+}
+
+pub type MlsKeyPackageConsumeReceiptIssuer = std::sync::Arc<
+    dyn Fn(
+            &arkret_models_crypto::KeyPackagesConsumeRequestBody,
+            chrono::DateTime<chrono::Utc>,
+        ) -> PersistenceResult<arkret_models_crypto::KeyPackageConsumeReceipt>
+        + Send
+        + Sync,
+>;
+
+/// Complete original command and trusted ingress evidence for narrow cleanup.
+/// The issuer runs only inside the same accepting transaction as the claim.
+pub struct AppletDeviceKeyPackageConsume<'a> {
+    pub body: &'a arkret_models_crypto::KeyPackagesConsumeRequestBody,
+    pub authority: &'a crate::AppletManagedDeviceAuthority,
+    pub effective_scope: &'a ScopeRef,
+    pub transport_expires_at: chrono::DateTime<chrono::Utc>,
+    pub issue_receipt: &'a MlsKeyPackageConsumeReceiptIssuer,
+}
+
+pub struct MlsKeyPackageConsumption {
+    pub outcome: arkret_models_crypto::KeyPackagesConsumeOutcome,
+    pub record: MlsKeyPackageRow,
+}
+
+/// Serving-layer verified original command and its issued terminal receipt.
+/// The destination retains their exact digest in the consuming transaction.
+#[derive(Clone, Copy)]
+pub struct MlsKeyPackageConsumeEvidence<'a> {
+    pub request: &'a arkret_models_crypto::KeyPackagesConsumeRequestBody,
+    pub receipt: &'a arkret_models_crypto::KeyPackageConsumeReceipt,
+}
+
+impl MlsKeyPackageConsumeEvidence<'_> {
+    pub fn request_digest(&self) -> PersistenceResult<String> {
+        let invalid = |error: &str| super::PersistenceError::SchemaViolation(error.to_owned());
+        self.request.validate_shape().map_err(invalid)?;
+        self.receipt.validate_shape().map_err(invalid)?;
+        let digest = arkret_models_crypto::keypackages_consume_request_digest(self.request)
+            .map_err(super::PersistenceError::database)?;
+        if self.receipt.claim_id != self.request.claim_id
+            || arkret_canonical::canonical_json_bytes(&self.receipt.recipient_durable_receipt)
+                .map_err(super::PersistenceError::database)?
+                != arkret_canonical::canonical_json_bytes(&self.request.recipient_durable_receipt)
+                    .map_err(super::PersistenceError::database)?
+            || self.receipt.request_digest.as_str() != digest
+        {
+            return Err(invalid(
+                "consume receipt differs from its complete signed request",
+            ));
+        }
+        Ok(digest)
+    }
+}
+
 /// G3.S1 — KeyPackage store. The `try_claim` CAS path is what
 /// guarantees at-most-one Welcome per published KeyPackage.
 #[async_trait]
 pub trait MlsKeyPackageStore: Send + Sync {
+    async fn consume_for_applet_device(
+        &self,
+        command: AppletDeviceKeyPackageConsume<'_>,
+    ) -> PersistenceResult<MlsKeyPackageConsumption>;
     /// Insert a fresh KeyPackage row. Returns `Ok(false)` if the
     /// `id` is already present (re-publishes of the same id are
     /// idempotent — production fixtures sometimes resubmit on retry).
     async fn put(&self, record: &MlsKeyPackageRow) -> PersistenceResult<bool>;
+    /// Publish under the same current native Account/PCR/installation cut.
+    async fn put_for_applet_device(
+        &self,
+        _record: &MlsKeyPackageRow,
+        _guard: &crate::AppletManagedDeviceScopeGuard,
+        _expires_at: chrono::DateTime<chrono::Utc>,
+        _body: &arkret_models_crypto::KeyPackagesUploadRequestBody,
+    ) -> PersistenceResult<bool> {
+        Err(super::PersistenceError::Conflict(
+            "capability_denied: native KeyPackage publication is unavailable".into(),
+        ))
+    }
+
+    /// Revoke original own material under the current PCR Device cut, even
+    /// after an installation fence. No new business material is returned.
+    async fn revoke_for_applet_device(
+        &self,
+        _body: &arkret_models_crypto::KeyPackagesRevokeRequestBody,
+        _authority: &crate::AppletManagedDeviceAuthority,
+        _scope: &ScopeRef,
+        _expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<MlsKeyPackageRevocation> {
+        Err(super::PersistenceError::Conflict(
+            "capability_denied: native KeyPackage revocation is unavailable".into(),
+        ))
+    }
     async fn get(&self, id: &str) -> PersistenceResult<Option<MlsKeyPackageRow>>;
     async fn get_by_ref(&self, keypackage_ref: &str)
     -> PersistenceResult<Option<MlsKeyPackageRow>>;
+    /// Read only this authenticated command's durable target candidates.
+    /// This is a private selection input, not an inventory response or an
+    /// authorization decision; the accepting transaction still performs CAS
+    /// and rechecks the original endpoint and all current authority gates.
+    async fn peer_claim_candidates(
+        &self,
+        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    ) -> PersistenceResult<Vec<MlsKeyPackageRow>>;
     /// Atomically claim the named KeyPackage for `mls_group_id`. Returns
     /// `Ok(Some(record))` on success (with `claimed_by_mls_group_id` /
     /// claim-window fields filled in), `Ok(None)` if the row is already
@@ -590,8 +822,17 @@ pub trait MlsKeyPackageStore: Send + Sync {
         id: &str,
         mls_group_id: &str,
         now_unix_ms: i64,
-        peer_consume_receipt: Option<&Value>,
+        consumption: Option<MlsKeyPackageConsumeEvidence<'_>>,
     ) -> PersistenceResult<Option<MlsKeyPackageRow>>;
+    /// Charge an already authenticated original SDK command against the
+    /// shared closed requester, target and source/target budgets. Exact
+    /// retries recover their first decision without another charge.
+    async fn record_peer_claim_attempt(
+        &self,
+        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    ) -> PersistenceResult<PeerKeyPackageClaimRateDecision>;
+    /// Reclaim expired private attempt decisions using the database clock.
+    async fn prune_peer_claim_attempts(&self) -> PersistenceResult<usize>;
     /// Read a peer claim ledger row without revealing KeyPackage inventory.
     async fn get_peer_claim(
         &self,
@@ -616,8 +857,9 @@ pub trait MlsKeyPackageStore: Send + Sync {
         &self,
         keypackage_id: &str,
     ) -> PersistenceResult<Option<PeerKeyPackageClaimLedgerRecord>>;
-    /// Atomically claim one ordinary KeyPackage and persist the exact terminal
-    /// success outcome. Last-resort rows are never eligible on this path.
+    /// Atomically claim one eligible KeyPackage and persist its exact terminal
+    /// outcome. Reusable last-resort packages remain published and keep an
+    /// independent audit for every claim.
     async fn try_claim_peer(
         &self,
         attempt: PeerKeyPackageClaimAttempt<'_>,

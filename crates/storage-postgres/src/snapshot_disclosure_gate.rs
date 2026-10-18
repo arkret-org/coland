@@ -8,8 +8,8 @@
 //! Reports and franking proofs additionally require exact target-scope
 //! moderator authority; a Realm-stream proof never broadens a Circle target.
 //!
-//! Every installed current family is audited. Unsupported families and imported handoff tenures
-//! remain unproved, so those cuts cannot be signed. Bootstrap changes only its own
+//! Every installed current family and the installed handoff tenure are audited.
+//! Unsupported families remain unproved. Bootstrap changes only its own
 //! join stream's history floor (`federation.md` section 4.1.1).
 
 use arkret_wire::{
@@ -29,6 +29,8 @@ use super::{
 /// other accepted kind refuses the cut rather than risk an omitted result.
 pub(crate) const DISCLOSED_EVENT_KINDS: &[EventKind] = &[
     EventKind::RealmCreate,
+    EventKind::ProfileCreate,
+    EventKind::ProfileUpdate,
     EventKind::RealmProfile,
     EventKind::RealmPolicyBundle,
     EventKind::PolicySet,
@@ -116,7 +118,7 @@ const AUDITED_FAMILIES: &[&str] = &[
     "capability_grant_current_results",
     "realm_policy_bundle_current_results",
     "schema_definition_current_results",
-    // Only exact Realm-bound generic Agent Policy has shared disclosure.
+    // Exact Realm-bound Access, Moderation and Agent policies are shared state.
     "policy_current_results",
     "policy_action_current_results",
     // Controller-PCR confirmation state has no ordinary Realm disclosure carrier.
@@ -130,6 +132,8 @@ const AUDITED_FAMILIES: &[&str] = &[
     "circle_current_results",
     "circle_member_state_current_results",
     "call_state_current_results",
+    "call_component_current_results",
+    "realm_media_service_current_results",
     "sidecar_current_results",
     "sidecar_context_current_results",
     "sidecar_exchange_controls_current_results",
@@ -159,8 +163,7 @@ const AUDITED_FAMILIES: &[&str] = &[
     "key_backup_active_series_current_results",
     "pcr_device_generation_current_results",
     "pcr_device_authorization_current_results",
-    // PCR-stream Actor Profile and accountability state: no row of an
-    // ordinary collaboration Realm, so any row refuses the cut below.
+    // Ordinary scope Profiles are shared; PCR identity remains private.
     "actor_profile_current_results",
     "identity_accountability_current_results",
     // Controller-PCR Agent provisioning state: likewise never in an ordinary
@@ -473,6 +476,14 @@ pub async fn issue_account_snapshot(
                     rejected("the current governing Snapshot has not been installed").into()
                 });
             }
+            if material.governance_generation > 0 {
+                let full = crate::authority_commit::realm_state_snapshot_material_in_connection(
+                    conn, realm_id,
+                )
+                .await?
+                .ok_or_else(|| rejected("the governing handoff material is unavailable"))?;
+                prove_handoff_tenure_in_connection(conn, &full).await?;
+            }
             let snapshot = sign(&material)?;
             if !coland_storage::signed_snapshot_matches_material(&snapshot, &material) {
                 return Err(PersistenceError::Internal(
@@ -739,10 +750,76 @@ fn anchor_bootstrap_join(
 }
 
 /// The Account's disclosed material on the caller's cut.
+async fn prove_handoff_tenure_in_connection(
+    conn: &mut AsyncPgConnection,
+    material: &coland_storage::RealmStateSnapshotMaterial,
+) -> PersistenceResult<()> {
+    if material.governance_generation == 0 {
+        return Ok(());
+    }
+    #[derive(QueryableByName)]
+    struct InstalledHandoff {
+        #[diesel(sql_type = Jsonb)]
+        handoff_json: serde_json::Value,
+        #[diesel(sql_type = Jsonb)]
+        snapshot_json: serde_json::Value,
+    }
+    let row = sql_query(
+        "SELECT h.handoff_json,s.snapshot_json FROM realm_authorities a \
+         JOIN realm_authority_handoffs h ON h.handoff_id=a.last_handoff_ref \
+           AND h.realm_id=a.realm_id AND h.to_generation=a.generation AND h.to_service_id=a.service_id \
+         JOIN realm_state_snapshots s ON s.snapshot_id=h.handoff_json->>'snapshot_ref' \
+         WHERE a.realm_id=$1 AND a.generation=$2",
+    )
+    .bind::<Text, _>(material.realm_id.as_str())
+    .bind::<super::BigInt, _>(i64::try_from(material.governance_generation).map_err(PersistenceError::database)?)
+    .get_result::<InstalledHandoff>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+    .ok_or_else(|| rejected("the nonzero tenure has no complete installed handoff cut"))?;
+    let handoff: arkret_wire::RealmAuthorityHandoff =
+        serde_json::from_value(row.handoff_json).map_err(rejected)?;
+    let snapshot: arkret_wire::RealmStateSnapshot =
+        serde_json::from_value(row.snapshot_json).map_err(rejected)?;
+    handoff.validate_shape().map_err(rejected)?;
+    if handoff.historical_signer_facts_digest.is_none()
+        || snapshot.snapshot_id != handoff.snapshot_ref
+        || snapshot.realm_id != material.realm_id
+        || snapshot.governance_generation != handoff.from_generation
+        || arkret_wire::Hash::new(
+            arkret_canonical::canonical_sha256(&snapshot.visible_stream_heads).map_err(rejected)?,
+        )
+        .map_err(rejected)?
+            != handoff.final_stream_heads_digest
+        || !snapshot.visible_stream_heads.iter().all(|old| {
+            material.visible_stream_heads.iter().any(|head| {
+                head.stream_ref == old.stream_ref
+                    && (head.stream_position > old.stream_position || head == old)
+            })
+        })
+    {
+        return Err(rejected(
+            "the nonzero tenure does not extend the complete installed handoff cut",
+        ));
+    }
+    Ok(())
+}
+
+/// The Account's disclosed material on the caller's cut.
 pub(crate) async fn account_snapshot_material_in_connection(
     conn: &mut AsyncPgConnection,
     realm_id: &RealmId,
     account: &AccountId,
+) -> PersistenceResult<Option<coland_storage::RealmStateSnapshotMaterial>> {
+    account_snapshot_candidate_in_connection(conn, realm_id, account, None).await
+}
+
+/// Reapply current authority to original rows without replacing their values.
+/// Candidate heads are used only for validation against the current accepted
+/// prefix; an archived signed object is never rewritten with this projection.
+pub(crate) async fn account_snapshot_candidate_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm_id: &RealmId,
+    account: &AccountId,
+    mut candidate: Option<coland_storage::RealmStateSnapshotMaterial>,
 ) -> PersistenceResult<Option<coland_storage::RealmStateSnapshotMaterial>> {
     crate::agent_management_admission::read_controller_in_connection(
         conn,
@@ -751,7 +828,7 @@ pub(crate) async fn account_snapshot_material_in_connection(
         &ActorId::account(account.clone()),
     )
     .await?;
-    let Some(material) =
+    let Some(authority_material) =
         crate::authority_commit::realm_state_snapshot_material_in_connection(conn, realm_id)
             .await?
     else {
@@ -770,7 +847,16 @@ pub(crate) async fn account_snapshot_material_in_connection(
     {
         return Err(rejected("an unaudited typed-current family is installed"));
     }
-    let mut facts = disclosure_facts_in_connection(conn, realm_id, account, &material).await?;
+    if let Some(candidate) = &mut candidate {
+        if candidate.realm_id != *realm_id {
+            return Err(rejected("candidate rows belong to another Realm"));
+        }
+        candidate.visible_stream_heads = authority_material.visible_stream_heads.clone();
+    }
+    let material = candidate.as_ref().unwrap_or(&authority_material);
+    let mut facts =
+        disclosure_facts_in_connection(conn, realm_id, account, &authority_material, material)
+            .await?;
     let caller = ActorId::account(account.clone());
     if crate::committed_disclosure::ordinary_agent_read_ceiling(
         crate::account_stream_scan::realm_purpose(conn, realm_id).await?,
@@ -786,8 +872,14 @@ pub(crate) async fn account_snapshot_material_in_connection(
         let controller_account = controller
             .as_account_id()
             .ok_or_else(|| rejected("the Agent controller is not an Account"))?;
-        let owner_facts =
-            disclosure_facts_in_connection(conn, realm_id, controller_account, &material).await?;
+        let owner_facts = disclosure_facts_in_connection(
+            conn,
+            realm_id,
+            controller_account,
+            &authority_material,
+            material,
+        )
+        .await?;
         let owner_material =
             disclose_to_account(material.clone(), controller_account, &owner_facts)?;
         let Some(owner_floor) = owner_facts.caller_floor.as_ref() else {
@@ -830,7 +922,8 @@ pub(crate) async fn account_snapshot_material_in_connection(
                 true
             });
         }
-        let mut agent_material = disclose_to_account(material, account, &facts)?;
+        let mut agent_material =
+            disclose_to_account(candidate.unwrap_or(authority_material), account, &facts)?;
         agent_material
             .visible_stream_heads
             .retain(|head| owner_material.visible_stream_heads.contains(head));
@@ -863,13 +956,14 @@ pub(crate) async fn account_snapshot_material_in_connection(
         // complete bytes. A missing pair/anchor is unavailable, never fabricated.
         return disclose_to_account(agent_material, account, &facts).map(Some);
     }
-    disclose_to_account(material, account, &facts).map(Some)
+    disclose_to_account(candidate.unwrap_or(authority_material), account, &facts).map(Some)
 }
 
 async fn disclosure_facts_in_connection(
     conn: &mut AsyncPgConnection,
     realm_id: &RealmId,
     account: &AccountId,
+    authority_material: &coland_storage::RealmStateSnapshotMaterial,
     material: &coland_storage::RealmStateSnapshotMaterial,
 ) -> PersistenceResult<DisclosureFacts> {
     let undisclosed_family_row = sql_query(
@@ -877,13 +971,13 @@ async fn disclosure_facts_in_connection(
             OR EXISTS(SELECT 1 FROM mimi_room_binding_current_results WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM policy_current_results WHERE realm_id=$1 \
                 AND (value->>'schema' IS DISTINCT FROM 'ak.schema.policy.v1' \
-                    OR value->>'policy_kind' IS DISTINCT FROM 'agent' \
+                    OR COALESCE(value->>'policy_kind','') NOT IN ('access','moderation','agent') \
                     OR value->>'realm_id' IS DISTINCT FROM realm_id)) \
             OR EXISTS(SELECT 1 FROM agent_status_current_results WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM agent_key_current_results WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM key_backup_active_series_current_results WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM pcr_device_generation_current_results WHERE realm_id=$1) \
-            OR EXISTS(SELECT 1 FROM actor_profile_current_results WHERE realm_id=$1) \
+            OR EXISTS(SELECT 1 FROM actor_profile_current_results p WHERE p.realm_id=$1 AND NOT EXISTS(SELECT 1 FROM realm_bootstrap_current_results g WHERE g.realm_id=$1 AND g.result_family='realm_genesis' AND g.value->>'purpose'='collaboration')) \
             OR EXISTS(SELECT 1 FROM agent_pcr_genesis_declaration_current_results WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM agent_selector_claim_current_results WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM pcr_device_authorization_current_results WHERE realm_id=$1) \
@@ -957,7 +1051,11 @@ async fn disclosure_facts_in_connection(
     let mut call_creations = std::collections::BTreeMap::new();
     for entry in &material.current_state_entries {
         if let TypedCurrentRow::Value {
-            selector: CurrentSelector::CallState { call_id },
+            selector:
+                CurrentSelector::CallState { call_id }
+                | CurrentSelector::CallFocus { call_id }
+                | CurrentSelector::CallRoster { call_id }
+                | CurrentSelector::CallModeration { call_id },
             ..
         } = entry
         {
@@ -971,7 +1069,7 @@ async fn disclosure_facts_in_connection(
     // circle.md section 9.1: effective Circle membership compares the two
     // typed currents of this one cut -- the caller's parent Realm
     // member_state and each Circle join's bound parent revision.
-    let parent = material
+    let parent = authority_material
         .current_state_entries
         .iter()
         .find_map(|entry| match entry {
@@ -990,7 +1088,7 @@ async fn disclosure_facts_in_connection(
         .transpose()
         .map_err(PersistenceError::database)?;
     let mut circle_floors = std::collections::BTreeMap::new();
-    for entry in &material.current_state_entries {
+    for entry in &authority_material.current_state_entries {
         let TypedCurrentRow::Value {
             selector:
                 CurrentSelector::CircleMemberState {
@@ -1028,7 +1126,7 @@ async fn disclosure_facts_in_connection(
                 "Circle member current has a different source stream",
             ));
         }
-        let object = material
+        let object = authority_material
             .current_state_entries
             .iter()
             .find_map(|entry| match entry {
@@ -1045,26 +1143,29 @@ async fn disclosure_facts_in_connection(
         if circle.id.as_ref() != Some(circle_id) || &circle.realm_id != realm_id {
             return Err(rejected("Circle object differs from its typed subject"));
         }
-        let page = crate::authority_commit::stream_page_in_connection(
-            conn,
-            &arkret_wire::StreamScanRequest {
-                realm_id: realm_id.clone(),
-                stream_ref: stream.clone(),
-                direction: arkret_wire::StreamScanDirection::After(None),
-                limit: 1,
-            },
-        )
-        .await?;
-        let Some(mut floor) = page.readable_floor else {
-            return Err(rejected("joined Circle stream has no provable floor"));
-        };
-        if circle.history_access == arkret_wire::HistoryAccess::SinceJoin {
-            floor = ReadableFloor {
+        let mut floor = if circle.history_access == arkret_wire::HistoryAccess::SinceJoin {
+            // The verified effective join is this caller's exact lower bound.
+            // A member replica must not need the private pre-join position zero
+            // merely to disclose its already proved current cut.
+            ReadableFloor {
                 oldest_position: revision.stream_position,
                 floor_commit_id: revision.commit_id.clone(),
                 floor_reason: arkret_wire::ReadableFloorReason::MembershipJoin,
-            };
-        }
+            }
+        } else {
+            let page = crate::authority_commit::stream_page_in_connection(
+                conn,
+                &arkret_wire::StreamScanRequest {
+                    realm_id: realm_id.clone(),
+                    stream_ref: stream.clone(),
+                    direction: arkret_wire::StreamScanDirection::After(None),
+                    limit: 1,
+                },
+            )
+            .await?;
+            page.readable_floor
+                .ok_or_else(|| rejected("joined Circle stream has no provable floor"))?
+        };
         let Some(current_floor) = crate::account_stream_scan::caller_circle_floor_in_connection(
             conn, realm_id, circle_id, &caller,
         )
@@ -1155,7 +1256,7 @@ async fn disclosure_facts_in_connection(
     let mut sidecar_public_floors = std::collections::BTreeMap::new();
     let mut owned_sidecars = std::collections::BTreeSet::new();
     if caller_floor.is_some() {
-        for row in &material.current_state_entries {
+        for row in &authority_material.current_state_entries {
             if let TypedCurrentRow::Value {
                 selector: CurrentSelector::Sidecar { sidecar_id },
                 value,
@@ -1287,7 +1388,7 @@ async fn message_creation_stream(
     Ok(stream)
 }
 
-fn rejected(reason: &str) -> PersistenceError {
+fn rejected(reason: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::SchemaViolation(format!("snapshot disclosure is unproved: {reason}"))
 }
 
@@ -1353,11 +1454,6 @@ pub(crate) fn disclose_to_account(
         return Err(rejected(&format!(
             "accepted Event kind {kind} is outside the disclosure subset"
         )));
-    }
-    if material.governance_generation != 0 {
-        return Err(rejected(
-            "a handed-off tenure's imported current families are not proved",
-        ));
     }
     let caller = ActorId::account(account.clone());
     let Some(floor) = &facts.caller_floor else {
@@ -1501,6 +1597,11 @@ pub(crate) fn disclose_to_account(
             CurrentSelector::Strand { .. }
             | CurrentSelector::Space { .. }
             | CurrentSelector::Relation { .. } => Some(object_scope(value)?),
+            CurrentSelector::StrandWatch { strand_id, .. } => {
+                Some(object_scope(strands.get(strand_id).ok_or_else(|| {
+                    rejected("Watch target has no Strand current")
+                })?)?)
+            }
             CurrentSelector::Rsvp { event_ref, .. }
             | CurrentSelector::CalendarScheduleSource {
                 strand_id: event_ref,
@@ -1513,6 +1614,22 @@ pub(crate) fn disclose_to_account(
             CurrentSelector::MlsGroup { scope_ref } => Some(
                 CommitStreamRef::from_scope(scope_ref, None).map_err(PersistenceError::database)?,
             ),
+            CurrentSelector::ActorProfile { actor_profile_id } => {
+                crate::applet_scope_profiles::validate_disclosed(
+                    actor_profile_id,
+                    source_stream_ref,
+                    value,
+                )?;
+                Some(source_stream_ref.clone())
+            }
+            CurrentSelector::Policy { .. } => {
+                crate::policy_current_results::management_policy_scope_target(
+                    &material.realm_id,
+                    source_stream_ref,
+                )
+                .map_err(rejected)?;
+                Some(source_stream_ref.clone())
+            }
             CurrentSelector::MessageRevision { message_id } => Some(
                 facts
                     .message_streams
@@ -1527,7 +1644,10 @@ pub(crate) fn disclose_to_account(
                     .ok_or_else(|| rejected("reaction target has no accepted creation scope"))?
                     .clone(),
             ),
-            CurrentSelector::CallState { call_id } => Some(
+            CurrentSelector::CallState { call_id }
+            | CurrentSelector::CallFocus { call_id }
+            | CurrentSelector::CallRoster { call_id }
+            | CurrentSelector::CallModeration { call_id } => Some(
                 facts
                     .call_creations
                     .get(call_id)
@@ -1704,9 +1824,32 @@ pub(crate) fn disclose_to_account(
                     .call_creations
                     .get(call_id)
                     .ok_or_else(|| rejected("Call current has no accepted creation"))?;
-                if current.from.is_some() || current.to != creation.initial_state {
+                if current.from.is_none() && current.to != creation.initial_state {
                     return Err(rejected("Call current differs from its accepted creation"));
                 }
+            }
+            CurrentSelector::CallFocus { .. } => {
+                let _: arkret_models_collaboration::events_payloads::call::CallFocus =
+                    serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
+            }
+            CurrentSelector::CallRoster { .. } => {
+                let roster: arkret_models_collaboration::events_payloads::call::CallRosterCurrentValue =
+                    serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
+                roster
+                    .validate_sources(source_stream_ref, revision)
+                    .map_err(PersistenceError::database)?;
+            }
+            CurrentSelector::CallModeration { .. } => {
+                let moderation: arkret_models_collaboration::events_payloads::call::CallModerationCurrentValue =
+                    serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
+                moderation
+                    .validate_sources(source_stream_ref, revision)
+                    .map_err(PersistenceError::database)?;
+            }
+            CurrentSelector::RealmMediaService => {
+                let descriptor: arkret_models_collaboration::events_payloads::RealmMediaServiceValue =
+                    serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
+                descriptor.validate().map_err(PersistenceError::database)?;
             }
             CurrentSelector::DirectConversationBinding { pair_key } => {
                 let binding: arkret_models_collaboration::events_payloads::direct_conversation::DirectConversationBindingCurrentValue =
@@ -2004,8 +2147,15 @@ pub(crate) fn disclose_to_account(
             | CurrentSelector::InviteLiveTarget { .. }
             | CurrentSelector::InviteDirectedInvitee { .. }
             | CurrentSelector::CapabilityGrant { .. } => {}
+            CurrentSelector::ActorProfile { actor_profile_id } => {
+                crate::applet_scope_profiles::validate_disclosed(
+                    actor_profile_id,
+                    source_stream_ref,
+                    value,
+                )?;
+            }
             CurrentSelector::Policy { policy_id } => {
-                crate::policy_current_results::validate_disclosed_agent_policy(
+                crate::policy_current_results::validate_disclosed_shared_policy(
                     &material.realm_id,
                     policy_id,
                     source_stream_ref,
@@ -2898,6 +3048,47 @@ mod tests {
     }
 
     #[test]
+    fn product_policy_disclosure_preserves_scope_and_signed_values_below_floor() {
+        for kind in ["access", "moderation"] {
+            for circle in [false, true] {
+                let (caller, mut material, facts) = if circle {
+                    circle_fixture()
+                } else {
+                    joined_fixture()
+                };
+                let policy_id =
+                    arkret_wire::PolicyId::new("ak:policy:0198ff00-0000-7000-8000-000000000001")
+                        .unwrap();
+                let value = json!({"schema":"ak.schema.policy.v1","id":policy_id,
+                    "realm_id":realm_id(),"policy_kind":kind,
+                    "rules":[{"rule_id":"typing","kind":"action","effect":"deny",
+                        "actions":["ak.typing.broadcast"]}],"default_effect":"allow",
+                    "created_by":ActorId::account(caller.clone()),
+                    "created_at":"2026-10-05T12:00:00.000Z"});
+                let mut policy = row(CurrentSelector::Policy { policy_id }, 1, value);
+                if circle {
+                    let TypedCurrentRow::Value {
+                        source_stream_ref, ..
+                    } = &mut policy;
+                    *source_stream_ref = CommitStreamRef::Circle {
+                        realm_id: realm_id(),
+                        circle_id: CircleId::from_event_id(&event_id(0x51)),
+                    };
+                }
+                material.current_state_entries.push(policy.clone());
+                let disclosed = disclose_to_account(material.clone(), &caller, &facts).unwrap();
+                assert!(disclosed.current_state_entries.contains(&policy));
+                if circle {
+                    let mut outsider_facts = facts;
+                    outsider_facts.circle_floors.clear();
+                    let outsider = disclose_to_account(material, &caller, &outsider_facts).unwrap();
+                    assert!(!outsider.current_state_entries.contains(&policy));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn agent_policy_disclosure_refuses_unbound_private_and_mismatched_values() {
         let (caller, base, facts) = fixture();
         let id =
@@ -2934,9 +3125,8 @@ mod tests {
         let TypedCurrentRow::Value {
             source_stream_ref, ..
         } = &mut policy;
-        *source_stream_ref = CommitStreamRef::Circle {
-            realm_id: realm_id(),
-            circle_id: CircleId::from_event_id(&event_id(0x55)),
+        *source_stream_ref = CommitStreamRef::Realm {
+            realm_id: RealmId::from_event_id(&event_id(0x55)),
         };
         material.current_state_entries.push(policy);
         assert!(disclose_to_account(material, &caller, &facts).is_err());
@@ -3089,7 +3279,7 @@ mod tests {
         assert!(disclose_to_account(material, &founder, &facts).is_err());
         let (founder, mut material, facts) = fixture();
         material.governance_generation = 1;
-        assert!(disclose_to_account(material, &founder, &facts).is_err());
+        assert!(disclose_to_account(material, &founder, &facts).is_ok());
     }
 
     #[test]
@@ -3205,6 +3395,41 @@ mod tests {
             TypedCurrentRow::Value {
                 selector: CurrentSelector::Circle { .. }
                     | CurrentSelector::CircleMemberState { .. },
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn circle_agent_policy_preserves_exact_current_only_for_its_joined_members() {
+        let (caller, mut material, facts) = circle_fixture();
+        let circle_id = CircleId::from_event_id(&event_id(0x51));
+        let policy_id =
+            arkret_wire::PolicyId::new("ak:policy:0198ff00-0000-7000-8000-000000000001").unwrap();
+        let value = json!({"schema":"ak.schema.policy.v1","id":policy_id,"realm_id":realm_id(),
+            "policy_kind":"agent","rules":[{"rule_id":"ban","kind":"agent","effect":"deny",
+                "agent_target":{"kind":"all"},"agent_operations":["authorize"]}],
+            "default_effect":"allow","created_by":ActorId::account(caller.clone()),
+            "created_at":"2026-10-05T12:00:00.000Z"});
+        let mut policy = row(CurrentSelector::Policy { policy_id }, 1, value);
+        let TypedCurrentRow::Value {
+            source_stream_ref, ..
+        } = &mut policy;
+        *source_stream_ref = CommitStreamRef::Circle {
+            realm_id: realm_id(),
+            circle_id,
+        };
+        material.current_state_entries.push(policy.clone());
+        let disclosed = disclose_to_account(material.clone(), &caller, &facts).unwrap();
+        assert!(disclosed.current_state_entries.contains(&policy));
+        let mut outsider_facts = facts;
+        outsider_facts.circle_floors.clear();
+        let outsider = disclose_to_account(material, &caller, &outsider_facts).unwrap();
+        assert!(!outsider.current_state_entries.contains(&policy));
+        assert!(!outsider.current_state_entries.iter().any(|row| matches!(
+            row,
+            TypedCurrentRow::Value {
+                selector: CurrentSelector::Policy { .. },
                 ..
             }
         )));

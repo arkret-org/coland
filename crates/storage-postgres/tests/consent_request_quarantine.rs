@@ -1,5 +1,12 @@
 //! The Consent request ledger charge and holder-private queue CAS form one PG cut.
 
+#[path = "../../test-support/src/device_authorization_history.rs"]
+#[expect(dead_code, reason = "Shared accepted PCR fixture subset.")]
+mod device_authorization_history;
+#[path = "../../test-support/src/pcr_genesis.rs"]
+#[expect(dead_code, reason = "Shared accepted PCR fixture subset.")]
+mod pcr_genesis;
+
 use arkret_models_collaboration::governance::holder_quarantine::{
     HolderQuarantine, HolderQuarantineSurfaceKind,
 };
@@ -58,12 +65,9 @@ fn input(
     quota_constraints.max_new_sources_per_window = Some(1);
     ConsentRequestQuarantineInput {
         holder: holder.clone(),
+        acceptor_service_id: holder.station_id.clone(),
         requester: requester.clone(),
         consent_scope: scope,
-        source_digest: arkret_canonical::canonical_sha256(&requester.principal_id)
-            .unwrap()
-            .trim_start_matches("sha256:")
-            .to_owned(),
         received_at: Utc::now(),
         quota_constraints,
     }
@@ -73,7 +77,23 @@ fn input(
 async fn consent_request_quarantine_charges_and_writes_in_one_cut_or_nothing() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
-    let holder = account("consent-request-holder");
+    let fixture = pcr_genesis::PcrGenesisFixture::new(
+        arkret_wire::Did::new("did:web:coland.example").unwrap(),
+    );
+    let holder = fixture.history.account.clone();
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query("INSERT INTO device_inventory_station(singleton,station_id) VALUES(TRUE,$1)")
+        .bind::<diesel::sql_types::Text, _>(holder.station_id.as_str())
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    drop(conn);
+    fixture
+        .admit_founding_device(&coland_storage_postgres::PgPersistenceStore::new(
+            pool.clone(),
+        ))
+        .await
+        .unwrap();
     let first = account("consent-request-first");
     let second = account("consent-request-second");
     let accounts = PgAccountStore { pool: pool.clone() };

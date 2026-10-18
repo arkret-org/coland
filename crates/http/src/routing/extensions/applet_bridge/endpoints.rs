@@ -1818,11 +1818,7 @@ async fn provision_ghost_actor_endpoint(
         .managed_actor_bundle
         .as_ref()
         .expect("creation branch");
-    if !provision.approval_signatures.is_empty() {
-        return Err(AppError::conflict(
-            "management review consumption is not established",
-        ));
-    }
+
     let authoring_basis = provision
         .authoring_basis()
         .ok_or_else(|| AppError::param_invalid("Ghost authoring basis is missing"))?
@@ -1862,6 +1858,75 @@ async fn provision_ghost_actor_endpoint(
         res.status_code(StatusCode::OK);
         return json_ok(outcome);
     }
+    let submitted_provision = provision
+        .managed_actor_provision_payload()
+        .map_err(|error| {
+            AppError::param_invalid(format!(
+                "managed actor provision payload is invalid: {error}"
+            ))
+        })?;
+    if verified.install.applet_id.as_str() != path_applet_id
+        || verified.install.package.service_id != authoring_basis.service_id
+    {
+        return Err(AppError::capability_denied(
+            "authenticated Applet service registration does not match the provisioning request",
+        )
+        .with_wire_code("applet_registration_unauthorized"));
+    }
+    // Wire ids are validated at deserialization (typed AppletId/Did/RealmId).
+    let service_id = authoring_basis.service_id.clone();
+    let ghost_actor_id = submitted_provision.actor_id.clone();
+    // G3.S9 — ghost actor DID recorded against the applet MUST be a
+    // well-formed DID scalar without DID URL components.
+    let realm_id = authoring_basis.effective_scope.realm_id().clone();
+
+    let mut record = applet_record(state, &path_applet_id, &authoring_basis.effective_scope)
+        .await?
+        .ok_or_else(|| AppError::not_found("applet is not installed"))?;
+    if let Some(existing) = record.ghosts.iter().find(|ghost| {
+        ghost.external_ref == authoring_basis.external_ref || ghost.ghost_actor_id == ghost_actor_id
+    }) {
+        if existing.request_digest.as_str() != request_digest {
+            return Err(AppError::conflict(
+                "Ghost provisioning tuple already exists with different signed Events",
+            )
+            .with_wire_code("duplicate_conflict"));
+        }
+        let existing_provision = existing.provision_payload().map_err(|error| {
+            AppError::internal(format!(
+                "stored Ghost provision bindings are invalid: {error}"
+            ))
+        })?;
+        let outcome = GhostActorProvisionOutcome {
+            ghost_actor_id,
+            managed_actor_provision_ref: durable_ghost_event_ref(
+                state,
+                &existing.managed_actor_provision_event,
+            )
+            .await?
+            .event_id,
+            principal_control_realm_id: existing.principal_control_realm_id(),
+            profile_event_ref: durable_ghost_event_ref(state, &existing.profile_event)
+                .await?
+                .event_id,
+            accountability_grant_ref: durable_ghost_event_ref(
+                state,
+                &existing.accountability_grant_event,
+            )
+            .await?
+            .event_id,
+            authorization_ref: existing_provision.applet_authority_ref,
+            display_name: existing.display_name.clone(),
+        };
+        res.status_code(StatusCode::OK);
+        return json_ok(outcome);
+    }
+
+    // Recover only an exact accepted candidate before first-commit fences.
+    // A committed preview is no longer current; it cannot invalidate the
+    // original outcome or reserve creation quota again under a new HTTP key.
+    ensure_not_revoked(&record)?;
+    ensure_formal_ghost_provision_allowed(&record, &provision)?;
     provision
         .authoring_request
         .validate_bindings()
@@ -1928,72 +1993,6 @@ async fn provision_ghost_actor_endpoint(
     )
     .await
     .map_err(|error| AppError::param_invalid(format!("Ghost bundle proof is invalid: {error}")))?;
-    let submitted_provision = provision
-        .managed_actor_provision_payload()
-        .map_err(|error| {
-            AppError::param_invalid(format!(
-                "managed actor provision payload is invalid: {error}"
-            ))
-        })?;
-    if verified.install.applet_id.as_str() != path_applet_id
-        || verified.install.package.service_id != authoring_basis.service_id
-    {
-        return Err(AppError::capability_denied(
-            "authenticated Applet service registration does not match the provisioning request",
-        )
-        .with_wire_code("applet_registration_unauthorized"));
-    }
-    // Wire ids are validated at deserialization (typed AppletId/Did/RealmId).
-    let service_id = authoring_basis.service_id.clone();
-    let ghost_actor_id = submitted_provision.actor_id.clone();
-    // G3.S9 — ghost actor DID recorded against the applet MUST be a
-    // well-formed DID scalar without DID URL components.
-    let realm_id = authoring_basis.effective_scope.realm_id().clone();
-
-    let mut record = applet_record(state, &path_applet_id, &authoring_basis.effective_scope)
-        .await?
-        .ok_or_else(|| AppError::not_found("applet is not installed"))?;
-    ensure_not_revoked(&record)?;
-    ensure_formal_ghost_provision_allowed(&record, &provision)?;
-    if let Some(existing) = record.ghosts.iter().find(|ghost| {
-        ghost.external_ref == authoring_basis.external_ref || ghost.ghost_actor_id == ghost_actor_id
-    }) {
-        if existing.request_digest.as_str() != request_digest {
-            return Err(AppError::conflict(
-                "Ghost provisioning tuple already exists with different signed Events",
-            )
-            .with_wire_code("duplicate_conflict"));
-        }
-        let existing_provision = existing.provision_payload().map_err(|error| {
-            AppError::internal(format!(
-                "stored Ghost provision bindings are invalid: {error}"
-            ))
-        })?;
-        let outcome = GhostActorProvisionOutcome {
-            ghost_actor_id,
-            managed_actor_provision_ref: durable_ghost_event_ref(
-                state,
-                &existing.managed_actor_provision_event,
-            )
-            .await?
-            .event_id,
-            principal_control_realm_id: existing.principal_control_realm_id(),
-            profile_event_ref: durable_ghost_event_ref(state, &existing.profile_event)
-                .await?
-                .event_id,
-            accountability_grant_ref: durable_ghost_event_ref(
-                state,
-                &existing.accountability_grant_event,
-            )
-            .await?
-            .event_id,
-            authorization_ref: existing_provision.applet_authority_ref,
-            display_name: existing.display_name.clone(),
-        };
-        res.status_code(StatusCode::OK);
-        return json_ok(outcome);
-    }
-
     let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     for existing_record in applet_records(state).await? {
         let candidate = ghost_actor_id.signing_principal_id().as_str();
@@ -2047,40 +2046,45 @@ async fn provision_ghost_actor_endpoint(
     let identity_value = encode_applet_identity(&record.identity)?;
     record.ghosts.push(ghost);
     let applet_record_value = encode_applet_record(&record)?;
-    let input = coland_storage::AppletAuthoringUnitWrite {
-        request: coland_storage::AppletAdmissionRequest::Managed(
-            arkret_models_integration::AppletManagedActorCommittedRequest::Ghost(Box::new(
-                provision.clone(),
-            )),
-        ),
-        package: record.package.clone(),
-        recomputed_install_plan: None,
-        service_did_document,
-        controller_did_document: super::install::package_controller_document(
-            state,
-            &record.package,
-        )?,
-        station_verification_method: state
-            .service_verification_method("notary-key")
-            .map_err(AppError::internal)?,
-        station_public_key: *state.notary_verifying_key().as_bytes(),
-        admin_actor_id: arkret_wire::ActorId::service(service_id.clone()),
-        admin_producer_guards: Vec::new(),
+    let mut input = coland_storage::AppletAuthoringUnitWrite {
+        candidate: coland_storage::AppletAuthoringCandidate {
+            request: coland_storage::AppletAdmissionRequest::Managed(
+                arkret_models_integration::AppletManagedActorCommittedRequest::Ghost(Box::new(
+                    provision.clone(),
+                )),
+            ),
+            package: record.package.clone(),
+            recomputed_install_plan: None,
+            service_did_document,
+            controller_did_document: super::install::package_controller_document(
+                state,
+                &record.package,
+            )?,
+            station_verification_method: state
+                .service_verification_method("notary-key")
+                .map_err(AppError::internal)?,
+            station_public_key: *state.notary_verifying_key().as_bytes(),
+            admin_actor_id: arkret_wire::ActorId::service(service_id.clone()),
+            admin_producer_guards: Vec::new(),
+            request_digest: provision
+                .authoring_request
+                .canonical_digest()
+                .map_err(|error| AppError::param_invalid(error.to_string()))?,
+            canonical_request_hash: Hash::new(request_digest.clone())
+                .map_err(|error| AppError::param_invalid(error.to_string()))?,
+            prior_managed_refs: Vec::new(),
+            prior_service_signer_evidence: None,
+            accepted_at: now,
+        },
         expected_identity: Some(identity_value.clone()),
         expected_installation: Some(expected_applet_record.clone()),
         preview_subject_key: applet_authoring_preview_subject_key(&provision.authoring_request)?,
-        request_digest: provision
-            .authoring_request
-            .canonical_digest()
-            .map_err(|error| AppError::param_invalid(error.to_string()))?,
-        canonical_request_hash: Hash::new(request_digest.clone())
-            .map_err(|error| AppError::param_invalid(error.to_string()))?,
         operation_id: "ak.self.applet.ghost.command.provision".to_owned(),
         idempotency_key: idempotency_key.clone(),
-        prior_managed_refs: Vec::new(),
-        prior_service_signer_evidence: None,
-        accepted_at: now,
+        operation_approvals: None,
     };
+    input.operation_approvals =
+        super::management_review::prepare_creation_approvals(state, &input.candidate).await?;
     let target_station_id = record.target_station_id.clone();
     let outcome_actor = ghost_actor_id.clone();
     let outcome_service = service_id.clone();

@@ -49,7 +49,7 @@ async fn historical_human_true_signature_atomic_bootstrap_and_exact_coordinate()
     // Every atomic bootstrap producer was frozen, including its RealmCreate.
     for transaction in &fixture.unit.transactions {
         let original = store
-            .human_signer_fact(&transaction.event, &transaction.commit)
+            .account_device_signer_fact(&transaction.event, &transaction.commit)
             .await
             .unwrap();
         assert_eq!(
@@ -66,7 +66,7 @@ async fn historical_human_true_signature_atomic_bootstrap_and_exact_coordinate()
             .unwrap()
             .validate_commit_binding(&full, arkret_canonical::DigestSuite::Sha256)
             .unwrap();
-        arkret_identity::account_device_signer_evidence::verify_historical_human_event_signature(
+        arkret_identity::account_device_signer_evidence::verify_historical_account_device_event_signature(
             &full.event,
             original.as_ref().unwrap(),
             arkret_canonical::DigestSuite::Sha256,
@@ -139,7 +139,7 @@ async fn historical_human_true_signature_atomic_bootstrap_and_exact_coordinate()
     assert!(
         error
             .to_string()
-            .contains("Human historical producer signature differs"),
+            .contains("Account Device historical producer signature differs"),
         "wrong Ed key must reach the genuine proof gate: {error}"
     );
     assert_eq!(
@@ -322,7 +322,7 @@ async fn historical_human_locked_full_source_equality_rejects_resigned_substitut
             .authority_commit
             .producer_signer_fact
             .as_mut()
-            .and_then(|fact| fact.as_human_mut())
+            .and_then(|fact| fact.as_account_device_mut())
             .unwrap();
         match variant {
             0 => {
@@ -412,15 +412,15 @@ async fn peer_full_scan_carries_each_original_fact_and_never_repairs_missing_arc
         assert_eq!(entry.target.stream_ref, row.commit.stream_ref);
         assert_eq!(entry.target.stream_position, row.commit.stream_position);
         assert_eq!(
-            entry.producer_signer_fact.as_human().cloned(),
+            entry.producer_signer_fact.as_account_device().cloned(),
             store
-                .human_signer_fact(&row.event, &row.commit)
+                .account_device_signer_fact(&row.event, &row.commit)
                 .await
                 .unwrap()
         );
-        arkret_identity::account_device_signer_evidence::verify_historical_human_event_signature(
+        arkret_identity::account_device_signer_evidence::verify_historical_account_device_event_signature(
             &row.event,
-            entry.producer_signer_fact.as_human().unwrap(),
+            entry.producer_signer_fact.as_account_device().unwrap(),
             arkret_canonical::DigestSuite::Sha256,
         )
         .unwrap();
@@ -500,7 +500,7 @@ async fn production_uow_exact_accepted_retry_precedes_current_revocation_and_nev
     );
     let store = PgAuthorityCommitStore { pool: pool.clone() };
     let original_fact = store
-        .human_signer_fact(
+        .account_device_signer_fact(
             &request.authority_commit.event,
             &request.authority_commit.commit,
         )
@@ -530,7 +530,7 @@ async fn production_uow_exact_accepted_retry_precedes_current_revocation_and_nev
     assert_eq!(footprint(&pool).await, before);
     assert_eq!(
         store
-            .human_signer_fact(
+            .account_device_signer_fact(
                 &request.authority_commit.event,
                 &request.authority_commit.commit
             )
@@ -590,7 +590,7 @@ async fn withheld_full_upgrade_atomically_retains_original_human_fact_without_he
     .unwrap()
     .unwrap();
     let core = &evidence.device_projection_attestation.attestation;
-    let fact = arkret_identity::account_device_signer_evidence::verify_forwarded_human_signer_fact(
+    let fact = arkret_identity::account_device_signer_evidence::verify_forwarded_account_device_signer_fact(
         &evidence,
         &join.authority_commit.event,
         &member_account.station_id,
@@ -625,6 +625,7 @@ async fn withheld_full_upgrade_atomically_retains_original_human_fact_without_he
     let replica = |request: &coland_storage::EventCommitRequest, role| CommittedReplica {
         local_service_id: member_account.station_id.clone(),
         authority: authority.clone(),
+        historical_commit: None,
         event: request.authority_commit.event.clone(),
         commit: request.authority_commit.commit.clone(),
         producer_signer_fact: request.authority_commit.producer_signer_fact.clone(),
@@ -697,7 +698,7 @@ async fn withheld_full_upgrade_atomically_retains_original_human_fact_without_he
     ));
     uow.commit_event(target.clone()).await.unwrap();
     let original_fact = source_store
-        .human_signer_fact(
+        .account_device_signer_fact(
             &target.authority_commit.event,
             &target.authority_commit.commit,
         )
@@ -708,6 +709,7 @@ async fn withheld_full_upgrade_atomically_retains_original_human_fact_without_he
         .install_committed_chain_node(&CommittedChainNode {
             local_service_id: member_account.station_id.clone(),
             authority: authority.clone(),
+            historical_commit: None,
             commit: target.authority_commit.commit.clone(),
         })
         .await
@@ -753,7 +755,7 @@ async fn withheld_full_upgrade_atomically_retains_original_human_fact_without_he
     );
     assert_eq!(
         member
-            .human_signer_fact(
+            .account_device_signer_fact(
                 &target.authority_commit.event,
                 &target.authority_commit.commit
             )
@@ -784,7 +786,7 @@ async fn withheld_full_upgrade_atomically_retains_original_human_fact_without_he
     changed
         .producer_signer_fact
         .as_mut()
-        .and_then(|fact| fact.as_human_mut())
+        .and_then(|fact| fact.as_account_device_mut())
         .unwrap()
         .accepted_at += chrono::TimeDelta::seconds(1);
     assert!(member.install_committed_replica(&changed).await.is_err());

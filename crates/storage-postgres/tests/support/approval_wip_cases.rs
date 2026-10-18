@@ -52,6 +52,7 @@ fn vote(
             .unwrap(),
     );
     coland_storage::EventApprovalCommit {
+        carrier_binding: None,
         management_current: None,
         event_id: event.event_id.clone(),
         event_digest: digest,
@@ -65,6 +66,7 @@ fn batch(
     proof: coland_storage::EventApprovalCommit,
 ) -> coland_storage::EventBatchCommitRequest {
     coland_storage::EventBatchCommitRequest {
+        audit_unit: None,
         events: vec![request],
         franking_replay_nonce: None,
         realm_organization_proof: None,
@@ -86,50 +88,46 @@ struct WipSetup {
 }
 
 async fn prepare_wip_setup(pool: &PgPool) -> WipSetup {
-    let opened = review_future(|| open_discussion(&pool, "list-wip-approval")).await;
+    let opened = Box::pin(open_discussion(&pool, "list-wip-approval")).await;
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let realm = opened.head.authority_commit.event.realm_id.clone();
     let actor = opened.head.authority_commit.event.actor_id.clone();
     let at = opened.head.authority_commit.commit.committed_at;
-    let board = review_future(|| {
-        ordinary_realm::source_request(
-            &pool,
-            next_request(
-                &opened.head.authority_commit,
-                arkret_wire::EventKind::SpaceCreate,
-                &founder(),
-                space_payload(&realm, &actor, at, "board", "Review Board", None, json!({})),
-                at,
-            ),
-        )
-    })
+    let board = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &opened.head.authority_commit,
+            arkret_wire::EventKind::SpaceCreate,
+            &founder(),
+            space_payload(&realm, &actor, at, "board", "Review Board", None, json!({})),
+            at,
+        ),
+    ))
     .await;
     let board_id = arkret_wire::SpaceId::from_event_id(&board.authority_commit.event.event_id);
     uow.commit_event(board.clone()).await.unwrap();
-    let list = review_future(|| {
-        ordinary_realm::source_request(
-            &pool,
-            next_request(
-                &board.authority_commit,
-                arkret_wire::EventKind::SpaceCreate,
-                &founder(),
-                space_payload(
-                    &realm,
-                    &actor,
-                    at,
-                    "list",
-                    "Review",
-                    Some(&board_id),
-                    json!({"wip_limit":1,"wip_limit_enforcement":"require_review"}),
-                ),
+    let list = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &board.authority_commit,
+            arkret_wire::EventKind::SpaceCreate,
+            &founder(),
+            space_payload(
+                &realm,
+                &actor,
                 at,
+                "list",
+                "Review",
+                Some(&board_id),
+                json!({"wip_limit":1,"wip_limit_enforcement":"require_review"}),
             ),
-        )
-    })
+            at,
+        ),
+    ))
     .await;
     let list_id = arkret_wire::SpaceId::from_event_id(&list.authority_commit.event.event_id);
     uow.commit_event(list.clone()).await.unwrap();
-    let second = review_future(|| ordinary_realm::source_request(&pool, next_request(
+    let second = Box::pin(ordinary_realm::source_request(&pool, next_request(
         &list.authority_commit,
         arkret_wire::EventKind::StrandCreate,
         &founder(),
@@ -138,7 +136,7 @@ async fn prepare_wip_setup(pool: &PgPool) -> WipSetup {
     ))).await;
     let second_id = arkret_wire::StrandId::from_event_id(&second.authority_commit.event.event_id);
     uow.commit_event(second.clone()).await.unwrap();
-    let first = review_future(|| ordinary_realm::source_request(&pool, next_request(
+    let first = Box::pin(ordinary_realm::source_request(&pool, next_request(
         &second.authority_commit,
         arkret_wire::EventKind::StrandMove,
         &founder(),
@@ -157,7 +155,6 @@ async fn prepare_wip_setup(pool: &PgPool) -> WipSetup {
 }
 
 async fn qualify_wip_review(pool: &PgPool, setup: &WipSetup) -> coland_storage::EventCommitRequest {
-    let station = ordinary_realm::station();
     let opened = &setup.opened;
     let board_id = setup.board_id.clone();
     let list_id = setup.list_id.clone();
@@ -171,15 +168,19 @@ async fn qualify_wip_review(pool: &PgPool, setup: &WipSetup) -> coland_storage::
         stream_position: setup.list.authority_commit.commit.stream_position,
     };
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
-    let review = review_future(|| ordinary_realm::source_request(&pool, next_request(
+    let review = Box::pin(ordinary_realm::source_request(&pool, next_request(
         &first.authority_commit,
         arkret_wire::EventKind::StrandMove,
         &founder(),
         json!({"board_space_id":board_id,"strand_id":second_id,"target_space_id":list_id,"rank":"b"}),
         at,
     ))).await;
-    let account_label = approval_account_label(43);
-    review_future(|| ordinary_realm::human_profile::admit(&pool, &station, &account_label)).await;
+    Box::pin(ordinary_realm::human_profile::admit(
+        &pool,
+        &ordinary_realm::station(),
+        &approval_account_label(43),
+    ))
+    .await;
     let proof = vote(
         &review,
         &list_id,
@@ -212,7 +213,7 @@ async fn qualify_wip_review(pool: &PgPool, setup: &WipSetup) -> coland_storage::
         .bind::<Text,_>(first.authority_commit.commit.commit_id.as_str()).bind::<BigInt,_>(first.authority_commit.commit.stream_position as i64)
         .bind::<diesel::sql_types::Timestamptz,_>(at).execute(&mut conn).await.unwrap();
     drop(conn);
-    let grant = review_future(|| ordinary_realm::source_request(&pool, next_request(
+    let grant = Box::pin(ordinary_realm::source_request(&pool, next_request(
         &first.authority_commit,
         arkret_wire::EventKind::CapabilityGrant,
         &founder(),
@@ -222,7 +223,7 @@ async fn qualify_wip_review(pool: &PgPool, setup: &WipSetup) -> coland_storage::
     uow.commit_event(grant.clone()).await.unwrap();
     // A joined approver's exact-resource grant still needs the action's
     // registered allowed_space_kinds constraint before it can earn a vote.
-    let incomplete_review = review_future(|| ordinary_realm::source_request(&pool, next_request(
+    let incomplete_review = Box::pin(ordinary_realm::source_request(&pool, next_request(
         &grant.authority_commit,
         arkret_wire::EventKind::StrandMove,
         &founder(),
@@ -258,7 +259,7 @@ async fn qualify_wip_review(pool: &PgPool, setup: &WipSetup) -> coland_storage::
         count(&pool, &realm, "event_approval_private_audit").await,
         0
     );
-    let grant = review_future(|| ordinary_realm::source_request(&pool, next_request(
+    let grant = Box::pin(ordinary_realm::source_request(&pool, next_request(
         &grant.authority_commit,
         arkret_wire::EventKind::CapabilityGrant,
         &founder(),
@@ -266,7 +267,7 @@ async fn qualify_wip_review(pool: &PgPool, setup: &WipSetup) -> coland_storage::
         at,
     ))).await;
     uow.commit_event(grant.clone()).await.unwrap();
-    let review = review_future(|| ordinary_realm::source_request(&pool, next_request(
+    let review = Box::pin(ordinary_realm::source_request(&pool, next_request(
         &grant.authority_commit,
         arkret_wire::EventKind::StrandMove,
         &founder(),
@@ -278,121 +279,125 @@ async fn qualify_wip_review(pool: &PgPool, setup: &WipSetup) -> coland_storage::
 
 #[tokio::test]
 async fn list_wip_review_verifies_actual_signatures_and_consumes_only_at_success() {
-    list_wip_review_scenario().await;
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let fixture_pool = pool.clone();
+    let setup =
+        tokio::spawn(async move { Box::new(Box::pin(prepare_wip_setup(&fixture_pool)).await) })
+            .await
+            .unwrap();
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(async move { Box::pin(list_wip_review_transaction(pool, setup)).await });
+    tasks.join_next().await.unwrap().unwrap();
 }
 
-#[inline(never)]
-fn list_wip_review_scenario() -> std::pin::Pin<Box<impl std::future::Future<Output = ()>>> {
-    Box::pin(async move {
-        let database = TestDatabase::lease().await;
-        let pool = database.pool();
-        let setup = review_future(|| prepare_wip_setup(&pool)).await;
-        let review = review_future(|| qualify_wip_review(&pool, &setup)).await;
-        let opened = &setup.opened;
-        let board_id = setup.board_id.clone();
-        let list = &setup.list;
-        let list_id = setup.list_id.clone();
-        let second_id = setup.second_id.clone();
-        let first = &setup.first;
-        let realm = opened.head.authority_commit.event.realm_id.clone();
-        let at = opened.head.authority_commit.commit.committed_at;
-        let revision = CurrentRevision {
-            commit_id: list.authority_commit.commit.commit_id.clone(),
-            stream_position: list.authority_commit.commit.stream_position,
-        };
-        let uow = PgEventCommitUnitOfWork::new(pool.clone());
-        let proof = vote(
-            &review,
-            &list_id,
-            revision,
-            "wip-nonce-128-bit-fixture-approval",
-        );
-        let before = (
+async fn list_wip_review_transaction(pool: PgPool, setup: Box<WipSetup>) {
+    let review = Box::pin(qualify_wip_review(&pool, &setup)).await;
+    let opened = &setup.opened;
+    let board_id = setup.board_id.clone();
+    let list = &setup.list;
+    let list_id = setup.list_id.clone();
+    let second_id = setup.second_id.clone();
+    let first = &setup.first;
+    let realm = opened.head.authority_commit.event.realm_id.clone();
+    let at = opened.head.authority_commit.commit.committed_at;
+    let revision = CurrentRevision {
+        commit_id: list.authority_commit.commit.commit_id.clone(),
+        stream_position: list.authority_commit.commit.stream_position,
+    };
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let proof = vote(
+        &review,
+        &list_id,
+        revision,
+        "wip-nonce-128-bit-fixture-approval",
+    );
+    let before = (
+        count(&pool, &realm, "canonical_events").await,
+        count(&pool, &realm, "realm_commits").await,
+    );
+    let mut bad = proof.clone();
+    bad.methods[0].signature.input.nonce.push('x');
+    assert!(
+        uow.commit_event_batch(batch(review.clone(), bad))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("approval_required")
+    );
+    assert_eq!(
+        before,
+        (
             count(&pool, &realm, "canonical_events").await,
-            count(&pool, &realm, "realm_commits").await,
-        );
-        let mut bad = proof.clone();
-        bad.methods[0].signature.input.nonce.push('x');
-        assert!(
-            uow.commit_event_batch(batch(review.clone(), bad))
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("approval_required")
-        );
-        assert_eq!(
-            before,
-            (
-                count(&pool, &realm, "canonical_events").await,
-                count(&pool, &realm, "realm_commits").await
-            )
-        );
-        assert_eq!(
-            count(&pool, &realm, "event_approval_private_audit").await,
-            0
-        );
-        let mut stale = proof.clone();
-        if let ApprovalContext::ListWip {
-            list_policy_revision,
-            ..
-        } = &mut stale.methods[0].signature.input.approval_context
-        {
-            *list_policy_revision = CurrentRevision {
-                commit_id: first.authority_commit.commit.commit_id.clone(),
-                stream_position: first.authority_commit.commit.stream_position,
-            };
-        }
-        let signer = arkret_signatures::Ed25519DetachedJwsSigner::from_seed(
-            [70; 32],
-            stale.methods[0]
-                .signature
-                .proof
-                .verification_method
-                .as_str(),
-        );
-        stale.methods[0].signature.proof.jws = signer.sign_detached_jws(
-            &arkret_signatures::approval_signature::approval_signature_signing_bytes(
-                &stale.methods[0].signature,
-            )
-            .unwrap(),
-        );
-        assert!(
-            uow.commit_event_batch(batch(review.clone(), stale))
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("approval_required")
-        );
-        assert_eq!(
-            before,
-            (
-                count(&pool, &realm, "canonical_events").await,
-                count(&pool, &realm, "realm_commits").await
-            )
-        );
-        assert_eq!(
-            count(&pool, &realm, "event_approval_private_audit").await,
-            0
-        );
-        uow.commit_event_batch(batch(review.clone(), proof.clone()))
+            count(&pool, &realm, "realm_commits").await
+        )
+    );
+    assert_eq!(
+        count(&pool, &realm, "event_approval_private_audit").await,
+        0
+    );
+    let mut stale = proof.clone();
+    if let ApprovalContext::ListWip {
+        list_policy_revision,
+        ..
+    } = &mut stale.methods[0].signature.input.approval_context
+    {
+        *list_policy_revision = CurrentRevision {
+            commit_id: first.authority_commit.commit.commit_id.clone(),
+            stream_position: first.authority_commit.commit.stream_position,
+        };
+    }
+    let signer = arkret_signatures::Ed25519DetachedJwsSigner::from_seed(
+        [70; 32],
+        stale.methods[0]
+            .signature
+            .proof
+            .verification_method
+            .as_str(),
+    );
+    stale.methods[0].signature.proof.jws = signer.sign_detached_jws(
+        &arkret_signatures::approval_signature::approval_signature_signing_bytes(
+            &stale.methods[0].signature,
+        )
+        .unwrap(),
+    );
+    assert!(
+        uow.commit_event_batch(batch(review.clone(), stale))
             .await
-            .unwrap();
-        assert_eq!(
-            count(&pool, &realm, "event_approval_private_audit").await,
-            1
-        );
-        assert_eq!(
-            position(&pool, &board_id, &second_id).await.value,
-            json!({"list_space_id":list_id,"rank":"b"})
-        );
-        uow.commit_event_batch(batch(review.clone(), proof))
-            .await
-            .unwrap();
-        assert_eq!(
-            count(&pool, &realm, "event_approval_private_audit").await,
-            1
-        );
-        let reused = review_future(|| ordinary_realm::source_request(&pool, next_request(
+            .unwrap_err()
+            .to_string()
+            .contains("approval_required")
+    );
+    assert_eq!(
+        before,
+        (
+            count(&pool, &realm, "canonical_events").await,
+            count(&pool, &realm, "realm_commits").await
+        )
+    );
+    assert_eq!(
+        count(&pool, &realm, "event_approval_private_audit").await,
+        0
+    );
+    uow.commit_event_batch(batch(review.clone(), proof.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        count(&pool, &realm, "event_approval_private_audit").await,
+        1
+    );
+    assert_eq!(
+        position(&pool, &board_id, &second_id).await.value,
+        json!({"list_space_id":list_id,"rank":"b"})
+    );
+    uow.commit_event_batch(batch(review.clone(), proof))
+        .await
+        .unwrap();
+    assert_eq!(
+        count(&pool, &realm, "event_approval_private_audit").await,
+        1
+    );
+    let reused = Box::pin(ordinary_realm::source_request(&pool, next_request(
         &review.authority_commit,
         arkret_wire::EventKind::StrandMove,
         &founder(),
@@ -400,49 +405,39 @@ fn list_wip_review_scenario() -> std::pin::Pin<Box<impl std::future::Future<Outp
             "expected_position":{"list_space_id":list_id,"rank":"b"}}),
         at,
     ))).await;
-        let reused_proof = vote(
-            &reused,
-            &list_id,
-            CurrentRevision {
-                commit_id: list.authority_commit.commit.commit_id.clone(),
-                stream_position: list.authority_commit.commit.stream_position,
-            },
-            "wip-nonce-128-bit-fixture-approval",
-        );
-        let before = (
+    let reused_proof = vote(
+        &reused,
+        &list_id,
+        CurrentRevision {
+            commit_id: list.authority_commit.commit.commit_id.clone(),
+            stream_position: list.authority_commit.commit.stream_position,
+        },
+        "wip-nonce-128-bit-fixture-approval",
+    );
+    let before = (
+        count(&pool, &realm, "canonical_events").await,
+        count(&pool, &realm, "realm_commits").await,
+    );
+    assert_eq!(
+        uow.commit_event_batch(batch(reused, reused_proof))
+            .await
+            .unwrap_err()
+            .conflict_code(),
+        Some(ConflictCode::ApprovalNonceReused)
+    );
+    assert_eq!(
+        count(&pool, &realm, "event_approval_private_audit").await,
+        1
+    );
+    assert_eq!(
+        before,
+        (
             count(&pool, &realm, "canonical_events").await,
-            count(&pool, &realm, "realm_commits").await,
-        );
-        assert_eq!(
-            uow.commit_event_batch(batch(reused, reused_proof))
-                .await
-                .unwrap_err()
-                .conflict_code(),
-            Some(ConflictCode::ApprovalNonceReused)
-        );
-        assert_eq!(
-            count(&pool, &realm, "event_approval_private_audit").await,
-            1
-        );
-        assert_eq!(
-            before,
-            (
-                count(&pool, &realm, "canonical_events").await,
-                count(&pool, &realm, "realm_commits").await
-            )
-        );
-        assert_eq!(
-            position(&pool, &board_id, &second_id).await.value,
-            json!({"list_space_id":list_id,"rank":"b"})
-        );
-    })
-}
-
-#[inline(never)]
-fn review_future<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future,
-{
-    Box::pin(make())
+            count(&pool, &realm, "realm_commits").await
+        )
+    );
+    assert_eq!(
+        position(&pool, &board_id, &second_id).await.value,
+        json!({"list_space_id":list_id,"rank":"b"})
+    );
 }

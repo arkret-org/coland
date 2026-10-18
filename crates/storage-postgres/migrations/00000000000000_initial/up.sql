@@ -623,6 +623,10 @@ CREATE INDEX applet_authoring_completions_pending_idx
     ON public.applet_authoring_completions (accepted_at)
     WHERE delivered_at IS NULL;
 
+CREATE INDEX applet_authoring_completions_genesis_idx
+    ON public.applet_authoring_completions
+    ((context#>>'{committed_request,managed_actor_bundle,pcr_genesis_event,event_id}'));
+
 CREATE TABLE public.applet_authoring_previews (
     subject_key text NOT NULL,
     basis_digest text NOT NULL,
@@ -1478,10 +1482,18 @@ CREATE TABLE public.device_message_ack_tokens (
     recipient text NOT NULL,
     device_id text NOT NULL,
     recipient_device_authorization jsonb NOT NULL,
+    effective_scope jsonb,
+    delivered_positions bigint[],
     queue_position bigint NOT NULL,
     issued_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone NOT NULL,
-    consumed_at timestamp with time zone
+    consumed_at timestamp with time zone,
+    CONSTRAINT device_message_ack_tokens_exact_page_check CHECK (
+        (effective_scope IS NULL AND delivered_positions IS NULL)
+        OR (effective_scope IS NOT NULL AND delivered_positions IS NOT NULL
+            AND array_ndims(delivered_positions)=1 AND cardinality(delivered_positions)>0
+            AND array_position(delivered_positions,NULL) IS NULL)
+    )
 );
 
 CREATE INDEX device_message_ack_tokens_device_idx ON public.device_message_ack_tokens USING btree (recipient, device_id, expires_at);
@@ -1620,6 +1632,7 @@ SELECT event.* FROM public.canonical_events event WHERE event.state = 'committed
 
 CREATE TABLE public.invite_receive_policies (
     account_pk bigint PRIMARY KEY REFERENCES public.accounts(pk) ON DELETE CASCADE,
+    revision bigint NOT NULL DEFAULT 1 CHECK(revision>=1),
     policy_payload jsonb NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
@@ -1629,6 +1642,59 @@ CREATE TABLE public.invite_new_source_ledgers (
     source_digest text NOT NULL,
     first_admitted_at timestamp with time zone NOT NULL,
     PRIMARY KEY (account_pk, source_digest)
+);
+
+-- Holder-private anti-abuse key, independent of every Station signing key.
+-- Created with the native account and migrated with its private PCR effects.
+CREATE TABLE public.invite_new_source_hmac_keys (
+    account_pk bigint PRIMARY KEY REFERENCES public.accounts(pk) ON DELETE CASCADE,
+    key_bytes bytea NOT NULL CHECK(octet_length(key_bytes)=32)
+);
+
+-- A native acceptance and its recoverable hosting publication intent are atomic.
+CREATE TABLE public.consent_private_effect_jobs (
+    holder_account_id jsonb PRIMARY KEY,
+    realm_id text NOT NULL,
+    sequence bigint NOT NULL CHECK(sequence>=1)
+);
+
+-- Hosting publication replay never repeats its Station-CAS notification.
+CREATE TABLE public.consent_private_effect_fences (
+    holder_account_id jsonb NOT NULL,
+    governance_generation bigint NOT NULL CHECK(governance_generation>=0),
+    nonce text NOT NULL,
+    expires_at timestamptz NOT NULL,
+    request_digest text NOT NULL CHECK(request_digest ~ '^sha256:[0-9a-f]{64}$'),
+    outcome jsonb NOT NULL,
+    PRIMARY KEY(holder_account_id,governance_generation,nonce)
+);
+
+-- Closed private-command replay fence at the actual PCR accepting authority.
+CREATE TABLE public.consent_private_proxy_fences (
+    holder_account_id jsonb NOT NULL,
+    realm_id text NOT NULL,
+    governance_generation bigint NOT NULL CHECK(governance_generation>=0),
+    nonce text NOT NULL,
+    expires_at timestamptz NOT NULL,
+    request_digest text NOT NULL CHECK(request_digest ~ '^sha256:[0-9a-f]{64}$'),
+    outcome jsonb NOT NULL,
+    PRIMARY KEY(holder_account_id,governance_generation,nonce)
+);
+
+CREATE TABLE public.pcr_private_handoff_imports (
+    handoff_id text PRIMARY KEY,
+    realm_id text NOT NULL,
+    manifest jsonb NOT NULL
+);
+
+-- Reject-only hosting projection. This never authorizes a private acceptance.
+CREATE TABLE public.consent_private_proxy_cuts (
+    holder_account_id jsonb PRIMARY KEY,
+    realm_id text NOT NULL,
+    governance_generation bigint NOT NULL CHECK(governance_generation>=0),
+    head_stream_position bigint NOT NULL CHECK(head_stream_position>=0),
+    head_commit_id text NOT NULL,
+    cell_revisions jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
 CREATE INDEX invite_new_source_ledgers_first_admitted_at_idx
@@ -1807,7 +1873,8 @@ CREATE TABLE public.mls_key_packages (
     id text PRIMARY KEY,
     keypackage_ref text NOT NULL,
     keypackage_digest text NOT NULL,
-    owner_account_pk bigint NOT NULL,
+    owner_account_id jsonb NOT NULL CHECK (jsonb_typeof(owner_account_id)='object'),
+    effective_scope jsonb,
     actor_id text NOT NULL,
     device_id text,
     endpoint_verification_method text,
@@ -1843,11 +1910,27 @@ CREATE TABLE public.mls_key_packages (
 ALTER TABLE ONLY public.mls_key_packages
     ADD CONSTRAINT mls_key_packages_keypackage_ref_key UNIQUE (keypackage_ref);
 
-ALTER TABLE ONLY public.mls_key_packages
-    ADD CONSTRAINT mls_key_packages_owner_account_pk_fkey
-    FOREIGN KEY (owner_account_pk) REFERENCES public.accounts(pk);
+CREATE INDEX mls_key_packages_by_owner_endpoint ON public.mls_key_packages USING btree (owner_account_id, actor_id, device_id, endpoint_verification_method, claimed_by_mls_group_id);
 
-CREATE INDEX mls_key_packages_by_owner_endpoint ON public.mls_key_packages USING btree (owner_account_pk, actor_id, device_id, endpoint_verification_method, claimed_by_mls_group_id);
+-- Authenticated claim attempts share one database-clock budget across workers.
+-- Only identity digests and a short-lived first decision are retained; this
+-- table is neither a claim reservation nor a receipt or authority source.
+CREATE TABLE public.keypackage_claim_attempts (
+    source_id text NOT NULL,
+    claim_request_id text NOT NULL,
+    request_digest text NOT NULL,
+    requester_identity text NOT NULL CHECK (requester_identity ~ '^sha256:[0-9a-f]{64}$'),
+    target_identity text NOT NULL CHECK (target_identity ~ '^sha256:[0-9a-f]{64}$'),
+    source_target_identity text NOT NULL CHECK (source_target_identity ~ '^sha256:[0-9a-f]{64}$'),
+    rejection_reason text CHECK (rejection_reason IS NULL OR rejection_reason='keypackage_claim_rate_limited'),
+    attempted_at timestamptz NOT NULL,
+    expires_at timestamptz NOT NULL CHECK (expires_at > attempted_at),
+    PRIMARY KEY (source_id,claim_request_id)
+);
+CREATE INDEX keypackage_claim_attempts_requester_idx ON public.keypackage_claim_attempts(requester_identity,attempted_at);
+CREATE INDEX keypackage_claim_attempts_target_idx ON public.keypackage_claim_attempts(target_identity,attempted_at);
+CREATE INDEX keypackage_claim_attempts_source_target_idx ON public.keypackage_claim_attempts(source_target_identity,attempted_at);
+CREATE INDEX keypackage_claim_attempts_expiry_idx ON public.keypackage_claim_attempts(expires_at);
 
 CREATE TABLE public.peer_keypackage_claims (
     source_id text NOT NULL,
@@ -1858,6 +1941,7 @@ CREATE TABLE public.peer_keypackage_claims (
     outcome jsonb,
     terminal_receipt jsonb,
     consume_receipt jsonb,
+    consume_request_digest text CHECK (consume_request_digest IS NULL OR consume_request_digest ~ '^sha256:[0-9a-f]{64}$'),
     claim_expires_at_unix_ms bigint,
     expires_at bigint NOT NULL,
     state text NOT NULL,
@@ -2714,6 +2798,18 @@ CREATE TABLE public.websocket_auth_replay_ledger (
 
 CREATE INDEX websocket_auth_replay_ledger_retain_until_idx ON public.websocket_auth_replay_ledger (retain_until);
 
+-- Private RFC 9421 replay state; not a session or business acceptance ledger.
+CREATE TABLE public.applet_managed_device_nonces (
+    principal_id text NOT NULL,
+    station_id text NOT NULL,
+    device_id text NOT NULL,
+    nonce text NOT NULL CHECK(nonce ~ '^[A-Za-z0-9_-]{22,128}$'),
+    consumed_at timestamptz NOT NULL,
+    retain_until timestamptz NOT NULL CHECK(retain_until > consumed_at),
+    PRIMARY KEY (principal_id,station_id,device_id,nonce)
+);
+CREATE INDEX applet_managed_device_nonces_expiry_idx ON public.applet_managed_device_nonces (retain_until);
+
 CREATE TABLE public.websocket_connection_leases (
     connection_id text PRIMARY KEY,
     session_binding text NOT NULL,
@@ -3525,14 +3621,22 @@ CREATE TABLE event_approval_private_audit (
  approval_context TEXT NOT NULL,
  approver_did TEXT NOT NULL,
  nonce TEXT NOT NULL,
- event_id TEXT NOT NULL,
- event_digest TEXT NOT NULL,
+ event_id TEXT,
+ event_digest TEXT,
  realm_id TEXT NOT NULL,
- accepted_commit_id TEXT NOT NULL,
+ accepted_commit_id TEXT,
+ operation_id TEXT,
+ operation_target_digest TEXT,
+ operation_outcome JSONB,
  evidence JSONB NOT NULL,
  accepted_basis JSONB NOT NULL,
  accepted_at TIMESTAMPTZ NOT NULL,
  PRIMARY KEY(approval_context,approver_did,nonce),
+ CHECK((event_id IS NOT NULL AND event_digest IS NOT NULL AND accepted_commit_id IS NOT NULL
+        AND operation_id IS NULL AND operation_target_digest IS NULL AND operation_outcome IS NULL)
+       OR (event_id IS NULL AND event_digest IS NULL AND accepted_commit_id IS NULL
+        AND operation_id IS NOT NULL AND operation_target_digest IS NOT NULL AND operation_outcome IS NOT NULL
+        AND jsonb_typeof(operation_outcome)='object')),
  CHECK(jsonb_typeof(evidence)='object'),
  CHECK(jsonb_typeof(accepted_basis)='object')
 );
@@ -3636,6 +3740,43 @@ CREATE TABLE call_state_current_results (
  PRIMARY KEY(realm_id,call_id),
  CHECK(jsonb_typeof(value)='object'),
  CHECK(source_stream_ref->>'kind' IN ('realm','circle')),
+ CHECK(source_stream_ref->>'realm_id'=realm_id)
+);
+
+CREATE TABLE call_component_current_results (
+ realm_id TEXT NOT NULL,
+ call_id TEXT NOT NULL,
+ selector JSONB NOT NULL,
+ source_stream_ref JSONB NOT NULL,
+ current_commit_id TEXT NOT NULL,
+ current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
+ value JSONB NOT NULL,
+ updated_at TIMESTAMPTZ NOT NULL,
+ PRIMARY KEY(realm_id,call_id,selector),
+ CHECK(selector->>'call_id'=call_id),
+ CHECK(selector->>'kind' IN ('call_focus','call_roster','call_moderation','call_recording_state','call_recording_artifact','call_transcript_state','call_transcript_artifact')),
+ CHECK(source_stream_ref->>'kind' IN ('realm','circle')),
+ CHECK(source_stream_ref->>'realm_id'=realm_id)
+);
+
+CREATE TABLE call_voluntary_join_nonces (
+ subject_actor_id JSONB NOT NULL,
+ subject_device_id TEXT NOT NULL,
+ nonce TEXT NOT NULL,
+ expires_at TIMESTAMPTZ NOT NULL,
+ PRIMARY KEY(subject_actor_id,subject_device_id,nonce),
+ CHECK(jsonb_typeof(subject_actor_id)='object')
+);
+
+CREATE TABLE realm_media_service_current_results (
+ realm_id TEXT PRIMARY KEY,
+ source_stream_ref JSONB NOT NULL,
+ current_commit_id TEXT NOT NULL,
+ current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
+ value JSONB NOT NULL,
+ updated_at TIMESTAMPTZ NOT NULL,
+ CHECK(jsonb_typeof(value)='object'),
+ CHECK(source_stream_ref->>'kind'='realm'),
  CHECK(source_stream_ref->>'realm_id'=realm_id)
 );
 
@@ -3885,6 +4026,40 @@ CREATE TABLE realm_set_default_strand_current_results (
 -- same MessageId replaces it whole, so the carrier is either the create payload
 -- (naming its Strand) or a revise payload (naming this Message).
 -- Whole-value watch CAS preserves written null and its accepting revision.
+-- Registered audit fences retain the full original inner request and outcome.
+CREATE TABLE registered_audit_replica_units (
+    business_event_id TEXT PRIMARY KEY,
+    audit_event_id TEXT NOT NULL UNIQUE,
+    realm_id TEXT NOT NULL,
+    canonical_submission BYTEA NOT NULL
+);
+
+-- Origin exact unit bytes and verified acknowledgement survive process loss.
+CREATE TABLE registered_audit_forward_units (
+    business_event_id TEXT PRIMARY KEY,
+    audit_event_id TEXT NOT NULL UNIQUE,
+    realm_id TEXT NOT NULL,
+    canonical_request BYTEA NOT NULL,
+    outcome JSONB
+);
+
+CREATE TABLE registered_audit_units (
+    business_event_id TEXT PRIMARY KEY,
+    audit_event_id TEXT NOT NULL UNIQUE,
+    realm_id TEXT NOT NULL,
+    canonical_request BYTEA NOT NULL,
+    outcome JSONB NOT NULL,
+    private_audit_digest TEXT NOT NULL
+);
+CREATE TABLE watch_audit_read_results (
+    audit_event_id TEXT PRIMARY KEY,
+    realm_id TEXT NOT NULL,
+    auditor_actor_id TEXT NOT NULL,
+    canonical_request BYTEA NOT NULL,
+    outcome JSONB NOT NULL,
+    private_audit_digest TEXT NOT NULL
+);
+
 CREATE TABLE strand_watch_current_results (
  realm_id TEXT NOT NULL,
  strand_id TEXT NOT NULL,
@@ -3896,7 +4071,7 @@ CREATE TABLE strand_watch_current_results (
  PRIMARY KEY(strand_id,watcher_actor_id)
 );
 CREATE INDEX strand_watch_current_results_realm_idx ON strand_watch_current_results (realm_id,strand_id,watcher_actor_id);
-CREATE INDEX canonical_events_watch_key_idx ON public.canonical_events (realm_id,((envelope->'payload'->>'strand_id')),actor_id) WHERE kind='ak.strand.watch.set' AND state='committed';
+CREATE INDEX canonical_events_watch_key_idx ON public.canonical_events (realm_id,((envelope->'payload'->>'strand_id')),((envelope->'payload'->'watcher_actor_id'))) WHERE kind='ak.strand.watch.set' AND state='committed';
 
 -- Poll response history references its canonical truth in the same acceptance
 -- transaction. No independently mutable selections or Actor claims are stored.
@@ -4424,14 +4599,17 @@ CREATE TABLE pcr_device_revocation_proposals (
 CREATE INDEX pcr_device_revocation_proposals_commit
  ON pcr_device_revocation_proposals(commit_id);
 
--- actor_profile typed current (profiles-presence.md section 2.3). One global
--- Actor Profile per create-derived id, projected in its owner's Principal
--- Control Realm by the transaction that writes the accepting RealmCommit. The
--- self-service surface keeps one profile lineage per PCR, so the Realm is
--- unique; the value is the complete materialized object.
+-- Actor Profile current: one lineage per full Account and exact signed scope.
+-- PCR identity and ordinary Applet interaction profiles never share a lineage.
 CREATE TABLE actor_profile_current_results (
- realm_id TEXT NOT NULL UNIQUE,
+ realm_id TEXT NOT NULL,
  actor_profile_id TEXT PRIMARY KEY,
+ actor_id JSONB NOT NULL,
+ scope_ref JSONB NOT NULL,
+ UNIQUE(scope_ref,actor_id),
+ CHECK(actor_id->>'kind'='account'),
+ CHECK(scope_ref->>'kind' IN ('realm','circle')),
+ CHECK(scope_ref->>'realm_id'=realm_id),
  current_commit_id TEXT NOT NULL REFERENCES realm_commits(commit_id),
  current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
  value JSONB NOT NULL,
@@ -4752,7 +4930,7 @@ CREATE TABLE management_review_requests (
  realm_id TEXT NOT NULL,
  requester_actor_key TEXT NOT NULL,
  effective_scope JSONB NOT NULL,
- management_operation TEXT NOT NULL CHECK(management_operation IN ('join','publish')),
+ management_operation TEXT NOT NULL CHECK(management_operation IN ('join','publish','create_bot','map_ghost')),
  request_digest TEXT NOT NULL,
  target_digest TEXT NOT NULL,
  request_body JSONB NOT NULL,
@@ -4764,11 +4942,17 @@ CREATE TABLE management_review_requests (
  approval_signatures JSONB NOT NULL DEFAULT '[]'::jsonb,
  approval_basis JSONB NOT NULL DEFAULT '[]'::jsonb,
  accepted_commit_id TEXT,
+ accepted_operation_outcome JSONB,
  CHECK(expires_at>created_at AND expires_at<=created_at+INTERVAL '24 hours'),
  CHECK(jsonb_typeof(request_body)='object' AND jsonb_typeof(immutable_pins)='object'),
  CHECK(jsonb_typeof(requirements)='array' AND jsonb_typeof(approval_signatures)='array' AND jsonb_typeof(approval_basis)='array'),
- CHECK((status='consumed')=(accepted_commit_id IS NOT NULL))
+ CHECK((status='consumed')=(num_nonnulls(accepted_commit_id,accepted_operation_outcome)=1)),
+ CHECK(num_nonnulls(accepted_commit_id,accepted_operation_outcome)<=1),
+ CHECK(accepted_operation_outcome IS NULL OR jsonb_typeof(accepted_operation_outcome)='object')
 );
 CREATE UNIQUE INDEX management_review_one_nonterminal_target ON management_review_requests
  (requester_actor_key,effective_scope,management_operation,target_digest)
  WHERE status IN ('pending','approved');
+
+-- Publication progress is distinct from reject-only response high water.
+CREATE TABLE public.consent_private_effect_cuts (LIKE public.consent_private_proxy_cuts INCLUDING ALL);

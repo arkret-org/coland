@@ -66,7 +66,7 @@ pub(crate) async fn member_selector(
     .map_err(PgTransactionError::into_persistence)
 }
 
-async fn member_selector_in_connection(
+pub(crate) async fn member_selector_in_connection(
     conn: &mut AsyncPgConnection,
     request: &arkret_models_collaboration::mls_roster_authority::MlsMemberRosterAuthorityReadRequestBody,
     issuer: &DidCoreId,

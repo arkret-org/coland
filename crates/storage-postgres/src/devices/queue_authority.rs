@@ -363,7 +363,7 @@ pub(super) async fn human_queue_has_capacity_in_transaction(
     Ok(row.count < i64::try_from(capacity).unwrap_or(i64::MAX))
 }
 
-async fn current_binding(
+pub(super) async fn current_binding(
     conn: &mut diesel_async::AsyncPgConnection,
     recipient: &str,
     device_id: &str,
@@ -424,7 +424,7 @@ pub(super) async fn ack_with_token(
     let mut conn = pg_conn(pool).await.map_err(PersistenceError::database)?;
     conn.transaction::<_, PgTransactionError, _>(async move |conn| {
         let Some(binding) = current_binding(conn, recipient, device_id).await? else { return Ok(None); };
-        let token = sql_query("SELECT recipient,device_id,recipient_device_authorization,queue_position,expires_at,consumed_at FROM device_message_ack_tokens WHERE ack_token=$1 FOR UPDATE")
+        let token = sql_query("SELECT recipient,device_id,recipient_device_authorization,queue_position,expires_at,consumed_at FROM device_message_ack_tokens WHERE ack_token=$1 AND effective_scope IS NULL FOR UPDATE")
             .bind::<Text,_>(ack_token).get_result::<DeviceMessageAckTokenRow>(conn).await.optional()?;
         let Some(token) = token else { return Ok(None); };
         if token.recipient != recipient || token.device_id != device_id || token.recipient_device_authorization != binding || token.expires_at <= Utc::now() { return Ok(None); }

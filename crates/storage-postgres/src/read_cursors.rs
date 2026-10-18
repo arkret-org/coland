@@ -52,8 +52,8 @@ struct TenureRow {
 
 #[derive(QueryableByName)]
 struct JoinFloorRow {
-    #[diesel(sql_type = BigInt)]
-    current_stream_position: i64,
+    #[diesel(sql_type = BigInt, column_name = current_stream_position)]
+    _position: i64,
 }
 
 #[derive(QueryableByName)]
@@ -62,6 +62,8 @@ struct PositionRow {
     realm_id: String,
     #[diesel(sql_type = Text)]
     stream_key: String,
+    #[diesel(sql_type = Jsonb)]
+    stream_ref: serde_json::Value,
     #[diesel(sql_type = BigInt)]
     stream_position: i64,
 }
@@ -118,7 +120,7 @@ async fn prove_position(
     advance: &ReadCursorAdvance,
 ) -> Result<Result<ProvedPosition, ReadCursorAdvanceRefusal>, PgTransactionError> {
     let realm_id = advance.cursor.realm_id.as_str();
-    let tenure = sql_query("SELECT service_id FROM realm_authorities WHERE realm_id=$1")
+    let tenure = sql_query("SELECT service_id FROM realm_authorities WHERE realm_id=$1 FOR SHARE")
         .bind::<Text, _>(realm_id)
         .get_result::<TenureRow>(&mut *conn)
         .await
@@ -129,7 +131,7 @@ async fn prove_position(
         )));
     }
     let owner = ActorId::account(advance.owner.clone()).to_string();
-    let Some(floor) = sql_query(
+    let Some(_membership) = sql_query(
         "SELECT current_stream_position FROM member_state_current_results \
          WHERE realm_id=$1 AND member_id=$2 AND membership='join' FOR SHARE",
     )
@@ -146,7 +148,7 @@ async fn prove_position(
             PersistenceError::SchemaViolation("read cursor position Event id is invalid".to_owned())
         })?;
     let Some(position) = sql_query(
-        "SELECT c.realm_id, c.stream_key, c.stream_position FROM canonical_events e \
+        "SELECT c.realm_id, c.stream_key, c.stream_ref, c.stream_position FROM canonical_events e \
          JOIN realm_commits c ON c.event_pk=e.pk WHERE e.id=$1 AND e.state='committed'",
     )
     .bind::<Binary, _>(token.to_vec())
@@ -159,15 +161,56 @@ async fn prove_position(
     if position.realm_id != realm_id {
         return Ok(Err(ReadCursorAdvanceRefusal::PositionNotInRealm));
     }
-    let realm_stream = crate::authority_commit::stream_key(&CommitStreamRef::Realm {
-        realm_id: advance.cursor.realm_id.clone(),
-    })?;
-    if position.stream_key != realm_stream {
-        return Ok(Err(ReadCursorAdvanceRefusal::Unproved(
-            "Circle and Sidecar stream visibility is not proved at this cut",
-        )));
+    let stream: CommitStreamRef = decode(position.stream_ref, "read cursor position stream")?;
+    if stream.realm_id() != &advance.cursor.realm_id
+        || crate::authority_commit::stream_key(&stream)? != position.stream_key
+    {
+        return Err(PersistenceError::SchemaViolation(
+            "read cursor position stream does not bind its accepted coordinate".into(),
+        )
+        .into());
     }
-    if position.stream_position < floor.current_stream_position {
+    let caller = ActorId::account(advance.owner.clone());
+    let floor = match &stream {
+        CommitStreamRef::Realm { realm_id } => {
+            sql_query("SELECT 1 FROM realm_bootstrap_current_results WHERE realm_id=$1 AND result_family='realm_history_access' FOR SHARE")
+                .bind::<Text, _>(realm_id.as_str()).execute(&mut *conn).await?;
+            crate::account_stream_scan::caller_realm_floor_in_connection(conn, realm_id, &caller)
+                .await?
+        }
+        CommitStreamRef::Circle {
+            realm_id,
+            circle_id,
+        } => {
+            // Pin the exact accepted Circle current and join while evaluating
+            // the same parent-bound interval used by ordinary stream reads.
+            sql_query(
+                "SELECT 1 FROM circle_current_results WHERE realm_id=$1 AND circle_id=$2 FOR SHARE",
+            )
+            .bind::<Text, _>(realm_id.as_str())
+            .bind::<Text, _>(circle_id.as_str())
+            .execute(&mut *conn)
+            .await?;
+            sql_query("SELECT 1 FROM circle_member_state_current_results WHERE realm_id=$1 AND circle_id=$2 AND member_id=$3 FOR SHARE")
+                .bind::<Text, _>(realm_id.as_str()).bind::<Text, _>(circle_id.as_str())
+                .bind::<Text, _>(&owner).execute(&mut *conn).await?;
+            crate::account_stream_scan::caller_circle_floor_in_connection(
+                conn, realm_id, circle_id, &caller,
+            )
+            .await?
+        }
+        _ => {
+            return Ok(Err(ReadCursorAdvanceRefusal::Unproved(
+                "the position stream visibility is not proved at this cut",
+            )));
+        }
+    };
+    let Some(floor) = floor else {
+        return Ok(Err(ReadCursorAdvanceRefusal::PositionNotReadable));
+    };
+    if position.stream_position
+        < i64::try_from(floor.oldest_position).map_err(PersistenceError::database)?
+    {
         return Ok(Err(ReadCursorAdvanceRefusal::PositionNotReadable));
     }
     Ok(Ok(ProvedPosition {

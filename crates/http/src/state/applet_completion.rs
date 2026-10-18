@@ -156,6 +156,9 @@ async fn deliver_one(
             source_id: completion.source_id.clone(),
             authoring_context: completion.context.clone(),
         }));
+    // Authoring returns accepted context; this branch publishes no new originals.
+    let body = arkret_identity::VerifiedSubmission::from_verified_events(body, &[])
+        .map_err(|error| error.to_string())?;
     let outcome = client
         .applet_transaction_from_service(
             &completion.idempotency_key,

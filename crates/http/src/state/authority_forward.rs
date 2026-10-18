@@ -1,6 +1,6 @@
 //! `authority_forward` on both Stations of device-lifecycle §8.2.2.
 //!
-//! A human-device producer is resolved by one rule for every Event kind. When
+//! A real Account Device producer is resolved by one rule for every Event kind. When
 //! the producer's Account lives on another Station, the forwarding Station
 //! (the Account Station, "A") signs a fresh `account_device_signer_evidence`
 //! from its own live PCR gate for every forwarding attempt and persists it
@@ -46,10 +46,10 @@ fn wire_refusal(error: arkret_wire::WireError) -> ServiceError {
     )
 }
 
-/// Governance Station check of one forwarded human-device producer.
+/// Governance Station check of one forwarded Account Device producer.
 ///
 /// `evidence` has already passed the Event-decided presence rule, so `None`
-/// means the producer is not a human Account device.
+/// means the producer is not an Account Device producer.
 fn verify_forwarded_producer(
     state: &AppState,
     peer: &AuthenticatedPeerContext,
@@ -58,7 +58,7 @@ fn verify_forwarded_producer(
     body_digest: &arkret_wire::Hash,
     now: DateTime<Utc>,
 ) -> ServiceResult<Option<ForwardedProducerDeviceEvidence>> {
-    arkret_schema::validate_event_for_submit(event)
+    arkret_event_draft::validate_event_for_submit(event)
         .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
     let digest_suite = state
         .projections()
@@ -70,7 +70,7 @@ fn verify_forwarded_producer(
         return Ok(None);
     };
     let verified =
-        arkret_identity::account_device_signer_evidence::verify_forwarded_human_signer_fact(
+        arkret_identity::account_device_signer_evidence::verify_forwarded_account_device_signer_fact(
             evidence,
             event,
             &peer.source_service_id,
@@ -91,7 +91,7 @@ fn verify_forwarded_producer(
     )?))
 }
 
-fn resolve_forwarded_producer(
+pub(super) fn resolve_forwarded_producer(
     state: &AppState,
     peer: &AuthenticatedPeerContext,
     event: &Event,
@@ -103,6 +103,15 @@ fn resolve_forwarded_producer(
     super::authority_self_event_unit::AdmittedProducer,
     arkret_signatures::PublicKeyMaterial,
 )> {
+    // Structural PCR candidates must never weaken ordinary producer admission.
+    arkret_models_collaboration::authority_commit::validate_producer_agent_evidence_presence(
+        event, agent,
+    )
+    .map_err(wire_refusal)?;
+    arkret_models_collaboration::authority_commit::validate_producer_device_evidence_presence(
+        event, device,
+    )
+    .map_err(wire_refusal)?;
     if let Some(device) = verify_forwarded_producer(state, peer, event, device, body_digest, now)? {
         let key = forwarded_producer_key(Some(&device.evidence))?;
         return Ok((
@@ -130,10 +139,67 @@ fn resolve_forwarded_producer(
             key,
         ));
     }
+    if let Some(service) = resolve_service_producer(state, event)? {
+        return Ok(service);
+    }
     Err(ServiceError::protocol(
         ErrorCode::DependencyMissing,
-        "forwarded Service producer authority is unavailable",
+        "forwarded producer authority is unavailable",
     ))
+}
+
+pub(super) fn resolve_service_producer(
+    state: &AppState,
+    event: &Event,
+) -> ServiceResult<
+    Option<(
+        super::authority_self_event_unit::AdmittedProducer,
+        arkret_signatures::PublicKeyMaterial,
+    )>,
+> {
+    if matches!(event.actual_signer(), arkret_wire::ActorId::Service { .. }) {
+        let proof = event.producer_proof.as_ref().ok_or_else(|| {
+            ServiceError::protocol(
+                ErrorCode::SignatureInvalid,
+                "Service producer proof is absent",
+            )
+        })?;
+        crate::jws_verify::validate_verification_method_controller(
+            event.actual_signer().route_service_id().as_str(),
+            proof.verification_method.as_str(),
+        )
+        .map_err(|error| ServiceError::protocol(ErrorCode::SignatureInvalid, error))?;
+        let (controller, _) = proof
+            .verification_method
+            .as_str()
+            .rsplit_once('#')
+            .ok_or_else(|| {
+                ServiceError::protocol(
+                    ErrorCode::SignatureInvalid,
+                    "Service method has no fragment",
+                )
+            })?;
+        let did = arkret_wire::Did::new(controller.to_owned())
+            .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+        let document = crate::jws_verify::resolve_did_document(state, &did)
+            .map_err(temporarily_unavailable)?;
+        let key = arkret_identity::public_key_material_from_document(
+            &document,
+            &proof.verification_method,
+        )
+        .map_err(temporarily_unavailable)?;
+        // Registration epoch, installation, grant, producer proof and source
+        // fact are independently rechecked under the accepting transaction.
+        return Ok(Some((
+            super::authority_self_event_unit::AdmittedProducer::Applet(
+                coland_storage::AppletEventProducerGuard {
+                    service_did_document: document,
+                },
+            ),
+            key,
+        )));
+    }
+    Ok(None)
 }
 
 /// B: admit one forwarded ordinary Event at `now`.
@@ -145,6 +211,15 @@ pub(crate) async fn admit_forwarded_event(
 ) -> ServiceResult<AuthoritySubmitOutcome> {
     let event = &request.event_submission.event;
     super::authority_port::refuse_actor_private_event(&event.kind)?;
+    if request.is_native_pcr_candidate()
+        && state
+            .persistence()
+            .principal_resolution_for_realm(&event.realm_id)
+            .await?
+            .is_some()
+    {
+        return super::authority_pcr::admit_forwarded(state, peer, &request).await;
+    }
     if let Some(outcome) = super::authority_self_event_unit::exact_replay(state, event).await? {
         return Ok(outcome);
     }
@@ -251,25 +326,13 @@ fn forwarded_producer_key(
     })
 }
 
-/// A: sign and persist fresh `producer_device_evidence` for this attempt.
-///
-/// `None` when the Event's producer is not a human Account device. The live
-/// PCR gate refuses a revoked, revocation-pending, fenced or out-of-window
-/// device with its registered code before anything is signed, and the
-/// retention transaction re-proves the same cut at `attested_at`.
-pub(super) async fn fresh_directory_device_evidence(
-    state: &AppState,
-    event: &Event,
-) -> ServiceResult<Option<AccountDeviceSignerEvidence>> {
-    prepare_directory_device_evidence(state, event, true).await
-}
-
+/// Human controller dependency for the independently registered native Agent unit.
 async fn prepare_directory_device_evidence(
     state: &AppState,
     event: &Event,
     retain: bool,
 ) -> ServiceResult<Option<AccountDeviceSignerEvidence>> {
-    let Some(producer) = event.human_device_producer().map_err(wire_refusal)? else {
+    let Some(producer) = event.account_device_producer().map_err(wire_refusal)? else {
         return Ok(None);
     };
     if producer.account_id.station_id != state.service_core_id() {
@@ -336,37 +399,40 @@ pub(crate) async fn fresh_producer_device_evidence(
     destination: &DidCoreId,
     body_digest: &arkret_wire::Hash,
 ) -> ServiceResult<Option<ForwardAccountDeviceSignerEvidence>> {
-    let Some(directory) = fresh_directory_device_evidence(state, event).await? else {
+    let Some(producer) = event.account_device_producer().map_err(wire_refusal)? else {
         return Ok(None);
     };
-    let core = directory.device_projection_attestation.attestation;
-    let fact = state
-        .authority_commits()
-        .prepare_human_signer_fact(event, core.attested_at)
+    if producer.account_id.station_id != state.service_core_id() {
+        return Err(ServiceError::SchemaViolation(
+            "only the producer's Account Station may issue its forward source".into(),
+        ));
+    }
+    let admission = state
+        .persistence()
+        .pcr_device_admission(
+            &producer.account_id,
+            &producer.device_id,
+            crate::wire::now(),
+        )
+        .await
+        .map_err(|error| temporarily_unavailable(format!("PCR Device status: {error}")))?;
+    if let Some(refusal) = ServiceError::device_admission_refusal(
+        admission,
+        "producer Device is not active at its origin Station",
+    ) {
+        return Err(refusal);
+    }
+    let Some(forward_core) = state
+        .persistence()
+        .prepare_forward_current_signer_evidence(event, destination, body_digest)
         .await?
-        .ok_or_else(|| temporarily_unavailable("forward origin immutable source is unavailable"))?;
-    let forward_core = arkret_models_crypto::ForwardDeviceProjectionAttestationCore {
-        account_id: core.account_id,
-        device_id: core.device_id,
-        device_signing_key_did: core.device_signing_key_did,
-        hpke_key: core.hpke_key,
-        device_authorize_event_id: core.device_authorize_event_id,
-        authorized_generation_ref: core.authorized_generation_ref,
-        device_status: core.device_status,
-        authorization_window: core.authorization_window,
-        attested_at: core.attested_at,
-        expires_at: core.expires_at,
-        event_authorization: arkret_models_crypto::HumanEventAuthorization {
-            event_id: fact.event_id,
-            verification_method: fact.verification_method,
-            destination_service_id: destination.clone(),
-            forward_body_digest: body_digest.clone(),
-            authorization_ref: fact.key.authorization_ref,
-            revision: fact.key.revision,
-            governance_generation: fact.key.governance_generation,
-            accepted_at: fact.accepted_at,
-        },
+    else {
+        return Ok(None);
     };
+    let service_resolution =
+        crate::routing::system::service_resolution::current_authenticated_service_resolution(state)
+            .await
+            .map_err(|error| temporarily_unavailable(error.message))?;
     let attestation =
         arkret_signatures::device_projection::sign_forward_device_projection_attestation(
             forward_core,
@@ -378,7 +444,7 @@ pub(crate) async fn fresh_producer_device_evidence(
         .map_err(wire_refusal)?;
     let evidence = ForwardAccountDeviceSignerEvidence {
         device_projection_attestation: attestation,
-        service_resolution: directory.service_resolution,
+        service_resolution,
     };
     // Same original PCR lock re-prepares every immutable field and checks the
     // fresh projection before retaining the complete signed origin root.
@@ -477,7 +543,7 @@ pub(crate) async fn fresh_producer_agent_evidence(
     event: &Event,
 ) -> ServiceResult<Option<arkret_models_identity::AgentProducerEvidence>> {
     if event
-        .human_device_producer()
+        .account_device_producer()
         .map_err(wire_refusal)?
         .is_some()
         || event.actual_signer().as_account_id().is_none()
@@ -923,8 +989,14 @@ pub(super) async fn validate_recovery_caller(
             "recovery requires a standard grant",
         )
     })?;
-    if event.actor_id != actor
-        || event.executed_by.is_some()
+    // Recovery authenticates the original actual producer. Attributed Agent
+    // commands retain the controller author in their immutable Event bytes;
+    // they must not be mistaken for a different caller on exact retry.
+    let delegated_agent = session.agent_session().is_some()
+        && event.executed_by.as_ref() == Some(&actor)
+        && event.actor_id != actor;
+    if event.actual_signer() != &actor
+        || (event.executed_by.is_some() && !delegated_agent)
         || grant.account_id != *account
         || grant.credential_class != SessionGrantCredentialClass::Standard
         || account.station_id != state.service_core_id()
@@ -1082,7 +1154,7 @@ async fn verify_bound_invite_claim(
     }
     let fact = state
         .persistence()
-        .forwarded_bound_human_signer_fact(event, commit, governance)
+        .forwarded_bound_account_device_signer_fact(event, commit, governance)
         .await
         .map_err(temporarily_unavailable)?
         .ok_or_else(|| {
@@ -1113,7 +1185,7 @@ async fn verify_bound_invite_claim(
     Ok(true)
 }
 
-async fn verify_forwarded_acknowledgement(
+pub(super) async fn verify_forwarded_acknowledgement(
     state: &AppState,
     governance: &DidCoreId,
     event: &Event,
@@ -1172,7 +1244,7 @@ async fn verify_forwarded_acknowledgement(
 /// refusal carries (such as `epoch_update_required` on
 /// `failed_precondition`) is kept so the relayed refusal renders identically.
 /// A server failure or an unregistered answer is retryable unavailability.
-fn relayed_refusal(status: u16, body: &[u8]) -> ServiceError {
+pub(super) fn relayed_refusal(status: u16, body: &[u8]) -> ServiceError {
     let problem = serde_json::from_slice::<arkret_wire::Problem>(body).ok();
     let code = problem.as_ref().and_then(arkret_wire::Problem::error_code);
     let (Some(problem), Some(code)) = (problem, code) else {
@@ -1197,7 +1269,7 @@ fn relayed_refusal(status: u16, body: &[u8]) -> ServiceError {
 
 /// Relay the governance Station's answer to exactly this forward: a typed
 /// outcome bound to the forwarded Event, or its registered refusal code.
-fn relay_governance_response(
+pub(super) fn relay_governance_response(
     request: &PeerAuthoritySubmitRequest,
     response: crate::routing::federation::outbox::PeerSubmitResponse,
 ) -> ServiceResult<AuthoritySubmitOutcome> {
@@ -1227,7 +1299,15 @@ fn relay_governance_response(
             ));
         }
     };
-    if let AuthoritySubmitOutcome::Accepted { commit, .. } = &value.outcome {
+    let arkret_models_collaboration::authority_commit::PeerAuthorityForwardOutcomeValue::Ordinary(
+        outcome,
+    ) = value.outcome
+    else {
+        return Err(temporarily_unavailable(
+            "single Event forward received an atomic outcome",
+        ));
+    };
+    if let AuthoritySubmitOutcome::Accepted { commit, .. } = &outcome {
         let stream_ref = arkret_wire::CommitStreamRef::from_scope(
             &event.scope_ref,
             Some(event.realm_id.clone()),
@@ -1242,7 +1322,7 @@ fn relay_governance_response(
             ));
         }
     }
-    Ok(value.outcome)
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -1284,12 +1364,14 @@ pub(super) async fn prepare_control_source(
     if !relevant {
         return Ok(None);
     }
-    let transactional_profile = matches!(
+    let transactional_origin = matches!(
         event.kind,
-        arkret_wire::EventKind::ProfileCreate | arkret_wire::EventKind::ProfileUpdate
+        arkret_wire::EventKind::AgentKeyAuthorize
+            | arkret_wire::EventKind::ProfileCreate
+            | arkret_wire::EventKind::ProfileUpdate
     );
     let dependency = if let Some(root) =
-        prepare_directory_device_evidence(state, event, !transactional_profile).await?
+        prepare_directory_device_evidence(state, event, !transactional_origin).await?
     {
         arkret_models_identity::AgentSignerDependency::AccountDevice {
             signer_resolution_evidence_ref: root.signer_evidence_ref().map_err(wire_refusal)?,

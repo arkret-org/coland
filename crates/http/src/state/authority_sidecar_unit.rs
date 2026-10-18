@@ -71,10 +71,12 @@ pub(crate) async fn commit_sidecar_ensure_unit(
             received_at: committed_at,
         };
         commands.push(coland_services::events::CommitAcceptedEventCommand {
+            verified_media_participant: None,
             authority_commit: transaction,
             self_producer_guard: Some(producer),
             applet_producer_guard: None,
             widget_token_gate: None,
+            agent_grant_scope_evidence: None,
             forwarded_producer_evidence: None,
             forwarded_agent_producer: None,
             agent_deployment_ceiling: arkret_models_collaboration::governance::agent_participation::ParticipationBits::ALL,
@@ -103,6 +105,7 @@ pub(crate) async fn commit_sidecar_ensure_unit(
     state
         .events()
         .commit_accepted_event_batch(coland_services::events::CommitAcceptedEventBatchCommand {
+            audit_unit: None,
             events: commands,
             franking_replay_nonce: None,
             realm_organization_proof: None,

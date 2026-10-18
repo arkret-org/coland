@@ -334,12 +334,12 @@ async fn seed_snapshot_families(conn: &mut AsyncPgConnection, first: i64, last: 
     let realm = "'ak:realm:capacity-' || r";
     let commit = "'capacity-' || r || '-0'";
     let key = "r || '-' || m";
-    conn.batch_execute(&format!("INSERT INTO canonical_events(id,digest_suite,digest,actor_id,realm_id,scope_ref,kind,canonical_bytes,envelope,state,committed_at) SELECT '\\x01'::bytea || d.digest,1,d.digest,jsonb_build_object('watcher','actor-' || {key})::text,{realm},'{{}}','ak.strand.watch.set','\\x00'::bytea,jsonb_build_object('event_id','watch-event-' || {key},'payload',jsonb_build_object('strand_id','strand-' || {key})),'committed',now() {rows},LATERAL(SELECT sha256(convert_to('watch-' || {key},'UTF8')) AS digest)d"))
+    conn.batch_execute(&format!("INSERT INTO canonical_events(id,digest_suite,digest,actor_id,realm_id,scope_ref,kind,canonical_bytes,envelope,state,committed_at) SELECT '\\x01'::bytea || d.digest,1,d.digest,jsonb_build_object('watcher','actor-' || {key})::text,{realm},'{{}}','ak.strand.watch.set','\\x00'::bytea,jsonb_build_object('event_id','watch-event-' || {key},'payload',jsonb_build_object('strand_id','strand-' || {key},'watcher_actor_id',jsonb_build_object('watcher','actor-' || {key}))),'committed',now() {rows},LATERAL(SELECT sha256(convert_to('watch-' || {key},'UTF8')) AS digest)d"))
         .await.unwrap();
     if first == 1 {
         // A nonempty hot watch index must retain bounded exact-selector reads
         // even after many accepted replacements of the same cell.
-        conn.batch_execute(&format!("INSERT INTO canonical_events(id,digest_suite,digest,actor_id,realm_id,scope_ref,kind,canonical_bytes,envelope,state,committed_at) SELECT '\\x01'::bytea || d.digest,1,d.digest,jsonb_build_object('watcher','actor-1-1')::text,'ak:realm:capacity-1','{{}}','ak.strand.watch.set','\\x00'::bytea,jsonb_build_object('event_id','watch-hot-' || p,'payload',jsonb_build_object('strand_id','strand-1-1')),'committed',now() FROM generate_series(1,{HOT_HISTORY}) p,LATERAL(SELECT sha256(convert_to('watch-hot-' || p,'UTF8')) AS digest)d"))
+        conn.batch_execute(&format!("INSERT INTO canonical_events(id,digest_suite,digest,actor_id,realm_id,scope_ref,kind,canonical_bytes,envelope,state,committed_at) SELECT '\\x01'::bytea || d.digest,1,d.digest,jsonb_build_object('watcher','actor-1-1')::text,'ak:realm:capacity-1','{{}}','ak.strand.watch.set','\\x00'::bytea,jsonb_build_object('event_id','watch-hot-' || p,'payload',jsonb_build_object('strand_id','strand-1-1','watcher_actor_id',jsonb_build_object('watcher','actor-1-1'))),'committed',now() FROM generate_series(1,{HOT_HISTORY}) p,LATERAL(SELECT sha256(convert_to('watch-hot-' || p,'UTF8')) AS digest)d"))
             .await.unwrap();
     }
     for (table, columns, expressions, value) in [

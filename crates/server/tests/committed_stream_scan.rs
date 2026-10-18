@@ -20,11 +20,13 @@ use serde_json::{Value, json};
 const SCAN_PATH: &str = "/_arkret/self/streams/scan";
 
 #[tokio::test]
-async fn authority_bundle_unknown_and_non_governing_realms_have_one_public_refusal() {
-    let (state, _pool) = coland_test_support::app_state_with_pool(AppConfig {
+async fn authority_bundle_unknown_refuses_and_unavailable_remote_locator_fails_closed() {
+    let mut config = AppConfig {
         development_mode: true,
         ..coland_test_support::app_config()
-    });
+    };
+    config.did_resolver_allow_methods.push("webvh".into());
+    let (state, _pool) = coland_test_support::app_state_with_pool(config);
     let foreign =
         ordinary_realm::bootstrap_unit(&format!("non-governing-bundle-{}", uuid::Uuid::now_v7()));
     // A replica records remote governance without importing foreign devices
@@ -40,15 +42,31 @@ async fn authority_bundle_unknown_and_non_governing_realms_have_one_public_refus
         .expect("durable remote Realm authority");
     let unknown =
         ordinary_realm::bootstrap_unit(&format!("unknown-bundle-{}", uuid::Uuid::now_v7()));
-    let mut refusals = Vec::new();
-    for realm_id in [
-        foreign.transactions[0].event.realm_id.clone(),
-        unknown.transactions[0].event.realm_id.clone(),
+    // A known remote governor is a locator: only its verified nonce-bound
+    // original can succeed. An unavailable dependency is the registered 503,
+    // while an unknown Realm has the universal non-enumerating refusal.
+    for (realm_id, status, code) in [
+        (
+            foreign.transactions[0].event.realm_id.clone(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+        ),
+        (
+            unknown.transactions[0].event.realm_id.clone(),
+            StatusCode::FORBIDDEN,
+            "capability_denied",
+        ),
     ] {
         let request = arkret_wire::AuthorityBundleRequest {
             realm_id,
             nonce: arkret_wire::Base64UrlString::new("a".repeat(32)).unwrap(),
         };
+        let before = state
+            .test_persistence()
+            .authority_commits()
+            .current_authority(&request.realm_id)
+            .await
+            .unwrap();
         let body =
             String::from_utf8(arkret_canonical::canonical_json_bytes(&request).unwrap()).unwrap();
         let mut response = TestClient::post("http://server/_arkret/open/realm-authority/bundle")
@@ -60,17 +78,36 @@ async fn authority_bundle_unknown_and_non_governing_realms_have_one_public_refus
             .raw_json(body)
             .send(&service(state.clone()))
             .await;
-        assert_eq!(response.status_code, Some(StatusCode::FORBIDDEN));
-        let mut problem: Value = response.take_json().await.unwrap();
+        let received_status = response.status_code;
+        let problem: Value = response.take_json().await.unwrap();
+        assert_eq!(received_status, Some(status), "{problem}");
         assert_eq!(
             problem["type"],
-            "https://arkret.org/problems/capability_denied"
+            format!("https://arkret.org/problems/{code}")
         );
         assert!(problem["instance"].as_str().is_some());
-        problem.as_object_mut().unwrap().remove("instance");
-        refusals.push(problem);
+        assert_eq!(
+            state
+                .test_persistence()
+                .authority_commits()
+                .current_authority(&request.realm_id)
+                .await
+                .unwrap(),
+            before
+        );
+        assert!(
+            state
+                .test_persistence()
+                .authority_commits()
+                .held_stream_head_commit(&CommitStreamRef::Realm {
+                    realm_id: request.realm_id
+                })
+                .await
+                .unwrap()
+                .is_none(),
+            "a failed locator read must not mint a local Realm head"
+        );
     }
-    assert_eq!(refusals[0], refusals[1]);
 }
 
 async fn dev_session(

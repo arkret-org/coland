@@ -435,22 +435,22 @@ impl ProjectionState {
                     );
                 }
                 CallRosterDelta::Leave {
-                    expected_revision: _,
-                    actor_id: _,
-                    device_id: _,
+                    actor_id,
+                    device_id,
+                    ..
                 } => {
-                    // The leave delta no longer names the join entry by an
-                    // observed tag: it carries `CurrentRevision { commit_id,
-                    // stream_position }` of the roster value the producer read,
-                    // and the compare is field-for-field. `SettledFacet` holds
-                    // only a write counter and `ProjectionContext` carries no
-                    // commit id or stream position, so this reducer cannot
-                    // evaluate that precondition at all. Rejecting is the only
-                    // honest outcome: dropping the compare would accept a stale
-                    // leave against a roster the producer never read.
-                    return ProjectionEffect::Rejected {
-                        reason: "call_roster_expected_revision_unevaluable".to_owned(),
-                    };
+                    // The covering Commit already decided the whole-axis CAS.
+                    // This cache only restores its accepted effective roster.
+                    let actor =
+                        serde_json::to_value(actor_id).expect("typed roster actor serializes");
+                    entries.retain(|entry| {
+                        entry.get("value").and_then(|value| value.get("actor_id")) != Some(&actor)
+                            || entry
+                                .get("value")
+                                .and_then(|value| value.get("device_id"))
+                                .and_then(Value::as_str)
+                                != Some(device_id.as_str())
+                    });
                 }
             }
             writes.push((roster, Value::Array(entries)));
@@ -473,14 +473,18 @@ impl ProjectionState {
                         operation.context.event_id.as_str(),
                     );
                 }
-                CallModerationDelta::RestoreParticipant { .. } => {
-                    // Same gap as `CallRosterDelta::Leave`: the restore now
-                    // carries a typed `expected_revision` of the moderation
-                    // value instead of the banned entry's observed tag, and
-                    // nothing in this projection can evaluate it.
-                    return ProjectionEffect::Rejected {
-                        reason: "call_moderation_expected_revision_unevaluable".to_owned(),
-                    };
+                CallModerationDelta::RestoreParticipant { actor_id, .. } => {
+                    // Restore an accepted delta; admission lives in the authority UoW.
+                    let actor = serde_json::to_value(actor_id)
+                        .expect("typed moderation subject serializes");
+                    entries.retain(|entry| {
+                        entry.get("value").and_then(|value| value.get("actor_id")) != Some(&actor)
+                            || entry
+                                .get("value")
+                                .and_then(|value| value.get("action"))
+                                .and_then(Value::as_str)
+                                != Some("ban")
+                    });
                 }
             }
             writes.push((moderation, Value::Array(entries)));
@@ -752,17 +756,12 @@ fn call_transcript_wire(state: CallTranscriptState) -> &'static str {
 
 /// Insert or replace one entry of a list-valued call facet.
 ///
-/// Each entry carries the accepted Event id that produced it under `tag_id`,
-/// which is exactly the coordinate a later `observed_tag` names.
+/// Entries are a cache fold of accepted Events; typed current and CAS live
+/// in the accepting authority transaction.
 fn upsert_call_entry(entries: &mut Vec<Value>, keys: &[&str], value: Value, tag_id: &str) {
     let matches_key = |entry: &Value| {
-        keys.iter().all(|key| {
-            entry
-                .get("value")
-                .and_then(|current| current.get(key))
-                .and_then(Value::as_str)
-                == value.get(key).and_then(Value::as_str)
-        })
+        keys.iter()
+            .all(|key| entry.get("value").and_then(|v| v.get(key)) == value.get(key))
     };
     entries.retain(|entry| !matches_key(entry));
     entries.push(serde_json::json!({ "tag_id": tag_id, "value": value }));

@@ -17,8 +17,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use arkret_event_draft::EventPayloadExt as _;
+use arkret_models_collaboration::SignalStreamFrame;
 use arkret_models_collaboration::signal_operations::SignalSubmitOutcome;
-use arkret_wire::{SignalEnvelope, SignalRelayRequest, SignalStreamFrame};
+use arkret_wire::{SignalEnvelope, SignalRelayRequest};
 use coland_http::error::AppError;
 use coland_services::identity::SessionIdentityState;
 use futures_util::stream::StreamExt;
@@ -179,7 +181,7 @@ fn remote_recipient_services(
         .collect()
 }
 
-async fn admit_signal(
+pub(crate) async fn admit_signal(
     state: &AppState,
     session: &SessionIdentityState,
     envelope: &SignalEnvelope,
@@ -233,14 +235,30 @@ async fn admit_signal(
 }
 
 /// Resolve both declared and current accepted governance cuts in one read transaction.
-async fn verify_signal_scope_authority(
+pub(crate) async fn verify_signal_scope_authority(
     state: &AppState,
     envelope: &SignalEnvelope,
     actor: &arkret_wire::ActorId,
 ) -> Result<coland_storage::SignalScopeAuthority, AppError> {
+    verify_signal_scope_authority_with_product(state, envelope, actor, false, None).await
+}
+
+async fn verify_signal_scope_authority_with_product(
+    state: &AppState,
+    envelope: &SignalEnvelope,
+    actor: &arkret_wire::ActorId,
+    include_product_authority: bool,
+    product_agent: Option<(
+        &arkret_wire::AccountId,
+        &arkret_models_collaboration::events_payloads::agent::AgentKeyScope,
+    )>,
+) -> Result<coland_storage::SignalScopeAuthority, AppError> {
     let authority = state
         .authority_commits()
         .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+            include_product_authority,
+            product_agent,
+
             scope: &envelope.scope_ref,
             authority_commit_id: &envelope.authority_commit_id,
             parent_realm_authority_commit_id: envelope.parent_realm_authority_commit_id.as_ref(),
@@ -405,7 +423,7 @@ async fn resolve_local_signal_device_key(
 /// Recipient admission resolves remote exact-account authority through the
 /// registered peer keys surface, with the same verified attestation gate as
 /// self signer lookup. Peer relay itself never enters this device gate.
-async fn resolve_signal_delivery_device_key(
+pub(crate) async fn resolve_signal_delivery_device_key(
     state: &AppState,
     recipient: &arkret_wire::AccountId,
     envelope: &SignalEnvelope,
@@ -494,6 +512,30 @@ async fn verify_signal_agent_proof(
         Some((agent_key_authorization_ref, verification_method)),
     )
     .await
+}
+
+pub(crate) async fn invitation_agent_key(
+    state: &AppState,
+    envelope: &SignalEnvelope,
+) -> Result<arkret_signatures::PublicKeyMaterial, AppError> {
+    verify_signal_agent_current_authority(state, envelope, &envelope.sender_actor_id, None).await?;
+    let record = crate::routing::identity::agent_pcr::agent_record_for_actor(
+        state,
+        &envelope.sender_actor_id,
+    )
+    .await
+    .map_err(|_| signal_rail_unavailable("resolve accepted Agent invitation key"))?
+    .ok_or_else(|| signal_proof_invalid("Agent is unavailable"))?;
+    let runtime = record
+        .runtime_bindings()
+        .map_err(|_| signal_proof_invalid("Agent runtime binding is inconsistent"))?
+        .active_binding
+        .ok_or_else(|| signal_proof_invalid("Agent runtime binding is absent"))?;
+    let key = arkret_models_identity::agent_signer_evidence::AgentAuthorizedSigningKey::from_event(
+        &runtime.key_authorization_event,
+    )
+    .map_err(|_| signal_proof_invalid("Agent invitation key is invalid"))?;
+    agent_runtime_signal_public_key(&key.public_key, &runtime.public_key_digest)
 }
 
 async fn verify_signal_agent_current_authority(
@@ -677,7 +719,7 @@ fn require_local_signal_device_account(
 /// the HTTP handler deliberately converts it to the same opaque accepted
 /// outcome. Request authentication and request-shape failures are handled
 /// before this function is entered.
-pub(in crate::routing::events) async fn accept_peer_signal(
+pub(crate) async fn accept_peer_signal(
     state: &AppState,
     source_id: &str,
     envelope: &SignalEnvelope,
@@ -759,7 +801,7 @@ impl AppState {
 }
 
 /// Server-visible checks shared by source dispatch and destination admission.
-async fn admit_signal_outer(
+pub(crate) async fn admit_signal_outer(
     state: &AppState,
     source_id: &str,
     envelope: &SignalEnvelope,
@@ -910,8 +952,14 @@ pub(super) fn signal_response(
                         break;
                     }
                     for envelope in pending_signals_for_subscriber(&state, &session, &mut live_starts).await {
-                        if let Ok(frame) = admitted_signal_frame(&state, &session, envelope).await {
-                            yield Ok(ndjson_line(&frame));
+                        match admitted_signal_frame(&state, &session, envelope).await {
+                            Ok(frame) => yield Ok(ndjson_line(&frame)),
+                            Err(error) => {
+                                #[cfg(feature = "conformance-harness")]
+                                tracing::warn!(code=error.wire_code(), %error, "conformance Signal frame refused by the production emission gate");
+                                #[cfg(not(feature = "conformance-harness"))]
+                                let _ = error;
+                            }
                         }
                     }
                 }
@@ -1013,7 +1061,9 @@ pub(crate) async fn admitted_signal_frame(
         }
         None => resolve_signal_delivery_device_key(state, &recipient, &envelope).await?,
     };
-    let authority = arkret_wire::SignalDeliveryAuthority {
+    let mut authority = arkret_models_collaboration::SignalDeliveryAuthority {
+        product_authority: None,
+        call_invitation: None,
         recipient_account_id: recipient,
         key,
     };
@@ -1024,6 +1074,7 @@ pub(crate) async fn admitted_signal_frame(
     // Repeat the session and governance gates at the actual frame boundary.
     #[cfg(feature = "conformance-harness")]
     let probe = emission_probe::pause(state, &envelope, &authority.recipient_account_id).await?;
+    require_signal_content_mapping(state, session, &envelope.realm_id).await?;
     let decision = async {
         let current_actor =
             crate::routing::identity::session_actor::validated_session_actor(state, session)
@@ -1034,8 +1085,41 @@ pub(crate) async fn admitted_signal_frame(
             &envelope,
         )
         .await?;
-        let current =
-            verify_signal_scope_authority(state, &envelope, &envelope.sender_actor_id).await?;
+        if envelope.sender_device_id.is_none() {
+            verify_signal_agent_current_authority(
+                state,
+                &envelope,
+                &envelope.sender_actor_id,
+                Some((
+                    &authority.key.authorization_ref,
+                    &authority.key.verification_method,
+                )),
+            )
+            .await?;
+        } else {
+            let current_key = resolve_signal_delivery_device_key(
+                state,
+                &authority.recipient_account_id,
+                &envelope,
+            )
+            .await?;
+            if current_key != authority.key {
+                return Err(signal_proof_invalid(
+                    "Signal signer authorization changed before emission",
+                ));
+            }
+        }
+        let product_agent = signal_product_agent(state, &envelope, &authority.key).await?;
+        let current = verify_signal_scope_authority_with_product(
+            state,
+            &envelope,
+            &envelope.sender_actor_id,
+            true,
+            product_agent
+                .as_ref()
+                .map(|(controller, scope)| (controller, scope)),
+        )
+        .await?;
         if current_actor.as_account_id() != Some(&authority.recipient_account_id)
             || !current.recipient_actors.contains(&current_actor)
         {
@@ -1044,14 +1128,122 @@ pub(crate) async fn admitted_signal_frame(
                 "Signal recipient is no longer eligible"
             ));
         }
+        if envelope.expires_at <= chrono::Utc::now() {
+            return Err(signal_invalid("Signal expired before emission"));
+        }
+        authority.product_authority = current.product_authority;
+        authority.call_invitation = if let Some(device) = session.human_device_id() {
+            crate::routing::call_admission::delivery_for_device(
+                state,
+                &envelope,
+                &authority.recipient_account_id,
+                &arkret_wire::DeviceId::new(device)
+                    .map_err(|e| AppError::param_invalid(e.to_string()))?,
+            )
+            .await?
+        } else {
+            None
+        };
+        authority
+            .validate_for_envelope(&envelope)
+            .map_err(structural_error)?;
         Ok(())
     }
     .await;
     #[cfg(feature = "conformance-harness")]
-    emission_probe::record(probe.as_deref(), &envelope, &decision)?;
+    emission_probe::record(
+        probe.as_deref(),
+        &envelope,
+        &decision,
+        authority.call_invitation.is_some(),
+    )?;
     decision?;
-    require_signal_content_mapping(state, session, &envelope.realm_id).await?;
     Ok(SignalStreamFrame::signal(envelope, authority))
+}
+
+/// Project the accepted public key ceiling into this Realm, without leaking
+/// another Realm or private controller participation preference to recipients.
+async fn signal_product_agent(
+    state: &AppState,
+    envelope: &SignalEnvelope,
+    key: &arkret_wire::StationSigningKey,
+) -> Result<
+    Option<(
+        arkret_wire::AccountId,
+        arkret_models_collaboration::events_payloads::agent::AgentKeyScope,
+    )>,
+    AppError,
+> {
+    if envelope.sender_device_id.is_some() {
+        return Ok(None);
+    }
+    let record = crate::routing::identity::agent_pcr::agent_record_for_actor(
+        state,
+        &envelope.sender_actor_id,
+    )
+    .await
+    .map_err(|_| signal_rail_unavailable("resolve accepted Agent product ceiling"))?
+    .ok_or_else(|| signal_proof_invalid("Agent product authorization is unavailable"))?;
+    let controller =
+        crate::routing::identity::agent_pcr::agent_controller_account(state, &record).await?;
+    let binding = record
+        .runtime_bindings()
+        .map_err(|_| signal_proof_invalid("Agent product runtime is inconsistent"))?
+        .active_binding
+        .ok_or_else(|| signal_proof_invalid("Agent product runtime is unavailable"))?;
+    if binding.authorized_event_ref != key.authorization_ref
+        || binding.verification_method != key.verification_method
+    {
+        return Err(signal_proof_invalid(
+            "Agent product key authorization changed",
+        ));
+    }
+    let mut scope = binding
+        .key_authorization_event
+        .as_agent_key_authorize()
+        .map_err(|_| signal_proof_invalid("Agent product key ceiling is invalid"))?
+        .agent_key_scope;
+    scope.actions.retain(|action| {
+        matches!(
+            action.as_str(),
+            arkret_wire::CapabilityActionId::MESSAGE_STREAM_SEND
+                | arkret_wire::CapabilityActionId::MESSAGE_CREATE
+                | arkret_wire::CapabilityActionId::TYPING_BROADCAST
+        )
+    });
+    let mut projected = Vec::new();
+    let mut has_content_selector = false;
+    for mut resource in scope.resources {
+        let selector = arkret_policy::agent_content_ceiling::key_scope_content_selector(&resource)
+            .map_err(|_| signal_proof_invalid("Agent product resource ceiling is invalid"))?;
+        let Some(selector) = selector else {
+            continue;
+        };
+        has_content_selector = true;
+        if selector
+            .realm_id
+            .as_ref()
+            .is_some_and(|realm| realm != &envelope.realm_id)
+        {
+            continue;
+        }
+        if !matches!(
+            selector.kind,
+            arkret_wire::ResourceSelectorKind::Realm | arkret_wire::ResourceSelectorKind::Strand
+        ) {
+            continue;
+        }
+        resource.realm_id = Some(envelope.realm_id.clone());
+        projected.push(resource);
+    }
+    if !has_content_selector && !scope.actions.is_empty() {
+        projected.push(arkret_models_collaboration::events_payloads::agent::AgentKeyScopeResource {
+            kind: arkret_models_collaboration::events_payloads::agent::AgentKeyScopeResourceKind::Realm,
+            realm_id: Some(envelope.realm_id.clone()), resource_ref: None, schema_ref: None, operation: None, service_id: None,
+        });
+    }
+    scope.resources = projected;
+    Ok(Some((controller, scope)))
 }
 
 async fn require_signal_content_mapping(

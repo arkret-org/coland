@@ -18,7 +18,7 @@ use arkret_wire::{
     RealmAuthorityBundle, RealmAuthorityHandoff, StreamScanRequest,
 };
 use chrono::Utc;
-use coland_services::authority_commit::AuthorityProtocolPort;
+use coland_services::authority_commit::{AuthenticatedPeerContext, AuthorityProtocolPort};
 use coland_services::identity::SessionIdentityState;
 use coland_services::{ServiceError, ServiceResult};
 
@@ -69,6 +69,7 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         | EventKind::RealmRestore
         | EventKind::RealmFreeze
         | EventKind::RealmUnfreeze
+        | EventKind::RealmGovernanceStationChange
         | EventKind::StrandUpdate
         | EventKind::StrandTracksUpdate
         | EventKind::RsvpSet
@@ -79,12 +80,14 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         | EventKind::StrandReorder
         | EventKind::StrandWatchSet
         | EventKind::AgentInteractionSet
+        | EventKind::AgentActionApprove
         | EventKind::SpaceCreate
         | EventKind::SpaceUpdate
         | EventKind::SpaceParent
         | EventKind::SpaceTombstone
         | EventKind::SchemaDefine
         | EventKind::RealmPolicyBundle
+        | EventKind::PolicySet
         | EventKind::DirectConversationBound
         | EventKind::RealmSetDefaultStrand
         | EventKind::RealmReadReceiptPolicy
@@ -92,6 +95,8 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         | EventKind::RealmPreviewPolicy
         | EventKind::MemberIdentityUpdate
         | EventKind::CallCreate
+        | EventKind::CallState
+        | EventKind::RealmMediaService
         | EventKind::MessageCreate
         | EventKind::MemberState
         | EventKind::CapabilityGrant
@@ -192,6 +197,7 @@ pub(super) async fn refuse_unrouted_event(
 /// whether its producer was resolved locally or from a forward.
 pub(super) fn require_guarded_unit_event(request: &EventAdmissionSubmission) -> ServiceResult<()> {
     let event = &request.event;
+    refuse_deferred_call_payload(event)?;
     if self_event_route(&event.kind)? != SelfEventRoute::GuardedUnit {
         return Err(ServiceError::UnsupportedEventKind(format!(
             "{} is admitted only on its producer's own Station",
@@ -203,6 +209,10 @@ pub(super) fn require_guarded_unit_event(request: &EventAdmissionSubmission) -> 
             && matches!(
                 event.kind,
                 arkret_wire::EventKind::CircleMemberState
+                    | arkret_wire::EventKind::CallCreate
+                    | arkret_wire::EventKind::CallState
+                    | arkret_wire::EventKind::StrandWatchSet
+                    | arkret_wire::EventKind::PolicySet
                     | arkret_wire::EventKind::StrandCreate
                     | arkret_wire::EventKind::AppletBridgeError
                     | arkret_wire::EventKind::MessageCreate
@@ -232,10 +242,22 @@ pub(super) fn require_guarded_unit_event(request: &EventAdmissionSubmission) -> 
     Ok(())
 }
 
+fn refuse_deferred_call_payload(event: &arkret_wire::Event) -> ServiceResult<()> {
+    if event.kind == arkret_wire::EventKind::CallState
+        && event.payload.contains_key("mute_override")
+    {
+        return Err(ServiceError::protocol(
+            arkret_wire::ErrorCode::SchemaViolation,
+            "mute_override is deferred in v1",
+        ));
+    }
+    Ok(())
+}
+
 /// The other Station that currently governs `realm_id`, if any. Only a
 /// durable current-authority record names it; a Realm this Station knows
 /// nothing about has no forwarding target.
-async fn remote_governance(
+pub(super) async fn remote_governance(
     state: &AppState,
     realm_id: &arkret_wire::RealmId,
 ) -> ServiceResult<Option<arkret_wire::DidCoreId>> {
@@ -249,6 +271,44 @@ async fn remote_governance(
 
 #[async_trait::async_trait]
 impl AuthorityProtocolPort for AppState {
+    async fn submit_managed_device(
+        &self,
+        metadata: &arkret_models_integration::AppletManagedDeviceMetadata,
+        authority: &coland_storage::AppletManagedDeviceAuthority,
+        request: arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest,
+    ) -> ServiceResult<arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome>
+    {
+        super::authority_managed_device::submit(self, metadata, authority, request).await
+    }
+
+    async fn submit_self_audit_pair(
+        &self,
+        session: &SessionIdentityState,
+        request: arkret_models_collaboration::authority_commit::AuditPairedEventUnitSubmission,
+    ) -> ServiceResult<
+        arkret_models_collaboration::authority_commit::AuditPairedEventAcceptanceOutcome,
+    > {
+        super::authority_audit_unit::submit_self_pair(self, session, request).await
+    }
+    async fn replicate_peer_audit_pair(
+        &self,
+        peer: &AuthenticatedPeerContext,
+        request: arkret_models_collaboration::authority_commit::AuditPairedEventFederationSubmission,
+    ) -> ServiceResult<
+        arkret_models_collaboration::authority_commit::AuditPairedEventAcceptanceOutcome,
+    > {
+        super::committed_replication::receive_audit_pair(self, peer, request).await
+    }
+    async fn submit_peer_audit_pair(
+        &self,
+        peer: &AuthenticatedPeerContext,
+        request: arkret_models_collaboration::authority_commit::PeerAuthorityForwardAtomicRequest,
+    ) -> ServiceResult<
+        arkret_models_collaboration::authority_commit::AuditPairedEventAcceptanceOutcome,
+    > {
+        super::authority_audit_unit::submit_peer_pair(self, peer, request).await
+    }
+
     async fn submit_self_ordinary_realm_bootstrap(
         &self,
         session: &SessionIdentityState,
@@ -459,7 +519,14 @@ impl AuthorityProtocolPort for AppState {
             .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
         let event = &request.event;
         super::authority_self_event_unit::validate_replay_event_identity(event)?;
+        refuse_deferred_call_payload(event)?;
         refuse_actor_private_event(&event.kind)?;
+        if let Some(outcome) =
+            crate::boxed_future(|| super::authority_pcr::submit_self(self, session, &request))
+                .await?
+        {
+            return Ok(outcome);
+        }
         if matches!(
             event.kind,
             arkret_wire::EventKind::ConsentGrant | arkret_wire::EventKind::ConsentRevoke
@@ -490,17 +557,19 @@ impl AuthorityProtocolPort for AppState {
             })
             .await;
         }
-        // Controller-executed key revocations and Agent Profiles are decided
+        // Controller-executed key renewals, revocations and Agent Profiles are decided
         // by the Agent control unit.
-        if event.kind == arkret_wire::EventKind::AgentKeyRevoke
-            || (matches!(
-                event.kind,
-                arkret_wire::EventKind::ProfileCreate | arkret_wire::EventKind::ProfileUpdate
-            ) && event
-                .executed_by
-                .as_ref()
-                .is_some_and(|actor| actor.as_account_id().is_some())
-                && event.actor_id.as_account_id().is_some())
+        if matches!(
+            event.kind,
+            arkret_wire::EventKind::AgentKeyAuthorize | arkret_wire::EventKind::AgentKeyRevoke
+        ) || (matches!(
+            event.kind,
+            arkret_wire::EventKind::ProfileCreate | arkret_wire::EventKind::ProfileUpdate
+        ) && event
+            .executed_by
+            .as_ref()
+            .is_some_and(|actor| actor.as_account_id().is_some())
+            && event.actor_id.as_account_id().is_some())
         {
             return crate::boxed_future(|| {
                 super::authority_agent_control::submit_self_agent_controller_event(
@@ -519,68 +588,68 @@ impl AuthorityProtocolPort for AppState {
                 | arkret_wire::EventKind::SelfAgentResume
                 | arkret_wire::EventKind::SelfAgentDeactivate
         ) {
-            arkret_schema::validate_event_for_submit(event)
+            arkret_event_draft::validate_event_for_submit(event)
                 .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
             if request.approval_signatures.is_some() {
                 return Err(ServiceError::SchemaViolation(
                     "an Agent control Event carries no approval signatures".to_owned(),
                 ));
             }
-            let controller =
-                crate::routing::identity::session_actor::validated_session_actor(self, session)
-                    .await
-                    .map_err(|error| {
-                        ServiceError::Conflict(format!(
-                            "authenticated Account unavailable: {error}"
-                        ))
-                    })?;
+            let controller = Box::pin(
+                crate::routing::identity::session_actor::validated_session_actor(self, session),
+            )
+            .await
+            .map_err(|error| {
+                ServiceError::Conflict(format!("authenticated Account unavailable: {error}"))
+            })?;
             if event.executed_by.as_ref() != Some(&controller) {
                 return Err(ServiceError::Conflict(
                     "an Agent control Event is executed by the authenticated controller".to_owned(),
                 ));
             }
             if let Some(original) =
-                super::authority_self_event_unit::exact_replay(self, event).await?
+                Box::pin(super::authority_self_event_unit::exact_replay(self, event)).await?
             {
                 return Ok(original);
             }
         }
-        if let Some(original) = super::authority_forward::recover_forwarded_original(
+        if let Some(original) = Box::pin(super::authority_forward::recover_forwarded_original(
             self,
             session,
             &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
                 request.clone(),
             ),
-        )
+        ))
         .await?
         {
             return Ok(original);
         }
-        let (producer_guard, producer_key) =
-            super::authority_producer_validation::verify_self_event_producer_key(
+        let (producer_guard, producer_key) = Box::pin(
+            super::authority_producer_validation::verify_self_event_submission_producer_key(
                 self, session, event,
-            )
-            .await
-            .inspect_err(|_error| {
-                #[cfg(feature = "conformance-harness")]
-                crate::routing::trace_submission_refusal(
-                    "producer_preflight",
-                    crate::routing::submission_kind_class(&event.kind),
-                    if session.agent_session().is_some() {
-                        "agent"
-                    } else {
-                        "human"
-                    },
-                    Some(_error),
-                );
-            })?;
-        if let Some(governance) = remote_governance(self, &event.realm_id).await? {
-            let outcome = super::authority_forward::forward_self_event_with_session(
+            ),
+        )
+        .await
+        .inspect_err(|_error| {
+            #[cfg(feature = "conformance-harness")]
+            crate::routing::trace_submission_refusal(
+                "producer_preflight",
+                crate::routing::submission_kind_class(&event.kind),
+                if session.agent_session().is_some() {
+                    "agent"
+                } else {
+                    "human"
+                },
+                Some(_error),
+            );
+        })?;
+        if let Some(governance) = Box::pin(remote_governance(self, &event.realm_id)).await? {
+            let outcome = Box::pin(super::authority_forward::forward_self_event_with_session(
                 self,
                 &governance,
                 request,
                 session,
-            )
+            ))
             .await;
             #[cfg(feature = "conformance-harness")]
             if let Err(error) = &outcome {
@@ -597,7 +666,7 @@ impl AuthorityProtocolPort for AppState {
             }
             return outcome;
         }
-        if let Some(outcome) = refuse_unrouted_event(self, event).await? {
+        if let Some(outcome) = Box::pin(refuse_unrouted_event(self, event)).await? {
             return Ok(outcome);
         }
         match self_event_route(&event.kind)? {
@@ -791,47 +860,29 @@ impl AuthorityProtocolPort for AppState {
             .await
     }
 
-    /// The nonce-bound genesis-to-current chain, signed by this Station's
-    /// notary method and carrying its current authenticated service route.
+    /// The current governor's nonce-bound original. A known former governor
+    /// remains a locator and never signs a replacement current assertion.
     async fn authority_bundle(
         &self,
         request: AuthorityBundleRequest,
     ) -> ServiceResult<RealmAuthorityBundle> {
-        let route =
-            crate::routing::system::service_resolution::current_authenticated_service_resolution(
-                self,
-            )
+        crate::routing::realm_join::local_authority_bundle(self, &request.realm_id, &request.nonce)
             .await
             .map_err(|error| {
-                ServiceError::Internal(format!(
-                    "current authenticated service route is unavailable: {}",
-                    error.message
-                ))
-            })?;
-        let route = serde_json::to_value(route)
-            .map_err(|error| ServiceError::Internal(error.to_string()))?;
-        let verification_method = self
-            .service_verification_method("notary-key")
-            .map_err(|error| ServiceError::Internal(error.to_string()))?;
-        self.authority_commits()
-            .authority_bundle(
-                &request,
-                &self.service_core_id(),
-                route,
-                verification_method,
-                self.notary_signing_key().as_ref(),
-                crate::wire::now(),
-            )
-            .await
+                if error.code == crate::error::ErrorCode::NotFound {
+                    ServiceError::NotFound(error.message.to_string())
+                } else {
+                    ServiceError::Conflict(format!("temporarily_unavailable: {}", error.message))
+                }
+            })
     }
 
     async fn install_authority_handoff(
         &self,
-        _request: AuthorityHandoffRequest,
+        peer: &coland_services::authority_commit::AuthenticatedPeerContext,
+        request: AuthorityHandoffRequest,
     ) -> ServiceResult<RealmAuthorityHandoff> {
-        Err(ServiceError::Internal(
-            "peer handoff authentication and fencing are unavailable".to_owned(),
-        ))
+        super::authority_handoff::install(self, peer, request).await
     }
 }
 
@@ -878,6 +929,8 @@ mod tests {
             EventKind::SpaceUpdate,
             EventKind::SchemaDefine,
             EventKind::RealmPolicyBundle,
+            EventKind::RealmGovernanceStationChange,
+            EventKind::PolicySet,
             EventKind::DirectConversationBound,
             EventKind::InviteClaim,
             EventKind::CircleCreate,
@@ -1011,6 +1064,8 @@ mod tests {
             EventKind::PinRemove,
             EventKind::PinReorder,
             EventKind::RealmPolicyBundle,
+            EventKind::RealmGovernanceStationChange,
+            EventKind::PolicySet,
             EventKind::SchemaDefine,
             EventKind::SidecarContextAttach,
             EventKind::AgentSidecarExchangeControl,

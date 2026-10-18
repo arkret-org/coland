@@ -58,120 +58,127 @@ pub(crate) async fn scan_stream_for_account(
 ) -> PersistenceResult<AccountStreamScan> {
     request
         .validate()
-        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-    let caller = ActorId::account(account.clone()).to_string();
+        .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
     let mut conn = pg_conn(pool).await?;
     conn.transaction::<_, PgTransactionError, _>(async move |conn| {
         sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .execute(&mut *conn)
             .await?;
-        let Some(tenure) = sql_query("SELECT service_id FROM realm_authorities WHERE realm_id=$1")
-            .bind::<Text, _>(request.realm_id.as_str())
-            .get_result::<TenureRow>(&mut *conn)
-            .await
-            .optional()?
-        else {
-            return Ok(AccountStreamScan::NotAuthorized);
-        };
-        let members = sql_query(
-            "SELECT member_id, membership FROM member_state_current_results \
-             WHERE realm_id=$1 ORDER BY member_id",
-        )
-        .bind::<Text, _>(request.realm_id.as_str())
-        .load::<MemberRow>(&mut *conn)
-        .await?;
-        if !members
-            .iter()
-            .any(|row| row.member_id == caller && row.membership == "join")
-        {
-            return Ok(AccountStreamScan::NotAuthorized);
-        }
-        let caller_actor = ActorId::account(account.clone());
-        let floor = match (&request.stream_ref, tenure.service_id == issuer.as_str()) {
-            (CommitStreamRef::Realm { .. }, true) => {
-                caller_realm_floor_in_connection(conn, &request.realm_id, &caller_actor).await?
-            }
-            (CommitStreamRef::Circle { circle_id, .. }, true) => {
-                caller_circle_floor_in_connection(conn, &request.realm_id, circle_id, &caller_actor)
-                    .await?
-            }
-            (CommitStreamRef::Sidecar { sidecar_id, .. }, true) => {
-                crate::sidecar_authority_cut::public_material_floor_in_connection(
-                    conn,
-                    &request.realm_id,
-                    sidecar_id,
-                    &caller_actor,
-                )
-                .await?
-            }
-            (CommitStreamRef::Realm { .. }, false) => {
-                match replica_realm_floor_in_connection(conn, &request.realm_id, &caller_actor)
-                    .await?
-                {
-                    Ok(floor) => Some(floor),
-                    Err(reason) => return Ok(AccountStreamScan::Unproved(reason)),
-                }
-            }
-            (CommitStreamRef::Circle { circle_id, .. }, false) => {
-                match replica_circle_floor_in_connection(
-                    conn,
-                    &request.realm_id,
-                    circle_id,
-                    &caller_actor,
-                )
-                .await?
-                {
-                    Ok(floor) => Some(floor),
-                    Err(reason) => return Ok(AccountStreamScan::Unproved(reason)),
-                }
-            }
-            (CommitStreamRef::Sidecar { sidecar_id, .. }, false) => {
-                match crate::sidecar_replica_authority::handshake_floor_in_connection(
-                    conn,
-                    &request.realm_id,
-                    sidecar_id,
-                    &caller_actor,
-                )
-                .await?
-                {
-                    Ok(floor) => floor,
-                    Err(reason) => return Ok(AccountStreamScan::Unproved(reason)),
-                }
-            }
-            _ => {
-                return Ok(AccountStreamScan::Unproved(
-                    "the requested stream has no proved disclosure rule",
-                ));
-            }
-        };
-        let Some(floor) = floor else {
-            if matches!(
-                request.stream_ref,
-                CommitStreamRef::Circle { .. } | CommitStreamRef::Sidecar { .. }
-            ) {
-                return Ok(AccountStreamScan::NotAuthorized);
-            }
-            return Ok(AccountStreamScan::Unproved(
-                "the caller's join or history floor is not proved at this cut",
-            ));
-        };
-        let page = crate::authority_commit::stream_page_above_floor_in_connection(
-            conn,
-            request,
-            Some(floor),
-        )
-        .await?;
-        // Per-Event disclosure applies on top of the interval: a withheld row
-        // keeps its Commit so the page stays one verifiable chain.
-        let committed_events =
-            disclose_page_to_member(conn, page.committed_events.clone(), &caller_actor).await?;
-        Ok(AccountStreamScan::Page(StreamScanOutcome {
-            committed_events,
-            ..page
-        }))
+        scan_stream_for_account_in_connection(conn, request, account, issuer).await
     })
     .await
     .map_err(PgTransactionError::into_persistence)
+}
+
+pub(crate) async fn scan_stream_for_account_in_connection(
+    conn: &mut AsyncPgConnection,
+    request: &StreamScanRequest,
+    account: &AccountId,
+    issuer: &DidCoreId,
+) -> Result<AccountStreamScan, PgTransactionError> {
+    request
+        .validate()
+        .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
+    let caller = ActorId::account(account.clone()).to_string();
+    let Some(tenure) = sql_query("SELECT service_id FROM realm_authorities WHERE realm_id=$1")
+        .bind::<Text, _>(request.realm_id.as_str())
+        .get_result::<TenureRow>(&mut *conn)
+        .await
+        .optional()?
+    else {
+        return Ok(AccountStreamScan::NotAuthorized);
+    };
+    let members = sql_query(
+        "SELECT member_id, membership FROM member_state_current_results \
+         WHERE realm_id=$1 ORDER BY member_id",
+    )
+    .bind::<Text, _>(request.realm_id.as_str())
+    .load::<MemberRow>(&mut *conn)
+    .await?;
+    if !members
+        .iter()
+        .any(|row| row.member_id == caller && row.membership == "join")
+    {
+        return Ok(AccountStreamScan::NotAuthorized);
+    }
+    let caller_actor = ActorId::account(account.clone());
+    let floor = match (&request.stream_ref, tenure.service_id == issuer.as_str()) {
+        (CommitStreamRef::Realm { .. }, true) => {
+            caller_realm_floor_in_connection(conn, &request.realm_id, &caller_actor).await?
+        }
+        (CommitStreamRef::Circle { circle_id, .. }, true) => {
+            caller_circle_floor_in_connection(conn, &request.realm_id, circle_id, &caller_actor)
+                .await?
+        }
+        (CommitStreamRef::Sidecar { sidecar_id, .. }, true) => {
+            crate::sidecar_authority_cut::public_material_floor_in_connection(
+                conn,
+                &request.realm_id,
+                sidecar_id,
+                &caller_actor,
+            )
+            .await?
+        }
+        (CommitStreamRef::Realm { .. }, false) => {
+            match replica_realm_floor_in_connection(conn, &request.realm_id, &caller_actor).await? {
+                Ok(floor) => Some(floor),
+                Err(reason) => return Ok(AccountStreamScan::Unproved(reason)),
+            }
+        }
+        (CommitStreamRef::Circle { circle_id, .. }, false) => {
+            match replica_circle_floor_in_connection(
+                conn,
+                &request.realm_id,
+                circle_id,
+                &caller_actor,
+            )
+            .await?
+            {
+                Ok(floor) => Some(floor),
+                Err(reason) => return Ok(AccountStreamScan::Unproved(reason)),
+            }
+        }
+        (CommitStreamRef::Sidecar { sidecar_id, .. }, false) => {
+            match crate::sidecar_replica_authority::handshake_floor_in_connection(
+                conn,
+                &request.realm_id,
+                sidecar_id,
+                &caller_actor,
+            )
+            .await?
+            {
+                Ok(floor) => floor,
+                Err(reason) => return Ok(AccountStreamScan::Unproved(reason)),
+            }
+        }
+        _ => {
+            return Ok(AccountStreamScan::Unproved(
+                "the requested stream has no proved disclosure rule",
+            ));
+        }
+    };
+    let Some(floor) = floor else {
+        if matches!(
+            request.stream_ref,
+            CommitStreamRef::Circle { .. } | CommitStreamRef::Sidecar { .. }
+        ) {
+            return Ok(AccountStreamScan::NotAuthorized);
+        }
+        return Ok(AccountStreamScan::Unproved(
+            "the caller's join or history floor is not proved at this cut",
+        ));
+    };
+    let page =
+        crate::authority_commit::stream_page_above_floor_in_connection(conn, request, Some(floor))
+            .await?;
+    // Per-Event disclosure applies on top of the interval: a withheld row
+    // keeps its Commit so the page stays one verifiable chain.
+    let committed_events =
+        disclose_page_to_member(conn, page.committed_events.clone(), &caller_actor).await?;
+    Ok(AccountStreamScan::Page(StreamScanOutcome {
+        committed_events,
+        ..page
+    }))
 }
 
 #[derive(QueryableByName)]
@@ -1455,148 +1462,77 @@ pub(crate) async fn committed_event_for_member(
     caller: &ActorId,
     issuer: &DidCoreId,
 ) -> PersistenceResult<coland_storage::MemberCommittedEventRead> {
-    use coland_storage::MemberCommittedEventRead as Read;
-
-    let Some(token) = crate::ids::parse_event_id(event_id.as_str()) else {
-        return Ok(Read::NotVisible);
-    };
     let mut conn = pg_conn(pool).await?;
     conn.transaction::<_, PgTransactionError, _>(async move |conn| {
         sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .execute(&mut *conn)
             .await?;
-        let invalid = |what: &str, error: serde_json::Error| {
-            PgTransactionError::from(PersistenceError::Internal(format!(
-                "stored committed {what} is invalid: {error}"
-            )))
-        };
-        let (commit, event) = if let Some(row) = sql_query(
-            "SELECT c.commit_json, e.envelope FROM canonical_events e \
-             JOIN realm_commits c ON c.event_pk=e.pk WHERE e.id=$1 AND e.state='committed'",
-        )
-        .bind::<diesel::sql_types::Binary, _>(token.to_vec())
-        .get_result::<CommittedRow>(&mut *conn)
-        .await
-        .optional()?
-        {
-            let commit: arkret_wire::RealmCommit = serde_json::from_value(row.commit_json)
-                .map_err(|error| invalid("Commit", error))?;
-            let event: arkret_wire::Event =
-                serde_json::from_value(row.envelope).map_err(|error| invalid("Event", error))?;
-            (commit, Some(event))
-        } else if let Some(row) = sql_query(
-            "SELECT commit_json FROM realm_commits \
-             WHERE event_pk IS NULL AND commit_json->>'event_ref'=$1",
-        )
-        .bind::<Text, _>(event_id.as_str())
-        .get_result::<ChainNodeRow>(&mut *conn)
-        .await
-        .optional()?
-        {
-            let commit: arkret_wire::RealmCommit = serde_json::from_value(row.commit_json)
-                .map_err(|error| invalid("chain node Commit", error))?;
-            (commit, None)
-        } else {
-            return Ok(Read::NotVisible);
-        };
-        let realm_id = commit.realm_id.clone();
-        let anchor =
-            sql_query("SELECT anchor_commit_id FROM replica_stream_anchors WHERE realm_id=$1 AND stream_key=$2")
-                .bind::<Text, _>(realm_id.as_str())
-                .bind::<Text, _>(crate::authority_commit::stream_key(&commit.stream_ref)?)
-                .get_result::<AnchorStateRow>(&mut *conn)
-                .await
-                .optional()?;
-        if anchor
-            .as_ref()
-            .is_some_and(|row| row.anchor_commit_id.is_none())
-        {
-            return Ok(Read::PendingAnchor);
-        }
-        if let CommitStreamRef::Circle { circle_id, .. } = &commit.stream_ref {
-            let Some(tenure) = sql_query("SELECT service_id FROM realm_authorities WHERE realm_id=$1")
-                .bind::<Text,_>(realm_id.as_str()).get_result::<TenureRow>(&mut *conn).await.optional()?
-            else { return Ok(Read::NotVisible); };
-            let floor = if tenure.service_id == issuer.as_str() {
-                caller_circle_floor_in_connection(conn,&realm_id,circle_id,caller).await?
-            } else {
-                replica_circle_floor_in_connection(conn,&realm_id,circle_id,caller).await?.ok()
-            };
-            if floor.is_none_or(|floor| commit.stream_position<floor.oldest_position) {
-                return Ok(Read::NotVisible);
-            }
-            return Ok(Read::Read(Box::new(match event {
-                Some(event) => single_row(crate::committed_disclosure::disclose_to_member_in_connection(
-                    conn,vec![arkret_wire::CommittedEventFullView { commit,event }],caller,
-                ).await?)?,
-                None => CommittedEventView::Withheld(arkret_wire::CommittedEventWithheldView {
-                    commit,event_disclosure:arkret_wire::EventDisclosure { status:arkret_wire::EventDisclosureStatus::Withheld },
-                }),
-            })));
-        }
-        if let CommitStreamRef::Sidecar { sidecar_id, .. } = &commit.stream_ref {
-            let Some(tenure) = sql_query("SELECT service_id FROM realm_authorities WHERE realm_id=$1")
-                .bind::<Text, _>(realm_id.as_str())
-                .get_result::<TenureRow>(&mut *conn)
-                .await
-                .optional()?
-            else {
-                return Ok(Read::NotVisible);
-            };
-            let floor = if tenure.service_id == issuer.as_str() {
-                crate::sidecar_authority_cut::public_material_floor_in_connection(
-                    conn, &realm_id, sidecar_id, caller,
-                ).await?
-            } else {
-                crate::sidecar_replica_authority::handshake_floor_in_connection(
-                    conn, &realm_id, sidecar_id, caller,
-                ).await?.unwrap_or_default()
-            };
-            if floor.is_none_or(|floor| commit.stream_position < floor.oldest_position) {
-                return Ok(Read::NotVisible);
-            }
-            return Ok(Read::Read(Box::new(match event {
-                Some(event) => single_row(crate::committed_disclosure::disclose_to_member_in_connection(
-                    conn, vec![arkret_wire::CommittedEventFullView { commit, event }], caller,
-                ).await?)?,
-                None => CommittedEventView::Withheld(arkret_wire::CommittedEventWithheldView {
-                    commit, event_disclosure: arkret_wire::EventDisclosure {
-                        status: arkret_wire::EventDisclosureStatus::Withheld,
-                    },
-                }),
-            })));
-        }
-        if commit.stream_ref
-            != (CommitStreamRef::Realm {
-                realm_id: realm_id.clone(),
-            })
-        {
-            return Ok(Read::OutsideOrdinaryRealmStream);
-        }
-        use arkret_models_collaboration::events_payloads::realm::RealmPurpose;
-        // A control Realm's since_join history profile does not give it
-        // ordinary membership. Its read path applies principal/controller gates.
-        if matches!(
-            realm_purpose(conn, &realm_id).await?,
-            Some(RealmPurpose::PrincipalControl | RealmPurpose::AgentControl | RealmPurpose::AppletManagedControl)
-        ) {
-            return Ok(Read::OutsideOrdinaryRealmStream);
-        }
-        let Some(history) = realm_history_access(conn, &realm_id).await? else {
-            return Ok(Read::OutsideOrdinaryRealmStream);
-        };
-        if let Some(event) = &event
-            && &event.actor_id == caller
-            && event.kind != arkret_wire::EventKind::CircleCreate
-        {
-            let full = arkret_wire::CommittedEventFullView {
-                commit,
-                event: event.clone(),
-            };
-            return Ok(Read::Read(Box::new(single_row(
-                crate::committed_disclosure::disclose_to_member_in_connection(conn, vec![full], caller).await?,
-            )?)));
-        }
+        committed_event_for_member_in_connection(conn, event_id, caller, issuer).await
+    })
+    .await
+    .map_err(PgTransactionError::into_persistence)
+}
+
+pub(crate) async fn committed_event_for_member_in_connection(
+    conn: &mut AsyncPgConnection,
+    event_id: &arkret_wire::EventId,
+    caller: &ActorId,
+    issuer: &DidCoreId,
+) -> Result<coland_storage::MemberCommittedEventRead, PgTransactionError> {
+    use coland_storage::MemberCommittedEventRead as Read;
+    let Some(token) = crate::ids::parse_event_id(event_id.as_str()) else {
+        return Ok(Read::NotVisible);
+    };
+    let invalid = |what: &str, error: serde_json::Error| {
+        PgTransactionError::from(PersistenceError::Internal(format!(
+            "stored committed {what} is invalid: {error}"
+        )))
+    };
+    let (commit, event) = if let Some(row) = sql_query(
+        "SELECT c.commit_json, e.envelope FROM canonical_events e \
+         JOIN realm_commits c ON c.event_pk=e.pk WHERE e.id=$1 AND e.state='committed'",
+    )
+    .bind::<diesel::sql_types::Binary, _>(token.to_vec())
+    .get_result::<CommittedRow>(&mut *conn)
+    .await
+    .optional()?
+    {
+        let commit: arkret_wire::RealmCommit =
+            serde_json::from_value(row.commit_json).map_err(|error| invalid("Commit", error))?;
+        let event: arkret_wire::Event =
+            serde_json::from_value(row.envelope).map_err(|error| invalid("Event", error))?;
+        (commit, Some(event))
+    } else if let Some(row) = sql_query(
+        "SELECT commit_json FROM realm_commits \
+         WHERE event_pk IS NULL AND commit_json->>'event_ref'=$1",
+    )
+    .bind::<Text, _>(event_id.as_str())
+    .get_result::<ChainNodeRow>(&mut *conn)
+    .await
+    .optional()?
+    {
+        let commit: arkret_wire::RealmCommit = serde_json::from_value(row.commit_json)
+            .map_err(|error| invalid("chain node Commit", error))?;
+        (commit, None)
+    } else {
+        return Ok(Read::NotVisible);
+    };
+    let realm_id = commit.realm_id.clone();
+    let anchor = sql_query(
+        "SELECT anchor_commit_id FROM replica_stream_anchors WHERE realm_id=$1 AND stream_key=$2",
+    )
+    .bind::<Text, _>(realm_id.as_str())
+    .bind::<Text, _>(crate::authority_commit::stream_key(&commit.stream_ref)?)
+    .get_result::<AnchorStateRow>(&mut *conn)
+    .await
+    .optional()?;
+    if anchor
+        .as_ref()
+        .is_some_and(|row| row.anchor_commit_id.is_none())
+    {
+        return Ok(Read::PendingAnchor);
+    }
+    if let CommitStreamRef::Circle { circle_id, .. } = &commit.stream_ref {
         let Some(tenure) = sql_query("SELECT service_id FROM realm_authorities WHERE realm_id=$1")
             .bind::<Text, _>(realm_id.as_str())
             .get_result::<TenureRow>(&mut *conn)
@@ -1605,64 +1541,173 @@ pub(crate) async fn committed_event_for_member(
         else {
             return Ok(Read::NotVisible);
         };
-        let governs = tenure.service_id == issuer.as_str();
-        if (!governs && anchor.is_none())
-            || !crate::authority_commit::accepted_current_member_joined_in_connection(
-                conn, &realm_id, caller,
-            )
-            .await?
-        {
+        let floor = if tenure.service_id == issuer.as_str() {
+            caller_circle_floor_in_connection(conn, &realm_id, circle_id, caller).await?
+        } else {
+            replica_circle_floor_in_connection(conn, &realm_id, circle_id, caller)
+                .await?
+                .ok()
+        };
+        if floor.is_none_or(|floor| commit.stream_position < floor.oldest_position) {
             return Ok(Read::NotVisible);
         }
-        // The genesis is a member of the Realm's authority bundle: every
-        // current member resolves it.
-        let genesis = commit.stream_position == 0
-            && event
-                .as_ref()
-                .is_some_and(|event| event.kind == arkret_wire::EventKind::RealmCreate);
-        if !genesis {
-            let floor = if governs {
-                match caller_realm_floor_in_connection(conn, &realm_id, caller).await? {
-                    Some(floor) => floor.oldest_position,
-                    None => return Ok(Read::NotVisible),
-                }
-            } else {
-                match history.as_str() {
-                    "all_history_for_current_members" => 0,
-                    "since_join" => {
-                        match replica_realm_floor_in_connection(conn, &realm_id, caller).await? {
-                            Ok(floor) => floor.oldest_position,
-                            Err(_) => return Ok(Read::NotVisible),
-                        }
-                    }
-                    _ => return Ok(Read::NotVisible),
-                }
-            };
-            if commit.stream_position < floor {
-                return Ok(Read::NotVisible);
-            }
-        }
-        let Some(event) = event else {
-            return Ok(Read::Read(Box::new(CommittedEventView::Withheld(
-                arkret_wire::CommittedEventWithheldView {
-                    commit,
-                    event_disclosure: arkret_wire::EventDisclosure {
-                        status: arkret_wire::EventDisclosureStatus::Withheld,
-                    },
+        return Ok(Read::Read(Box::new(match event {
+            Some(event) => single_row(
+                crate::committed_disclosure::disclose_to_member_in_connection(
+                    conn,
+                    vec![arkret_wire::CommittedEventFullView { commit, event }],
+                    caller,
+                )
+                .await?,
+            )?,
+            None => CommittedEventView::Withheld(arkret_wire::CommittedEventWithheldView {
+                commit,
+                event_disclosure: arkret_wire::EventDisclosure {
+                    status: arkret_wire::EventDisclosureStatus::Withheld,
                 },
-            ))));
+            }),
+        })));
+    }
+    if let CommitStreamRef::Sidecar { sidecar_id, .. } = &commit.stream_ref {
+        let Some(tenure) = sql_query("SELECT service_id FROM realm_authorities WHERE realm_id=$1")
+            .bind::<Text, _>(realm_id.as_str())
+            .get_result::<TenureRow>(&mut *conn)
+            .await
+            .optional()?
+        else {
+            return Ok(Read::NotVisible);
         };
-        Ok(Read::Read(Box::new(single_row(
-            crate::committed_disclosure::disclose_to_member_in_connection(
-                conn,
-                vec![arkret_wire::CommittedEventFullView { commit, event }],
-                caller,
+        let floor = if tenure.service_id == issuer.as_str() {
+            crate::sidecar_authority_cut::public_material_floor_in_connection(
+                conn, &realm_id, sidecar_id, caller,
             )
-            .await?,
-        )?)))
-    })
-    .await
-    .map_err(PgTransactionError::into_persistence)
+            .await?
+        } else {
+            crate::sidecar_replica_authority::handshake_floor_in_connection(
+                conn, &realm_id, sidecar_id, caller,
+            )
+            .await?
+            .unwrap_or_default()
+        };
+        if floor.is_none_or(|floor| commit.stream_position < floor.oldest_position) {
+            return Ok(Read::NotVisible);
+        }
+        return Ok(Read::Read(Box::new(match event {
+            Some(event) => single_row(
+                crate::committed_disclosure::disclose_to_member_in_connection(
+                    conn,
+                    vec![arkret_wire::CommittedEventFullView { commit, event }],
+                    caller,
+                )
+                .await?,
+            )?,
+            None => CommittedEventView::Withheld(arkret_wire::CommittedEventWithheldView {
+                commit,
+                event_disclosure: arkret_wire::EventDisclosure {
+                    status: arkret_wire::EventDisclosureStatus::Withheld,
+                },
+            }),
+        })));
+    }
+    if commit.stream_ref
+        != (CommitStreamRef::Realm {
+            realm_id: realm_id.clone(),
+        })
+    {
+        return Ok(Read::OutsideOrdinaryRealmStream);
+    }
+    use arkret_models_collaboration::events_payloads::realm::RealmPurpose;
+    // A control Realm's since_join history profile does not give it
+    // ordinary membership. Its read path applies principal/controller gates.
+    if matches!(
+        realm_purpose(conn, &realm_id).await?,
+        Some(
+            RealmPurpose::PrincipalControl
+                | RealmPurpose::AgentControl
+                | RealmPurpose::AppletManagedControl
+        )
+    ) {
+        return Ok(Read::OutsideOrdinaryRealmStream);
+    }
+    let Some(history) = realm_history_access(conn, &realm_id).await? else {
+        return Ok(Read::OutsideOrdinaryRealmStream);
+    };
+    if let Some(event) = &event
+        && &event.actor_id == caller
+        && event.kind != arkret_wire::EventKind::CircleCreate
+    {
+        let full = arkret_wire::CommittedEventFullView {
+            commit,
+            event: event.clone(),
+        };
+        return Ok(Read::Read(Box::new(single_row(
+            crate::committed_disclosure::disclose_to_member_in_connection(conn, vec![full], caller)
+                .await?,
+        )?)));
+    }
+    let Some(tenure) = sql_query("SELECT service_id FROM realm_authorities WHERE realm_id=$1")
+        .bind::<Text, _>(realm_id.as_str())
+        .get_result::<TenureRow>(&mut *conn)
+        .await
+        .optional()?
+    else {
+        return Ok(Read::NotVisible);
+    };
+    let governs = tenure.service_id == issuer.as_str();
+    if (!governs && anchor.is_none())
+        || !crate::authority_commit::accepted_current_member_joined_in_connection(
+            conn, &realm_id, caller,
+        )
+        .await?
+    {
+        return Ok(Read::NotVisible);
+    }
+    // The genesis is a member of the Realm's authority bundle: every
+    // current member resolves it.
+    let genesis = commit.stream_position == 0
+        && event
+            .as_ref()
+            .is_some_and(|event| event.kind == arkret_wire::EventKind::RealmCreate);
+    if !genesis {
+        let floor = if governs {
+            match caller_realm_floor_in_connection(conn, &realm_id, caller).await? {
+                Some(floor) => floor.oldest_position,
+                None => return Ok(Read::NotVisible),
+            }
+        } else {
+            match history.as_str() {
+                "all_history_for_current_members" => 0,
+                "since_join" => {
+                    match replica_realm_floor_in_connection(conn, &realm_id, caller).await? {
+                        Ok(floor) => floor.oldest_position,
+                        Err(_) => return Ok(Read::NotVisible),
+                    }
+                }
+                _ => return Ok(Read::NotVisible),
+            }
+        };
+        if commit.stream_position < floor {
+            return Ok(Read::NotVisible);
+        }
+    }
+    let Some(event) = event else {
+        return Ok(Read::Read(Box::new(CommittedEventView::Withheld(
+            arkret_wire::CommittedEventWithheldView {
+                commit,
+                event_disclosure: arkret_wire::EventDisclosure {
+                    status: arkret_wire::EventDisclosureStatus::Withheld,
+                },
+            },
+        ))));
+    };
+    Ok(Read::Read(Box::new(single_row(
+        crate::committed_disclosure::disclose_to_member_in_connection(
+            conn,
+            vec![arkret_wire::CommittedEventFullView { commit, event }],
+            caller,
+        )
+        .await?,
+    )?)))
 }
 
 pub(crate) async fn scan_stream_for_peer(

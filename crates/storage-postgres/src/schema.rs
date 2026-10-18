@@ -500,6 +500,8 @@ diesel::table! {
         recipient -> Text,
         device_id -> Text,
         recipient_device_authorization -> Jsonb,
+        effective_scope -> Nullable<Jsonb>,
+        delivered_positions -> Nullable<Array<Int8>>,
         queue_position -> Int8,
         issued_at -> Timestamptz,
         expires_at -> Timestamptz,
@@ -820,7 +822,8 @@ diesel::table! {
         id -> Text,
         keypackage_ref -> Text,
         keypackage_digest -> Text,
-        owner_account_pk -> Int8,
+        owner_account_id -> Jsonb,
+        effective_scope -> Nullable<Jsonb>,
         actor_id -> Text,
         device_id -> Nullable<Text>,
         endpoint_verification_method -> Nullable<Text>,
@@ -895,6 +898,20 @@ diesel::table! {
 }
 
 diesel::table! {
+    keypackage_claim_attempts (source_id, claim_request_id) {
+        source_id -> Text,
+        claim_request_id -> Text,
+        request_digest -> Text,
+        requester_identity -> Text,
+        target_identity -> Text,
+        source_target_identity -> Text,
+        rejection_reason -> Nullable<Text>,
+        attempted_at -> Timestamptz,
+        expires_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     peer_keypackage_claims (source_id, claim_request_id) {
         source_id -> Text,
         claim_request_id -> Text,
@@ -904,6 +921,7 @@ diesel::table! {
         outcome -> Nullable<Jsonb>,
         terminal_receipt -> Nullable<Jsonb>,
         consume_receipt -> Nullable<Jsonb>,
+        consume_request_digest -> Nullable<Text>,
         claim_expires_at_unix_ms -> Nullable<Int8>,
         expires_at -> Int8,
         state -> Text,
@@ -1498,6 +1516,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     notifications,
     one_time_keys,
     organizations,
+    keypackage_claim_attempts,
     peer_keypackage_claims,
     policy_documents,
     principal_resolution_events,

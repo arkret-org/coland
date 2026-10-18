@@ -786,157 +786,137 @@ struct WipOverrideSetup {
 }
 
 async fn prepare_wip_override_setup(pool: &PgPool) -> WipOverrideSetup {
-    let opened =
-        scenario_future(|| async { open_discussion(&pool, "strand-position-wip-override").await })
-            .await;
+    let opened = Box::pin(open_discussion(&pool, "strand-position-wip-override")).await;
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let realm = opened.head.authority_commit.event.realm_id.clone();
     let actor = opened.head.authority_commit.event.actor_id.clone();
     let at = opened.head.authority_commit.commit.committed_at;
-    let board = scenario_future(|| async {
-        ordinary_realm::source_request(
-            &pool,
-            next_request(
-                &opened.head.authority_commit,
-                arkret_wire::EventKind::SpaceCreate,
-                opened
-                    .head
-                    .authority_commit
-                    .event
-                    .actor_id
-                    .signing_principal_id(),
-                space_payload(&realm, &actor, at, "board", "Board", None, json!({})),
-                at,
-            ),
-        )
-        .await
-    })
+    let board = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &opened.head.authority_commit,
+            arkret_wire::EventKind::SpaceCreate,
+            opened
+                .head
+                .authority_commit
+                .event
+                .actor_id
+                .signing_principal_id(),
+            space_payload(&realm, &actor, at, "board", "Board", None, json!({})),
+            at,
+        ),
+    ))
     .await;
     let board_id = arkret_wire::SpaceId::from_event_id(&board.authority_commit.event.event_id);
     uow.commit_event(board.clone()).await.unwrap();
-    let list_a = scenario_future(|| async {
-        ordinary_realm::source_request(
-            &pool,
-            next_request(
-                &board.authority_commit,
-                arkret_wire::EventKind::SpaceCreate,
-                opened
-                    .head
-                    .authority_commit
-                    .event
-                    .actor_id
-                    .signing_principal_id(),
-                space_payload(
-                    &realm,
-                    &actor,
-                    at,
-                    "list",
-                    "A",
-                    Some(&board_id),
-                    json!({"wip_limit":1,"wip_limit_enforcement":"reject"}),
-                ),
+    let list_a = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &board.authority_commit,
+            arkret_wire::EventKind::SpaceCreate,
+            opened
+                .head
+                .authority_commit
+                .event
+                .actor_id
+                .signing_principal_id(),
+            space_payload(
+                &realm,
+                &actor,
                 at,
+                "list",
+                "A",
+                Some(&board_id),
+                json!({"wip_limit":1,"wip_limit_enforcement":"reject"}),
             ),
-        )
-        .await
-    })
+            at,
+        ),
+    ))
     .await;
     let list_a_id = arkret_wire::SpaceId::from_event_id(&list_a.authority_commit.event.event_id);
     uow.commit_event(list_a.clone()).await.unwrap();
-    let list_b = scenario_future(|| async {
-        ordinary_realm::source_request(
-            &pool,
-            next_request(
-                &list_a.authority_commit,
-                arkret_wire::EventKind::SpaceCreate,
-                opened
-                    .head
-                    .authority_commit
-                    .event
-                    .actor_id
-                    .signing_principal_id(),
-                space_payload(
-                    &realm,
-                    &actor,
-                    at,
-                    "list",
-                    "B",
-                    Some(&board_id),
-                    json!({"wip_limit":1,"wip_limit_enforcement":"reject"}),
-                ),
+    let list_b = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &list_a.authority_commit,
+            arkret_wire::EventKind::SpaceCreate,
+            opened
+                .head
+                .authority_commit
+                .event
+                .actor_id
+                .signing_principal_id(),
+            space_payload(
+                &realm,
+                &actor,
                 at,
+                "list",
+                "B",
+                Some(&board_id),
+                json!({"wip_limit":1,"wip_limit_enforcement":"reject"}),
             ),
-        )
-        .await
-    })
+            at,
+        ),
+    ))
     .await;
     let list_b_id = arkret_wire::SpaceId::from_event_id(&list_b.authority_commit.event.event_id);
     uow.commit_event(list_b.clone()).await.unwrap();
-    let second_strand = scenario_future(|| async {
-        ordinary_realm::source_request(
-            &pool,
-            next_request(
-                &list_b.authority_commit,
-                arkret_wire::EventKind::StrandCreate,
-                opened
-                    .head
-                    .authority_commit
-                    .event
-                    .actor_id
-                    .signing_principal_id(),
-                json!({"object":{"schema":"ak.schema.strand.v1","realm_id":realm,
+    let second_strand = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &list_b.authority_commit,
+            arkret_wire::EventKind::StrandCreate,
+            opened
+                .head
+                .authority_commit
+                .event
+                .actor_id
+                .signing_principal_id(),
+            json!({"object":{"schema":"ak.schema.strand.v1","realm_id":realm,
             "tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},
             "metadata":{"title":"Second"},"state":"active","created_by":actor,
             "created_at":arkret_canonical::format_timestamp_canonical(at)}}),
-                at,
-            ),
-        )
-        .await
-    })
+            at,
+        ),
+    ))
     .await;
     let second_id =
         arkret_wire::StrandId::from_event_id(&second_strand.authority_commit.event.event_id);
     uow.commit_event(second_strand.clone()).await.unwrap();
-    let first_placed = scenario_future(|| async {
-        ordinary_realm::source_request(
-            &pool,
-            next_request(
-                &second_strand.authority_commit,
-                arkret_wire::EventKind::StrandMove,
-                opened
-                    .head
-                    .authority_commit
-                    .event
-                    .actor_id
-                    .signing_principal_id(),
-                json!({"board_space_id":board_id,"strand_id":opened.strand_id,
+    let first_placed = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &second_strand.authority_commit,
+            arkret_wire::EventKind::StrandMove,
+            opened
+                .head
+                .authority_commit
+                .event
+                .actor_id
+                .signing_principal_id(),
+            json!({"board_space_id":board_id,"strand_id":opened.strand_id,
             "target_space_id":list_a_id,"rank":"a"}),
-                at,
-            ),
-        )
-        .await
-    })
+            at,
+        ),
+    ))
     .await;
     uow.commit_event(first_placed.clone()).await.unwrap();
-    let second_placed = scenario_future(|| async {
-        ordinary_realm::source_request(
-            &pool,
-            next_request(
-                &first_placed.authority_commit,
-                arkret_wire::EventKind::StrandMove,
-                opened
-                    .head
-                    .authority_commit
-                    .event
-                    .actor_id
-                    .signing_principal_id(),
-                json!({"board_space_id":board_id,"strand_id":second_id,
+    let second_placed = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &first_placed.authority_commit,
+            arkret_wire::EventKind::StrandMove,
+            opened
+                .head
+                .authority_commit
+                .event
+                .actor_id
+                .signing_principal_id(),
+            json!({"board_space_id":board_id,"strand_id":second_id,
             "target_space_id":list_b_id,"rank":"a"}),
-                at,
-            ),
-        )
-        .await
-    })
+            at,
+        ),
+    ))
     .await;
     uow.commit_event(second_placed.clone()).await.unwrap();
 
@@ -991,46 +971,40 @@ async fn exercise_wip_override_resource_grants(
             json!({"constraint_kind":"scope_limitation","effect":"allow",
             "wip_limit_override":false}),
         );
-    let conflicting_grant = scenario_future(|| async {
-        ordinary_realm::source_request(
-            &pool,
-            next_request(
-                &second_placed.authority_commit,
-                arkret_wire::EventKind::CapabilityGrant,
-                opened
-                    .head
-                    .authority_commit
-                    .event
-                    .actor_id
-                    .signing_principal_id(),
-                conflicting_payload,
-                at,
-            ),
-        )
-        .await
-    })
+    let conflicting_grant = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &second_placed.authority_commit,
+            arkret_wire::EventKind::CapabilityGrant,
+            opened
+                .head
+                .authority_commit
+                .event
+                .actor_id
+                .signing_principal_id(),
+            conflicting_payload,
+            at,
+        ),
+    ))
     .await;
     uow.commit_event(conflicting_grant.clone()).await.unwrap();
-    let conflicting_move = scenario_future(|| async {
-        ordinary_realm::source_request(
-            &pool,
-            next_request(
-                &conflicting_grant.authority_commit,
-                arkret_wire::EventKind::StrandMove,
-                opened
-                    .head
-                    .authority_commit
-                    .event
-                    .actor_id
-                    .signing_principal_id(),
-                json!({"board_space_id":board_id,"strand_id":second_id,
+    let conflicting_move = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &conflicting_grant.authority_commit,
+            arkret_wire::EventKind::StrandMove,
+            opened
+                .head
+                .authority_commit
+                .event
+                .actor_id
+                .signing_principal_id(),
+            json!({"board_space_id":board_id,"strand_id":second_id,
             "from_space_id":list_b_id,"target_space_id":list_a_id,"rank":"b",
             "expected_position":{"list_space_id":list_b_id,"rank":"a"}}),
-                at,
-            ),
-        )
-        .await
-    })
+            at,
+        ),
+    ))
     .await;
     let before = (
         count(&pool, &realm, "canonical_events").await,
@@ -1050,49 +1024,43 @@ async fn exercise_wip_override_resource_grants(
             count(&pool, &realm, "realm_commits").await
         )
     );
-    let override_grant = scenario_future(|| async {
-        ordinary_realm::source_request(
-            &pool,
-            next_request(
-                &conflicting_grant.authority_commit,
-                arkret_wire::EventKind::CapabilityGrant,
-                opened
-                    .head
-                    .authority_commit
-                    .event
-                    .actor_id
-                    .signing_principal_id(),
-                grant_payload.clone(),
-                at,
-            ),
-        )
-        .await
-    })
+    let override_grant = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &conflicting_grant.authority_commit,
+            arkret_wire::EventKind::CapabilityGrant,
+            opened
+                .head
+                .authority_commit
+                .event
+                .actor_id
+                .signing_principal_id(),
+            grant_payload.clone(),
+            at,
+        ),
+    ))
     .await;
     uow.commit_event(override_grant.clone()).await.unwrap();
 
     // Root ownership admits ordinary moves, but the narrow grant cannot
     // override WIP for another Strand or destination List.
-    let wrong_target = scenario_future(|| async {
-        ordinary_realm::source_request(
-            &pool,
-            next_request(
-                &override_grant.authority_commit,
-                arkret_wire::EventKind::StrandMove,
-                opened
-                    .head
-                    .authority_commit
-                    .event
-                    .actor_id
-                    .signing_principal_id(),
-                json!({"board_space_id":board_id,"strand_id":opened.strand_id,
+    let wrong_target = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &override_grant.authority_commit,
+            arkret_wire::EventKind::StrandMove,
+            opened
+                .head
+                .authority_commit
+                .event
+                .actor_id
+                .signing_principal_id(),
+            json!({"board_space_id":board_id,"strand_id":opened.strand_id,
             "from_space_id":list_a_id,"target_space_id":list_b_id,"rank":"b",
             "expected_position":{"list_space_id":list_a_id,"rank":"a"}}),
-                at,
-            ),
-        )
-        .await
-    })
+            at,
+        ),
+    ))
     .await;
     let before = (
         count(&pool, &realm, "canonical_events").await,
@@ -1156,46 +1124,40 @@ async fn exercise_wip_override_global_deny(
         "constraint_kind":"scope_limitation","effect":"deny",
         "denied_space_ids":[list_a_id]
     }]);
-    let denial_grant = scenario_future(|| async {
-        ordinary_realm::source_request(
-            &pool,
-            next_request(
-                &override_grant.authority_commit,
-                arkret_wire::EventKind::CapabilityGrant,
-                opened
-                    .head
-                    .authority_commit
-                    .event
-                    .actor_id
-                    .signing_principal_id(),
-                denial_payload,
-                at,
-            ),
-        )
-        .await
-    })
+    let denial_grant = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &override_grant.authority_commit,
+            arkret_wire::EventKind::CapabilityGrant,
+            opened
+                .head
+                .authority_commit
+                .event
+                .actor_id
+                .signing_principal_id(),
+            denial_payload,
+            at,
+        ),
+    ))
     .await;
     uow.commit_event(denial_grant.clone()).await.unwrap();
-    let denied_by_other_grant = scenario_future(|| async {
-        ordinary_realm::source_request(
-            &pool,
-            next_request(
-                &denial_grant.authority_commit,
-                arkret_wire::EventKind::StrandMove,
-                opened
-                    .head
-                    .authority_commit
-                    .event
-                    .actor_id
-                    .signing_principal_id(),
-                json!({"board_space_id":board_id,"strand_id":second_id,
+    let denied_by_other_grant = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &denial_grant.authority_commit,
+            arkret_wire::EventKind::StrandMove,
+            opened
+                .head
+                .authority_commit
+                .event
+                .actor_id
+                .signing_principal_id(),
+            json!({"board_space_id":board_id,"strand_id":second_id,
             "from_space_id":list_b_id,"target_space_id":list_a_id,"rank":"b",
             "expected_position":{"list_space_id":list_b_id,"rank":"a"}}),
-                at,
-            ),
-        )
-        .await
-    })
+            at,
+        ),
+    ))
     .await;
     let before = (
         count(&pool, &realm, "canonical_events").await,
@@ -1215,52 +1177,46 @@ async fn exercise_wip_override_global_deny(
             count(&pool, &realm, "realm_commits").await
         )
     );
-    let denial_revoked = scenario_future(|| async {
-        ordinary_realm::source_request(
-            &pool,
-            next_request(
-                &denial_grant.authority_commit,
-                arkret_wire::EventKind::CapabilityRevoke,
-                opened
-                    .head
-                    .authority_commit
-                    .event
-                    .actor_id
-                    .signing_principal_id(),
-                json!({"grant_id":arkret_wire::GrantId::from_event_id(
-                &denial_grant.authority_commit.event.event_id),
-                "expected_revision":{
-                    "commit_id":denial_grant.authority_commit.commit.commit_id,
-                    "stream_position":denial_grant.authority_commit.commit.stream_position
-                }}),
-                at,
-            ),
-        )
-        .await
-    })
+    let denial_revoked = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &denial_grant.authority_commit,
+            arkret_wire::EventKind::CapabilityRevoke,
+            opened
+                .head
+                .authority_commit
+                .event
+                .actor_id
+                .signing_principal_id(),
+            json!({"grant_id":arkret_wire::GrantId::from_event_id(
+            &denial_grant.authority_commit.event.event_id),
+            "expected_revision":{
+                "commit_id":denial_grant.authority_commit.commit.commit_id,
+                "stream_position":denial_grant.authority_commit.commit.stream_position
+            }}),
+            at,
+        ),
+    ))
     .await;
     uow.commit_event(denial_revoked.clone()).await.unwrap();
 
-    let override_move = scenario_future(|| async {
-        ordinary_realm::source_request(
-            &pool,
-            next_request(
-                &denial_revoked.authority_commit,
-                arkret_wire::EventKind::StrandMove,
-                opened
-                    .head
-                    .authority_commit
-                    .event
-                    .actor_id
-                    .signing_principal_id(),
-                json!({"board_space_id":board_id,"strand_id":second_id,
+    let override_move = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &denial_revoked.authority_commit,
+            arkret_wire::EventKind::StrandMove,
+            opened
+                .head
+                .authority_commit
+                .event
+                .actor_id
+                .signing_principal_id(),
+            json!({"board_space_id":board_id,"strand_id":second_id,
             "from_space_id":list_b_id,"target_space_id":list_a_id,"rank":"b",
             "expected_position":{"list_space_id":list_b_id,"rank":"a"}}),
-                at,
-            ),
-        )
-        .await
-    })
+            at,
+        ),
+    ))
     .await;
     uow.commit_event(override_move.clone()).await.unwrap();
     assert_eq!(
@@ -1285,73 +1241,64 @@ async fn exercise_wip_after_override_revocation(
     let realm = opened.head.authority_commit.event.realm_id.clone();
     let at = opened.head.authority_commit.commit.committed_at;
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
-    let revoked = scenario_future(|| async {
-        ordinary_realm::source_request(
-            &pool,
-            next_request(
-                &override_move.authority_commit,
-                arkret_wire::EventKind::CapabilityRevoke,
-                opened
-                    .head
-                    .authority_commit
-                    .event
-                    .actor_id
-                    .signing_principal_id(),
-                json!({"grant_id":arkret_wire::GrantId::from_event_id(
-                    &override_grant.authority_commit.event.event_id),
-                "expected_revision":{
-                    "commit_id":override_grant.authority_commit.commit.commit_id,
-                    "stream_position":override_grant.authority_commit.commit.stream_position
-                }}),
-                at,
-            ),
-        )
-        .await
-    })
+    let revoked = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &override_move.authority_commit,
+            arkret_wire::EventKind::CapabilityRevoke,
+            opened
+                .head
+                .authority_commit
+                .event
+                .actor_id
+                .signing_principal_id(),
+            json!({"grant_id":arkret_wire::GrantId::from_event_id(
+                &override_grant.authority_commit.event.event_id),
+            "expected_revision":{
+                "commit_id":override_grant.authority_commit.commit.commit_id,
+                "stream_position":override_grant.authority_commit.commit.stream_position
+            }}),
+            at,
+        ),
+    ))
     .await;
     uow.commit_event(revoked.clone()).await.unwrap();
-    let move_out = scenario_future(|| async {
-        ordinary_realm::source_request(
-            &pool,
-            next_request(
-                &revoked.authority_commit,
-                arkret_wire::EventKind::StrandMove,
-                opened
-                    .head
-                    .authority_commit
-                    .event
-                    .actor_id
-                    .signing_principal_id(),
-                json!({"board_space_id":board_id,"strand_id":second_id,
+    let move_out = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &revoked.authority_commit,
+            arkret_wire::EventKind::StrandMove,
+            opened
+                .head
+                .authority_commit
+                .event
+                .actor_id
+                .signing_principal_id(),
+            json!({"board_space_id":board_id,"strand_id":second_id,
             "from_space_id":list_a_id,"target_space_id":list_b_id,"rank":"a",
             "expected_position":{"list_space_id":list_a_id,"rank":"b"}}),
-                at,
-            ),
-        )
-        .await
-    })
+            at,
+        ),
+    ))
     .await;
     uow.commit_event(move_out.clone()).await.unwrap();
-    let after_revocation = scenario_future(|| async {
-        ordinary_realm::source_request(
-            &pool,
-            next_request(
-                &move_out.authority_commit,
-                arkret_wire::EventKind::StrandMove,
-                opened
-                    .head
-                    .authority_commit
-                    .event
-                    .actor_id
-                    .signing_principal_id(),
-                json!({"board_space_id":board_id,"strand_id":second_id,
+    let after_revocation = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &move_out.authority_commit,
+            arkret_wire::EventKind::StrandMove,
+            opened
+                .head
+                .authority_commit
+                .event
+                .actor_id
+                .signing_principal_id(),
+            json!({"board_space_id":board_id,"strand_id":second_id,
             "from_space_id":list_b_id,"target_space_id":list_a_id,"rank":"c",
             "expected_position":{"list_space_id":list_b_id,"rank":"a"}}),
-                at,
-            ),
-        )
-        .await
-    })
+            at,
+        ),
+    ))
     .await;
     let before = (
         count(&pool, &realm, "canonical_events").await,
@@ -1379,28 +1326,21 @@ async fn exercise_wip_after_override_revocation(
 
 #[tokio::test]
 async fn wip_override_requires_a_current_grant_matching_the_strand_and_destination() {
-    wip_override_scenario().await;
-}
-
-#[inline(never)]
-fn wip_override_scenario() -> std::pin::Pin<Box<impl std::future::Future<Output = ()>>> {
-    Box::pin(async move {
-        let database = TestDatabase::lease().await;
-        let pool = database.pool();
-        let setup = scenario_future(|| async { prepare_wip_override_setup(&pool).await }).await;
-        let grant = scenario_future(|| async {
-            exercise_wip_override_resource_grants(&pool, &setup).await
-        })
-        .await;
-        let moved = scenario_future(|| async {
-            exercise_wip_override_global_deny(&pool, &setup, &grant).await
-        })
-        .await;
-        scenario_future(|| async {
-            exercise_wip_after_override_revocation(&pool, &setup, &grant, &moved).await
-        })
-        .await;
-    })
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let fixture_pool = pool.clone();
+    let setup =
+        tokio::spawn(
+            async move { Box::new(Box::pin(prepare_wip_override_setup(&fixture_pool)).await) },
+        )
+        .await
+        .unwrap();
+    let grant = Box::pin(exercise_wip_override_resource_grants(&pool, &setup)).await;
+    let moved = Box::pin(exercise_wip_override_global_deny(&pool, &setup, &grant)).await;
+    Box::pin(exercise_wip_after_override_revocation(
+        &pool, &setup, &grant, &moved,
+    ))
+    .await;
 }
 
 #[path = "support/approval_wip_cases.rs"]
@@ -1584,13 +1524,4 @@ async fn terminal_target_keeps_canonical_position_without_breaking_the_joined_re
         .unwrap();
     assert_eq!(strand.board_space_id.as_ref(), Some(&board_id));
     assert_eq!(strand.list_space_id.as_ref(), Some(&list_a_id));
-}
-
-#[inline(never)]
-fn scenario_future<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future,
-{
-    Box::pin(make())
 }

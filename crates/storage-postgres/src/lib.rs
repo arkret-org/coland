@@ -50,7 +50,9 @@ mod agent_principal_row;
 mod agent_producer_evidence;
 mod agent_producer_signer_keys;
 mod agent_provisioning;
+mod agent_session_authority;
 mod agents;
+mod applet_action_approval;
 mod applet_admission;
 mod applet_authority_material;
 mod applet_current_results;
@@ -63,6 +65,11 @@ mod capability_grant_current_results;
 mod capability_quota;
 mod committed_disclosure;
 mod consent_current;
+mod consent_private_commands;
+mod consent_private_cuts;
+mod consent_private_effects;
+mod consent_private_effects_projection;
+mod consent_private_invites;
 mod consent_request_quarantine;
 pub use consent_current::PgConsentCurrentStore;
 mod contacts;
@@ -95,6 +102,10 @@ mod policy_action_admission;
 mod policy_current_results;
 pub use invite_current_results::PgInviteCurrentResultStore;
 mod applet_authoring_context;
+mod applet_content_delivery;
+mod applet_device_admission;
+mod applet_e2ee;
+mod applet_scope_profiles;
 mod call_state_current_results;
 mod circle_current_results;
 mod circle_reads;
@@ -114,6 +125,12 @@ mod message_revision_current_results;
 mod mls;
 mod mls_group_current_results;
 mod mls_group_state_material_read;
+mod mls_keypackage_claim_admission;
+mod mls_keypackage_claim_budget;
+mod mls_keypackage_claim_endpoints;
+mod mls_keypackage_consume;
+mod mls_keypackage_publication;
+mod mls_keypackage_revocation;
 mod mls_recipient_attestation_outbox;
 mod mls_roster_attest_add;
 mod mls_roster_authority_read;
@@ -128,6 +145,8 @@ mod object_redaction_current_results;
 mod organization_moderation_gate;
 mod organization_registration;
 mod pcr_accepted_device_unit;
+mod pcr_applet_device;
+mod pcr_applet_device_authority;
 mod pcr_device_current_results;
 mod pcr_device_revocation_proposals;
 mod pcr_device_status_fold;
@@ -136,6 +155,8 @@ mod pcr_device_status_reader;
 #[path = "../../test-support/src/pcr_genesis.rs"]
 #[allow(dead_code)]
 mod pcr_genesis;
+mod pcr_private_archive;
+mod pcr_private_authority;
 mod pcr_recovery_policy_unit;
 mod pin_current_results;
 mod policy;
@@ -260,22 +281,32 @@ struct DatabaseReadyRow {
 }
 
 pub async fn database_ready(pool: Option<&PgPool>) -> bool {
-    match pool {
-        Some(pool) => match pool.get().await {
-            Ok(mut conn) => sql_query("SELECT 1 AS ok")
-                .get_result::<DatabaseReadyRow>(&mut *conn)
-                .await
-                .is_ok_and(|row| row.ok == 1),
-            Err(_) => false,
-        },
-        None => true,
-    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        match pool {
+            Some(pool) => match pool.get().await {
+                Ok(mut conn) => sql_query("SELECT 1 AS ok")
+                    .get_result::<DatabaseReadyRow>(&mut *conn)
+                    .await
+                    .is_ok_and(|row| row.ok == 1),
+                Err(_) => false,
+            },
+            None => true,
+        }
+    })
+    .await
+    .unwrap_or(false)
 }
 
 pub(crate) async fn pg_conn(pool: &PgPool) -> PersistenceResult<Object<AsyncPgConnection>> {
-    pool.get()
-        .await
-        .map_err(|error| PersistenceError::Internal(format!("database pool error: {error}")))
+    tokio::time::timeout(
+        pool.timeouts()
+            .wait
+            .unwrap_or(std::time::Duration::from_secs(5)),
+        pool.get(),
+    )
+    .await
+    .map_err(|_| PersistenceError::Internal("database checkout timed out".into()))?
+    .map_err(|error| PersistenceError::Internal(format!("database pool error: {error}")))
 }
 
 pub(crate) fn json_string_array(value: Value) -> Vec<String> {
@@ -330,3 +361,5 @@ where
 {
     Box::pin(make())
 }
+
+mod registered_audit;

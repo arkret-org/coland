@@ -56,6 +56,7 @@ use super::authority_self_event_unit::{AdmittedProducer, SelfEventUnitEffects};
 pub(super) struct MlsUnitInstallation {
     pub(super) state: MlsStateInstallation,
     pub(super) welcomes: Vec<VerifiedMlsWelcome>,
+    pub(super) native_request: Option<super::authority_managed_device::mls::NativeMlsRequest>,
 }
 
 fn refused(code: ConflictCode, detail: impl std::fmt::Display) -> ServiceError {
@@ -104,7 +105,31 @@ pub(super) fn admit_mls_event<'a>(
         genesis_material,
         producer,
         producer_key,
+        None,
     ))
+}
+
+#[inline(never)]
+pub(super) fn admit_native_mls_event<'a>(
+    state: &'a AppState,
+    event: &'a Event,
+    welcomes: &'a [MlsWelcomeDelivery],
+    genesis_material: Option<&'a MlsGenesisMaterial>,
+    producer: AdmittedProducer,
+    producer_key: &'a arkret_signatures::PublicKeyMaterial,
+    native_request: Option<super::authority_managed_device::mls::NativeMlsRequest>,
+) -> impl std::future::Future<Output = ServiceResult<AuthoritySubmitOutcome>> + Send + 'a {
+    crate::boxed_future(move || {
+        admit_mls_event_inner(
+            state,
+            event,
+            welcomes,
+            genesis_material,
+            producer,
+            producer_key,
+            native_request,
+        )
+    })
 }
 
 async fn admit_mls_event_inner(
@@ -114,6 +139,7 @@ async fn admit_mls_event_inner(
     genesis_material: Option<&MlsGenesisMaterial>,
     producer: AdmittedProducer,
     producer_key: &arkret_signatures::PublicKeyMaterial,
+    native_request: Option<super::authority_managed_device::mls::NativeMlsRequest>,
 ) -> ServiceResult<AuthoritySubmitOutcome> {
     if let Some(outcome) = super::authority_self_event_unit::exact_replay(state, event).await? {
         return Ok(outcome);
@@ -124,6 +150,28 @@ async fn admit_mls_event_inner(
             "the MLS effective scope has no supported authority cut".to_owned(),
         ));
     }
+    let native_guard = match &producer {
+        AdmittedProducer::Local(guard) => match guard.as_ref() {
+            coland_storage::SelfProducerCommitGuard::AppletManagedDevice(guard) => {
+                Some(guard.clone())
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    let refusal_record = native_request
+        .as_ref()
+        .map(|context| context.refusal_record(arkret_wire::ReasonCode::GOVERNANCE_BINDING_MISMATCH))
+        .transpose()?;
+    let native_refusal = native_guard.as_deref().zip(refusal_record.as_ref());
+    let refusal_authority = if event.kind == EventKind::MlsCommit {
+        state
+            .authority_commits()
+            .current_authority(&event.realm_id)
+            .await?
+    } else {
+        None
+    };
     let (installation, added_leaves) = match event.kind {
         EventKind::MlsGenesis => {
             if !welcomes.is_empty() {
@@ -134,7 +182,28 @@ async fn admit_mls_event_inner(
                 Vec::new(),
             )
         }
-        EventKind::MlsCommit if genesis_material.is_none() => verify_commit(state, event).await?,
+        EventKind::MlsCommit if genesis_material.is_none() => {
+            match prepare_commit(state, event).await? {
+                PreparedCommit::Ready(installation, added_leaves) => (installation, added_leaves),
+                PreparedCommit::KeyAccessRefused(added_leaves) => {
+                    // A malformed or unsealed Welcome is a request refusal,
+                    // never a durable Event-level rejection.
+                    verify_welcomes(state, event, welcomes, &added_leaves, producer_key).await?;
+                    let authority = refusal_authority.as_ref().ok_or_else(|| {
+                        failed_precondition("MLS refusal has no current authority")
+                    })?;
+                    return state
+                        .authority_commits()
+                        .finalize_mls_rejection(
+                            event,
+                            authority,
+                            arkret_wire::ReasonCode::GOVERNANCE_BINDING_MISMATCH,
+                            native_refusal,
+                        )
+                        .await;
+                }
+            }
+        }
         _ => {
             return Err(ServiceError::Internal(
                 "the MLS unit admits only ak.mls.genesis and ak.mls.commit".to_owned(),
@@ -142,14 +211,6 @@ async fn admit_mls_event_inner(
         }
     };
     let welcomes = verify_welcomes(state, event, welcomes, &added_leaves, producer_key).await?;
-    let refusal_authority = if event.kind == EventKind::MlsCommit {
-        state
-            .authority_commits()
-            .current_authority(&event.realm_id)
-            .await?
-    } else {
-        None
-    };
     let outcome = super::authority_self_event_unit::commit_event_unit(
         state,
         &EventAdmissionSubmission::new(event.clone()),
@@ -158,11 +219,35 @@ async fn admit_mls_event_inner(
             mls: Some(MlsUnitInstallation {
                 state: installation,
                 welcomes,
+                native_request,
             }),
             ..SelfEventUnitEffects::default()
         },
     )
-    .await?;
+    .await;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error)
+            if event.kind == EventKind::MlsCommit
+                && error.conflict_code() == Some(ConflictCode::GovernanceBindingMismatch) =>
+        {
+            // The complete request was verified above; a revision race at the
+            // locked admission cut needs the same exclusive refusal fence.
+            let authority = refusal_authority
+                .as_ref()
+                .ok_or_else(|| failed_precondition("MLS refusal has no current authority"))?;
+            return state
+                .authority_commits()
+                .finalize_mls_rejection(
+                    event,
+                    authority,
+                    arkret_wire::ReasonCode::GOVERNANCE_BINDING_MISMATCH,
+                    native_refusal,
+                )
+                .await;
+        }
+        Err(error) => return Err(error),
+    };
     if let AuthoritySubmitOutcome::Rejected {
         status: arkret_wire::AuthorityRejectionStatus::Rejected,
         reason_code,
@@ -173,7 +258,7 @@ async fn admit_mls_event_inner(
             .ok_or_else(|| failed_precondition("MLS refusal has no current authority"))?;
         return state
             .authority_commits()
-            .finalize_mls_rejection(event, &authority, reason_code)
+            .finalize_mls_rejection(event, &authority, reason_code, native_refusal)
             .await;
     }
     Ok(outcome)
@@ -560,10 +645,25 @@ async fn stage_mls_public_blob(
 /// §2.2 and §2.5: one member-sent public Commit processed against the
 /// scope's current group, whose resulting GroupContext binding is the
 /// payload binding and names the current base, epoch and key-access revision.
+enum PreparedCommit {
+    Ready(MlsStateInstallation, Vec<MlsPublicEndpointLeaf>),
+    KeyAccessRefused(Vec<MlsPublicEndpointLeaf>),
+}
+
+#[cfg(test)]
 async fn verify_commit(
     state: &AppState,
     event: &Event,
 ) -> ServiceResult<(MlsStateInstallation, Vec<MlsPublicEndpointLeaf>)> {
+    match prepare_commit(state, event).await? {
+        PreparedCommit::Ready(installation, leaves) => Ok((installation, leaves)),
+        PreparedCommit::KeyAccessRefused(_) => Err(binding_mismatch(
+            "the Commit does not cover the current key-access revision",
+        )),
+    }
+}
+
+async fn prepare_commit(state: &AppState, event: &Event) -> ServiceResult<PreparedCommit> {
     let payload: MlsCommitPayload = payload(event)?;
     let binding = payload.governance_binding();
     if binding.effective_scope() != &event.scope_ref {
@@ -622,7 +722,7 @@ async fn verify_commit(
     let extension = tracker
         .governance_binding()
         .map_err(|error| binding_mismatch(error.to_string()))?;
-    arkret_mls::verify_governance_binding_against_public_state_and_payload(
+    let binding_check = arkret_mls::verify_governance_binding_against_public_state_and_payload(
         &extension,
         &arkret_mls::MlsGovernanceBindingPublicState::new(
             event.scope_ref.clone(),
@@ -631,8 +731,40 @@ async fn verify_commit(
             group.current_key_access_revision,
         ),
         binding,
-    )
-    .map_err(|rejection| binding_mismatch(rejection.code()))?;
+    );
+    if let Err(rejection) = binding_check {
+        #[cfg(feature = "conformance-harness")]
+        tracing::warn!(
+            extension_matches_payload = &extension == binding,
+            scope_matches = extension.effective_scope() == &event.scope_ref,
+            group_matches =
+                extension.mls_group_id().ok() == event.scope_ref.canonical_mls_group_id().ok(),
+            base_matches =
+                extension.base_group_state_ref() == Some(&group.current_mls_commit_event_ref),
+            previous_epoch_matches = extension.previous_epoch() == group.epoch,
+            next_epoch_matches = group.epoch.checked_add(1) == Some(extension.next_epoch()),
+            key_access_matches =
+                extension.key_access_revision() == group.current_key_access_revision,
+            extension_key_access = extension.key_access_revision(),
+            current_key_access = group.current_key_access_revision,
+            "MLS public binding coordinate refusal"
+        );
+        // Only the current membership revision may differ. The real public
+        // base, member-sent handshake and complete payload remain exact.
+        if extension.key_access_revision() != group.current_key_access_revision
+            && &extension == binding
+            && extension.effective_scope() == &event.scope_ref
+            && extension.base_group_state_ref() == Some(&group.current_mls_commit_event_ref)
+            && previous_epoch == group.epoch
+            && epoch == payload.next_epoch()
+            && payload.covers_key_access_revision() == extension.key_access_revision()
+            && arkret_mls::verify_next_epoch_governance_binding(&group_id, group.epoch, &extension)
+                .is_ok()
+        {
+            return Ok(PreparedCommit::KeyAccessRefused(added_leaves));
+        }
+        return Err(binding_mismatch(rejection.code()));
+    }
     if previous_epoch != group.epoch
         || epoch != payload.next_epoch()
         || payload.covers_key_access_revision() != group.current_key_access_revision
@@ -673,7 +805,7 @@ async fn verify_commit(
     ))
     .map_err(schema)?;
     let public_blobs = vec![stage_mls_public_blob(state, &tree_ref, tree).await?];
-    Ok((
+    Ok(PreparedCommit::Ready(
         MlsStateInstallation {
             effective_scope: event.scope_ref.clone(),
             base: Some(MlsInstalledBase {
@@ -732,6 +864,7 @@ async fn verify_welcomes(
         .collect::<BTreeMap<_, _>>();
     let local = state.service_core_id();
     let mut claims = BTreeMap::new();
+    let mut native_targets = BTreeMap::new();
     for welcome in welcomes {
         verify_welcome_proof(welcome, producer_method, producer_key)?;
         if welcome.realm_id != event.realm_id
@@ -750,6 +883,9 @@ async fn verify_welcomes(
             continue;
         }
         let (claim, record) = resolve_claim(state, event, welcome).await?;
+        if let Some(guard) = native_welcome_target(state, welcome).await? {
+            native_targets.insert(welcome.welcome_id.clone(), guard);
+        }
         let leaf = arkret_mls::author_leaf_from_key_package_bytes(
             &arkret_canonical::base64url_decode(&record.keypackage).map_err(schema)?,
             0,
@@ -786,6 +922,7 @@ async fn verify_welcomes(
         verified.push(VerifiedMlsWelcome {
             delivery: welcome.clone(),
             claim,
+            applet_device_scope_guard: native_targets.remove(&welcome.welcome_id),
             roster_witness: None,
         });
     }
@@ -1251,9 +1388,28 @@ mod tests {
         )
         .unwrap();
         let payload = add_member(&mut group, &genesis, &stale_revision);
-        let error = verify_commit(&state, &commit_event(actor(CREATOR), &payload))
-            .await
-            .unwrap_err();
+        let event = commit_event(actor(CREATOR), &payload);
+        let prepared = prepare_commit(&state, &event).await.unwrap();
+        let PreparedCommit::KeyAccessRefused(leaves) = prepared else {
+            panic!("a revision mismatch must not produce an installable state");
+        };
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(leaves[0].actor_id, actor(MEMBER));
+        let key = arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+            bytes: vec![0x44; 32],
+        };
+        assert!(
+            verify_welcomes(&state, &event, &[], &leaves, &key)
+                .await
+                .is_err()
+        );
+        let mut inconsistent_payload = event.clone();
+        inconsistent_payload
+            .payload
+            .get_mut("governance_binding")
+            .unwrap()["key_access_revision"] = serde_json::json!(4);
+        assert!(prepare_commit(&state, &inconsistent_payload).await.is_err());
+        let error = verify_commit(&state, &event).await.unwrap_err();
         assert_eq!(
             error.conflict_code(),
             Some(ConflictCode::GovernanceBindingMismatch),
@@ -1323,4 +1479,39 @@ mod tests {
             Some(ConflictCode::SignatureInvalid)
         );
     }
+}
+
+/// Resolver evidence for a real native recipient. Storage independently checks
+/// that evidence and refuses an omitted proof for a native publication.
+pub(super) async fn native_welcome_target(
+    state: &AppState,
+    welcome: &MlsWelcomeDelivery,
+) -> ServiceResult<Option<coland_storage::AppletManagedDeviceScopeGuard>> {
+    let MlsWelcomeRecipientEndpoint::Device { device_id } = &welcome.recipient_endpoint else {
+        return Ok(None);
+    };
+    let account = welcome
+        .recipient_actor_id
+        .as_account_id()
+        .ok_or_else(|| failed_precondition("Welcome has no Account"))?;
+    let Some(authority) = state
+        .persistence()
+        .applet_managed_device_authority(account, device_id, chrono::Utc::now())
+        .await?
+    else {
+        return Ok(None);
+    };
+    crate::routing::identity::applet_managed_device::scope_guard_for_authority(
+        state,
+        &authority,
+        &welcome.effective_scope,
+    )
+    .await
+    .map(Some)
+    .map_err(|error| {
+        ServiceError::protocol(
+            arkret_wire::ErrorCode::TemporarilyUnavailable,
+            error.to_string(),
+        )
+    })
 }

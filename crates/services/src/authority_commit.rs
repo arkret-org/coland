@@ -2,9 +2,9 @@
 
 mod mls_roster;
 use arkret_models_collaboration::authority_commit::{
-    AuthorityForwardBranch, AuthorityHandoffRequest, DirectConversationFoundingAcceptanceOutcome,
-    DirectConversationFoundingFederationSubmission, DirectConversationFoundingUnitSubmission,
-    HistoricalProducerSignerFact, HumanHistoricalSignerFact,
+    AccountDeviceHistoricalSignerFact, AuthorityForwardBranch, AuthorityHandoffRequest,
+    DirectConversationFoundingAcceptanceOutcome, DirectConversationFoundingFederationSubmission,
+    DirectConversationFoundingUnitSubmission, HistoricalProducerSignerFact,
     MembershipCompensationAcceptanceOutcome, MembershipCompensationFederationSubmission,
     MembershipCompensationUnitSubmission, OrdinaryRealmBootstrapAcceptanceOutcome,
     OrdinaryRealmBootstrapUnitSubmission, PeerAuthorityForwardEventRequest,
@@ -406,6 +406,31 @@ pub struct AuthorityCommitApplication {
 }
 
 impl AuthorityCommitApplication {
+    pub async fn check_call_media_release(
+        &self,
+        request: &arkret_models_collaboration::objects::media::CallMediaTokenExchangeRequestBody,
+        issuer: &arkret_wire::DidCoreId,
+    ) -> ServiceResult<bool> {
+        Ok(self
+            .store()
+            .check_call_media_release(request, issuer)
+            .await?)
+    }
+    pub async fn call_current_cut(
+        &self,
+        realm: &arkret_wire::RealmId,
+        call: &arkret_wire::CallId,
+        actor: &arkret_wire::ActorId,
+    ) -> ServiceResult<Option<coland_storage::CallCurrentCut>> {
+        Ok(self.store().call_current_cut(realm, call, actor).await?)
+    }
+    pub async fn realm_media_service_current(
+        &self,
+        realm: &arkret_wire::RealmId,
+    ) -> ServiceResult<Option<arkret_models_collaboration::events_payloads::RealmMediaServiceValue>>
+    {
+        Ok(self.store().realm_media_service_current(realm).await?)
+    }
     pub async fn morph_list_for_actor(
         &self,
         realm: &arkret_wire::RealmId,
@@ -508,22 +533,25 @@ impl AuthorityCommitApplication {
         }
     }
 
-    pub async fn human_signer_fact(
+    pub async fn account_device_signer_fact(
         &self,
         event: &Event,
         commit: &RealmCommit,
-    ) -> ServiceResult<Option<HumanHistoricalSignerFact>> {
-        Ok(self.store().human_signer_fact(event, commit).await?)
+    ) -> ServiceResult<Option<AccountDeviceHistoricalSignerFact>> {
+        Ok(self
+            .store()
+            .account_device_signer_fact(event, commit)
+            .await?)
     }
 
-    pub async fn prepare_human_signer_fact(
+    pub async fn prepare_account_device_signer_fact(
         &self,
         event: &Event,
         admitted_at: DateTime<Utc>,
-    ) -> ServiceResult<Option<HumanHistoricalSignerFact>> {
+    ) -> ServiceResult<Option<AccountDeviceHistoricalSignerFact>> {
         Ok(self
             .store()
-            .prepare_human_signer_fact(event, admitted_at)
+            .prepare_account_device_signer_fact(event, admitted_at)
             .await?)
     }
 
@@ -544,6 +572,63 @@ impl AuthorityCommitApplication {
         Ok(self
             .store()
             .prepare_service_signer_fact(event, guard, at)
+            .await?)
+    }
+
+    pub async fn retain_registered_pair_forward(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::AuditPairedEventUnitSubmission,
+        outcome: Option<
+            &arkret_models_collaboration::authority_commit::AuditPairedEventAcceptanceOutcome,
+        >,
+    ) -> ServiceResult<()> {
+        Ok(self
+            .store()
+            .retain_registered_pair_forward(request, outcome)
+            .await?)
+    }
+
+    pub async fn registered_audit_result(
+        &self,
+        event_id: &arkret_wire::EventId,
+    ) -> ServiceResult<Option<coland_storage::RegisteredAuditResult>> {
+        Ok(self.store().registered_audit_result(event_id).await?)
+    }
+
+    pub async fn watch_audit_read_disclosure(
+        &self,
+        request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
+        outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+        issuer: &DidCoreId,
+    ) -> ServiceResult<()> {
+        Ok(self
+            .store()
+            .watch_audit_read_disclosure(request, outcome, issuer)
+            .await?)
+    }
+
+    pub async fn watch_audit_read_delivery_guard(
+        &self,
+        request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
+        outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+        issuer: &DidCoreId,
+        expires_at: DateTime<Utc>,
+    ) -> ServiceResult<Box<dyn coland_storage::AccountContentDeliveryGuard>> {
+        Ok(self
+            .store()
+            .watch_audit_read_delivery_guard(request, outcome, issuer, expires_at)
+            .await?)
+    }
+
+    pub async fn install_committed_audit_pair(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::AuditPairedEventFederationSubmission,
+        replicas: &[coland_storage::CommittedReplica; 2],
+    ) -> ServiceResult<arkret_models_collaboration::authority_commit::AggregateAcceptanceStatus>
+    {
+        Ok(self
+            .store()
+            .install_committed_audit_pair(request, replicas)
             .await?)
     }
 
@@ -694,10 +779,14 @@ impl AuthorityCommitApplication {
         event: &Event,
         authority: &CurrentRealmAuthority,
         reason_code: &str,
+        native: Option<(
+            &coland_storage::AppletManagedDeviceScopeGuard,
+            &coland_storage::IdempotencyRecord,
+        )>,
     ) -> ServiceResult<AuthoritySubmitOutcome> {
         Ok(self
             .store()
-            .finalize_mls_rejection(event, authority, reason_code)
+            .finalize_mls_rejection(event, authority, reason_code, native)
             .await?)
     }
 
@@ -789,7 +878,7 @@ impl AuthorityCommitApplication {
         for submitted in &submission.events {
             let producer_signer_fact = self
                 .store()
-                .prepare_human_signer_fact(&submitted.event, committed_at)
+                .prepare_account_device_signer_fact(&submitted.event, committed_at)
                 .await?
                 .map(Into::into);
             let commit = build_signed_event_commit(
@@ -1028,7 +1117,7 @@ impl AuthorityCommitApplication {
             }
             let producer_signer_fact = self
                 .store()
-                .prepare_human_signer_fact(event, committed_at)
+                .prepare_account_device_signer_fact(event, committed_at)
                 .await?
                 .map(Into::into);
             let commit = build_signed_event_commit(
@@ -1240,7 +1329,7 @@ impl AuthorityCommitApplication {
             Some(fact) => Some(fact.clone()),
             None => self
                 .store()
-                .prepare_human_signer_fact(event, committed_at)
+                .prepare_account_device_signer_fact(event, committed_at)
                 .await?
                 .map(Into::into),
         };
@@ -1266,6 +1355,62 @@ impl AuthorityCommitApplication {
             ServiceError::SchemaViolation(format!("invalid authority transaction: {error}"))
         })?;
         Ok(transaction)
+    }
+
+    pub async fn prepare_registered_event_transactions(
+        &self,
+        events: &[arkret_wire::Event],
+        local_service_id: &DidCoreId,
+        verification_method: DidUrl,
+        signing_key: &SigningKey,
+        committed_at: DateTime<Utc>,
+        facts: &[Option<HistoricalProducerSignerFact>],
+    ) -> ServiceResult<Vec<AuthorityCommitTransaction>> {
+        if events.is_empty() || events.len() != facts.len() {
+            return Err(ServiceError::SchemaViolation(
+                "registered unit has inconsistent slots".to_owned(),
+            ));
+        }
+        let mut transactions: Vec<AuthorityCommitTransaction> = Vec::with_capacity(events.len());
+        for (event, fact) in events.iter().zip(facts) {
+            let mut transaction = self
+                .prepare_self_event_transaction_with_signer_fact(
+                    event,
+                    local_service_id,
+                    verification_method.clone(),
+                    signing_key,
+                    committed_at,
+                    fact.as_ref(),
+                )
+                .await?;
+            if let Some(previous) = transactions.last() {
+                if transaction.expected_authority != previous.expected_authority
+                    || transaction.commit.stream_ref != previous.commit.stream_ref
+                {
+                    return Err(ServiceError::Conflict(
+                        "stale_authority: registered unit crossed a governing cut".to_owned(),
+                    ));
+                }
+                transaction.commit = build_signed_event_commit(
+                    event,
+                    &transaction.expected_authority,
+                    Some(&arkret_wire::CommitStreamHead {
+                        stream_ref: previous.commit.stream_ref.clone(),
+                        stream_position: previous.commit.stream_position,
+                        commit_id: previous.commit.commit_id.clone(),
+                    }),
+                    verification_method.clone(),
+                    signing_key,
+                    committed_at,
+                    transaction.producer_signer_fact.as_ref(),
+                )?;
+                transaction
+                    .validate()
+                    .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+            }
+            transactions.push(transaction);
+        }
+        Ok(transactions)
     }
 
     /// Prepare the position-zero Commit of a Realm this Station would create
@@ -1383,7 +1528,7 @@ impl AuthorityCommitApplication {
             Some(fact) => Some(fact.clone()),
             None => self
                 .store()
-                .prepare_human_signer_fact(event, committed_at)
+                .prepare_account_device_signer_fact(event, committed_at)
                 .await?
                 .map(Into::into),
         };
@@ -1417,6 +1562,44 @@ impl AuthorityCommitApplication {
     /// An exact retry of an accepted Event returns its stored Commit before
     /// any authority read; the unit itself rechecks the approving device,
     /// generation, target history and every signature at the locked PCR cut.
+    pub async fn admit_applet_managed_device_authorization(
+        &self,
+        event: &Event,
+        carrier: &coland_storage::AppletControlCarrier,
+        local_service_id: &DidCoreId,
+        verification_method: DidUrl,
+        signing_key: &SigningKey,
+    ) -> ServiceResult<AuthorityEventAdmissionOutcome> {
+        event
+            .validate_for_submit_structural()
+            .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
+        // Prepare does not consult a Device for this Principal-signed branch.
+        // The accepting unit proves the original Service even on replay.
+        let transaction = self
+            .prepare_self_event_transaction(
+                event,
+                local_service_id,
+                verification_method,
+                signing_key,
+                Utc::now(),
+            )
+            .await?;
+        Ok(
+            match self
+                .store()
+                .admit_applet_managed_device_authorization(&transaction, carrier)
+                .await?
+            {
+                coland_storage::AcceptedDeviceAuthorizationOutcome::Committed(commit) => {
+                    AuthorityEventAdmissionOutcome::Committed(commit)
+                }
+                coland_storage::AcceptedDeviceAuthorizationOutcome::Duplicate(commit) => {
+                    AuthorityEventAdmissionOutcome::Duplicate(commit)
+                }
+            },
+        )
+    }
+
     pub async fn admit_accepted_device_authorization(
         &self,
         event: &Event,
@@ -2006,16 +2189,18 @@ impl AuthorityCommitApplication {
 
     /// Archive the original governing object after peer authority and
     /// cryptographic verification, without granting local signing authority.
+    /// Return the retained original selected by the store's same-cut policy.
     pub async fn install_verified_account_snapshot(
         &self,
         account: &arkret_wire::AccountId,
         issuer: &DidCoreId,
         snapshot: &RealmStateSnapshot,
-    ) -> ServiceResult<()> {
+        minimum: &coland_storage::RealmStateSnapshotMaterial,
+    ) -> ServiceResult<RealmStateSnapshot> {
         coland_storage::enforce_inline_realm_state_snapshot_capacity(snapshot)?;
         Ok(self
             .store()
-            .install_verified_account_snapshot(account, issuer, snapshot)
+            .install_verified_account_snapshot(account, issuer, snapshot, minimum)
             .await?)
     }
 
@@ -2404,15 +2589,78 @@ impl AuthorityCommitApplication {
             .await?)
     }
 
+    pub async fn handoff_originals(
+        &self,
+        realm_id: &arkret_wire::RealmId,
+        through_generation: u64,
+    ) -> ServiceResult<Vec<arkret_wire::CommittedEventFullView>> {
+        // A retry still verifies the outgoing frozen cut even when the new
+        // Station has already appended its own accepted Events.
+        let mut originals = self.store().handoff_originals(realm_id).await?;
+        originals.retain(|full| full.commit.governance_generation <= through_generation);
+        Ok(originals)
+    }
+
+    pub async fn admit_pcr_governance_change(
+        &self,
+        transaction: &AuthorityCommitTransaction,
+    ) -> ServiceResult<AuthorityCommitWriteOutcome> {
+        Ok(self
+            .store()
+            .admit_pcr_governance_change(transaction)
+            .await?)
+    }
+
     pub async fn install_handoff(&self, request: &AuthorityHandoffRequest) -> ServiceResult<()> {
-        request.validate_shape().map_err(|error| {
+        request.validate_new_handoff().map_err(|error| {
             crate::ServiceError::SchemaViolation(format!("invalid authority handoff: {error}"))
         })?;
+        let held = self
+            .store()
+            .authority_handoffs(&request.handoff.realm_id)
+            .await?;
+        let prior = request
+            .authority_bundle
+            .authority_transitions
+            .iter()
+            .take(
+                request
+                    .authority_bundle
+                    .authority_transitions
+                    .len()
+                    .saturating_sub(1),
+            )
+            .map(|transition| transition.handoff.clone())
+            .collect::<Vec<_>>();
+        if held != prior
+            && held
+                != request
+                    .authority_bundle
+                    .authority_transitions
+                    .iter()
+                    .map(|transition| transition.handoff.clone())
+                    .collect::<Vec<_>>()
+        {
+            return Err(crate::ServiceError::SchemaViolation(
+                "handoff requires the complete exact installed authority history".into(),
+            ));
+        }
+        let originals = self
+            .handoff_originals(&request.handoff.realm_id, request.handoff.from_generation)
+            .await?;
+        request
+            .validate_imported_signer_facts(&originals)
+            .map_err(|error| {
+                crate::ServiceError::SchemaViolation(format!(
+                    "incomplete authority handoff: {error}"
+                ))
+            })?;
         self.store()
-            .install_handoff(
+            .install_handoff_with_private_state(
                 &request.handoff,
                 &request.final_stream_heads,
                 &request.snapshot,
+                request.pcr_private_state.as_ref(),
             )
             .await?;
         Ok(())
@@ -2593,7 +2841,7 @@ fn authority_forward_outcome(
 ) -> ServiceResult<PeerAuthoritySubmitOutcome> {
     let outcome = PeerAuthoritySubmitOutcome::AuthorityForward(PeerAuthorityForwardOutcome {
         branch: AuthorityForwardBranch::AuthorityForward,
-        outcome,
+        outcome: arkret_models_collaboration::authority_commit::PeerAuthorityForwardOutcomeValue::Ordinary(outcome),
     });
     outcome.validate().map_err(|error| {
         ServiceError::Internal(format!(
@@ -2620,6 +2868,19 @@ pub struct AuthenticatedPeerContext {
 
 #[async_trait]
 pub trait AuthorityProtocolPort: Send + Sync {
+    /// The caller supplies the mounted native transport identity, never a Session.
+    /// Each implemented domain still owns its source, current and atomic gates.
+    async fn submit_managed_device(
+        &self,
+        _metadata: &arkret_models_integration::AppletManagedDeviceMetadata,
+        _authority: &coland_storage::AppletManagedDeviceAuthority,
+        _request: SelfAuthoritySubmitRequest,
+    ) -> ServiceResult<SelfAuthoritySubmitOutcome> {
+        Err(ServiceError::UnsupportedEventKind(
+            "managed Device submission has no accepting domain unit".into(),
+        ))
+    }
+
     async fn submit_self_event(
         &self,
         session: &crate::identity::SessionIdentityState,
@@ -2652,6 +2913,42 @@ pub trait AuthorityProtocolPort: Send + Sync {
     ) -> ServiceResult<OrdinaryRealmBootstrapAcceptanceOutcome> {
         Err(crate::ServiceError::internal(
             "ordinary Realm bootstrap is not connected to the authority transaction path",
+        ))
+    }
+
+    async fn submit_self_audit_pair(
+        &self,
+        _session: &crate::identity::SessionIdentityState,
+        _request: arkret_models_collaboration::authority_commit::AuditPairedEventUnitSubmission,
+    ) -> ServiceResult<
+        arkret_models_collaboration::authority_commit::AuditPairedEventAcceptanceOutcome,
+    > {
+        Err(crate::ServiceError::Conflict(
+            "failed_precondition: audit pair admission unavailable".to_owned(),
+        ))
+    }
+
+    async fn submit_peer_audit_pair(
+        &self,
+        _peer: &AuthenticatedPeerContext,
+        _request: arkret_models_collaboration::authority_commit::PeerAuthorityForwardAtomicRequest,
+    ) -> ServiceResult<
+        arkret_models_collaboration::authority_commit::AuditPairedEventAcceptanceOutcome,
+    > {
+        Err(crate::ServiceError::Conflict(
+            "failed_precondition: audit pair forwarding unavailable".to_owned(),
+        ))
+    }
+
+    async fn replicate_peer_audit_pair(
+        &self,
+        _peer: &AuthenticatedPeerContext,
+        _request: arkret_models_collaboration::authority_commit::AuditPairedEventFederationSubmission,
+    ) -> ServiceResult<
+        arkret_models_collaboration::authority_commit::AuditPairedEventAcceptanceOutcome,
+    > {
+        Err(crate::ServiceError::Conflict(
+            "revision_unavailable: audit pair materialization unavailable".to_owned(),
         ))
     }
 
@@ -2696,6 +2993,11 @@ pub trait AuthorityProtocolPort: Send + Sync {
                 SelfAuthoritySubmitOutcome::DirectConversationFounding(
                     self.submit_self_direct_conversation_founding(session, value)
                         .await?,
+                )
+            }
+            SelfAuthoritySubmitRequest::AuditPairedEvent(value) => {
+                SelfAuthoritySubmitOutcome::AuditPairedEvent(
+                    self.submit_self_audit_pair(session, value).await?,
                 )
             }
             SelfAuthoritySubmitRequest::MembershipCompensation(value) => {
@@ -2790,6 +3092,13 @@ pub trait AuthorityProtocolPort: Send + Sync {
                     .await?;
                 return authority_forward_outcome(outcome);
             }
+            PeerAuthoritySubmitRequest::AuthorityForwardAtomic(value) => {
+                let outcome = self.submit_peer_audit_pair(peer, value).await?;
+                outcome
+                    .validate()
+                    .map_err(|error| ServiceError::Internal(error.to_string()))?;
+                return Ok(PeerAuthoritySubmitOutcome::AuthorityForward(PeerAuthorityForwardOutcome { branch: AuthorityForwardBranch::AuthorityForward, outcome: arkret_models_collaboration::authority_commit::PeerAuthorityForwardOutcomeValue::AuditPairedEvent(outcome) }));
+            }
             PeerAuthoritySubmitRequest::AuthorityForwardMls(value) => {
                 let outcome = self.submit_peer_authority_forward_mls(peer, value).await?;
                 return authority_forward_outcome(outcome);
@@ -2803,7 +3112,8 @@ pub trait AuthorityProtocolPort: Send + Sync {
         })?;
         let outcome = match request.clone() {
             PeerAuthoritySubmitRequest::AuthorityForwardEvent(_)
-            | PeerAuthoritySubmitRequest::AuthorityForwardMls(_) => {
+            | PeerAuthoritySubmitRequest::AuthorityForwardMls(_)
+            | PeerAuthoritySubmitRequest::AuthorityForwardAtomic(_) => {
                 return Err(crate::ServiceError::internal(
                     "authority_forward is dispatched before whole-request validation",
                 ));
@@ -2820,6 +3130,11 @@ pub trait AuthorityProtocolPort: Send + Sync {
                         PeerRegisteredAtomicUnitOutcomeValue::DirectConversationFounding(
                             self.submit_peer_direct_conversation_founding(peer, unit)
                                 .await?,
+                        )
+                    }
+                    PeerRegisteredAtomicUnit::AuditPairedEvent(unit) => {
+                        PeerRegisteredAtomicUnitOutcomeValue::AuditPairedEvent(
+                            self.replicate_peer_audit_pair(peer, unit).await?,
                         )
                     }
                     PeerRegisteredAtomicUnit::MembershipCompensation(unit) => {
@@ -2864,6 +3179,7 @@ pub trait AuthorityProtocolPort: Send + Sync {
 
     async fn install_authority_handoff(
         &self,
+        peer: &AuthenticatedPeerContext,
         request: AuthorityHandoffRequest,
     ) -> ServiceResult<RealmAuthorityHandoff>;
 }

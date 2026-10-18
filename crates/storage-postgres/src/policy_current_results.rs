@@ -94,7 +94,10 @@ pub(crate) async fn read_scoped_agent_management_policies_in_connection(
     realm: &arkret_wire::RealmId,
     circle: Option<&arkret_wire::CircleId>,
 ) -> PersistenceResult<Vec<arkret_models_collaboration::governance::operation_wire::Policy>> {
-    read_scoped_agent_management_policies_at_cut(conn, realm, circle, true).await
+    Box::pin(read_scoped_agent_management_policies_at_cut(
+        conn, realm, circle, true,
+    ))
+    .await
 }
 
 /// Governing visibility from an enclosing repeatable-read transaction. This is
@@ -307,7 +310,7 @@ async fn read_scoped_agent_management_policies_at_cut(
     lock: bool,
 ) -> PersistenceResult<Vec<arkret_models_collaboration::governance::operation_wire::Policy>> {
     Ok(
-        read_agent_management_policy_domains_at_cut(conn, realm, circle, lock, false)
+        read_management_policy_domains_at_cut(conn, realm, circle, lock, false, &PolicyKind::Agent)
             .await?
             .into_iter()
             .map(|(policy, _)| policy)
@@ -327,15 +330,43 @@ pub(crate) async fn read_agent_management_authorization_domains_in_connection(
         CommitStreamRef,
     )>,
 > {
-    read_agent_management_policy_domains_at_cut(conn, realm, None, true, true).await
+    read_management_policy_domains_at_cut(conn, realm, None, true, true, &PolicyKind::Agent).await
 }
 
-async fn read_agent_management_policy_domains_at_cut(
+pub(crate) async fn read_scoped_applet_management_policies_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    circle: Option<&arkret_wire::CircleId>,
+) -> PersistenceResult<Vec<arkret_models_collaboration::governance::operation_wire::Policy>> {
+    Ok(
+        read_management_policy_domains_at_cut(
+            conn,
+            realm,
+            circle,
+            true,
+            false,
+            &PolicyKind::Applet,
+        )
+        .await
+        .map_err(|error| match error {
+            PersistenceError::Conflict(detail) => {
+                PersistenceError::Conflict(format!("revision_unavailable: {detail}"))
+            }
+            other => other,
+        })?
+        .into_iter()
+        .map(|(policy, _)| policy)
+        .collect(),
+    )
+}
+
+async fn read_management_policy_domains_at_cut(
     conn: &mut AsyncPgConnection,
     realm: &arkret_wire::RealmId,
     circle: Option<&arkret_wire::CircleId>,
     lock: bool,
     all_scopes: bool,
+    kind: &PolicyKind,
 ) -> PersistenceResult<
     Vec<(
         arkret_models_collaboration::governance::operation_wire::Policy,
@@ -374,8 +405,8 @@ async fn read_agent_management_policy_domains_at_cut(
           AND (pc.realm_id=$1 OR pe.envelope->'payload'->'value'->>'realm_id'=$1))"
     )).bind::<Text,_>(realm.as_str()).load::<ManagementPolicyHistory>(&mut *conn)
         .await.map_err(PersistenceError::database)?;
-    let agent_value =
-        |value: &Value| value.get("policy_kind").and_then(Value::as_str) == Some("agent");
+    let kind_value = serde_json::to_value(kind).map_err(schema)?;
+    let agent_value = |value: &Value| value.get("policy_kind") == Some(&kind_value);
     let mut ids = BTreeSet::new();
     let mut by_id: BTreeMap<String, Vec<ManagementPolicyHistory>> = BTreeMap::new();
     for row in history {
@@ -409,7 +440,7 @@ async fn read_agent_management_policy_domains_at_cut(
                 .get(&id)
                 .ok_or_else(|| refused("Agent Policy current has no accepted history"))?,
             realm,
-            &PolicyKind::Agent,
+            kind,
         )?;
         let accepted = chain
             .last()
@@ -904,9 +935,44 @@ fn require_supported_policy(
     use arkret_wire::PolicyEffect;
 
     if document.policy_kind == PolicyKind::Applet {
-        return Err(refused(
-            "Applet management execution and delivery gates are not established",
-        ));
+        use arkret_models_collaboration::governance::operation_wire::AppletPolicyOperation;
+        document.validate().map_err(schema)?;
+        if !matches!(scope,arkret_wire::ScopeRef::Realm {realm_id}|arkret_wire::ScopeRef::Circle {realm_id,..} if document.realm_id.as_ref()==Some(realm_id))
+            || document.default_effect != PolicyEffect::Allow
+            || document.rules.iter().any(|rule| {
+                rule.kind != PolicyRuleKind::Applet
+                    || rule.actions.is_some()
+                    || rule.resources.as_ref().is_some_and(|resources| {
+                        resources.iter().any(|resource| {
+                            resource.kind == PolicyResourceKind::Service
+                                || resource
+                                    .realm_id
+                                    .as_ref()
+                                    .is_some_and(|realm| document.realm_id.as_ref() != Some(realm))
+                        })
+                    })
+                    || rule.applet_operations.as_ref().is_none_or(|ops| {
+                        ops.iter().any(|op| {
+                            !matches!(
+                                op,
+                                AppletPolicyOperation::CreateBot | AppletPolicyOperation::MapGhost
+                            ) && !(matches!(op,AppletPolicyOperation::Join | AppletPolicyOperation::Publish | AppletPolicyOperation::Execute)
+                                && matches!(&rule.applet_target,Some(arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::Installation {effective_scope,..}) if matches!(effective_scope,arkret_wire::ScopeRef::Realm{realm_id}|arkret_wire::ScopeRef::Circle{realm_id,..} if document.realm_id.as_ref()==Some(realm_id))))
+                                && !(matches!(op,AppletPolicyOperation::Install)
+                                    && match &rule.applet_target {
+                                        Some(arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::All {} | arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::Requester { .. }) => true,
+                                        Some(arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::Installation { effective_scope, .. }) => document.realm_id.as_ref() == effective_scope.realm_id_opt(),
+                                        _ => false,
+                                    })
+                        })
+                    })
+            })
+        {
+            return Err(refused(
+                "Applet Policy requires established consumers; only install, creation and exact Realm/Circle installation join, publish or execute rules with an allow default are supported",
+            ));
+        }
+        return Ok(());
     }
     if document.policy_kind != PolicyKind::Agent {
         return Ok(());
@@ -1167,6 +1233,88 @@ mod admission_tests {
     }
 
     #[test]
+    fn applet_join_configuration_stays_within_established_native_scope_consumers() {
+        use arkret_models_collaboration::governance::operation_wire::{
+            AppletPolicyOperation, AppletPolicyTarget, PolicyRuleKind,
+        };
+        let mut policy = join_policy();
+        let realm = policy.realm_id.clone().unwrap();
+        let scope = arkret_wire::ScopeRef::Realm {
+            realm_id: realm.clone(),
+        };
+        policy.policy_kind = PolicyKind::Applet;
+        let rule = &mut policy.rules[0];
+        rule.kind = PolicyRuleKind::Applet;
+        rule.agent_target = None;
+        rule.agent_operations = None;
+        rule.applet_operations = Some(vec![AppletPolicyOperation::Join]);
+        rule.applet_target = Some(AppletPolicyTarget::Installation {
+            applet_id: format!("ak:applet:{}", uuid::Uuid::now_v7())
+                .parse()
+                .unwrap(),
+            effective_scope: scope.clone(),
+        });
+        assert!(require_supported_policy(&policy, &scope).is_ok());
+        let circle = arkret_wire::ScopeRef::Circle {
+            realm_id: realm.clone(),
+            circle_id: arkret_wire::CircleId::from_event_id(&arkret_wire::EventId::from_digest(
+                arkret_canonical::DigestSuite::Sha256,
+                [217; 32],
+            )),
+        };
+        let mut circle_join = policy.clone();
+        if let Some(AppletPolicyTarget::Installation {
+            effective_scope, ..
+        }) = &mut circle_join.rules[0].applet_target
+        {
+            *effective_scope = circle.clone();
+        }
+        assert!(require_supported_policy(&circle_join, &scope).is_ok());
+        assert!(require_supported_policy(&circle_join, &circle).is_ok());
+        circle_join.rules[0].effect = arkret_wire::PolicyEffect::RequireReview;
+        circle_join.rules[0].review_requirement = Some(
+            arkret_models_collaboration::governance::operation_wire::ManagementReviewRequirement {
+                approver_actor_ids: vec![policy.created_by.clone()],
+                threshold: 1,
+                max_age_seconds: 60,
+            },
+        );
+        circle_join.validate().unwrap();
+        assert!(require_supported_policy(&circle_join, &circle).is_ok());
+        let mut wrong_realm = circle_join.clone();
+        wrong_realm.realm_id = Some(arkret_wire::RealmId::from_event_id(
+            &arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [218; 32]),
+        ));
+        assert!(require_supported_policy(&wrong_realm, &circle).is_err());
+        let mut broad = policy.clone();
+        broad.rules[0].applet_target = Some(AppletPolicyTarget::All {});
+        assert!(require_supported_policy(&broad, &scope).is_err());
+        broad.rules[0].applet_operations = Some(vec![AppletPolicyOperation::Install]);
+        assert!(require_supported_policy(&broad, &scope).is_ok());
+        broad.rules[0].applet_target = Some(AppletPolicyTarget::Requester {
+            actor_id: policy.created_by.clone(),
+        });
+        assert!(require_supported_policy(&broad, &scope).is_ok());
+        let mut publish = policy.clone();
+        publish.rules[0].applet_operations = Some(vec![AppletPolicyOperation::Publish]);
+        assert!(require_supported_policy(&publish, &scope).is_ok());
+        let mut execute = policy.clone();
+        execute.rules[0].applet_operations = Some(vec![AppletPolicyOperation::Execute]);
+        assert!(require_supported_policy(&execute, &scope).is_ok());
+        execute.rules[0].effect = arkret_wire::PolicyEffect::RequireReview;
+        assert!(require_supported_policy(&execute, &scope).is_err());
+        for op in [
+            AppletPolicyOperation::Read,
+            AppletPolicyOperation::Deliver,
+            AppletPolicyOperation::Serve,
+        ] {
+            let mut unsupported = policy.clone();
+            unsupported.rules[0].applet_operations = Some(vec![op]);
+            assert!(require_supported_policy(&unsupported, &scope).is_err());
+        }
+    }
+
+    #[test]
     fn ordinary_policy_kinds_keep_their_existing_admission() {
         for kind in [
             arkret_wire::PolicyKind::Access,
@@ -1185,9 +1333,9 @@ fn payload<T: serde::de::DeserializeOwned>(event: &Event) -> PersistenceResult<T
     serde_json::from_value(serde_json::to_value(&event.payload).map_err(schema)?).map_err(schema)
 }
 
-/// Shared Agent policy values may be carried by verified scope snapshots.
+/// Shared Access, Moderation and Agent policies require verified scope snapshots.
 /// This does not recreate their private admission Event or enable writes.
-pub(crate) fn validate_disclosed_agent_policy(
+pub(crate) fn validate_disclosed_shared_policy(
     realm: &arkret_wire::RealmId,
     policy_id: &arkret_wire::PolicyId,
     source: &CommitStreamRef,
@@ -1199,7 +1347,10 @@ pub(crate) fn validate_disclosed_agent_policy(
         PolicySetValue::Governance(policy)
             if policy.id == *policy_id
                 && policy.realm_id.as_ref() == Some(realm)
-                && policy.policy_kind == PolicyKind::Agent
+                && matches!(
+                    policy.policy_kind,
+                    PolicyKind::Access | PolicyKind::Moderation | PolicyKind::Agent
+                )
                 && source.realm_id() == realm
                 && matches!(
                     source,
@@ -1208,9 +1359,7 @@ pub(crate) fn validate_disclosed_agent_policy(
         {
             Ok(())
         }
-        _ => Err(schema(
-            "Policy current has no proved shared Agent scope binding",
-        )),
+        _ => Err(schema("Policy current has no proved shared scope binding")),
     }
 }
 

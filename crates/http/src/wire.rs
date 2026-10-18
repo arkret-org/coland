@@ -599,6 +599,13 @@ pub fn describe(
             // handler. coland mounts the handler unconditionally, and also
             // claims the required `ak.profile.webrtc_media.v1` dependency above.
             profiles.push(arkret_wire::ProfileId::MEDIA_SERVICE_BINDING_V1.to_owned());
+            profiles.push(arkret_wire::ProfileId::MEDIA_SERVICE_BINDING_ARKRET_NATIVE_V1.to_owned());
+            if config.livekit.api_key.as_deref().is_some_and(|key| !key.is_empty())
+                && config.livekit.api_secret.as_deref().is_some_and(|secret| !secret.is_empty())
+            {
+                profiles.push(arkret_wire::ProfileId::MEDIA_SERVICE_BINDING_LIVEKIT_V1.to_owned());
+            }
+
             if websocket_binding.is_some() {
                 profiles.push(arkret_wire::ProfileId::BINDING_WEBSOCKET_V1.to_owned());
             }
@@ -617,12 +624,15 @@ pub fn describe(
             arkret_wire::OperationBundleDescriptor::STATION_APPLET_GHOST_V1.to_owned(),
             arkret_wire::OperationBundleDescriptor::STATION_APPLET_INSTALL_V1.to_owned(),
             arkret_wire::OperationBundleDescriptor::STATION_DESCRIBE_V1.to_owned(),
+            arkret_wire::OperationBundleDescriptor::STATION_HTTP_AUDIT_OPERATIONS_V1.to_owned(),
             // service-surface.md 2.7: the client-visible stage/resolve/status
             // origin is the Station, which forwards the exact DTO to its
             // Account Authority. The Authority is a Station-internal role, so
             // its unavailability is runtime availability, not a missing member.
             arkret_wire::OperationBundleDescriptor::STATION_DEVICE_PAIRING_HANDOFF_V1.to_owned(),
             arkret_wire::OperationBundleDescriptor::STATION_HTTP_CORE_CURRENT_V1.to_owned(),
+            arkret_wire::OperationBundleDescriptor::STATION_HTTP_PEER_WATCH_CURRENT_V1.to_owned(),
+            arkret_wire::OperationBundleDescriptor::STATION_REALM_AUTHORITY_HANDOFF_V1.to_owned(),
             // Private invite dispatch is a mounted optional operation. It has
             // its own bundle so core tier no longer implies reachability.
             arkret_wire::OperationBundleDescriptor::STATION_INVITE_DELIVERY_V1.to_owned(),

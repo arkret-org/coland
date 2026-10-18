@@ -29,6 +29,17 @@ fn heap_future<F: std::future::Future>(make: impl FnOnce() -> F) -> std::pin::Pi
     Box::pin(make())
 }
 
+// Clone retained originals outside the matrix poll frame. The protocol
+// request and production unit of work are unchanged; callers retain only a
+// small borrowed future while the request crosses the real transaction.
+#[inline(never)]
+async fn commit_request(
+    uow: &PgEventCommitUnitOfWork,
+    request: &EventCommitRequest,
+) -> coland_storage::PersistenceResult<coland_storage::EventCommitOutcome> {
+    uow.commit_event(request.clone()).await
+}
+
 fn remote_member(label: &str) -> ActorId {
     ActorId::account(arkret_wire::AccountId::new(
         arkret_wire::DidCoreId::new(format!("ak:did_core:web:{label}.example")).unwrap(),
@@ -244,7 +255,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
         "first join",
     );
     let realm_join = heap_future(|| ordinary_realm::source_request(&pool, realm_join)).await;
-    uow.commit_event(realm_join.clone()).await.unwrap();
+    commit_request(&uow, &realm_join).await.unwrap();
     let create = heap_future(|| ordinary_realm::source_request(&pool, sourced(ordinary_realm::next_request_for_actor(
         &realm_join.authority_commit,
         EventKind::CircleCreate,
@@ -256,7 +267,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             "created_at":arkret_canonical::format_timestamp_canonical(at)}}),
         at,
     )))).await;
-    uow.commit_event(create.clone()).await.unwrap();
+    commit_request(&uow, &create).await.unwrap();
     let circle = CircleId::from_event_id(&create.authority_commit.event.event_id);
     let stream = CommitStreamRef::Circle {
         realm_id: realm.clone(),
@@ -292,7 +303,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
         }}),
         at,
     )))).await;
-    uow.commit_event(grant.clone()).await.unwrap();
+    commit_request(&uow, &grant).await.unwrap();
     let first_parent = ordinary_realm::parent_membership_revision(&pool, &realm, &alice).await;
     assert_eq!(
         first_parent,
@@ -311,7 +322,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
         );
         let missing = heap_future(|| ordinary_realm::source_request(&pool, missing)).await;
         assert!(matches!(
-            uow.commit_event(missing).await.unwrap_err(),
+            commit_request(&uow, &missing).await.unwrap_err(),
             PersistenceError::SchemaViolation(_)
         ));
         let mut foreign_revision = first_parent.clone();
@@ -329,7 +340,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             ),
         );
         let foreign = heap_future(|| ordinary_realm::source_request(&pool, foreign)).await;
-        let refused = uow.commit_event(foreign).await.unwrap_err();
+        let refused = commit_request(&uow, &foreign).await.unwrap_err();
         assert_eq!(
             refusal_code(&refused),
             Some(ConflictCode::FailedPrecondition)
@@ -350,7 +361,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
         );
         let shifted = heap_future(|| ordinary_realm::source_request(&pool, shifted)).await;
         assert_eq!(
-            refusal_code(&uow.commit_event(shifted).await.unwrap_err()),
+            refusal_code(&commit_request(&uow, &shifted).await.unwrap_err()),
             Some(ConflictCode::FailedPrecondition)
         );
         assert_eq!(circle_stream_commits(&pool, &stream).await, 0);
@@ -364,7 +375,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
         circle_membership(&circle, &alice, "join", Value::Null, Some(&first_parent)),
     );
     let circle_join = heap_future(|| ordinary_realm::source_request(&pool, circle_join)).await;
-    uow.commit_event(circle_join.clone()).await.unwrap();
+    commit_request(&uow, &circle_join).await.unwrap();
     let joined = circle_member(&pool, &circle, &alice).await;
     assert!(joined.effective);
     assert_eq!(joined.value["parent_membership_revision"], first_parent);
@@ -402,13 +413,13 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             payload.clone(),
             at,
         );
-        let genesis = sourced(ordinary_realm::request_for_event(
+        let mut genesis = sourced(ordinary_realm::request_for_event(
             &circle_join.authority_commit,
             event,
             at,
         ));
-        let mut genesis = heap_future(|| ordinary_realm::source_request(&pool, genesis)).await;
         genesis.authority_commit.commit.stream_ref = stream.clone();
+        let mut genesis = heap_future(|| ordinary_realm::source_request(&pool, genesis)).await;
         genesis.authority_commit.mls_state = Some(coland_storage::MlsStateInstallation {
             effective_scope: ScopeRef::Circle {
                 realm_id: realm.clone(),
@@ -425,10 +436,10 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
     }).await;
     let activated = history == "since_join";
     if activated {
-        uow.commit_event(genesis.clone()).await.unwrap();
+        commit_request(&uow, &genesis).await.unwrap();
     } else {
         assert_eq!(
-            refusal_code(&uow.commit_event(genesis.clone()).await.unwrap_err()),
+            refusal_code(&commit_request(&uow, &genesis).await.unwrap_err()),
             Some(ConflictCode::FailedPrecondition)
         );
         assert_eq!(circle_stream_commits(&pool, &stream).await, 1);
@@ -476,6 +487,8 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                 genesis.authority_commit.commit.committed_at + chrono::TimeDelta::seconds(1);
             let authority = store
                 .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+ include_product_authority: false, product_agent: None,
+
                     scope: &material_request.effective_scope,
                     authority_commit_id: &genesis.authority_commit.commit.commit_id,
                     parent_realm_authority_commit_id: Some(&grant.authority_commit.commit.commit_id),
@@ -500,6 +513,8 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                 assert!(
                     store
                         .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+ include_product_authority: false, product_agent: None,
+
                             scope: &material_request.effective_scope,
                             authority_commit_id: &genesis.authority_commit.commit.commit_id,
                             parent_realm_authority_commit_id: parent,
@@ -527,11 +542,13 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             ));
             let moderation_grant =
                 heap_future(|| ordinary_realm::source_request(&pool, moderation_grant)).await;
-            uow.commit_event(moderation_grant.clone()).await.unwrap();
+            commit_request(&uow, &moderation_grant).await.unwrap();
             // A later grant cannot retroactively authorize an older parent cut.
             assert!(
                 store
                     .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+ include_product_authority: false, product_agent: None,
+
                         scope: &material_request.effective_scope,
                         authority_commit_id: &genesis.authority_commit.commit.commit_id,
                         parent_realm_authority_commit_id: Some(
@@ -549,6 +566,8 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             assert!(
                 store
                     .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+ include_product_authority: false, product_agent: None,
+
                         scope: &material_request.effective_scope,
                         authority_commit_id: &genesis.authority_commit.commit.commit_id,
                         parent_realm_authority_commit_id: Some(
@@ -569,6 +588,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                 let original_parent = &moderation_grant.authority_commit.commit.commit_id;
                 let mut tail = moderation_grant.authority_commit.clone();
                 if branch == "reset" {
+                    heap_future(|| async {
                     let reset = sourced(ordinary_realm::next_request_for_actor(
                         &tail,
                         EventKind::RealmAuthorityReset,
@@ -577,10 +597,12 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                         moderation_at + chrono::TimeDelta::milliseconds(1),
                     ));
                     let reset = heap_future(|| ordinary_realm::source_request(&pool, reset)).await;
-                    uow.commit_event(reset).await.unwrap();
+                    commit_request(&uow, &reset).await.unwrap();
                     assert!(
                         store
                             .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+include_product_authority: false,
+product_agent: None,
                                 scope,
                                 authority_commit_id: scope_head,
                                 parent_realm_authority_commit_id: Some(original_parent),
@@ -594,7 +616,9 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                             .is_none(),
                         "current root reset invalidates the old root-generation moderation grant"
                     );
+                    }).await;
                 } else if branch == "controller" {
+                    heap_future(|| async {
                     let transfer = sourced(ordinary_realm::next_request_for_actor(
                         &tail,
                         EventKind::RealmOwnerTransfer,
@@ -604,10 +628,12 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                         moderation_at + chrono::TimeDelta::milliseconds(1),
                     ));
                     let transfer = heap_future(|| ordinary_realm::source_request(&pool, transfer)).await;
-                    uow.commit_event(transfer.clone()).await.unwrap();
+                    commit_request(&uow, &transfer).await.unwrap();
                     assert!(
                         store
                             .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+include_product_authority: false,
+product_agent: None,
                                 scope,
                                 authority_commit_id: scope_head,
                                 parent_realm_authority_commit_id: Some(original_parent),
@@ -631,7 +657,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                         tail.commit.committed_at + chrono::TimeDelta::milliseconds(1),
                     ));
                     let revoke = heap_future(|| ordinary_realm::source_request(&pool, revoke)).await;
-                    uow.commit_event(revoke.clone()).await.unwrap();
+                    commit_request(&uow, &revoke).await.unwrap();
                     let transfer_back = sourced(ordinary_realm::next_request_for_actor(
                         &revoke.authority_commit,
                         EventKind::RealmOwnerTransfer,
@@ -643,10 +669,12 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                     ));
                     let transfer_back =
                         heap_future(|| ordinary_realm::source_request(&pool, transfer_back)).await;
-                    uow.commit_event(transfer_back).await.unwrap();
+                    commit_request(&uow, &transfer_back).await.unwrap();
                     assert!(
                         store
                             .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+include_product_authority: false,
+product_agent: None,
                                 scope,
                                 authority_commit_id: scope_head,
                                 parent_realm_authority_commit_id: Some(original_parent),
@@ -660,7 +688,9 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                             .is_none(),
                         "old controller authority cannot revive a revoked moderation grant"
                     );
+                    }).await;
                 } else {
+                    heap_future(|| async {
                     let next_station =
                         arkret_wire::DidCoreId::new("ak:did_core:web:next-signal-station.example")
                             .unwrap();
@@ -673,7 +703,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                         tail.commit.committed_at + chrono::TimeDelta::milliseconds(1),
                     ));
                     let change = heap_future(|| ordinary_realm::source_request(&pool, change)).await;
-                    uow.commit_event(change.clone()).await.unwrap();
+                    commit_request(&uow, &change).await.unwrap();
                     let mut heads = vec![
                         arkret_wire::CommitStreamHead {
                             stream_ref: change.authority_commit.commit.stream_ref.clone(),
@@ -687,6 +717,25 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                         },
                     ];
                     heads.sort_by(|a, b| a.stream_ref.cmp(&b.stream_ref));
+                    let material = store.realm_state_snapshot_material(&realm).await.unwrap().unwrap();
+                    assert_eq!(material.visible_stream_heads, heads);
+                    let mut inventory = Vec::new();
+                    for full in store.handoff_originals(&realm).await.unwrap() {
+                        if full.commit.producer_signer_fact_digest.is_some() {
+                            inventory.push(arkret_models_collaboration::authority_commit::HistoricalProducerSignerFactEntry {
+                                target: arkret_wire::CommittedEventRef {
+                                    event_id: full.event.event_id.clone(),
+                                    commit_id: full.commit.commit_id.clone(),
+                                    stream_ref: full.commit.stream_ref.clone(),
+                                    stream_position: full.commit.stream_position,
+                                },
+                                producer_signer_fact: store.producer_signer_fact(&full.event, &full.commit).await.unwrap().unwrap(),
+                            });
+                        }
+                    }
+                    inventory.sort_by_key(|entry| (arkret_canonical::canonical_json_bytes(&entry.target.stream_ref).unwrap(),
+                        entry.target.stream_position,entry.target.event_id.to_string(),entry.target.commit_id.to_string()));
+                    let inventory_digest = arkret_models_collaboration::authority_commit::historical_signer_facts_digest(&inventory).unwrap();
                     let mut snapshot_signature =
                         ordinary_realm::signature(&ordinary_realm::station(), signal_at);
                     snapshot_signature.context = arkret_wire::DetachedSignatureContext::RealmSnapshot;
@@ -695,17 +744,8 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                         realm_id: realm.clone(),
                         governance_generation: 0,
                         visible_stream_heads: heads.clone(),
-                        current_state_entries: Vec::new(),
-                        retention_and_history_floor: arkret_wire::RetentionAndHistoryFloor {
-                            history_access: arkret_wire::HistoryAccess::SinceJoin,
-                            stream_floors: heads
-                                .iter()
-                                .map(|head| arkret_wire::StreamHistoryFloor {
-                                    stream_ref: head.stream_ref.clone(),
-                                    oldest_position: 0,
-                                })
-                                .collect(),
-                        },
+                        current_state_entries: material.current_state_entries,
+                        retention_and_history_floor: material.retention_and_history_floor,
                         created_at: signal_at,
                         signature: snapshot_signature,
                     };
@@ -728,6 +768,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                     new_signature.context =
                         arkret_wire::DetachedSignatureContext::RealmAuthorityHandoffNewAcceptance;
                     let handoff = arkret_wire::RealmAuthorityHandoff {
+                        pcr_private_state_digest: None,
                         handoff_id: arkret_wire::RealmAuthorityHandoffId::from_digest([0x92; 32]),
                         realm_id: realm.clone(),
                         from_generation: 0,
@@ -739,7 +780,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                         )
                         .unwrap(),
                         snapshot_ref: snapshot.snapshot_id.clone(),
-                        historical_signer_facts_digest: None,
+                        historical_signer_facts_digest: Some(inventory_digest),
                         change_event_ref: change.authority_commit.event.event_id.clone(),
                         change_commit_id: change.authority_commit.commit.commit_id.clone(),
                         old_authority_signature: old_signature,
@@ -754,6 +795,8 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                     assert!(
                         store
                             .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+include_product_authority: false,
+product_agent: None,
                                 scope,
                                 authority_commit_id: scope_head,
                                 parent_realm_authority_commit_id: Some(original_parent),
@@ -786,6 +829,8 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                     assert!(
                         store
                             .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+include_product_authority: false,
+product_agent: None,
                                 scope,
                                 authority_commit_id: scope_head,
                                 parent_realm_authority_commit_id: Some(original_parent),
@@ -798,6 +843,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                             .is_err(),
                         "missing durable handoff manifest cannot authorize an old generation head"
                     );
+                    }).await;
                 }
                 assert_eq!(
                     circle_stream_commits(&pool, &stream).await,
@@ -818,10 +864,12 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                 moderation_at + chrono::TimeDelta::milliseconds(1),
             ));
             let revoke = heap_future(|| ordinary_realm::source_request(&pool, revoke)).await;
-            uow.commit_event(revoke.clone()).await.unwrap();
+            commit_request(&uow, &revoke).await.unwrap();
             assert!(
                 store
                     .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+ include_product_authority: false, product_agent: None,
+
                         scope: &material_request.effective_scope,
                         authority_commit_id: &genesis.authority_commit.commit.commit_id,
                         parent_realm_authority_commit_id: Some(
@@ -869,7 +917,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
         );
         let same_parent_leave =
             heap_future(|| ordinary_realm::source_request(&pool, same_parent_leave)).await;
-        uow.commit_event(same_parent_leave.clone()).await.unwrap();
+        commit_request(&uow, &same_parent_leave).await.unwrap();
         let same_parent_join = circle_request(
             &same_parent_leave.authority_commit,
             &circle,
@@ -877,7 +925,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             circle_membership(&circle, &alice, "join", json!("leave"), Some(&first_parent)),
         );
         let same_parent_join = heap_future(|| ordinary_realm::source_request(&pool, same_parent_join)).await;
-        uow.commit_event(same_parent_join.clone()).await.unwrap();
+        commit_request(&uow, &same_parent_join).await.unwrap();
         let answer = store
             .mls_member_group_state_material_read(&material_request, &ordinary_realm::station(), None)
             .await
@@ -915,7 +963,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
         // Circle Event is synthesized and the canonical row is not rewritten.
         let realm_leave = realm_membership(&parent_tail, &alice, &alice, "leave", "parent leave");
         let realm_leave = heap_future(|| ordinary_realm::source_request(&pool, realm_leave)).await;
-        uow.commit_event(realm_leave.clone()).await.unwrap();
+        commit_request(&uow, &realm_leave).await.unwrap();
         let after_leave = circle_member(&pool, &circle, &alice).await;
         if activated {
             let signal_at =
@@ -923,6 +971,8 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             assert!(
                 store
                     .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+ include_product_authority: false, product_agent: None,
+
                         scope: &material_request.effective_scope,
                         authority_commit_id: &genesis.authority_commit.commit.commit_id,
                         parent_realm_authority_commit_id: Some(
@@ -975,7 +1025,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             "parent rejoin",
         );
         let rejoin = heap_future(|| ordinary_realm::source_request(&pool, rejoin)).await;
-        uow.commit_event(rejoin.clone()).await.unwrap();
+        commit_request(&uow, &rejoin).await.unwrap();
         let second_parent = ordinary_realm::parent_membership_revision(&pool, &realm, &alice).await;
         assert_ne!(second_parent, first_parent);
         let after_rejoin = circle_member(&pool, &circle, &alice).await;
@@ -984,6 +1034,8 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             assert!(
                 store
                     .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+ include_product_authority: false, product_agent: None,
+
                         scope: &material_request.effective_scope,
                         authority_commit_id: &genesis.authority_commit.commit.commit_id,
                         parent_realm_authority_commit_id: Some(
@@ -1034,7 +1086,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
         );
         let stale = heap_future(|| ordinary_realm::source_request(&pool, stale)).await;
         assert_eq!(
-            refusal_code(&uow.commit_event(stale).await.unwrap_err()),
+            refusal_code(&commit_request(&uow, &stale).await.unwrap_err()),
             Some(ConflictCode::FailedPrecondition)
         );
         // A leave never carries the revision.
@@ -1052,7 +1104,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
         );
         let misplaced = heap_future(|| ordinary_realm::source_request(&pool, misplaced)).await;
         assert!(matches!(
-            uow.commit_event(misplaced).await.unwrap_err(),
+            commit_request(&uow, &misplaced).await.unwrap_err(),
             PersistenceError::SchemaViolation(_)
         ));
         // Only an explicit leave then a new join bound to the new revision
@@ -1064,7 +1116,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             circle_membership(&circle, &alice, "leave", json!("join"), None),
         );
         let circle_leave = heap_future(|| ordinary_realm::source_request(&pool, circle_leave)).await;
-        uow.commit_event(circle_leave.clone()).await.unwrap();
+        commit_request(&uow, &circle_leave).await.unwrap();
         let circle_rejoin = circle_request(
             &circle_leave.authority_commit,
             &circle,
@@ -1078,7 +1130,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             ),
         );
         let circle_rejoin = heap_future(|| ordinary_realm::source_request(&pool, circle_rejoin)).await;
-        uow.commit_event(circle_rejoin.clone()).await.unwrap();
+        commit_request(&uow, &circle_rejoin).await.unwrap();
         let restored = circle_member(&pool, &circle, &alice).await;
         assert!(restored.effective);
         assert_eq!(restored.value["parent_membership_revision"], second_parent);
@@ -1113,7 +1165,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             "parent ban",
         );
         let ban = heap_future(|| ordinary_realm::source_request(&pool, ban)).await;
-        uow.commit_event(ban).await.unwrap();
+        commit_request(&uow, &ban).await.unwrap();
         let after_ban = circle_member(&pool, &circle, &alice).await;
         assert!(!after_ban.effective);
         assert_eq!(after_ban.value, restored.value);

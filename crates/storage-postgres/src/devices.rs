@@ -1,3 +1,4 @@
+mod native_queue;
 mod queue_authority;
 
 pub(crate) use queue_authority::enqueue_mls_welcome_in_connection;
@@ -103,6 +104,19 @@ struct DeviceMessageSnapshotRow {
 }
 #[async_trait]
 impl DeviceMessageStore for PgDeviceMessageStore {
+    async fn applet_device_queue(
+        &self,
+        input: coland_storage::AppletDeviceQueueRead<'_>,
+    ) -> PersistenceResult<coland_storage::AppletDeviceQueuePage> {
+        crate::boxed_future(|| native_queue::read(&self.pool, input)).await
+    }
+    async fn ack_applet_device_queue(
+        &self,
+        input: coland_storage::AppletDeviceQueueAck<'_>,
+    ) -> PersistenceResult<Option<usize>> {
+        crate::boxed_future(|| native_queue::ack(&self.pool, input)).await
+    }
+
     async fn append(
         &self,
         device_revocation_gate: Option<&DeviceRevocationGateSelector>,

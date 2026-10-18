@@ -11,6 +11,35 @@ use super::{
 pub struct PgAccountStore {
     pub pool: PgPool,
 }
+
+/// Native Agent account storage and its immutable admission key share the
+/// accepted genesis transaction. Reads never manufacture this private key.
+pub(crate) async fn create_agent_holder_account_in_connection(
+    conn: &mut diesel_async::AsyncPgConnection,
+    account: &arkret_wire::AccountId,
+    accepted_at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<()> {
+    let inserted = sql_query(
+        "WITH account AS (INSERT INTO accounts(principal_id,station_id,payload,created_at,updated_at) \
+         VALUES($1,$2,'{}'::jsonb,$3,$3) ON CONFLICT(station_id,principal_id) DO NOTHING RETURNING pk), \
+         private_key AS (INSERT INTO invite_new_source_hmac_keys(account_pk,key_bytes) \
+         SELECT pk,$4 FROM account) SELECT pk FROM account",
+    )
+    .bind::<Text, _>(account.principal_id.as_str())
+    .bind::<Text, _>(account.station_id.as_str())
+    .bind::<Timestamptz, _>(accepted_at)
+    .bind::<sql_types::Binary, _>(rand::random::<[u8; 32]>().to_vec())
+    .get_result::<AccountIdRow>(conn)
+    .await
+    .optional()
+    .map_err(PersistenceError::database)?;
+    if inserted.is_none() {
+        return Err(PersistenceError::Conflict(
+            "failed_precondition: native Agent account already exists".to_owned(),
+        ));
+    }
+    Ok(())
+}
 #[async_trait]
 impl AccountStore for PgAccountStore {
     async fn get(
@@ -54,17 +83,19 @@ impl AccountStore for PgAccountStore {
             "avatar_blob_ref": record.avatar_blob_ref,
         });
         let row = sql_query(
-            "INSERT INTO accounts (principal_id, station_id, display_name, payload, created_at, updated_at) \
+            "WITH account AS (INSERT INTO accounts (principal_id, station_id, display_name, payload, created_at, updated_at) \
              VALUES ($1, $2, $3, $4, $5, $5) \
              ON CONFLICT (station_id, principal_id) DO UPDATE SET \
              display_name = EXCLUDED.display_name, payload = EXCLUDED.payload, updated_at = NOW() \
-             RETURNING pk",
+             RETURNING pk), private_key AS (INSERT INTO invite_new_source_hmac_keys(account_pk,key_bytes) \
+             SELECT pk,$6 FROM account ON CONFLICT(account_pk) DO NOTHING) SELECT pk FROM account",
         )
         .bind::<Text, _>(record.principal_id.as_str())
         .bind::<Text, _>(record.station_id.as_str())
         .bind::<Nullable<Text>, _>(&record.display_name)
         .bind::<Jsonb, _>(&payload)
         .bind::<Timestamptz, _>(record.created_at)
+        .bind::<sql_types::Binary, _>(rand::random::<[u8;32]>().to_vec())
         .get_result::<AccountIdRow>(&mut *conn)
         .await
         .map_err(PersistenceError::database)?;

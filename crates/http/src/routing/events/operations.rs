@@ -33,7 +33,6 @@ use arkret_event_draft::ProjectedEventOperation as Operation;
 use coland_services::operation_semantics as kinds;
 use serde_json::Value;
 
-use crate::routing::interop::participant_binding;
 use crate::state::AppState;
 
 mod policy;
@@ -49,8 +48,6 @@ pub(crate) use payload_validators::*;
 
 #[cfg(test)]
 mod mention_tests;
-#[cfg(test)]
-mod participant_binding_tests;
 #[cfg(test)]
 mod policy_tests;
 

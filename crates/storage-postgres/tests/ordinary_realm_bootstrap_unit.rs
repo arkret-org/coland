@@ -1241,6 +1241,7 @@ fn strand_create_request(unit: &OrdinaryRealmBootstrapCommitUnit) -> EventCommit
         received_at: at,
     };
     let request = EventCommitRequest {
+        verified_media_participant: None,
         authority_commit: AuthorityCommitTransaction {
             expected_authority: previous.expected_authority.clone(),
             event,
@@ -1253,6 +1254,7 @@ fn strand_create_request(unit: &OrdinaryRealmBootstrapCommitUnit) -> EventCommit
         self_producer_guard: None,
         applet_producer_guard: None,
         widget_token_gate: None,
+        agent_grant_scope_evidence: None,
         forwarded_producer_evidence: None,
         forwarded_agent_producer: None,
         agent_deployment_ceiling:
@@ -2980,6 +2982,45 @@ async fn account_window_carries_same_cut_current_and_reservation_deadline() {
     .unwrap();
     assert_eq!(reserved.expires_at_ms, request.expires_at_ms);
 
+    #[derive(diesel::QueryableByName)]
+    struct Issuances {
+        #[diesel(sql_type = diesel::sql_types::Jsonb)]
+        value: serde_json::Value,
+    }
+    const ISSUANCES: &str = "SELECT jsonb_build_object('snapshots', (SELECT jsonb_agg(to_jsonb(s) ORDER BY snapshot_id) FROM realm_state_snapshots s), 'issuances', (SELECT jsonb_agg(to_jsonb(i) ORDER BY account_id, snapshot_id) FROM realm_state_snapshot_issuances i), 'reservations', (SELECT jsonb_agg(to_jsonb(r) ORDER BY window_cursor, stream_key) FROM realm_state_snapshot_window_reservations r)) AS value";
+    let before = diesel::sql_query(ISSUANCES)
+        .get_result::<Issuances>(&mut conn)
+        .await
+        .unwrap()
+        .value;
+    // History alone fits. The complete current and coverage do not; the
+    // attempted basis reservation must roll back along with the refusal.
+    let rows_budget = arkret_canonical::canonical_json_bytes(&backed.committed_events)
+        .unwrap()
+        .len()
+        + 16;
+    let refused = store
+        .freeze_account_realm_window(
+            &AccountRealmWindowRequest {
+                byte_budget: rows_budget,
+                window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
+                ..request.clone()
+            },
+            &sign,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, coland_storage::PersistenceError::SchemaViolation(ref reason)
+        if reason.contains("atomic detail payload exceeds its byte budget"))
+    );
+    let after = diesel::sql_query(ISSUANCES)
+        .get_result::<Issuances>(&mut conn)
+        .await
+        .unwrap()
+        .value;
+    assert_eq!(before, after);
+
     // A preview-only window still carries the same-cut current: current
     // never depends on the window start.
     let preview = store
@@ -3940,6 +3981,7 @@ fn franking_nonce(
     replay_nonce: &str,
 ) -> coland_storage::EventBatchCommitRequest {
     coland_storage::EventBatchCommitRequest {
+        audit_unit: None,
         events: vec![request.clone()],
         realm_organization_proof: None,
         invite_claim_proof: None,
@@ -5368,7 +5410,7 @@ fn source_if_human(
         if request
             .authority_commit
             .event
-            .human_device_producer()
+            .account_device_producer()
             .unwrap()
             .is_some()
         {
@@ -5386,7 +5428,7 @@ fn source_request(
     Box::pin(async move {
         request.authority_commit.producer_signer_fact =
             PgAuthorityCommitStore { pool: pool.clone() }
-                .prepare_human_signer_fact(
+                .prepare_account_device_signer_fact(
                     &request.authority_commit.event,
                     request.authority_commit.commit.committed_at,
                 )
@@ -6993,7 +7035,7 @@ async fn circle_create_and_self_join_write_same_cut_current() {
                     circle_id: circle_id.clone(),
                 }]),
                 window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
-                ..request
+                ..request.clone()
             },
             &sign,
         )
@@ -7029,8 +7071,12 @@ async fn circle_create_and_self_join_write_same_cut_current() {
             if view.event.event_id == create.authority_commit.event.event_id
     ));
 
+    let circle_tail = Box::pin(assert_circle_window_dependencies(
+        &pool, &store, &uow, &unit, &create, &join, &request, &sign,
+    ))
+    .await;
     let stale = circle_self_member_request(
-        &join,
+        &circle_tail,
         &creator,
         &circle_id,
         "leave",
@@ -7063,7 +7109,7 @@ async fn circle_create_and_self_join_write_same_cut_current() {
     assert_eq!(unchanged.count, 1);
     drop(conn);
     let leave = circle_self_member_request(
-        &join,
+        &circle_tail,
         &creator,
         &circle_id,
         "leave",
@@ -7071,6 +7117,38 @@ async fn circle_create_and_self_join_write_same_cut_current() {
         None,
     );
     uow.commit_event(leave).await.unwrap();
+    let after_revocation = store
+        .freeze_account_realm_window(
+            &coland_storage::AccountRealmWindowRequest {
+                delivered_heads: frozen.current_stream_heads.clone(),
+                window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
+                ..request
+            },
+            &sign,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(after_revocation.additional_windows.is_empty());
+    assert!(
+        after_revocation
+            .current_stream_heads
+            .iter()
+            .all(|head| matches!(head.stream_ref, arkret_wire::CommitStreamRef::Realm { .. }))
+    );
+    assert!(
+        !after_revocation
+            .current_state_entries
+            .iter()
+            .any(|row| matches!(
+                row,
+                arkret_wire::TypedCurrentRow::Value {
+                    selector: arkret_wire::CurrentSelector::Circle { .. }
+                        | arkret_wire::CurrentSelector::CircleMemberState { .. },
+                    ..
+                }
+            ))
+    );
     let after_leave = store
         .committed_event_for_member(
             &create.authority_commit.event.event_id,
@@ -7084,6 +7162,134 @@ async fn circle_create_and_self_join_write_same_cut_current() {
         coland_storage::MemberCommittedEventRead::Read(view)
             if matches!(*view, arkret_wire::CommittedEventView::Withheld(_))
     ));
+}
+
+async fn assert_circle_window_dependencies(
+    pool: &coland_storage_postgres::PgPool,
+    store: &PgAuthorityCommitStore,
+    uow: &PgEventCommitUnitOfWork,
+    unit: &OrdinaryRealmBootstrapCommitUnit,
+    create: &EventCommitRequest,
+    join: &EventCommitRequest,
+    request: &coland_storage::AccountRealmWindowRequest,
+    sign: coland_storage::RealmStateSnapshotSigner<'_>,
+) -> EventCommitRequest {
+    use coland_storage::RetentionTombstoneStore as _;
+    let circle_id = arkret_wire::CircleId::from_event_id(&create.authority_commit.event.event_id);
+    let creator = creator_account(unit);
+    let strand = scoped_event_request_as(
+        join,
+        &creator,
+        arkret_wire::EventKind::StrandCreate,
+        serde_json::json!({"object": {
+            "schema":"ak.schema.strand.v1", "realm_id":request.realm_id,
+            "scope_circle_id":circle_id,
+            "tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},
+            "metadata":{"title":"Bounded Circle tail"}, "state":"active",
+            "created_by":arkret_wire::ActorId::account(creator.clone()),
+            "created_at":arkret_canonical::format_timestamp_canonical(join.authority_commit.commit.committed_at)
+        }}),
+        arkret_wire::ScopeRef::Circle {
+            realm_id: request.realm_id.clone(),
+            circle_id,
+        },
+    );
+    uow.commit_event(strand.clone()).await.unwrap();
+    let bounded = coland_storage::AccountRealmWindowRequest {
+        window_limit: 1,
+        window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
+        selected_stream_refs: Some(vec![join.authority_commit.commit.stream_ref.clone()]),
+        ..request.clone()
+    };
+    let frozen = store
+        .freeze_account_realm_window(&bounded, sign)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(frozen.window.preview_only, None);
+    assert_eq!(frozen.committed_events.len(), 1);
+    assert_eq!(
+        frozen.committed_events[0].commit(),
+        &strand.authority_commit.commit
+    );
+    let basis = frozen.window.window_start_basis.unwrap();
+    assert_eq!(
+        basis.anchor_commit_ref,
+        join.authority_commit.commit.commit_id
+    );
+    let refs = basis.accepted_dependency_refs.as_ref().unwrap();
+    let parent = unit
+        .transactions
+        .iter()
+        .find(|row| row.event.kind == arkret_wire::EventKind::MemberState)
+        .unwrap();
+    assert_eq!(refs.len(), 2);
+    for accepted in [&create.authority_commit, parent] {
+        assert!(
+            refs.iter()
+                .any(|reference| reference.event_id == accepted.event.event_id
+                    && reference.commit_id == accepted.commit.commit_id
+                    && reference.stream_ref == accepted.commit.stream_ref
+                    && reference.stream_position == accepted.commit.stream_position)
+        );
+    }
+    assert_eq!(
+        store
+            .account_window_basis(
+                &bounded.realm_id,
+                &creator,
+                &bounded.window_cursor,
+                &join.authority_commit.commit.stream_ref,
+                &bounded.issuer,
+                bounded.now_ms,
+            )
+            .await
+            .unwrap(),
+        Some(basis)
+    );
+    // Current metadata remains valid when retention withholds the original.
+    // Both an existing reservation and a new window must withdraw the basis.
+    let tombstones = coland_storage_postgres::PgRetentionTombstoneStore { pool: pool.clone() };
+    tombstones
+        .put(&coland_storage::RetentionTombstoneRecord {
+            event_id: create.authority_commit.event.event_id.to_string(),
+            realm_id: bounded.realm_id.to_string(),
+            reason: "retention_policy.ttl".into(),
+            policy_ttl_seconds: 60,
+            expired_at: chrono::Utc::now(),
+            tombstoned_at: chrono::Utc::now(),
+            sealed: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        store
+            .account_window_basis(
+                &bounded.realm_id,
+                &creator,
+                &bounded.window_cursor,
+                &join.authority_commit.commit.stream_ref,
+                &bounded.issuer,
+                bounded.now_ms,
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let withdrawn = store
+        .freeze_account_realm_window(
+            &coland_storage::AccountRealmWindowRequest {
+                window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
+                ..bounded
+            },
+            sign,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(withdrawn.window.preview_only, Some(true));
+    assert!(withdrawn.window.window_start_basis.is_none());
+    strand
 }
 
 /// Real PostgreSQL: the same-cut evaluator refuses an actor without an
@@ -7744,6 +7950,262 @@ async fn message_revise_replaces_exact_revision_and_rejects_foreign_editor() {
     let revised = assert_message_revision_carriers(&pool, &fixture).await;
     let moderated = assert_message_revision_editor_grants(&pool, &fixture, &revised).await;
     assert_message_revision_window_and_redaction(&pool, &fixture, &moderated).await;
+}
+
+/// Historical originals survive legitimate state/content updates, but current
+/// redaction must withdraw the entire signed object without substituting a head.
+#[tokio::test]
+async fn historical_snapshot_rechecks_original_rows_after_updates_and_withdrawal() {
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let fixture = message_revision_fixture(&pool).await;
+    let realm = &fixture.unit.transactions[0].event.realm_id;
+    let creator = creator_account(&fixture.unit);
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let issuer = store
+        .current_authority(realm)
+        .await
+        .unwrap()
+        .unwrap()
+        .service_id;
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+    let method = snapshot_signer_for_issuer(&fixture.unit, &issuer);
+    let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
+        coland_services::authority_commit::build_signed_realm_state_snapshot(
+            material,
+            method.clone(),
+            &key,
+            chrono::Utc::now(),
+        )
+        .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
+    };
+    let before = store
+        .issue_realm_state_snapshot_for_account(realm, &creator, &issuer, &sign)
+        .await
+        .unwrap()
+        .unwrap();
+    let before_bytes = arkret_canonical::canonical_json_bytes(&before).unwrap();
+    let message_id =
+        arkret_wire::MessageId::from_event_id(&fixture.created.authority_commit.event.event_id);
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let profile = realm_event_request_as(
+        &fixture.created,
+        &creator,
+        arkret_wire::EventKind::RealmProfile,
+        serde_json::json!({"schema":"ak.schema.realm_profile.v1","title":"Updated Realm"}),
+    );
+    let profile = source_if_human(&pool, profile).await;
+    uow.commit_event(profile.clone()).await.unwrap();
+    let revised = realm_event_request_as(
+        &profile,
+        &creator,
+        arkret_wire::EventKind::MessageRevise,
+        plain_revision(&message_id, "updated content"),
+    );
+    let revised = source_if_human(&pool, revised).await;
+    uow.commit_event(revised.clone()).await.unwrap();
+    let current = store
+        .issue_realm_state_snapshot_for_account(realm, &creator, &issuer, &sign)
+        .await
+        .unwrap()
+        .unwrap();
+    for selector in [
+        arkret_wire::CurrentSelector::RealmProfile,
+        arkret_wire::CurrentSelector::MessageRevision {
+            message_id: message_id.clone(),
+        },
+    ] {
+        let row = |snapshot: &arkret_wire::RealmStateSnapshot| {
+            snapshot.current_state_entries.iter()
+            .find(|row| matches!(row, arkret_wire::TypedCurrentRow::Value { selector: actual, .. } if actual == &selector))
+            .cloned().unwrap()
+        };
+        assert_ne!(row(&before), row(&current));
+    }
+    let exact = store
+        .issued_realm_state_snapshot(realm, &creator, &before.snapshot_id, &issuer)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        arkret_canonical::canonical_json_bytes(&exact).unwrap(),
+        before_bytes
+    );
+    assert_ne!(exact.visible_stream_heads, current.visible_stream_heads);
+
+    // Expiring the superseded create withdraws only the snapshot containing
+    // that carrier. The current revision remains readable at the same cut.
+    use coland_storage::RetentionTombstoneStore as _;
+    coland_storage_postgres::PgRetentionTombstoneStore { pool: pool.clone() }
+        .put(&coland_storage::RetentionTombstoneRecord {
+            event_id: fixture.created.authority_commit.event.event_id.to_string(),
+            realm_id: realm.to_string(),
+            reason: "retention_policy.ttl".into(),
+            policy_ttl_seconds: 60,
+            expired_at: chrono::Utc::now(),
+            tombstoned_at: chrono::Utc::now(),
+            sealed: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        store
+            .issued_realm_state_snapshot(realm, &creator, &before.snapshot_id, &issuer)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .issued_realm_state_snapshot(realm, &creator, &current.snapshot_id, &issuer)
+            .await
+            .unwrap(),
+        Some(current.clone())
+    );
+
+    let redaction = realm_event_request_as(
+        &revised,
+        &creator,
+        arkret_wire::EventKind::MessageRedact,
+        serde_json::json!({"message_id":message_id,"reason":"withdraw historical content"}),
+    );
+    let redaction = source_if_human(&pool, redaction).await;
+    uow.commit_event(redaction).await.unwrap();
+    for snapshot in [&before, &current] {
+        assert!(
+            store
+                .issued_realm_state_snapshot(realm, &creator, &snapshot.snapshot_id, &issuer)
+                .await
+                .is_err(),
+            "redaction must withdraw every old content carrier"
+        );
+    }
+    let after = store
+        .issue_realm_state_snapshot_for_account(realm, &creator, &issuer, &sign)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!after.current_state_entries.iter().any(|row| matches!(row,
+        arkret_wire::TypedCurrentRow::Value {
+            selector: arkret_wire::CurrentSelector::MessageRevision { message_id: id }, ..
+        } if id == &message_id)));
+    assert!(after.current_state_entries.iter().any(|row| matches!(row,
+        arkret_wire::TypedCurrentRow::Value {
+            selector: arkret_wire::CurrentSelector::ObjectRedaction { target_ref }, ..
+        } if target_ref == message_id.as_str())));
+    assert_eq!(
+        store
+            .issued_realm_state_snapshot(realm, &creator, &after.snapshot_id, &issuer)
+            .await
+            .unwrap(),
+        Some(after)
+    );
+}
+
+#[tokio::test]
+async fn historical_snapshot_watch_publication_is_rechecked_for_other_members() {
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let fixture = message_revision_fixture(&pool).await;
+    let realm = &fixture.unit.transactions[0].event.realm_id;
+    let creator = creator_account(&fixture.unit);
+    let actor = arkret_wire::ActorId::account(creator.clone());
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let (reader, joined) = admit_joined_human(
+        &pool,
+        &uow,
+        &fixture.created,
+        &fixture.unit,
+        "snapshot-watch-reader",
+        'e',
+    )
+    .await;
+    let issuer = store
+        .current_authority(realm)
+        .await
+        .unwrap()
+        .unwrap()
+        .service_id;
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+    let method = snapshot_signer_for_issuer(&fixture.unit, &issuer);
+    let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
+        coland_services::authority_commit::build_signed_realm_state_snapshot(
+            material,
+            method.clone(),
+            &key,
+            chrono::Utc::now(),
+        )
+        .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
+    };
+    let public = realm_event_request_as(
+        &joined,
+        &creator,
+        arkret_wire::EventKind::StrandWatchSet,
+        serde_json::json!({"strand_id":fixture.strand_id,"watcher_actor_id":actor,
+            "level":"all","level_public":true}),
+    );
+    let public = source_if_human(&pool, public).await;
+    uow.commit_event(public.clone()).await.unwrap();
+    let observed = store
+        .issue_realm_state_snapshot_for_account(realm, &reader, &issuer, &sign)
+        .await
+        .unwrap()
+        .unwrap();
+    let own = store
+        .issue_realm_state_snapshot_for_account(realm, &creator, &issuer, &sign)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        observed
+            .current_state_entries
+            .iter()
+            .any(|row| matches!(row,
+        arkret_wire::TypedCurrentRow::Value {
+            selector: arkret_wire::CurrentSelector::StrandWatch { watcher_actor_id, .. }, ..
+        } if watcher_actor_id == &actor))
+    );
+    let update = realm_event_request_as(
+        &public,
+        &creator,
+        arkret_wire::EventKind::StrandWatchSet,
+        serde_json::json!({"strand_id":fixture.strand_id,"watcher_actor_id":actor,
+            "level":"participating","level_public":true,
+            "expected_value":{"level":"all","level_public":true}}),
+    );
+    let update = source_if_human(&pool, update).await;
+    uow.commit_event(update.clone()).await.unwrap();
+    assert_eq!(
+        store
+            .issued_realm_state_snapshot(realm, &reader, &observed.snapshot_id, &issuer)
+            .await
+            .unwrap(),
+        Some(observed.clone())
+    );
+    let private = realm_event_request_as(
+        &update,
+        &creator,
+        arkret_wire::EventKind::StrandWatchSet,
+        serde_json::json!({"strand_id":fixture.strand_id,"watcher_actor_id":actor,
+            "level":"participating","level_public":false,
+            "expected_value":{"level":"participating","level_public":true}}),
+    );
+    let private = source_if_human(&pool, private).await;
+    uow.commit_event(private).await.unwrap();
+    assert!(
+        store
+            .issued_realm_state_snapshot(realm, &reader, &observed.snapshot_id, &issuer)
+            .await
+            .is_err(),
+        "the old public flag cannot restore revoked publication"
+    );
+    assert_eq!(
+        store
+            .issued_realm_state_snapshot(realm, &creator, &own.snapshot_id, &issuer)
+            .await
+            .unwrap(),
+        Some(own)
+    );
 }
 
 struct MessageRevisionFixture {
@@ -8551,150 +9013,145 @@ async fn poll_responses_keep_accepted_history_and_reject_invalid_partition_heads
 
 #[tokio::test]
 async fn replies_and_direct_mentions_require_accepted_visible_full_accounts() {
-    replies_and_mentions_scenario().await;
-}
-
-#[inline(never)]
-fn replies_and_mentions_scenario() -> std::pin::Pin<Box<impl std::future::Future<Output = ()>>> {
-    Box::pin(async move {
-        let database = TestDatabase::lease().await;
-        let pool = database.pool();
-        let (unit, head, strand_id) = scenario_future(|| admitted_message_discussion(&pool)).await;
-        let creator = creator_account(&unit);
-        let uow = PgEventCommitUnitOfWork::new(pool.clone());
-        let store = PgAuthorityCommitStore { pool: pool.clone() };
-        let target = message_create_request(&head, &strand_id, "target");
-        let target = scenario_future(|| source_if_human(&pool, target)).await;
-        uow.commit_event(target.clone()).await.unwrap();
-        let message_id =
-            arkret_wire::MessageId::from_event_id(&target.authority_commit.event.event_id);
-        let reply = realm_event_request_as(
-            &target,
-            &creator,
-            arkret_wire::EventKind::MessageCreate,
-            serde_json::json!({"strand_id":strand_id,"track_name":"discussion","reply_to_id":message_id,
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    ordinary_realm::case_future(|| async move {
+    let fixture_pool = pool.clone();
+    let setup = tokio::spawn(async move {
+        Box::new(Box::pin(admitted_message_discussion(&fixture_pool)).await)
+    })
+    .await
+    .unwrap();
+    let (unit, head, strand_id) = &*setup;
+    let creator = creator_account(&unit);
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let target = message_create_request(&head, &strand_id, "target");
+    let target = source_if_human(&pool, target).await;
+    uow.commit_event(target.clone()).await.unwrap();
+    let message_id = arkret_wire::MessageId::from_event_id(&target.authority_commit.event.event_id);
+    let reply = realm_event_request_as(
+        &target,
+        &creator,
+        arkret_wire::EventKind::MessageCreate,
+        serde_json::json!({"strand_id":strand_id,"track_name":"discussion","reply_to_id":message_id,
             "content":{"kind":"ak.content.text","body":"reply","mentions":[{
                 "kind":"mention","subject_account_id":creator,"display_name_at_time":"untrusted audit"}]}}),
-        );
-        let reply = scenario_future(|| source_if_human(&pool, reply)).await;
-        uow.commit_event(reply.clone()).await.unwrap();
-        let mut other_station = creator.clone();
-        other_station.station_id =
-            arkret_wire::DidCoreId::new("ak:did_core:web:other-station.example").unwrap();
-        for payload in [
-            serde_json::json!({"strand_id":strand_id,"track_name":"discussion",
+    );
+    let reply = source_if_human(&pool, reply).await;
+    uow.commit_event(reply.clone()).await.unwrap();
+    let mut other_station = creator.clone();
+    other_station.station_id =
+        arkret_wire::DidCoreId::new("ak:did_core:web:other-station.example").unwrap();
+    for payload in [
+        serde_json::json!({"strand_id":strand_id,"track_name":"discussion",
             "reply_to_id":arkret_wire::MessageId::from_event_id(&unit.transactions[0].event.event_id),
             "content":{"kind":"ak.content.text","body":"missing target"}}),
-            serde_json::json!({"strand_id":strand_id,"track_name":"discussion",
+        serde_json::json!({"strand_id":strand_id,"track_name":"discussion",
             "content":{"kind":"ak.content.text","body":"same principal elsewhere","mentions":[{
                 "kind":"mention","subject_account_id":other_station}]}}),
-            serde_json::json!({"strand_id":strand_id,"track_name":"discussion","reply_to":message_id,
+        serde_json::json!({"strand_id":strand_id,"track_name":"discussion","reply_to":message_id,
             "content":{"kind":"ak.content.text","body":"legacy alias"}}),
-        ] {
-            let request = realm_event_request_as(
-                &reply,
-                &creator,
-                arkret_wire::EventKind::MessageCreate,
-                payload,
-            );
-            let request = scenario_future(|| source_if_human(&pool, request)).await;
-            let before = message_families(&pool, &head.authority_commit.event.realm_id).await;
-            assert!(uow.commit_event(request.clone()).await.is_err());
-            assert!(
-                store
-                    .committed_event(&request.authority_commit.event.event_id)
-                    .await
-                    .unwrap()
-                    .is_none()
-            );
-            assert_eq!(
-                message_families(&pool, &head.authority_commit.event.realm_id).await,
-                before
-            );
-        }
-        // The exact Account joins through accepted Invite/Accept facts without
-        // a display Profile. Mention admission is bound to membership and scope;
-        // Profile absence or classification cannot substitute for Agent gates.
-        let account_without_profile = scenario_future(|| {
-            human_profile::admit_without_profile(&pool, &creator.station_id, "reply-late-member")
-        })
-        .await;
-        let mut conn = pool.get().await.unwrap();
-        let profiles = diesel::sql_query("SELECT count(*) AS count FROM actor_profile_current_results WHERE value->>'principal_id'=$1")
+    ] {
+        let request = realm_event_request_as(
+            &reply,
+            &creator,
+            arkret_wire::EventKind::MessageCreate,
+            payload,
+        );
+        let request = source_if_human(&pool, request).await;
+        let before = message_families(&pool, &head.authority_commit.event.realm_id).await;
+        assert!(uow.commit_event(request.clone()).await.is_err());
+        assert!(
+            store
+                .committed_event(&request.authority_commit.event.event_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            message_families(&pool, &head.authority_commit.event.realm_id).await,
+            before
+        );
+    }
+    // The exact Account joins through accepted Invite/Accept facts without
+    // a display Profile. Mention admission is bound to membership and scope;
+    // Profile absence or classification cannot substitute for Agent gates.
+    let account_without_profile =
+        human_profile::admit_without_profile(&pool, &creator.station_id, "reply-late-member").await;
+    let mut conn = pool.get().await.unwrap();
+    let profiles = diesel::sql_query("SELECT count(*) AS count FROM actor_profile_current_results WHERE value->>'principal_id'=$1")
         .bind::<Text, _>(account_without_profile.principal_id.as_str())
         .get_result::<CountRow>(&mut *conn).await.unwrap().count;
-        assert_eq!(
-            profiles, 0,
-            "membership and mention do not require a display Profile"
-        );
-        drop(conn);
-        let (late_member, joined) = scenario_future(|| {
-            admit_joined_account(&pool, &uow, &reply, &unit, account_without_profile, 'c')
-        })
-        .await;
-        let root =
-            realm_root_authority_event_ref(&pool, &head.authority_commit.event.realm_id).await;
-        let grant = invite_grant_request(
-            &pool,
-            &joined,
-            &unit,
-            &root,
-            &late_member,
-            &["ak.message.create"],
-        )
-        .await;
-        uow.commit_event(grant.clone()).await.unwrap();
-        let hidden_reply = realm_event_request_as(
-            &grant,
-            &late_member,
-            arkret_wire::EventKind::MessageCreate,
-            serde_json::json!({"strand_id":strand_id,"track_name":"discussion","reply_to_id":message_id,
+    assert_eq!(
+        profiles, 0,
+        "membership and mention do not require a display Profile"
+    );
+    drop(conn);
+    let (late_member, joined) =
+        admit_joined_account(&pool, &uow, &reply, &unit, account_without_profile, 'c').await;
+    let root = realm_root_authority_event_ref(&pool, &head.authority_commit.event.realm_id).await;
+    let grant = invite_grant_request(
+        &pool,
+        &joined,
+        &unit,
+        &root,
+        &late_member,
+        &["ak.message.create"],
+    )
+    .await;
+    uow.commit_event(grant.clone()).await.unwrap();
+    let hidden_reply = realm_event_request_as(
+        &grant,
+        &late_member,
+        arkret_wire::EventKind::MessageCreate,
+        serde_json::json!({"strand_id":strand_id,"track_name":"discussion","reply_to_id":message_id,
             "content":{"kind":"ak.content.text","body":"before my membership floor"}}),
-        );
-        let hidden_reply = scenario_future(|| source_if_human(&pool, hidden_reply)).await;
-        assert_message_write_refused(
-            &uow,
-            &store,
-            &pool,
-            &hidden_reply,
-            Some(coland_storage::ConflictCode::FailedPrecondition),
-        )
-        .await;
-        let mention_member = realm_event_request_as(
-            &grant,
-            &creator,
-            arkret_wire::EventKind::MessageCreate,
-            serde_json::json!({"strand_id":strand_id,"track_name":"discussion",
+    );
+    let hidden_reply = source_if_human(&pool, hidden_reply).await;
+    assert_message_write_refused(
+        &uow,
+        &store,
+        &pool,
+        &hidden_reply,
+        Some(coland_storage::ConflictCode::FailedPrecondition),
+    )
+    .await;
+    let mention_member = realm_event_request_as(
+        &grant,
+        &creator,
+        arkret_wire::EventKind::MessageCreate,
+        serde_json::json!({"strand_id":strand_id,"track_name":"discussion",
             "content":{"kind":"ak.content.text","body":"joined exact account","mentions":[{
                 "kind":"mention","subject_account_id":late_member}]}}),
-        );
-        let mention_member = source_if_human(&pool, mention_member).await;
-        uow.commit_event(mention_member.clone()).await.unwrap();
-        let redaction = realm_event_request_as(
-            &mention_member,
-            &creator,
-            arkret_wire::EventKind::MessageRedact,
-            serde_json::json!({"message_id":message_id}),
-        );
-        let redaction = source_if_human(&pool, redaction).await;
-        uow.commit_event(redaction.clone()).await.unwrap();
-        let refused = realm_event_request_as(
-            &redaction,
-            &creator,
-            arkret_wire::EventKind::MessageCreate,
-            serde_json::json!({"strand_id":strand_id,"track_name":"discussion","reply_to_id":message_id,
+    );
+    let mention_member = source_if_human(&pool, mention_member).await;
+    uow.commit_event(mention_member.clone()).await.unwrap();
+    let redaction = realm_event_request_as(
+        &mention_member,
+        &creator,
+        arkret_wire::EventKind::MessageRedact,
+        serde_json::json!({"message_id":message_id}),
+    );
+    let redaction = source_if_human(&pool, redaction).await;
+    uow.commit_event(redaction.clone()).await.unwrap();
+    let refused = realm_event_request_as(
+        &redaction,
+        &creator,
+        arkret_wire::EventKind::MessageCreate,
+        serde_json::json!({"strand_id":strand_id,"track_name":"discussion","reply_to_id":message_id,
             "content":{"kind":"ak.content.text","body":"reply to unavailable target"}}),
-        );
-        let refused = source_if_human(&pool, refused).await;
-        assert_message_write_refused(
-            &uow,
-            &store,
-            &pool,
-            &refused,
-            Some(coland_storage::ConflictCode::FailedPrecondition),
-        )
-        .await;
-    })
+    );
+    let refused = source_if_human(&pool, refused).await;
+    assert_message_write_refused(
+        &uow,
+        &store,
+        &pool,
+        &refused,
+        Some(coland_storage::ConflictCode::FailedPrecondition),
+    )
+    .await;
+    }).await;
 }
 
 fn identity_payload(unit: &OrdinaryRealmBootstrapCommitUnit, name: &str) -> serde_json::Value {
@@ -8893,7 +9350,7 @@ async fn source_unit(
     let mut previous = None;
     for (index, tx) in unit.transactions.iter_mut().enumerate() {
         tx.producer_signer_fact = store
-            .prepare_human_signer_fact(&tx.event, tx.commit.committed_at)
+            .prepare_account_device_signer_fact(&tx.event, tx.commit.committed_at)
             .await
             .unwrap()
             .map(Into::into);
@@ -8941,7 +9398,7 @@ fn seal_request_fact(mut request: EventCommitRequest) -> EventCommitRequest {
         .authority_commit
         .producer_signer_fact
         .as_mut()
-        .and_then(|fact| fact.as_human_mut())
+        .and_then(|fact| fact.as_account_device_mut())
     {
         if fact.actor == request.authority_commit.event.actor_id {
             fact.event_id = request.authority_commit.event.event_id.clone();
@@ -8955,13 +9412,4 @@ fn seal_request_fact(mut request: EventCommitRequest) -> EventCommitRequest {
     }
     seal_suite_commit(&mut request.authority_commit.commit);
     request
-}
-
-#[inline(never)]
-fn scenario_future<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future,
-{
-    Box::pin(make())
 }

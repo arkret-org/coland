@@ -262,6 +262,23 @@ impl crate::delivery::DeviceMessagePort for PersistenceDeviceMessages {
             .await?)
     }
 
+    async fn applet_device_queue(
+        &self,
+        input: coland_storage::AppletDeviceQueueRead<'_>,
+    ) -> crate::ServiceResult<coland_storage::AppletDeviceQueuePage> {
+        Ok(self.0.device_messages().applet_device_queue(input).await?)
+    }
+    async fn ack_applet_device_queue(
+        &self,
+        input: coland_storage::AppletDeviceQueueAck<'_>,
+    ) -> crate::ServiceResult<Option<usize>> {
+        Ok(self
+            .0
+            .device_messages()
+            .ack_applet_device_queue(input)
+            .await?)
+    }
+
     async fn recipient_deliveries_after(
         &self,
         selector: &crate::delivery::RecipientQueueSelector,

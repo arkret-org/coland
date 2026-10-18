@@ -317,6 +317,8 @@ async fn run(raw_args: Vec<String>) -> anyhow::Result<()> {
         );
     }
 
+    let _consent_effect_publication_worker =
+        coland_http::routing::spawn_effect_publication_worker(state.clone());
     let _account_erasure_worker = coland_http::account_erasure_worker::spawn(state.clone());
     // security-transactions.md §3 — the Station, not a client, advances the
     // coordinator-owned SecurityRotation `revoke` step and resumes it after a

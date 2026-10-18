@@ -303,17 +303,7 @@ impl SyncCursorStore for PgSyncCursorStore {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
-        sql_query(
-            "SELECT id AS handle, binding_subject, device_id, session_id, service_id, filter_digest, purpose, \
-             positions, target, issued_at_ms, expires_at_ms \
-             FROM sync_cursor_handles WHERE id = $1",
-        )
-        .bind::<Text, _>(handle)
-        .get_result::<SyncCursorRow>(&mut *conn)
-        .await
-        .optional()
-        .map(|row| row.map(SyncCursorRecord::from))
-        .map_err(PersistenceError::database)
+        get_in_connection(&mut conn, handle).await
     }
 
     async fn upsert(&self, record: &SyncCursorRecord) -> PersistenceResult<()> {
@@ -328,50 +318,14 @@ impl SyncCursorStore for PgSyncCursorStore {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
-        let floors = retention::cursor_floors(record)?;
         conn.transaction::<_, crate::PgTransactionError, _>(async |conn| {
-            sql_query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED").execute(&mut *conn).await?;
-            if let Some((summary, global)) = floors {
-                retention::check(conn, Some(summary), Some(global)).await?;
-            }
-        // The entire issuance instance is immutable, including its expiry.
-        let written = sql_query(
-            "INSERT INTO sync_cursor_handles \
-             (id, binding_subject, device_id, session_id, service_id, filter_digest, purpose, positions, target, issued_at_ms, expires_at_ms) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
-             ON CONFLICT (id) DO UPDATE SET id = EXCLUDED.id \
-             WHERE sync_cursor_handles.binding_subject IS NOT DISTINCT FROM EXCLUDED.binding_subject \
-               AND sync_cursor_handles.device_id IS NOT DISTINCT FROM EXCLUDED.device_id \
-               AND sync_cursor_handles.session_id IS NOT DISTINCT FROM EXCLUDED.session_id \
-               AND sync_cursor_handles.service_id = EXCLUDED.service_id \
-               AND sync_cursor_handles.filter_digest IS NOT DISTINCT FROM EXCLUDED.filter_digest \
-               AND sync_cursor_handles.purpose = EXCLUDED.purpose \
-               AND sync_cursor_handles.positions IS NOT DISTINCT FROM EXCLUDED.positions \
-               AND sync_cursor_handles.target IS NOT DISTINCT FROM EXCLUDED.target \
-               AND sync_cursor_handles.issued_at_ms = EXCLUDED.issued_at_ms \
-               AND sync_cursor_handles.expires_at_ms = EXCLUDED.expires_at_ms",
-        )
-        .bind::<Text, _>(&record.handle)
-        .bind::<Nullable<Text>, _>(&record.binding_subject)
-        .bind::<Nullable<Text>, _>(&record.device_id)
-        .bind::<Nullable<Text>, _>(&record.session_id)
-        .bind::<Text, _>(&record.service_id)
-        .bind::<Nullable<Text>, _>(&record.filter_digest)
-        .bind::<Text, _>(&record.purpose)
-        .bind::<Nullable<Jsonb>, _>(&record.positions)
-        .bind::<Nullable<Jsonb>, _>(&record.target)
-        .bind::<BigInt, _>(record.issued_at_ms)
-        .bind::<BigInt, _>(record.expires_at_ms)
-        .execute(&mut *conn)
+            sql_query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+                .execute(&mut *conn)
+                .await?;
+            upsert_in_connection(conn, record, inputs).await
+        })
         .await
-        .map_err(PersistenceError::database)?;
-            if written != 1 {
-                return Err(PersistenceError::Conflict("cursor issuance is immutable".into()).into());
-            }
-            validate_issuance_inputs(conn, inputs).await?;
-            retention::save_cursor(conn, record, floors).await?;
-            Ok(())
-        }).await.map_err(crate::PgTransactionError::into_persistence)
+        .map_err(crate::PgTransactionError::into_persistence)
     }
 
     async fn delete(&self, handle: &str) -> PersistenceResult<bool> {
@@ -444,7 +398,7 @@ impl SyncCursorStore for PgSyncCursorStore {
         Ok(rows.into_iter().map(CursorRevocation::from).collect())
     }
 }
-async fn validate_issuance_inputs(
+pub(crate) async fn validate_issuance_inputs(
     conn: &mut super::AsyncPgConnection,
     inputs: &[SyncCursorRecord],
 ) -> Result<(), crate::PgTransactionError> {
@@ -654,4 +608,69 @@ mod account_summary_query_tests {
             5
         );
     }
+}
+
+pub(crate) async fn upsert_in_connection(
+    conn: &mut super::AsyncPgConnection,
+    record: &SyncCursorRecord,
+    inputs: &[SyncCursorRecord],
+) -> Result<(), crate::PgTransactionError> {
+    let floors = retention::cursor_floors(record)?;
+    if let Some((summary, global)) = floors {
+        retention::check(conn, Some(summary), Some(global)).await?;
+    }
+    // The entire issuance instance is immutable, including its expiry.
+    let written = sql_query(
+            "INSERT INTO sync_cursor_handles \
+             (id, binding_subject, device_id, session_id, service_id, filter_digest, purpose, positions, target, issued_at_ms, expires_at_ms) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+             ON CONFLICT (id) DO UPDATE SET id = EXCLUDED.id \
+             WHERE sync_cursor_handles.binding_subject IS NOT DISTINCT FROM EXCLUDED.binding_subject \
+               AND sync_cursor_handles.device_id IS NOT DISTINCT FROM EXCLUDED.device_id \
+               AND sync_cursor_handles.session_id IS NOT DISTINCT FROM EXCLUDED.session_id \
+               AND sync_cursor_handles.service_id = EXCLUDED.service_id \
+               AND sync_cursor_handles.filter_digest IS NOT DISTINCT FROM EXCLUDED.filter_digest \
+               AND sync_cursor_handles.purpose = EXCLUDED.purpose \
+               AND sync_cursor_handles.positions IS NOT DISTINCT FROM EXCLUDED.positions \
+               AND sync_cursor_handles.target IS NOT DISTINCT FROM EXCLUDED.target \
+               AND sync_cursor_handles.issued_at_ms = EXCLUDED.issued_at_ms \
+               AND sync_cursor_handles.expires_at_ms = EXCLUDED.expires_at_ms",
+        )
+        .bind::<Text, _>(&record.handle)
+        .bind::<Nullable<Text>, _>(&record.binding_subject)
+        .bind::<Nullable<Text>, _>(&record.device_id)
+        .bind::<Nullable<Text>, _>(&record.session_id)
+        .bind::<Text, _>(&record.service_id)
+        .bind::<Nullable<Text>, _>(&record.filter_digest)
+        .bind::<Text, _>(&record.purpose)
+        .bind::<Nullable<Jsonb>, _>(&record.positions)
+        .bind::<Nullable<Jsonb>, _>(&record.target)
+        .bind::<BigInt, _>(record.issued_at_ms)
+        .bind::<BigInt, _>(record.expires_at_ms)
+        .execute(&mut *conn)
+        .await
+        .map_err(PersistenceError::database)?;
+    if written != 1 {
+        return Err(PersistenceError::Conflict("cursor issuance is immutable".into()).into());
+    }
+    validate_issuance_inputs(conn, inputs).await?;
+    retention::save_cursor(conn, record, floors).await?;
+    Ok(())
+}
+
+pub(crate) async fn get_in_connection(
+    conn: &mut super::AsyncPgConnection,
+    handle: &str,
+) -> PersistenceResult<Option<SyncCursorRecord>> {
+    sql_query(
+            "SELECT id AS handle, binding_subject, device_id, session_id, service_id, filter_digest, purpose, \
+             positions, target, issued_at_ms, expires_at_ms \
+             FROM sync_cursor_handles WHERE id = $1",
+        )
+        .bind::<Text, _>(handle)
+        .get_result::<SyncCursorRow>(&mut *conn)
+        .await
+        .optional()
+        .map(|row| row.map(SyncCursorRecord::from))
+        .map_err(PersistenceError::database)
 }

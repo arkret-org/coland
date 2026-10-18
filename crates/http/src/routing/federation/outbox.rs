@@ -725,6 +725,7 @@ fn is_authority_forward(
         request,
         PeerAuthoritySubmitRequest::AuthorityForwardEvent(_)
             | PeerAuthoritySubmitRequest::AuthorityForwardMls(_)
+            | PeerAuthoritySubmitRequest::AuthorityForwardAtomic(_)
     )
 }
 
@@ -2320,14 +2321,21 @@ async fn realm_fanout_still_owed(
         arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
     >(&row.delivery.payload_json)
     .map_err(|error| format!("Realm fanout body is not a peer submission: {error}"))?;
-    let arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest::CommittedReplication(
-        request,
-    ) = request
-    else {
-        return Err("Realm fanout body is not committed_replication".to_owned());
+    use arkret_models_collaboration::authority_commit::{
+        PeerAuthoritySubmitRequest, PeerRegisteredAtomicUnit,
+    };
+    let items = match &request {
+        PeerAuthoritySubmitRequest::CommittedReplication(request) => {
+            request.replications.as_slice()
+        }
+        PeerAuthoritySubmitRequest::RegisteredAtomicUnit(request) => match &request.unit {
+            PeerRegisteredAtomicUnit::AuditPairedEvent(pair) => pair.committed_events.as_slice(),
+            _ => return Err("Realm fanout has an unregistered atomic body".to_owned()),
+        },
+        _ => return Err("Realm fanout body has no source-committed events".to_owned()),
     };
     let now = chrono::Utc::now();
-    for item in &request.replications {
+    for item in items {
         if !state
             .authority_commits()
             .realm_fanout_still_owed(

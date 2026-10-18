@@ -38,7 +38,7 @@ pub async fn run_pin_admission_fixture() -> Vec<(&'static str, usize)> {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
-    let discussion = crate::boxed_future(|| open_discussion(&pool, "pin-admission")).await;
+    let discussion = Box::pin(open_discussion(&pool, "pin-admission")).await;
     let realm = discussion.realm_id();
     let at = discussion.committed_at();
     let message = crate::boxed_future(|| {
@@ -48,7 +48,9 @@ pub async fn run_pin_admission_fixture() -> Vec<(&'static str, usize)> {
         )
     })
     .await;
-    uow.commit_event(message.clone()).await.unwrap();
+    crate::boxed_future(|| uow.commit_event(message.clone()))
+        .await
+        .unwrap();
     let target = arkret_wire::MessageId::from_event_id(&message.authority_commit.event.event_id);
     let home = json!({"kind":"strand","id":discussion.strand_id});
     let add = json!({"pin_scope":home,"target_ref":target,"rank":"a0"});
@@ -67,7 +69,7 @@ pub async fn run_pin_admission_fixture() -> Vec<(&'static str, usize)> {
     .await;
     let baseline = count(&pool, "realm_commits", &realm).await;
     assert!(
-        uow.commit_event(no_grant)
+        crate::boxed_future(|| uow.commit_event(no_grant))
             .await
             .unwrap_err()
             .to_string()
@@ -95,7 +97,9 @@ pub async fn run_pin_admission_fixture() -> Vec<(&'static str, usize)> {
         }}),
         at,
     ))).await;
-    uow.commit_event(grant.clone()).await.unwrap();
+    crate::boxed_future(|| uow.commit_event(grant.clone()))
+        .await
+        .unwrap();
     let reorder = crate::boxed_future(|| {
         ordinary_realm::source_request(
             &pool,
@@ -111,7 +115,7 @@ pub async fn run_pin_admission_fixture() -> Vec<(&'static str, usize)> {
     .await;
     let baseline = count(&pool, "realm_commits", &realm).await;
     assert!(
-        uow.commit_event(reorder)
+        crate::boxed_future(|| uow.commit_event(reorder))
             .await
             .unwrap_err()
             .to_string()
@@ -140,7 +144,9 @@ pub async fn run_pin_admission_fixture() -> Vec<(&'static str, usize)> {
         )
     })
     .await;
-    uow.commit_event(add.clone()).await.unwrap();
+    crate::boxed_future(|| uow.commit_event(add.clone()))
+        .await
+        .unwrap();
     let stale = crate::boxed_future(|| {
         ordinary_realm::source_request(
             &pool,
@@ -156,7 +162,7 @@ pub async fn run_pin_admission_fixture() -> Vec<(&'static str, usize)> {
     .await;
     let baseline = count(&pool, "realm_commits", &realm).await;
     assert!(
-        uow.commit_event(stale)
+        crate::boxed_future(|| uow.commit_event(stale))
             .await
             .unwrap_err()
             .to_string()
@@ -181,7 +187,9 @@ pub async fn run_pin_admission_fixture() -> Vec<(&'static str, usize)> {
         )
     })
     .await;
-    uow.commit_event(reorder.clone()).await.unwrap();
+    crate::boxed_future(|| uow.commit_event(reorder.clone()))
+        .await
+        .unwrap();
     let remove = crate::boxed_future(|| {
         ordinary_realm::source_request(
             &pool,
@@ -195,7 +203,9 @@ pub async fn run_pin_admission_fixture() -> Vec<(&'static str, usize)> {
         )
     })
     .await;
-    uow.commit_event(remove.clone()).await.unwrap();
+    crate::boxed_future(|| uow.commit_event(remove.clone()))
+        .await
+        .unwrap();
     let resurrect = crate::boxed_future(|| {
         ordinary_realm::source_request(
             &pool,
@@ -211,7 +221,7 @@ pub async fn run_pin_admission_fixture() -> Vec<(&'static str, usize)> {
     .await;
     let baseline = count(&pool, "realm_commits", &realm).await;
     assert!(
-        uow.commit_event(resurrect)
+        crate::boxed_future(|| uow.commit_event(resurrect))
             .await
             .unwrap_err()
             .to_string()
@@ -253,9 +263,11 @@ pub async fn run_pin_admission_fixture() -> Vec<(&'static str, usize)> {
             .as_u64()
             .unwrap()
     );
-    let other = crate::boxed_future(|| open_discussion(&pool, "foreign-pin-target")).await;
+    let other = Box::pin(open_discussion(&pool, "foreign-pin-target")).await;
     let foreign = other.message_after(&other.head.authority_commit, "private foreign message", at);
-    uow.commit_event(foreign.clone()).await.unwrap();
+    crate::boxed_future(|| uow.commit_event(foreign.clone()))
+        .await
+        .unwrap();
     let forbidden = crate::boxed_future(|| ordinary_realm::source_request(&pool, next_request(
         &remove.authority_commit,
         arkret_wire::EventKind::PinAdd,
@@ -269,7 +281,9 @@ pub async fn run_pin_admission_fixture() -> Vec<(&'static str, usize)> {
         "not_found"
     );
     assert!(matches!(
-        uow.commit_event(forbidden).await.unwrap_err(),
+        crate::boxed_future(|| uow.commit_event(forbidden))
+            .await
+            .unwrap_err(),
         coland_storage::PersistenceError::NotFound(_)
     ));
     assert_eq!(

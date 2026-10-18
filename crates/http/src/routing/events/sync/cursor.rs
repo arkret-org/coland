@@ -445,6 +445,16 @@ pub fn spawn_sync_cursor_ttl_sweeper(
             // api-conventions.md §6 — the generic `Idempotency-Key` cache shares
             // this periodic sweep so its mapping table stays bounded by the
             // per-record TTL instead of growing with every keyed write.
+            match state.mls_key_packages().prune_peer_claim_attempts().await {
+                Ok(0) => {}
+                Ok(pruned) => tracing::debug!(
+                    worker = "sync_cursor_ttl_sweep",
+                    pruned,
+                    "expired KeyPackage claim attempts pruned"
+                ),
+                Err(error) => tracing::warn!(worker="sync_cursor_ttl_sweep", %error,
+                    "KeyPackage claim attempt TTL sweep failed"),
+            }
             match state.jobs().prune_expired_idempotency(now).await {
                 Ok(0) => {}
                 Ok(pruned) => tracing::debug!(

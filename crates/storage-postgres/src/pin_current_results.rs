@@ -126,6 +126,7 @@ pub(crate) async fn commit_pin_in_connection(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     authorize: bool,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if !matches!(
         event.kind,
@@ -152,10 +153,8 @@ pub(crate) async fn commit_pin_in_connection(
         return Err(absent());
     }
     if authorize {
-        crate::realm_authorization_cut::authorize_capability_gated_event_in_connection(
-            conn,
-            event,
-            commit.committed_at,
+        crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+            conn, event, commit, prepared,
         )
         .await?;
         if matches!(effective, ScopeRef::Circle { .. }) {

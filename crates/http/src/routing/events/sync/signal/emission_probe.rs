@@ -71,11 +71,13 @@ pub(super) fn record(
     path: Option<&Path>,
     envelope: &SignalEnvelope,
     decision: &Result<(), AppError>,
+    call_invitation: bool,
 ) -> Result<(), AppError> {
     let Some(path) = path else { return Ok(()) };
     let observed = serde_json::json!({
         "envelope_digest": envelope.proof.envelope_digest,
         "admitted": decision.is_ok(),
+        "call_invitation": call_invitation,
         "error_code": decision.as_ref().err().map(|error| error.wire_code()),
         "observed_at": arkret_canonical::format_timestamp_canonical(chrono::Utc::now()),
     });

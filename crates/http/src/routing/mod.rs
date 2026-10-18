@@ -16,7 +16,7 @@ pub(crate) mod events;
 pub mod extensions;
 pub mod federation;
 pub(crate) mod identity;
-mod interop;
+pub(crate) mod interop;
 pub(crate) use interop::moderation::validate_franking_covering_commit;
 pub(crate) mod invites;
 // G3.S1: MLS lifecycle (KeyPackage claim, Welcome to-device, commit_epoch).
@@ -26,7 +26,10 @@ pub(crate) mod realms;
 pub(crate) mod spaces;
 pub(crate) mod system;
 // SOL-ORG-06: realm organization-relationship read surface
+pub(crate) mod call_admission;
+pub(crate) mod consent_private;
 mod management_review;
+pub(crate) mod media_service_binding;
 pub(crate) mod message_authoring;
 pub(crate) mod realm_join;
 pub(crate) mod realm_organization;
@@ -140,3 +143,5 @@ mod operation_conformance_tests;
 #[cfg(test)]
 #[path = "canonical_conformance_vectors.rs"]
 mod canonical_conformance_vectors;
+
+pub use consent_private::spawn_effect_publication_worker;

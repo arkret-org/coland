@@ -689,7 +689,7 @@ async fn founding_unit(
         // negative vectors remain wrong and are refused by the founding gate.
         let fact = if shape.author == pair.founder_actor() {
             pair.store()
-                .prepare_human_signer_fact(&event, at)
+                .prepare_account_device_signer_fact(&event, at)
                 .await
                 .unwrap()
         } else {
@@ -1641,7 +1641,11 @@ async fn peer_founding_missing_contact_dependency_writes_nothing() {
     };
     assert_eq!(exact_founder_join.event, founder_join.event);
     assert_eq!(exact_founder_join.commit, founder_join.commit);
-    let human = founder_join.event.human_device_producer().unwrap().unwrap();
+    let human = founder_join
+        .event
+        .account_device_producer()
+        .unwrap()
+        .unwrap();
     let historical_selector = arkret_models_identity::SignerKeyQuerySelector::HistoricalEvent {
         sender: arkret_models_identity::HistoricalSignerKeyQuerySender::AccountDevice {
             actor: founder_join.event.actual_signer().clone(),
@@ -1744,16 +1748,101 @@ async fn peer_founding_missing_contact_dependency_writes_nothing() {
         original.visible_stream_heads[0].commit_id,
         unit.transactions[3].commit.commit_id
     );
-    peer_store
-        .install_verified_account_snapshot(&pair.peer, &peer_station, &original)
+    let issued_original = peer_store
+        .install_verified_account_snapshot(&pair.peer, &peer_station, &original, &origin_bootstrap)
         .await
         .unwrap();
+    assert_eq!(issued_original, original);
+    let original_count = count(
+        &peer_pool,
+        "SELECT COUNT(*) AS count FROM realm_state_snapshots WHERE realm_id=$1",
+        &realm_id,
+    )
+    .await;
+    // A fresh peer bootstrap signs a new original even when its material is
+    // unchanged. Emit the archived same-cut original selected by the store.
+    let refreshed = coland_services::authority_commit::build_signed_realm_state_snapshot(
+        &origin_bootstrap,
+        original.signature.verification_method.clone(),
+        &snapshot_key,
+        original.created_at + chrono::Duration::milliseconds(1),
+    )
+    .unwrap();
+    assert_ne!(refreshed.snapshot_id, original.snapshot_id);
+    assert!(coland_storage::signed_snapshot_matches_material(
+        &refreshed,
+        &origin_bootstrap
+    ));
+    arkret_signatures::detached_object::verify_detached_object_signature(
+        &refreshed.signature,
+        &arkret_canonical::unsigned_value(&refreshed, &["signature"]).unwrap(),
+        arkret_wire::DetachedSignatureContext::RealmSnapshot,
+        &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+            bytes: snapshot_key.verifying_key().to_bytes().to_vec(),
+        },
+    )
+    .unwrap();
+    let issued_refreshed = peer_store
+        .install_verified_account_snapshot(&pair.peer, &peer_station, &refreshed, &origin_bootstrap)
+        .await
+        .unwrap();
+    assert_eq!(issued_refreshed, issued_original);
+    for expected in [&issued_original, &issued_refreshed] {
+        let retained = peer_store
+            .issued_realm_state_snapshot(
+                &realm_id,
+                &pair.peer,
+                &expected.snapshot_id,
+                &peer_station,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            retained.as_ref(),
+            Some(expected),
+            "every emitted original must retain its exact reference"
+        );
+    }
     let archived_before = count(
         &peer_pool,
         "SELECT COUNT(*) AS count FROM realm_state_snapshots WHERE realm_id=$1",
         &realm_id,
     )
     .await;
+    assert_eq!(
+        archived_before, original_count,
+        "same-cut reuse adds no object"
+    );
+    eprintln!(
+        "[2133-snapshot-ref] signed_distinct_input=1 archived_same_cut_reused=1 exact_roundtrips=2"
+    );
+    let mut later_known_head = origin_bootstrap.clone();
+    later_known_head.visible_stream_heads[0].stream_position += 1;
+    assert!(
+        peer_store
+            .install_verified_account_snapshot(
+                &pair.peer,
+                &peer_station,
+                &original,
+                &later_known_head,
+            )
+            .await
+            .is_err()
+    );
+    let mut forked_known_head = origin_bootstrap.clone();
+    forked_known_head.visible_stream_heads[0].commit_id =
+        unit.transactions[0].commit.commit_id.clone();
+    assert!(
+        peer_store
+            .install_verified_account_snapshot(
+                &pair.peer,
+                &peer_station,
+                &original,
+                &forked_known_head,
+            )
+            .await
+            .is_err()
+    );
     let mut mismatched_material = origin_bootstrap.clone();
     mismatched_material
         .retention_and_history_floor
@@ -1771,7 +1860,12 @@ async fn peer_founding_missing_contact_dependency_writes_nothing() {
     ));
     assert!(
         peer_store
-            .install_verified_account_snapshot(&pair.peer, &peer_station, &changed)
+            .install_verified_account_snapshot(
+                &pair.peer,
+                &peer_station,
+                &changed,
+                &origin_bootstrap
+            )
             .await
             .is_err()
     );
@@ -2023,7 +2117,7 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
         controller_seed,
     );
     let agent_pcr = RealmId::from_event_id(&genesis.event_id);
-    let provision = agent_provision_event(
+    let mut provision = agent_provision_event(
         &controller,
         &controller_realm,
         &controller_method,
@@ -2032,6 +2126,32 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
         &agent_pcr,
         &delegation,
         controller_head.committed_at,
+    );
+    let mut content_scope: arkret_models_collaboration::events_payloads::agent::AgentKeyScope =
+        serde_json::from_value(serde_json::json!({
+            "actions":[arkret_wire::CapabilityActionId::EventRead, arkret_wire::CapabilityActionId::MessageCreate,
+                arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1],
+            "resources":[{"kind":"realm"},{"kind":"operation","operation":arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1}]
+        })).unwrap();
+    content_scope.actions =
+        arkret_schema::agent_runtime_scope::complete_agent_runtime_scope(&content_scope.actions)
+            .unwrap();
+    provision.payload.insert(
+        "requested_scope_digest".to_owned(),
+        serde_json::to_value(
+            arkret_models_collaboration::agent_scope::agent_requested_scope_digest(
+                &agent_id,
+                &controller.principal_id,
+                &content_scope,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    let provision = device_authorization_history::sign_event(
+        provision,
+        controller_method.clone(),
+        controller_seed,
     );
     let provision_commit = station_successor(&controller_head, &provision, &station_did, 1);
     let transaction =
@@ -2080,6 +2200,28 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
             ),
             queued_at: genesis_commit.committed_at,
         },
+    )
+    .await
+    .unwrap();
+
+    // Native accepted-history supply retains the private scope separately
+    // from the shared Provision's digest, as the normal provider does.
+    let mut record = coland_storage::AgentPrincipalRecord::new(
+        agent_id.to_string(),
+        controller.principal_id.to_string(),
+        agent_pcr.to_string(),
+        DidUrl::new(delegation.clone()).unwrap(),
+        arkret_models_collaboration::agent_operations::AgentLifecycleState::Active,
+        genesis_commit.committed_at,
+    );
+    record.requested_scope = Some(serde_json::to_value(&content_scope).unwrap());
+    record.provision_event_refs = Some(serde_json::json!({
+        "provision_event_id":provision.event_id,
+        "initial_resolution":genesis.payload["object"]["initial_resolution"],
+    }));
+    coland_storage::AgentStore::put(
+        &coland_storage_postgres::PgAgentStore { pool: pool.clone() },
+        record,
     )
     .await
     .unwrap();
@@ -2133,11 +2275,15 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
         &agent,
         &agent_pcr,
         &delegation,
-        agent_key_authorization(
-            &agent_did,
-            &controller.principal_id,
-            genesis_commit.committed_at,
-        ),
+        {
+            let mut payload = agent_key_authorization(
+                &agent_did,
+                &controller.principal_id,
+                genesis_commit.committed_at,
+            );
+            payload["agent_key_scope"] = serde_json::to_value(&content_scope).unwrap();
+            payload
+        },
         genesis_commit.committed_at,
     );
     let key_commit = station_successor(&genesis_commit, &key_event, &station_did, 1);
@@ -2218,6 +2364,46 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
     // An owned Agent never needs a Contact round. Its provisional Message
     // and peer Add use the current controller/provision branch at the cut.
     let realm_id = realm_of(&unit);
+    use coland_storage::CapabilityGrantCurrentResultStore;
+    let content_request = coland_storage::AgentSessionAuthorityRequest {
+        approval_evidence_refs: Vec::new(),
+        agent_account_id: agent.clone(),
+        controller_account_id: controller.clone(),
+        agent_key_authorization_ref: key_event.event_id.clone(),
+        verification_method: pair.peer_method.clone(),
+        intent_digest: fixture_hash('c'),
+        requested_scope: vec![arkret_wire::CapabilityActionId::EVENT_READ.to_owned()],
+        resource_scope: serde_json::from_value(
+            serde_json::json!({"realm_ids":[realm_id],"strand_ids":[],"track_names":[]}),
+        )
+        .unwrap(),
+    };
+    let content_store =
+        coland_storage_postgres::PgCapabilityGrantCurrentResultStore { pool: pool.clone() };
+    let issued = content_store
+        .agent_session_authority(&content_request, chrono::Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(issued.granted_scope, content_request.requested_scope);
+    assert!(issued.capability_grant_refs.is_empty());
+    assert!(
+        issued.policy_refs.is_empty(),
+        "independent Direct has no unrelated Realm policy"
+    );
+    let mut write_request = content_request.clone();
+    write_request
+        .requested_scope
+        .push(arkret_wire::CapabilityActionId::MESSAGE_CREATE.to_owned());
+    assert_eq!(
+        content_store
+            .agent_session_authority(&write_request, chrono::Utc::now())
+            .await
+            .unwrap()
+            .granted_scope,
+        content_request.requested_scope,
+        "pending read authority must not manufacture a settled participant write source"
+    );
+
     let founder = pair.founder_actor();
     let facts = unit.facts().unwrap();
     let create_ref = unit.transactions[0].event.event_id.clone();
@@ -2303,6 +2489,9 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
     let signal_at = bound.authority_commit.commit.committed_at + chrono::TimeDelta::seconds(1);
     let signal = store
         .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+            include_product_authority: false,
+            product_agent: None,
+
             scope: &signal_scope,
             authority_commit_id: &bound.authority_commit.commit.commit_id,
             parent_realm_authority_commit_id: None,
@@ -2317,6 +2506,23 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
     assert_eq!(signal.current_mls.current_mls_commit_event_ref, add_ref);
     assert!(signal.recipient_actors.contains(&founder));
     assert!(signal.recipient_actors.contains(&peer));
+    assert_eq!(
+        content_store
+            .agent_session_authority(&content_request, chrono::Utc::now())
+            .await
+            .unwrap()
+            .granted_scope,
+        content_request.requested_scope
+    );
+    let can_write = content_store
+        .agent_session_authority(&write_request, chrono::Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(can_write.granted_scope, write_request.requested_scope);
+    assert!(
+        can_write.capability_grant_refs.is_empty(),
+        "Direct writes use the registered participant profile"
+    );
     // Accepted founding coordinates do not bypass a current Agent pause.
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
@@ -2327,6 +2533,13 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
     .await
     .unwrap();
     drop(conn);
+    assert!(
+        content_store
+            .agent_session_authority(&content_request, chrono::Utc::now())
+            .await
+            .is_err(),
+        "a frozen participant source cannot bypass current Agent pause"
+    );
     assert_eq!(
         store
             .direct_conversation_admission(&message.authority_commit.event)
@@ -2339,6 +2552,9 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
     assert!(
         store
             .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+                include_product_authority: false,
+                product_agent: None,
+
                 scope: &signal_scope,
                 authority_commit_id: &bound.authority_commit.commit.commit_id,
                 parent_realm_authority_commit_id: None,
@@ -2368,6 +2584,9 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
     assert!(
         store
             .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+                include_product_authority: false,
+                product_agent: None,
+
                 scope: &signal_scope,
                 authority_commit_id: &bound.authority_commit.commit.commit_id,
                 parent_realm_authority_commit_id: None,
@@ -2708,7 +2927,7 @@ fn cited(
             if let Some(fact) = previous
                 .producer_signer_fact
                 .as_ref()
-                .and_then(|fact| fact.as_human())
+                .and_then(|fact| fact.as_account_device())
                 .filter(|fact| fact.actor == event.actor_id)
             {
                 event = device_authorization_history::sign_event(
@@ -2735,7 +2954,7 @@ fn cited(
     if let Some(fact) = previous
         .producer_signer_fact
         .as_ref()
-        .and_then(|fact| fact.as_human())
+        .and_then(|fact| fact.as_account_device())
         .filter(|fact| fact.actor == event.actor_id)
     {
         event = device_authorization_history::sign_event(
@@ -2789,7 +3008,7 @@ async fn sourced_cited_at(
     let mut request = ordinary_realm::request_for_event(previous, event, at);
     request.authority_commit.producer_signer_fact = pair
         .store()
-        .prepare_human_signer_fact(
+        .prepare_account_device_signer_fact(
             &request.authority_commit.event,
             request.authority_commit.commit.committed_at,
         )
@@ -2799,7 +3018,7 @@ async fn sourced_cited_at(
     if request
         .authority_commit
         .event
-        .human_device_producer()
+        .account_device_producer()
         .unwrap()
         .is_some()
     {
@@ -3677,6 +3896,8 @@ async fn participant_authority_scenario() {
     let signal_at = head.commit.committed_at + chrono::TimeDelta::seconds(1);
     let signal_cut = store
         .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+ include_product_authority: false, product_agent: None,
+
             scope: &arkret_wire::ScopeRef::Realm {
                 realm_id: realm_id.clone(),
             },
@@ -4665,7 +4886,7 @@ async fn claim_human_peer_package(
         pk: i64,
     }
     let mut conn = pair.pool.get().await.unwrap();
-    let owner = diesel::sql_query("INSERT INTO accounts(principal_id,station_id) VALUES($1,$2) ON CONFLICT(principal_id,station_id) DO UPDATE SET principal_id=EXCLUDED.principal_id RETURNING pk")
+    let _owner = diesel::sql_query("INSERT INTO accounts(principal_id,station_id) VALUES($1,$2) ON CONFLICT(principal_id,station_id) DO UPDATE SET principal_id=EXCLUDED.principal_id RETURNING pk")
         .bind::<Text,_>(pair.peer.principal_id.as_str()).bind::<Text,_>(pair.peer.station_id.as_str())
         .get_result::<Owner>(&mut conn).await.unwrap().pk;
     drop(conn);
@@ -4678,7 +4899,8 @@ async fn claim_human_peer_package(
                 id: package.keypackage_id.clone(),
                 keypackage_ref: package.keypackage_ref.to_string(),
                 keypackage_digest: package.keypackage_ref.to_string(),
-                owner_account_pk: coland_storage::AccountPk(owner),
+                owner_account_id: pair.peer.clone(),
+                effective_scope: None,
                 actor_id: pair.peer.principal_id.to_string(),
                 device_id: Some(device.to_string()),
                 endpoint_verification_method: None,
@@ -4805,6 +5027,8 @@ async fn claim_human_peer_package(
     let group = scope.canonical_mls_group_id().unwrap();
     let result = store
         .try_claim_peer(coland_storage::PeerKeyPackageClaimAttempt {
+            admission: None,
+            applet_device_scope_guard: None,
             keypackage_id: &package.keypackage_id,
             mls_group_id: group.as_str(),
             device_authorize_event_id: Some(guard.authorization_ref.event_id.as_str()),

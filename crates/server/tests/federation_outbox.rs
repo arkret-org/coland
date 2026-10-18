@@ -232,6 +232,7 @@ fn verified_peer_route(
         candidate: VerifiedRouteCandidate {
             evidence,
             description: VerifiedServiceDescribeMetadata {
+                supported_profiles: Vec::new(),
                 service_id,
                 service_kind: ServiceKind::Station.as_str().to_owned(),
                 service_resolution: commitment,

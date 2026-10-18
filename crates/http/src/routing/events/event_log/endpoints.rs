@@ -25,9 +25,14 @@ async fn get_committed_event(
     req: &mut Request,
 ) -> coland_http::result::GuardedJsonResult<CommittedEventView> {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
     let event_id = EventId::new(event_id.into_inner())
         .map_err(|_| AppError::not_found("committed event not found"))?;
+    if let Ok(device) = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>(
+    ) {
+        return native_committed_event(state, device, &event_id).await;
+    }
+    let session = aa.authenticated_session(state, req).await?;
     let caller =
         crate::routing::identity::session_actor::session_actor_from_credential(state, &session)
             .map_err(|_| AppError::not_found("committed event not found"))?;
@@ -69,6 +74,51 @@ async fn get_committed_event(
     let input = coland_storage::AccountContentDeliveryInput::committed(std::slice::from_ref(&view));
     let guard = super::super::sync::content_delivery_guard(state, &session, &input).await?;
     coland_http::result::guarded_json_ok(view, guard)
+}
+
+/// The actual authenticated Account reads through the ordinary history and
+/// disclosure reducer; its final native guard independently holds all current
+/// Device, installation, role, source and resource bounds through handoff.
+async fn native_committed_event(
+    state: &AppState,
+    device: &crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice,
+    event_id: &EventId,
+) -> coland_http::result::GuardedJsonResult<CommittedEventView> {
+    if device.operation != arkret_wire::ServiceOperationId::SelfCommittedEventResourceGetV1 {
+        return Err(AppError::unauthenticated(
+            "native operation differs from actual route",
+        ));
+    }
+    let caller = arkret_wire::ActorId::account(device.authority.account_id.clone());
+    let view = match state
+        .authority_commits()
+        .committed_event_for_member(event_id, &caller, &state.service_core_id())
+        .await
+        .map_err(|_| AppError::not_found("committed event not found"))?
+    {
+        MemberCommittedEventRead::Read(view) => *view,
+        MemberCommittedEventRead::PendingAnchor => {
+            return Err(crate::app_error!(
+                TemporarilyUnavailable,
+                "the held Realm stream is pending its bootstrap anchor"
+            ));
+        }
+        _ => return Err(AppError::not_found("committed event not found")),
+    };
+    let view = view
+        .into_effective_scope(&device.metadata.effective_scope)
+        .map_err(|_| AppError::not_found("committed event not found"))?
+        .ok_or_else(|| AppError::not_found("committed event not found"))?;
+    view.validate_shape()
+        .map_err(|_| AppError::not_found("committed event not found"))?;
+    let guard = crate::routing::identity::applet_managed_device::content_delivery_guard(
+        state,
+        device,
+        std::slice::from_ref(&view),
+    )
+    .await
+    .map_err(|_| AppError::not_found("committed event not found"))?;
+    coland_http::result::guarded_json_ok(view, Some(guard))
 }
 
 /// A committed Event outside an ordinary Realm's Realm stream -- in a

@@ -13,6 +13,9 @@ pub(crate) use std::collections::{BTreeMap, BTreeSet};
 pub(crate) use arkret_event_draft::ProjectedEventOperation;
 pub(crate) use async_trait::async_trait;
 pub(crate) use chrono::Utc;
+pub use coland_contracts::agent_session_authority::{
+    AgentSessionAuthorityOutcome, AgentSessionAuthorityRequest,
+};
 pub use coland_domain::identity::{ContactRecord, ContactRequestSlotState};
 pub(crate) use serde_json::Value;
 pub(crate) use uuid::Uuid;
@@ -203,6 +206,8 @@ pub enum ConflictCode {
     ApprovalRequired,
     /// The applet was revoked between admission and commit.
     AppletRevoked,
+    /// The exact installation has no independent current MLS join consent.
+    AppletE2eeJoinUnauthorized,
     /// An Actor Profile `accountable_principal_ids` entry has no committed
     /// active accountability record at the accepting Commit
     /// (`zh/models/actor.md` section 3.3.1).
@@ -383,14 +388,19 @@ pub enum ConflictCode {
     AgentPcrGenesisDeclarationConflict,
     /// An Agent PCR genesis has no accepted provision declaring its id.
     AgentPcrGenesisDeclarationMissing,
+    /// An Agent grant exceeds the immutable disclosed provision ceiling.
+    AgentGrantExceedsRequestedScope,
+    /// The Agent scope lacks qualified accepted-at private evidence.
+    AgentRequestedScopeCommitmentInvalid,
 }
 
 impl ConflictCode {
     /// Every registered code, in the order the variants are declared.
-    pub const ALL: [Self; 84] = [
+    pub const ALL: [Self; 87] = [
         Self::ApprovalNonceReused,
         Self::ApprovalRequired,
         Self::AppletRevoked,
+        Self::AppletE2eeJoinUnauthorized,
         Self::AccountabilityGrantMissing,
         Self::BackupRevisionStale,
         Self::CapabilityDenied,
@@ -472,14 +482,25 @@ impl ConflictCode {
         Self::AgentProvisioningAlreadyDeclared,
         Self::AgentPcrGenesisDeclarationConflict,
         Self::AgentPcrGenesisDeclarationMissing,
+        Self::AgentGrantExceedsRequestedScope,
+        Self::AgentRequestedScopeCommitmentInvalid,
     ];
 
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::AgentGrantExceedsRequestedScope => {
+                arkret_wire::ReasonCode::AGENT_GRANT_EXCEEDS_REQUESTED_SCOPE
+            }
+            Self::AgentRequestedScopeCommitmentInvalid => {
+                arkret_wire::ReasonCode::AGENT_REQUESTED_SCOPE_COMMITMENT_INVALID
+            }
             Self::ApprovalNonceReused => arkret_wire::ReasonCode::APPROVAL_NONCE_REUSED,
             Self::ApprovalRequired => arkret_wire::ReasonCode::APPROVAL_REQUIRED,
             Self::AppletRevoked => "applet_revoked",
+            Self::AppletE2eeJoinUnauthorized => {
+                arkret_wire::ErrorCode::APPLET_E2EE_JOIN_UNAUTHORIZED
+            }
             Self::AccountabilityGrantMissing => {
                 arkret_wire::ReasonCode::ACCOUNTABILITY_GRANT_MISSING
             }
@@ -823,3 +844,6 @@ mod conflict_code_tests {
         }
     }
 }
+
+mod registered_audit;
+pub use registered_audit::*;

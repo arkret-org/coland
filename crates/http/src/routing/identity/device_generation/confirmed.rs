@@ -41,6 +41,7 @@ pub(crate) struct ConfirmedDeviceHistory {
     realm_id: RealmId,
     head: CommitStreamHead,
     current_generation: u64,
+    managed_applet: Option<arkret_wire::AppletId>,
     authorizations: BTreeMap<EventId, ConfirmedDeviceAuthorization>,
     current_by_device: BTreeMap<DeviceId, EventId>,
 }
@@ -76,6 +77,119 @@ fn invalid(message: impl std::fmt::Display) -> String {
 
 fn unavailable(message: impl std::fmt::Display) -> String {
     format!("accepted PCR device history unavailable: {message}")
+}
+
+/// Reverify the original creation against its durable Service root. Current
+/// installation liveness and current Service keys are not historical evidence.
+async fn verify_managed_genesis(
+    state: &AppState,
+    account: &AccountId,
+    genesis: &arkret_wire::Event,
+) -> Result<arkret_wire::AppletId, String> {
+    use arkret_models_integration::AppletManagedActorCommittedRequest;
+
+    let context = state
+        .persistence()
+        .managed_pcr_creation_context(&genesis.event_id)
+        .await
+        .map_err(unavailable)?
+        .ok_or_else(|| unavailable("managed PCR creation closure is missing"))?;
+    context.validate().map_err(invalid)?;
+    let (request, bundle) = match &context.committed_request {
+        AppletManagedActorCommittedRequest::Bot(body) => {
+            (&body.authoring_request, &body.managed_actor_bundle)
+        }
+        AppletManagedActorCommittedRequest::Ghost(body) => (
+            &body.authoring_request,
+            body.managed_actor_bundle
+                .as_ref()
+                .ok_or_else(|| invalid("managed genesis cannot be Ghost reuse"))?,
+        ),
+    };
+    bundle.validate_bindings(request).map_err(invalid)?;
+    let service = request.basis.service_id();
+    let root = &context
+        .applet_service_signer_evidence
+        .authenticated_signer_evidence;
+    if bundle.pcr_genesis_event != *genesis
+        || request.basis.target_station_id() != &account.station_id
+        || genesis.executed_by.as_ref() != Some(&ActorId::service(service.clone()))
+        || root.subject_id != *service
+        || context
+            .managed_actor_signer_evidence
+            .authenticated_signer_evidence
+            .subject_id
+            != account.principal_id
+    {
+        return Err(invalid(
+            "managed PCR creation closure names another identity",
+        ));
+    }
+    let key = arkret_signatures::PublicKeyMaterial::Jwk {
+        value: serde_json::to_value(&root.public_key_jwk).map_err(invalid)?,
+    };
+    key.ed25519_bytes().map_err(invalid)?;
+    if bundle.proof.verification_method != root.verification_method {
+        return Err(invalid("managed creation bundle changed Service method"));
+    }
+    arkret_signatures::Ed25519DetachedJwsVerifier::new()
+        .verify_detached_jws(
+            &bundle.proof.jws,
+            &bundle.proof_binding_bytes().map_err(invalid)?,
+            &key,
+        )
+        .map_err(invalid)?;
+    for event in [
+        &bundle.managed_actor_provision_event,
+        &bundle.pcr_genesis_event,
+        &bundle.accountability_grant_event,
+        &bundle.profile_event,
+    ] {
+        let suite = event.event_id.digest_suite_code().digest_suite();
+        let accepted = state
+            .authority_commits()
+            .committed_event(&event.event_id)
+            .await
+            .map_err(unavailable)?
+            .ok_or_else(|| unavailable("managed creation original is missing"))?;
+        if accepted.event != *event {
+            return Err(invalid(
+                "managed creation original differs from retained closure",
+            ));
+        }
+        event
+            .verify_event_id_matches_content_with_digest_suite(suite)
+            .map_err(invalid)?;
+        let proof = event
+            .producer_proof
+            .as_ref()
+            .ok_or_else(|| invalid("managed creation original omits proof"))?;
+        if proof.verification_method != root.verification_method
+            || event.actual_signer() != &ActorId::service(service.clone())
+        {
+            return Err(invalid(
+                "managed creation original changed Service producer",
+            ));
+        }
+        arkret_signatures::verify_ed25519_detached_jws_proof_with_digest_suite(
+            proof,
+            &arkret_signatures::EventProofBuilder::new()
+                .envelope_bytes(event)
+                .map_err(invalid)?,
+            &event.actor_id,
+            &key,
+            suite,
+        )
+        .map_err(invalid)?;
+    }
+    Ok(match &request.basis {
+        arkret_models_integration::AppletManagedActorAuthoringBasis::ProvisionBot(basis) => {
+            basis.applet_id.clone()
+        }
+        arkret_models_integration::AppletManagedActorAuthoringBasis::ProvisionGhost(basis) => {
+            basis.applet_id.clone()
+        }
+    })
 }
 
 async fn verify_registered_genesis(
@@ -179,6 +293,15 @@ fn apply_device_event(
             let payload: DeviceAuthorizePayload = event
                 .typed_payload::<arkret_wire::event_spec::DeviceAuthorize>()
                 .map_err(invalid)?;
+            if let Some(applet) = &history.managed_applet
+                && (payload.authorization_binding_kind
+                    != DeviceAuthorizationBindingKind::AppletManagedDelegation
+                    || payload.applet_id.as_ref() != Some(applet))
+            {
+                return Err(invalid(
+                    "managed PCR device authorization changed its delegation branch",
+                ));
+            }
             if history.current_generation == 0 {
                 if payload.authorization_binding_kind
                     != DeviceAuthorizationBindingKind::RegistrationAnchor
@@ -214,6 +337,9 @@ fn apply_device_event(
                 .insert(payload.device_id, event.event_id.clone());
         }
         EventKind::DeviceReanchor => {
+            if history.managed_applet.is_some() {
+                return Err(invalid("managed PCR cannot use human device recovery"));
+            }
             if event.actor_id != ActorId::account(account.clone()) {
                 return Err(invalid("device reanchor actor differs from PCR Account"));
             }
@@ -276,7 +402,6 @@ pub(crate) async fn load_confirmed_device_history(
         || genesis.realm_id != binding.pcr_realm_id
         || genesis.actor_id != ActorId::account(account.clone())
         || genesis.kind != EventKind::RealmCreate
-        || genesis.executed_by.is_some()
     {
         return Err(invalid(
             "registered PCR genesis does not bind local Account",
@@ -285,14 +410,24 @@ pub(crate) async fn load_confirmed_device_history(
     let create = genesis
         .typed_payload::<arkret_wire::event_spec::RealmCreate>()
         .map_err(invalid)?;
-    if create.object.purpose
-        != arkret_models_collaboration::events_payloads::RealmPurpose::PrincipalControl
-    {
-        return Err(invalid(
-            "registered PCR genesis has a different Realm purpose",
-        ));
-    }
-    verify_registered_genesis(state, account, genesis, &create).await?;
+    let managed_applet = match create.object.purpose {
+        arkret_models_collaboration::events_payloads::RealmPurpose::PrincipalControl
+            if genesis.executed_by.is_none() =>
+        {
+            verify_registered_genesis(state, account, genesis, &create).await?;
+            None
+        }
+        arkret_models_collaboration::events_payloads::RealmPurpose::AppletManagedControl
+            if create.object.founding_device_descriptor.is_none() =>
+        {
+            Some(verify_managed_genesis(state, account, genesis).await?)
+        }
+        _ => {
+            return Err(invalid(
+                "registered PCR genesis has a different Realm purpose",
+            ));
+        }
+    };
     let realm_id = binding.pcr_realm_id.clone();
     let stream_ref = CommitStreamRef::Realm {
         realm_id: realm_id.clone(),
@@ -313,7 +448,8 @@ pub(crate) async fn load_confirmed_device_history(
     let mut history = ConfirmedDeviceHistory {
         realm_id: realm_id.clone(),
         head: head.clone(),
-        current_generation: 0,
+        current_generation: if managed_applet.is_some() { 1 } else { 0 },
+        managed_applet,
         authorizations: BTreeMap::new(),
         current_by_device: BTreeMap::new(),
     };
@@ -355,7 +491,10 @@ pub(crate) async fn load_confirmed_device_history(
             {
                 return Err(invalid("PCR stream does not begin with registered genesis"));
             }
-            if commit.stream_position == 1 && full.event.kind != EventKind::DeviceAuthorize {
+            if history.managed_applet.is_none()
+                && commit.stream_position == 1
+                && full.event.kind != EventKind::DeviceAuthorize
+            {
                 return Err(invalid("PCR founding unit omits device authorization"));
             }
             full.event
@@ -368,7 +507,7 @@ pub(crate) async fn load_confirmed_device_history(
             if commit.stream_position > head.stream_position {
                 break;
             }
-            if commit.stream_position == 1 {
+            if history.managed_applet.is_none() && commit.stream_position == 1 {
                 let descriptor = create
                     .object
                     .founding_device_descriptor
@@ -513,6 +652,7 @@ mod tests {
                 .unwrap(),
             },
             current_generation: 1,
+            managed_applet: None,
             authorizations: BTreeMap::from([(authorization_id.clone(), authorization.clone())]),
             current_by_device: BTreeMap::from([(device_id.clone(), authorization_id)]),
         };
@@ -576,6 +716,7 @@ mod tests {
                 .unwrap(),
             },
             current_generation: 1,
+            managed_applet: None,
             authorizations: BTreeMap::from([
                 (first_id.clone(), first.clone()),
                 (successor_id.clone(), successor.clone()),

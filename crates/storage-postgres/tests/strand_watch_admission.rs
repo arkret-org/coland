@@ -84,6 +84,94 @@ async fn read(
 }
 
 #[tokio::test]
+async fn complete_watch_reads_with_ten_thousand_accepted_history_events_meet_latency_budget() {
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let discussion = ordinary_realm::open_human_discussion(&pool, "watch-complete-history").await;
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let mut head = discussion.head.authority_commit.clone();
+    let creator = head.event.actor_id.clone();
+    let at = head.commit.committed_at + chrono::Duration::seconds(1);
+    let empty = ordinary_realm::next_request(
+        &head,
+        arkret_wire::EventKind::StrandCreate,
+        creator.signing_principal_id(),
+        json!({"object":{
+            "schema":"ak.schema.strand.v1", "realm_id":discussion.realm_id(),
+            "tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},
+            "metadata":{"title":"Never watched"}, "state":"active", "created_by":creator,
+            "created_at":arkret_canonical::format_timestamp_canonical(at)}}),
+        at,
+    );
+    let empty = Box::pin(ordinary_realm::source_request(&pool, empty)).await;
+    uow.commit_event(empty.clone()).await.unwrap();
+    let empty_id = arkret_wire::StrandId::from_event_id(&empty.authority_commit.event.event_id);
+    head = empty.authority_commit;
+    let watch = write(&pool, &discussion, &head, json!("all"), None, None, 2).await;
+    uow.commit_event(watch.clone()).await.unwrap();
+    head = watch.authority_commit.clone();
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let account = creator.as_account_id().unwrap();
+    let requests = [
+        read_request(&discussion),
+        StrandWatchCurrentRequestBody {
+            strand_id: empty_id,
+            ..read_request(&discussion)
+        },
+    ];
+    for ordinal in 1..=10_000 {
+        let request = discussion.message_after(
+            &head,
+            &format!("accepted-history-{ordinal}"),
+            discussion.committed_at() + chrono::Duration::seconds(ordinal + 2),
+        );
+        let request = Box::pin(ordinary_realm::source_request(&pool, request)).await;
+        uow.commit_event(request.clone()).await.unwrap();
+        head = request.authority_commit;
+        if ![100, 1000, 10_000].contains(&ordinal) {
+            continue;
+        }
+        for (index, request) in requests.iter().enumerate() {
+            let mut samples = Vec::new();
+            for _ in 0..12 {
+                let started = std::time::Instant::now();
+                let outcome = store
+                    .strand_watch_current_for_account(request, account, &ordinary_realm::station())
+                    .await
+                    .unwrap();
+                samples.push(started.elapsed());
+                assert!(match (index, outcome) {
+                    (
+                        0,
+                        SelfExactCurrentRead::Answer(StrandWatchCurrentOutcome::Current {
+                            result,
+                            ..
+                        }),
+                    ) => result.revision.commit_id == watch.authority_commit.commit.commit_id,
+                    (
+                        1,
+                        SelfExactCurrentRead::Answer(StrandWatchCurrentOutcome::NeverWritten {
+                            ..
+                        }),
+                    ) => true,
+                    _ => false,
+                });
+            }
+            samples.sort();
+            let maximum = samples.last().unwrap();
+            println!(
+                "[complete-watch-budget] accepted_history={ordinal} selector={index} samples=12 max_ms={:.3} budget_ms=250",
+                maximum.as_secs_f64() * 1000.0
+            );
+            assert!(
+                *maximum < std::time::Duration::from_millis(250),
+                "complete namespace and authorization read exceeded the 250ms engineering budget"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn realm_watch_current_remains_provable_after_private_sidecar_history() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
@@ -371,4 +459,517 @@ async fn watch_projection_fault_rolls_back_event_commit_and_outbox() {
         read(&pool, &discussion).await,
         SelfExactCurrentRead::Answer(StrandWatchCurrentOutcome::Current { .. })
     ));
+}
+
+fn scoped_request(
+    previous: &coland_storage::AuthorityCommitTransaction,
+    scope: arkret_wire::ScopeRef,
+    kind: arkret_wire::EventKind,
+    payload: Value,
+    at: chrono::DateTime<chrono::Utc>,
+) -> EventCommitRequest {
+    let event = ordinary_realm::event_for_actor(
+        kind,
+        scope.clone(),
+        previous.event.actor_id.clone(),
+        payload,
+        at,
+    );
+    let stream = arkret_wire::CommitStreamRef::from_scope(&scope, None).unwrap();
+    let mut request = ordinary_realm::request_for_event(previous, event, at);
+    if previous.commit.stream_ref != stream {
+        request.authority_commit.commit.stream_position = 0;
+        request.authority_commit.commit.previous_commit_ref = None;
+    }
+    request.authority_commit.commit.stream_ref = stream;
+    request
+}
+
+#[tokio::test]
+async fn circle_watch_uses_its_exact_namespace_and_loses_disclosure_on_circle_leave() {
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let discussion = Box::pin(ordinary_realm::open_human_discussion(&pool, "circle-watch")).await;
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let realm = discussion.realm_id();
+    let actor = discussion.head.authority_commit.event.actor_id.clone();
+    let at = discussion.committed_at() + chrono::Duration::seconds(20);
+    let create = ordinary_realm::next_request_for_actor(
+        &discussion.head.authority_commit,
+        arkret_wire::EventKind::CircleCreate,
+        actor.clone(),
+        json!({"object":{
+            "schema":"ak.schema.circle.v1","realm_id":realm,"title":"Private Watch",
+            "display":{"short_name":"Watch","color_token":"blue","symbol":{"glyph":"lock"}},
+            "directory_visibility":"members","join_rule":"public","history_access":"since_join",
+            "state":"active","created_by":actor,"created_at":arkret_canonical::format_timestamp_canonical(at)
+        }}),
+        at,
+    );
+    let create = Box::pin(ordinary_realm::source_request(&pool, create)).await;
+    uow.commit_event(create.clone()).await.unwrap();
+    let circle = arkret_wire::CircleId::from_event_id(&create.authority_commit.event.event_id);
+    let scope = arkret_wire::ScopeRef::Circle {
+        realm_id: realm.clone(),
+        circle_id: circle.clone(),
+    };
+    let parent = ordinary_realm::parent_membership_revision(&pool, &realm, &actor).await;
+    let join = scoped_request(
+        &create.authority_commit,
+        scope.clone(),
+        arkret_wire::EventKind::CircleMemberState,
+        json!({"circle_id":circle,"member_id":actor,"membership":"join","expected_membership":null,"parent_membership_revision":parent}),
+        at,
+    );
+    let join = Box::pin(ordinary_realm::source_request(&pool, join)).await;
+    uow.commit_event(join.clone()).await.unwrap();
+    let strand = scoped_request(
+        &join.authority_commit,
+        scope.clone(),
+        arkret_wire::EventKind::StrandCreate,
+        json!({"object":{"schema":"ak.schema.strand.v1","realm_id":realm,"scope_circle_id":circle,
+        "tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},"metadata":{"title":"Circle Watch"},
+        "state":"active","created_by":actor,"created_at":arkret_canonical::format_timestamp_canonical(at)}}),
+        at,
+    );
+    let strand = Box::pin(ordinary_realm::source_request(&pool, strand)).await;
+    uow.commit_event(strand.clone()).await.unwrap();
+    let strand_id = arkret_wire::StrandId::from_event_id(&strand.authority_commit.event.event_id);
+    let request = StrandWatchCurrentRequestBody {
+        realm_id: realm.clone(),
+        strand_id: strand_id.clone(),
+        watcher_actor_id: actor.clone(),
+    };
+    let account = actor.as_account_id().unwrap();
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let first_read = store
+        .strand_watch_current_for_account(&request, account, &ordinary_realm::station())
+        .await
+        .unwrap();
+    let SelfExactCurrentRead::Answer(StrandWatchCurrentOutcome::NeverWritten {
+        stream_head, ..
+    }) = first_read
+    else {
+        panic!("complete Circle namespace proves never-written");
+    };
+    assert_eq!(
+        stream_head.stream_ref,
+        strand.authority_commit.commit.stream_ref
+    );
+    let watch = scoped_request(
+        &strand.authority_commit,
+        scope.clone(),
+        arkret_wire::EventKind::StrandWatchSet,
+        json!({"strand_id":strand_id,"watcher_actor_id":actor,"level":"all","level_public":true}),
+        at + chrono::Duration::seconds(1),
+    );
+    let watch = Box::pin(ordinary_realm::source_request(&pool, watch)).await;
+    uow.commit_event(watch.clone()).await.unwrap();
+    let baseline = footprint(&pool).await;
+    let losing = scoped_request(
+        &watch.authority_commit,
+        scope.clone(),
+        arkret_wire::EventKind::StrandWatchSet,
+        json!({"strand_id":strand_id,"watcher_actor_id":actor,"level":"muted","expected_value":{"level":"all"}}),
+        at + chrono::Duration::seconds(2),
+    );
+    let losing = Box::pin(ordinary_realm::source_request(&pool, losing)).await;
+    assert_eq!(
+        uow.commit_event(losing).await.unwrap_err().conflict_code(),
+        Some(coland_storage::ConflictCode::FailedPrecondition)
+    );
+    assert_eq!(footprint(&pool).await, baseline);
+    let clear = scoped_request(
+        &watch.authority_commit,
+        scope.clone(),
+        arkret_wire::EventKind::StrandWatchSet,
+        json!({"strand_id":strand_id,"watcher_actor_id":actor,"level":null,"expected_value":{"level":"all","level_public":true}}),
+        at + chrono::Duration::seconds(3),
+    );
+    let clear = Box::pin(ordinary_realm::source_request(&pool, clear)).await;
+    uow.commit_event(clear.clone()).await.unwrap();
+    let SelfExactCurrentRead::Answer(StrandWatchCurrentOutcome::Current {
+        result,
+        stream_head,
+        ..
+    }) = store
+        .strand_watch_current_for_account(&request, account, &ordinary_realm::station())
+        .await
+        .unwrap()
+    else {
+        panic!("Circle clear retains its revision");
+    };
+    assert_eq!(result.source_stream_ref, stream_head.stream_ref);
+    assert_eq!(
+        result.revision.commit_id,
+        clear.authority_commit.commit.commit_id
+    );
+    assert_eq!(serde_json::to_value(result.value).unwrap(), Value::Null);
+    let snapshot = store
+        .realm_state_snapshot_material_for_account(&realm, account)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(snapshot.current_state_entries.iter().any(|row| matches!(row,
+        arkret_wire::TypedCurrentRow::Value {
+            selector: arkret_wire::CurrentSelector::StrandWatch { strand_id: id, watcher_actor_id },
+            source_stream_ref, value, ..
+        } if id == &strand_id && watcher_actor_id == &actor
+            && source_stream_ref == &clear.authority_commit.commit.stream_ref && value.is_null()
+    )));
+    let leave = scoped_request(
+        &clear.authority_commit,
+        scope,
+        arkret_wire::EventKind::CircleMemberState,
+        json!({"circle_id":circle,"member_id":actor,"membership":"leave","expected_membership":"join"}),
+        at + chrono::Duration::seconds(4),
+    );
+    let leave = Box::pin(ordinary_realm::source_request(&pool, leave)).await;
+    uow.commit_event(leave).await.unwrap();
+    assert!(matches!(
+        store
+            .strand_watch_current_for_account(&request, account, &ordinary_realm::station())
+            .await
+            .unwrap(),
+        SelfExactCurrentRead::NotFound
+    ));
+}
+
+#[tokio::test]
+async fn original_author_does_not_replace_the_full_watcher_selector_when_current_is_lost() {
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let discussion = Box::pin(ordinary_realm::open_human_discussion(&pool, "watch-source")).await;
+    let author = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+        arkret_wire::DidCoreId::new("ak:did_core:web:imported-watch-writer.example").unwrap(),
+        ordinary_realm::station(),
+    ));
+    let event = ordinary_realm::event_for_actor(
+        arkret_wire::EventKind::StrandWatchSet,
+        arkret_wire::ScopeRef::Realm {
+            realm_id: discussion.realm_id(),
+        },
+        author,
+        json!({"strand_id":discussion.strand_id,"watcher_actor_id":discussion.head.authority_commit.event.actor_id,"level":"all"}),
+        discussion.committed_at() + chrono::Duration::seconds(30),
+    );
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    store
+        .queue_event(&event, discussion.committed_at())
+        .await
+        .unwrap();
+    // Fault injection models imported history without a covering Commit or
+    // current. It never claims an accepted .others production positive.
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query(
+        "UPDATE canonical_events SET state='committed',committed_at=now() WHERE envelope->>'event_id'=$1",
+    )
+    .bind::<Text, _>(event.event_id.as_str())
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+    assert!(matches!(
+        read(&pool, &discussion).await,
+        SelfExactCurrentRead::Unresolved(_)
+    ));
+}
+
+#[tokio::test]
+async fn remote_watch_delivery_uses_the_verified_peer_cut_without_local_reducer_material() {
+    use coland_storage::AccountContentDeliveryInput;
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let _local_identity = Box::pin(ordinary_realm::open_human_discussion(
+        &pool,
+        "watch-delivery-station",
+    ))
+    .await;
+    let local = ordinary_realm::station();
+    let fixture = ordinary_realm::human_profile::fixture(&local, "watch-delivery");
+    let device = Box::pin(fixture.admit_founding_device(
+        &coland_storage_postgres::PgPersistenceStore::new(pool.clone()),
+    ))
+    .await
+    .unwrap();
+    let account = fixture.history.account.clone();
+    let foreign = arkret_wire::DidCoreId::new("ak:did_core:web:watch-governor.example").unwrap();
+    let realm = arkret_wire::RealmId::from_event_id(&arkret_wire::EventId::from_digest(
+        arkret_canonical::DigestSuite::Sha256,
+        [53; 32],
+    ));
+    let strand = arkret_wire::StrandId::from_event_id(&arkret_wire::EventId::from_digest(
+        arkret_canonical::DigestSuite::Sha256,
+        [54; 32],
+    ));
+    let request = StrandWatchCurrentRequestBody {
+        realm_id: realm.clone(),
+        strand_id: strand.clone(),
+        watcher_actor_id: arkret_wire::ActorId::account(account.clone()),
+    };
+    // This contract test injects an already authenticated read witness at the
+    // production storage port; it does not claim real S2S authentication.
+    let outcome = StrandWatchCurrentOutcome::NeverWritten {
+        realm_id: realm.clone(), governance_generation: 4,
+        stream_head: arkret_wire::CommitStreamHead {
+            stream_ref: arkret_wire::CommitStreamRef::Realm { realm_id: realm.clone() },
+            commit_id: arkret_wire::RealmCommitId::from_digest([55;32]), stream_position: 17,
+        },
+        selector: arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentSelector {
+            kind: arkret_models_collaboration::strand_watch_operations::StrandWatchSelectorKind::StrandWatch,
+            strand_id: strand, watcher_actor_id: request.watcher_actor_id.clone(),
+        },
+    };
+    let authority = coland_storage::CurrentRealmAuthority {
+        realm_id: realm.clone(),
+        generation: 4,
+        service_id: foreign,
+        authority_ref: arkret_wire::RealmCommitAuthorityRef::Handoff(
+            arkret_wire::RealmAuthorityHandoffId::from_digest([56; 32]),
+        ),
+        last_handoff_ref: Some(arkret_wire::RealmAuthorityHandoffId::from_digest([56; 32])),
+    };
+    let expires_at = chrono::DateTime::from_timestamp_millis(
+        (chrono::Utc::now() + chrono::Duration::minutes(1)).timestamp_millis(),
+    )
+    .unwrap();
+    #[derive(diesel::QueryableByName)]
+    struct LocalAccount {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        pk: i64,
+    }
+    let mut conn = pool.get().await.unwrap();
+    let account_pk = diesel::sql_query(
+        "INSERT INTO accounts (principal_id,station_id) VALUES ($1,$2) RETURNING pk",
+    )
+    .bind::<Text, _>(account.principal_id.as_str())
+    .bind::<Text, _>(local.as_str())
+    .get_result::<LocalAccount>(&mut *conn)
+    .await
+    .unwrap()
+    .pk;
+    diesel::sql_query("INSERT INTO sessions (id,account_pk,actor_id,device_id,audience,expires_at) VALUES ($1,$2,$3,$4,$5,$6)")
+        .bind::<Text, _>("watch-live-session")
+        .bind::<diesel::sql_types::BigInt, _>(account_pk)
+        .bind::<Text, _>(account.principal_id.as_str())
+        .bind::<Text, _>(&device.device_id)
+        .bind::<Text, _>(local.as_str())
+        .bind::<diesel::sql_types::Timestamptz, _>(expires_at)
+        .execute(&mut *conn).await.unwrap();
+    // A stale cache without any accepted provenance cannot override the
+    // authenticated governor's current active namespace. This is not a replica.
+    diesel::sql_query("INSERT INTO strand_current_results(realm_id,strand_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,9,$4,now())")
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(request.strand_id.as_str())
+        .bind::<Text,_>(arkret_wire::RealmCommitId::from_digest([70;32]).as_str())
+        .bind::<Jsonb,_>(json!({"id":request.strand_id,"realm_id":realm,"state":"archived"}))
+        .execute(&mut *conn).await.unwrap();
+    drop(conn);
+    let input = AccountContentDeliveryInput {
+        remote_watch_read: Some((request, outcome, authority)),
+        watch_delivery_device: Some(device.clone()),
+        watch_local_session: Some((
+            "watch-live-session".to_owned(),
+            coland_storage::AccountPk(account_pk),
+        )),
+        credential_expires_at: Some(expires_at),
+        ..Default::default()
+    };
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let baseline = footprint(&pool).await;
+    let guard = store
+        .acquire_committed_content_delivery(&account, &local, &input)
+        .await
+        .unwrap()
+        .expect("remote Watch keeps its local final guard");
+    assert!(guard.permits_handoff());
+    guard.finish().await.unwrap();
+    assert_eq!(footprint(&pool).await, baseline);
+    for branch in [
+        "expired",
+        "device_replaced",
+        "other_account",
+        "unverified_generation",
+        "withdrawn_local_session",
+    ] {
+        let mut rejected = input.clone();
+        match branch {
+            "expired" => {
+                rejected.credential_expires_at =
+                    Some(chrono::Utc::now() - chrono::Duration::seconds(1))
+            }
+            "device_replaced" => {
+                rejected
+                    .watch_delivery_device
+                    .as_mut()
+                    .unwrap()
+                    .authorization_ref
+                    .commit_id = arkret_wire::RealmCommitId::from_digest([57; 32])
+            }
+            "other_account" => {
+                rejected
+                    .remote_watch_read
+                    .as_mut()
+                    .unwrap()
+                    .0
+                    .watcher_actor_id = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+                    account.principal_id.clone(),
+                    arkret_wire::DidCoreId::new("ak:did_core:web:other-account-station.example")
+                        .unwrap(),
+                ))
+            }
+            "unverified_generation" => {
+                rejected.remote_watch_read.as_mut().unwrap().2.generation += 1
+            }
+            "withdrawn_local_session" => {
+                rejected.watch_local_session = Some((
+                    "withdrawn-watch-session".to_owned(),
+                    coland_storage::AccountPk(1),
+                ));
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            store
+                .acquire_committed_content_delivery(&account, &local, &rejected)
+                .await
+                .is_err(),
+            "{branch}"
+        );
+        assert_eq!(footprint(&pool).await, baseline, "{branch} is read-only");
+    }
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query("UPDATE sessions SET revoked_at=now() WHERE id=$1")
+        .bind::<Text, _>("watch-live-session")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    assert!(matches!(
+        store
+            .acquire_committed_content_delivery(&account, &local, &input)
+            .await,
+        Err(coland_storage::PersistenceError::NotFound(_))
+    ));
+    assert_eq!(footprint(&pool).await, baseline);
+}
+
+#[tokio::test]
+async fn a_missing_original_in_the_effective_namespace_never_proves_never_written() {
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let discussion = Box::pin(ordinary_realm::open_human_discussion(
+        &pool,
+        "watch-incomplete-chain",
+    ))
+    .await;
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query(
+        "UPDATE realm_commits SET event_pk=NULL WHERE realm_id=$1 AND stream_position=0",
+    )
+    .bind::<Text, _>(discussion.realm_id().as_str())
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+    assert!(matches!(
+        read(&pool, &discussion).await,
+        SelfExactCurrentRead::Unresolved(_)
+    ));
+}
+
+#[tokio::test]
+async fn circle_self_knock_and_cancel_have_durable_current_without_join_access() {
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let discussion = Box::pin(ordinary_realm::open_human_discussion(
+        &pool,
+        "circle-knock-current",
+    ))
+    .await;
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let realm = discussion.realm_id();
+    let actor = discussion.head.authority_commit.event.actor_id.clone();
+    let at = discussion.committed_at() + chrono::Duration::seconds(20);
+    let create = ordinary_realm::next_request_for_actor(
+        &discussion.head.authority_commit,
+        arkret_wire::EventKind::CircleCreate,
+        actor.clone(),
+        json!({"object":{
+            "schema":"ak.schema.circle.v1","realm_id":realm,"title":"Knock Current",
+            "display":{"short_name":"Knock","color_token":"blue","symbol":{"glyph":"lock"}},
+            "directory_visibility":"members","join_rule":"knock","history_access":"since_join",
+            "state":"active","created_by":actor,"created_at":arkret_canonical::format_timestamp_canonical(at)
+        }}),
+        at,
+    );
+    let create = Box::pin(ordinary_realm::source_request(&pool, create)).await;
+    uow.commit_event(create.clone()).await.unwrap();
+    let circle = arkret_wire::CircleId::from_event_id(&create.authority_commit.event.event_id);
+    let scope = arkret_wire::ScopeRef::Circle {
+        realm_id: realm,
+        circle_id: circle.clone(),
+    };
+    let knock = scoped_request(
+        &create.authority_commit,
+        scope.clone(),
+        arkret_wire::EventKind::CircleMemberState,
+        json!({"circle_id":circle,"member_id":actor,"membership":"knock","expected_membership":null}),
+        at + chrono::Duration::seconds(1),
+    );
+    let knock = Box::pin(ordinary_realm::source_request(&pool, knock)).await;
+    uow.commit_event(knock.clone()).await.unwrap();
+    let mut conn = pool.get().await.unwrap();
+    #[derive(diesel::QueryableByName)]
+    struct Member {
+        #[diesel(sql_type=Text)]
+        membership: String,
+        #[diesel(sql_type=Text)]
+        current_commit_id: String,
+        #[diesel(sql_type=diesel::sql_types::Bool)]
+        effective: bool,
+    }
+    let current = diesel::sql_query("SELECT membership,current_commit_id,circle_member_parent_join_current(realm_id,member_id,value) AS effective FROM circle_member_state_current_results WHERE circle_id=$1 AND member_id=$2")
+        .bind::<Text,_>(circle.as_str()).bind::<Text,_>(actor.to_string()).get_result::<Member>(&mut *conn).await.unwrap();
+    assert_eq!(current.membership, "knock");
+    assert_eq!(
+        current.current_commit_id,
+        knock.authority_commit.commit.commit_id.as_str()
+    );
+    assert!(
+        !current.effective,
+        "knock cannot substitute for joined membership"
+    );
+    drop(conn);
+    let baseline = footprint(&pool).await;
+    let stale = scoped_request(
+        &knock.authority_commit,
+        scope.clone(),
+        arkret_wire::EventKind::CircleMemberState,
+        json!({"circle_id":circle,"member_id":actor,"membership":"leave","expected_membership":null}),
+        at + chrono::Duration::seconds(2),
+    );
+    let stale = Box::pin(ordinary_realm::source_request(&pool, stale)).await;
+    assert_eq!(
+        uow.commit_event(stale).await.unwrap_err().conflict_code(),
+        Some(coland_storage::ConflictCode::FailedPrecondition)
+    );
+    assert_eq!(footprint(&pool).await, baseline);
+    let cancel = scoped_request(
+        &knock.authority_commit,
+        scope,
+        arkret_wire::EventKind::CircleMemberState,
+        json!({"circle_id":circle,"member_id":actor,"membership":"leave","expected_membership":"knock"}),
+        at + chrono::Duration::seconds(3),
+    );
+    let cancel = Box::pin(ordinary_realm::source_request(&pool, cancel)).await;
+    uow.commit_event(cancel.clone()).await.unwrap();
+    let mut conn = pool.get().await.unwrap();
+    let current = diesel::sql_query("SELECT membership,current_commit_id,circle_member_parent_join_current(realm_id,member_id,value) AS effective FROM circle_member_state_current_results WHERE circle_id=$1 AND member_id=$2")
+        .bind::<Text,_>(circle.as_str()).bind::<Text,_>(actor.to_string()).get_result::<Member>(&mut *conn).await.unwrap();
+    assert_eq!(current.membership, "leave");
+    assert_eq!(
+        current.current_commit_id,
+        cancel.authority_commit.commit.commit_id.as_str()
+    );
+    assert!(!current.effective);
 }

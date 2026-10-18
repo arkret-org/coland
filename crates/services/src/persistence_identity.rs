@@ -1676,6 +1676,31 @@ impl crate::identity::DidDocumentPort for PersistenceDidDocuments {
         )
     }
 
+    async fn ingest_verified_history(
+        &self,
+        expected_current_head: Option<String>,
+        document: crate::identity::DidDocumentState,
+    ) -> crate::ServiceResult<crate::identity::DidLogCommitResult> {
+        Ok(
+            match self
+                .0
+                .webvh()
+                .ingest_verified_history(expected_current_head, document)
+                .await?
+            {
+                coland_storage::WebvhLogCommitOutcome::Accepted => {
+                    crate::identity::DidLogCommitResult::Accepted
+                }
+                coland_storage::WebvhLogCommitOutcome::Duplicate => {
+                    crate::identity::DidLogCommitResult::Duplicate
+                }
+                coland_storage::WebvhLogCommitOutcome::Conflict => {
+                    crate::identity::DidLogCommitResult::Conflict
+                }
+            },
+        )
+    }
+
     async fn commit_log_operation(
         &self,
         expected_current_head: Option<String>,

@@ -414,7 +414,7 @@ async fn export_floor_in_connection(
     Ok(floor.map(|floor| floor.oldest_position))
 }
 
-struct DeliveryGuard {
+pub(crate) struct DeliveryGuard {
     connection: Option<Connection>,
     runtime: tokio::runtime::Handle,
     clock: Option<DeliveryClockProof>,
@@ -554,6 +554,10 @@ impl DeliveryClockProof {
             || self.key_expiry.is_some_and(|expiry| now >= expiry)
             || self.credential_expiry.is_some_and(|expiry| now >= expiry)
         {
+            tracing::warn!(
+                diagnostic = "native_reply_or_expiry",
+                "owned content handoff clock refused"
+            );
             return false;
         }
         if self
@@ -561,6 +565,10 @@ impl DeliveryClockProof {
             .iter()
             .any(|values| !values.iter().any(|value| value.verifies_at(now)))
         {
+            tracing::warn!(
+                diagnostic = "accountability",
+                "owned content handoff clock refused"
+            );
             return false;
         }
         if !self
@@ -576,20 +584,31 @@ impl DeliveryClockProof {
                 };
                 [&self.provision_scope, &self.key_scope]
                     .iter()
-                    .all(|scope| {
-                        crate::agent_management_admission::require_key_scope_content_ceiling(
+                    .enumerate()
+                    .all(|(ceiling, scope)| {
+                        let allowed = crate::agent_management_admission::require_key_scope_content_ceiling(
                             scope, &operation,
                         )
-                        .is_ok()
+                        .is_ok();
+                        if !allowed {
+                            tracing::warn!(ceiling, action = action.as_str(), target_kind = ?target.kind,
+                                "owned content handoff ceiling is unavailable");
+                        }
+                        allowed
                     })
                     && self
                         .session_scope
                         .as_ref()
                         .is_none_or(|(actions, details)| {
-                            crate::agent_management_admission::require_session_content_ceiling(
+                            let allowed = crate::agent_management_admission::require_session_content_ceiling(
                                 actions, details, &operation,
                             )
-                            .is_ok()
+                            .is_ok();
+                            if !allowed {
+                                tracing::warn!(diagnostic = "session_scope", action = action.as_str(), target_kind = ?target.kind,
+                                    "owned content handoff clock refused");
+                            }
+                            allowed
                         })
             })
         {
@@ -600,42 +619,113 @@ impl DeliveryClockProof {
             policy.not_before.is_none_or(|start| at >= start)
                 && policy.expires_at.is_none_or(|end| at < end)
         };
-        self.policies
+        let policies = self
+            .policies
             .iter()
-            .all(|policy| active(policy, self.checked_at) == active(policy, now))
-            && self.positive_actions.iter().all(|(cut, target, actions)| {
-                cut.permits_unreserved_current_actions(actions, target, now)
-            })
-            && self
-                .native_projection_reads
-                .iter()
-                .all(|(cut, source, fact)| {
-                    cut.time_sources_unchanged(self.checked_at, now)
-                        && cut
-                            .require_native_projection_read(
-                                &fact.target,
-                                &fact.facts,
-                                fact.action,
-                                source.clone(),
-                                now,
-                            )
-                            .is_ok()
-                })
-            && self.reads.iter().all(|(cut, source, events, objects)| {
+            .all(|policy| active(policy, self.checked_at) == active(policy, now));
+        if !policies {
+            tracing::warn!(
+                diagnostic = "policy_time",
+                "owned content handoff clock refused"
+            );
+            return false;
+        }
+        if !self.positive_actions.iter().all(|(cut, target, actions)| {
+            cut.permits_unreserved_current_actions(actions, target, now)
+        }) {
+            tracing::warn!(
+                diagnostic = "positive_actions",
+                "owned content handoff clock refused"
+            );
+            return false;
+        }
+        if !self
+            .native_projection_reads
+            .iter()
+            .all(|(cut, source, fact)| {
                 cut.time_sources_unchanged(self.checked_at, now)
-                    && events.iter().all(|event| {
-                        cut.require_membership_read_constraints(event, now, source.clone())
-                            .is_ok()
-                    })
-                    && objects.iter().all(|(event, action)| {
-                        cut.require_content_read_constraints(event, now, source.clone(), *action)
-                            .is_ok()
-                    })
+                    && cut
+                        .require_native_projection_read(
+                            &fact.target,
+                            &fact.facts,
+                            fact.action,
+                            source.clone(),
+                            now,
+                        )
+                        .is_ok()
             })
+        {
+            tracing::warn!(
+                diagnostic = "native_projection_read",
+                "owned content handoff clock refused"
+            );
+            return false;
+        }
+        self.reads.iter().all(|(cut, source, events, objects)| {
+            if !cut.time_sources_unchanged(self.checked_at, now) {
+                tracing::warn!(
+                    diagnostic = "read_time_sources",
+                    "owned content handoff clock refused"
+                );
+                return false;
+            }
+            if !events.iter().all(|event| {
+                cut.require_membership_read_constraints(event, now, source.clone())
+                    .is_ok()
+            }) {
+                tracing::warn!(
+                    diagnostic = "membership_read",
+                    "owned content handoff clock refused"
+                );
+                return false;
+            }
+            let allowed = objects.iter().all(|(event, action)| {
+                cut.require_content_read_constraints(event, now, source.clone(), *action)
+                    .is_ok()
+            });
+            if !allowed {
+                tracing::warn!(
+                    diagnostic = "object_read",
+                    "owned content handoff clock refused"
+                );
+            }
+            allowed
+        })
     }
 }
 impl DeliveryGuard {
-    fn connection(&mut self) -> &mut AsyncPgConnection {
+    pub(crate) async fn begin(pool: &crate::PgPool) -> PersistenceResult<Box<Self>> {
+        let mut guard = Box::new(Self {
+            connection: Some(crate::pg_conn(pool).await?),
+            runtime: tokio::runtime::Handle::current(),
+            clock: None,
+        });
+        sql_query("BEGIN")
+            .execute(guard.connection())
+            .await
+            .map_err(PersistenceError::database)?;
+        Ok(guard)
+    }
+    /// Probe this same held transaction; never reacquire a new connection or
+    /// authorization cut after a backend lost the locks protecting its bytes.
+    pub(crate) async fn probe(&mut self) -> PersistenceResult<()> {
+        sql_query("SELECT 1")
+            .execute(self.connection())
+            .await
+            .map_err(PersistenceError::database)?;
+        Ok(())
+    }
+    /// A native queue page commits its private allocations only after the
+    /// guarded response frame crossed the same held authorization cut.
+    pub(crate) async fn commit(mut self: Box<Self>) -> PersistenceResult<()> {
+        sql_query("COMMIT")
+            .execute(self.connection())
+            .await
+            .map_err(PersistenceError::database)?;
+        drop(self.connection.take());
+        Ok(())
+    }
+    pub(crate) fn connection(&mut self) -> &mut AsyncPgConnection {
         self.connection.as_mut().expect("content cut is held")
     }
 }
@@ -688,7 +778,7 @@ struct SourceEventRow {
     event_id: String,
 }
 
-async fn provision_scope_in_connection(
+pub(crate) async fn provision_scope_in_connection(
     conn: &mut AsyncPgConnection,
     endpoint: &coland_storage::AgentEndpointGuard,
     evidence: &coland_storage::VerifiedAgentScopeEvidence,
@@ -989,13 +1079,408 @@ async fn require_owned_content_source_in_connection(
     Ok(())
 }
 
+/// A peer read linearizes Realm authorization remotely. This lease holds only
+/// the local Account/endpoint and already observed conflicting evidence.
+struct RemoteWatchGuard {
+    held: Box<DeliveryGuard>,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[async_trait::async_trait]
+impl AccountContentDeliveryGuard for RemoteWatchGuard {
+    fn permits_handoff(&self) -> bool {
+        chrono::Utc::now() < self.expires_at
+            && self
+                .held
+                .clock
+                .as_ref()
+                .is_none_or(|clock| clock.permits_at(chrono::Utc::now()))
+    }
+    async fn finish(self: Box<Self>) -> PersistenceResult<()> {
+        self.held.finish().await
+    }
+}
+
+async fn acquire_remote_watch_delivery(
+    pool: &crate::PgPool,
+    account: &AccountId,
+    station: &DidCoreId,
+    input: &coland_storage::AccountContentDeliveryInput,
+) -> PersistenceResult<Option<Box<dyn AccountContentDeliveryGuard>>> {
+    use diesel::sql_types::{BigInt, Jsonb};
+    let audited_selector;
+    let audited = input.audited_watch_read.as_ref();
+    let (request, outcome, authority) = match (&input.remote_watch_read, audited) {
+        (Some(watch), None) => (&watch.0, &watch.1, &watch.2),
+        (None, Some((request, outcome, authority))) => {
+            outcome
+                .validate_for_request(request, authority.generation)
+                .map_err(|error| unavailable(&error.to_string()))?;
+            if request.audit_submission.event.actor_id.as_account_id() != Some(account) {
+                return Err(PersistenceError::NotFound(
+                    "audited Watch caller differs".to_owned(),
+                ));
+            }
+            audited_selector = request.selector().map_err(PersistenceError::database)?;
+            (&audited_selector, &outcome.current, authority)
+        }
+        _ => {
+            return Err(unavailable(
+                "delivery needs exactly one current or audited Watch witness",
+            ));
+        }
+    };
+    let expires_at = input
+        .credential_expires_at
+        .ok_or_else(|| unavailable("remote Watch credential has no expiry"))?;
+    if (audited.is_none() && request.watcher_actor_id.as_account_id() != Some(account))
+        || &account.station_id != station
+        || (audited.is_none() && authority.service_id == *station)
+        || authority.realm_id != request.realm_id
+        || !input.realms.is_empty()
+        || !input.watch_reads.is_empty()
+        || !input.committed_events.is_empty()
+        || !input.current_views.is_empty()
+        || !input.projection_lists.is_empty()
+        || !input.morph_lists.is_empty()
+        || !input.morph_documents.is_empty()
+        || !input.morph_absences.is_empty()
+        || !input.realm_exports.is_empty()
+        || !input.snapshots.is_empty()
+        || !input.future_materials.is_empty()
+        || !input.notifications.is_empty()
+        || !input.exact_reads.is_empty()
+        || !input.blobs.is_empty()
+        || !input.unresolved_content_realms.is_empty()
+    {
+        return Err(unavailable(
+            "remote Watch delivery is not one exact self response",
+        ));
+    }
+    outcome
+        .validate_for_generation(request, authority.generation)
+        .map_err(|error| unavailable(&error.to_string()))?;
+    let mut held = Box::new(DeliveryGuard {
+        connection: Some(crate::pg_conn(pool).await?),
+        runtime: tokio::runtime::Handle::current(),
+        clock: None,
+    });
+    sql_query("BEGIN")
+        .execute(held.connection())
+        .await
+        .map_err(PersistenceError::database)?;
+    #[derive(QueryableByName)]
+    struct ObservedAuthority {
+        #[diesel(sql_type=BigInt)]
+        generation: i64,
+        #[diesel(sql_type=Text)]
+        service_id: String,
+        #[diesel(sql_type=Jsonb)]
+        authority_ref: serde_json::Value,
+    }
+    let observed = sql_query("SELECT generation,service_id,authority_ref FROM realm_authorities WHERE realm_id=$1 FOR SHARE")
+        .bind::<Text,_>(request.realm_id.as_str()).get_result::<ObservedAuthority>(held.connection()).await.optional().map_err(PersistenceError::database)?;
+    if let Some(observed) = observed {
+        let generation = u64::try_from(observed.generation).map_err(PersistenceError::database)?;
+        if generation > authority.generation
+            || (generation == authority.generation
+                && (observed.service_id != authority.service_id.as_str()
+                    || observed.authority_ref
+                        != serde_json::to_value(&authority.authority_ref)
+                            .map_err(PersistenceError::database)?))
+        {
+            return Err(unavailable(
+                "remote Watch authority was superseded or conflicts",
+            ));
+        }
+    }
+    if let Some((request, outcome, _)) = audited {
+        if authority.service_id == *station {
+            crate::registered_audit::read_visibility_in_connection(
+                held.connection(),
+                request,
+                station,
+                Some(outcome.audit_commit.governance_generation),
+            )
+            .await?;
+        }
+    }
+    let actor = ActorId::account(account.clone());
+    #[derive(QueryableByName)]
+    struct LocalCurrent {
+        #[diesel(sql_type=Jsonb)]
+        value: serde_json::Value,
+        #[diesel(sql_type=BigInt)]
+        current_stream_position: i64,
+        #[diesel(sql_type=Text)]
+        current_commit_id: String,
+        #[diesel(sql_type=diesel::sql_types::Nullable<Jsonb>)]
+        source_stream_ref: Option<serde_json::Value>,
+    }
+    let (head, result) = match outcome {
+        arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome::Current { stream_head, result, .. } => (stream_head, Some(result)),
+        arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome::NeverWritten { stream_head, .. } => (stream_head, None),
+    };
+    let revoked = sql_query("SELECT EXISTS(SELECT 1 FROM member_state_current_results WHERE realm_id=$1 AND member_id=$2 AND membership<>'join') AS present")
+        .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(actor.to_string())
+        .get_result::<crate::ExistsRow>(held.connection()).await.map_err(PersistenceError::database)?.present;
+    if revoked {
+        return Err(PersistenceError::NotFound(
+            "remote Watch member withdrawal has been observed".to_owned(),
+        ));
+    }
+    let strand_source = crate::object_projection_reads::current_source_sql(
+        "s",
+        "jsonb_build_object('kind','strand','strand_id',s.strand_id)",
+    );
+    let strand = sql_query(format!("SELECT s.value,s.current_commit_id,s.current_stream_position,{strand_source} AS source_stream_ref FROM strand_current_results s WHERE s.realm_id=$1 AND s.strand_id=$2 FOR SHARE OF s"))
+        .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.strand_id.as_str())
+        .get_result::<LocalCurrent>(held.connection()).await.optional().map_err(PersistenceError::database)?;
+    // Only retained accepted provenance can contradict the verified governor.
+    // An unproved hydration/cache row is not a second current authority cut.
+    if let Some(strand) = strand.filter(|row| row.source_stream_ref.is_some()) {
+        if strand
+            .value
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            != Some("active")
+        {
+            return Err(PersistenceError::NotFound(
+                "remote Watch Strand is no longer active".to_owned(),
+            ));
+        }
+        let expected_circle = match &head.stream_ref {
+            arkret_wire::CommitStreamRef::Circle { circle_id, .. } => Some(circle_id.as_str()),
+            _ => None,
+        };
+        if strand.source_stream_ref.as_ref()
+            != Some(&serde_json::to_value(&head.stream_ref).map_err(PersistenceError::database)?)
+            || strand
+                .value
+                .get("scope_circle_id")
+                .and_then(serde_json::Value::as_str)
+                != expected_circle
+        {
+            return Err(unavailable(
+                "remote Watch Strand scope or lifecycle conflicts with observed current",
+            ));
+        }
+    }
+    if let arkret_wire::CommitStreamRef::Circle { circle_id, .. } = &head.stream_ref {
+        let revoked = sql_query("SELECT EXISTS(SELECT 1 FROM circle_member_state_current_results m WHERE realm_id=$1 AND circle_id=$2 AND member_id=$3 AND (membership<>'join' OR NOT circle_member_parent_join_current(m.realm_id,m.member_id,m.value))) AS present")
+            .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).bind::<Text,_>(actor.to_string())
+            .get_result::<crate::ExistsRow>(held.connection()).await.map_err(PersistenceError::database)?.present;
+        if revoked && audited.is_none() {
+            return Err(PersistenceError::NotFound(
+                "remote Watch Circle withdrawal has been observed".to_owned(),
+            ));
+        }
+    }
+    let watch_source = crate::object_projection_reads::current_source_sql(
+        "w",
+        "jsonb_build_object('kind','strand_watch','strand_id',w.strand_id,'watcher_actor_id',w.watcher_actor_id::jsonb)",
+    );
+    let current = sql_query(format!("SELECT w.value,w.current_commit_id,w.current_stream_position,{watch_source} AS source_stream_ref FROM strand_watch_current_results w WHERE w.realm_id=$1 AND w.strand_id=$2 AND w.watcher_actor_id=$3 FOR SHARE OF w"))
+        .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.strand_id.as_str()).bind::<Text,_>(request.watcher_actor_id.to_string())
+        .get_result::<LocalCurrent>(held.connection()).await.optional().map_err(PersistenceError::database)?;
+    if let Some(current) = current.filter(|_| audited.is_none()) {
+        if current.source_stream_ref.as_ref()
+            != Some(&serde_json::to_value(&head.stream_ref).map_err(PersistenceError::database)?)
+        {
+            return Err(unavailable(
+                "observed Watch current belongs to another or unproved stream",
+            ));
+        }
+        let Some(result) = result else {
+            return Err(unavailable(
+                "accepted local Watch excludes remote never-written",
+            ));
+        };
+        let position =
+            u64::try_from(current.current_stream_position).map_err(PersistenceError::database)?;
+        if position > result.revision.stream_position
+            || (position == result.revision.stream_position
+                && (current.current_commit_id != result.revision.commit_id.as_str()
+                    || current.value
+                        != serde_json::to_value(result.value)
+                            .map_err(PersistenceError::database)?))
+        {
+            return Err(unavailable(
+                "remote Watch current is older than or conflicts with observed current",
+            ));
+        }
+    }
+    if let Some(endpoint) = &input.agent_endpoint {
+        if endpoint.agent_id != account.principal_id || input.watch_delivery_device.is_some() {
+            return Err(unavailable(
+                "remote Watch endpoint differs from its Agent credential",
+            ));
+        }
+        let evidence = input
+            .qualified_agent_scope_evidence
+            .as_ref()
+            .ok_or_else(|| unavailable("remote Watch lacks qualified Agent scope"))?;
+        let (_, details) = input
+            .agent_session_scope
+            .as_ref()
+            .ok_or_else(|| unavailable("remote Watch lacks the Agent session content ceiling"))?;
+        if details.get("controller_principal_id")
+            != Some(&serde_json::json!(
+                evidence.accepted_binding().controller_account.principal_id
+            ))
+            || details.get("agent_key_authorization_ref")
+                != Some(&serde_json::json!(endpoint.authorization_ref.event_id))
+        {
+            return Err(unavailable(
+                "remote Watch session controller or key differs",
+            ));
+        }
+        Box::pin(crate::agent_current_results::lock_agent_producer_current(
+            held.connection(),
+            &endpoint.pcr_realm_id,
+            &endpoint.agent_id,
+        ))
+        .await?;
+        let at = chrono::Utc::now();
+        Box::pin(
+            crate::authority_commit::check_agent_endpoint_current_in_connection(
+                held.connection(),
+                &endpoint.pcr_realm_id,
+                &endpoint.agent_id,
+                &endpoint.authorization_ref,
+                &endpoint.verification_method,
+                at,
+            ),
+        )
+        .await?;
+        let source = crate::committed_disclosure::accepted_full_event_in_connection(
+            held.connection(),
+            &endpoint.authorization_ref.event_id,
+        )
+        .await?
+        .ok_or_else(|| unavailable("remote Watch Agent key original is unavailable"))?;
+        let key: arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload =
+            serde_json::from_value(
+                serde_json::to_value(&source.event.payload).map_err(PersistenceError::database)?,
+            )
+            .map_err(PersistenceError::database)?;
+        let provision_scope = Box::pin(provision_scope_in_connection(
+            held.connection(),
+            endpoint,
+            evidence,
+            station,
+        ))
+        .await?;
+        let mut facts = coland_storage::OperationFacts::default();
+        facts.strand_id = Some(request.strand_id.to_string());
+        facts.object_kind = Some("strand".to_owned());
+        if let arkret_wire::CommitStreamRef::Circle { circle_id, .. } = &head.stream_ref {
+            facts.circle_id = Some(circle_id.to_string());
+        }
+        held.clock = Some(DeliveryClockProof {
+            checked_at: at,
+            key_expiry: key.expires_at,
+            credential_expiry: Some(expires_at),
+            key_scope: key.agent_key_scope,
+            provision_scope,
+            session_scope: input.agent_session_scope.clone(),
+            scope_operations: vec![(
+                actor,
+                arkret_wire::WireResourceSelector::strand(
+                    request.realm_id.clone(),
+                    request.strand_id.clone(),
+                ),
+                facts,
+                if audited.is_some() {
+                    CapabilityActionId::RealmNotificationAudit
+                } else {
+                    CapabilityActionId::ObjectRead
+                },
+            )],
+            accountability: Vec::new(),
+            policies: Vec::new(),
+            positive_actions: Vec::new(),
+            native_projection_reads: Vec::new(),
+            native_reply: None,
+            reads: Vec::new(),
+        });
+    } else {
+        if input.agent_session_scope.is_some() || input.qualified_agent_scope_evidence.is_some() {
+            return Err(unavailable(
+                "remote Watch Agent cannot use a Human endpoint",
+            ));
+        }
+        let device = input
+            .watch_delivery_device
+            .as_ref()
+            .ok_or_else(|| unavailable("remote Watch has no bound device"))?;
+        if device.principal_id != account.principal_id || device.station_id != account.station_id {
+            return Err(unavailable("remote Watch Device binds another Account"));
+        }
+        crate::device_revocations::lock_artifact_devices_in_transaction(
+            held.connection(),
+            &[device],
+        )
+        .await?;
+        crate::ensure_gate_allowed_in_transaction(held.connection(), device).await?;
+    }
+    if let Some((token, account_pk)) = &input.watch_local_session {
+        #[derive(QueryableByName)]
+        struct LiveSession {
+            #[diesel(sql_type=diesel::sql_types::Timestamptz)]
+            expires_at: chrono::DateTime<chrono::Utc>,
+        }
+        let device = input
+            .watch_delivery_device
+            .as_ref()
+            .ok_or_else(|| unavailable("local Watch session has no Device binding"))?;
+        let session = sql_query("SELECT s.expires_at FROM sessions s JOIN accounts a ON a.pk=s.account_pk WHERE s.id=$1 AND s.account_pk=$2 AND s.actor_id=$3 AND s.audience=$4 AND s.device_id=$5 AND s.revoked_at IS NULL AND a.principal_id=$3 AND a.station_id=$4 AND a.disabled_at IS NULL FOR SHARE OF s,a")
+            .bind::<Text,_>(token).bind::<BigInt,_>(account_pk.0).bind::<Text,_>(account.principal_id.as_str())
+            .bind::<Text,_>(account.station_id.as_str()).bind::<Text,_>(&device.device_id)
+            .get_result::<LiveSession>(held.connection()).await.optional().map_err(PersistenceError::database)?
+            .ok_or_else(|| PersistenceError::NotFound("local Watch session was withdrawn or changed".to_owned()))?;
+        if session.expires_at != expires_at || session.expires_at <= chrono::Utc::now() {
+            return Err(unavailable("local Watch session expiry changed"));
+        }
+    }
+    let guard = Box::new(RemoteWatchGuard { held, expires_at });
+    if !guard.permits_handoff() {
+        return Err(unavailable(
+            "remote Watch credential or content ceiling expired",
+        ));
+    }
+    Ok(Some(guard))
+}
+
 pub(crate) async fn acquire(
     pool: &crate::PgPool,
     account: &AccountId,
     station: &DidCoreId,
     input: &coland_storage::AccountContentDeliveryInput,
 ) -> PersistenceResult<Option<Box<dyn AccountContentDeliveryGuard>>> {
-    acquire_with_native_reply(pool, account, station, input, None).await
+    if let Some(endpoint) = &input.applet_endpoint {
+        return crate::boxed_future(|| {
+            crate::applet_content_delivery::acquire(pool, account, station, endpoint, input)
+        })
+        .await;
+    }
+    if !input.stream_scans.is_empty()
+        || !input.keypackage_claims.is_empty()
+        || !input.mls_group_material_reads.is_empty()
+        || !input.mls_roster_reads.is_empty()
+    {
+        return Err(PersistenceError::Conflict(
+            "capability_denied: stream delivery requires its exact native consumer".into(),
+        ));
+    }
+    if input.remote_watch_read.is_some() || input.audited_watch_read.is_some() {
+        return Box::pin(acquire_remote_watch_delivery(pool, account, station, input)).await;
+    }
+    // Bound the nested admission future without changing the caller stack budget.
+    Box::pin(acquire_with_native_reply(
+        pool, account, station, input, None,
+    ))
+    .await
 }
 
 pub(crate) async fn acquire_native_message_reply_preparation(
@@ -1044,6 +1529,8 @@ pub(crate) async fn acquire_native_message_reply_preparation(
         || !input.notifications.is_empty()
         || !input.exact_reads.is_empty()
         || !input.watch_reads.is_empty()
+        || input.remote_watch_read.is_some()
+        || input.audited_watch_read.is_some()
         || !input.blobs.is_empty()
         || !input.unresolved_content_realms.is_empty()
         || !input
@@ -1073,7 +1560,7 @@ pub(crate) async fn acquire_native_message_reply_preparation(
             "native reply has no exact accepted third-party source or trusted credential",
         ));
     }
-    acquire_with_native_reply(
+    Box::pin(acquire_with_native_reply(
         pool,
         agent,
         station,
@@ -1085,9 +1572,1192 @@ pub(crate) async fn acquire_native_message_reply_preparation(
             strand,
             deployment,
         }),
-    )
+    ))
     .await?
     .ok_or_else(|| unavailable("native reply has no current owned governing cut"))
+}
+
+// Revalidate original queued Events on the same locked transaction cut.
+async fn revalidate_committed_events_in_connection(
+    conn: &mut AsyncPgConnection,
+    account: &AccountId,
+    actor: ActorId,
+    realms: &std::collections::BTreeSet<arkret_wire::RealmId>,
+    input: &coland_storage::AccountContentDeliveryInput,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<()> {
+    for row in &input.committed_events {
+        let realm = row.commit().stream_ref.realm_id();
+        if !realms.contains(realm) {
+            continue;
+        }
+        let controller = Box::pin(
+            crate::realm_authorization_cut::owned_controller_in_connection(
+                &mut *conn, realm, &actor, at,
+            ),
+        )
+        .await?
+        .ok_or_else(|| unavailable("current controller is unavailable"))?;
+        let controller_account = controller
+            .as_account_id()
+            .ok_or_else(|| unavailable("controller is not an Account"))?;
+        let accepted = Box::pin(
+            crate::committed_disclosure::accepted_full_event_in_connection(
+                &mut *conn,
+                &row.commit().event_ref,
+            ),
+        )
+        .await?
+        .ok_or_else(|| unavailable("delivery has no accepted canonical pair"))?;
+        if accepted.commit != *row.commit() {
+            return Err(unavailable("queued Commit differs from accepted content"));
+        }
+        for recipient in [&actor, &controller] {
+            let floor = match &row.commit().stream_ref {
+                arkret_wire::CommitStreamRef::Realm { .. } => {
+                    Box::pin(
+                        crate::account_stream_scan::caller_realm_floor_in_connection(
+                            &mut *conn, realm, recipient,
+                        ),
+                    )
+                    .await?
+                }
+                arkret_wire::CommitStreamRef::Circle { circle_id, .. } => {
+                    Box::pin(
+                        crate::account_stream_scan::caller_circle_floor_in_connection(
+                            &mut *conn, realm, circle_id, recipient,
+                        ),
+                    )
+                    .await?
+                }
+                arkret_wire::CommitStreamRef::Sidecar { sidecar_id, .. } => {
+                    if !Box::pin(crate::sidecar_access::participant_in_connection(
+                        &mut *conn, realm, sidecar_id, recipient,
+                    ))
+                    .await?
+                    {
+                        return Err(unavailable("current Sidecar delivery recipient changed"));
+                    }
+                    // The complete current snapshot also proves the private
+                    // Sidecar's exact readable floor on this governing cut.
+                    let recipient = recipient
+                        .as_account_id()
+                        .ok_or_else(|| unavailable("delivery recipient is not an Account"))?;
+                    let material = Box::pin(
+                        crate::snapshot_disclosure_gate::account_snapshot_material_in_connection(
+                            &mut *conn, realm, recipient,
+                        ),
+                    )
+                    .await?
+                    .ok_or_else(|| unavailable("Sidecar delivery floor is unavailable"))?;
+                    let floor = material
+                        .retention_and_history_floor
+                        .stream_floors
+                        .into_iter()
+                        .find(|floor| floor.stream_ref == row.commit().stream_ref)
+                        .ok_or_else(|| unavailable("Sidecar delivery floor is unavailable"))?;
+                    if row.commit().stream_position < floor.oldest_position {
+                        return Err(unavailable("Sidecar queued position is no longer readable"));
+                    }
+                    None
+                }
+                _ => {
+                    return Err(unavailable(
+                        "delivery stream has no registered current proof",
+                    ));
+                }
+            };
+            if !matches!(
+                row.commit().stream_ref,
+                arkret_wire::CommitStreamRef::Sidecar { .. }
+            ) && floor
+                .as_ref()
+                .is_none_or(|floor| row.commit().stream_position < floor.oldest_position)
+            {
+                return Err(unavailable(
+                    "queued position is no longer readable by the recipient",
+                ));
+            }
+        }
+        match row {
+            CommittedEventView::Full(full) => {
+                if full != &accepted
+                    || !Box::pin(
+                        crate::committed_disclosure::withheld_commit_ids_in_connection(
+                            &mut *conn,
+                            &[full.commit.commit_id.to_string()],
+                        ),
+                    )
+                    .await?
+                    .is_empty()
+                {
+                    return Err(unavailable(
+                        "queued full content is no longer the accepted disclosure",
+                    ));
+                }
+                if !Box::pin(
+                    crate::committed_disclosure::full_event_for_member_in_connection(
+                        &mut *conn, full, &actor, at,
+                    ),
+                )
+                .await?
+                {
+                    return Err(PersistenceError::Conflict(
+                        "capability_denied: current content is withheld".into(),
+                    ));
+                }
+                let resources =
+                    crate::agent_management_admission::event_content_resources(&full.event)?;
+                let circle = match &full.event.scope_ref {
+                    arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
+                    _ => None,
+                };
+                Box::pin(
+                    crate::agent_management_admission::require_content_snapshot_in_connection(
+                        &mut *conn,
+                        realm,
+                        circle,
+                        controller_account,
+                        account,
+                        AgentPolicyOperation::Deliver,
+                        CapabilityActionId::EventRead,
+                        &resources,
+                        at,
+                    ),
+                )
+                .await?;
+            }
+            CommittedEventView::Withheld(_) => {
+                let resources =
+                    crate::agent_management_admission::event_content_resources(&accepted.event)?;
+                let circle = match &accepted.event.scope_ref {
+                    arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
+                    _ => None,
+                };
+                for operation in [AgentPolicyOperation::Read, AgentPolicyOperation::Deliver] {
+                    Box::pin(
+                        crate::agent_management_admission::require_content_snapshot_in_connection(
+                            &mut *conn,
+                            realm,
+                            circle,
+                            controller_account,
+                            account,
+                            operation,
+                            CapabilityActionId::EventRead,
+                            &resources,
+                            at,
+                        ),
+                    )
+                    .await?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// Build the physical native reply time proof under the original held cut.
+async fn native_reply_time_proof_in_connection(
+    conn: &mut AsyncPgConnection,
+    account: &AccountId,
+    station: &DidCoreId,
+    input: &coland_storage::AccountContentDeliveryInput,
+    actor: ActorId,
+    realms: &std::collections::BTreeSet<arkret_wire::RealmId>,
+    native_human_pcrs: &std::collections::BTreeMap<AccountId, arkret_wire::RealmId>,
+    reply: NativeReplyContext<'_>,
+) -> PersistenceResult<NativeReplyTimeProof> {
+    let realm = &reply.source.event.realm_id;
+    if realms.len() != 1
+        || !realms.contains(realm)
+        || input
+            .qualified_agent_scope_evidence
+            .as_ref()
+            .map(|e| &e.accepted_binding().controller_account)
+            != Some(reply.controller)
+    {
+        return Err(unavailable(
+            "native reply controller or governing Realm differs",
+        ));
+    }
+    // Authentication refresh happens before acquire. These original native
+    // observations bind exact AA heads under the held current cut, never a
+    // fabricated active default or a product account projection.
+    for (human, pcr) in native_human_pcrs {
+        let observation = input
+            .account_status_observations
+            .iter()
+            .find(|observation| observation.record().account_id == *human);
+        Box::pin(
+            crate::morph_projection_reads::require_accepted_human_identity(
+                &mut *conn,
+                human,
+                pcr,
+                station,
+                observation,
+            ),
+        )
+        .await?;
+    }
+    let source = Box::pin(crate::realm_authorization_cut::owned_source_in_connection(
+        &mut *conn,
+        realm,
+        &actor,
+        chrono::Utc::now(),
+        true,
+    ))
+    .await?
+    .ok_or_else(|| unavailable("native reply has no accepted owned source"))?;
+    let owner_actor = ActorId::account(reply.controller.clone());
+    let agent_cut = Box::pin(crate::realm_authorization_cut::RealmAuthorizationCut::read(
+        &mut *conn, realm, &actor,
+    ))
+    .await?;
+    let controller_cut = Box::pin(crate::realm_authorization_cut::RealmAuthorizationCut::read(
+        &mut *conn,
+        realm,
+        &owner_actor,
+    ))
+    .await?;
+    let (target, facts) = Box::pin(agent_cut.native_message_reply_target_in_connection(
+        &mut *conn,
+        &reply.source.event.scope_ref,
+        reply.strand,
+        &controller_cut,
+        &ActorId::account(reply.caller.clone()),
+    ))
+    .await?;
+    Box::pin(
+        crate::agent_interaction_current_results::require_current_public_in_connection(
+            &mut *conn,
+            realm,
+            reply.controller,
+            account,
+        ),
+    )
+    .await?;
+    Box::pin(
+        crate::agent_participation_admission::require_native_reply_current(
+            &mut *conn,
+            account,
+            &reply.source.event.scope_ref,
+            reply.strand,
+            station,
+            reply.deployment,
+        ),
+    )
+    .await?;
+    let policies = Box::pin(
+        crate::policy_current_results::read_scoped_agent_management_policies_in_connection(
+            &mut *conn,
+            realm,
+            target
+                .circle_id
+                .as_ref()
+                .or(match &reply.source.event.scope_ref {
+                    arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
+                    _ => None,
+                }),
+        ),
+    )
+    .await?;
+    let mut input_resources = Vec::new();
+    let mut body_events = Vec::new();
+    for row in &input.committed_events {
+        let CommittedEventView::Full(full) = row else {
+            return Err(unavailable(
+                "native reply model input cannot use withheld bytes",
+            ));
+        };
+        agent_cut.require_unreserved_native_message_body(
+            &controller_cut,
+            &full.event,
+            &source,
+            chrono::Utc::now(),
+        )?;
+        let resources = crate::agent_management_admission::event_content_resources(&full.event)?;
+        for action in [
+            CapabilityActionId::EventRead,
+            CapabilityActionId::ObjectReadContent,
+        ] {
+            input_resources.push((resources.clone(), action));
+        }
+        body_events.push(full.event.clone());
+    }
+    let proof = NativeReplyTimeProof {
+        checked_at: chrono::Utc::now(),
+        agent: account.clone(),
+        controller: reply.controller.clone(),
+        agent_cut,
+        controller_cut,
+        source,
+        target: target.clone(),
+        facts: facts.clone(),
+        policies,
+        input_resources,
+        body_events,
+    };
+    Ok(proof)
+}
+
+#[derive(Default)]
+struct QueuedContentFacts {
+    object_sources: std::collections::BTreeMap<
+        arkret_wire::RealmId,
+        Vec<(arkret_wire::Event, CapabilityActionId)>,
+    >,
+    native_projection_reads: Vec<crate::morph_projection_reads::NativeTimeProof>,
+    positive_actions: Vec<(
+        crate::realm_authorization_cut::RealmAuthorizationCut,
+        arkret_wire::WireResourceSelector,
+        Vec<&'static str>,
+    )>,
+    blob_scope_operations: Vec<(
+        ActorId,
+        arkret_wire::WireResourceSelector,
+        coland_storage::OperationFacts,
+        CapabilityActionId,
+    )>,
+    blob_source_actions: std::collections::BTreeSet<(arkret_wire::EventId, &'static str)>,
+}
+
+// Preserve queued material checks on the caller's existing transaction cut.
+async fn revalidate_projection_inputs_in_connection(
+    conn: &mut AsyncPgConnection,
+    account: &AccountId,
+    station: &DidCoreId,
+    actor: ActorId,
+    realms: &std::collections::BTreeSet<arkret_wire::RealmId>,
+    input: &mut coland_storage::AccountContentDeliveryInput,
+    facts: &mut QueuedContentFacts,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<()> {
+    let QueuedContentFacts {
+        object_sources,
+        native_projection_reads,
+        positive_actions,
+        blob_scope_operations: _,
+        blob_source_actions: _,
+    } = facts;
+    for export in input.realm_exports.clone() {
+        if !realms.contains(&export.realm_id) {
+            continue;
+        }
+        let (fresh, sources) = Box::pin(realm_export_in_connection(
+            &mut *conn,
+            &export.realm_id,
+            &actor,
+            station,
+            export.generated_at,
+        ))
+        .await?
+        .ok_or_else(|| unavailable("queued Realm export has no current caller cut"))?;
+        if arkret_canonical::canonical_json_bytes(&export).map_err(PersistenceError::database)?
+            != arkret_canonical::canonical_json_bytes(&fresh).map_err(PersistenceError::database)?
+        {
+            return Err(unavailable(
+                "queued Realm export differs from the complete accepted cut",
+            ));
+        }
+        // Reconstructed originals, including withheld slots, enter the same
+        // per-source Read/Deliver and transport ceilings as ordinary content.
+        for source in sources {
+            if !input.committed_events.contains(&source) {
+                input.committed_events.push(source);
+            }
+        }
+        let controller = crate::realm_authorization_cut::owned_controller_in_connection(
+            &mut *conn,
+            &export.realm_id,
+            &actor,
+            at,
+        )
+        .await?
+        .ok_or_else(|| unavailable("export controller is unavailable"))?;
+        let owner = controller
+            .as_account_id()
+            .ok_or_else(|| unavailable("export controller is not an Account"))?;
+        let resources = [arkret_models_collaboration::governance::operation_wire::PolicyResourceSelector {
+            kind: arkret_models_collaboration::governance::operation_wire::PolicyResourceKind::Realm,
+            realm_id: Some(export.realm_id.clone()), resource_ref: Some(export.realm_id.to_string()),
+        }];
+        for operation in [AgentPolicyOperation::Read, AgentPolicyOperation::Deliver] {
+            Box::pin(
+                crate::agent_management_admission::require_content_snapshot_in_connection(
+                    &mut *conn,
+                    &export.realm_id,
+                    None,
+                    owner,
+                    account,
+                    operation,
+                    CapabilityActionId::EventRead,
+                    &resources,
+                    at,
+                ),
+            )
+            .await?;
+        }
+    }
+    for (realm, include_terminal, spaces, strands) in &input.projection_lists {
+        if !realms.contains(realm) {
+            continue;
+        }
+        let controller = crate::realm_authorization_cut::owned_controller_in_connection(
+            &mut *conn, realm, &actor, at,
+        )
+        .await?
+        .ok_or_else(|| unavailable("projection controller is unavailable"))?;
+        let owner = controller
+            .as_account_id()
+            .ok_or_else(|| unavailable("projection controller is not an Account"))?;
+        if !crate::object_projection_reads::projection_lists_match_in_connection(
+            &mut *conn,
+            realm,
+            &actor,
+            *include_terminal,
+            spaces,
+            strands,
+            owner,
+        )
+        .await?
+        {
+            return Err(unavailable(
+                "queued projection list differs from the current complete cut",
+            ));
+        }
+    }
+    for (realm, include_terminal, output) in &input.morph_lists {
+        if !realms.contains(realm) {
+            continue;
+        }
+        let controller = crate::realm_authorization_cut::owned_controller_in_connection(
+            &mut *conn, realm, &actor, at,
+        )
+        .await?
+        .ok_or_else(|| unavailable("Morph controller is unavailable"))?;
+        let owner = controller
+            .as_account_id()
+            .ok_or_else(|| unavailable("Morph controller is not an Account"))?;
+        let (fresh, facts) = Box::pin(crate::morph_projection_reads::list_in_connection(
+            &mut *conn,
+            realm,
+            &actor,
+            station,
+            *include_terminal,
+            at,
+        ))
+        .await?
+        .ok_or_else(|| unavailable("Morph list has no current actor cut"))?;
+        if arkret_canonical::canonical_json_bytes(&fresh).map_err(PersistenceError::database)?
+            != arkret_canonical::canonical_json_bytes(output).map_err(PersistenceError::database)?
+        {
+            return Err(unavailable(
+                "Morph list changed before publication, including empty output",
+            ));
+        }
+        let (owner_output, _) = Box::pin(crate::morph_projection_reads::list_in_connection(
+            &mut *conn,
+            realm,
+            &controller,
+            station,
+            *include_terminal,
+            at,
+        ))
+        .await?
+        .ok_or_else(|| unavailable("Morph list has no current controller cut"))?;
+        for row in &output.morphs {
+            let Some(owner_row) = owner_output
+                .morphs
+                .iter()
+                .find(|candidate| candidate.morph_id == row.morph_id)
+            else {
+                return Err(unavailable("controller cannot see a returned Morph row"));
+            };
+            if arkret_canonical::canonical_json_bytes(row).map_err(PersistenceError::database)?
+                != arkret_canonical::canonical_json_bytes(owner_row)
+                    .map_err(PersistenceError::database)?
+            {
+                return Err(unavailable(
+                    "controller's Morph row differs from the exact returned content",
+                ));
+            }
+        }
+        native_projection_reads.extend(
+            Box::pin(crate::morph_projection_reads::qualify_delivery_facts(
+                &mut *conn, account, owner, facts, at,
+            ))
+            .await?,
+        );
+    }
+    for (realm, morph, output) in &input.morph_documents {
+        if !realms.contains(realm) {
+            continue;
+        }
+        let controller = crate::realm_authorization_cut::owned_controller_in_connection(
+            &mut *conn, realm, &actor, at,
+        )
+        .await?
+        .ok_or_else(|| unavailable("document controller is unavailable"))?;
+        let owner = controller
+            .as_account_id()
+            .ok_or_else(|| unavailable("document controller is not an Account"))?;
+        let (fresh, facts) = Box::pin(crate::morph_projection_reads::document_in_connection(
+            &mut *conn, realm, morph, &actor, station, at,
+        ))
+        .await?
+        .ok_or_else(|| unavailable("document has no current actor cut"))?;
+        if arkret_canonical::canonical_json_bytes(&fresh).map_err(PersistenceError::database)?
+            != arkret_canonical::canonical_json_bytes(output).map_err(PersistenceError::database)?
+        {
+            return Err(unavailable(
+                "complete document output changed before publication",
+            ));
+        }
+        let (owner_output, _) = Box::pin(crate::morph_projection_reads::document_in_connection(
+            &mut *conn,
+            realm,
+            morph,
+            &controller,
+            station,
+            at,
+        ))
+        .await?
+        .ok_or_else(|| unavailable("document has no current controller cut"))?;
+        if !crate::morph_projection_reads::owner_covers_document(output, &owner_output)? {
+            return Err(unavailable(
+                "controller cannot see every returned document component",
+            ));
+        }
+        native_projection_reads.extend(
+            Box::pin(crate::morph_projection_reads::qualify_delivery_facts(
+                &mut *conn, account, owner, facts, at,
+            ))
+            .await?,
+        );
+    }
+    for (realm, morph) in &input.morph_absences {
+        if !realms.contains(realm) {
+            continue;
+        }
+        let controller = crate::realm_authorization_cut::owned_controller_in_connection(
+            &mut *conn, realm, &actor, at,
+        )
+        .await?
+        .ok_or_else(|| unavailable("document absence controller is unavailable"))?;
+        let owner = controller
+            .as_account_id()
+            .ok_or_else(|| unavailable("document absence controller is not an Account"))?;
+        let facts = Box::pin(
+            crate::morph_projection_reads::document_absence_in_connection(
+                &mut *conn, realm, morph, &actor, station, at,
+            ),
+        )
+        .await?;
+        Box::pin(
+            crate::morph_projection_reads::document_absence_in_connection(
+                &mut *conn,
+                realm,
+                morph,
+                &controller,
+                station,
+                at,
+            ),
+        )
+        .await?;
+        native_projection_reads.extend(
+            Box::pin(crate::morph_projection_reads::qualify_delivery_facts(
+                &mut *conn, account, owner, facts, at,
+            ))
+            .await?,
+        );
+    }
+    for (request, outcome) in &input.exact_reads {
+        if !realms.contains(&request.realm_id) {
+            continue;
+        }
+        let owner = crate::realm_authorization_cut::owned_controller_in_connection(
+            &mut *conn,
+            &request.realm_id,
+            &actor,
+            at,
+        )
+        .await?
+        .ok_or_else(|| unavailable("exact current controller is unavailable"))?;
+        let owner = owner
+            .as_account_id()
+            .ok_or_else(|| unavailable("current controller is not an Account"))?;
+        for recipient in [account, owner] {
+            let fresh = Box::pin(
+                crate::self_current_reads::exact_current_result_in_connection(
+                    &mut *conn, request, recipient, station,
+                ),
+            )
+            .await
+            .map_err(crate::PgTransactionError::into_persistence)?;
+            let coland_storage::SelfExactCurrentRead::Answer(fresh) = fresh else {
+                return Err(unavailable(
+                    "exact current is not currently disclosed to both recipients",
+                ));
+            };
+            if arkret_canonical::canonical_json_bytes(&fresh).map_err(PersistenceError::database)?
+                != arkret_canonical::canonical_json_bytes(outcome)
+                    .map_err(PersistenceError::database)?
+            {
+                return Err(unavailable(
+                    "queued exact current differs from the held cut",
+                ));
+            }
+        }
+        use arkret_models_collaboration::exact_current_results::{
+            ExactCurrentResultEntry as Entry, ExactCurrentResultsReadOutcome as Outcome,
+        };
+        let Outcome::Present { entry, .. } = outcome else {
+            return Err(unavailable(
+                "owned absence disclosure has no complete target proof",
+            ));
+        };
+        let (stream, revision) = match entry {
+            Entry::Relation(row) => (&row.source_stream_ref, &row.revision),
+            Entry::ModerationState(row) => (&row.source_stream_ref, &row.revision),
+            Entry::AgentInteraction(row) => (&row.source_stream_ref, &row.revision),
+            Entry::CapabilityGrant(row) => (&row.source_stream_ref, &row.revision),
+            Entry::Policy(row) => (&row.source_stream_ref, &row.revision),
+            Entry::CalendarScheduleSource(row) => (&row.source_stream_ref, &row.revision),
+        };
+        if matches!(entry, Entry::Policy(_)) {
+            let target = crate::policy_current_results::management_policy_scope_target(
+                &request.realm_id,
+                stream,
+            )?;
+            let actions = arkret_schema::capability_actions_for_event_kind(
+                arkret_wire::EventKind::PolicySet.as_str(),
+            )
+            .filter(|action| action.required_evaluator_checks.is_empty())
+            .map(|action| action.action.as_str())
+            .collect::<Vec<_>>();
+            for recipient in [account, owner] {
+                let cut = Box::pin(crate::realm_authorization_cut::RealmAuthorizationCut::read(
+                    &mut *conn,
+                    &request.realm_id,
+                    &ActorId::account(recipient.clone()),
+                ))
+                .await?;
+                if !cut.permits_unreserved_current_actions(&actions, &target, at) {
+                    return Err(unavailable("Policy current action coverage changed"));
+                }
+                positive_actions.push((cut, target.clone(), actions.clone()));
+            }
+        }
+        let event =
+            current_source_in_connection(&mut *conn, &request.realm_id, stream, revision).await?;
+        Box::pin(require_owned_current_source_in_connection(
+            &mut *conn, &event, owner, account, at,
+        ))
+        .await?;
+        object_sources
+            .entry(request.realm_id.clone())
+            .or_default()
+            .push((event, CapabilityActionId::ObjectRead));
+    }
+    for (request, outcome) in &input.watch_reads {
+        if !realms.contains(&request.realm_id) {
+            continue;
+        }
+        let fresh = Box::pin(
+            crate::self_current_reads::strand_watch_current_in_connection(
+                &mut *conn, request, account, station,
+            ),
+        )
+        .await
+        .map_err(crate::PgTransactionError::into_persistence)?;
+        let coland_storage::SelfExactCurrentRead::Answer(fresh) = fresh else {
+            return Err(unavailable("watch current is unavailable at the held cut"));
+        };
+        if arkret_canonical::canonical_json_bytes(&fresh).map_err(PersistenceError::database)?
+            != arkret_canonical::canonical_json_bytes(outcome)
+                .map_err(PersistenceError::database)?
+        {
+            return Err(unavailable(
+                "queued watch current differs from the held cut",
+            ));
+        }
+        let owner = crate::realm_authorization_cut::owned_controller_in_connection(
+            &mut *conn,
+            &request.realm_id,
+            &actor,
+            at,
+        )
+        .await?
+        .ok_or_else(|| unavailable("watch current controller is unavailable"))?;
+        let owner = owner
+            .as_account_id()
+            .ok_or_else(|| unavailable("current controller is not an Account"))?;
+        // The self-only watch cell is confirmed above, including native
+        // never-written proof. Its content boundary is the actual Strand;
+        // another recipient's watch cell is never a substitute read source.
+        let material = Box::pin(
+            crate::authority_commit::realm_state_snapshot_material_in_connection(
+                &mut *conn,
+                &request.realm_id,
+            ),
+        )
+        .await?
+        .ok_or_else(|| unavailable("watch target current material is unavailable"))?;
+        let (generation, head) = match outcome {
+            arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome::Current {
+                governance_generation, stream_head, ..
+            }
+            | arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome::NeverWritten {
+                governance_generation, stream_head, ..
+            } => (*governance_generation, stream_head),
+        };
+        if material.governance_generation != generation
+            || !material.visible_stream_heads.contains(head)
+        {
+            return Err(unavailable(
+                "watch target differs from its confirmed current cut",
+            ));
+        }
+        let row = material
+            .current_state_entries
+            .iter()
+            .find(|row| {
+                let arkret_wire::TypedCurrentRow::Value { selector, .. } = row;
+                matches!(selector, arkret_wire::CurrentSelector::Strand { strand_id }
+                if strand_id == &request.strand_id)
+            })
+            .ok_or_else(|| unavailable("watch target Strand current is unavailable"))?;
+        let arkret_wire::TypedCurrentRow::Value {
+            source_stream_ref,
+            revision,
+            ..
+        } = row;
+        if source_stream_ref != &head.stream_ref
+            || revision.stream_position > head.stream_position
+            || (revision.stream_position == head.stream_position
+                && revision.commit_id != head.commit_id)
+        {
+            return Err(unavailable(
+                "watch target Strand is outside its confirmed prefix",
+            ));
+        }
+        let event = current_source_in_connection(
+            &mut *conn,
+            &request.realm_id,
+            source_stream_ref,
+            revision,
+        )
+        .await?;
+        Box::pin(require_owned_content_source_in_connection(
+            &mut *conn,
+            &event,
+            owner,
+            account,
+            at,
+            CapabilityActionId::StrandRead,
+        ))
+        .await?;
+        object_sources
+            .entry(request.realm_id.clone())
+            .or_default()
+            .push((event, CapabilityActionId::StrandRead));
+    }
+    Ok(())
+}
+
+// Preserve queued material checks on the caller's existing transaction cut.
+async fn revalidate_content_inputs_in_connection(
+    conn: &mut AsyncPgConnection,
+    account: &AccountId,
+    actor: ActorId,
+    realms: &std::collections::BTreeSet<arkret_wire::RealmId>,
+    input: &mut coland_storage::AccountContentDeliveryInput,
+    facts: &mut QueuedContentFacts,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<()> {
+    let QueuedContentFacts {
+        object_sources,
+        native_projection_reads: _,
+        positive_actions: _,
+        blob_scope_operations,
+        blob_source_actions,
+    } = facts;
+    for realm in realms {
+        Box::pin(crate::realm_authorization_cut::owned_source_in_connection(
+            &mut *conn, realm, &actor, at, true,
+        ))
+        .await?
+        .ok_or_else(|| unavailable("current owned Agent source is unavailable"))?;
+    }
+    for delta in &input.notifications {
+        let Some(content) = delta.ordinary_projection() else {
+            continue;
+        };
+        if !realms.contains(&content.realm_id) {
+            continue;
+        }
+        let arkret_models_collaboration::objects::read_receipts::NotificationIdentity::Projection(
+            id,
+        ) = &delta.id
+        else {
+            return Err(unavailable("ordinary notification identity differs"));
+        };
+        content
+            .verify_id(account, id)
+            .map_err(|_| unavailable("ordinary notification recipient differs"))?;
+        let stored = sql_query("SELECT projection_data AS value FROM notifications WHERE projection_id=$1 AND recipient_actor_id=$2 AND realm_id=$3 AND source_event_id=$4 AND projection_action='upsert' FOR SHARE")
+            .bind::<Text,_>(id.as_str())
+            .bind::<Text,_>(actor.to_string())
+            .bind::<Text,_>(content.realm_id.as_str())
+            .bind::<Text,_>(content.source_event_id.as_str())
+            .get_result::<ValueRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+            .ok_or_else(|| unavailable("ordinary notification current source changed"))?;
+        let mut original: arkret_models_collaboration::objects::read_receipts::OrdinaryProjectionContent = serde_json::from_value(stored.value).map_err(PersistenceError::database)?;
+        original
+            .verify_id(account, id)
+            .map_err(|_| unavailable("stored notification recipient differs"))?;
+        // The original channel budget may omit a preview, never replace it.
+        if content.preview.is_none() {
+            original.preview = None;
+        }
+        if &original != content {
+            return Err(unavailable(
+                "queued notification differs from its current source",
+            ));
+        }
+        let full = crate::committed_disclosure::accepted_full_event_in_connection(
+            &mut *conn,
+            &content.source_event_id,
+        )
+        .await?
+        .ok_or_else(|| unavailable("ordinary notification has no accepted source"))?;
+        if full.event.realm_id != content.realm_id {
+            return Err(unavailable("ordinary notification source Realm differs"));
+        }
+        let view = CommittedEventView::Full(full);
+        if !input.committed_events.contains(&view) {
+            input.committed_events.push(view);
+        }
+    }
+    for (blob_ref, original, action) in &input.blobs {
+        if !matches!(
+            action,
+            CapabilityActionId::ObjectReadContent | CapabilityActionId::ObjectReadMetadata
+        ) {
+            return Err(unavailable(
+                "attachment has no registered content surface action",
+            ));
+        }
+        let realm = original
+            .realm_id
+            .as_deref()
+            .map(arkret_wire::RealmId::new)
+            .transpose()
+            .map_err(PersistenceError::database)?;
+        let Some(realm) = realm.filter(|realm| realms.contains(realm)) else {
+            continue;
+        };
+        let held = crate::blobs::blob_for_delivery_in_connection(&mut *conn, blob_ref)
+            .await?
+            .ok_or_else(|| unavailable("attachment current metadata is unavailable"))?;
+        if &held != original || held.redacted || held.legal_hold {
+            return Err(unavailable("attachment current source changed"));
+        }
+        let sources = sql_query("SELECT e.envelope->>'event_id' AS event_id FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE c.realm_id=$1 AND e.state='committed' AND e.kind='ak.message.create' AND e.envelope->'payload'->'blob_refs' ? $2 ORDER BY e.envelope->>'event_id'")
+            .bind::<Text,_>(realm.as_str()).bind::<Text,_>(blob_ref.as_str()).load::<SourceEventRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+        let owner = crate::realm_authorization_cut::owned_controller_in_connection(
+            &mut *conn, &realm, &actor, at,
+        )
+        .await?
+        .ok_or_else(|| unavailable("attachment controller is unavailable"))?;
+        let owner = owner
+            .as_account_id()
+            .ok_or_else(|| unavailable("attachment controller is not an Account"))?;
+        let mut selected = None;
+        for source in sources {
+            let id =
+                arkret_wire::EventId::new(source.event_id).map_err(PersistenceError::database)?;
+            let full =
+                crate::committed_disclosure::accepted_full_event_in_connection(&mut *conn, &id)
+                    .await?
+                    .ok_or_else(|| unavailable("attachment has no accepted producer"))?;
+            let body: arkret_models_collaboration::events_payloads::message::MessageCreatePayload =
+                serde_json::from_value(
+                    serde_json::to_value(&full.event.payload)
+                        .map_err(PersistenceError::database)?,
+                )
+                .map_err(PersistenceError::database)?;
+            if !body
+                .blob_refs
+                .iter()
+                .any(|value| value == blob_ref.as_str())
+                || full.event.realm_id != realm
+            {
+                return Err(unavailable("attachment original signed binding differs"));
+            }
+            if !crate::committed_disclosure::withheld_commit_ids_in_connection(
+                &mut *conn,
+                &[full.commit.commit_id.to_string()],
+            )
+            .await?
+            .is_empty()
+                || !crate::committed_disclosure::full_event_for_member_in_connection(
+                    &mut *conn, &full, &actor, at,
+                )
+                .await?
+            {
+                continue;
+            }
+            let authorized: PersistenceResult<()> = async {
+        let mut resources =
+            crate::agent_management_admission::event_content_resources(&full.event)?;
+        let resource = arkret_models_collaboration::governance::operation_wire::PolicyResourceSelector {
+            kind: arkret_models_collaboration::governance::operation_wire::PolicyResourceKind::Object,
+            realm_id: Some(realm.clone()),
+            resource_ref: Some(blob_ref.as_str().to_owned()),
+        };
+        if !resources.contains(&resource) {
+            resources.push(resource);
+        }
+        let circle = match &full.event.scope_ref {
+            arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
+            _ => None,
+        };
+        for operation in [AgentPolicyOperation::Read, AgentPolicyOperation::Deliver] {
+            Box::pin(crate::agent_management_admission::require_content_snapshot_in_connection(
+                &mut *conn,
+                &realm,
+                circle,
+                owner,
+                account,
+                operation,
+                *action,
+                &resources,
+                at,
+            ))
+            .await?;
+        }
+                for recipient in [account, owner] {
+                    let recipient_actor = ActorId::account(recipient.clone());
+                    let cut = Box::pin(crate::realm_authorization_cut::RealmAuthorizationCut::read(
+                        &mut *conn, &realm, &recipient_actor,
+                    )).await?;
+                    let source = Box::pin(crate::realm_authorization_cut::owned_source_in_connection(
+                        &mut *conn, &realm, &recipient_actor, at, false,
+                    )).await?;
+                    cut.require_content_read_constraints(
+                        &full.event, at, source, *action,
+                    )?;
+                }
+                Ok(())
+            }.await;
+            match authorized {
+                Ok(()) => {
+                    selected = Some(full);
+                    break;
+                }
+                Err(error)
+                    if error.conflict_code()
+                        == Some(coland_storage::ConflictCode::CapabilityDenied) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let full = selected
+            .ok_or_else(|| unavailable("attachment has no currently readable signed source"))?;
+        let cut = Box::pin(crate::realm_authorization_cut::RealmAuthorizationCut::read(
+            &mut *conn, &realm, &actor,
+        ))
+        .await?;
+        let (_, facts) = cut.content_scope_facts(&full.event, *action)?;
+        let mut target = arkret_wire::WireResourceSelector::realm(realm.clone());
+        target.kind = arkret_wire::ResourceSelectorKind::Blob;
+        target.blob_ref = Some(blob_ref.clone());
+        blob_scope_operations.push((actor.clone(), target, facts, *action));
+        blob_source_actions.insert((full.event.event_id.clone(), action.as_str()));
+        object_sources
+            .entry(realm)
+            .or_default()
+            .push((full.event.clone(), *action));
+    }
+    for realm in realms {
+        if input.unresolved_content_realms.contains(realm) {
+            return Err(unavailable(
+                "the content carrier has no current target proof",
+            ));
+        }
+        let views = input
+            .current_views
+            .iter()
+            .filter(|view| &view.realm_id == realm);
+        let snapshots = input
+            .snapshots
+            .iter()
+            .filter(|snapshot| &snapshot.realm_id == realm);
+        if input
+            .current_views
+            .iter()
+            .any(|view| &view.realm_id == realm)
+            || input
+                .snapshots
+                .iter()
+                .any(|snapshot| &snapshot.realm_id == realm)
+        {
+            let current = Box::pin(
+                crate::snapshot_disclosure_gate::account_snapshot_material_in_connection(
+                    &mut *conn, realm, account,
+                ),
+            )
+            .await?
+            .ok_or_else(|| unavailable("current disclosure material is unavailable"))?;
+            for row in input
+                .current_views
+                .iter()
+                .filter(|view| &view.realm_id == realm)
+                .flat_map(|view| &view.entries)
+                .chain(
+                    input
+                        .snapshots
+                        .iter()
+                        .filter(|snapshot| &snapshot.realm_id == realm)
+                        .flat_map(|snapshot| &snapshot.current_state_entries),
+                )
+            {
+                let arkret_wire::TypedCurrentRow::Value {
+                    source_stream_ref,
+                    revision,
+                    ..
+                } = row;
+                object_sources.entry(realm.clone()).or_default().push((
+                    current_source_in_connection(&mut *conn, realm, source_stream_ref, revision)
+                        .await?,
+                    CapabilityActionId::ObjectRead,
+                ));
+            }
+            for view in views {
+                view.validate()
+                    .map_err(|error| unavailable(&error.to_string()))?;
+                if view.governance_generation != current.governance_generation
+                    || view
+                        .entries
+                        .iter()
+                        .any(|row| !current.current_state_entries.contains(row))
+                    || view
+                        .stream_heads
+                        .iter()
+                        .any(|head| !current.visible_stream_heads.contains(head))
+                {
+                    return Err(unavailable(
+                        "queued current bytes no longer match the current disclosure cut",
+                    ));
+                }
+            }
+            for snapshot in snapshots {
+                if snapshot.governance_generation != current.governance_generation
+                    || snapshot
+                        .current_state_entries
+                        .iter()
+                        .any(|row| !current.current_state_entries.contains(row))
+                    || snapshot
+                        .visible_stream_heads
+                        .iter()
+                        .any(|head| !current.visible_stream_heads.contains(head))
+                    || snapshot.retention_and_history_floor != current.retention_and_history_floor
+                {
+                    return Err(unavailable(
+                        "issued snapshot has no current complete disclosure proof",
+                    ));
+                }
+            }
+        }
+    }
+    for welcome in &input.future_materials {
+        if !realms.contains(&welcome.realm_id) {
+            continue;
+        }
+        welcome
+            .validate_shape()
+            .map_err(|error| unavailable(&error.to_string()))?;
+        if welcome.recipient_actor_id != actor {
+            return Err(unavailable("future material recipient differs"));
+        }
+        let full = crate::committed_disclosure::accepted_full_event_in_connection(
+            &mut *conn,
+            &welcome.commit_event_ref,
+        )
+        .await?
+        .ok_or_else(|| unavailable("future material has no accepted producer"))?;
+        if full.event.realm_id != welcome.realm_id
+            || full.event.scope_ref != welcome.effective_scope
+            || !crate::committed_disclosure::full_event_for_member_in_connection(
+                &mut *conn, &full, &actor, at,
+            )
+            .await
+            .inspect_err(|_| {
+                tracing::warn!(
+                    stage = "future_material_disclosure_error",
+                    "owned future material delivery is unavailable"
+                );
+            })?
+        {
+            tracing::warn!(
+                stage = "future_material_disclosure",
+                "owned future material delivery is unavailable"
+            );
+            return Err(unavailable(
+                "future material has no current disclosure proof",
+            ));
+        }
+        let queued = sql_query("SELECT EXISTS(SELECT 1 FROM mls_welcome_deliveries WHERE welcome_id=$1 AND state='queued' AND delivery_json=$2) AS present")
+            .bind::<Text,_>(welcome.welcome_id.as_str())
+            .bind::<diesel::sql_types::Jsonb,_>(serde_json::to_value(welcome).map_err(PersistenceError::database)?)
+            .get_result::<crate::query_rows::ExistsRow>(&mut *conn).await.map_err(PersistenceError::database)?.present;
+        if !queued {
+            return Err(unavailable("future material queue source changed"));
+        }
+        let controller = crate::realm_authorization_cut::owned_controller_in_connection(
+            &mut *conn,
+            &welcome.realm_id,
+            &actor,
+            at,
+        )
+        .await?
+        .ok_or_else(|| unavailable("future material controller is unavailable"))?;
+        let owner = controller
+            .as_account_id()
+            .ok_or_else(|| unavailable("controller is not an Account"))?;
+        let resources = crate::agent_management_admission::event_content_resources(&full.event)?;
+        let circle = match &welcome.effective_scope {
+            arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
+            _ => None,
+        };
+        Box::pin(
+            crate::agent_management_admission::require_content_snapshot_in_connection(
+                &mut *conn,
+                &welcome.realm_id,
+                circle,
+                owner,
+                account,
+                AgentPolicyOperation::Deliver,
+                CapabilityActionId::EventRead,
+                &resources,
+                at,
+            ),
+        )
+        .await?;
+    }
+    Box::pin(revalidate_committed_events_in_connection(
+        &mut *conn,
+        account,
+        actor.clone(),
+        &realms,
+        &input,
+        at,
+    ))
+    .await?;
+    Ok(())
 }
 
 async fn acquire_with_native_reply(
@@ -1097,7 +2767,7 @@ async fn acquire_with_native_reply(
     input: &coland_storage::AccountContentDeliveryInput,
     reply: Option<NativeReplyContext<'_>>,
 ) -> PersistenceResult<Option<Box<dyn AccountContentDeliveryGuard>>> {
-    let mut input = input.clone();
+    let input = input.clone();
     let mut guard = Box::new(DeliveryGuard {
         connection: Some(crate::pg_conn(pool).await?),
         runtime: tokio::runtime::Handle::current(),
@@ -1148,11 +2818,27 @@ async fn acquire_with_native_reply(
     }
     if realms.is_empty() {
         guard.finish().await?;
-        return crate::morph_projection_reads::ordinary_delivery_guard(
+        return Box::pin(crate::morph_projection_reads::ordinary_delivery_guard(
             pool, account, station, &input,
-        )
+        ))
         .await;
     }
+    // Keep the ordinary branch out of the owned-content state machine. Both
+    // branches preserve the same transaction and handoff ownership rules.
+    Box::pin(acquire_owned_delivery_guard(
+        guard, account, station, input, realms, reply,
+    ))
+    .await
+}
+
+async fn acquire_owned_delivery_guard(
+    mut guard: Box<DeliveryGuard>,
+    account: &AccountId,
+    station: &DidCoreId,
+    mut input: coland_storage::AccountContentDeliveryInput,
+    realms: std::collections::BTreeSet<arkret_wire::RealmId>,
+    reply: Option<NativeReplyContext<'_>>,
+) -> PersistenceResult<Option<Box<dyn AccountContentDeliveryGuard>>> {
     // Discover immutable PCR bindings without taking subordinate row locks.
     // Keep the original business-then-Agent-then-Human hierarchy. Original
     // ordinary Morph also sorts its business/PCR cuts together, so added PCR
@@ -1189,7 +2875,8 @@ async fn acquire_with_native_reply(
     let endpoint = input
         .agent_endpoint
         .as_ref()
-        .ok_or_else(|| unavailable("Agent delivery has no current endpoint binding"))?;
+        .ok_or_else(|| unavailable("Agent delivery has no current endpoint binding"))?
+        .clone();
     if endpoint.agent_id != account.principal_id {
         return Err(unavailable(
             "Agent delivery endpoint differs from recipient",
@@ -1220,1154 +2907,139 @@ async fn acquire_with_native_reply(
     }
     // Take the producer lock before reading the clock. The same lock is held
     // by native status/key writers; a waiter cannot reuse pre-wait liveness.
-    crate::agent_current_results::lock_agent_producer_current(
+    Box::pin(crate::agent_current_results::lock_agent_producer_current(
         guard.connection(),
         &endpoint.pcr_realm_id,
         &endpoint.agent_id,
-    )
+    ))
     .await?;
     // Acquire every membership, provisioning, accountability and lifecycle
     // dependency before fixing the content evaluation time.
     for realm in &realms {
-        crate::realm_authorization_cut::owned_source_in_connection(
+        Box::pin(crate::realm_authorization_cut::owned_source_in_connection(
             guard.connection(),
             realm,
             &actor,
             chrono::Utc::now(),
             true,
-        )
-        .await?
-        .ok_or_else(|| unavailable("current owned Agent source is unavailable"))?;
+        ))
+        .await
+        .inspect_err(|_| {
+            if !input.future_materials.is_empty() {
+                tracing::warn!(
+                    stage = "future_material_owned_source",
+                    "owned future material delivery is unavailable"
+                );
+            }
+        })?
+        .ok_or_else(|| {
+            if !input.future_materials.is_empty() {
+                tracing::warn!(
+                    stage = "future_material_owned_source_absent",
+                    "owned future material delivery is unavailable"
+                );
+            }
+            unavailable("current owned Agent source is unavailable")
+        })?;
     }
     let at = chrono::Utc::now();
-    crate::authority_commit::check_agent_endpoint_current_in_connection(
-        guard.connection(),
-        &endpoint.pcr_realm_id,
-        &endpoint.agent_id,
-        &endpoint.authorization_ref,
-        &endpoint.verification_method,
-        at,
+    Box::pin(
+        crate::authority_commit::check_agent_endpoint_current_in_connection(
+            guard.connection(),
+            &endpoint.pcr_realm_id,
+            &endpoint.agent_id,
+            &endpoint.authorization_ref,
+            &endpoint.verification_method,
+            at,
+        ),
     )
     .await?;
-    let mut object_sources = std::collections::BTreeMap::<
-        arkret_wire::RealmId,
-        Vec<(arkret_wire::Event, CapabilityActionId)>,
-    >::new();
-    let mut native_projection_reads = Vec::new();
-    let mut positive_actions = Vec::new();
-    let mut blob_scope_operations = Vec::new();
-    let mut blob_source_actions = std::collections::BTreeSet::new();
-    crate::boxed_future(|| async {
-for export in input.realm_exports.clone() {
-        if !realms.contains(&export.realm_id) {
-            continue;
-        }
-        let (fresh, sources) = realm_export_in_connection(
-            guard.connection(),
-            &export.realm_id,
-            &actor,
-            station,
-            export.generated_at,
-        )
-        .await?
-        .ok_or_else(|| unavailable("queued Realm export has no current caller cut"))?;
-        if arkret_canonical::canonical_json_bytes(&export).map_err(PersistenceError::database)?
-            != arkret_canonical::canonical_json_bytes(&fresh).map_err(PersistenceError::database)?
-        {
-            return Err(unavailable(
-                "queued Realm export differs from the complete accepted cut",
-            ));
-        }
-        // Reconstructed originals, including withheld slots, enter the same
-        // per-source Read/Deliver and transport ceilings as ordinary content.
-        for source in sources {
-            if !input.committed_events.contains(&source) {
-                input.committed_events.push(source);
-            }
-        }
-        let controller = crate::realm_authorization_cut::owned_controller_in_connection(
-            guard.connection(),
-            &export.realm_id,
-            &actor,
-            at,
-        )
-        .await?
-        .ok_or_else(|| unavailable("export controller is unavailable"))?;
-        let owner = controller
-            .as_account_id()
-            .ok_or_else(|| unavailable("export controller is not an Account"))?;
-        let resources = [arkret_models_collaboration::governance::operation_wire::PolicyResourceSelector {
-            kind: arkret_models_collaboration::governance::operation_wire::PolicyResourceKind::Realm,
-            realm_id: Some(export.realm_id.clone()), resource_ref: Some(export.realm_id.to_string()),
-        }];
-        for operation in [AgentPolicyOperation::Read, AgentPolicyOperation::Deliver] {
-            crate::agent_management_admission::require_content_snapshot_in_connection(
-                guard.connection(),
-                &export.realm_id,
-                None,
-                owner,
-                account,
-                operation,
-                CapabilityActionId::EventRead,
-                &resources,
-                at,
-            )
-            .await?;
-        }
-    }
-Ok(())
-}).await?;
-    crate::boxed_future(|| async {
-        for (realm, include_terminal, spaces, strands) in &input.projection_lists {
-            if !realms.contains(realm) {
-                continue;
-            }
-            let controller = crate::realm_authorization_cut::owned_controller_in_connection(
-                guard.connection(),
-                realm,
-                &actor,
-                at,
-            )
-            .await?
-            .ok_or_else(|| unavailable("projection controller is unavailable"))?;
-            let owner = controller
-                .as_account_id()
-                .ok_or_else(|| unavailable("projection controller is not an Account"))?;
-            if !crate::object_projection_reads::projection_lists_match_in_connection(
-                guard.connection(),
-                realm,
-                &actor,
-                *include_terminal,
-                spaces,
-                strands,
-                owner,
-            )
-            .await?
-            {
-                return Err(unavailable(
-                    "queued projection list differs from the current complete cut",
-                ));
-            }
-        }
-        Ok(())
-    })
+    let mut queued = QueuedContentFacts::default();
+    Box::pin(revalidate_projection_inputs_in_connection(
+        guard.connection(),
+        account,
+        station,
+        actor.clone(),
+        &realms,
+        &mut input,
+        &mut queued,
+        at,
+    ))
     .await?;
-    crate::boxed_future(|| async {
-        for (realm, include_terminal, output) in &input.morph_lists {
-            if !realms.contains(realm) {
-                continue;
-            }
-            let controller = crate::realm_authorization_cut::owned_controller_in_connection(
-                guard.connection(),
-                realm,
-                &actor,
-                at,
-            )
-            .await?
-            .ok_or_else(|| unavailable("Morph controller is unavailable"))?;
-            let owner = controller
-                .as_account_id()
-                .ok_or_else(|| unavailable("Morph controller is not an Account"))?;
-            let (fresh, facts) = crate::morph_projection_reads::list_in_connection(
-                guard.connection(),
-                realm,
-                &actor,
-                station,
-                *include_terminal,
-                at,
-            )
-            .await?
-            .ok_or_else(|| unavailable("Morph list has no current actor cut"))?;
-            if arkret_canonical::canonical_json_bytes(&fresh).map_err(PersistenceError::database)?
-                != arkret_canonical::canonical_json_bytes(output)
-                    .map_err(PersistenceError::database)?
-            {
-                return Err(unavailable(
-                    "Morph list changed before publication, including empty output",
-                ));
-            }
-            let (owner_output, _) = crate::morph_projection_reads::list_in_connection(
-                guard.connection(),
-                realm,
-                &controller,
-                station,
-                *include_terminal,
-                at,
-            )
-            .await?
-            .ok_or_else(|| unavailable("Morph list has no current controller cut"))?;
-            for row in &output.morphs {
-                let Some(owner_row) = owner_output
-                    .morphs
-                    .iter()
-                    .find(|candidate| candidate.morph_id == row.morph_id)
-                else {
-                    return Err(unavailable("controller cannot see a returned Morph row"));
-                };
-                if arkret_canonical::canonical_json_bytes(row)
-                    .map_err(PersistenceError::database)?
-                    != arkret_canonical::canonical_json_bytes(owner_row)
-                        .map_err(PersistenceError::database)?
-                {
-                    return Err(unavailable(
-                        "controller's Morph row differs from the exact returned content",
-                    ));
-                }
-            }
-            native_projection_reads.extend(
-                crate::morph_projection_reads::qualify_delivery_facts(
-                    guard.connection(),
-                    account,
-                    owner,
-                    facts,
-                    at,
-                )
-                .await?,
+    Box::pin(revalidate_content_inputs_in_connection(
+        guard.connection(),
+        account,
+        actor.clone(),
+        &realms,
+        &mut input,
+        &mut queued,
+        at,
+    ))
+    .await
+    .inspect_err(|_| {
+        if !input.future_materials.is_empty() {
+            tracing::warn!(
+                stage = "future_material_content_inputs",
+                "owned future material delivery is unavailable"
             );
         }
-        Ok(())
-    })
-    .await?;
-    crate::boxed_future(|| async {
-        for (realm, morph, output) in &input.morph_documents {
-            if !realms.contains(realm) {
-                continue;
-            }
-            let controller = crate::realm_authorization_cut::owned_controller_in_connection(
-                guard.connection(),
-                realm,
-                &actor,
-                at,
-            )
-            .await?
-            .ok_or_else(|| unavailable("document controller is unavailable"))?;
-            let owner = controller
-                .as_account_id()
-                .ok_or_else(|| unavailable("document controller is not an Account"))?;
-            let (fresh, facts) = crate::morph_projection_reads::document_in_connection(
-                guard.connection(),
-                realm,
-                morph,
-                &actor,
-                station,
-                at,
-            )
-            .await?
-            .ok_or_else(|| unavailable("document has no current actor cut"))?;
-            if arkret_canonical::canonical_json_bytes(&fresh).map_err(PersistenceError::database)?
-                != arkret_canonical::canonical_json_bytes(output)
-                    .map_err(PersistenceError::database)?
-            {
-                return Err(unavailable(
-                    "complete document output changed before publication",
-                ));
-            }
-            let (owner_output, _) = crate::morph_projection_reads::document_in_connection(
-                guard.connection(),
-                realm,
-                morph,
-                &controller,
-                station,
-                at,
-            )
-            .await?
-            .ok_or_else(|| unavailable("document has no current controller cut"))?;
-            if !crate::morph_projection_reads::owner_covers_document(output, &owner_output)? {
-                return Err(unavailable(
-                    "controller cannot see every returned document component",
-                ));
-            }
-            native_projection_reads.extend(
-                crate::morph_projection_reads::qualify_delivery_facts(
-                    guard.connection(),
-                    account,
-                    owner,
-                    facts,
-                    at,
-                )
-                .await?,
-            );
-        }
-        Ok(())
-    })
-    .await?;
-    crate::boxed_future(|| async {
-        for (realm, morph) in &input.morph_absences {
-            if !realms.contains(realm) {
-                continue;
-            }
-            let controller = crate::realm_authorization_cut::owned_controller_in_connection(
-                guard.connection(),
-                realm,
-                &actor,
-                at,
-            )
-            .await?
-            .ok_or_else(|| unavailable("document absence controller is unavailable"))?;
-            let owner = controller
-                .as_account_id()
-                .ok_or_else(|| unavailable("document absence controller is not an Account"))?;
-            let facts = crate::morph_projection_reads::document_absence_in_connection(
-                guard.connection(),
-                realm,
-                morph,
-                &actor,
-                station,
-                at,
-            )
-            .await?;
-            crate::morph_projection_reads::document_absence_in_connection(
-                guard.connection(),
-                realm,
-                morph,
-                &controller,
-                station,
-                at,
-            )
-            .await?;
-            native_projection_reads.extend(
-                crate::morph_projection_reads::qualify_delivery_facts(
-                    guard.connection(),
-                    account,
-                    owner,
-                    facts,
-                    at,
-                )
-                .await?,
-            );
-        }
-        Ok(())
-    })
-    .await?;
-    crate::boxed_future(|| async {
-        for (request, outcome) in &input.exact_reads {
-            if !realms.contains(&request.realm_id) {
-                continue;
-            }
-            let owner = crate::realm_authorization_cut::owned_controller_in_connection(
-                guard.connection(),
-                &request.realm_id,
-                &actor,
-                at,
-            )
-            .await?
-            .ok_or_else(|| unavailable("exact current controller is unavailable"))?;
-            let owner = owner
-                .as_account_id()
-                .ok_or_else(|| unavailable("current controller is not an Account"))?;
-            for recipient in [account, owner] {
-                let fresh = crate::self_current_reads::exact_current_result_in_connection(
-                    guard.connection(),
-                    request,
-                    recipient,
-                    station,
-                )
-                .await
-                .map_err(crate::PgTransactionError::into_persistence)?;
-                let coland_storage::SelfExactCurrentRead::Answer(fresh) = fresh else {
-                    return Err(unavailable(
-                        "exact current is not currently disclosed to both recipients",
-                    ));
-                };
-                if arkret_canonical::canonical_json_bytes(&fresh)
-                    .map_err(PersistenceError::database)?
-                    != arkret_canonical::canonical_json_bytes(outcome)
-                        .map_err(PersistenceError::database)?
-                {
-                    return Err(unavailable(
-                        "queued exact current differs from the held cut",
-                    ));
-                }
-            }
-            use arkret_models_collaboration::exact_current_results::{
-                ExactCurrentResultEntry as Entry, ExactCurrentResultsReadOutcome as Outcome,
-            };
-            let Outcome::Present { entry, .. } = outcome else {
-                return Err(unavailable(
-                    "owned absence disclosure has no complete target proof",
-                ));
-            };
-            let (stream, revision) = match entry {
-                Entry::Relation(row) => (&row.source_stream_ref, &row.revision),
-                Entry::ModerationState(row) => (&row.source_stream_ref, &row.revision),
-                Entry::AgentInteraction(row) => (&row.source_stream_ref, &row.revision),
-                Entry::CapabilityGrant(row) => (&row.source_stream_ref, &row.revision),
-                Entry::Policy(row) => (&row.source_stream_ref, &row.revision),
-                Entry::CalendarScheduleSource(row) => (&row.source_stream_ref, &row.revision),
-            };
-            if matches!(entry, Entry::Policy(_)) {
-                let target = crate::policy_current_results::management_policy_scope_target(
-                    &request.realm_id,
-                    stream,
-                )?;
-                let actions = arkret_schema::capability_actions_for_event_kind(
-                    arkret_wire::EventKind::PolicySet.as_str(),
-                )
-                .filter(|action| action.required_evaluator_checks.is_empty())
-                .map(|action| action.action.as_str())
-                .collect::<Vec<_>>();
-                for recipient in [account, owner] {
-                    let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
-                        guard.connection(),
-                        &request.realm_id,
-                        &ActorId::account(recipient.clone()),
-                    )
-                    .await?;
-                    if !cut.permits_unreserved_current_actions(&actions, &target, at) {
-                        return Err(unavailable("Policy current action coverage changed"));
-                    }
-                    positive_actions.push((cut, target.clone(), actions.clone()));
-                }
-            }
-            let event = current_source_in_connection(
-                guard.connection(),
-                &request.realm_id,
-                stream,
-                revision,
-            )
-            .await?;
-            require_owned_current_source_in_connection(
-                guard.connection(),
-                &event,
-                owner,
-                account,
-                at,
-            )
-            .await?;
-            object_sources
-                .entry(request.realm_id.clone())
-                .or_default()
-                .push((event, CapabilityActionId::ObjectRead));
-        }
-        Ok(())
-    })
-    .await?;
-    crate::boxed_future(|| async {
-for (request, outcome) in &input.watch_reads {
-        if !realms.contains(&request.realm_id) {
-            continue;
-        }
-        let fresh = crate::self_current_reads::strand_watch_current_in_connection(
-            guard.connection(),
-            request,
-            account,
-            station,
-        )
-        .await
-        .map_err(crate::PgTransactionError::into_persistence)?;
-        let coland_storage::SelfExactCurrentRead::Answer(fresh) = fresh else {
-            return Err(unavailable("watch current is unavailable at the held cut"));
-        };
-        if arkret_canonical::canonical_json_bytes(&fresh).map_err(PersistenceError::database)?
-            != arkret_canonical::canonical_json_bytes(outcome)
-                .map_err(PersistenceError::database)?
-        {
-            return Err(unavailable(
-                "queued watch current differs from the held cut",
-            ));
-        }
-        let owner = crate::realm_authorization_cut::owned_controller_in_connection(
-            guard.connection(),
-            &request.realm_id,
-            &actor,
-            at,
-        )
-        .await?
-        .ok_or_else(|| unavailable("watch current controller is unavailable"))?;
-        let owner = owner
-            .as_account_id()
-            .ok_or_else(|| unavailable("current controller is not an Account"))?;
-        // The self-only watch cell is confirmed above, including native
-        // never-written proof. Its content boundary is the actual Strand;
-        // another recipient's watch cell is never a substitute read source.
-        let material = crate::authority_commit::realm_state_snapshot_material_in_connection(
-            guard.connection(),
-            &request.realm_id,
-        )
-        .await?
-        .ok_or_else(|| unavailable("watch target current material is unavailable"))?;
-        let (generation, head) = match outcome {
-            arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome::Current {
-                governance_generation, stream_head, ..
-            }
-            | arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome::NeverWritten {
-                governance_generation, stream_head, ..
-            } => (*governance_generation, stream_head),
-        };
-        if material.governance_generation != generation
-            || !material.visible_stream_heads.contains(head)
-        {
-            return Err(unavailable(
-                "watch target differs from its confirmed current cut",
-            ));
-        }
-        let row = material
-            .current_state_entries
-            .iter()
-            .find(|row| {
-                let arkret_wire::TypedCurrentRow::Value { selector, .. } = row;
-                matches!(selector, arkret_wire::CurrentSelector::Strand { strand_id }
-                if strand_id == &request.strand_id)
-            })
-            .ok_or_else(|| unavailable("watch target Strand current is unavailable"))?;
-        let arkret_wire::TypedCurrentRow::Value {
-            source_stream_ref,
-            revision,
-            ..
-        } = row;
-        if source_stream_ref != &head.stream_ref
-            || revision.stream_position > head.stream_position
-            || (revision.stream_position == head.stream_position
-                && revision.commit_id != head.commit_id)
-        {
-            return Err(unavailable(
-                "watch target Strand is outside its confirmed prefix",
-            ));
-        }
-        let event = current_source_in_connection(
-            guard.connection(),
-            &request.realm_id,
-            source_stream_ref,
-            revision,
-        )
-        .await?;
-        require_owned_content_source_in_connection(
-            guard.connection(),
-            &event,
-            owner,
-            account,
-            at,
-            CapabilityActionId::StrandRead,
-        )
-        .await?;
-        object_sources
-            .entry(request.realm_id.clone())
-            .or_default()
-            .push((event, CapabilityActionId::StrandRead));
-    }
-Ok(())
-}).await?;
-    crate::boxed_future(|| async {
-        for realm in &realms {
-            crate::realm_authorization_cut::owned_source_in_connection(
-                guard.connection(),
-                realm,
-                &actor,
-                at,
-                true,
-            )
-            .await?
-            .ok_or_else(|| unavailable("current owned Agent source is unavailable"))?;
-        }
-        Ok(())
-    })
-    .await?;
-    crate::boxed_future(|| async {
-for delta in &input.notifications {
-        let Some(content) = delta.ordinary_projection() else {
-            continue;
-        };
-        if !realms.contains(&content.realm_id) {
-            continue;
-        }
-        let arkret_models_collaboration::objects::read_receipts::NotificationIdentity::Projection(
-            id,
-        ) = &delta.id
-        else {
-            return Err(unavailable("ordinary notification identity differs"));
-        };
-        content
-            .verify_id(account, id)
-            .map_err(|_| unavailable("ordinary notification recipient differs"))?;
-        let stored = sql_query("SELECT projection_data AS value FROM notifications WHERE projection_id=$1 AND recipient_actor_id=$2 AND realm_id=$3 AND source_event_id=$4 AND projection_action='upsert' FOR SHARE")
-            .bind::<Text,_>(id.as_str())
-            .bind::<Text,_>(actor.to_string())
-            .bind::<Text,_>(content.realm_id.as_str())
-            .bind::<Text,_>(content.source_event_id.as_str())
-            .get_result::<ValueRow>(guard.connection()).await.optional().map_err(PersistenceError::database)?
-            .ok_or_else(|| unavailable("ordinary notification current source changed"))?;
-        let mut original: arkret_models_collaboration::objects::read_receipts::OrdinaryProjectionContent = serde_json::from_value(stored.value).map_err(PersistenceError::database)?;
-        original
-            .verify_id(account, id)
-            .map_err(|_| unavailable("stored notification recipient differs"))?;
-        // The original channel budget may omit a preview, never replace it.
-        if content.preview.is_none() {
-            original.preview = None;
-        }
-        if &original != content {
-            return Err(unavailable(
-                "queued notification differs from its current source",
-            ));
-        }
-        let full = crate::committed_disclosure::accepted_full_event_in_connection(
-            guard.connection(),
-            &content.source_event_id,
-        )
-        .await?
-        .ok_or_else(|| unavailable("ordinary notification has no accepted source"))?;
-        if full.event.realm_id != content.realm_id {
-            return Err(unavailable("ordinary notification source Realm differs"));
-        }
-        let view = CommittedEventView::Full(full);
-        if !input.committed_events.contains(&view) {
-            input.committed_events.push(view);
-        }
-    }
-Ok(())
-}).await?;
-    crate::boxed_future(|| async {
-for (blob_ref, original, action) in &input.blobs {
-        if !matches!(
-            action,
-            CapabilityActionId::ObjectReadContent | CapabilityActionId::ObjectReadMetadata
-        ) {
-            return Err(unavailable(
-                "attachment has no registered content surface action",
-            ));
-        }
-        let realm = original
-            .realm_id
-            .as_deref()
-            .map(arkret_wire::RealmId::new)
-            .transpose()
-            .map_err(PersistenceError::database)?;
-        let Some(realm) = realm.filter(|realm| realms.contains(realm)) else {
-            continue;
-        };
-        let held = crate::blobs::blob_for_delivery_in_connection(guard.connection(), blob_ref)
-            .await?
-            .ok_or_else(|| unavailable("attachment current metadata is unavailable"))?;
-        if &held != original || held.redacted || held.legal_hold {
-            return Err(unavailable("attachment current source changed"));
-        }
-        let sources = sql_query("SELECT e.envelope->>'event_id' AS event_id FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE c.realm_id=$1 AND e.state='committed' AND e.kind='ak.message.create' AND e.envelope->'payload'->'blob_refs' ? $2 ORDER BY e.envelope->>'event_id'")
-            .bind::<Text,_>(realm.as_str()).bind::<Text,_>(blob_ref.as_str()).load::<SourceEventRow>(guard.connection()).await.map_err(PersistenceError::database)?;
-        let owner = crate::realm_authorization_cut::owned_controller_in_connection(
-            guard.connection(),
-            &realm,
-            &actor,
-            at,
-        )
-        .await?
-        .ok_or_else(|| unavailable("attachment controller is unavailable"))?;
-        let owner = owner
-            .as_account_id()
-            .ok_or_else(|| unavailable("attachment controller is not an Account"))?;
-        let mut selected = None;
-        for source in sources {
-            let id =
-                arkret_wire::EventId::new(source.event_id).map_err(PersistenceError::database)?;
-            let full = crate::committed_disclosure::accepted_full_event_in_connection(
-                guard.connection(),
-                &id,
-            )
-            .await?
-            .ok_or_else(|| unavailable("attachment has no accepted producer"))?;
-            let body: arkret_models_collaboration::events_payloads::message::MessageCreatePayload =
-                serde_json::from_value(
-                    serde_json::to_value(&full.event.payload)
-                        .map_err(PersistenceError::database)?,
-                )
-                .map_err(PersistenceError::database)?;
-            if !body
-                .blob_refs
-                .iter()
-                .any(|value| value == blob_ref.as_str())
-                || full.event.realm_id != realm
-            {
-                return Err(unavailable("attachment original signed binding differs"));
-            }
-            if !crate::committed_disclosure::withheld_commit_ids_in_connection(
-                guard.connection(),
-                &[full.commit.commit_id.to_string()],
-            )
-            .await?
-            .is_empty()
-                || !crate::committed_disclosure::full_event_for_member_in_connection(
-                    guard.connection(),
-                    &full,
-                    &actor,
-                    at,
-                )
-                .await?
-            {
-                continue;
-            }
-            let authorized: PersistenceResult<()> = async {
-        let mut resources =
-            crate::agent_management_admission::event_content_resources(&full.event)?;
-        let resource = arkret_models_collaboration::governance::operation_wire::PolicyResourceSelector {
-            kind: arkret_models_collaboration::governance::operation_wire::PolicyResourceKind::Object,
-            realm_id: Some(realm.clone()),
-            resource_ref: Some(blob_ref.as_str().to_owned()),
-        };
-        if !resources.contains(&resource) {
-            resources.push(resource);
-        }
-        let circle = match &full.event.scope_ref {
-            arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
-            _ => None,
-        };
-        for operation in [AgentPolicyOperation::Read, AgentPolicyOperation::Deliver] {
-            crate::agent_management_admission::require_content_snapshot_in_connection(
-                guard.connection(),
-                &realm,
-                circle,
-                owner,
-                account,
-                operation,
-                *action,
-                &resources,
-                at,
-            )
-            .await?;
-        }
-                for recipient in [account, owner] {
-                    let recipient_actor = ActorId::account(recipient.clone());
-                    let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
-                        guard.connection(), &realm, &recipient_actor,
-                    ).await?;
-                    let source = crate::realm_authorization_cut::owned_source_in_connection(
-                        guard.connection(), &realm, &recipient_actor, at, false,
-                    ).await?;
-                    cut.require_content_read_constraints(
-                        &full.event, at, source, *action,
-                    )?;
-                }
-                Ok(())
-            }.await;
-            match authorized {
-                Ok(()) => {
-                    selected = Some(full);
-                    break;
-                }
-                Err(error)
-                    if error.conflict_code()
-                        == Some(coland_storage::ConflictCode::CapabilityDenied) =>
-                {
-                    continue;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        let full = selected
-            .ok_or_else(|| unavailable("attachment has no currently readable signed source"))?;
-        let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
-            guard.connection(),
-            &realm,
-            &actor,
-        )
-        .await?;
-        let (_, facts) = cut.content_scope_facts(&full.event, *action)?;
-        let mut target = arkret_wire::WireResourceSelector::realm(realm.clone());
-        target.kind = arkret_wire::ResourceSelectorKind::Blob;
-        target.blob_ref = Some(blob_ref.clone());
-        blob_scope_operations.push((actor.clone(), target, facts, *action));
-        blob_source_actions.insert((full.event.event_id.clone(), action.as_str()));
-        object_sources
-            .entry(realm)
-            .or_default()
-            .push((full.event.clone(), *action));
-    }
-Ok(())
-}).await?;
-    crate::boxed_future(|| async {
-        for realm in &realms {
-            if input.unresolved_content_realms.contains(realm) {
-                return Err(unavailable(
-                    "the content carrier has no current target proof",
-                ));
-            }
-            let views = input
-                .current_views
-                .iter()
-                .filter(|view| &view.realm_id == realm);
-            let snapshots = input
-                .snapshots
-                .iter()
-                .filter(|snapshot| &snapshot.realm_id == realm);
-            if input
-                .current_views
-                .iter()
-                .any(|view| &view.realm_id == realm)
-                || input
-                    .snapshots
-                    .iter()
-                    .any(|snapshot| &snapshot.realm_id == realm)
-            {
-                let current =
-                    crate::snapshot_disclosure_gate::account_snapshot_material_in_connection(
-                        guard.connection(),
-                        realm,
-                        account,
-                    )
-                    .await?
-                    .ok_or_else(|| unavailable("current disclosure material is unavailable"))?;
-                for row in input
-                    .current_views
-                    .iter()
-                    .filter(|view| &view.realm_id == realm)
-                    .flat_map(|view| &view.entries)
-                    .chain(
-                        input
-                            .snapshots
-                            .iter()
-                            .filter(|snapshot| &snapshot.realm_id == realm)
-                            .flat_map(|snapshot| &snapshot.current_state_entries),
-                    )
-                {
-                    let arkret_wire::TypedCurrentRow::Value {
-                        source_stream_ref,
-                        revision,
-                        ..
-                    } = row;
-                    object_sources.entry(realm.clone()).or_default().push((
-                        current_source_in_connection(
-                            guard.connection(),
-                            realm,
-                            source_stream_ref,
-                            revision,
-                        )
-                        .await?,
-                        CapabilityActionId::ObjectRead,
-                    ));
-                }
-                for view in views {
-                    view.validate()
-                        .map_err(|error| unavailable(&error.to_string()))?;
-                    if view.governance_generation != current.governance_generation
-                        || view
-                            .entries
-                            .iter()
-                            .any(|row| !current.current_state_entries.contains(row))
-                        || view
-                            .stream_heads
-                            .iter()
-                            .any(|head| !current.visible_stream_heads.contains(head))
-                    {
-                        return Err(unavailable(
-                            "queued current bytes no longer match the current disclosure cut",
-                        ));
-                    }
-                }
-                for snapshot in snapshots {
-                    if snapshot.governance_generation != current.governance_generation
-                        || snapshot
-                            .current_state_entries
-                            .iter()
-                            .any(|row| !current.current_state_entries.contains(row))
-                        || snapshot
-                            .visible_stream_heads
-                            .iter()
-                            .any(|head| !current.visible_stream_heads.contains(head))
-                        || snapshot.retention_and_history_floor
-                            != current.retention_and_history_floor
-                    {
-                        return Err(unavailable(
-                            "issued snapshot has no current complete disclosure proof",
-                        ));
-                    }
-                }
-            }
-        }
-        Ok(())
-    })
-    .await?;
-    crate::boxed_future(|| async {
-for welcome in &input.future_materials {
-        if !realms.contains(&welcome.realm_id) {
-            continue;
-        }
-        welcome
-            .validate_shape()
-            .map_err(|error| unavailable(&error.to_string()))?;
-        if welcome.recipient_actor_id != actor {
-            return Err(unavailable("future material recipient differs"));
-        }
-        let full = crate::committed_disclosure::accepted_full_event_in_connection(
-            guard.connection(),
-            &welcome.commit_event_ref,
-        )
-        .await?
-        .ok_or_else(|| unavailable("future material has no accepted producer"))?;
-        if full.event.realm_id != welcome.realm_id
-            || full.event.scope_ref != welcome.effective_scope
-            || !crate::committed_disclosure::full_event_for_member_in_connection(
-                guard.connection(),
-                &full,
-                &actor,
-                at,
-            )
-            .await?
-        {
-            return Err(unavailable(
-                "future material has no current disclosure proof",
-            ));
-        }
-        let queued = sql_query("SELECT EXISTS(SELECT 1 FROM mls_welcome_deliveries WHERE welcome_id=$1 AND state='queued' AND delivery_json=$2) AS present")
-            .bind::<Text,_>(welcome.welcome_id.as_str())
-            .bind::<diesel::sql_types::Jsonb,_>(serde_json::to_value(welcome).map_err(PersistenceError::database)?)
-            .get_result::<crate::query_rows::ExistsRow>(guard.connection()).await.map_err(PersistenceError::database)?.present;
-        if !queued {
-            return Err(unavailable("future material queue source changed"));
-        }
-        let controller = crate::realm_authorization_cut::owned_controller_in_connection(
-            guard.connection(),
-            &welcome.realm_id,
-            &actor,
-            at,
-        )
-        .await?
-        .ok_or_else(|| unavailable("future material controller is unavailable"))?;
-        let owner = controller
-            .as_account_id()
-            .ok_or_else(|| unavailable("controller is not an Account"))?;
-        let resources = crate::agent_management_admission::event_content_resources(&full.event)?;
-        let circle = match &welcome.effective_scope {
-            arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
-            _ => None,
-        };
-        crate::agent_management_admission::require_content_snapshot_in_connection(
-            guard.connection(),
-            &welcome.realm_id,
-            circle,
-            owner,
-            account,
-            AgentPolicyOperation::Deliver,
-            CapabilityActionId::EventRead,
-            &resources,
-            at,
-        )
-        .await?;
-    }
-Ok(())
-}).await?;
-    crate::boxed_future(|| async {
+    })?;
+    let QueuedContentFacts {
+        mut object_sources,
+        native_projection_reads,
+        positive_actions,
+        blob_scope_operations,
+        blob_source_actions,
+    } = queued;
+    if reply.is_some() {
         for row in &input.committed_events {
-            let realm = row.commit().stream_ref.realm_id();
-            if !realms.contains(realm) {
-                continue;
-            }
-            let controller = crate::realm_authorization_cut::owned_controller_in_connection(
+            let CommittedEventView::Full(full) = row else {
+                return Err(unavailable("native reply body source is withheld"));
+            };
+            let message_id = arkret_wire::MessageId::from_event_id(&full.event.event_id);
+            let current = crate::message_revision_current_results::locked_message_target(
                 guard.connection(),
-                realm,
-                &actor,
-                at,
+                &full.event.realm_id,
+                &message_id,
             )
-            .await?
-            .ok_or_else(|| unavailable("current controller is unavailable"))?;
-            let controller_account = controller
-                .as_account_id()
-                .ok_or_else(|| unavailable("controller is not an Account"))?;
-            let accepted = crate::committed_disclosure::accepted_full_event_in_connection(
-                guard.connection(),
-                &row.commit().event_ref,
-            )
-            .await?
-            .ok_or_else(|| unavailable("delivery has no accepted canonical pair"))?;
-            if accepted.commit != *row.commit() {
-                return Err(unavailable("queued Commit differs from accepted content"));
-            }
-            for recipient in [&actor, &controller] {
-                let floor = match &row.commit().stream_ref {
-                    arkret_wire::CommitStreamRef::Realm { .. } => {
-                        crate::account_stream_scan::caller_realm_floor_in_connection(
-                            guard.connection(),
-                            realm,
-                            recipient,
-                        )
-                        .await?
-                    }
-                    arkret_wire::CommitStreamRef::Circle { circle_id, .. } => {
-                        crate::account_stream_scan::caller_circle_floor_in_connection(
-                            guard.connection(),
-                            realm,
-                            circle_id,
-                            recipient,
-                        )
-                        .await?
-                    }
-                    arkret_wire::CommitStreamRef::Sidecar { sidecar_id, .. } => {
-                        if !crate::sidecar_access::participant_in_connection(
-                            guard.connection(),
-                            realm,
-                            sidecar_id,
-                            recipient,
-                        )
-                        .await?
-                        {
-                            return Err(unavailable("current Sidecar delivery recipient changed"));
-                        }
-                        // The complete current snapshot also proves the private
-                        // Sidecar's exact readable floor on this governing cut.
-                        let recipient = recipient
-                            .as_account_id()
-                            .ok_or_else(|| unavailable("delivery recipient is not an Account"))?;
-                        let material =
-                        crate::snapshot_disclosure_gate::account_snapshot_material_in_connection(
-                            guard.connection(),
-                            realm,
-                            recipient,
-                        )
-                        .await?
-                        .ok_or_else(|| unavailable("Sidecar delivery floor is unavailable"))?;
-                        let floor = material
-                            .retention_and_history_floor
-                            .stream_floors
-                            .into_iter()
-                            .find(|floor| floor.stream_ref == row.commit().stream_ref)
-                            .ok_or_else(|| unavailable("Sidecar delivery floor is unavailable"))?;
-                        if row.commit().stream_position < floor.oldest_position {
-                            return Err(unavailable(
-                                "Sidecar queued position is no longer readable",
-                            ));
-                        }
-                        None
-                    }
-                    _ => {
-                        return Err(unavailable(
-                            "delivery stream has no registered current proof",
-                        ));
-                    }
-                };
-                if !matches!(
-                    row.commit().stream_ref,
-                    arkret_wire::CommitStreamRef::Sidecar { .. }
-                ) && floor
-                    .as_ref()
-                    .is_none_or(|floor| row.commit().stream_position < floor.oldest_position)
-                {
-                    return Err(unavailable(
-                        "queued position is no longer readable by the recipient",
-                    ));
+            .await
+            .map_err(|error| match error {
+                PersistenceError::NotFound(_) => {
+                    unavailable("native reply Message current is unavailable")
                 }
-            }
-            match row {
-                CommittedEventView::Full(full) => {
-                    if full != &accepted
-                        || !crate::committed_disclosure::withheld_commit_ids_in_connection(
-                            guard.connection(),
-                            &[full.commit.commit_id.to_string()],
-                        )
-                        .await?
-                        .is_empty()
-                    {
-                        return Err(unavailable(
-                            "queued full content is no longer the accepted disclosure",
-                        ));
-                    }
-                    if !crate::committed_disclosure::full_event_for_member_in_connection(
-                        guard.connection(),
-                        full,
-                        &actor,
-                        at,
-                    )
-                    .await?
-                    {
-                        return Err(PersistenceError::Conflict(
-                            "capability_denied: current content is withheld".into(),
-                        ));
-                    }
-                    let resources =
-                        crate::agent_management_admission::event_content_resources(&full.event)?;
-                    let circle = match &full.event.scope_ref {
-                        arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
-                        _ => None,
-                    };
-                    crate::agent_management_admission::require_content_snapshot_in_connection(
-                        guard.connection(),
-                        realm,
-                        circle,
-                        controller_account,
-                        account,
-                        AgentPolicyOperation::Deliver,
-                        CapabilityActionId::EventRead,
-                        &resources,
-                        at,
-                    )
-                    .await?;
-                }
-                CommittedEventView::Withheld(_) => {
-                    let resources = crate::agent_management_admission::event_content_resources(
-                        &accepted.event,
-                    )?;
-                    let circle = match &accepted.event.scope_ref {
-                        arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
-                        _ => None,
-                    };
-                    for operation in [AgentPolicyOperation::Read, AgentPolicyOperation::Deliver] {
-                        crate::agent_management_admission::require_content_snapshot_in_connection(
-                            guard.connection(),
-                            realm,
-                            circle,
-                            controller_account,
-                            account,
-                            operation,
-                            CapabilityActionId::EventRead,
-                            &resources,
-                            at,
-                        )
-                        .await?;
-                    }
-                }
-            }
-        }
-        Ok(())
-    })
-    .await?;
-    crate::boxed_future(|| async {
-        if let Some(reply) = &reply {
-            for row in &input.committed_events {
-                let CommittedEventView::Full(full) = row else {
-                    return Err(unavailable("native reply body source is withheld"));
-                };
-                let message_id = arkret_wire::MessageId::from_event_id(&full.event.event_id);
-                let current = crate::message_revision_current_results::locked_message_target(
+                error => error,
+            })?;
+            if current.current_commit_id != full.commit.commit_id.to_string()
+                || current.author != full.event.actor_id
+                || current.created_at != full.event.created_at
+                || current.scope_ref != full.event.scope_ref
+                || current.strand_id != reply.as_ref().expect("native context").strand.clone()
+                || crate::message_revision_current_results::message_is_redacted(
                     guard.connection(),
                     &full.event.realm_id,
                     &message_id,
                 )
-                .await
-                .map_err(|error| match error {
-                    PersistenceError::NotFound(_) => {
-                        unavailable("native reply Message current is unavailable")
-                    }
-                    error => error,
-                })?;
-                if current.current_commit_id != full.commit.commit_id.to_string()
-                    || current.author != full.event.actor_id
-                    || current.created_at != full.event.created_at
-                    || current.scope_ref != full.event.scope_ref
-                    || current.strand_id != reply.strand.clone()
-                    || crate::message_revision_current_results::message_is_redacted(
-                        guard.connection(),
-                        &full.event.realm_id,
-                        &message_id,
-                    )
-                    .await?
-                {
-                    return Err(unavailable(
-                        "native reply body is not its exact current Message revision",
-                    ));
-                }
-                require_owned_content_source_in_connection(
-                    guard.connection(),
-                    &full.event,
-                    reply.controller,
-                    account,
-                    at,
-                    CapabilityActionId::ObjectReadContent,
-                )
-                .await?;
-                object_sources
-                    .entry(full.event.realm_id.clone())
-                    .or_default()
-                    .push((full.event.clone(), CapabilityActionId::ObjectReadContent));
+                .await?
+            {
+                return Err(unavailable(
+                    "native reply body is not its exact current Message revision",
+                ));
             }
+            Box::pin(require_owned_content_source_in_connection(
+                guard.connection(),
+                &full.event,
+                reply.as_ref().expect("native context").controller,
+                account,
+                at,
+                CapabilityActionId::ObjectReadContent,
+            ))
+            .await?;
+            object_sources
+                .entry(full.event.realm_id.clone())
+                .or_default()
+                .push((full.event.clone(), CapabilityActionId::ObjectReadContent));
         }
-        Ok(())
-    })
-    .await?;
+    }
     let key_source = crate::committed_disclosure::accepted_full_event_in_connection(
         guard.connection(),
         &endpoint.authorization_ref.event_id,
@@ -2388,8 +3060,13 @@ Ok(())
         .qualified_agent_scope_evidence
         .as_ref()
         .ok_or_else(|| unavailable("Agent delivery has no qualified private scope custody"))?;
-    let provision_scope =
-        provision_scope_in_connection(guard.connection(), endpoint, evidence, station).await?;
+    let provision_scope = Box::pin(provision_scope_in_connection(
+        guard.connection(),
+        &endpoint,
+        evidence,
+        station,
+    ))
+    .await?;
     let mut clock = DeliveryClockProof {
         checked_at: at,
         key_expiry: key.expires_at,
@@ -2405,27 +3082,22 @@ Ok(())
         native_reply: None,
         reads: Vec::new(),
     };
-    crate::boxed_future(|| async {
-        for (_, _, fact) in &clock.native_projection_reads {
-            clock.scope_operations.push((
-                actor.clone(),
-                fact.target.clone(),
-                fact.facts.clone(),
-                fact.action,
-            ));
-        }
-        Ok(())
-    })
-    .await?;
-    crate::boxed_future(|| async {
-for realm in &realms {
-        let source = crate::realm_authorization_cut::owned_source_in_connection(
+    for (_, _, fact) in &clock.native_projection_reads {
+        clock.scope_operations.push((
+            actor.clone(),
+            fact.target.clone(),
+            fact.facts.clone(),
+            fact.action,
+        ));
+    }
+    for realm in &realms {
+        let source = Box::pin(crate::realm_authorization_cut::owned_source_in_connection(
             guard.connection(),
             realm,
             &actor,
             chrono::Utc::now(),
             true,
-        )
+        ))
         .await?
         .ok_or_else(|| unavailable("current owned Agent source is unavailable"))?;
         let arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::OwnedAgent { controller_account_id, .. } = &source else {
@@ -2437,15 +3109,16 @@ for realm in &realms {
                 "current owned controller differs from private scope custody",
             ));
         }
-        if let Some((_, details)) = &clock.session_scope
-            && ( details.get("controller_principal_id")
+        if let Some((_, details)) = &clock.session_scope {
+            if details.get("controller_principal_id")
                 != Some(&serde_json::json!(controller_account_id.principal_id))
                 || details.get("agent_key_authorization_ref")
                     != Some(&serde_json::json!(endpoint.authorization_ref.event_id))
-            ) {
+            {
                 return Err(unavailable(
                     "session scope differs from the current controller or key",
                 ));
+            }
         }
         let accountability = sql_query("SELECT value FROM identity_accountability_current_results WHERE subject_id=$1 AND issuer_id=$2 ORDER BY realm_id,scope_set_digest FOR SHARE")
             .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(controller_account_id.principal_id.as_str())
@@ -2488,11 +3161,11 @@ for realm in &realms {
             (actor.clone(), Some(source)),
             (ActorId::account(controller_account_id.clone()), None),
         ] {
-            let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
+            let cut = Box::pin(crate::realm_authorization_cut::RealmAuthorizationCut::read(
                 guard.connection(),
                 realm,
                 &recipient,
-            )
+            ))
             .await?;
             if recipient == actor {
                 if input
@@ -2552,150 +3225,27 @@ for realm in &realms {
             ));
         }
     }
-Ok(())
-}).await?;
-    crate::boxed_future(|| async {
-        if let Some(reply) = reply {
-            let realm = &reply.source.event.realm_id;
-            if realms.len() != 1
-                || !realms.contains(realm)
-                || input
-                    .qualified_agent_scope_evidence
-                    .as_ref()
-                    .map(|e| &e.accepted_binding().controller_account)
-                    != Some(reply.controller)
-            {
-                return Err(unavailable(
-                    "native reply controller or governing Realm differs",
-                ));
-            }
-            // Authentication refresh happens before acquire. These original native
-            // observations bind exact AA heads under the held current cut, never a
-            // fabricated active default or a product account projection.
-            for (human, pcr) in &native_human_pcrs {
-                let observation = input
-                    .account_status_observations
-                    .iter()
-                    .find(|observation| observation.record().account_id == *human);
-                crate::morph_projection_reads::require_accepted_human_identity(
-                    guard.connection(),
-                    human,
-                    pcr,
-                    station,
-                    observation,
-                )
-                .await?;
-            }
-            let source = crate::realm_authorization_cut::owned_source_in_connection(
-                guard.connection(),
-                realm,
-                &actor,
-                chrono::Utc::now(),
-                true,
-            )
-            .await?
-            .ok_or_else(|| unavailable("native reply has no accepted owned source"))?;
-            let owner_actor = ActorId::account(reply.controller.clone());
-            let agent_cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
-                guard.connection(),
-                realm,
-                &actor,
-            )
-            .await?;
-            let controller_cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
-                guard.connection(),
-                realm,
-                &owner_actor,
-            )
-            .await?;
-            let (target, facts) = agent_cut
-                .native_message_reply_target_in_connection(
-                    guard.connection(),
-                    &reply.source.event.scope_ref,
-                    reply.strand,
-                    &controller_cut,
-                    &ActorId::account(reply.caller.clone()),
-                )
-                .await?;
-            crate::agent_interaction_current_results::require_current_public_in_connection(
-                guard.connection(),
-                realm,
-                reply.controller,
-                account,
-            )
-            .await?;
-            crate::agent_participation_admission::require_native_reply_current(
-                guard.connection(),
-                account,
-                &reply.source.event.scope_ref,
-                reply.strand,
-                station,
-                reply.deployment,
-            )
-            .await?;
-            let policies =
-                crate::policy_current_results::read_scoped_agent_management_policies_in_connection(
-                    guard.connection(),
-                    realm,
-                    target
-                        .circle_id
-                        .as_ref()
-                        .or(match &reply.source.event.scope_ref {
-                            arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
-                            _ => None,
-                        }),
-                )
-                .await?;
-            let mut input_resources = Vec::new();
-            let mut body_events = Vec::new();
-            for row in &input.committed_events {
-                let CommittedEventView::Full(full) = row else {
-                    return Err(unavailable(
-                        "native reply model input cannot use withheld bytes",
-                    ));
-                };
-                agent_cut.require_unreserved_native_message_body(
-                    &controller_cut,
-                    &full.event,
-                    &source,
-                    chrono::Utc::now(),
-                )?;
-                let resources =
-                    crate::agent_management_admission::event_content_resources(&full.event)?;
-                for action in [
-                    CapabilityActionId::EventRead,
-                    CapabilityActionId::ObjectReadContent,
-                ] {
-                    input_resources.push((resources.clone(), action));
-                }
-                body_events.push(full.event.clone());
-            }
-            let proof = NativeReplyTimeProof {
-                checked_at: chrono::Utc::now(),
-                agent: account.clone(),
-                controller: reply.controller.clone(),
-                agent_cut,
-                controller_cut,
-                source,
-                target: target.clone(),
-                facts: facts.clone(),
-                policies,
-                input_resources,
-                body_events,
-            };
-            // This concrete MessageCreate ceiling is additional to the original
-            // Read/Deliver ceiling for every actual model input source.
-            clock.scope_operations.push((
-                actor.clone(),
-                target,
-                facts,
-                CapabilityActionId::MessageCreate,
-            ));
-            clock.native_reply = Some(proof);
-        }
-        Ok(())
-    })
-    .await?;
+    if let Some(reply) = reply {
+        let proof = Box::pin(native_reply_time_proof_in_connection(
+            guard.connection(),
+            account,
+            station,
+            &input,
+            actor.clone(),
+            &realms,
+            &native_human_pcrs,
+            reply,
+        ))
+        .await?;
+        // MessageCreate remains additional to every model input Read/Deliver ceiling.
+        clock.scope_operations.push((
+            actor.clone(),
+            proof.target.clone(),
+            proof.facts.clone(),
+            CapabilityActionId::MessageCreate,
+        ));
+        clock.native_reply = Some(proof);
+    }
     guard.clock = Some(clock);
     if !guard.permits_handoff() {
         return Err(unavailable(
@@ -2703,4 +3253,34 @@ Ok(())
         ));
     }
     Ok(Some(guard))
+}
+
+/// Hold the governing authorization cut until a signed peer audit answer is serialized.
+pub(crate) async fn acquire_governor_audit_delivery(
+    pool: &crate::PgPool,
+    request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
+    outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+    issuer: &DidCoreId,
+    expires_at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<Box<dyn AccountContentDeliveryGuard>> {
+    outcome
+        .validate_for_request(request, outcome.audit_commit.governance_generation)
+        .map_err(PersistenceError::database)?;
+    let mut held = Box::new(DeliveryGuard {
+        connection: Some(crate::pg_conn(pool).await?),
+        runtime: tokio::runtime::Handle::current(),
+        clock: None,
+    });
+    sql_query("BEGIN")
+        .execute(held.connection())
+        .await
+        .map_err(PersistenceError::database)?;
+    crate::registered_audit::read_visibility_in_connection(
+        held.connection(),
+        request,
+        issuer,
+        Some(outcome.audit_commit.governance_generation),
+    )
+    .await?;
+    Ok(Box::new(RemoteWatchGuard { held, expires_at }))
 }

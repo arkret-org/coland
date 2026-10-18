@@ -561,6 +561,13 @@ async fn get_account_data(
         return Err(AppError::not_found("not found"));
     }
 
+    if matches!(
+        account_data_key.as_str(),
+        arkret_wire::AccountDataKey::ACCOUNT_HOLDER_QUARANTINE
+            | arkret_wire::AccountDataKey::ACCOUNT_INVITE_DELIVERY
+    ) {
+        crate::routing::consent_private::refresh_holder_effects(state, &session).await?;
+    }
     match state
         .account_data()
         .entry(&account_key, &account_data_key)
@@ -590,6 +597,9 @@ async fn list_account_data(
     // Same predicate as put/delete: agent grant marker OR Agent
     // principal (non-disclosure list filtering).
     let agent_context = session_is_agent_context(state, &session).await?;
+    if !agent_context && session.human_device_id().is_some() {
+        crate::routing::consent_private::refresh_holder_effects(state, &session).await?;
+    }
     let entries = state
         .account_data()
         .entries_for_actor(&account_key)

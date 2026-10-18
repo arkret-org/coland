@@ -14,7 +14,7 @@ use crate::{PersistenceError, PersistenceResult};
 pub struct ForwardedProducerDeviceEvidence {
     pub evidence: arkret_models_identity::ForwardAccountDeviceSignerEvidence,
     pub producer_signer_fact:
-        arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact,
+        arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact,
     pub evidence_ref: SignerEvidenceRef,
 }
 
@@ -22,7 +22,7 @@ impl ForwardedProducerDeviceEvidence {
     /// Address the complete object exactly as the evidence ref rule requires.
     pub fn new(
         evidence: arkret_models_identity::ForwardAccountDeviceSignerEvidence,
-        producer_signer_fact: arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact,
+        producer_signer_fact: arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact,
     ) -> PersistenceResult<Self> {
         let evidence_ref = forwarded_producer_device_evidence_ref(&evidence)?;
         Ok(Self {
@@ -52,15 +52,25 @@ pub fn forwarded_producer_device_evidence_ref(
 /// historical reads require the caller to authorize disclosure separately.
 #[async_trait]
 pub trait AccountDeviceSignerEvidenceStore: Send + Sync {
+    /// Prepare the existing forward-only unsigned core from a locked native
+    /// authorization cut. This grants neither directory disclosure nor business
+    /// authority; retaining its signed wrapper rechecks the same source.
+    async fn prepare_forward_current(
+        &self,
+        event: &arkret_wire::Event,
+        destination: &arkret_wire::DidCoreId,
+        body_digest: &arkret_wire::Hash,
+    ) -> PersistenceResult<Option<arkret_models_crypto::ForwardDeviceProjectionAttestationCore>>;
+
     /// Resolve only an immutable origin source already bound by this Commit.
     /// This neither authorizes current admission nor installs a stream replica.
-    async fn forwarded_bound_human_signer_fact(
+    async fn forwarded_bound_account_device_signer_fact(
         &self,
         event: &arkret_wire::Event,
         commit: &arkret_wire::RealmCommit,
         governance: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<
-        Option<arkret_models_collaboration::authority_commit::HumanHistoricalSignerFact>,
+        Option<arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact>,
     >;
 
     async fn get_forward(

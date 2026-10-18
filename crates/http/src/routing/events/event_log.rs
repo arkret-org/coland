@@ -20,7 +20,9 @@ use arkret_event_draft::ProjectedEventOperation as Operation;
 use arkret_identifiers::DeviceId;
 #[cfg(test)]
 use arkret_identifiers::DidCoreId;
-use arkret_identifiers::{EventId, OperationId, RealmId};
+#[cfg(test)]
+use arkret_identifiers::RealmId;
+use arkret_identifiers::{EventId, OperationId};
 #[cfg(test)]
 use arkret_wire::CommittedEventWithheldView;
 #[cfg(test)]
@@ -137,11 +139,11 @@ use inception::canonical_value_digest;
 #[cfg(test)]
 use inception::resolve_event_root_anchor_method;
 
+#[cfg(test)]
 mod realm_index;
 
 #[cfg(test)]
 use realm_index::event_string_field;
-use realm_index::invite_create_actor_is_inviter;
 
 mod submit;
 #[cfg(test)]
@@ -157,10 +159,10 @@ pub(in crate::routing) use submit::{
     submit_one_error_to_app_error, submit_peer_pcr_genesis, submit_sidecar_ensure_batch,
 };
 
+#[cfg(test)]
 mod validation;
 #[cfg(test)]
 use validation::*;
-pub(in crate::routing) use validation::{PrivateInviteEnvelope, validate_private_invite_envelope};
 mod sdk_projection;
 pub(crate) use sdk_projection::*;
 

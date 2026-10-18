@@ -17,8 +17,10 @@ use serde_json::{Value, json};
 
 #[tokio::test]
 async fn pin_grants_are_explicit_and_assertions_preserve_removals_with_atomic_cas() {
-    let cases =
-        scenario_future(coland_storage_postgres::pin_conformance::run_pin_admission_fixture).await;
+    let cases = ordinary_realm::case_future(
+        coland_storage_postgres::pin_conformance::run_pin_admission_fixture,
+    )
+    .await;
     assert_eq!(cases.len(), 6);
     assert!(cases.iter().all(|(_, assertions)| *assertions > 0));
 }
@@ -890,13 +892,4 @@ async fn schema_subjects_are_immutable_and_policy_revisions_are_contiguous() {
         assert!(error.contains(reason), "{error}");
         assert_eq!(count(&pool, "realm_commits", &realm).await, baseline);
     }
-}
-
-#[inline(never)]
-fn scenario_future<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future,
-{
-    Box::pin(make())
 }

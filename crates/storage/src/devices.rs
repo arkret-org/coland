@@ -46,9 +46,48 @@ pub trait DeviceInventoryStore: Send + Sync {
     ) -> PersistenceResult<Vec<DeviceInventoryRecord>>;
     async fn list(&self) -> PersistenceResult<Vec<DeviceInventoryRecord>>;
 }
+/// Private native queue request, authenticated by the real accepted Device.
+pub struct AppletDeviceQueueRead<'a> {
+    pub endpoint: &'a crate::AppletManagedDeviceScopeGuard,
+    pub after: Option<&'a str>,
+    pub limit: usize,
+    pub transport_expires_at: chrono::DateTime<Utc>,
+}
+
+/// Pending private allocations and the current cut survive until publication.
+pub struct AppletDeviceQueuePage {
+    pub outcome: arkret_models_collaboration::device_messages::DeviceMessagesGetOutcome,
+    pub guard: Box<dyn crate::AccountContentDeliveryGuard>,
+}
+
+/// ACK is a narrow completion of an original legally delivered exact page.
+pub struct AppletDeviceQueueAck<'a> {
+    pub authority: &'a crate::AppletManagedDeviceAuthority,
+    pub effective_scope: &'a arkret_wire::ScopeRef,
+    pub body: &'a arkret_models_collaboration::device_messages::DeviceMessagesAckRequestBody,
+    pub transport_expires_at: chrono::DateTime<Utc>,
+}
+
 /// To-device message queue + idempotency-key set.
 #[async_trait]
 pub trait DeviceMessageStore: Send + Sync {
+    async fn applet_device_queue(
+        &self,
+        _input: AppletDeviceQueueRead<'_>,
+    ) -> PersistenceResult<AppletDeviceQueuePage> {
+        Err(crate::PersistenceError::Internal(
+            "native recipient queue is unavailable".into(),
+        ))
+    }
+    async fn ack_applet_device_queue(
+        &self,
+        _input: AppletDeviceQueueAck<'_>,
+    ) -> PersistenceResult<Option<usize>> {
+        Err(crate::PersistenceError::Internal(
+            "native recipient ACK is unavailable".into(),
+        ))
+    }
+
     async fn append(
         &self,
         device_revocation_gate: Option<&DeviceRevocationGateSelector>,

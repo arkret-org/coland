@@ -89,14 +89,6 @@ impl ConsentRequestQuarantineStore for PgConsentRequestQuarantineStore {
             .requester
             .validate()
             .map_err(|_| invalid("invalid Consent requester"))?;
-        if input.source_digest.len() != 64
-            || !input
-                .source_digest
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit())
-        {
-            return Err(invalid("Consent source digest must be a keyed SHA-256 tag"));
-        }
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             admit_in_connection(conn, &input).await.map_err(Into::into)
@@ -106,10 +98,32 @@ impl ConsentRequestQuarantineStore for PgConsentRequestQuarantineStore {
     }
 }
 
-async fn admit_in_connection(
+pub(crate) async fn admit_in_connection(
     conn: &mut diesel_async::AsyncPgConnection,
     input: &ConsentRequestQuarantineInput,
 ) -> PersistenceResult<ConsentRequestQuarantineOutcome> {
+    #[derive(diesel::QueryableByName)]
+    struct Present {
+        #[diesel(sql_type=Bool)]
+        present: bool,
+    }
+    let present = sql_query(
+        "SELECT EXISTS(SELECT 1 FROM accounts WHERE principal_id=$1 AND station_id=$2) AS present",
+    )
+    .bind::<Text, _>(input.holder.principal_id.as_str())
+    .bind::<Text, _>(input.holder.station_id.as_str())
+    .get_result::<Present>(&mut *conn)
+    .await
+    .map_err(PersistenceError::database)?;
+    if !present.present {
+        return Ok(ConsentRequestQuarantineOutcome::Dropped);
+    }
+    let authority = crate::pcr_private_authority::lock_holder(
+        conn,
+        &input.holder,
+        Some(&input.acceptor_service_id),
+    )
+    .await?;
     // The Invite and Contact surfaces acquire this lock before touching their
     // account-backed ledger. Keep the same order to avoid a lock cycle with
     // their account foreign-key checks.
@@ -208,6 +222,13 @@ async fn admit_in_connection(
         return Ok(ConsentRequestQuarantineOutcome::AlreadyPending);
     }
 
+    let source_digest = crate::invite_new_source_ledger::source_digest_in_connection(
+        conn,
+        &input.holder,
+        &input.requester.principal_id,
+    )
+    .await?;
+
     // The same holder lock also keeps the policy and the queue decision on
     // one stable admission cut while the source quota is checked below.
     let retention_floor = input.received_at - Duration::seconds(quota.retention_seconds as i64);
@@ -217,7 +238,7 @@ async fn admit_in_connection(
          WHERE account_pk=$1 AND source_digest=$2 AND first_admitted_at>$3",
     )
     .bind::<BigInt, _>(holder.pk)
-    .bind::<Text, _>(&input.source_digest)
+    .bind::<Text, _>(&source_digest)
     .bind::<Timestamptz, _>(retention_floor)
     .get_result::<CountRow>(&mut *conn)
     .await
@@ -314,7 +335,7 @@ async fn admit_in_connection(
              VALUES($1,$2,$3) ON CONFLICT(account_pk,source_digest) DO NOTHING",
         )
         .bind::<BigInt, _>(holder.pk)
-        .bind::<Text, _>(&input.source_digest)
+        .bind::<Text, _>(&source_digest)
         .bind::<Timestamptz, _>(input.received_at)
         .execute(&mut *conn)
         .await
@@ -325,5 +346,6 @@ async fn admit_in_connection(
             ));
         }
     }
+    crate::consent_private_effects::mark_pending(conn, &input.holder, &authority.realm_id).await?;
     Ok(ConsentRequestQuarantineOutcome::Queued(record))
 }

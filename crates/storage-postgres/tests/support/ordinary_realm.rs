@@ -67,7 +67,7 @@ pub fn bind_structural_human_device(event: &mut arkret_wire::Event) {
     let proof = event.producer_proof.as_mut().unwrap();
     let (did, _) = proof.verification_method.as_str().split_once('#').unwrap();
     proof.verification_method = arkret_wire::DidUrl::new(format!("{did}#{device}")).unwrap();
-    assert!(event.human_device_producer().unwrap().is_some());
+    assert!(event.account_device_producer().unwrap().is_some());
     reseal(event);
 }
 
@@ -437,7 +437,7 @@ pub fn next_request_for_actor(
     let event = if let Some(fact) = previous
         .producer_signer_fact
         .as_ref()
-        .and_then(|fact| fact.as_human())
+        .and_then(|fact| fact.as_account_device())
         .filter(|fact| fact.actor == event.actor_id)
     {
         human_profile::sign_original_device(event, fact.verification_method.clone())
@@ -493,12 +493,12 @@ pub fn request_for_event(
     let fact = previous
         .producer_signer_fact
         .as_ref()
-        .and_then(|fact| fact.as_human())
+        .and_then(|fact| fact.as_account_device())
         .filter(|fact| fact.actor == event.actor_id)
         .cloned()
         .map(|mut fact| {
             fact.event_id = event.event_id.clone();
-            arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact::Human(fact)
+            arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact::AccountDevice(fact)
         });
     commit.producer_signer_fact_digest = fact.as_ref().map(|f| f.digest().unwrap());
     if fact.is_some() {
@@ -544,6 +544,7 @@ pub fn request_for_event(
         received_at: at,
     };
     EventCommitRequest {
+        verified_media_participant: None,
         authority_commit: AuthorityCommitTransaction {
             expected_authority: previous.expected_authority.clone(),
             event,
@@ -556,6 +557,7 @@ pub fn request_for_event(
         self_producer_guard: None,
         applet_producer_guard: None,
         widget_token_gate: None,
+        agent_grant_scope_evidence: None,
         forwarded_producer_evidence: None,
         forwarded_agent_producer: None,
         agent_deployment_ceiling:
@@ -658,11 +660,11 @@ pub async fn source_request(pool: &PgPool, mut request: EventCommitRequest) -> E
     }
     let tx = &mut request.authority_commit;
     tx.producer_signer_fact = PgAuthorityCommitStore { pool: pool.clone() }
-        .prepare_human_signer_fact(&tx.event, tx.commit.committed_at)
+        .prepare_account_device_signer_fact(&tx.event, tx.commit.committed_at)
         .await
         .unwrap()
         .map(Into::into);
-    if tx.event.human_device_producer().unwrap().is_some() {
+    if tx.event.account_device_producer().unwrap().is_some() {
         assert!(tx.producer_signer_fact.is_some());
     } else {
         assert!(tx.producer_signer_fact.is_none());
@@ -703,7 +705,7 @@ pub async fn source_bootstrap(
             .expect("bootstrap author has an actual accepted PCR fixture device");
         tx.commit.event_ref = tx.event.event_id.clone();
         tx.producer_signer_fact = store
-            .prepare_human_signer_fact(&tx.event, tx.commit.committed_at)
+            .prepare_account_device_signer_fact(&tx.event, tx.commit.committed_at)
             .await
             .unwrap()
             .map(Into::into);
@@ -865,4 +867,14 @@ pub async fn parent_membership_revision(
         "commit_id": row.current_commit_id,
         "stream_position": row.current_stream_position,
     })
+}
+
+/// Build a large case future outside the Tokio test wrapper's poll frame.
+#[inline(never)]
+pub fn case_future<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future,
+{
+    Box::pin(make())
 }

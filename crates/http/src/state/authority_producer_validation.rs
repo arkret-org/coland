@@ -70,15 +70,44 @@ pub(crate) async fn verify_self_event_producer_key(
     SelfProducerCommitGuard,
     arkret_signatures::PublicKeyMaterial,
 )> {
-    arkret_schema::validate_event_for_submit(event)
+    verify_self_event_producer_key_inner(state, session, event, false).await
+}
+
+/// Ordinary shared Events may name an independently authenticated Agent as
+/// their actual producer. Private and dedicated commands retain direct authors.
+pub(crate) async fn verify_self_event_submission_producer_key(
+    state: &AppState,
+    session: &SessionIdentityState,
+    event: &Event,
+) -> ServiceResult<(
+    SelfProducerCommitGuard,
+    arkret_signatures::PublicKeyMaterial,
+)> {
+    verify_self_event_producer_key_inner(state, session, event, true).await
+}
+
+async fn verify_self_event_producer_key_inner(
+    state: &AppState,
+    session: &SessionIdentityState,
+    event: &Event,
+    allow_agent_execution: bool,
+) -> ServiceResult<(
+    SelfProducerCommitGuard,
+    arkret_signatures::PublicKeyMaterial,
+)> {
+    arkret_event_draft::validate_event_for_submit(event)
         .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
     let actor = crate::routing::identity::session_actor::validated_session_actor(state, session)
         .await
         .map_err(|error| rejected(format!("authenticated Account unavailable: {error}")))?;
-    if event.actor_id != actor || event.executed_by.is_some() {
+    let delegated_agent = allow_agent_execution
+        && session.agent_session().is_some()
+        && event.executed_by.as_ref() == Some(&actor)
+        && event.actor_id != actor;
+    if event.actual_signer() != &actor || (event.executed_by.is_some() && !delegated_agent) {
         return Err(ServiceError::protocol(
             arkret_wire::ErrorCode::CapabilityDenied,
-            "self Event requires the exact authenticated actor without delegated execution"
+            "self Event requires the exact authenticated producer on its registered execution path"
                 .to_owned(),
         ));
     }
@@ -125,6 +154,8 @@ pub(crate) async fn verify_self_event_producer_key(
                 .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
             if authorized.agent_id != *agent_id
                 || authorized.verification_method != *verification_method
+                || (delegated_agent
+                    && committed.event.executed_by.as_ref() != Some(&event.actor_id))
             {
                 return Err(rejected(
                     "Agent grant authorization differs from accepted Event",
@@ -217,7 +248,12 @@ pub(crate) async fn verify_account_device_producer(
         .producer_proof
         .as_ref()
         .ok_or_else(|| ServiceError::SchemaViolation("Event has no producer proof".into()))?;
-    let (key, _) = account_device_producer_key(state, account, &proof.verification_method).await?;
+    let (key, _) = Box::pin(account_device_producer_key(
+        state,
+        account,
+        &proof.verification_method,
+    ))
+    .await?;
     let digest_suite =
         arkret_canonical::canonical::digest_suite(event.event_id.digest_suite_code().as_str())
             .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
@@ -367,18 +403,21 @@ pub(super) async fn account_device_producer_key(
     ) {
         return Err(refusal);
     }
-    let facet =
+    let facet = Box::pin(
         crate::routing::identity::device_signing::try_resolve_device_signing_directory_facet(
             state,
             account.principal_id.as_str(),
             device_id.as_str(),
-        )
-        .await?;
-    let authorization = crate::routing::identity::device_signing::current_device_authorization(
-        state,
-        &ActorId::account(account.clone()),
-        &device_id,
-        &facet,
+        ),
+    )
+    .await?;
+    let authorization = Box::pin(
+        crate::routing::identity::device_signing::current_device_authorization(
+            state,
+            &ActorId::account(account.clone()),
+            &device_id,
+            &facet,
+        ),
     )
     .await?
     .ok_or_else(|| {
@@ -392,12 +431,13 @@ pub(super) async fn account_device_producer_key(
             "Event producer device authorization is not its current confirmed instance",
         ));
     }
-    let (evidence, _) =
+    let (evidence, _) = Box::pin(
         crate::routing::identity::keys::prepare_current_account_device_signer_evidence(
             state, account, &device_id, &facet,
-        )
-        .await?
-        .ok_or_else(|| rejected("native original Account Device root is unavailable"))?;
+        ),
+    )
+    .await?
+    .ok_or_else(|| rejected("native original Account Device root is unavailable"))?;
     let multibase = authorization
         .device_public_key_did
         .as_str()

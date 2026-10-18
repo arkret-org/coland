@@ -191,6 +191,19 @@ pub trait ActorProfileStore: Send + Sync {
         self.admit_agent_control_event(write).await
     }
 
+    /// Renew an already active key without the fresh-key pairing ceremony.
+    /// The current key material and immutable provision ceiling are checked
+    /// under the same lock as the signed supersession basis and Commit.
+    async fn admit_agent_same_key_renewal(
+        &self,
+        _write: AgentControlAdmissionWrite,
+        _origin: Option<AgentControlOriginSource>,
+    ) -> PersistenceResult<AgentControlAdmissionOutcome> {
+        Err(crate::PersistenceError::Internal(
+            "atomic Agent same-key renewal unavailable".to_owned(),
+        ))
+    }
+
     /// The current profile of the account's local PCR, with the exact Event
     /// and Commit that produced it.
     async fn current_profile(

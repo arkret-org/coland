@@ -95,6 +95,7 @@ async fn install_verified_route(sender: &AppState, recipient: &AppState) {
         .unwrap();
     let boundary = evidence.method_history_evidence.boundary();
     let description = VerifiedServiceDescribeMetadata {
+        supported_profiles: Vec::new(),
         service_id: recipient.service_core_id(),
         service_kind: "station".into(),
         service_resolution: ResolutionCommitment {
@@ -159,7 +160,7 @@ async fn admitted_owner(
     for (index, tx) in owner.unit.transactions.iter_mut().enumerate() {
         tx.commit.event_ref = tx.event.event_id.clone();
         tx.producer_signer_fact = store
-            .prepare_human_signer_fact(&tx.event, tx.commit.committed_at)
+            .prepare_account_device_signer_fact(&tx.event, tx.commit.committed_at)
             .await
             .unwrap()
             .map(Into::into);
@@ -194,6 +195,7 @@ async fn install_opening_anchor(
         .install_committed_replica(&CommittedReplica {
             local_service_id: receiver.state.service_core_id(),
             authority: tx.expected_authority.clone(),
+            historical_commit: None,
             event: tx.event.clone(),
             commit: tx.commit.clone(),
             producer_signer_fact: tx.producer_signer_fact.clone(),

@@ -15,6 +15,10 @@ mod ordinary_realm;
 #[allow(dead_code)]
 mod pcr_genesis;
 
+#[path = "support/agent_scope_custody.rs"]
+#[allow(dead_code)]
+mod agent_scope_custody;
+
 use arkret_models_collaboration::device_messages::RecipientDelivery;
 use chrono::{Duration, Utc};
 use coland_storage::contract_tests::test_device_message_envelope;
@@ -617,6 +621,9 @@ struct CommittedAgent {
     verification_method: arkret_wire::DidUrl,
     key_id: arkret_wire::NonEmptyString,
     authorization_ref: arkret_wire::CommittedEventRef,
+    requested_scope: arkret_models_collaboration::events_payloads::agent::AgentKeyScope,
+    initial_resolution: arkret_models_identity::ResolutionCommitment,
+    provision_event_id: arkret_wire::EventId,
 }
 
 impl CommittedAgent {
@@ -669,6 +676,23 @@ impl CommittedAgent {
         let agent_did = arkret_wire::Did::new(inception.did.clone()).unwrap();
         let agent_id = arkret_wire::project_did_to_core_id(&agent_did).unwrap();
         let agent_account = arkret_wire::AccountId::new(agent_id.clone(), station.clone());
+        let send = arkret_wire::ServiceOperationId::SELF_DEVICE_MESSAGES_COMMAND_SEND_V1;
+        let requested_scope: arkret_models_collaboration::events_payloads::agent::AgentKeyScope =
+            serde_json::from_value(serde_json::json!({
+                "actions": [send, "ak.message.create"],
+                "resources": [{"kind": "operation", "operation": send}],
+            }))
+            .unwrap();
+        let requested_scope_digest =
+            arkret_models_collaboration::agent_scope::agent_requested_scope_digest(
+                &agent_id,
+                &controller.account.principal_id,
+                &requested_scope,
+            )
+            .unwrap();
+        let controller_genesis: arkret_models_collaboration::events_payloads::RealmCreatePayload =
+            serde_json::from_value(serde_json::to_value(&controller.events[0].payload).unwrap())
+                .unwrap();
         let create = arkret_bootstrap::build_agent_pcr_create_payload(
             arkret_bootstrap::AgentPcrCreatePayloadInput {
                 agent_id: agent_id.clone(),
@@ -683,8 +707,7 @@ impl CommittedAgent {
                     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
                 )
                 .unwrap(),
-                trust_domain: arkret_wire::TrustDomainId::new("ak:trust_domain:example.net")
-                    .unwrap(),
+                trust_domain: controller_genesis.object.trust_domain,
                 initial_join_rule: arkret_wire::JoinRule::Closed,
                 initial_history_access: arkret_wire::HistoryAccess::SinceJoin,
                 initial_discoverability: arkret_wire::Discoverability::Secret,
@@ -719,7 +742,7 @@ impl CommittedAgent {
                     "controller_authorization_ref": format!("{agent_did}#managed-controller"),
                     "agent_slug": "queue-agent",
                     "accountability_scope": "agent_operator",
-                    "requested_scope_digest": format!("sha256:{}", "9".repeat(64)),
+                    "requested_scope_digest": requested_scope_digest,
                     "selector_visibility": "private",
                     "created_at": arkret_canonical::format_timestamp_canonical(at)
                 }),
@@ -796,11 +819,7 @@ impl CommittedAgent {
                 next_root_public_key_multibase: &future_root,
                 controller_principal_id: &controller.account.principal_id,
                 principal_control_realm_id: &pcr_realm_id,
-                requested_scope_digest: &arkret_wire::Hash::new(format!(
-                    "sha256:{}",
-                    "9".repeat(64)
-                ))
-                .unwrap(),
+                requested_scope_digest: &requested_scope_digest,
             },
         )
         .unwrap();
@@ -892,6 +911,8 @@ impl CommittedAgent {
             revocation_check_ref: None,
             runtime_attestation: None,
         };
+        let mut payload = serde_json::to_value(payload).unwrap();
+        agent_scope_custody::bind_native_pairing_approval(&mut payload, &station);
         let authorize = controller_signed(
             &controller,
             &agent_did,
@@ -900,7 +921,7 @@ impl CommittedAgent {
             arkret_wire::ScopeRef::Realm {
                 realm_id: pcr_realm_id.clone(),
             },
-            serde_json::to_value(&payload).unwrap(),
+            payload,
             at,
         );
         let commit = admit(&authority, &store, &station, &authorize).await;
@@ -921,6 +942,9 @@ impl CommittedAgent {
             verification_method,
             key_id,
             authorization_ref,
+            requested_scope,
+            initial_resolution: create.object.initial_resolution.clone().unwrap(),
+            provision_event_id: provision.event_id,
         };
         (agent, recipient)
     }
@@ -1490,15 +1514,22 @@ fn agent_message_send_gate_scenario() -> std::pin::Pin<Box<impl std::future::Fut
             lifecycle,
             arkret_models_collaboration::agent_operations::AgentLifecycleState::Active
         );
+        let mut agent_record = coland_storage::AgentPrincipalRecord::new(
+            agent.agent_account.principal_id.to_string(),
+            provision.controller_principal_id.to_string(),
+            provision.principal_control_realm_id.to_string(),
+            provision.controller_authorization_ref,
+            lifecycle,
+            owner.created_at,
+        );
+        agent_record.requested_scope = Some(serde_json::to_value(&agent.requested_scope).unwrap());
+        agent_record.provision_event_refs = Some(serde_json::json!({
+            "provision_event_id": agent.provision_event_id,
+            "initial_resolution": agent.initial_resolution,
+            "controller_authority": agent.controller.account,
+        }));
         coland_storage_postgres::PgAgentStore { pool: pool.clone() }
-            .put(coland_storage::AgentPrincipalRecord::new(
-                agent.agent_account.principal_id.to_string(),
-                provision.controller_principal_id.to_string(),
-                provision.principal_control_realm_id.to_string(),
-                provision.controller_authorization_ref,
-                lifecycle,
-                owner.created_at,
-            ))
+            .put(agent_record)
             .await
             .unwrap();
         let participation =
@@ -1645,6 +1676,36 @@ fn agent_message_send_gate_scenario() -> std::pin::Pin<Box<impl std::future::Fut
             .expect("Agent member binding has a durable source");
         assert_eq!(joined.commit, join.authority_commit.commit);
         assert_eq!(joined.event.actor_id, controller_actor);
+        let accepted_key = agent
+            .store
+            .committed_event(&agent.authorization_ref.event_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let station = historical_control_source::HistoricalControlStation::new(
+            "device-queue-native-agent",
+            STATION_AUTHORITY_SEED,
+        );
+        let endpoint = coland_storage::AgentEndpointGuard {
+            pcr_realm_id: agent.pcr_realm_id.clone(),
+            agent_id: agent.agent_account.principal_id.clone(),
+            authorization_ref: agent.authorization_ref.clone(),
+            verification_method: agent.verification_method.clone(),
+        };
+        let (_scope_vault, scope_evidence) = scenario_future(|| {
+            agent_scope_custody::retain_delivery_scope_with_runtime_seed(
+                &pool,
+                &station,
+                &agent.controller,
+                &agent.agent_account,
+                &accepted_key.event,
+                &agent.requested_scope,
+                &endpoint,
+                false,
+                &AGENT_RUNTIME_SEED,
+            )
+        })
+        .await;
         let mut head = mode;
         for subject in [
             controller_actor.clone(),
@@ -1678,15 +1739,24 @@ fn agent_message_send_gate_scenario() -> std::pin::Pin<Box<impl std::future::Fut
                 arkret_wire::EventKind::CapabilityGrant,
                 controller_actor.clone(),
                 serde_json::to_value(grant).unwrap(),
-                at,
+                Utc::now().max(head.authority_commit.commit.committed_at)
+                    + chrono::TimeDelta::milliseconds(1),
             );
-            let grant = ordinary_realm::source_request(&pool, grant).await;
+            let mut grant = ordinary_realm::source_request(&pool, grant).await;
+            if grant.authority_commit.event.payload["grant"]["subject"]
+                == serde_json::to_value(arkret_wire::ActorId::account(agent.agent_account.clone()))
+                    .unwrap()
+            {
+                grant.agent_grant_scope_evidence = Some(scope_evidence.clone());
+            }
             uow.commit_event(grant.clone())
                 .await
                 .expect("admit the bounded message capability");
             head = grant;
         }
         discussion.head = head;
+        let at = Utc::now().max(discussion.head.authority_commit.commit.committed_at)
+            + chrono::TimeDelta::milliseconds(1);
         let creator_leaf_authority =
             arkret_models_collaboration::events_payloads::MlsGenesisCreatorLeafAuthority {
                 leaf_signature_key_b64u: arkret_wire::Base64UrlString::new(
@@ -1724,7 +1794,7 @@ fn agent_message_send_gate_scenario() -> std::pin::Pin<Box<impl std::future::Fut
             .authority_commit
             .producer_signer_fact
             .as_ref()
-            .and_then(|fact| fact.as_human())
+            .and_then(|fact| fact.as_account_device())
             .expect("discussion founder has accepted Human signer provenance");
         assert_eq!(
             creator_leaf_authority.endpoint,

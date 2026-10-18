@@ -62,7 +62,9 @@ pub use revocation::{
 };
 pub(super) use sessions::request_requires_fresh_introspection;
 pub use sessions::{auth_or_render, authenticated_session};
-pub(crate) use sessions::{revalidate_stream_session, websocket_session};
+pub(crate) use sessions::{
+    revalidate_current_read_session, revalidate_stream_session, websocket_session,
+};
 
 pub(super) fn router() -> Router {
     local_router()

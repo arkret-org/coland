@@ -779,6 +779,11 @@ pub(crate) async fn plan_realm_fanout_in_connection(
             && matches!(
                 event.kind,
                 arkret_wire::EventKind::CircleMemberState
+                    | arkret_wire::EventKind::CapabilityGrant
+                    | arkret_wire::EventKind::CapabilityRevoke
+                    | arkret_wire::EventKind::PolicySet
+                    | arkret_wire::EventKind::StrandWatchSet
+                    | arkret_wire::EventKind::AuditAccessed
                     | arkret_wire::EventKind::MlsGenesis
                     | arkret_wire::EventKind::MlsCommit
                     | arkret_wire::EventKind::StrandCreate
@@ -919,6 +924,112 @@ pub(crate) async fn plan_realm_fanout_in_connection(
             .execute(&mut *conn)
             .await
             .map_err(PersistenceError::database)?;
+        }
+    }
+    Ok(inserted)
+}
+
+/// One source-committed business/audit unit; never two ordinary fanout items.
+pub(crate) async fn plan_audit_pair_in_connection(
+    conn: &mut AsyncPgConnection,
+    unit: &arkret_models_collaboration::authority_commit::AuditPairedEventUnitSubmission,
+    commits: &[arkret_wire::RealmCommit; 2],
+    authority_station: &arkret_wire::DidCoreId,
+) -> Result<usize, PgTransactionError> {
+    use arkret_models_collaboration::authority_commit::{
+        AuditPairedEventFederationSubmission, PeerRegisteredAtomicUnit,
+        PeerRegisteredAtomicUnitRequest, RegisteredAtomicUnitBranch,
+    };
+    let mut business_targets = remote_targets(
+        conn,
+        &unit.events[0].event,
+        authority_station,
+        commits[1].committed_at,
+    )
+    .await?;
+    let audit_targets = remote_targets(
+        conn,
+        &unit.events[1].event,
+        authority_station,
+        commits[1].committed_at,
+    )
+    .await?;
+    let mut sources = Vec::with_capacity(2);
+    for (slot, commit) in unit.events.iter().zip(commits) {
+        let fact = crate::agent_producer_signer_keys::producer_source_for_commit_in_connection(
+            conn,
+            &slot.event,
+            commit,
+        )
+        .await?;
+        sources.push(CommittedEventSubmission::from_source_submission(
+            slot,
+            commit.clone(),
+            fact,
+            None,
+            None,
+        ));
+    }
+    let committed_events: [CommittedEventSubmission; 2] = sources
+        .try_into()
+        .map_err(|_| internal("audit pair requires two source slots"))?;
+    let request =
+        PeerAuthoritySubmitRequest::RegisteredAtomicUnit(PeerRegisteredAtomicUnitRequest {
+            branch: RegisteredAtomicUnitBranch::RegisteredAtomicUnit,
+            unit: PeerRegisteredAtomicUnit::AuditPairedEvent(
+                AuditPairedEventFederationSubmission {
+                    unit_kind: unit.unit_kind,
+                    committed_events,
+                },
+            ),
+        });
+    request.validate().map_err(PersistenceError::database)?;
+    let payload_json = String::from_utf8(
+        arkret_canonical::canonical_json_bytes(&request).map_err(PersistenceError::database)?,
+    )
+    .map_err(internal)?;
+    let idempotency_key = fanout_idempotency_key(&commits[1].commit_id);
+    let mut inserted = 0;
+    for (station, witnesses) in business_targets.iter_mut() {
+        let Some(audit_witnesses) = audit_targets.get(station) else {
+            continue;
+        };
+        for witness in audit_witnesses {
+            if !witnesses.contains(witness) {
+                witnesses.push(witness.clone());
+            }
+        }
+        let id = format!("{idempotency_key}:{station}");
+        let peer_url = crate::service_route::cached_station_base_in_connection(
+            conn,
+            station,
+            commits[1].committed_at,
+        )
+        .await?;
+        let record = FederationOutboxRecord::realm_fanout(RealmFanoutOutboxInput {
+            id: id.clone(),
+            peer_id: station.clone(),
+            peer_url,
+            endpoint: PEER_EVENTS_ENDPOINT.to_owned(),
+            idempotency_key: idempotency_key.clone(),
+            payload_json: payload_json.clone(),
+            binding: RealmFanoutBinding {
+                realm_id: unit.events[0].event.realm_id.to_string(),
+                source_event_ids: unit
+                    .events
+                    .iter()
+                    .map(|slot| slot.event.event_id.to_string())
+                    .collect(),
+                authority_witnesses: witnesses.clone(),
+            },
+            created_at: commits[1].committed_at.timestamp(),
+        });
+        if crate::federation::enqueue_federation_outbox_in_connection(conn, &record).await? {
+            inserted += 1;
+            for slot in &unit.events {
+                sql_query("INSERT INTO event_federation_outbox(event_pk,outbox_id) SELECT pk,$2 FROM canonical_events WHERE envelope->>'event_id'=$1 ON CONFLICT DO NOTHING")
+                    .bind::<Text,_>(slot.event.event_id.as_str()).bind::<Text,_>(&id).execute(&mut *conn).await?;
+            }
         }
     }
     Ok(inserted)

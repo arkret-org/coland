@@ -1,5 +1,4 @@
 //! Grant-local detached approvals; no governance configuration grants authority.
-//! This module is prepared independently until the shared evaluator window opens.
 use arkret_models_collaboration::governance::grant_constraint::{
     CapabilityGrant, GrantConstraint, GrantConstraintKind, GrantConstraintSubkind,
 };
@@ -40,12 +39,13 @@ fn approval_deadline(
     committed_at: chrono::DateTime<chrono::Utc>,
     timeout: Option<chrono::TimeDelta>,
 ) -> bool {
-    approved_at <= committed_at
-        && timeout.is_none_or(|age| {
-            approved_at
-                .checked_add_signed(age)
-                .is_some_and(|deadline| committed_at <= deadline)
-        })
+    // The shared signature verifier owns the independent future-only guard.
+    // Timeout has only an upper age boundary, with no additional lower bound.
+    timeout.is_none_or(|age| {
+        approved_at
+            .checked_add_signed(age)
+            .is_some_and(|deadline| committed_at <= deadline)
+    })
 }
 
 fn approval_not_before(grant: &CapabilityGrant) -> chrono::DateTime<chrono::Utc> {
@@ -55,6 +55,39 @@ fn approval_not_before(grant: &CapabilityGrant) -> chrono::DateTime<chrono::Utc>
         .filter(|constraint| constraint.constraint_kind == GrantConstraintKind::Temporal)
         .filter_map(|constraint| constraint.not_before)
         .fold(grant.issued_at, std::cmp::max)
+}
+
+/// A grant-context vote retains its declared time limits when reused by the
+/// independent governance layer. Another fresh vote cannot revive its nonce.
+pub(crate) fn grant_vote_is_current(
+    grant: &CapabilityGrant,
+    action: CapabilityActionId,
+    signature: &arkret_wire::ApprovalSignature,
+    at: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    if signature.input.approved_at < approval_not_before(grant) {
+        return false;
+    }
+    grant
+        .constraints
+        .iter()
+        .filter(|constraint| {
+            is_approval_constraint(constraint)
+                && (constraint.approval_required == Some(true)
+                    || constraint.guardian_approval_required == Some(true)
+                    || constraint.controller_approval_required == Some(true))
+                && (constraint.applies_to_actions.is_empty()
+                    || constraint
+                        .applies_to_actions
+                        .iter()
+                        .any(|entry| entry.as_str() == action.as_str()))
+        })
+        .all(|constraint| match constraint.timeout.as_deref() {
+            Some(value) => coland_storage::fixed_duration(value)
+                .filter(|age| *age > chrono::TimeDelta::zero())
+                .is_some_and(|age| approval_deadline(signature.input.approved_at, at, Some(age))),
+            None => true,
+        })
 }
 
 /// Return only exact constraints proved at this cut. The shared evaluator must
@@ -74,6 +107,127 @@ pub(crate) async fn require_grant_approvals(
     facts: &OperationFacts,
 ) -> PersistenceResult<Vec<SatisfiedGrantApproval>> {
     let methods = validate_candidate(event, commit, prepared)?;
+    let source = GrantApprovalSource::Event {
+        event,
+        at: commit.committed_at,
+        registered_pair: prepared.is_some_and(|prepared| {
+            matches!(
+                prepared.carrier_binding,
+                Some(coland_storage::ApprovalCarrierBinding::AuditPair { .. })
+            )
+        }),
+    };
+    require_with_source(conn, &source, methods, grant, action, target, facts).await
+}
+
+pub(crate) async fn require_creation_grant_approvals(
+    conn: &mut AsyncPgConnection,
+    creation: &crate::applet_action_approval::CreationAuthority<'_>,
+    methods: &[coland_storage::ApprovalHistoricalMethod],
+    grant: &CapabilityGrant,
+    current: &coland_storage::ManagementReviewCurrent,
+) -> PersistenceResult<Vec<SatisfiedGrantApproval>> {
+    if grant.constraints.iter().any(|constraint| {
+        is_approval_constraint(constraint)
+            && (constraint.approval_required == Some(true)
+                || constraint.guardian_approval_required == Some(true)
+                || constraint.controller_approval_required == Some(true))
+            && (constraint.applies_to_actions.is_empty()
+                || constraint
+                    .applies_to_actions
+                    .iter()
+                    .any(|action| action.as_str() == creation.action.as_str()))
+    }) && !methods.iter().any(|method| {
+        matches!(
+            &method.signature.input.approval_context,
+            ApprovalContext::Grant { grant_id } if grant_id == &grant.id
+        )
+    }) {
+        return Err(missing(creation.action, 1, 0));
+    }
+    require_with_source(
+        conn,
+        &GrantApprovalSource::Creation(creation, current),
+        methods,
+        grant,
+        creation.action,
+        &creation.target,
+        &creation.facts,
+    )
+    .await
+}
+
+enum GrantApprovalSource<'a> {
+    Event {
+        event: &'a Event,
+        at: chrono::DateTime<chrono::Utc>,
+        registered_pair: bool,
+    },
+    Creation(
+        &'a crate::applet_action_approval::CreationAuthority<'a>,
+        &'a coland_storage::ManagementReviewCurrent,
+    ),
+}
+impl GrantApprovalSource<'_> {
+    fn at(&self) -> chrono::DateTime<chrono::Utc> {
+        match self {
+            Self::Event { at, .. } => *at,
+            Self::Creation(creation, _) => creation.input.accepted_at,
+        }
+    }
+    fn initiator(&self) -> &arkret_wire::ActorId {
+        match self {
+            Self::Event { event, .. } => &event.actor_id,
+            Self::Creation(creation, _) => &creation.input.admin_actor_id,
+        }
+    }
+    async fn qualify(
+        &self,
+        conn: &mut AsyncPgConnection,
+        principal: &arkret_wire::DidCoreId,
+        action: CapabilityActionId,
+        target: &WireResourceSelector,
+        facts: &OperationFacts,
+    ) -> PersistenceResult<Option<serde_json::Value>> {
+        match self {
+            Self::Event {
+                event,
+                at,
+                registered_pair,
+            } => {
+                crate::approval_admission::qualify_principal(
+                    conn,
+                    event,
+                    principal,
+                    action,
+                    target,
+                    facts,
+                    *at,
+                    false,
+                    *registered_pair,
+                )
+                .await
+            }
+            Self::Creation(creation, current) => {
+                crate::approval_admission::qualify_creation_principal(
+                    conn, creation, principal, current,
+                )
+                .await
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn require_with_source(
+    conn: &mut AsyncPgConnection,
+    source: &GrantApprovalSource<'_>,
+    methods: &[coland_storage::ApprovalHistoricalMethod],
+    grant: &CapabilityGrant,
+    action: CapabilityActionId,
+    target: &WireResourceSelector,
+    facts: &OperationFacts,
+) -> PersistenceResult<Vec<SatisfiedGrantApproval>> {
     let mut requirements = Vec::new();
     for constraint in grant
         .constraints
@@ -113,20 +267,12 @@ pub(crate) async fn require_grant_approvals(
             .collect::<std::collections::BTreeSet<_>>();
         let mut qualified = std::collections::BTreeMap::new();
         for principal in roster {
-            if &principal == event.actor_id.signing_principal_id() {
+            if &principal == source.initiator().signing_principal_id() {
                 continue;
             }
-            if let Some(basis) = crate::approval_admission::qualify_principal(
-                conn,
-                event,
-                &principal,
-                action,
-                target,
-                facts,
-                commit.committed_at,
-                false,
-            )
-            .await?
+            if let Some(basis) =
+                crate::boxed_future(|| source.qualify(conn, &principal, action, target, facts))
+                    .await?
             {
                 qualified.insert(principal, basis);
             }
@@ -148,7 +294,7 @@ pub(crate) async fn require_grant_approvals(
                 continue;
             }
             if vote.input.approved_at < approval_not_before(grant)
-                || !approval_deadline(vote.input.approved_at, commit.committed_at, timeout)
+                || !approval_deadline(vote.input.approved_at, source.at(), timeout)
             {
                 continue;
             }
@@ -192,10 +338,10 @@ mod tests {
             signed + age + chrono::TimeDelta::milliseconds(1),
             Some(age)
         ));
-        assert!(!approval_deadline(
+        assert!(approval_deadline(
             signed,
             signed - chrono::TimeDelta::milliseconds(1),
-            None
+            Some(age)
         ));
         assert!(approval_deadline(
             signed,

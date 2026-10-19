@@ -198,7 +198,7 @@ async fn read_before_in_connection(
     let mut focus = None;
     let mut roster_revision = None;
     let mut moderation_revision = None;
-    let mut moderation_history = None;
+    let mut moderation_current = None;
     for axis in axes {
         let source: CommitStreamRef =
             serde_json::from_value(axis.source_stream_ref).map_err(PersistenceError::database)?;
@@ -222,6 +222,8 @@ async fn read_before_in_connection(
                 value
                     .validate_sources(&stream, &revision)
                     .map_err(|e| invalid(&e.to_string()))?;
+                arkret_signatures::media::verify_call_roster_bindings(realm, call, &value)
+                    .map_err(|e| invalid(&e.to_string()))?;
                 participants = value
                     .active_participants()
                     .map_err(|e| invalid(&e.to_string()))?;
@@ -236,7 +238,7 @@ async fn read_before_in_connection(
                 moderation = value
                     .effective_removals()
                     .map_err(|e| invalid(&e.to_string()))?;
-                moderation_history = Some(value);
+                moderation_current = Some(value);
                 moderation_revision = Some(revision);
             }
             _ => {}
@@ -247,8 +249,8 @@ async fn read_before_in_connection(
         #[diesel(sql_type=Jsonb)]
         commit_json: serde_json::Value,
     }
-    let head=sql_query("SELECT commit_json FROM realm_commits WHERE realm_id=$1 AND stream_ref=$2 AND ($3::text IS NULL OR commit_json->>'event_ref'<>$3) ORDER BY stream_position DESC LIMIT 1")
-        .bind::<Text,_>(realm.as_str()).bind::<Jsonb,_>(serde_json::to_value(&stream).map_err(PersistenceError::database)?)
+    let head=sql_query("SELECT commit_json FROM realm_commits WHERE realm_id=$1 AND stream_key=$2 AND ($3::text IS NULL OR commit_json->>'event_ref'<>$3) ORDER BY stream_position DESC LIMIT 1")
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(crate::authority_commit::stream_key(&stream)?)
         .bind::<diesel::sql_types::Nullable<Text>,_>(excluded.map(|e|e.as_str())).get_result::<HeadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let head: RealmCommit =
         serde_json::from_value(head.commit_json).map_err(PersistenceError::database)?;
@@ -294,7 +296,7 @@ async fn read_before_in_connection(
         moderation,
         roster_revision,
         moderation_revision,
-        moderation_history,
+        moderation_current,
     }))
 }
 
@@ -303,6 +305,7 @@ pub(crate) async fn write_axes(
     event: &Event,
     commit: &RealmCommit,
     payload: &CallStatePayload,
+    verified: Option<&arkret_signatures::media::VerifiedCallParticipant>,
 ) -> PersistenceResult<()> {
     payload.validate().map_err(invalid)?;
     let call = &payload.call_id;
@@ -347,37 +350,74 @@ pub(crate) async fn write_axes(
         }
         let rich = matches!(kind, "call_roster" | "call_moderation");
         if rich {
-            let mut assertions = match &old {
-                Some(old) => old
-                    .value
-                    .get("assertions")
-                    .and_then(|a| a.as_array())
-                    .cloned()
-                    .ok_or_else(|| invalid("Call axis is not a complete assertion set"))?,
-                None => Vec::new(),
+            let index = if kind == "call_roster" {
+                CALL_ROSTER_WRITE_INDEX
+            } else {
+                CALL_MODERATION_WRITE_INDEX
             };
-            let index = if kind == "call_roster" { 7 } else { 6 };
-            let assertion = serde_json::json!({"tag_id":format!("{}:{}",event.event_id,index),"source_commit":commit,"value":value});
-            if let Some(existing) = assertions
-                .iter()
-                .find(|a| a["tag_id"] == assertion["tag_id"])
-            {
-                if existing != &assertion {
-                    return Err(invalid("Call assertion dot has a different carrier"));
+            let source = serde_json::json!({"tag_id":format!("{}:{index}",event.event_id),"source_commit":commit,"value":value});
+            if let Some(old) = &old {
+                if old.current_stream_position as u64 > commit.stream_position {
+                    continue;
                 }
-                continue;
+                if old.current_stream_position as u64 == commit.stream_position {
+                    if old.current_commit_id != commit.commit_id.as_str()
+                        || old.value.get("last_source") != Some(&source)
+                    {
+                        return Err(invalid("Call effective axis forks its exact last source"));
+                    }
+                    continue;
+                }
             }
-            if old
-                .as_ref()
-                .is_some_and(|o| o.current_stream_position as u64 >= commit.stream_position)
-            {
-                return Err(invalid(
-                    "complete Call axis omitted an earlier accepted assertion",
-                ));
-            }
-            assertions.push(assertion);
-            assertions.sort_by(|a, b| a["tag_id"].as_str().cmp(&b["tag_id"].as_str()));
-            value = serde_json::json!({"assertions":assertions});
+            value = if kind == "call_roster" {
+                let previous = old
+                    .as_ref()
+                    .map(|old| {
+                        serde_json::from_value::<CallRosterCurrentValue>(old.value.clone())
+                            .map_err(PersistenceError::database)
+                    })
+                    .transpose()?;
+                let source: CallRosterSource =
+                    serde_json::from_value(source).map_err(PersistenceError::database)?;
+                let key = if let CallRosterDelta::Join { participant } = &source.value {
+                    if let Some(binding) = &participant.participant_binding {
+                        Some(
+                            crate::call_participant_issuer_sources::for_join(
+                                conn,
+                                event,
+                                commit,
+                                call,
+                                &binding.issuer_kid,
+                                verified,
+                            )
+                            .await?,
+                        )
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                serde_json::to_value(
+                    CallRosterCurrentValue::apply_delta(previous.as_ref(), source, key)
+                        .map_err(|e| invalid(&e.to_string()))?,
+                )
+                .map_err(PersistenceError::database)?
+            } else {
+                let previous = old
+                    .as_ref()
+                    .map(|old| {
+                        serde_json::from_value::<CallModerationCurrentValue>(old.value.clone())
+                            .map_err(PersistenceError::database)
+                    })
+                    .transpose()?;
+                let source = serde_json::from_value(source).map_err(PersistenceError::database)?;
+                serde_json::to_value(
+                    CallModerationCurrentValue::apply_delta(previous.as_ref(), source)
+                        .map_err(|e| invalid(&e.to_string()))?,
+                )
+                .map_err(PersistenceError::database)?
+            };
         } else if let Some(old) = &old {
             if old.current_stream_position as u64 > commit.stream_position {
                 continue;
@@ -573,7 +613,7 @@ async fn commit_state(
             .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(payload.call_id.as_str()).bind::<Text,_>(commit.commit_id.as_str()).bind::<BigInt,_>(commit.stream_position as i64)
             .bind::<Jsonb,_>(serde_json::to_value(t).map_err(PersistenceError::database)?).bind::<Timestamptz,_>(commit.committed_at).execute(&mut *conn).await.map_err(PersistenceError::database)?;
     }
-    write_axes(conn, event, commit, &payload).await?;
+    write_axes(conn, event, commit, &payload, verified).await?;
     Ok(())
 }
 
@@ -627,8 +667,8 @@ pub(crate) async fn release_in_connection(
         }) else {
             return Ok(false);
         };
-        if cut.moderation_history.as_ref().is_some_and(|history| {
-            history.assertions.iter().any(|assertion| {
+        if cut.moderation_current.as_ref().is_some_and(|history| {
+            history.entries.iter().any(|assertion| {
                 matches!(&assertion.value, CallModerationDelta::RemoveParticipant { removal }
                 if removal.action == CallParticipantRemovalAction::Kick
                     && removal.actor_id == request.actor_id

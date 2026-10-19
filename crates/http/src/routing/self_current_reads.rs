@@ -792,7 +792,8 @@ async fn resolve_media_binding(
     let MediaServiceAnchorRead::Anchored { value, .. } = &anchor else {
         return Ok(None);
     };
-    let (route, signing_keys) = super::media_service_binding::resolve_issuer(state, value).await?;
+    let (route, signing_keys, _) =
+        super::media_service_binding::resolve_issuer(state, value).await?;
     let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let outcome = MediaServiceBindingOutcome {
         request_id: request.request_id.clone(),

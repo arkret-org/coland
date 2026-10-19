@@ -232,27 +232,53 @@ async fn every_stream_checks_genesis_successors_and_cross_stream_predecessors() 
     }
 }
 
-#[tokio::test]
-async fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
+#[test]
+fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
+    std::thread::spawn(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(Box::pin(call_current_handoff_scenario()));
+    })
+    .join()
+    .unwrap();
+}
+
+async fn call_current_handoff_scenario() {
     eprintln!("[2133-handoff] starting complete PG fixture");
     let database = TestDatabase::lease().await;
     let pool = database.pool();
-    let fixture = Box::pin(HumanFixture::new(
-        &pool,
-        "did:web:handoff-old.example".parse().unwrap(),
-    ))
-    .await;
-    Box::pin(fixture.admit(&pool)).await;
+    let fixture_pool = pool.clone();
+    let fixture = tokio::spawn(async move {
+        std::sync::Arc::new(
+            Box::pin(HumanFixture::new(
+                &fixture_pool,
+                "did:web:handoff-old.example".parse().unwrap(),
+            ))
+            .await,
+        )
+    })
+    .await
+    .unwrap();
+    let admitted_fixture = fixture.clone();
+    let admitted_pool = pool.clone();
+    tokio::spawn(async move {
+        Box::pin(admitted_fixture.admit(&admitted_pool)).await;
+    })
+    .await
+    .unwrap();
     eprintln!("[2133-handoff] accepted founder fixture");
     let store = PgAuthorityCommitStore { pool: pool.clone() };
-    let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let mut watch_tail = fixture.unit.transactions.last().unwrap().clone();
     let realm = watch_tail.event.realm_id.clone();
     let watcher = ActorId::account(fixture.pcr.history.account.clone());
     let mut strands = Vec::new();
     for label in ["Written Watch", "Never Written Watch"] {
         let created_at = watch_tail.commit.committed_at + chrono::TimeDelta::seconds(1);
-        let create = Box::pin(request(
+        eprintln!("[call-current-handoff] preparing Strand {label}");
+        let create = Box::pin(isolated_request(
             &fixture,
             &pool,
             &watch_tail,
@@ -263,19 +289,110 @@ async fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
                 "created_at":arkret_canonical::format_timestamp_canonical(created_at)}}),
         ))
         .await;
-        Box::pin(uow.commit_event(create.clone())).await.unwrap();
+        eprintln!("[call-current-handoff] admitting Strand {label}");
+        Box::pin(isolated_commit(&pool, create.clone()))
+            .await
+            .unwrap();
         strands.push(arkret_wire::StrandId::from_event_id(
             &create.authority_commit.event.event_id,
         ));
         watch_tail = create.authority_commit;
     }
-    let set = Box::pin(request(&fixture, &pool, &watch_tail, EventKind::StrandWatchSet,
+    let set = Box::pin(isolated_request(&fixture, &pool, &watch_tail, EventKind::StrandWatchSet,
         serde_json::json!({"strand_id":strands[0],"watcher_actor_id":watcher,"level":"all","level_public":true}))).await;
-    Box::pin(uow.commit_event(set.clone())).await.unwrap();
-    let clear = Box::pin(request(&fixture, &pool, &set.authority_commit, EventKind::StrandWatchSet,
+    Box::pin(isolated_commit(&pool, set.clone())).await.unwrap();
+    let clear = Box::pin(isolated_request(&fixture, &pool, &set.authority_commit, EventKind::StrandWatchSet,
         serde_json::json!({"strand_id":strands[0],"watcher_actor_id":watcher,"level":null,"expected_value":{"level":"all","level_public":true}}))).await;
-    Box::pin(uow.commit_event(clear.clone())).await.unwrap();
+    Box::pin(isolated_commit(&pool, clear.clone()))
+        .await
+        .unwrap();
     watch_tail = clear.authority_commit.clone();
+    let call = Box::pin(isolated_request(
+        &fixture,
+        &pool,
+        &watch_tail,
+        EventKind::CallCreate,
+        serde_json::json!({"initial_state":"connecting"}),
+    ))
+    .await;
+    Box::pin(isolated_commit(&pool, call.clone()))
+        .await
+        .unwrap();
+    let call_id = arkret_wire::CallId::from_event_id(&call.authority_commit.event.event_id);
+    let device = &fixture.pcr.history.founding_device_id;
+    let media_key = ed25519_dalek::SigningKey::from_bytes(&[31; 32]);
+    let multikey =
+        arkret_canonical::ed25519_pubkey_to_did_key_multibase(media_key.verifying_key().as_bytes());
+    let issuer_did: arkret_wire::Did = format!("did:key:{multikey}").parse().unwrap();
+    let issuer = arkret_wire::project_did_to_core_id(&issuer_did).unwrap();
+    let issuer_kid = format!("{issuer_did}#{multikey}");
+    let service = Box::pin(isolated_request(
+        &fixture,
+        &pool,
+        &call.authority_commit,
+        EventKind::RealmMediaService,
+        serde_json::json!({"value":{"service_id":issuer,"foci":[{
+            "focus_id":"handoff-media","focus_kind":"livekit",
+            "token_endpoint":"https://media.example/token","connect_url":"wss://media.example"
+        }]}}),
+    ))
+    .await;
+    Box::pin(isolated_commit(&pool, service.clone()))
+        .await
+        .unwrap();
+    let participant = format!("ak:rtc_participant:{}", uuid::Uuid::now_v7());
+    let expires_at = service.authority_commit.commit.committed_at + chrono::TimeDelta::minutes(10);
+    let fields = arkret_signatures::media::ParticipantBindingContext {
+        actor_id: &watcher,
+        call_id: &call_id,
+        device_id: device,
+        expires_at,
+        focus_id: "handoff-media",
+        participant_id: &participant,
+        realm_id: &realm,
+        issuer_kid: &issuer_kid,
+        media: arkret_models_collaboration::call_invitation::CallInvitationMedia {
+            audio: true,
+            video: false,
+            screen: false,
+        },
+    };
+    use ed25519_dalek::Signer as _;
+    let signature = arkret_canonical::base64url_encode(
+        media_key
+            .sign(&arkret_signatures::media::participant_binding_signing_input(&fields).unwrap())
+            .to_bytes(),
+    );
+    let mut joined = Box::pin(isolated_request(&fixture, &pool, &service.authority_commit,
+        EventKind::CallState, serde_json::json!({"call_id":call_id,
+            "focus":{"mode":"sfu","session_focus":"handoff-media"},
+            "roster_delta":{"op":"join","participant":{
+                "actor_id":watcher,"device_id":device,"focus_id":"handoff-media",
+                "participant_id":participant,"media":{"audio":true,"video":false,"screen":false},
+                "participant_binding":{"expires_at":arkret_canonical::format_timestamp_canonical(expires_at),
+                    "issuer_kid":issuer_kid,"sig":signature}
+            }}}))).await;
+    joined.verified_media_participant = arkret_signatures::media::VerifiedCallParticipant::verify(
+        &joined.authority_commit.event,
+        &issuer,
+        &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+            bytes: media_key.verifying_key().to_bytes().to_vec(),
+        },
+    )
+    .unwrap();
+    Box::pin(isolated_commit(&pool, joined.clone()))
+        .await
+        .unwrap();
+    let kick_at = joined.authority_commit.commit.committed_at + chrono::TimeDelta::seconds(1);
+    let kicked = Box::pin(isolated_request(&fixture, &pool, &joined.authority_commit, EventKind::CallState,
+        serde_json::json!({"call_id":call_id,"moderation_delta":{"op":"remove_participant","removal":{
+            "actor_id":watcher,"device_id":device,"action":"kick",
+            "removed_by":watcher.signing_principal_id(),"removed_at":arkret_canonical::format_timestamp_canonical(kick_at)
+        }}}))).await;
+    Box::pin(isolated_commit(&pool, kicked.clone()))
+        .await
+        .unwrap();
+    watch_tail = kicked.authority_commit.clone();
     let tail = &watch_tail;
     let account = fixture.pcr.history.account.clone();
     let next: arkret_wire::DidCoreId = "ak:did_core:web:handoff-new.example".parse().unwrap();
@@ -301,7 +418,7 @@ async fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
         serde_json::json!({"expected_governance_generation":0,"expected_realm_stream_commit_id":arkret_wire::RealmCommitId::from_digest([7;32]),"new_governance_station_id":next}),
         serde_json::json!({"expected_governance_generation":0,"expected_realm_stream_commit_id":tail.commit.commit_id,"new_governance_station_id":account.station_id}),
     ] {
-        let bad = Box::pin(request(
+        let bad = Box::pin(isolated_request(
             &fixture,
             &pool,
             tail,
@@ -309,16 +426,18 @@ async fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
             payload,
         ))
         .await;
-        assert!(Box::pin(uow.commit_event(bad)).await.is_err());
+        assert!(Box::pin(isolated_commit(&pool, bad)).await.is_err());
         assert_eq!(
             store.current_authority(&realm).await.unwrap(),
             Some(tail.expected_authority.clone())
         );
     }
-    let change = Box::pin(request(&fixture,&pool,tail,EventKind::RealmGovernanceStationChange,
+    let change = Box::pin(isolated_request(&fixture,&pool,tail,EventKind::RealmGovernanceStationChange,
         serde_json::json!({"expected_governance_generation":0,"expected_realm_stream_commit_id":tail.commit.commit_id,"new_governance_station_id":next}))).await;
-    Box::pin(uow.commit_event(change.clone())).await.unwrap();
-    let later = Box::pin(request(
+    Box::pin(isolated_commit(&pool, change.clone()))
+        .await
+        .unwrap();
+    let later = Box::pin(isolated_request(
         &fixture,
         &pool,
         &change.authority_commit,
@@ -326,7 +445,11 @@ async fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
         serde_json::json!({"schema":"ak.schema.realm_profile.v1","title":"Must not commit"}),
     ))
     .await;
-    assert!(Box::pin(uow.commit_event(later.clone())).await.is_err());
+    assert!(
+        Box::pin(isolated_commit(&pool, later.clone()))
+            .await
+            .is_err()
+    );
     let material = store
         .realm_state_snapshot_material(&realm)
         .await
@@ -413,7 +536,7 @@ async fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
         .await
         .unwrap();
     eprintln!("[2133-handoff] replayed complete handoff");
-    assert!(Box::pin(uow.commit_event(later)).await.is_err());
+    assert!(Box::pin(isolated_commit(&pool, later)).await.is_err());
     eprintln!("[2133-handoff] refused old authority write");
     let installed = store.current_authority(&realm).await.unwrap().unwrap();
     assert_eq!(installed.generation, 1);
@@ -472,6 +595,27 @@ async fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
         .unwrap()
         .unwrap();
     assert_eq!(new_snapshot.governance_generation, 1);
+    let roster = new_snapshot
+        .current_state_entries
+        .iter()
+        .find_map(|row| match row {
+            arkret_wire::TypedCurrentRow::Value {
+                selector: arkret_wire::CurrentSelector::CallRoster { call_id: actual },
+                value,
+                ..
+            } if actual == &call_id => Some(value),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(roster["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        roster["last_source"]["source_commit"],
+        serde_json::json!(joined.authority_commit.commit)
+    );
+    assert_eq!(
+        roster["last_source"]["source_commit"]["governance_generation"],
+        0
+    );
     eprintln!("[2133-handoff] issued successor Snapshot");
     let minimum = store
         .realm_state_snapshot_material_for_account(&realm, &account)
@@ -522,12 +666,14 @@ async fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
     // A new tenure extends the imported predecessor; it never restarts position.
     let mut next_tail = change.authority_commit.clone();
     next_tail.expected_authority = installed;
-    let mut fresh = Box::pin(request(
+    let mut fresh = Box::pin(isolated_request(
         &fixture,
         &pool,
         &next_tail,
-        EventKind::RealmProfile,
-        serde_json::json!({"schema":"ak.schema.realm_profile.v1","title":"New tenure"}),
+        EventKind::CallState,
+        serde_json::json!({"call_id":call_id,"roster_delta":{"op":"leave","actor_id":watcher,
+            "device_id":device,"expected_revision":{"commit_id":joined.authority_commit.commit.commit_id,
+                "stream_position":joined.authority_commit.commit.stream_position}}}),
     ))
     .await;
     fresh.authority_commit.commit.governance_generation = 1;
@@ -542,7 +688,7 @@ async fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
     // the fixture, rather than nesting its poll stack in the whole lifecycle.
     let mut admissions = tokio::task::JoinSet::new();
     let successor_pool = pool.clone();
-    let successor_request = Box::new(fresh.clone());
+    let successor_request = fresh.clone();
     admissions.spawn(async move {
         PgEventCommitUnitOfWork::new(successor_pool)
             .commit_event(*successor_request)
@@ -550,6 +696,48 @@ async fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
             .unwrap();
     });
     admissions.join_next().await.unwrap().unwrap();
+    let after = store
+        .realm_state_snapshot_material_for_account(&realm, &account)
+        .await
+        .unwrap()
+        .unwrap();
+    let roster = after
+        .current_state_entries
+        .iter()
+        .find_map(|row| match row {
+            arkret_wire::TypedCurrentRow::Value {
+                selector: arkret_wire::CurrentSelector::CallRoster { call_id: actual },
+                value,
+                ..
+            } if actual == &call_id => Some(value),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(roster["entries"], serde_json::json!([]));
+    assert_eq!(
+        roster["last_source"]["source_commit"],
+        serde_json::json!(fresh.authority_commit.commit)
+    );
+    let moderation = after
+        .current_state_entries
+        .iter()
+        .find_map(|row| match row {
+            arkret_wire::TypedCurrentRow::Value {
+                selector: arkret_wire::CurrentSelector::CallModeration { call_id: actual },
+                value,
+                ..
+            } if actual == &call_id => Some(value),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(moderation["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        moderation["last_source"]["source_commit"],
+        serde_json::json!(kicked.authority_commit.commit)
+    );
+    eprintln!(
+        "[call-current-handoff] original_generation_zero_sources=2 successor_empty_roster_last_source=1 retained_kick=1"
+    );
     eprintln!("[2133-handoff] successor extended original chain");
     assert_eq!(
         fresh.authority_commit.commit.previous_commit_ref,
@@ -583,4 +771,39 @@ async fn handoff_freezes_writes_preserves_current_and_reads_old_snapshots() {
             .count(),
         facts.len()
     );
+}
+
+/// Keep producer-material preparation off the retained lifecycle poll frame.
+async fn isolated_request(
+    fixture: &std::sync::Arc<HumanFixture>,
+    pool: &PgPool,
+    previous: &coland_storage::AuthorityCommitTransaction,
+    kind: EventKind,
+    payload: serde_json::Value,
+) -> Box<coland_storage::EventCommitRequest> {
+    let fixture = fixture.clone();
+    let pool = pool.clone();
+    let previous = Box::new(previous.clone());
+    tokio::spawn(async move {
+        Box::new(Box::pin(request(&fixture, &pool, &previous, kind, payload)).await)
+    })
+    .await
+    .unwrap()
+}
+
+/// Poll each real admission on a fresh default-stack worker, so the retained
+/// lifecycle fixture never shares its poll frame with the accepting unit.
+async fn isolated_commit(
+    pool: &PgPool,
+    request: Box<coland_storage::EventCommitRequest>,
+) -> coland_storage::PersistenceResult<()> {
+    let pool = pool.clone();
+    let mut admissions = tokio::task::JoinSet::new();
+    admissions.spawn(async move {
+        PgEventCommitUnitOfWork::new(pool)
+            .commit_event(*request)
+            .await
+            .map(|_| ())
+    });
+    admissions.join_next().await.unwrap().unwrap()
 }

@@ -1457,7 +1457,7 @@ pub struct CallCurrentCut {
     )>,
     pub roster_revision: Option<arkret_wire::CurrentRevision>,
     pub moderation_revision: Option<arkret_wire::CurrentRevision>,
-    pub moderation_history:
+    pub moderation_current:
         Option<arkret_models_collaboration::events_payloads::call::CallModerationCurrentValue>,
     pub moderation: Vec<arkret_models_collaboration::events_payloads::call::CallParticipantRemoval>,
 }

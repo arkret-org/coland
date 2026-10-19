@@ -711,7 +711,6 @@ pub fn describe(
             arkret_wire::FeatureDescriptor::MLS_LAST_RESORT_KEYPACKAGE_V1.to_owned(),
         ],
         auth_metadata,
-        privacy_derivation: Some(crate::routing::push_target_privacy_derivation_claim(now())),
         receive_policy_constraints: None,
         limits: arkret_models_discovery::service_description::ServerLimits {
             extensions: serde_json::from_value(serde_json::json!({
@@ -1132,22 +1131,7 @@ mod tests {
         description
             .validate()
             .expect("service description advertisement must remain transport-closed");
-        assert_eq!(
-            value["privacy_derivation"]["push_target_id_derivation"]["derivation_profile"],
-            json!("ak.push_target_id.hmac_sha256.v1")
-        );
-        assert_eq!(
-            value["privacy_derivation"]["push_target_id_derivation"]["secret_scope"],
-            json!("per_service")
-        );
-        assert_eq!(
-            value["privacy_derivation"]["push_target_id_derivation"]["salt_rotation_seconds"],
-            json!(30 * 24 * 60 * 60)
-        );
-        assert_eq!(
-            value["privacy_derivation"]["push_target_id_derivation"]["input_binding"],
-            json!(["account_id", "device_id", "push_route_id", "salt_epoch_id"])
-        );
+        assert!(value.get("privacy_derivation").is_none());
         assert_eq!(
             value["limits"]["resumable_upload_incomplete_ttl_seconds"],
             json!(86_400)

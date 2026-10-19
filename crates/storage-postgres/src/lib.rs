@@ -107,6 +107,7 @@ mod applet_content_delivery;
 mod applet_device_admission;
 mod applet_e2ee;
 mod applet_scope_profiles;
+mod call_participant_issuer_sources;
 mod call_state_current_results;
 mod circle_current_results;
 mod circle_reads;

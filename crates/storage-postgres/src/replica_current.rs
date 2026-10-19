@@ -1920,7 +1920,8 @@ mod tests {
         let database = TestDatabase::lease().await;
         let pool = database.pool();
         let mut conn = pool.get().await.unwrap();
-        let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+        // Exercise a whole second: generic Chrono JSON would omit .000.
+        let at = chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp(), 0).unwrap();
         let realm = arkret_wire::RealmId::from_event_id(&arkret_wire::EventId::from_digest(
             arkret_canonical::DigestSuite::Sha256,
             [0x61; 32],
@@ -1940,7 +1941,7 @@ mod tests {
         };
         let value = json!({"schema":"ak.schema.policy.v1","id":id,"realm_id":realm,
             "policy_kind":kind,"rules":rules,
-            "default_effect":"allow","created_by":actor,"created_at":at});
+            "default_effect":"allow","created_by":actor,"created_at":arkret_canonical::format_timestamp_canonical(at)});
         let head = arkret_wire::CommitStreamHead {
             stream_ref: arkret_wire::CommitStreamRef::Realm {
                 realm_id: realm.clone(),

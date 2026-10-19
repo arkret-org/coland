@@ -317,6 +317,56 @@ fn exercise(ghost: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = (
                 "historical resolution must not broaden into a Realm scan"
             );
         }
+        let mut replica =
+            garth::own_station_results::OwnStationDeviceReplica::new(scope.clone()).unwrap();
+        let current = reader
+            .client()
+            .snapshot_head(scope.realm_id())
+            .await
+            .unwrap();
+        let snapshot = garth::own_station_results::consume_own_station_device_snapshot(&current)
+            .unwrap()
+            .clone();
+        let original = reader
+            .client()
+            .snapshot_by_ref(scope.realm_id(), &snapshot.snapshot_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            garth::own_station_results::consume_own_station_device_snapshot(&original).unwrap(),
+            &snapshot
+        );
+        replica.install_current(current).unwrap();
+        assert!(
+            replica.head().unwrap().is_none(),
+            "current coverage is not downloaded history"
+        );
+        replica
+            .bootstrap_current_head(reader.client())
+            .await
+            .unwrap();
+        assert_eq!(
+            replica.head().unwrap(),
+            Some(&snapshot.visible_stream_heads[0])
+        );
+        let scan_request = arkret_wire::StreamScanRequest {
+            realm_id: scope.realm_id().clone(),
+            stream_ref: snapshot.visible_stream_heads[0].stream_ref.clone(),
+            direction: arkret_wire::StreamScanDirection::After(Some(
+                snapshot.visible_stream_heads[0].stream_position,
+            )),
+            limit: 1,
+        };
+        let scan = reader
+            .client()
+            .scan_commit_stream(&scan_request)
+            .await
+            .unwrap();
+        let page = replica
+            .apply_bound_scan(reader.client(), scan)
+            .await
+            .unwrap();
+        assert!(page.rows().unwrap().is_empty());
         // A stale opaque cursor is a transport continuation failure, not an
         // MLS reset. Revocation/integrity refusals must never take this path.
         for code in [
@@ -410,6 +460,10 @@ fn exercise(ghost: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = (
         // checkpoint provider rather than lose the newly generated bundles.
         runtime.maintain_mls_key_packages(&device, 2).await.unwrap();
         drop(reader);
+        assert!(replica.snapshot().is_err());
+        assert!(replica.head().is_err());
+        assert!(page.rows().is_err());
+        assert!(original.value().is_err());
         drop(device);
         drop(runtime);
         drop(edge);

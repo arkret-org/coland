@@ -536,6 +536,14 @@ pub(super) async fn realm_state_snapshot_head(
     let state = depot.get_typed::<AppState>().expect("state injected");
     let realm_id = query_param(req, "realm_id")
         .ok_or_else(|| coland_http::error::AppError::param_missing("realm_id is required"))?;
+    if let Ok(device) = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>(
+    ) {
+        return crate::routing::realm_state_snapshot::native_snapshot(
+            state, device, &realm_id, None,
+        )
+        .await;
+    }
     let realm_id = scope_selector_to_realm_id(&realm_id)?;
     let session = authenticated_session(state, req)
         .await
@@ -589,6 +597,17 @@ pub(super) async fn realm_state_snapshot_by_ref(
         .ok_or_else(|| coland_http::error::AppError::param_invalid("invalid snapshot_id"))?;
     let realm_id = query_param(req, "realm_id")
         .ok_or_else(|| coland_http::error::AppError::param_missing("realm_id is required"))?;
+    if let Ok(device) = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>(
+    ) {
+        return crate::routing::realm_state_snapshot::native_snapshot(
+            state,
+            device,
+            &realm_id,
+            Some(&snapshot_id),
+        )
+        .await;
+    }
     let realm_id = scope_selector_to_realm_id(&realm_id)?;
     let session = authenticated_session(state, req)
         .await

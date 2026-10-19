@@ -2887,6 +2887,21 @@ pub trait AuthorityCommitStore: Send + Sync {
         sign: RealmStateSnapshotSigner<'_>,
     ) -> PersistenceResult<Option<RealmStateSnapshot>>;
 
+    /// Issue the complete material visible in one accepted native Device
+    /// scope, proving its current read ceiling before signing or storing it.
+    async fn issue_realm_state_snapshot_for_applet_device(
+        &self,
+        endpoint: &crate::AppletManagedDeviceScopeGuard,
+        issuer: &arkret_wire::DidCoreId,
+        credential_expires_at: chrono::DateTime<chrono::Utc>,
+        sign: RealmStateSnapshotSigner<'_>,
+    ) -> PersistenceResult<Option<RealmStateSnapshot>> {
+        let _ = (endpoint, issuer, credential_expires_at, sign);
+        Err(crate::PersistenceError::Internal(
+            "native scoped Snapshot issuance is unavailable".to_owned(),
+        ))
+    }
+
     /// Archive an original governing Snapshot whose authority and signature
     /// the receiving layer verified. The store independently proves its exact
     /// Account disclosure against the member Station's durable replica cut.

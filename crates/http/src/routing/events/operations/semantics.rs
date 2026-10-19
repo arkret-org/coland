@@ -286,7 +286,7 @@ fn operation_extra_validator_for_kind(kind: &arkret_wire::EventKind) -> Option<O
         }
         arkret_wire::EventKind::RealmHistoryAccess
         | arkret_wire::EventKind::CircleHistoryAccess => Some(validate_history_access_payload),
-        arkret_wire::EventKind::RealmReadReceiptPolicy => {
+        arkret_wire::EventKind::ScopeReadReceiptPolicy => {
             Some(validate_read_receipt_policy_payload)
         }
         // views.md §3.1 — a shared View Event carrying `visibility="private"`

@@ -391,7 +391,7 @@ async fn seed_snapshot_families(conn: &mut AsyncPgConnection, first: i64, last: 
     conn.batch_execute(&format!(
         "INSERT INTO realm_bootstrap_current_results(realm_id,result_family,current_commit_id,current_stream_position,value,updated_at)
          SELECT {realm},f,{commit},0,'{{}}'::jsonb,now() FROM generate_series({first},{last}) r,
-         unnest(ARRAY['realm_genesis','realm_profile','realm_join_rule','realm_history_access','realm_discovery','realm_alias','realm_plaintext_visible_services','realm_read_receipt_policy']) f;
+         unnest(ARRAY['realm_genesis','realm_profile','realm_join_rule','realm_history_access','realm_discovery','realm_alias','realm_plaintext_visible_services']) f;
          INSERT INTO realm_authority_root_current_results(realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref,current_commit_id,current_stream_position,updated_at)
          SELECT {realm},'{{}}'::jsonb,0,0,'event',{commit},0,now() FROM generate_series({first},{last}) r;
          INSERT INTO realm_policy_bundle_current_results(realm_id,current_commit_id,current_stream_position,value,updated_at)

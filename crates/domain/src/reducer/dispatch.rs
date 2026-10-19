@@ -742,15 +742,15 @@ fn apply_realm_search_policy_dispatch(
     s.apply_realm_search_policy(op)
 }
 
-/// Dispatch for `ak.realm.read_receipt_policy`; writes the
-/// `realm_read_receipt_policy` current result named by
+/// Dispatch for `ak.scope.read_receipt_policy`; writes the
+/// `scope_read_receipt_policy` current result named by
 /// `discovery/read-receipts.md` section 2.5.
-fn apply_realm_read_receipt_policy_dispatch(
+fn apply_scope_read_receipt_policy_dispatch(
     s: &mut ProjectionState,
     op: &Operation,
     _hlc: &ServerHlc,
 ) -> ProjectionEffect {
-    s.apply_realm_read_receipt_policy(op)
+    s.apply_scope_read_receipt_policy(op)
 }
 
 fn apply_realm_preview_policy_dispatch(

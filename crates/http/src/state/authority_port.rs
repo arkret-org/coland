@@ -90,7 +90,7 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         | EventKind::PolicySet
         | EventKind::DirectConversationBound
         | EventKind::RealmSetDefaultStrand
-        | EventKind::RealmReadReceiptPolicy
+        | EventKind::ScopeReadReceiptPolicy
         | EventKind::RealmPlaintextVisibleServices
         | EventKind::RealmPreviewPolicy
         | EventKind::MemberIdentityUpdate
@@ -209,6 +209,7 @@ pub(super) fn require_guarded_unit_event(request: &EventAdmissionSubmission) -> 
             && matches!(
                 event.kind,
                 arkret_wire::EventKind::CircleMemberState
+                    | arkret_wire::EventKind::ScopeReadReceiptPolicy
                     | arkret_wire::EventKind::CallCreate
                     | arkret_wire::EventKind::CallState
                     | arkret_wire::EventKind::StrandWatchSet
@@ -941,7 +942,7 @@ mod tests {
             EventKind::RealmJoinRule,
             EventKind::StrandCreate,
             EventKind::RealmProfile,
-            EventKind::RealmReadReceiptPolicy,
+            EventKind::ScopeReadReceiptPolicy,
             EventKind::RealmPlaintextVisibleServices,
             EventKind::RealmPreviewPolicy,
             EventKind::RealmTombstone,
@@ -1012,7 +1013,7 @@ mod tests {
             EventKind::RealmJoinRule,
             EventKind::StrandCreate,
             EventKind::RealmProfile,
-            EventKind::RealmReadReceiptPolicy,
+            EventKind::ScopeReadReceiptPolicy,
             EventKind::RealmPlaintextVisibleServices,
             EventKind::RealmPreviewPolicy,
             EventKind::RealmTombstone,

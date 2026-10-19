@@ -169,50 +169,42 @@ impl ProjectionState {
         ProjectionEffect::RealmSearchPolicyProjected { realm_id }
     }
 
-    /// Project `ak.realm.read_receipt_policy` into the Realm read-receipt
-    /// policy facet.
-    ///
-    /// `discovery/read-receipts.md` section 2.5 makes this kind the sole
-    /// carrier of the `realm_read_receipt_policy` current result and keeps the
-    /// value out of `ak.realm.policy_bundle`. The registry projects the whole
-    /// accepted payload as the settled value, so the projection is the
-    /// identity on it: the payload is a flat closed object with no `value`
-    /// wrapper, and an absent field means the section 2.5 default rather than
-    /// a cleared field.
-    ///
-    /// An empty object is semantically identical to never writing the Event,
-    /// which is why the payload schema carries `minProperties: 1`; a Realm
-    /// that wants the defaults omits the Event. The parent/child privacy
-    /// comparison the same section requires is not repeated here: resolving a
-    /// Realm's parent needs the Realm link graph, which this projection does
-    /// not carry, and admission already runs
-    /// `ReadReceiptPolicy::validate_child_policy` before an Event of this kind
-    /// is accepted.
-    pub(crate) fn apply_realm_read_receipt_policy(
+    /// Replace this exact scope's whole receipt policy, preserving omissions.
+    pub(crate) fn apply_scope_read_receipt_policy(
         &mut self,
         operation: &Operation,
     ) -> ProjectionEffect {
-        let value = operation.payload.clone();
-        if !matches!(value.as_object(), Some(fields) if !fields.is_empty()) {
-            return ProjectionEffect::Rejected {
-                reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
-            };
-        }
-        // The SDK type is `deny_unknown_fields` with a default for every
-        // field, so this rejects exactly the closed-object violations the
-        // schema rejects without turning a partial payload into a full one.
-        if serde_json::from_value::<
-            arkret_models_collaboration::objects::read_receipts::ReadReceiptPolicy,
-        >(value.clone())
-        .is_err()
+        let scope = &operation.context.accepted_scope_ref;
+        if !matches!(
+            scope,
+            arkret_wire::ScopeRef::Realm { .. } | arkret_wire::ScopeRef::Circle { .. }
+        ) || scope.realm_id_opt() != Some(&operation.realm_id)
+            || serde_json::from_value::<
+                arkret_models_collaboration::events_payloads::ReadReceiptPolicyPayload,
+            >(operation.payload.clone())
+            .and_then(|value| value.validate().map_err(serde::de::Error::custom))
+            .is_err()
         {
             return ProjectionEffect::Rejected {
                 reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
             };
         }
-        let realm_id = operation.realm_id.to_string();
-        self.set_realm_facet(&realm_id, facet::REALM_READ_RECEIPT_POLICY, value);
-        ProjectionEffect::RealmReadReceiptPolicyProjected { realm_id }
+        let subject = match arkret_canonical::canonical_json_bytes(scope) {
+            Ok(bytes) => String::from_utf8(bytes).expect("canonical JSON is UTF-8"),
+            Err(_) => {
+                return ProjectionEffect::Rejected {
+                    reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
+                };
+            }
+        };
+        self.set_facet(
+            &operation.realm_id.to_string(),
+            FacetRef::new(facet::SCOPE_READ_RECEIPT_POLICY, subject),
+            operation.payload.clone(),
+        );
+        ProjectionEffect::ScopeReadReceiptPolicyProjected {
+            scope_ref: scope.clone(),
+        }
     }
 
     /// Project `ak.realm.media_service` into the Realm media-service facet

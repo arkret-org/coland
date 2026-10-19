@@ -57,7 +57,7 @@ pub mod facet {
     pub const REALM_POLICY_BUNDLE: &str = "realm.policy_bundle";
     pub const REALM_PROFILE: &str = "realm.profile";
     pub const REALM_PREVIEW_POLICY: &str = "realm.preview_policy";
-    pub const REALM_READ_RECEIPT_POLICY: &str = "realm.read_receipt_policy";
+    pub const SCOPE_READ_RECEIPT_POLICY: &str = "scope.read_receipt_policy";
     pub const REALM_SEARCH_POLICY: &str = "realm.search_policy";
     pub const REALM_TOMBSTONE: &str = "realm.tombstone";
     pub const STRAND_POSITION: &str = "strand.position";

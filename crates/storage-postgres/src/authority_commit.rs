@@ -757,6 +757,10 @@ pub(crate) const SNAPSHOT_CURRENT_SQL: &str = "SELECT result.*, covering.stream_
                 current_commit_id, current_stream_position, value \
            FROM realm_bootstrap_current_results WHERE realm_id = $1 \
          UNION ALL \
+         SELECT 'scope_read_receipt_policy'::text AS selector_kind, scope_ref AS selector_subject, \
+                current_commit_id, current_stream_position, value \
+           FROM scope_read_receipt_policy_current_results WHERE realm_id = $1 \
+         UNION ALL \
          SELECT 'realm_authority_root'::text AS selector_kind, NULL::jsonb AS selector_subject, \
                 current_commit_id, current_stream_position, \
                 jsonb_build_object('controller_actor_id',controller_actor_id, \
@@ -1030,7 +1034,9 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
                 ("sidecar_context" | "agent_sidecar_exchange_controls", Some(selector)) => serde_json::from_value(selector).map_err(PersistenceError::database)?,
                 ("realm_join_rule", None) => arkret_wire::CurrentSelector::RealmJoinRule,
                 ("realm_history_access", None) => arkret_wire::CurrentSelector::RealmHistoryAccess,
-                ("realm_read_receipt_policy", None) => arkret_wire::CurrentSelector::RealmReadReceiptPolicy,
+                ("scope_read_receipt_policy", Some(scope_ref)) => arkret_wire::CurrentSelector::ScopeReadReceiptPolicy {
+                    scope_ref: decode_json(scope_ref, "receipt policy scope")?,
+                },
                 ("realm_discovery", None) => arkret_wire::CurrentSelector::RealmDiscovery,
                 ("realm_alias", None) => arkret_wire::CurrentSelector::RealmAlias,
                 ("realm_plaintext_visible_services", None) => {

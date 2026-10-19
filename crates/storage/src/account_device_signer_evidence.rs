@@ -12,6 +12,76 @@ pub struct PreparedManagedForward {
     pub core: arkret_models_crypto::ForwardDeviceProjectionAttestationCore,
 }
 
+/// Prepared at one locked origin cut before the Station signs the Device core.
+#[derive(Clone, Debug)]
+pub struct PreparedAccountDeviceForwardSource {
+    pub device: arkret_models_crypto::ForwardDeviceProjectionAttestationCore,
+    pub managed:
+        Option<arkret_models_collaboration::authority_commit::ForwardManagedActorProvenance>,
+}
+
+/// Verified source of this exact managed Device Event; never a stored current authority.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ForwardedManagedActorSource {
+    verified: arkret_identity::managed_actor_provenance::VerifiedManagedActorProvenance,
+    original_event_digest: String,
+    service_did_document: arkret_identity::DidDocument,
+    provision: arkret_models_integration::AppletManagedActorProvisionPayload,
+}
+impl ForwardedManagedActorSource {
+    pub fn new(
+        verified: arkret_identity::managed_actor_provenance::VerifiedManagedActorProvenance,
+        event: &arkret_wire::Event,
+        service_did_document: arkret_identity::DidDocument,
+    ) -> PersistenceResult<Self> {
+        let provision = serde_json::from_value(
+            serde_json::to_value(&verified.original().creation.provision.event.payload)
+                .map_err(PersistenceError::database)?,
+        )
+        .map_err(PersistenceError::database)?;
+        let source = Self {
+            verified,
+            original_event_digest: arkret_canonical::canonical_sha256(event)
+                .map_err(PersistenceError::database)?,
+            service_did_document,
+            provision,
+        };
+        source.ensure_event(event, source.verified.source_time())?;
+        Ok(source)
+    }
+    pub fn provision(&self) -> &arkret_models_integration::AppletManagedActorProvisionPayload {
+        &self.provision
+    }
+    pub fn service_did_document(&self) -> &arkret_identity::DidDocument {
+        &self.service_did_document
+    }
+    pub fn verified(
+        &self,
+    ) -> &arkret_identity::managed_actor_provenance::VerifiedManagedActorProvenance {
+        &self.verified
+    }
+    pub fn ensure_event(
+        &self,
+        event: &arkret_wire::Event,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<()> {
+        self.verified
+            .ensure_live(at)
+            .map_err(|e| PersistenceError::Conflict(format!("device_unauthorized: {e}")))?;
+        if event.actor_id.as_account_id() != Some(self.verified.account())
+            || event.executed_by.is_some()
+            || event.applet_id.as_ref() != Some(&self.provision.applet_id)
+            || arkret_canonical::canonical_sha256(event).map_err(PersistenceError::database)?
+                != self.original_event_digest
+        {
+            return Err(PersistenceError::Conflict(
+                "signature_invalid: managed source belongs to another exact Event".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// The complete `producer_device_evidence` a governance Station verified for
 /// a cross-Station human-device producer, with its content address.
 ///
@@ -24,9 +94,34 @@ pub struct ForwardedProducerDeviceEvidence {
     pub producer_signer_fact:
         arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact,
     pub evidence_ref: SignerEvidenceRef,
+    pub managed: Option<Box<ForwardedManagedActorSource>>,
 }
 
 impl ForwardedProducerDeviceEvidence {
+    /// Preserve the SDK token's whole-body binding through the accepting unit.
+    pub fn ensure_managed_binding(
+        &self,
+        event: &arkret_wire::Event,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<()> {
+        let Some(source) = self.managed.as_ref() else {
+            return Ok(());
+        };
+        source
+            .verified()
+            .ensure_target(
+                event,
+                &self
+                    .evidence
+                    .device_projection_attestation
+                    .attestation
+                    .event_authorization
+                    .forward_body_digest,
+            )
+            .map_err(|error| PersistenceError::Conflict(format!("signature_invalid: {error}")))?;
+        source.ensure_event(event, at)
+    }
+
     /// Address the complete object exactly as the evidence ref rule requires.
     pub fn new(
         evidence: arkret_models_identity::ForwardAccountDeviceSignerEvidence,
@@ -37,6 +132,7 @@ impl ForwardedProducerDeviceEvidence {
             evidence,
             evidence_ref,
             producer_signer_fact,
+            managed: None,
         })
     }
 }
@@ -60,23 +156,6 @@ pub fn forwarded_producer_device_evidence_ref(
 /// historical reads require the caller to authorize disclosure separately.
 #[async_trait]
 pub trait AccountDeviceSignerEvidenceStore: Send + Sync {
-    /// Freeze the complete managed source and native Device core under one
-    /// confirmed PCR cut. Only ordinary Event and MLS forward branches apply.
-    async fn prepare_managed_forward(
-        &self,
-        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
-        destination: &arkret_wire::DidCoreId,
-    ) -> PersistenceResult<PreparedManagedForward>;
-
-    /// Recheck the entire signed body at its original issuance cut and retain
-    /// its exact private bytes before the first network attempt.
-    async fn retain_managed_forward(
-        &self,
-        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
-    ) -> PersistenceResult<SignerEvidenceRef>;
-
-    /// Private immutable read for recovery of this exact original request.
-    /// Callers still authenticate its Account/Device and authorize forwarding.
     async fn get_managed_forward(
         &self,
         account: &AccountId,
@@ -86,15 +165,23 @@ pub trait AccountDeviceSignerEvidenceStore: Send + Sync {
         Option<arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest>,
     >;
 
-    /// Prepare the existing forward-only unsigned core from a locked native
-    /// authorization cut. This grants neither directory disclosure nor business
-    /// authority; retaining its signed wrapper rechecks the same source.
-    async fn prepare_forward_current(
+    async fn prepare_non_managed_forward_current(
         &self,
         event: &arkret_wire::Event,
         destination: &arkret_wire::DidCoreId,
         body_digest: &arkret_wire::Hash,
     ) -> PersistenceResult<Option<arkret_models_crypto::ForwardDeviceProjectionAttestationCore>>;
+
+    async fn prepare_forward_request(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+        destination: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Option<PreparedAccountDeviceForwardSource>>;
+
+    async fn retain_forward_request(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+    ) -> PersistenceResult<SignerEvidenceRef>;
 
     /// Resolve only an immutable origin source already bound by this Commit.
     /// This neither authorizes current admission nor installs a stream replica.

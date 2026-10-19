@@ -32,7 +32,7 @@ fn signature_refused(error: impl std::fmt::Display) -> ServiceError {
     ServiceError::Conflict(format!("signature_invalid: {error}"))
 }
 
-pub(super) async fn install(
+pub(crate) async fn install(
     state: &AppState,
     peer: &AuthenticatedPeerContext,
     request: AuthorityHandoffRequest,

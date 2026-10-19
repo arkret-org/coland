@@ -2499,6 +2499,20 @@ fn commit_one_in_connection<'a>(
     ))
 }
 
+fn managed_device_source(
+    request: &EventCommitRequest,
+) -> Option<crate::managed_forward_admission::Source<'_>> {
+    if let Some(coland_storage::SelfProducerCommitGuard::AppletManagedDevice(guard)) =
+        request.self_producer_guard.as_ref()
+    {
+        Some(crate::managed_forward_admission::Source::Local(guard))
+    } else {
+        request
+            .forwarded_managed_source()
+            .map(crate::managed_forward_admission::Source::Forwarded)
+    }
+}
+
 async fn commit_one_inner(
     conn: &mut AsyncPgConnection,
     request: EventCommitRequest,
@@ -2576,6 +2590,9 @@ async fn commit_one_inner(
         return Ok(());
     }
 
+    if let Some(retained) = request.forwarded_producer_evidence.as_ref() {
+        retained.ensure_managed_binding(event, chrono::Utc::now())?;
+    }
     let prepared_human = if let Some(retained) = &request.forwarded_producer_evidence {
         let core = &retained.evidence.device_projection_attestation.attestation;
         let source = &core.event_authorization;
@@ -2696,9 +2713,34 @@ async fn commit_one_inner(
             request.authority_commit.producer_signer_fact.as_ref(),
         )?;
         prepared_service = Some(fact);
-    } else if let Some(coland_storage::SelfProducerCommitGuard::AppletManagedDevice(guard)) =
-        request.self_producer_guard.as_ref()
-    {
+    } else if let Some(source) = managed_device_source(&request) {
+        if source.forwarded().is_some() {
+            let (registration, _) = crate::applet_device_admission::installation_source(
+                conn,
+                event,
+                source,
+                request.authority_commit.commit.committed_at,
+            )
+            .await?;
+            let (_, decision) = crate::applet_device_admission::select_management(
+                conn,
+                event,
+                &registration,
+                request.authority_commit.commit.committed_at,
+            )
+            .await?;
+            let has_review = event_approvals.is_some_and(|v| {
+                v.methods.iter().any(|m| {
+                    matches!(
+                        m.signature.input.approval_context,
+                        arkret_wire::ApprovalContext::Management { .. }
+                    )
+                })
+            });
+            if !decision.review_requirements.is_empty() && !has_review {
+                return Err(PersistenceError::Conflict("approval_required: forwarded native action requires its current management review".into()).into());
+            }
+        }
         if matches!(
             event.kind,
             arkret_wire::EventKind::MessageCreate
@@ -2707,20 +2749,20 @@ async fn commit_one_inner(
                 | arkret_wire::EventKind::MlsCommit
         ) {
             service_approvals = crate::boxed_future(|| {
-                crate::applet_device_admission::require_business_in_connection(
+                crate::applet_device_admission::require_business_source(
                     conn,
                     event,
-                    guard,
+                    source,
                     &request.authority_commit.commit,
                     event_approvals,
                 )
             })
             .await?;
         } else {
-            crate::applet_device_admission::require_installation_binding(
+            crate::applet_device_admission::require_installation_source(
                 conn,
                 event,
-                guard,
+                source,
                 request.authority_commit.commit.committed_at,
             )
             .await?;
@@ -2827,12 +2869,11 @@ async fn commit_prepared_event_inner(
     service_approvals: Vec<crate::approval_admission::QualifiedApproval>,
     audit_unit: Option<&coland_storage::RegisteredAuditCommit>,
 ) -> Result<(), PgTransactionError> {
+    let forwarded_managed = request.forwarded_managed_source().cloned();
     let event = &request.authority_commit.event;
 
     let scope_profile = if crate::applet_scope_profiles::is_profile(event) {
-        let Some(coland_storage::SelfProducerCommitGuard::AppletManagedDevice(guard)) =
-            request.self_producer_guard.as_ref()
-        else {
+        let Some(source) = managed_device_source(&request) else {
             return Err(PersistenceError::Conflict(
                 "actor_profile_or_accountability_unit_required".into(),
             )
@@ -2840,10 +2881,10 @@ async fn commit_prepared_event_inner(
         };
         Some(
             crate::boxed_future(|| {
-                crate::applet_scope_profiles::prepare(
+                crate::applet_scope_profiles::prepare_source(
                     conn,
                     event,
-                    guard,
+                    source,
                     request.authority_commit.commit.committed_at,
                 )
             })
@@ -3015,7 +3056,8 @@ async fn commit_prepared_event_inner(
         if profile.is_public() {
             let cut =
                 crate::realm_authorization_cut::RealmAuthorizationCut::read_for_event(conn, event)
-                    .await?;
+                    .await?
+                    .with_forwarded_managed(request.forwarded_managed_source());
             cut.require_managed_self_action_in_connection(
                 conn,
                 event,
@@ -3064,6 +3106,7 @@ async fn commit_prepared_event_inner(
                 &request.authority_commit.expected_authority.service_id,
                 audit_unit,
                 event_approvals,
+                request.forwarded_managed_source(),
             )
         })
         .await?;
@@ -3083,6 +3126,7 @@ async fn commit_prepared_event_inner(
                 &request.authority_commit.commit,
                 management_review.as_ref(),
                 event_approvals,
+                request.forwarded_managed_source(),
             )
         })
         .await?;
@@ -3298,6 +3342,25 @@ async fn commit_prepared_event_inner(
                 })
                 .await?;
             }
+        }
+    }
+    if let Some(retained) = request.forwarded_producer_evidence.as_ref() {
+        retained.ensure_managed_binding(event, chrono::Utc::now())?;
+    }
+    if let Some(source) = forwarded_managed.as_ref() {
+        source.ensure_event(event, chrono::Utc::now())?;
+        if matches!(
+            event.kind,
+            arkret_wire::EventKind::MlsGenesis | arkret_wire::EventKind::MlsCommit
+        ) {
+            crate::applet_device_admission::require_mls_permission_source(
+                conn,
+                event,
+                crate::managed_forward_admission::Source::Forwarded(source),
+                chrono::Utc::now(),
+                false,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -3525,6 +3588,7 @@ async fn commit_object_current_results_inner(
             conn,
             &request.authority_commit,
             event_approvals,
+            request.forwarded_managed_source(),
         ),
     )
     .await?;
@@ -3666,6 +3730,7 @@ async fn commit_content_current_results_inner(
             event,
             commit,
             event_approvals,
+            request.forwarded_managed_source(),
         ),
     )
     .await?;

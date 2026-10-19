@@ -24,7 +24,6 @@ use arkret_signatures::http_signature::{
 use arkret_wire::{ActorId, Event, EventKind, ScopeRef};
 use base64::Engine as _;
 use coland_http::config::AppConfig;
-use coland_http::service;
 use coland_http::state::AppState;
 use coland_storage::AuthorityCommitStore;
 use coland_storage_postgres::{PgAuthorityCommitStore, PgPool};
@@ -38,6 +37,24 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::Url;
+
+// TestClient otherwise polls the server inside the scenario's own poll stack.
+// Each real connection gets its own default-stack task; dropping the caller
+// aborts that task, and response-body handoff guards remain owned by Response.
+struct FixtureService(AppState);
+
+fn service(state: AppState) -> FixtureService {
+    FixtureService(state)
+}
+
+impl salvo::test::SendTarget for &FixtureService {
+    async fn call(self, request: salvo::Request) -> salvo::Response {
+        let state = self.0.clone();
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(async move { coland_http::service(state).handle(request).await });
+        tasks.join_next().await.unwrap().unwrap()
+    }
+}
 
 #[tokio::test]
 async fn controller_cannot_directly_grant_business_authority_to_managed_bot() {
@@ -3592,7 +3609,7 @@ impl NativeAppletService {
 
         use rand_chacha::rand_core::SeedableRng as _;
         let expected = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/outbox-test-ca.pem")
+            .join("../server/tests/fixtures/outbox-test-ca.pem")
             .canonicalize()
             .expect("checked-in Applet TLS test CA");
         let configured = std::env::var_os("SSL_CERT_FILE")
@@ -4349,6 +4366,10 @@ impl Fixture {
         with_second_device: bool,
         public_base_url: Option<String>,
     ) -> Self {
+        let public_fixture = public_base_url.is_some();
+        if public_fixture {
+            eprintln!("[managed forward] origin fixture entered");
+        }
         let _ = tracing_subscriber::fmt()
             .with_env_filter("warn,coland_storage_postgres::applet_content_delivery=debug,coland_http::routing::identity::applet_managed_device=debug")
             .with_test_writer()
@@ -4379,15 +4400,14 @@ impl Fixture {
         config.account_authority_trust_domain = Some(config.trust_domain.clone());
         config.register_test_internal_authority_channel("applet-http-standard-grant".to_owned());
         let (state, pool) = coland_test_support::app_state_with_pool(config);
-        // A process abort can leave this fixture's fault trigger in its leased
-        // slot. Remove only the named test object before accepted prerequisites.
-        {
-            use diesel_async::SimpleAsyncConnection as _;
-            let mut conn = pool.get().await.unwrap();
-            conn.batch_execute("DROP TRIGGER IF EXISTS fail_native_membership ON member_state_current_results; DROP FUNCTION IF EXISTS fail_native_membership();").await.unwrap();
+        if public_fixture {
+            eprintln!("[managed forward] origin Station initialized");
         }
         let mut pcr = PcrGenesisFixture::new(state.service_did());
         Box::pin(pcr.admit(&state)).await.unwrap();
+        if public_fixture {
+            eprintln!("[managed forward] origin Human PCR accepted");
+        }
         let other_device = if with_second_device {
             Some(
                 pcr.admit_accepted_device(state.test_persistence().as_ref(), [89; 32])
@@ -4501,6 +4521,9 @@ impl Fixture {
         });
         let profile = fixture.admin_event(EventKind::ProfileCreate,ScopeRef::Realm {realm_id:fixture.pcr.unit.transactions[0].event.realm_id.clone()},
             json!({"object":{"principal_id":fixture.pcr.history.account.principal_id,"actor_kind":"user","display_name":"Applet admin"}}));
+        if public_fixture {
+            eprintln!("[managed forward] submitting origin Human Profile");
+        }
         let (status, body) = fixture
             .admin_post(
                 "/_arkret/self/account/profile",
@@ -4510,7 +4533,13 @@ impl Fixture {
             )
             .await;
         assert_eq!(status, StatusCode::OK, "Human Profile: {body}");
-        fixture.new_realm().await;
+        if public_fixture {
+            eprintln!("[managed forward] origin Human Profile accepted");
+        }
+        ordinary_realm::case_future(|| fixture.new_realm()).await;
+        if public_fixture {
+            eprintln!("[managed forward] origin Realm accepted");
+        }
         *fixture
     }
 
@@ -4558,17 +4587,7 @@ impl Fixture {
                 .as_ref()
                 .map(|fact| fact.digest().unwrap());
             tx.commit.previous_commit_ref = previous_commit;
-            ordinary_realm::seal_final_commit(&mut tx.commit);
-            tx.commit.signature = arkret_signatures::detached_object::sign_detached_object(
-                &arkret_canonical::unsigned_value(&tx.commit, &["signature"]).unwrap(),
-                arkret_wire::DetachedSignatureContext::RealmCommit,
-                self.state
-                    .service_verification_method("notary-key")
-                    .unwrap(),
-                tx.commit.committed_at,
-                self.state.notary_signing_key().as_ref(),
-            )
-            .unwrap();
+            self.seal_commit(&mut tx.commit);
             previous_commit = Some(tx.commit.commit_id.clone());
         }
         for (submission, tx) in unit.submission.events.iter_mut().zip(&unit.transactions) {
@@ -4582,6 +4601,26 @@ impl Fixture {
         .await
         .unwrap();
         self.authority_event_ref = Some(unit.transactions[0].event.event_id.clone());
+    }
+
+    fn seal_commit(&self, commit: &mut arkret_wire::RealmCommit) {
+        commit.commit_id = arkret_wire::RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
+            arkret_canonical::canonical_json_bytes(
+                &arkret_canonical::unsigned_value(commit, &["commit_id", "signature"]).unwrap(),
+            )
+            .unwrap(),
+        ));
+        commit.signature = arkret_signatures::detached_object::sign_detached_object(
+            &arkret_canonical::unsigned_value(commit, &["signature"]).unwrap(),
+            arkret_wire::DetachedSignatureContext::RealmCommit,
+            self.state
+                .service_verification_method("notary-key")
+                .unwrap(),
+            commit.committed_at,
+            self.state.notary_signing_key().as_ref(),
+        )
+        .unwrap();
+        commit.verify_commit_id_matches_content().unwrap();
     }
 
     fn sign_admin(&self, mut event: Event) -> Event {
@@ -5283,6 +5322,7 @@ async fn admin_domain_request(
         .map_or(0, |head| head.stream_position + 1);
     request.authority_commit.commit.previous_commit_ref = stream_head.map(|head| head.commit_id);
     let mut request = ordinary_realm::source_request(&fixture.pool, request).await;
+    fixture.seal_commit(&mut request.authority_commit.commit);
     if let Some(fact) = request
         .authority_commit
         .producer_signer_fact
@@ -6504,15 +6544,50 @@ fn business_without_reviews(mut snapshot: Value) -> Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn creation_reviews_use_original_targets_and_consume_with_real_bot_ghost_and_mapping_outcomes()
  {
-    tokio::spawn(Box::pin(creation_review_atomic_scenario()))
+    tokio::spawn(ordinary_realm::case_future(creation_review_atomic_scenario))
         .await
         .unwrap();
 }
 
+struct CreationReviewAtomicContext {
+    fixture: Box<Fixture>,
+    _native: NativeAppletService,
+    namespace: String,
+    first: Box<Installed>,
+    second: Box<Installed>,
+    policy: Event,
+    policy_id: String,
+    cases: Vec<(bool, Value, ScopeRef, bool)>,
+}
+
 async fn creation_review_atomic_scenario() {
-    use arkret_models_integration::management_review::*;
-    use arkret_wire::{ManagementOperation, ServiceOperationId};
-    let fixture = Box::pin(Fixture::new()).await;
+    let mut context = creation_approval_phase(creation_review_atomic_setup).await;
+    for (index, (second, body, scope, is_bot)) in
+        std::mem::take(&mut context.cases).into_iter().enumerate()
+    {
+        let install = if second {
+            context.second.as_ref()
+        } else {
+            context.first.as_ref()
+        };
+        creation_approval_phase(|| {
+            creation_review_atomic_case(
+                &context.fixture,
+                install,
+                &context.policy_id,
+                index,
+                body,
+                scope,
+                is_bot,
+            )
+        })
+        .await;
+    }
+    creation_approval_phase(|| creation_review_atomic_lifecycle(&context)).await;
+}
+
+async fn creation_review_atomic_setup() -> Box<CreationReviewAtomicContext> {
+    let fixture = Box::new(creation_approval_phase(Fixture::new).await);
     fixture.enable_management_authority();
     let namespace = format!("bridge.{}", uuid::Uuid::now_v7().simple());
     let native = NativeAppletService::new(
@@ -6520,15 +6595,24 @@ async fn creation_review_atomic_scenario() {
         &namespace,
         &fixture.state.service_core_id(),
     );
-    let first = Box::pin(fixture.install_package(true, native.package.clone(), &namespace)).await;
-    let circle = fixture.new_circle_scope().await;
-    let second = Box::pin(fixture.install_package_in_scope(
-        true,
-        native.package.clone(),
-        &namespace,
-        circle.clone(),
-    ))
-    .await;
+    let first = Box::new(
+        creation_approval_phase(|| {
+            fixture.install_package(true, native.package.clone(), &namespace)
+        })
+        .await,
+    );
+    let circle = creation_approval_phase(|| fixture.new_circle_scope()).await;
+    let second = Box::new(
+        creation_approval_phase(|| {
+            fixture.install_package_in_scope(
+                true,
+                native.package.clone(),
+                &namespace,
+                circle.clone(),
+            )
+        })
+        .await,
+    );
     let original_ghost = fixture.ghost_body(&first, &namespace, "review-reuse").await;
     assert_eq!(
         fixture
@@ -6560,9 +6644,9 @@ async fn creation_review_atomic_scenario() {
         .ghost_body(&second, &namespace, "review-reuse")
         .await;
     assert!(reused.get("managed_actor_bundle").is_none());
-    for (index, (install, mut body, scope, is_bot)) in [
+    let cases = vec![
         (
-            &first,
+            false,
             bot,
             ScopeRef::Realm {
                 realm_id: fixture.realm.clone(),
@@ -6570,314 +6654,342 @@ async fn creation_review_atomic_scenario() {
             true,
         ),
         (
-            &first,
+            false,
             fresh_ghost,
             ScopeRef::Realm {
                 realm_id: fixture.realm.clone(),
             },
             false,
         ),
-        (&second, reused, circle, false),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let path = format!(
-            "/_arkret/self/applets/{}/{}s/provision",
-            install.package.applet_id,
-            if is_bot { "bot" } else { "ghost" }
-        );
-        let operation = if is_bot {
-            ServiceOperationId::SELF_APPLET_BOT_COMMAND_PROVISION_V1
-        } else {
-            ServiceOperationId::SELF_APPLET_GHOST_COMMAND_PROVISION_V1
-        };
-        let before = authority_snapshot(&fixture.pool).await;
-        let (status, error) = fixture
-            .service_post(
-                &install.package,
-                &path,
-                operation,
-                &body,
-                &format!("unapproved-{index}"),
-            )
-            .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "unapproved creation {error}");
-        assert!(error.to_string().contains("approval_required"), "{error}");
-        assert_eq!(before, authority_snapshot(&fixture.pool).await);
-        let target = if is_bot {
-            ManagementReviewTarget::BotCreation {
-                applet_id: install.package.applet_id.clone(),
-                request_body: Box::new(serde_json::from_value(body.clone()).unwrap()),
-            }
-        } else {
-            ManagementReviewTarget::GhostCreation {
-                applet_id: install.package.applet_id.clone(),
-                request_body: Box::new(serde_json::from_value(body.clone()).unwrap()),
-            }
-        };
-        let request = ManagementReviewRequestBody {
-            request_id: format!("creation-review-{index}-{}", uuid::Uuid::now_v7()),
-            effective_scope: scope,
-            management_operation: if is_bot {
-                ManagementOperation::CreateBot
-            } else {
-                ManagementOperation::MapGhost
-            },
-            requester_actor_id: ActorId::service(install.package.service_id.clone()),
-            target,
-        };
-        let (status, pending) = fixture
-            .service_post(
-                &install.package,
-                "/_arkret/self/management-reviews/requests",
-                ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_REQUEST_V1,
-                &json!(request),
-                &format!("review-{index}"),
-            )
-            .await;
-        assert_eq!(status, StatusCode::OK, "pending creation {pending}");
-        assert_eq!(pending["status"], "pending");
-        assert_eq!(
-            pending["target_digest"],
-            json!(request.target.canonical_target_digest().unwrap())
-        );
-        let deadline: chrono::DateTime<chrono::Utc> =
-            serde_json::from_value(pending["expires_at"].clone()).unwrap();
-        let original_deadline: chrono::DateTime<chrono::Utc> =
-            serde_json::from_value(body["authoring_request"]["expires_at"].clone()).unwrap();
-        assert!(deadline <= original_deadline);
-        assert_eq!(
-            business_without_reviews(before),
-            business_without_reviews(authority_snapshot(&fixture.pool).await)
-        );
-        let stable = authority_snapshot(&fixture.pool).await;
-        let created: chrono::DateTime<chrono::Utc> = serde_json::from_value(
-            stable["reviews"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|row| row["request_id"] == request.request_id)
-                .unwrap()["created_at"]
-                .clone(),
+        (true, reused, circle, false),
+    ];
+    Box::new(CreationReviewAtomicContext {
+        fixture,
+        _native: native,
+        namespace,
+        first,
+        second,
+        policy,
+        policy_id,
+        cases,
+    })
+}
+
+async fn creation_review_atomic_case(
+    fixture: &Fixture,
+    install: &Installed,
+    policy_id: &str,
+    index: usize,
+    mut body: Value,
+    scope: ScopeRef,
+    is_bot: bool,
+) {
+    use arkret_models_integration::management_review::*;
+    use arkret_wire::{ManagementOperation, ServiceOperationId};
+    let path = format!(
+        "/_arkret/self/applets/{}/{}s/provision",
+        install.package.applet_id,
+        if is_bot { "bot" } else { "ghost" }
+    );
+    let operation = if is_bot {
+        ServiceOperationId::SELF_APPLET_BOT_COMMAND_PROVISION_V1
+    } else {
+        ServiceOperationId::SELF_APPLET_GHOST_COMMAND_PROVISION_V1
+    };
+    let before = authority_snapshot(&fixture.pool).await;
+    let (status, error) = fixture
+        .service_post(
+            &install.package,
+            &path,
+            operation,
+            &body,
+            &format!("unapproved-{index}"),
         )
-        .unwrap();
-        assert_eq!(
-            created,
-            arkret_canonical::normalize_timestamp_canonical(created)
-        );
-        let (status, retry) = fixture
-            .service_post(
-                &install.package,
-                "/_arkret/self/management-reviews/requests",
-                ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_REQUEST_V1,
-                &json!(request),
-                "same-private-intent",
-            )
-            .await;
-        assert_eq!(status, StatusCode::OK, "{retry}");
-        assert_eq!(pending, retry);
-        assert_eq!(stable, authority_snapshot(&fixture.pool).await);
-        if index == 0 {
-            #[derive(diesel::QueryableByName)]
-            struct PolicyRow {
-                #[diesel(sql_type=diesel::sql_types::Jsonb)]
-                value: Value,
-            }
-            let original = {
-                let mut conn = fixture.pool.get().await.unwrap();
-                diesel::sql_query("DELETE FROM policy_current_results p WHERE policy_id=$1 RETURNING to_jsonb(p) AS value")
-                .bind::<diesel::sql_types::Text,_>(&policy_id).get_result::<PolicyRow>(&mut conn).await.unwrap().value
-            };
-            let incomplete = authority_snapshot(&fixture.pool).await;
-            let (status, error) = fixture
-                .service_post(
-                    &install.package,
-                    "/_arkret/self/management-reviews/status",
-                    ServiceOperationId::SELF_MANAGEMENT_REVIEW_READ_STATUS_V1,
-                    &json!({"request_id":request.request_id}),
-                    "missing-policy-current",
-                )
-                .await;
-            assert_eq!(status, StatusCode::CONFLICT, "{error}");
-            assert!(
-                error.to_string().contains("revision_unavailable"),
-                "incomplete current is unavailable: {error}"
-            );
-            assert_eq!(
-                incomplete,
-                authority_snapshot(&fixture.pool).await,
-                "unknown must not terminalize the original pending ledger"
-            );
-            {
-                let mut conn = fixture.pool.get().await.unwrap();
-                diesel::sql_query("INSERT INTO policy_current_results SELECT (jsonb_populate_record(NULL::policy_current_results,$1)).*")
-                .bind::<diesel::sql_types::Jsonb,_>(original).execute(&mut conn).await.unwrap();
-            }
-            assert_eq!(stable, authority_snapshot(&fixture.pool).await);
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "unapproved creation {error}");
+    assert!(error.to_string().contains("approval_required"), "{error}");
+    assert_eq!(before, authority_snapshot(&fixture.pool).await);
+    let target = if is_bot {
+        ManagementReviewTarget::BotCreation {
+            applet_id: install.package.applet_id.clone(),
+            request_body: Box::new(serde_json::from_value(body.clone()).unwrap()),
         }
-        let mut collision = request.clone();
-        collision.request_id.push_str("-other");
-        let (status, error) = fixture
-            .service_post(
-                &install.package,
-                "/_arkret/self/management-reviews/requests",
-                ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_REQUEST_V1,
-                &json!(collision),
-                "same-candidate-new-id",
-            )
-            .await;
-        assert_eq!(status, StatusCode::CONFLICT, "{error}");
-        assert_eq!(stable, authority_snapshot(&fixture.pool).await);
-        let mut changed = json!(request);
-        let original = changed["target"]["request_body"]["authoring_request"]["proof"]["jws"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let mut changed_proof = original[..original.len() - 1].to_owned();
-        changed_proof.push(if original.ends_with('A') { 'Q' } else { 'A' });
-        changed["target"]["request_body"]["authoring_request"]["proof"]["jws"] =
-            json!(changed_proof);
-        let (status, error) = fixture
-            .service_post(
-                &install.package,
-                "/_arkret/self/management-reviews/requests",
-                ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_REQUEST_V1,
-                &changed,
-                "same-id-new-candidate",
-            )
-            .await;
-        assert_eq!(status, StatusCode::CONFLICT, "{error}");
-        assert_eq!(stable, authority_snapshot(&fixture.pool).await);
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-        let vote = creation_review_vote(&fixture, &request);
-        let decision = json!({"request_id":request.request_id,"expected_status":"pending","decision":"approve","approval_signatures":[vote]});
-        let (status, error) = fixture
-            .service_post(
-                &install.package,
-                "/_arkret/self/management-reviews/decisions",
-                ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_DECIDE_V1,
-                &decision,
-                "service-may-not-approve",
-            )
-            .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
-        assert_eq!(stable, authority_snapshot(&fixture.pool).await);
-        let (status, approved) = fixture
-            .admin_post(
-                "/_arkret/self/management-reviews/decisions",
-                ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_DECIDE_V1,
-                &decision,
-                None,
-            )
-            .await;
-        assert_eq!(status, StatusCode::OK, "approved creation {approved}");
-        assert_eq!(approved["status"], "approved");
-        let approved_snapshot = authority_snapshot(&fixture.pool).await;
-        assert_eq!(
-            business_without_reviews(stable),
-            business_without_reviews(approved_snapshot.clone())
-        );
-        body["approval_signatures"] = json!([vote]);
-        let fail_key = format!("review-fail-{index}-{}", uuid::Uuid::now_v7());
-        let constraint = format!("review_failure_{}", uuid::Uuid::now_v7().simple());
-        {
-            use std::io::Write as _;
-            writeln!(
-                std::io::stderr(),
-                "creation review fault injection: constraint={constraint} key={fail_key}"
-            )
-            .unwrap();
+    } else {
+        ManagementReviewTarget::GhostCreation {
+            applet_id: install.package.applet_id.clone(),
+            request_body: Box::new(serde_json::from_value(body.clone()).unwrap()),
         }
-        {
-            let mut conn = fixture.pool.get().await.unwrap();
-            diesel::sql_query(format!("ALTER TABLE applet_authoring_units ADD CONSTRAINT {constraint} CHECK (idempotency_key <> '{fail_key}') NOT VALID")).execute(&mut conn).await.unwrap();
-        }
-        let (status, error) = fixture
-            .service_post(&install.package, &path, operation, &body, &fail_key)
-            .await;
-        {
-            let mut conn = fixture.pool.get().await.unwrap();
-            diesel::sql_query(format!(
-                "ALTER TABLE applet_authoring_units DROP CONSTRAINT {constraint}"
-            ))
-            .execute(&mut conn)
-            .await
-            .unwrap();
-        }
-        assert!(
-            status.is_server_error(),
-            "injected final durable-outcome failure: {status} {error}"
-        );
-        assert_eq!(
-            approved_snapshot,
-            authority_snapshot(&fixture.pool).await,
-            "failed aggregate must roll back creation, ledger, nonce and quota"
-        );
-        let (status, accepted) = fixture
-            .service_post(&install.package, &path, operation, &body, &fail_key)
-            .await;
-        assert_eq!(
-            status,
-            StatusCode::CREATED,
-            "accepted reviewed creation {accepted}"
-        );
-        let after = authority_snapshot(&fixture.pool).await;
-        let row = after["reviews"]
+    };
+    let request = ManagementReviewRequestBody {
+        request_id: format!("creation-review-{index}-{}", uuid::Uuid::now_v7()),
+        effective_scope: scope,
+        management_operation: if is_bot {
+            ManagementOperation::CreateBot
+        } else {
+            ManagementOperation::MapGhost
+        },
+        requester_actor_id: ActorId::service(install.package.service_id.clone()),
+        target,
+    };
+    let (status, pending) = fixture
+        .service_post(
+            &install.package,
+            "/_arkret/self/management-reviews/requests",
+            ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_REQUEST_V1,
+            &json!(request),
+            &format!("review-{index}"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "pending creation {pending}");
+    assert_eq!(pending["status"], "pending");
+    assert_eq!(
+        pending["target_digest"],
+        json!(request.target.canonical_target_digest().unwrap())
+    );
+    let deadline: chrono::DateTime<chrono::Utc> =
+        serde_json::from_value(pending["expires_at"].clone()).unwrap();
+    let original_deadline: chrono::DateTime<chrono::Utc> =
+        serde_json::from_value(body["authoring_request"]["expires_at"].clone()).unwrap();
+    assert!(deadline <= original_deadline);
+    assert_eq!(
+        business_without_reviews(before),
+        business_without_reviews(authority_snapshot(&fixture.pool).await)
+    );
+    let stable = authority_snapshot(&fixture.pool).await;
+    let created: chrono::DateTime<chrono::Utc> = serde_json::from_value(
+        stable["reviews"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|r| r["request_id"] == request.request_id)
-            .unwrap();
-        assert_eq!(row["status"], "consumed");
-        assert!(row["accepted_commit_id"].is_null());
-        assert_eq!(row["accepted_operation_outcome"]["response_body"], accepted);
-        assert_eq!(
-            row["accepted_operation_outcome"]["committed_event_refs"]
-                .as_array()
-                .unwrap()
-                .len(),
-            4
-        );
-        let audit = after["approval_audit"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|r| r["nonce"] == vote.input.nonce)
-            .unwrap();
-        assert!(audit["event_id"].is_null());
-        assert!(audit["accepted_commit_id"].is_null());
-        assert_eq!(
-            audit["operation_outcome"],
-            row["accepted_operation_outcome"]
-        );
-        if index == 2 {
-            for key in ["events", "commits", "completions", "outbox"] {
-                assert_eq!(
-                    approved_snapshot[key], after[key],
-                    "mapping must not manufacture {key}"
-                );
-            }
+            .find(|row| row["request_id"] == request.request_id)
+            .unwrap()["created_at"]
+            .clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        created,
+        arkret_canonical::normalize_timestamp_canonical(created)
+    );
+    let (status, retry) = fixture
+        .service_post(
+            &install.package,
+            "/_arkret/self/management-reviews/requests",
+            ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_REQUEST_V1,
+            &json!(request),
+            "same-private-intent",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{retry}");
+    assert_eq!(pending, retry);
+    assert_eq!(stable, authority_snapshot(&fixture.pool).await);
+    if index == 0 {
+        #[derive(diesel::QueryableByName)]
+        struct PolicyRow {
+            #[diesel(sql_type=diesel::sql_types::Jsonb)]
+            value: Value,
         }
-        let (status, retry) = fixture
-            .service_post(&install.package, &path, operation, &body, &fail_key)
-            .await;
-        assert_eq!(status, StatusCode::OK, "{retry}");
-        assert_eq!(retry, accepted);
-        assert_eq!(after, authority_snapshot(&fixture.pool).await);
-        let (status, consumed) = fixture
+        let original = {
+            let mut conn = fixture.pool.get().await.unwrap();
+            diesel::sql_query("DELETE FROM policy_current_results p WHERE policy_id=$1 RETURNING to_jsonb(p) AS value")
+            .bind::<diesel::sql_types::Text,_>(&policy_id).get_result::<PolicyRow>(&mut conn).await.unwrap().value
+        };
+        let incomplete = authority_snapshot(&fixture.pool).await;
+        let (status, error) = fixture
             .service_post(
                 &install.package,
                 "/_arkret/self/management-reviews/status",
                 ServiceOperationId::SELF_MANAGEMENT_REVIEW_READ_STATUS_V1,
                 &json!({"request_id":request.request_id}),
-                "consumed-status",
+                "missing-policy-current",
             )
             .await;
-        assert_eq!(status, StatusCode::OK, "{consumed}");
-        assert_eq!(consumed["status"], "consumed");
-        assert_eq!(after, authority_snapshot(&fixture.pool).await);
+        assert_eq!(status, StatusCode::CONFLICT, "{error}");
+        assert!(
+            error.to_string().contains("revision_unavailable"),
+            "incomplete current is unavailable: {error}"
+        );
+        assert_eq!(
+            incomplete,
+            authority_snapshot(&fixture.pool).await,
+            "unknown must not terminalize the original pending ledger"
+        );
+        {
+            let mut conn = fixture.pool.get().await.unwrap();
+            diesel::sql_query("INSERT INTO policy_current_results SELECT (jsonb_populate_record(NULL::policy_current_results,$1)).*")
+            .bind::<diesel::sql_types::Jsonb,_>(original).execute(&mut conn).await.unwrap();
+        }
+        assert_eq!(stable, authority_snapshot(&fixture.pool).await);
     }
+    let mut collision = request.clone();
+    collision.request_id.push_str("-other");
+    let (status, error) = fixture
+        .service_post(
+            &install.package,
+            "/_arkret/self/management-reviews/requests",
+            ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_REQUEST_V1,
+            &json!(collision),
+            "same-candidate-new-id",
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(stable, authority_snapshot(&fixture.pool).await);
+    let mut changed = json!(request);
+    let original = changed["target"]["request_body"]["authoring_request"]["proof"]["jws"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut changed_proof = original[..original.len() - 1].to_owned();
+    changed_proof.push(if original.ends_with('A') { 'Q' } else { 'A' });
+    changed["target"]["request_body"]["authoring_request"]["proof"]["jws"] = json!(changed_proof);
+    let (status, error) = fixture
+        .service_post(
+            &install.package,
+            "/_arkret/self/management-reviews/requests",
+            ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_REQUEST_V1,
+            &changed,
+            "same-id-new-candidate",
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(stable, authority_snapshot(&fixture.pool).await);
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    let vote = creation_review_vote(&fixture, &request);
+    let decision = json!({"request_id":request.request_id,"expected_status":"pending","decision":"approve","approval_signatures":[vote]});
+    let (status, error) = fixture
+        .service_post(
+            &install.package,
+            "/_arkret/self/management-reviews/decisions",
+            ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_DECIDE_V1,
+            &decision,
+            "service-may-not-approve",
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
+    assert_eq!(stable, authority_snapshot(&fixture.pool).await);
+    let (status, approved) = fixture
+        .admin_post(
+            "/_arkret/self/management-reviews/decisions",
+            ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_DECIDE_V1,
+            &decision,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "approved creation {approved}");
+    assert_eq!(approved["status"], "approved");
+    let approved_snapshot = authority_snapshot(&fixture.pool).await;
+    assert_eq!(
+        business_without_reviews(stable),
+        business_without_reviews(approved_snapshot.clone())
+    );
+    body["approval_signatures"] = json!([vote]);
+    let fail_key = format!("review-fail-{index}-{}", uuid::Uuid::now_v7());
+    let constraint = format!("review_failure_{}", uuid::Uuid::now_v7().simple());
+    {
+        use std::io::Write as _;
+        writeln!(
+            std::io::stderr(),
+            "creation review fault injection: constraint={constraint} key={fail_key}"
+        )
+        .unwrap();
+    }
+    {
+        let mut conn = fixture.pool.get().await.unwrap();
+        diesel::sql_query(format!("ALTER TABLE applet_authoring_units ADD CONSTRAINT {constraint} CHECK (idempotency_key <> '{fail_key}') NOT VALID")).execute(&mut conn).await.unwrap();
+    }
+    let (status, error) = fixture
+        .service_post(&install.package, &path, operation, &body, &fail_key)
+        .await;
+    {
+        let mut conn = fixture.pool.get().await.unwrap();
+        diesel::sql_query(format!(
+            "ALTER TABLE applet_authoring_units DROP CONSTRAINT {constraint}"
+        ))
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    }
+    assert!(
+        status.is_server_error(),
+        "injected final durable-outcome failure: {status} {error}"
+    );
+    assert_eq!(
+        approved_snapshot,
+        authority_snapshot(&fixture.pool).await,
+        "failed aggregate must roll back creation, ledger, nonce and quota"
+    );
+    let (status, accepted) = fixture
+        .service_post(&install.package, &path, operation, &body, &fail_key)
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "accepted reviewed creation {accepted}"
+    );
+    let after = authority_snapshot(&fixture.pool).await;
+    let row = after["reviews"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["request_id"] == request.request_id)
+        .unwrap();
+    assert_eq!(row["status"], "consumed");
+    assert!(row["accepted_commit_id"].is_null());
+    assert_eq!(row["accepted_operation_outcome"]["response_body"], accepted);
+    assert_eq!(
+        row["accepted_operation_outcome"]["committed_event_refs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
+    let audit = after["approval_audit"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["nonce"] == vote.input.nonce)
+        .unwrap();
+    assert!(audit["event_id"].is_null());
+    assert!(audit["accepted_commit_id"].is_null());
+    assert_eq!(
+        audit["operation_outcome"],
+        row["accepted_operation_outcome"]
+    );
+    if index == 2 {
+        for key in ["events", "commits", "completions", "outbox"] {
+            assert_eq!(
+                approved_snapshot[key], after[key],
+                "mapping must not manufacture {key}"
+            );
+        }
+    }
+    let (status, retry) = fixture
+        .service_post(&install.package, &path, operation, &body, &fail_key)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{retry}");
+    assert_eq!(retry, accepted);
+    assert_eq!(after, authority_snapshot(&fixture.pool).await);
+    let (status, consumed) = fixture
+        .service_post(
+            &install.package,
+            "/_arkret/self/management-reviews/status",
+            ServiceOperationId::SELF_MANAGEMENT_REVIEW_READ_STATUS_V1,
+            &json!({"request_id":request.request_id}),
+            "consumed-status",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{consumed}");
+    assert_eq!(consumed["status"], "consumed");
+    assert_eq!(after, authority_snapshot(&fixture.pool).await);
+}
+
+async fn creation_review_atomic_lifecycle(context: &CreationReviewAtomicContext) {
+    use arkret_models_integration::management_review::*;
+    use arkret_wire::{ManagementOperation, ServiceOperationId};
+    let fixture = &context.fixture;
+    let first = &context.first;
+    let namespace = &context.namespace;
+    let policy = &context.policy;
+
     let body = fixture
         .bot_body_in_scope(
             &first.package,
@@ -7508,6 +7620,19 @@ async fn creation_action_approval_qualification(
     assert_creation_approval_missing(status, &error);
     assert_eq!(before, authority_snapshot(&fixture.pool).await);
     let administrator_grant = grant_creation_vote_administrator(fixture, scope).await;
+    let grant_vote = creation_operation_vote(
+        fixture,
+        target,
+        arkret_wire::ApprovalContext::Grant {
+            grant_id: grant_id.clone(),
+        },
+    );
+    let realm_vote = creation_operation_vote(
+        fixture,
+        target,
+        arkret_wire::ApprovalContext::RealmGovernance {},
+    );
+    body["approval_signatures"] = json!([grant_vote, realm_vote]);
     let before = authority_snapshot(&fixture.pool).await;
     let (status, error) = fixture
         .service_post(

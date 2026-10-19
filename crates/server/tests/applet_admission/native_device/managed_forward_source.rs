@@ -222,6 +222,32 @@ async fn managed_first_forward_closes_four_real_originals_and_retains_exact_priv
             };
             let verified = arkret_identity::managed_actor_provenance::verify_forwarded_managed_event_request(body, &verifier).unwrap();
             assert_eq!(verified.account(), &authority.account_id);
+            let evidence = body.producer_device_evidence.as_ref().unwrap();
+            let digest = arkret_models_collaboration::authority_commit::authority_forward_body_digest(body).unwrap();
+            let fact = arkret_identity::account_device_signer_evidence::verify_forwarded_account_device_signer_fact(
+                evidence, &event, &fixture.state.service_core_id(), &destination, &digest,
+                event.realm_id.digest_suite_code().digest_suite(), chrono::Utc::now(),
+            ).unwrap().into_fact();
+            let document = arkret_identity::authenticated_service_document_at(
+                &source.service_resolution, &context.install.package.service_id,
+                source.creation.provision.event.created_at,
+            ).unwrap();
+            let mut retained = coland_storage::ForwardedProducerDeviceEvidence::new(evidence.clone(), fact).unwrap();
+            retained.managed = Some(Box::new(coland_storage::ForwardedManagedActorSource::new(verified.clone(), &event, document).unwrap()));
+            retained.ensure_managed_binding(&event, chrono::Utc::now()).unwrap();
+            let mut different_body = body.clone();
+            different_body.producer_managed_provenance.as_mut().unwrap().current.expires_at -= chrono::Duration::seconds(1);
+            resign_source_binding(fixture, &mut different_body);
+            let changed_digest = arkret_models_collaboration::authority_commit::authority_forward_body_digest(&different_body).unwrap();
+            arkret_identity::account_device_signer_evidence::verify_forwarded_account_device_signer_fact(
+                different_body.producer_device_evidence.as_ref().unwrap(), &event,
+                &fixture.state.service_core_id(), &destination, &changed_digest,
+                event.realm_id.digest_suite_code().digest_suite(), chrono::Utc::now(),
+            ).unwrap();
+            retained.evidence = different_body.producer_device_evidence.unwrap();
+            // An independently valid origin signature over a different body cannot
+            // borrow the original token, even when the producer Event is unchanged.
+            assert!(retained.ensure_managed_binding(&event, chrono::Utc::now()).is_err());
             for attack in [0, 1, 2, 3] {
                 let mut wrong = body.clone();
                 match attack {

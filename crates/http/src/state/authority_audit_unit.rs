@@ -455,7 +455,7 @@ async fn forward_pair(
                 producer_agent_evidence: agent,
             },
         ]
-    } else if let Some(device) = super::authority_forward::fresh_producer_device_evidence(
+    } else if let Some(device) = super::authority_forward::fresh_non_managed_device_evidence(
         state,
         &first.event,
         &authority.service_id,
@@ -585,13 +585,14 @@ pub(crate) async fn submit_self_read(
         let digest =
             arkret_models_collaboration::authority_commit::authority_forward_body_digest(&peer)
                 .map_err(refusal)?;
-        peer.producer_device_evidence = super::authority_forward::fresh_producer_device_evidence(
-            state,
-            &request.audit_submission.event,
-            &authority.service_id,
-            &digest,
-        )
-        .await?;
+        peer.producer_device_evidence =
+            super::authority_forward::fresh_non_managed_device_evidence(
+                state,
+                &request.audit_submission.event,
+                &authority.service_id,
+                &digest,
+            )
+            .await?;
         peer.validate().map_err(refusal)?;
         let bytes = arkret_canonical::canonical_json_bytes(&peer)
             .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;

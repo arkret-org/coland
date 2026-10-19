@@ -1,6 +1,8 @@
 //! Real native Device join through the mounted self/events route and private ledger.
 #[path = "native_device/e2ee.rs"]
 mod e2ee;
+#[path = "native_device/forward_governor.rs"]
+mod forward_governor;
 #[path = "native_device/forward_source.rs"]
 mod forward_source;
 #[path = "native_device/managed_forward_source.rs"]
@@ -836,20 +838,42 @@ async fn native_sources_setup() -> Box<NativeSourcesContext> {
 }
 
 async fn native_sources_setup_for_history(history: Option<&str>) -> Box<NativeSourcesContext> {
-    use arkret_models_collaboration::governance::grant_constraint::{
-        GrantConstraintEffect, GrantConstraintKind,
-    };
-
     let mut fixture = Box::new(native_phase(Fixture::new).await);
     if let Some(history) = history {
         native_phase(|| fixture.new_realm_with_history(history)).await;
     }
+    native_phase(|| native_sources_setup_at(fixture)).await
+}
+
+async fn native_sources_setup_at(fixture: Box<Fixture>) -> Box<NativeSourcesContext> {
+    native_phase(|| native_sources_setup_at_with_e2ee(fixture, false)).await
+}
+async fn native_sources_setup_at_with_e2ee(
+    fixture: Box<Fixture>,
+    e2ee: bool,
+) -> Box<NativeSourcesContext> {
+    use arkret_models_collaboration::governance::grant_constraint::{
+        GrantConstraintEffect, GrantConstraintKind,
+    };
+
+    if e2ee {
+        eprintln!("[managed forward] preparing real Applet creation");
+    }
     let namespace = format!("bridge.{}", uuid::Uuid::now_v7().simple());
-    let native = NativeAppletService::new(
+    let mut native = NativeAppletService::new(
         &format!("ak:applet:{}", uuid::Uuid::now_v7()),
         &namespace,
         &fixture.state.service_core_id(),
     );
+    if e2ee {
+        native.package.e2ee_policy.enabled = true;
+        native.package.e2ee_policy.mls_join_requested = Some(true);
+        native
+            .package
+            .claimed_profiles
+            .push(arkret_wire::ProfileId::APPLET_E2EE_JOIN_V1.to_owned());
+        resign_native_applet_package(&mut native.package);
+    }
     let install = Box::new(
         native_phase(|| fixture.install_package(true, native.package.clone(), &namespace)).await,
     );
@@ -861,7 +885,7 @@ async fn native_sources_setup_for_history(history: Option<&str>) -> Box<NativeSo
             .0,
         StatusCode::CREATED
     );
-    let strand = native_strand(&fixture).await;
+    let strand = native_phase(|| native_strand(&fixture)).await;
     let quota:GrantConstraint=serde_json::from_value(json!({"constraint_kind":"quota","constraint_subkind":"rate","effect":"allow","max_operations":2,"period":"P1D","constraint_scope":"per_actor"})).unwrap();
     let mut control = GrantConstraint::new(
         GrantConstraintKind::AuthorityControl,
@@ -900,30 +924,36 @@ async fn native_sources_setup_for_history(history: Option<&str>) -> Box<NativeSo
         }),
     );
     let ancestor = arkret_wire::GrantId::from_event_id(&original.event_id);
-    accepted_admin_domain_event(&fixture, original).await;
-    let messages = native_business_parent(
-        &fixture,
-        &install,
-        vec![quota.clone()],
-        vec!["ak.message.create".into()],
-        Some(ancestor.clone()),
-    )
+    native_phase(|| accepted_admin_domain_event(&fixture, original)).await;
+    let messages = native_phase(|| {
+        native_business_parent(
+            &fixture,
+            &install,
+            vec![quota.clone()],
+            vec!["ak.message.create".into()],
+            Some(ancestor.clone()),
+        )
+    })
     .await;
-    let reading = native_business_parent(
-        &fixture,
-        &install,
-        vec![quota.clone()],
-        vec!["ak.event.read".into()],
-        Some(ancestor.clone()),
-    )
+    let reading = native_phase(|| {
+        native_business_parent(
+            &fixture,
+            &install,
+            vec![quota.clone()],
+            vec!["ak.event.read".into()],
+            Some(ancestor.clone()),
+        )
+    })
     .await;
-    let sibling = native_business_parent(
-        &fixture,
-        &install,
-        vec![quota],
-        vec!["ak.message.create".into()],
-        Some(ancestor.clone()),
-    )
+    let sibling = native_phase(|| {
+        native_business_parent(
+            &fixture,
+            &install,
+            vec![quota],
+            vec!["ak.message.create".into()],
+            Some(ancestor.clone()),
+        )
+    })
     .await;
     let ghost_actor: ActorId = serde_json::from_value(
         ghost["managed_actor_bundle"]["managed_actor_provision_event"]["payload"]["actor_id"]
@@ -931,19 +961,18 @@ async fn native_sources_setup_for_history(history: Option<&str>) -> Box<NativeSo
     )
     .unwrap();
     let before = business(&fixture).await;
-    let ghost_child = native_business_child(
-        &fixture,
-        &install,
-        &ghost_actor,
-        &[messages.clone(), reading.clone()],
-    )
-    .await;
-    let bot_child = native_message_child(
-        &fixture,
-        &install,
-        &install.bot_outcome.bot_actor_id,
-        &sibling,
-    )
+    let ghost_parents = [messages.clone(), reading.clone()];
+    let ghost_child =
+        native_phase(|| native_business_child(&fixture, &install, &ghost_actor, &ghost_parents))
+            .await;
+    let bot_child = native_phase(|| {
+        native_message_child(
+            &fixture,
+            &install,
+            &install.bot_outcome.bot_actor_id,
+            &sibling,
+        )
+    })
     .await;
     let after = business(&fixture).await;
     for table in ["quota_counters", "quota_buckets", "quota_consumptions"] {
@@ -959,7 +988,7 @@ async fn native_sources_setup_for_history(history: Option<&str>) -> Box<NativeSo
     ] {
         let key = SigningKey::from_bytes(&[seed; 32]);
         let device = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
-        let authority=authorize_scopes(&fixture,&install,bundle,&namespace,&key,device,json!([{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":["ak.applet.join","ak.event.read","ak.message.create"]}])).await;
+        let authority=native_phase(||authorize_scopes(&fixture,&install,bundle,&namespace,&key,device,json!([{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":["ak.applet.join","ak.event.read","ak.message.create"]}]))).await;
         let join = join_event(
             &fixture,
             &install,
@@ -967,7 +996,7 @@ async fn native_sources_setup_for_history(history: Option<&str>) -> Box<NativeSo
             &key,
             &install.bot_outcome.authorization_ref,
         );
-        let (status, out) = post(&fixture, &authority, &key, &join, vec![]).await;
+        let (status, out) = native_phase(|| post(&fixture, &authority, &key, &join, vec![])).await;
         assert_eq!(status, StatusCode::OK, "{out}");
         actors.push((authority, key, child));
     }

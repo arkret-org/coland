@@ -126,7 +126,9 @@ pub(super) async fn retain(
     let (event, evidence, managed) = parts(request)?;
     let evidence =
         evidence.ok_or_else(|| invalid("managed forward has no signed Device sibling"))?;
-    managed.ok_or_else(|| invalid("managed forward has no original creation source"))?;
+    let managed =
+        managed.ok_or_else(|| invalid("managed forward has no original creation source"))?;
+    let provenance = serde_json::to_value(managed).map_err(PersistenceError::database)?;
     let core = &evidence.device_projection_attestation.attestation;
     let source = &core.event_authorization;
     let digest =
@@ -141,21 +143,24 @@ pub(super) async fn retain(
     let request_json = serde_json::to_value(request).map_err(PersistenceError::database)?;
     let mut conn = pg_conn(pool).await?;
     conn.transaction::<_, PgTransactionError, _>(async |conn| {
-        let arkret_wire::CommitStreamRef::Realm { realm_id } = &source.authorization_ref.stream_ref else {
+        let arkret_wire::CommitStreamRef::Realm { .. } = &source.authorization_ref.stream_ref else {
             return Err(invalid("managed source requires its original PCR Realm stream").into());
         };
-        crate::realm_authorization_cut::lock_realm_authorization_cut(conn, realm_id).await?;
+        crate::managed_forward_source::lock_source(conn, event).await?;
         require_same_source(conn, request, core).await?;
-        sql_query("INSERT INTO account_device_signer_evidence(evidence_ref,principal_id,station_id,device_id,authorization_event_id,authorization_commit_id,attested_at,evidence_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(evidence_ref) DO NOTHING")
+        sql_query("INSERT INTO account_device_signer_evidence(evidence_ref,principal_id,station_id,device_id,authorization_event_id,authorization_commit_id,attested_at,evidence_json,managed_provenance_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(evidence_ref) DO NOTHING")
             .bind::<Text,_>(reference.as_ref()).bind::<Text,_>(core.account_id.principal_id.as_str())
             .bind::<Text,_>(core.account_id.station_id.as_str()).bind::<Text,_>(core.device_id.as_str())
             .bind::<Text,_>(fact.key.authorization_ref.event_id.as_str()).bind::<Text,_>(fact.key.authorization_ref.commit_id.as_str())
-            .bind::<Timestamptz,_>(core.attested_at).bind::<Jsonb,_>(&body).execute(&mut *conn).await?;
+            .bind::<Timestamptz,_>(core.attested_at).bind::<Jsonb,_>(&body).bind::<Jsonb,_>(&provenance).execute(&mut *conn).await?;
         let stored = sql_query("SELECT evidence_json,authorization_commit_id FROM account_device_signer_evidence WHERE evidence_ref=$1 FOR SHARE")
             .bind::<Text,_>(reference.as_ref()).get_result::<ArchiveRow>(&mut *conn).await?;
         if stored.evidence_json != body || stored.authorization_commit_id != fact.key.authorization_ref.commit_id.as_str() {
             return Err(invalid("managed forward immutable Device root collision").into());
         }
+        let stored_source = sql_query("SELECT managed_provenance_json AS request_json FROM account_device_signer_evidence WHERE evidence_ref=$1 FOR SHARE")
+            .bind::<Text,_>(reference.as_ref()).get_result::<RequestRow>(&mut *conn).await?;
+        if stored_source.request_json != provenance { return Err(invalid("managed forward original source archive collision").into()); }
         sql_query("INSERT INTO account_device_managed_forward_requests(evidence_ref,request_json) VALUES($1,$2) ON CONFLICT(evidence_ref) DO NOTHING")
             .bind::<Text,_>(reference.as_ref()).bind::<Jsonb,_>(&request_json).execute(&mut *conn).await?;
         let stored = sql_query("SELECT request_json FROM account_device_managed_forward_requests WHERE evidence_ref=$1 FOR SHARE")

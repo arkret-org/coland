@@ -256,19 +256,48 @@ pub async fn test_fresh_producer_device_evidence(
 ) -> coland_services::ServiceResult<
     Option<arkret_models_identity::ForwardAccountDeviceSignerEvidence>,
 > {
-    let request = arkret_models_collaboration::authority_commit::PeerAuthorityForwardEventRequest {
-        branch:
-            arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,
-        event_submission: arkret_wire::EventAdmissionSubmission::new(event.clone()),
-        mls_genesis_material: None,
-        producer_device_evidence: None,
-        producer_managed_provenance: None,
-        producer_agent_evidence: None,
+    let request = test_fresh_producer_forward_request(state, event, destination).await?;
+    Ok(request.producer_device_evidence)
+}
+
+/// Run the complete production origin assembler, signer and durable retention boundary.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub async fn test_fresh_producer_forward_request(
+    state: &crate::state::AppState,
+    event: &arkret_wire::Event,
+    destination: &arkret_wire::DidCoreId,
+) -> coland_services::ServiceResult<
+    arkret_models_collaboration::authority_commit::PeerAuthorityForwardEventRequest,
+> {
+    use arkret_models_collaboration::authority_commit::*;
+    let mut request =
+        PeerAuthoritySubmitRequest::AuthorityForwardEvent(PeerAuthorityForwardEventRequest {
+            branch: AuthorityForwardBranch::AuthorityForward,
+            event_submission: arkret_wire::EventAdmissionSubmission::new(event.clone()),
+            mls_genesis_material: None,
+            producer_device_evidence: None,
+            producer_managed_provenance: None,
+            producer_agent_evidence: None,
+        });
+    crate::state::fresh_device_request(state, destination, &mut request).await?;
+    let PeerAuthoritySubmitRequest::AuthorityForwardEvent(request) = request else {
+        unreachable!("known test forward branch")
     };
-    let digest =
-        arkret_models_collaboration::authority_commit::authority_forward_body_digest(&request)
-            .map_err(|e| coland_services::ServiceError::SchemaViolation(e.to_string()))?;
-    crate::state::fresh_producer_device_evidence(state, event, destination, &digest).await
+    Ok(request)
+}
+
+/// Assemble a complete native Event or MLS submission through the production source path.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub async fn test_fresh_native_forward_request(
+    state: &crate::state::AppState,
+    destination: &arkret_wire::DidCoreId,
+    submission: &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest,
+) -> coland_services::ServiceResult<
+    arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+> {
+    crate::state::prepare_native_forward_request(state, destination, submission).await
 }
 
 /// Exercise the forwarding-Station preflight and queue boundary through the
@@ -308,6 +337,38 @@ pub async fn test_admit_authority_forward(
     now: chrono::DateTime<chrono::Utc>,
 ) -> coland_services::ServiceResult<arkret_wire::AuthoritySubmitOutcome> {
     crate::state::admit_forwarded_event(state, peer, request, now).await
+}
+
+/// Consume the complete native forward through the real governance entry point.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub async fn test_admit_native_forward(
+    state: &crate::state::AppState,
+    peer: &coland_services::authority_commit::AuthenticatedPeerContext,
+    request: arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+    now: chrono::DateTime<chrono::Utc>,
+) -> coland_services::ServiceResult<arkret_wire::AuthoritySubmitOutcome> {
+    use arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest as R;
+    match request {
+        R::AuthorityForwardEvent(v) => {
+            crate::state::admit_forwarded_event(state, peer, v, now).await
+        }
+        R::AuthorityForwardMls(v) => crate::state::admit_forwarded_mls(state, peer, v, now).await,
+        _ => Err(coland_services::ServiceError::SchemaViolation(
+            "native forward branch required".into(),
+        )),
+    }
+}
+
+/// Verify and activate an actual pre-imported planned handoff through production admission.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub async fn test_install_planned_handoff(
+    state: &crate::state::AppState,
+    peer: &coland_services::authority_commit::AuthenticatedPeerContext,
+    request: arkret_models_collaboration::authority_commit::AuthorityHandoffRequest,
+) -> coland_services::ServiceResult<arkret_wire::RealmAuthorityHandoff> {
+    crate::state::install_test_handoff(state, peer, request).await
 }
 
 /// Produce a portable Agent context through the real verifier for SDK regression fixtures.

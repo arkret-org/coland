@@ -1520,7 +1520,7 @@ async fn postgres_relation_current_result_is_exact_commit_cas_and_atomic() {
 
 #[tokio::test]
 async fn postgres_franking_nonce_ledger_is_bounded_atomic_and_restart_stable() {
-    Box::pin(postgres_franking_nonce_ledger_case()).await;
+    ordinary_realm::case_future(postgres_franking_nonce_ledger_case).await;
 }
 
 async fn postgres_franking_nonce_ledger_case() {
@@ -2381,19 +2381,30 @@ async fn postgres_agent_approval_trigger_emits_a_readable_account_notification()
         arkret_canonical::sha256_bytes(suffix.as_bytes()),
     )
     .to_string();
+    let pairing_request_id = format!("agent_pairing_request:{}", uuid::Uuid::now_v7());
+    let request_digest = format!("sha256:{}", "a".repeat(64));
+    let runtime_key_binding_digest = format!("sha256:{}", "c".repeat(64));
+    let scope_custody_ref = coland_storage::AgentScopeCustodyRef {
+        key_ref: format!("scope-custody:{suffix}"),
+        content_digest: arkret_wire::Hash::new(format!("sha256:{}", "d".repeat(64))).unwrap(),
+    };
     let mut conn = pool.get().await.unwrap();
     sql_query(
         "INSERT INTO agent_pairing_receipts(
             authorize_event_ref, agent_id, controller_principal_id, pairing_request_id,
-            request_digest, raw_key_digest, expires_at, activation_state
-        ) VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '15 minutes', 'active')",
+            request_digest, approval_request_id, runtime_key_binding_digest, raw_key_digest,
+            expires_at, activation_state, scope_custody_ref
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW() + INTERVAL '15 minutes', 'active', $9)",
     )
     .bind::<sql_types::Text, _>(&authorize_event_ref)
     .bind::<sql_types::Text, _>(&agent_id)
     .bind::<sql_types::Text, _>(&controller_id)
-    .bind::<sql_types::Text, _>(format!("agent_pairing_request:{}", uuid::Uuid::now_v7()))
-    .bind::<sql_types::Text, _>(format!("sha256:{}", "a".repeat(64)))
+    .bind::<sql_types::Text, _>(&pairing_request_id)
+    .bind::<sql_types::Text, _>(&request_digest)
+    .bind::<sql_types::Text, _>(&approval_request_id)
+    .bind::<sql_types::Text, _>(&runtime_key_binding_digest)
     .bind::<sql_types::Text, _>(format!("sha256:{}", "b".repeat(64)))
+    .bind::<sql_types::Jsonb, _>(serde_json::to_value(&scope_custody_ref).unwrap())
     .execute(&mut *conn)
     .await
     .unwrap();
@@ -2404,6 +2415,16 @@ async fn postgres_agent_approval_trigger_emits_a_readable_account_notification()
         .unwrap()
         .expect("durable Agent pairing receipt");
     assert_eq!(receipt.authorize_event_ref, authorize_event_ref);
+    assert_eq!(receipt.agent_id, agent_id);
+    assert_eq!(receipt.controller_principal_id, controller_id);
+    assert_eq!(receipt.pairing_request_id.as_str(), pairing_request_id);
+    assert_eq!(receipt.request_digest, request_digest);
+    assert_eq!(receipt.approval_request_id.as_str(), approval_request_id);
+    assert_eq!(
+        receipt.runtime_key_binding_digest,
+        runtime_key_binding_digest
+    );
+    assert_eq!(receipt.scope_custody_ref, Some(scope_custody_ref));
     assert_eq!(
         receipt.outcome.authorize_event_ref.as_str(),
         authorize_event_ref
@@ -2923,7 +2944,7 @@ async fn postgres_adapter_satisfies_last_resort_claim_ledger_contract() {
                 matches!(
                     result,
                     PeerKeyPackageClaimLedgerWriteResult::Existing(existing)
-                        if **existing == concurrent
+                        if existing.as_ref() == &concurrent
                 )
             })
             .count(),
@@ -3151,11 +3172,29 @@ async fn postgres_retention_policy_preserves_full_actor_after_reopen() {
 
 #[tokio::test]
 async fn postgres_adapter_satisfies_invite_new_source_ledger_contract() {
+    use coland_storage::AccountStore;
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     let pool = database.pool();
     let _db_guard = DB_GUARD.lock().await;
     let ledger = PgInviteNewSourceLedgerStore { pool: pool.clone() };
-    let accounts = PgAccountStore { pool };
     let namespace = format!("postgres-invite-new-source-{}", uuid::Uuid::now_v7());
-    assert_invite_new_source_ledger_contract(&ledger, &accounts, &namespace).await;
+    let station = arkret_wire::DidCoreId::new("ak:did_core:web:coland.example").unwrap();
+    let holder = ordinary_realm::case_future(|| {
+        ordinary_realm::human_profile::admit(&pool, &station, &namespace)
+    })
+    .await;
+    PgAccountStore { pool: pool.clone() }
+        .put(&coland_storage::AccountRecord {
+            pk: coland_storage::AccountPk(0),
+            principal_id: holder.principal_id.clone(),
+            station_id: holder.station_id.clone(),
+            localpart: String::new(),
+            display_name: None,
+            bio: None,
+            avatar_blob_ref: None,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+    assert_invite_new_source_ledger_contract(&ledger, &holder, &namespace).await;
 }

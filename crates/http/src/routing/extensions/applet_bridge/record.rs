@@ -46,7 +46,7 @@ pub(super) fn encode_applet_identity(
         .map_err(|error| AppError::internal(format!("Applet identity serialize failed: {error}")))
 }
 
-pub(super) async fn applet_identity(
+pub(crate) async fn applet_identity(
     state: &AppState,
     applet_id: &str,
     target_station_id: &str,
@@ -85,9 +85,14 @@ pub(crate) async fn applet_record(
     else {
         return Ok(None);
     };
+    // A planned governance handoff preserves the original installation target.
+    let target_station_id = value
+        .get("target_station_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| AppError::internal("stored Applet installation omits target_station_id"))?;
     let identity = state
         .event_queries()
-        .applet_identity(applet_id, state.service_id())
+        .applet_identity(applet_id, target_station_id)
         .await
         .map_err(|error| {
             tracing::error!(%error, %applet_id, "failed to read applet identity winner");
@@ -108,9 +113,15 @@ pub(crate) async fn applet_records(state: &AppState) -> Result<Vec<AppletRecord>
             .get("applet_id")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| AppError::internal("stored applet installation omits applet_id"))?;
+        let target_station_id = installation
+            .get("target_station_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                AppError::internal("stored Applet installation omits target_station_id")
+            })?;
         let identity = state
             .event_queries()
-            .applet_identity(applet_id, state.service_id())
+            .applet_identity(applet_id, target_station_id)
             .await
             .map_err(|error| {
                 tracing::error!(%error, %applet_id, "failed to read applet identity winner");

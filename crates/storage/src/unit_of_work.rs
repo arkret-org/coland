@@ -116,6 +116,14 @@ pub struct EventCommitRequest {
     pub realm_fanout_source: Option<arkret_wire::EventAdmissionSubmission>,
 }
 
+impl EventCommitRequest {
+    pub fn forwarded_managed_source(&self) -> Option<&crate::ForwardedManagedActorSource> {
+        self.forwarded_producer_evidence
+            .as_ref()
+            .and_then(|e| e.managed.as_deref())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParentMembershipAdmissionCheck {
     pub expected_join_policy_digest: arkret_wire::Hash,

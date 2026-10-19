@@ -364,27 +364,6 @@ impl PersistenceHandle {
             .read_cut(holder, peer, scope, device)
             .await
     }
-    pub async fn prepare_managed_forward(
-        &self,
-        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
-        destination: &arkret_wire::DidCoreId,
-    ) -> PersistenceResult<coland_storage::PreparedManagedForward> {
-        self.persistence
-            .account_device_signer_evidence()
-            .prepare_managed_forward(request, destination)
-            .await
-    }
-
-    pub async fn retain_managed_forward(
-        &self,
-        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
-    ) -> PersistenceResult<arkret_wire::SignerEvidenceRef> {
-        self.persistence
-            .account_device_signer_evidence()
-            .retain_managed_forward(request)
-            .await
-    }
-
     pub async fn get_managed_forward(
         &self,
         account: &arkret_wire::AccountId,
@@ -399,7 +378,7 @@ impl PersistenceHandle {
             .await
     }
 
-    pub async fn prepare_forward_current_signer_evidence(
+    pub async fn prepare_non_managed_forward_current_signer_evidence(
         &self,
         event: &arkret_wire::Event,
         destination: &arkret_wire::DidCoreId,
@@ -408,7 +387,27 @@ impl PersistenceHandle {
     {
         self.persistence
             .account_device_signer_evidence()
-            .prepare_forward_current(event, destination, body_digest)
+            .prepare_non_managed_forward_current(event, destination, body_digest)
+            .await
+    }
+
+    pub async fn prepare_forward_request(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+        destination: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Option<coland_storage::PreparedAccountDeviceForwardSource>> {
+        self.persistence
+            .account_device_signer_evidence()
+            .prepare_forward_request(request, destination)
+            .await
+    }
+    pub async fn retain_forward_request(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+    ) -> PersistenceResult<arkret_wire::SignerEvidenceRef> {
+        self.persistence
+            .account_device_signer_evidence()
+            .retain_forward_request(request)
             .await
     }
 

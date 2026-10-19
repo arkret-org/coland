@@ -198,6 +198,7 @@ pub(crate) async fn commit_message_create_current_result_in_connection(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     prepared: Option<&coland_storage::EventApprovalCommit>,
+    forwarded: Option<&coland_storage::ForwardedManagedActorSource>,
 ) -> PersistenceResult<()> {
     if event.kind != arkret_wire::EventKind::MessageCreate {
         return Ok(());
@@ -293,6 +294,7 @@ pub(crate) async fn commit_message_create_current_result_in_connection(
             &attributed,
             commit,
             prepared,
+            forwarded,
         )
         .await?;
     if matches!(event.scope_ref, arkret_wire::ScopeRef::Circle { .. }) {
@@ -337,8 +339,13 @@ pub(crate) async fn commit_message_create_current_result_in_connection(
     require_active_discussion_strand(conn, &event.realm_id, &typed.strand_id, &event.scope_ref)
         .await?;
     if mimi.is_none() {
-        crate::message_interactions::require_message_actor(conn, event, commit.committed_at)
-            .await?;
+        crate::message_interactions::require_message_actor_with_source(
+            conn,
+            event,
+            commit.committed_at,
+            forwarded,
+        )
+        .await?;
     }
     crate::message_interactions::require_poll_content_in_connection(conn, event, commit, &typed)
         .await?;

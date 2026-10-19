@@ -72,16 +72,16 @@ async fn remove(pool: &PgPool, tables: &[String]) {
     for table in tables {
         let table = table.replace('"', "\"\"");
         diesel::sql_query(format!(
-            "DROP TRIGGER authority_unit_fault ON public.\"{table}\""
+            "DROP TRIGGER IF EXISTS authority_unit_fault ON public.\"{table}\""
         ))
         .execute(&mut conn)
         .await
         .unwrap();
     }
     for sql in [
-        "DROP FUNCTION authority_unit_fault()",
-        "DROP SEQUENCE authority_unit_fault_counter",
-        "DROP SEQUENCE authority_unit_fault_target",
+        "DROP FUNCTION IF EXISTS authority_unit_fault()",
+        "DROP SEQUENCE IF EXISTS authority_unit_fault_counter",
+        "DROP SEQUENCE IF EXISTS authority_unit_fault_target",
     ] {
         diesel::sql_query(sql).execute(&mut conn).await.unwrap();
     }
@@ -95,6 +95,9 @@ where
     Fut: Future<Output = PersistenceResult<T>>,
 {
     let tables = tables(pool).await;
+    // The leased slot is exclusive; clear only this harness's objects left
+    // by a previously aborted test before installing the first fault point.
+    remove(pool, &tables).await;
     let before = snapshot(pool).await;
     for point in 1..=512 {
         install(pool, &tables, point).await;

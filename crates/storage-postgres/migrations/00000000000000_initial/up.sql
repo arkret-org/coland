@@ -911,6 +911,7 @@ FOR EACH ROW EXECUTE FUNCTION public.enforce_canonical_event_immutability();
 CREATE TABLE public.authority_forward_attempts (
     -- Local frozen intent and verified acknowledgement; neither is installed state.
     original_submission_json jsonb,
+    peer_request_json jsonb,
     accepted_commit_json jsonb,
     -- Local first-attempt cut for an own Circle leave result, never a wire field.
     circle_leave_parent_revision jsonb,
@@ -920,6 +921,9 @@ CREATE TABLE public.authority_forward_attempts (
     attempted_at timestamptz NOT NULL,
     CONSTRAINT authority_forward_accepted_intent_check CHECK (
         accepted_commit_json IS NULL OR original_submission_json IS NOT NULL
+    ),
+    CONSTRAINT authority_forward_peer_intent_check CHECK (
+        peer_request_json IS NULL OR original_submission_json IS NOT NULL
     ),
     CONSTRAINT authority_forward_attempt_reason_check CHECK (
         (status = 'rejected' AND reason_code IS NOT NULL)
@@ -4805,7 +4809,8 @@ CREATE TABLE account_device_signer_evidence (
  authorization_event_id TEXT NOT NULL,
  authorization_commit_id TEXT NOT NULL REFERENCES realm_commits(commit_id),
  attested_at TIMESTAMPTZ NOT NULL,
- evidence_json JSONB NOT NULL CHECK(jsonb_typeof(evidence_json)='object')
+ evidence_json JSONB NOT NULL CHECK(jsonb_typeof(evidence_json)='object'),
+ managed_provenance_json JSONB CHECK(managed_provenance_json IS NULL OR jsonb_typeof(managed_provenance_json)='object')
 );
 CREATE INDEX account_device_signer_evidence_subject_idx
  ON account_device_signer_evidence(principal_id,station_id,device_id,attested_at);
@@ -4843,7 +4848,8 @@ CREATE TABLE forwarded_producer_device_evidence (
  station_id TEXT NOT NULL,
  device_id TEXT NOT NULL,
  attested_at TIMESTAMPTZ NOT NULL,
- evidence_json JSONB NOT NULL CHECK(jsonb_typeof(evidence_json)='object')
+ evidence_json JSONB NOT NULL CHECK(jsonb_typeof(evidence_json)='object'),
+ managed_provenance_json JSONB CHECK(managed_provenance_json IS NULL OR jsonb_typeof(managed_provenance_json)='object')
 );
 
 -- Complete verified Agent producer closure, retained with its accepting Commit.

@@ -262,6 +262,31 @@ where
 /// foreign-key cycle -- falls back to `TRUNCATE ... CASCADE`, which resolves
 /// order itself at roughly ten times the cost.
 async fn reset(connection: &mut AsyncPgConnection) {
+    // The lease is exclusive. A crashed native HTTP test can leave its named
+    // injectors behind; remove only these test objects before reusing the slot.
+    // Production authentication and immutable-ledger triggers stay installed.
+    execute(
+        connection,
+        "DO $native_faults$ BEGIN
+        DROP TRIGGER IF EXISTS fail_native_membership ON public.member_state_current_results;
+        DROP FUNCTION IF EXISTS public.fail_native_membership();
+        DROP TRIGGER IF EXISTS fail_native_profile ON public.actor_profile_current_results;
+        DROP FUNCTION IF EXISTS public.fail_native_profile();
+        DROP TRIGGER IF EXISTS fail_native_profile_source ON public.agent_producer_signer_keys;
+        DROP FUNCTION IF EXISTS public.fail_native_profile_source();
+        DROP TRIGGER IF EXISTS fail_native_message ON public.message_revision_current_results;
+        DROP FUNCTION IF EXISTS public.fail_native_message();
+        DROP TRIGGER IF EXISTS fail_native_circle ON public.circle_member_state_current_results;
+        DROP FUNCTION IF EXISTS public.fail_native_circle();
+        DROP TRIGGER IF EXISTS fail_native_keypackage_insert ON public.mls_key_packages;
+        DROP FUNCTION IF EXISTS public.fail_native_keypackage_insert();
+        DROP TRIGGER IF EXISTS fail_native_keypackage_claim ON public.peer_keypackage_claims;
+        DROP FUNCTION IF EXISTS public.fail_native_keypackage_claim();
+        DROP TRIGGER IF EXISTS fail_native_keypackage_revoke ON public.mls_key_packages;
+        DROP FUNCTION IF EXISTS public.fail_native_keypackage_revoke();
+        END $native_faults$",
+    )
+    .await;
     let plan = reset_plan(connection).await;
     let dirty = non_empty_tables(connection, &plan.probe).await;
     if dirty.is_empty() {

@@ -246,20 +246,28 @@ async fn assert_list_failures(
     let before = native_phase(|| business_snapshot(fixture)).await;
     let response = native_phase(|| list_response(fixture, authority, key, scope, None)).await;
     assert_eq!(response.status_code, Some(StatusCode::OK));
+    let mut writer = fixture.pool.get().await.unwrap();
+    // Catch only SQLSTATE 55P03; server message text is locale-dependent.
+    diesel::sql_query(
+        "CREATE OR REPLACE FUNCTION pg_temp.assert_native_queue_writer_locked(target_realm text) \
+         RETURNS void LANGUAGE plpgsql AS $$ BEGIN \
+           BEGIN \
+             PERFORM 1 FROM realm_authorities WHERE realm_id=target_realm FOR UPDATE NOWAIT; \
+           EXCEPTION WHEN lock_not_available THEN RETURN; END; \
+           RAISE EXCEPTION 'native queue authority writer was not locked'; \
+         END $$",
+    )
+    .execute(&mut *writer)
+    .await
+    .unwrap();
     for realm in [&authority.pcr_realm_id, scope.realm_id()] {
-        let mut writer = fixture.pool.get().await.unwrap();
-        let error = diesel::sql_query(
-            "SELECT realm_id FROM realm_authorities WHERE realm_id=$1 FOR UPDATE NOWAIT",
-        )
-        .bind::<diesel::sql_types::Text, _>(realm.as_str())
-        .execute(&mut *writer)
-        .await
-        .unwrap_err();
-        assert!(
-            error.to_string().contains("could not obtain lock"),
-            "the exact PCR and business current writers must be blocked before the page handoff: {error}"
-        );
+        diesel::sql_query("SELECT pg_temp.assert_native_queue_writer_locked($1)")
+            .bind::<diesel::sql_types::Text, _>(realm.as_str())
+            .execute(&mut *writer)
+            .await
+            .expect("the exact PCR and business current writers must remain locked before handoff");
     }
+    drop(writer);
     assert_eq!(
         before,
         native_phase(|| business_snapshot(fixture)).await,

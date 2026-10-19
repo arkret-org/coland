@@ -163,7 +163,19 @@ async fn admit_mls_event_inner(
         .as_ref()
         .map(|context| context.refusal_record(arkret_wire::ReasonCode::GOVERNANCE_BINDING_MISMATCH))
         .transpose()?;
-    let native_refusal = native_guard.as_deref().zip(refusal_record.as_ref());
+    let native_forwarded = match &producer {
+        AdmittedProducer::Forwarded(evidence) => evidence.managed.clone(),
+        _ => None,
+    };
+    let refusal_source = native_guard
+        .as_deref()
+        .map(coland_storage::ManagedMlsRefusalSource::Local)
+        .or_else(|| {
+            native_forwarded
+                .as_deref()
+                .map(coland_storage::ManagedMlsRefusalSource::Forwarded)
+        });
+    let native_refusal = refusal_source.zip(refusal_record.as_ref());
     let refusal_authority = if event.kind == EventKind::MlsCommit {
         state
             .authority_commits()

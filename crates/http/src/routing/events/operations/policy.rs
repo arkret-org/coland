@@ -225,7 +225,6 @@ async fn validate_one_operation_policy(
         validate_organization_moderation_policy_authority(operation)?;
         validate_set_default_strand_policy(state, operation).await?;
         validate_realm_organization_policy(state, operation).await?;
-        validate_read_receipt_policy_combination_write(state, operations, operation).await?;
         validate_audience_mention_operation_policy(state, operation).await?;
         validate_reaction_scope_policy(state, operation)?;
     }

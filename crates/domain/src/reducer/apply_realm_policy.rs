@@ -169,36 +169,41 @@ impl ProjectionState {
         ProjectionEffect::RealmSearchPolicyProjected { realm_id }
     }
 
-    /// Cache only this accepted scope's complete replacement payload.
+    /// Replace this exact scope's whole receipt policy, preserving omissions.
     pub(crate) fn apply_scope_read_receipt_policy(
         &mut self,
         operation: &Operation,
     ) -> ProjectionEffect {
         let scope = &operation.context.accepted_scope_ref;
-        let valid_scope = match scope {
-            arkret_wire::ScopeRef::Realm { realm_id }
-            | arkret_wire::ScopeRef::Circle { realm_id, .. } => realm_id == &operation.realm_id,
-            _ => false,
-        };
-        let policy = serde_json::from_value::<
-            arkret_models_collaboration::events_payloads::ReadReceiptPolicyPayload,
-        >(operation.payload.clone());
-        if !valid_scope || !matches!(policy, Ok(ref p) if p.validate().is_ok()) {
+        if !matches!(
+            scope,
+            arkret_wire::ScopeRef::Realm { .. } | arkret_wire::ScopeRef::Circle { .. }
+        ) || scope.realm_id_opt() != Some(&operation.realm_id)
+            || serde_json::from_value::<
+                arkret_models_collaboration::events_payloads::ReadReceiptPolicyPayload,
+            >(operation.payload.clone())
+            .and_then(|value| value.validate().map_err(serde::de::Error::custom))
+            .is_err()
+        {
             return ProjectionEffect::Rejected {
                 reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
             };
         }
-        let subject = String::from_utf8(
-            arkret_canonical::canonical_json_bytes(scope).expect("serializable scope"),
-        )
-        .expect("JSON UTF-8");
+        let subject = match arkret_canonical::canonical_json_bytes(scope) {
+            Ok(bytes) => String::from_utf8(bytes).expect("canonical JSON is UTF-8"),
+            Err(_) => {
+                return ProjectionEffect::Rejected {
+                    reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
+                };
+            }
+        };
         self.set_facet(
-            operation.realm_id.as_str(),
+            &operation.realm_id.to_string(),
             FacetRef::new(facet::SCOPE_READ_RECEIPT_POLICY, subject),
             operation.payload.clone(),
         );
         ProjectionEffect::ScopeReadReceiptPolicyProjected {
-            realm_id: operation.realm_id.to_string(),
+            scope_ref: scope.clone(),
         }
     }
 

@@ -266,58 +266,6 @@ pub(crate) async fn commit_plaintext_services_current_result_in_connection(
     .await
 }
 
-/// Scope-local read-receipt current shares the accepting authorization cut.
-pub(crate) async fn commit_read_receipt_policy_authority_current_result_in_connection(
-    conn: &mut AsyncPgConnection,
-    event: &arkret_wire::Event,
-    commit: &arkret_wire::RealmCommit,
-    prepared: Option<&coland_storage::EventApprovalCommit>,
-) -> PersistenceResult<()> {
-    if event.kind != arkret_wire::EventKind::ScopeReadReceiptPolicy {
-        return Ok(());
-    }
-    crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
-        conn, event, commit, prepared,
-    )
-    .await?;
-    if matches!(event.scope_ref, arkret_wire::ScopeRef::Circle { .. }) {
-        crate::circle_current_results::require_active_author_in_connection(conn, event, commit)
-            .await?;
-    }
-    commit_read_receipt_policy_current_result_in_connection(conn, event, commit).await
-}
-
-pub(crate) async fn commit_read_receipt_policy_current_result_in_connection(
-    conn: &mut AsyncPgConnection,
-    event: &arkret_wire::Event,
-    commit: &arkret_wire::RealmCommit,
-) -> PersistenceResult<()> {
-    if event.kind != arkret_wire::EventKind::ScopeReadReceiptPolicy {
-        return Ok(());
-    }
-    arkret_schema::validate_event_for_submit(event)
-        .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
-    if commit.realm_id != event.realm_id || commit.event_ref != event.event_id {
-        return Err(PersistenceError::Conflict(
-            "read-receipt policy covering Event differs".into(),
-        ));
-    }
-    let policy = typed_payload(event, EventPayloadExt::as_scope_read_receipt_policy)?;
-    crate::scope_read_receipt_policy_current_results::install(
-        conn,
-        &event.realm_id,
-        &event.scope_ref,
-        &commit.stream_ref,
-        &arkret_wire::CurrentRevision {
-            commit_id: commit.commit_id.clone(),
-            stream_position: commit.stream_position,
-        },
-        &result_value(&policy)?,
-        commit.committed_at,
-    )
-    .await
-}
-
 /// History policy is a scope-local security ratchet with an exact current
 /// predecessor. The accepted Event and its new provenance advance atomically.
 pub(crate) async fn commit_realm_history_access_authority_current_result_in_connection(
@@ -913,7 +861,7 @@ mod tests {
             );
             uow.commit_event(request.clone()).await.unwrap();
             let mut conn = pool.get().await.unwrap();
-            let current = diesel::sql_query("SELECT current_commit_id,value FROM scope_read_receipt_policy_current_results WHERE realm_id=$1")
+            let current = diesel::sql_query("SELECT current_commit_id,value FROM scope_read_receipt_policy_current_results WHERE realm_id=$1 AND scope_ref->>'kind'='realm'")
                 .bind::<Text, _>(request.authority_commit.event.realm_id.as_str()).get_result::<Row>(&mut *conn).await.unwrap();
             assert_eq!(
                 current.current_commit_id,
@@ -935,7 +883,7 @@ mod tests {
         );
         assert!(uow.commit_event(denied.clone()).await.is_err());
         let mut conn = pool.get().await.unwrap();
-        let current = diesel::sql_query("SELECT current_commit_id,value FROM scope_read_receipt_policy_current_results WHERE realm_id=$1")
+        let current = diesel::sql_query("SELECT current_commit_id,value FROM scope_read_receipt_policy_current_results WHERE realm_id=$1 AND scope_ref->>'kind'='realm'")
             .bind::<Text, _>(previous.event.realm_id.as_str()).get_result::<Row>(&mut *conn).await.unwrap();
         assert_eq!(
             current.current_commit_id,

@@ -1090,6 +1090,26 @@ fn knock_state_visible_in_members_in_state_query() {
 }
 
 #[test]
+fn read_receipt_policy_value_helper_extracts_only_its_exact_scope() {
+    let scope = arkret_wire::ScopeRef::Realm {
+        realm_id: "ak:realm:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb"
+            .parse()
+            .unwrap(),
+    };
+    let mut state = ProjectionState::new();
+    let value = serde_json::json!({"disclosure":"required","visibility":"members"});
+    state.set_facet(
+        scope.realm_id().as_str(),
+        FacetRef::new(
+            facet::SCOPE_READ_RECEIPT_POLICY,
+            String::from_utf8(arkret_canonical::canonical_json_bytes(&scope).unwrap()).unwrap(),
+        ),
+        value.clone(),
+    );
+    assert_eq!(state.read_receipt_policy_value(&scope), Some(&value));
+}
+
+#[test]
 fn the_policy_bundle_facet_does_not_leak_across_realms() {
     let mut state = ProjectionState::new();
     state.set_realm_facet(
@@ -1503,7 +1523,12 @@ fn every_bootstrap_facet_kind_is_reachable_through_the_dispatch_registry() {
     }
 }
 
-/// Accepted policy writes replace only the exact signed scope cache.
+/// `ak.scope.read_receipt_policy` must reach its reducer through the dispatch
+/// registry, not only through a direct call.
+///
+/// `discovery/read-receipts.md` section 2.5 names this kind the sole carrier of
+/// the `scope_read_receipt_policy` current result, and the registry projects
+/// the whole payload as the settled value for exactly the signed scope.
 #[test]
 fn read_receipt_policy_reaches_the_reducer_and_replaces_the_previous_value() {
     let realm_id = "ak:realm:AZ5nQ0y2uZ3d1tVvJ7mK8sXbR4fPcHlWgEoNiTaUdY6B";
@@ -1513,11 +1538,7 @@ fn read_receipt_policy_reaches_the_reducer_and_replaces_the_previous_value() {
         "visibility": "private"
     });
     let effect = state.apply(
-        &make_operation(
-            arkret_wire::EventKind::ScopeReadReceiptPolicy,
-            realm_id,
-            strict.clone(),
-        ),
+        &receipt_policy_operation(realm_id, strict.clone()),
         &ServerHlc::new("test"),
     );
     assert!(
@@ -1540,11 +1561,7 @@ fn read_receipt_policy_reaches_the_reducer_and_replaces_the_previous_value() {
     // the read side rather than keeping the superseded value.
     let partial = serde_json::json!({ "disclosure": "disabled" });
     let effect = state.apply(
-        &make_operation(
-            arkret_wire::EventKind::ScopeReadReceiptPolicy,
-            realm_id,
-            partial.clone(),
-        ),
+        &receipt_policy_operation(realm_id, partial.clone()),
         &ServerHlc::new("test"),
     );
     assert!(
@@ -1578,11 +1595,7 @@ fn read_receipt_policy_rejects_the_empty_object_and_unknown_fields() {
     ] {
         let mut state = ProjectionState::new();
         let effect = state.apply(
-            &make_operation(
-                arkret_wire::EventKind::ScopeReadReceiptPolicy,
-                realm_id,
-                payload.clone(),
-            ),
+            &receipt_policy_operation(realm_id, payload.clone()),
             &ServerHlc::new("test"),
         );
         assert!(
@@ -1735,4 +1748,51 @@ fn the_bundle_projects_every_registered_component() {
         state.realm_federation_policy(realm_id).as_deref(),
         Some("restricted")
     );
+}
+
+fn receipt_policy_operation(realm: &str, payload: Value) -> Operation {
+    let mut operation = make_operation(
+        arkret_wire::EventKind::ScopeReadReceiptPolicy,
+        realm,
+        payload,
+    );
+    operation.context.accepted_scope_ref = arkret_wire::ScopeRef::Realm {
+        realm_id: realm.parse().unwrap(),
+    };
+    operation
+}
+
+#[test]
+fn read_receipt_circle_and_realm_replace_independent_values() {
+    let realm = "ak:realm:AZ5nQ0y2uZ3d1tVvJ7mK8sXbR4fPcHlWgEoNiTaUdY6B";
+    let realm_scope = arkret_wire::ScopeRef::Realm {
+        realm_id: realm.parse().unwrap(),
+    };
+    let mut state = ProjectionState::new();
+    let mut scopes = vec![realm_scope];
+    for byte in [21, 22] {
+        scopes.push(arkret_wire::ScopeRef::Circle {
+            realm_id: realm.parse().unwrap(),
+            circle_id: arkret_wire::CircleId::from_event_id(&arkret_wire::EventId::from_digest(
+                arkret_canonical::DigestSuite::Sha256,
+                [byte; 32],
+            )),
+        });
+    }
+    let values = [
+        serde_json::json!({"disclosure":"disabled"}),
+        serde_json::json!({"disclosure":"required"}),
+        serde_json::json!({"visibility":"private"}),
+    ];
+    for (scope, value) in scopes.iter().zip(values.iter()) {
+        let mut operation = receipt_policy_operation(realm, value.clone());
+        operation.context.accepted_scope_ref = scope.clone();
+        assert!(matches!(
+            state.apply(&operation, &ServerHlc::new("test")),
+            ProjectionEffect::ScopeReadReceiptPolicyProjected { .. }
+        ));
+    }
+    for (scope, value) in scopes.iter().zip(values.iter()) {
+        assert_eq!(state.read_receipt_policy_value(scope), Some(value));
+    }
 }

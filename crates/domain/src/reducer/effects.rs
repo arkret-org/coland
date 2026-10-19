@@ -127,7 +127,7 @@ pub enum ProjectionEffect {
     /// projected into the `scope_read_receipt_policy` current result. That
     /// section names this kind the family's sole carrier.
     ScopeReadReceiptPolicyProjected {
-        realm_id: String,
+        scope_ref: arkret_wire::ScopeRef,
     },
     RealmNotaryProjected {
         realm_id: String,

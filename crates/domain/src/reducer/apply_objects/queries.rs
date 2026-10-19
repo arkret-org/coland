@@ -290,13 +290,9 @@ impl ProjectionState {
         self.facet_value(realm_id, &FacetRef::singleton(facet))
     }
 
-    /// Cached value for this exact scope; absence is not an authorization proof.
+    /// Current policy only for the exact signed Realm/Circle scope.
     pub fn read_receipt_policy_value(&self, scope: &arkret_wire::ScopeRef) -> Option<&Value> {
-        let realm = match scope {
-            arkret_wire::ScopeRef::Realm { realm_id }
-            | arkret_wire::ScopeRef::Circle { realm_id, .. } => realm_id,
-            _ => return None,
-        };
+        let realm = scope.realm_id_opt()?;
         let subject =
             String::from_utf8(arkret_canonical::canonical_json_bytes(scope).ok()?).ok()?;
         self.facet_value(

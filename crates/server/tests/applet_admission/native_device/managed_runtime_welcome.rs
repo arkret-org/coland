@@ -283,6 +283,83 @@ fn exercise(ghost: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = (
             "cold consume retry preserves the full original signed body"
         );
         assert_ne!(attempts[0].0.nonce, attempts[1].0.nonce);
+        let scans = context
+            .lost
+            .attempts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(metadata, bytes, _)| {
+                serde_json::from_slice::<arkret_wire::StreamScanRequest>(bytes)
+                    .ok()
+                    .map(|request| (metadata.clone(), request))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            scans.len(),
+            2,
+            "each fresh join must obtain its actual historical stream source"
+        );
+        for (metadata, scan) in scans {
+            assert_eq!(metadata.account_id, device.account_id);
+            assert_eq!(metadata.device_id, device.device_id);
+            assert_eq!(metadata.effective_scope, scope);
+            assert_eq!(scan.realm_id, accepted.commit.realm_id);
+            assert_eq!(scan.stream_ref, accepted.commit.stream_ref);
+            assert_eq!(
+                scan.direction,
+                arkret_wire::StreamScanDirection::Before(Some(
+                    accepted.commit.stream_position.checked_add(1).unwrap()
+                ))
+            );
+            assert_eq!(
+                scan.limit, 1,
+                "historical resolution must not broaden into a Realm scan"
+            );
+        }
+        // A stale opaque cursor is a transport continuation failure, not an
+        // MLS reset. Revocation/integrity refusals must never take this path.
+        for code in [
+            arkret_wire::ErrorCode::CursorRevoked,
+            arkret_wire::ErrorCode::CursorIntegrityInvalid,
+        ] {
+            context.lost.queue_reads.lock().unwrap().clear();
+            *context.lost.cursor_error_once.lock().unwrap() = Some(code);
+            let error = runtime
+                .poll_welcome_queue(&device, &reader)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(code.as_str()), "{error}");
+            {
+                let reads = context.lost.queue_reads.lock().unwrap();
+                assert_eq!(
+                    reads.len(),
+                    1,
+                    "an authority/integrity refusal cannot restart the queue"
+                );
+                assert!(reads[0].1.is_some());
+            }
+            assert_eq!(runtime.installed_mls_epoch(&device).await.unwrap(), Some(1));
+        }
+        context.lost.queue_reads.lock().unwrap().clear();
+        *context.lost.cursor_error_once.lock().unwrap() =
+            Some(arkret_wire::ErrorCode::CursorExpired);
+        let resumed = runtime.poll_welcome_queue(&device, &reader).await.unwrap();
+        assert!(!resumed.acknowledged);
+        let reads = context.lost.queue_reads.lock().unwrap().clone();
+        assert_eq!(reads.len(), 2);
+        assert!(reads[0].1.is_some());
+        assert!(
+            reads[1].1.is_none(),
+            "expiry requires a fresh current-authorized read"
+        );
+        for (metadata, _) in &reads {
+            assert_eq!(metadata.account_id, device.account_id);
+            assert_eq!(metadata.device_id, device.device_id);
+            assert_eq!(metadata.effective_scope, scope);
+        }
+        assert_ne!(reads[0].0.nonce, reads[1].0.nonce);
+        assert_eq!(runtime.installed_mls_epoch(&device).await.unwrap(), Some(1));
         // The actual persistent worker entry used by both production hosts
         // performs a real native queue read; its shutdown retires and joins
         // every per-Device task before the test removes private custody.

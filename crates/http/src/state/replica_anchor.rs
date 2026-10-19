@@ -625,19 +625,6 @@ async fn post_peer<T: serde::Serialize>(
     Ok(response.body)
 }
 
-async fn ensure_method_key(
-    state: &AppState,
-    located: &mut LocatedRealmAuthority,
-    method: &arkret_wire::DidUrl,
-) -> Result<(), String> {
-    if arkret_identity::RealmAuthorityKeyDirectory::public_key(&located.keys, method).is_none() {
-        crate::routing::realm_join::insert_method_key(state, &mut located.keys, method)
-            .await
-            .map_err(|error| error.message)?;
-    }
-    Ok(())
-}
-
 async fn ensure_historical_method_key(
     state: &AppState,
     located: &mut LocatedRealmAuthority,
@@ -696,10 +683,11 @@ async fn verify_snapshot(
     {
         return Err("bootstrap snapshot signer is not the governing Station".to_owned());
     }
-    ensure_method_key(state, located, &snapshot.signature.verification_method).await?;
-    let key = arkret_identity::RealmAuthorityKeyDirectory::public_key(
+    ensure_historical_method_key(state, located, &snapshot.signature).await?;
+    let key = arkret_identity::RealmAuthorityKeyDirectory::public_key_at(
         &located.keys,
         &snapshot.signature.verification_method,
+        snapshot.signature.created_at,
     )
     .ok_or("bootstrap snapshot signing method has no verified key")?;
     let unsigned = arkret_canonical::unsigned_value(snapshot, &["signature"]).map_err(temporary)?;
@@ -709,7 +697,103 @@ async fn verify_snapshot(
         arkret_wire::DetachedSignatureContext::RealmSnapshot,
         &key,
     )
-    .map_err(temporary)
+    .map_err(temporary)?;
+    for commit in arkret_models_collaboration::events_payloads::call::call_current_source_commits(
+        &snapshot.current_state_entries,
+    )
+    .map_err(temporary)?
+    {
+        if commit.governance_generation > snapshot.governance_generation {
+            return Err("Call source is from a future governance generation".into());
+        }
+        ensure_historical_method_key(state, located, &commit.signature).await?;
+        located
+            .authority
+            .verify_commit(&commit, &located.keys)
+            .map_err(temporary)?;
+    }
+    for row in &snapshot.current_state_entries {
+        let arkret_wire::TypedCurrentRow::Value {
+            selector: arkret_wire::CurrentSelector::CallRoster { call_id },
+            value,
+            ..
+        } = row
+        else {
+            continue;
+        };
+        let roster: arkret_models_collaboration::events_payloads::call::CallRosterCurrentValue =
+            serde_json::from_value(value.clone()).map_err(temporary)?;
+        arkret_signatures::media::verify_call_roster_bindings(&snapshot.realm_id, call_id, &roster)
+            .map_err(temporary)?;
+        for entry in &roster.entries {
+            let arkret_models_collaboration::events_payloads::call::CallRosterDelta::Join {
+                participant,
+            } = &entry.value
+            else {
+                continue;
+            };
+            if let Some(binding) = &participant.participant_binding {
+                ensure_call_issuer_history(state, &binding.issuer_kid).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Cache an independently authenticated native issuer history before the
+/// database installer selects its key at the original join Commit time.
+async fn ensure_call_issuer_history(
+    state: &AppState,
+    kid: &arkret_wire::DidUrl,
+) -> Result<(), String> {
+    let did = arkret_identity::verification_method_did(kid.as_str()).map_err(temporary)?;
+    if did.method() == "key" {
+        return Ok(());
+    }
+    let issuer = arkret_wire::project_did_to_core_id(&did).map_err(temporary)?;
+    if issuer == state.service_core_id() {
+        // A held Realm can contain a join signed by this Station itself.
+        // Retain its complete native history through the same independently
+        // verified durable floor instead of looking for ourselves as a peer.
+        let evidence =
+            crate::routing::system::service_resolution::current_authenticated_service_resolution(
+                state,
+            )
+            .await
+            .map_err(|error| temporary(error.message))?;
+        let projection = evidence.projection().map_err(temporary)?;
+        if projection.service_id != issuer || projection.did != did {
+            return Err("local media issuer history has a different identity".into());
+        }
+        let route =
+            arkret_models_identity::VerifiedServiceRoute::new(projection, chrono::Utc::now());
+        return match coland_storage::ServiceRouteStore::publish_route_cache(
+            state.persistence(),
+            evidence,
+            route,
+        )
+        .await
+        .map_err(temporary)?
+        {
+            coland_storage::MonotonicRouteWrite::Applied
+            | coland_storage::MonotonicRouteWrite::Replay => Ok(()),
+            _ => Err("local media issuer native history is stale or conflicting".into()),
+        };
+    }
+    match crate::routing::federation::resolved_peer_route(state, issuer.as_str(), "station", true)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(_) => crate::routing::federation::resolved_peer_route(
+            state,
+            issuer.as_str(),
+            "media_service",
+            true,
+        )
+        .await
+        .map(|_| ())
+        .map_err(temporary),
+    }
 }
 
 /// Anchor a pending held stream on the governing Station's bootstrap
@@ -1784,6 +1868,25 @@ async fn store_scanned(
     let fact = evidence.producer_signer_fact;
     let commit = item.commit();
     ensure_historical_method_key(state, located, &commit.signature).await?;
+    if let CommittedEventView::Full(view) = item {
+        if view.event.kind == arkret_wire::EventKind::CallState {
+            let payload: arkret_models_collaboration::events_payloads::call::CallStatePayload =
+                serde_json::from_value(
+                    serde_json::to_value(&view.event.payload).map_err(temporary)?,
+                )
+                .map_err(temporary)?;
+            if let Some(
+                arkret_models_collaboration::events_payloads::call::CallRosterDelta::Join {
+                    participant,
+                },
+            ) = payload.roster_delta
+            {
+                if let Some(binding) = participant.participant_binding {
+                    ensure_call_issuer_history(state, &binding.issuer_kid).await?;
+                }
+            }
+        }
+    }
     let commits = state.authority_commits();
     match item {
         CommittedEventView::Full(view) => {

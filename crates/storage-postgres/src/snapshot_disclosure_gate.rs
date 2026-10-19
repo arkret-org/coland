@@ -1739,7 +1739,8 @@ pub(crate) fn disclose_to_account(
                     .ok_or_else(|| rejected("RSVP target has no disclosed Strand current"))?;
                 Some(object_scope(strand)?)
             }
-            CurrentSelector::MlsGroup { scope_ref } => Some(
+            CurrentSelector::MlsGroup { scope_ref }
+            | CurrentSelector::ScopeReadReceiptPolicy { scope_ref } => Some(
                 CommitStreamRef::from_scope(scope_ref, None).map_err(PersistenceError::database)?,
             ),
             CurrentSelector::ActorProfile { actor_profile_id } => {
@@ -2117,8 +2118,8 @@ pub(crate) fn disclose_to_account(
                 );
             }
             CurrentSelector::ScopeReadReceiptPolicy { scope_ref } => {
-                if source_stream_ref.scope_ref() != *scope_ref {
-                    return Err(rejected("read receipt policy scope differs"));
+                if &source_stream_ref.scope_ref() != scope_ref {
+                    return Err(rejected("receipt policy current has another source scope"));
                 }
                 let policy: arkret_models_collaboration::events_payloads::ReadReceiptPolicyPayload =
                     serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;

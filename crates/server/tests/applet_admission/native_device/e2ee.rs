@@ -88,10 +88,15 @@ async fn activate_mls_with_private_state(
     let tracker =
         arkret_mls::MlsPublicGroupTracker::from_external(&info, &tree, group_id.as_str(), 0)
             .unwrap();
+    // The recipient's real material read needs the original public bytes in
+    // the object backend, in addition to the accepted Genesis references.
+    // Private MLS state remains solely in this Human committer and runtime.
+    let info_ref = mls::public_material(fixture, info).await;
+    let tree_ref = mls::public_material(fixture, tree).await;
     let event = fixture.admin_event(EventKind::MlsGenesis, scope.clone(), json!({
         "cipher_suite":"MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
-        "group_info_ref":format!("ak:blob:{}", arkret_canonical::sha256_digest(&info)),
-        "ratchet_tree_ref":format!("ak:blob:{}", arkret_canonical::sha256_digest(&tree)),
+        "group_info_ref":info_ref,
+        "ratchet_tree_ref":tree_ref,
         "creator_leaf_authority":{
             "leaf_signature_key_b64u":arkret_canonical::base64url_encode(SigningKey::from_bytes(&fixture.pcr.history.founding_device_signing_seed).verifying_key().as_bytes()),
             "endpoint":{"kind":"device","device_id":fixture.pcr.history.founding_device_id},

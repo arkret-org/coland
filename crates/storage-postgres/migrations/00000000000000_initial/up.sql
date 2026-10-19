@@ -974,6 +974,11 @@ CREATE TABLE public.realm_commits (
 
 CREATE INDEX realm_commits_realm_stream_tail_idx
     ON public.realm_commits (realm_id, stream_key, stream_position DESC);
+-- The loose head scan orders opaque stream keys bytewise. Keep that order
+-- distinct from the global stream-position index: a Realm filter on that
+-- global index can otherwise walk the histories of unrelated Realms.
+CREATE INDEX realm_commits_realm_stream_head_idx
+    ON public.realm_commits (realm_id, stream_key COLLATE "C", stream_position DESC);
 CREATE INDEX realm_commits_chain_node_event_ref_idx
     ON public.realm_commits ((commit_json->>'event_ref')) WHERE event_pk IS NULL;
 
@@ -2949,6 +2954,14 @@ CREATE TABLE public.service_method_states (
 
 
 
+CREATE TABLE public.service_resolution_histories (
+ service_id TEXT NOT NULL,
+ service_kind TEXT NOT NULL,
+ evidence JSONB NOT NULL,
+ verified_at TIMESTAMPTZ NOT NULL,
+ PRIMARY KEY(service_id,service_kind)
+);
+
 CREATE TABLE public.service_resolution_fork_quarantine (
     service_id text NOT NULL CHECK (service_id LIKE 'ak:did_core:%'),
     service_kind text NOT NULL,
@@ -3763,6 +3776,17 @@ CREATE TABLE call_component_current_results (
  CHECK(source_stream_ref->>'realm_id'=realm_id)
 );
 
+-- Original issuer material is retained independently of the effective roster.
+CREATE TABLE call_participant_issuer_sources (
+ realm_id TEXT NOT NULL,
+ call_id TEXT NOT NULL,
+ source_commit_id TEXT NOT NULL,
+ issuer_kid TEXT NOT NULL,
+ public_key_b64u TEXT NOT NULL,
+ issuer_history JSONB,
+ PRIMARY KEY(realm_id,call_id,source_commit_id)
+);
+
 CREATE TABLE call_voluntary_join_nonces (
  subject_actor_id JSONB NOT NULL,
  subject_device_id TEXT NOT NULL,
@@ -4436,21 +4460,6 @@ CREATE TABLE invite_directed_invitee_current_results (
  CHECK(jsonb_typeof(value->'invitee_account_id')='object')
 );
 
--- Read-receipt policy is independent for each exact Realm or Circle scope.
-CREATE TABLE scope_read_receipt_policy_current_results (
- realm_id TEXT NOT NULL,
- scope_ref JSONB NOT NULL,
- source_stream_ref JSONB NOT NULL,
- current_commit_id TEXT NOT NULL,
- current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
- value JSONB NOT NULL,
- updated_at TIMESTAMPTZ NOT NULL,
- PRIMARY KEY(realm_id,scope_ref),
- CHECK(scope_ref->>'kind' IN ('realm','circle')),
- CHECK(scope_ref->>'realm_id'=realm_id),
- CHECK(source_stream_ref=scope_ref)
-);
-
 -- Ordinary Realm bootstrap singleton families share one physical table. Each
 -- row is keyed by its registered typed-current-result selector kind and by
 -- the exact RealmCommit that first established it.
@@ -4462,6 +4471,26 @@ CREATE TABLE realm_bootstrap_current_results (
  value JSONB NOT NULL,
  updated_at TIMESTAMPTZ NOT NULL,
  PRIMARY KEY(realm_id,result_family)
+);
+
+-- One whole-value receipt policy per exact, independently configured scope.
+CREATE TABLE scope_read_receipt_policy_current_results (
+ realm_id TEXT NOT NULL,
+ scope_ref JSONB NOT NULL,
+ source_stream_ref JSONB NOT NULL,
+ current_commit_id TEXT NOT NULL,
+ current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
+ value JSONB NOT NULL,
+ updated_at TIMESTAMPTZ NOT NULL,
+ PRIMARY KEY(realm_id,scope_ref),
+ CHECK(jsonb_typeof(scope_ref)='object' AND scope_ref ?& ARRAY['kind','realm_id'] AND scope_ref->>'realm_id'=realm_id),
+ CHECK((scope_ref->>'kind'='realm' AND scope_ref - 'kind' - 'realm_id'='{}'::jsonb)
+    OR (scope_ref->>'kind'='circle' AND scope_ref ? 'circle_id' AND jsonb_typeof(scope_ref->'circle_id')='string'
+        AND scope_ref - 'kind' - 'realm_id' - 'circle_id'='{}'::jsonb)),
+ CHECK(source_stream_ref=scope_ref),
+ CHECK(jsonb_typeof(value)='object' AND value<>'{}'::jsonb AND value - 'disclosure' - 'visibility'='{}'::jsonb),
+ CHECK(NOT value ? 'disclosure' OR (jsonb_typeof(value->'disclosure')='string' AND value->>'disclosure' IN ('required','optional','disabled'))),
+ CHECK(NOT value ? 'visibility' OR (jsonb_typeof(value->'visibility')='string' AND value->>'visibility' IN ('public','members','private')))
 );
 
 CREATE TABLE agent_interaction_current_results (

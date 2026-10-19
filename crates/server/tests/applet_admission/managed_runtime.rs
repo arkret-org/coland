@@ -18,6 +18,8 @@ mod mls;
 #[derive(Default)]
 pub(crate) struct LostNativeReply {
     pub(crate) armed: std::sync::atomic::AtomicBool,
+    pub(crate) cursor_error_once: Mutex<Option<arkret_wire::ErrorCode>>,
+    pub(crate) queue_reads: Mutex<Vec<(arkret::AppletManagedDeviceMetadata, Option<String>)>>,
     pub(crate) attempts: Mutex<Vec<(arkret::AppletManagedDeviceMetadata, Vec<u8>, String)>>,
     pub(crate) responses: Mutex<
         Vec<(
@@ -54,6 +56,46 @@ async fn lose_native_reply(
             .lock()
             .unwrap()
             .push((metadata, body, idempotency));
+        if response_path == "/_arkret/self/device_messages"
+            && req.method() == salvo::http::Method::GET
+        {
+            let after = req.query::<String>("after");
+            state
+                .queue_reads
+                .lock()
+                .unwrap()
+                .push((response_identity.clone(), after.clone()));
+            let refusal = if after.is_some() {
+                state.cursor_error_once.lock().unwrap().take()
+            } else {
+                None
+            };
+            if let Some(code) = refusal {
+                let problem = arkret_wire::Problem::from_code(
+                    code.as_str(),
+                    "injected recipient cursor refusal",
+                );
+                res.status_code(StatusCode::from_u16(problem.status).unwrap());
+                res.render(salvo::prelude::Json(problem));
+                res.headers_mut().insert(
+                    "content-type",
+                    salvo::http::HeaderValue::from_static("application/problem+json"),
+                );
+                res.headers_mut().insert(
+                    "arkret-operation",
+                    salvo::http::HeaderValue::from_static(
+                        ServiceOperationId::SELF_DEVICE_MESSAGES_READ_LIST_V1,
+                    ),
+                );
+                ctrl.skip_rest();
+                state.responses.lock().unwrap().push((
+                    response_identity,
+                    response_path,
+                    res.status_code,
+                ));
+                return;
+            }
+        }
         ctrl.call_next(req, depot, res).await;
         if res.status_code == Some(StatusCode::OK)
             && state.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -114,6 +156,7 @@ pub(crate) fn host_with_retry(
 ) -> Arc<ArkretEdge> {
     let http = reqwest::Client::builder()
         .tls_backend_rustls()
+        .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .tls_certs_only([reqwest::Certificate::from_pem(include_bytes!(
             "../fixtures/outbox-test-ca.pem"

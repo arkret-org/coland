@@ -165,18 +165,16 @@ async fn per_stream_reads_stay_bounded_across_one_hundred_and_one_thousand_realm
             ("stream heads (hot Realm)", hot_realm),
             ("stream heads (last Realm)", last_realm.as_str()),
         ] {
-            let heads = measure(
-                sql_query(explain(crate::authority_commit::REALM_STREAM_HEADS_SQL))
-                    .bind::<Text, _>(realm)
-                    .get_result::<PlanRow>(&mut *conn)
-                    .await
-                    .unwrap()
-                    .plan,
-                label,
-            );
+            let plan = sql_query(explain(crate::authority_commit::REALM_STREAM_HEADS_SQL))
+                .bind::<Text, _>(realm)
+                .get_result::<PlanRow>(&mut *conn)
+                .await
+                .unwrap()
+                .plan;
+            let heads = measure(plan.clone(), label);
             assert!(
                 heads.history_rows <= 8.0,
-                "{label} read {}",
+                "{label} in {realms} Realms read {}: {plan}",
                 heads.history_rows
             );
             report.push((label, heads));
@@ -295,6 +293,40 @@ async fn per_stream_reads_stay_bounded_across_one_hundred_and_one_thousand_realm
             );
         }
     }
+
+    // A hot stream need not precede other Realms' streams in key order.
+    // Two sparse withheld streams also prove that head enumeration needs
+    // neither a position-zero Commit nor a retained canonical Event.
+    conn.batch_execute(
+        "UPDATE realm_commits SET stream_key='zz-hot-stream' \
+         WHERE realm_id='ak:realm:capacity-1'; \
+         INSERT INTO realm_commits \
+           (commit_id,realm_id,stream_key,stream_ref,stream_position,previous_commit_ref, \
+            event_pk,governance_generation,commit_json,committed_at) \
+         VALUES ('head-sparse-a','ak:realm:capacity-1','aa-sparse-stream','{}',7, \
+                 'head-unretained-a',NULL,0,'{}',now()), \
+                ('head-sparse-z','ak:realm:capacity-1','zzz-sparse-stream','{}',11, \
+                 'head-unretained-z',NULL,0,'{}',now()); \
+         ANALYZE realm_commits;",
+    )
+    .await
+    .unwrap();
+    let plan = sql_query(format!(
+        "EXPLAIN (ANALYZE, FORMAT JSON) {}",
+        crate::authority_commit::REALM_STREAM_HEADS_SQL
+    ))
+    .bind::<Text, _>(hot_realm)
+    .get_result::<PlanRow>(&mut *conn)
+    .await
+    .unwrap()
+    .plan;
+    assert_eq!(plan[0]["Plan"]["Actual Rows"].as_f64(), Some(3.0));
+    let heads = measure(plan.clone(), "stream heads (sparse and reordered)");
+    assert!(
+        heads.history_rows <= 8.0,
+        "sparse and reordered stream heads read {}: {plan}",
+        heads.history_rows
+    );
 }
 
 // These are query-plan fixtures, not admission evidence. The larger member

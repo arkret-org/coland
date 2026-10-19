@@ -423,28 +423,27 @@ pub(crate) async fn commit_mimi_room_binding_current_result_in_connection(
     Ok(())
 }
 
-/// The head of every commit stream of one Realm, as a loose index scan over
-/// `realm_commits_realm_stream_tail_idx`: one index probe per stream, never
-/// a walk over the Realm's history or other Realms' streams. The row
-/// comparisons keep each probe on the Realm-prefixed index.
+/// The head of every commit stream of one Realm, as a loose index scan.
+/// Bytewise stream ordering matches `realm_commits_realm_stream_head_idx`.
+/// It cannot be supplied by the global stream-position index with a Realm
+/// filter, which can walk unrelated history before finding a stream.
 pub(crate) const REALM_STREAM_HEADS_SQL: &str = "\
     WITH RECURSIVE stream_keys AS ( \
-      (SELECT stream_key FROM realm_commits \
-       WHERE (realm_id, stream_key) >= ($1, '') AND realm_id = $1 \
-       ORDER BY realm_id, stream_key LIMIT 1) \
-      UNION ALL \
-      SELECT (SELECT next_row.stream_key FROM realm_commits next_row \
-              WHERE (next_row.realm_id, next_row.stream_key) > ($1, stream_keys.stream_key) \
-                AND next_row.realm_id = $1 \
-              ORDER BY next_row.realm_id, next_row.stream_key LIMIT 1) \
-      FROM stream_keys WHERE stream_keys.stream_key IS NOT NULL \
+    (SELECT stream_key COLLATE \"C\" AS stream_key FROM realm_commits \
+    WHERE realm_id=$1 AND stream_key COLLATE \"C\" >= '' COLLATE \"C\" \
+    ORDER BY stream_key COLLATE \"C\" LIMIT 1) \
+    UNION ALL \
+    SELECT (SELECT next_row.stream_key COLLATE \"C\" FROM realm_commits next_row \
+    WHERE next_row.realm_id=$1 AND next_row.stream_key COLLATE \"C\" > stream_keys.stream_key \
+    ORDER BY next_row.stream_key COLLATE \"C\" LIMIT 1) \
+    FROM stream_keys WHERE stream_keys.stream_key IS NOT NULL \
     ) \
-    SELECT head.stream_ref, head.stream_position, head.commit_id \
+    SELECT head.stream_ref,head.stream_position,head.commit_id \
     FROM stream_keys CROSS JOIN LATERAL ( \
-      SELECT stream_ref, stream_position, commit_id FROM realm_commits \
-      WHERE realm_id = $1 AND stream_key = stream_keys.stream_key \
-      ORDER BY stream_position DESC LIMIT 1) head \
-    WHERE stream_keys.stream_key IS NOT NULL";
+    SELECT stream_ref,stream_position,commit_id FROM realm_commits \
+    WHERE realm_id=$1 AND stream_key COLLATE \"C\"=stream_keys.stream_key \
+    ORDER BY stream_position DESC LIMIT 1 \
+    ) head WHERE stream_keys.stream_key IS NOT NULL";
 
 #[derive(QueryableByName)]
 struct SnapshotRow {
@@ -758,8 +757,8 @@ pub(crate) const SNAPSHOT_CURRENT_SQL: &str = "SELECT result.*, covering.stream_
            FROM realm_bootstrap_current_results WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'scope_read_receipt_policy'::text AS selector_kind, scope_ref AS selector_subject, \
-                current_commit_id,current_stream_position,value \
-           FROM scope_read_receipt_policy_current_results WHERE realm_id=$1 \
+                current_commit_id, current_stream_position, value \
+           FROM scope_read_receipt_policy_current_results WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'realm_authority_root'::text AS selector_kind, NULL::jsonb AS selector_subject, \
                 current_commit_id, current_stream_position, \
@@ -1034,7 +1033,9 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
                 ("sidecar_context" | "agent_sidecar_exchange_controls", Some(selector)) => serde_json::from_value(selector).map_err(PersistenceError::database)?,
                 ("realm_join_rule", None) => arkret_wire::CurrentSelector::RealmJoinRule,
                 ("realm_history_access", None) => arkret_wire::CurrentSelector::RealmHistoryAccess,
-                ("scope_read_receipt_policy", Some(scope)) => arkret_wire::CurrentSelector::ScopeReadReceiptPolicy { scope_ref: serde_json::from_value(scope).map_err(PersistenceError::database)? },
+                ("scope_read_receipt_policy", Some(scope_ref)) => arkret_wire::CurrentSelector::ScopeReadReceiptPolicy {
+                    scope_ref: decode_json(scope_ref, "receipt policy scope")?,
+                },
                 ("realm_discovery", None) => arkret_wire::CurrentSelector::RealmDiscovery,
                 ("realm_alias", None) => arkret_wire::CurrentSelector::RealmAlias,
                 ("realm_plaintext_visible_services", None) => {

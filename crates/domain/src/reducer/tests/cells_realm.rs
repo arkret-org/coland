@@ -6,7 +6,7 @@ use super::*;
 fn facet_value_returns_none_for_unwritten_facet() {
     let state = ProjectionState::new();
     let realm_id = "ak:realm:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb";
-    let target = FacetRef::singleton(facet::REALM_READ_RECEIPT_POLICY);
+    let target = FacetRef::singleton(facet::SCOPE_READ_RECEIPT_POLICY);
     assert!(state.facet_value(realm_id, &target).is_none());
     assert_eq!(state.facet_revision(realm_id, &target), 0);
 }
@@ -1090,37 +1090,6 @@ fn knock_state_visible_in_members_in_state_query() {
 }
 
 #[test]
-fn read_receipt_policy_value_helper_extracts_canonical_value() {
-    let mut state = ProjectionState::new();
-    state.set_realm_facet(
-        "ak:realm:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb",
-        facet::REALM_READ_RECEIPT_POLICY,
-        serde_json::json!({
-            "disclosure": "required",
-            "visibility": "members",
-            "scope_overrides_allowed": false,
-        }),
-    );
-    let value = state
-        .read_receipt_policy_value("ak:realm:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb")
-        .expect("policy facet should resolve");
-    assert_eq!(
-        value.get("disclosure").and_then(Value::as_str),
-        Some("required")
-    );
-    assert_eq!(
-        value.get("visibility").and_then(Value::as_str),
-        Some("members")
-    );
-    assert_eq!(
-        value
-            .get("scope_overrides_allowed")
-            .and_then(Value::as_bool),
-        Some(false)
-    );
-}
-
-#[test]
 fn the_policy_bundle_facet_does_not_leak_across_realms() {
     let mut state = ProjectionState::new();
     state.set_realm_facet(
@@ -1534,27 +1503,18 @@ fn every_bootstrap_facet_kind_is_reachable_through_the_dispatch_registry() {
     }
 }
 
-/// `ak.realm.read_receipt_policy` must reach its reducer through the dispatch
-/// registry, not only through a direct call.
-///
-/// `discovery/read-receipts.md` section 2.5 names this kind the sole carrier of
-/// the `realm_read_receipt_policy` current result, and the registry projects
-/// the whole payload as the settled value. Before this registration the kind
-/// fell through to the registry's no-op fill, so every policy an author wrote
-/// was accepted on the wire and then silently dropped, leaving the parent
-/// policy every child write is compared against pinned at the SDK default.
+/// Accepted policy writes replace only the exact signed scope cache.
 #[test]
 fn read_receipt_policy_reaches_the_reducer_and_replaces_the_previous_value() {
     let realm_id = "ak:realm:AZ5nQ0y2uZ3d1tVvJ7mK8sXbR4fPcHlWgEoNiTaUdY6B";
     let mut state = ProjectionState::new();
     let strict = serde_json::json!({
         "disclosure": "required",
-        "visibility": "private",
-        "scope_overrides_allowed": false
+        "visibility": "private"
     });
     let effect = state.apply(
         &make_operation(
-            arkret_wire::EventKind::RealmReadReceiptPolicy,
+            arkret_wire::EventKind::ScopeReadReceiptPolicy,
             realm_id,
             strict.clone(),
         ),
@@ -1563,11 +1523,16 @@ fn read_receipt_policy_reaches_the_reducer_and_replaces_the_previous_value() {
     assert!(
         matches!(
             effect,
-            ProjectionEffect::RealmReadReceiptPolicyProjected { .. }
+            ProjectionEffect::ScopeReadReceiptPolicyProjected { .. }
         ),
         "read receipt policy must project its own effect, got {effect:?}"
     );
-    assert_eq!(state.read_receipt_policy_value(realm_id), Some(&strict));
+    assert_eq!(
+        state.read_receipt_policy_value(&arkret_wire::ScopeRef::Realm {
+            realm_id: realm_id.parse().unwrap()
+        }),
+        Some(&strict)
+    );
 
     // The registry projection is `set`, not write-once: a later accepted Event
     // replaces the settled value outright. A partial payload is projected
@@ -1576,7 +1541,7 @@ fn read_receipt_policy_reaches_the_reducer_and_replaces_the_previous_value() {
     let partial = serde_json::json!({ "disclosure": "disabled" });
     let effect = state.apply(
         &make_operation(
-            arkret_wire::EventKind::RealmReadReceiptPolicy,
+            arkret_wire::EventKind::ScopeReadReceiptPolicy,
             realm_id,
             partial.clone(),
         ),
@@ -1585,11 +1550,16 @@ fn read_receipt_policy_reaches_the_reducer_and_replaces_the_previous_value() {
     assert!(
         matches!(
             effect,
-            ProjectionEffect::RealmReadReceiptPolicyProjected { .. }
+            ProjectionEffect::ScopeReadReceiptPolicyProjected { .. }
         ),
         "a second policy Event must be accepted, got {effect:?}"
     );
-    assert_eq!(state.read_receipt_policy_value(realm_id), Some(&partial));
+    assert_eq!(
+        state.read_receipt_policy_value(&arkret_wire::ScopeRef::Realm {
+            realm_id: realm_id.parse().unwrap()
+        }),
+        Some(&partial)
+    );
 }
 
 /// `read_receipt_policy_payload` is a closed object with `minProperties: 1`.
@@ -1609,7 +1579,7 @@ fn read_receipt_policy_rejects_the_empty_object_and_unknown_fields() {
         let mut state = ProjectionState::new();
         let effect = state.apply(
             &make_operation(
-                arkret_wire::EventKind::RealmReadReceiptPolicy,
+                arkret_wire::EventKind::ScopeReadReceiptPolicy,
                 realm_id,
                 payload.clone(),
             ),
@@ -1623,7 +1593,12 @@ fn read_receipt_policy_rejects_the_empty_object_and_unknown_fields() {
             ),
             "{payload} must fail closed, got {effect:?}"
         );
-        assert_eq!(state.read_receipt_policy_value(realm_id), None);
+        assert_eq!(
+            state.read_receipt_policy_value(&arkret_wire::ScopeRef::Realm {
+                realm_id: realm_id.parse().unwrap()
+            }),
+            None
+        );
     }
 }
 

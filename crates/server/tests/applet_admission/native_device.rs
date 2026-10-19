@@ -535,11 +535,29 @@ fn native_business_parent_in_scope<'a>(
     source: Option<arkret_wire::GrantId>,
     scope: ScopeRef,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = arkret_wire::GrantId> + Send + 'a>> {
+    native_package_business_parent_in_scope(
+        fixture,
+        &install.package,
+        extra,
+        actions,
+        source,
+        scope,
+    )
+}
+#[inline(never)]
+fn native_package_business_parent_in_scope<'a>(
+    fixture: &'a Fixture,
+    package: &'a AppletPackage,
+    extra: Vec<GrantConstraint>,
+    actions: Vec<String>,
+    source: Option<arkret_wire::GrantId>,
+    scope: ScopeRef,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = arkret_wire::GrantId> + Send + 'a>> {
     Box::pin(async move {
         use arkret_models_collaboration::governance::grant_constraint::{
             GrantConstraintEffect, GrantConstraintKind, ManagedActorRole,
         };
-        let service = ActorId::service(install.package.service_id.clone());
+        let service = ActorId::service(package.service_id.clone());
         let mut control = GrantConstraint::new(
             GrantConstraintKind::AuthorityControl,
             GrantConstraintEffect::Allow,
@@ -549,9 +567,9 @@ fn native_business_parent_in_scope<'a>(
         control.allowed_managed_actor_roles = vec![ManagedActorRole::Bot, ManagedActorRole::Ghost];
         let mut constraints = vec![
             GrantConstraint::applet_authority(
-                install.package.applet_id.clone(),
+                package.applet_id.clone(),
                 service.clone(),
-                install.package.registration_epoch.clone(),
+                package.registration_epoch.clone(),
             ),
             control,
         ];

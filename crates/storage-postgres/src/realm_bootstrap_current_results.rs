@@ -266,21 +266,24 @@ pub(crate) async fn commit_plaintext_services_current_result_in_connection(
     .await
 }
 
-/// Read-receipt disclosure is a separate Realm current family; it does not
-/// alter the policy bundle or the MLS key-access revision.
+/// Scope-local read-receipt current shares the accepting authorization cut.
 pub(crate) async fn commit_read_receipt_policy_authority_current_result_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
-    if event.kind != arkret_wire::EventKind::RealmReadReceiptPolicy {
+    if event.kind != arkret_wire::EventKind::ScopeReadReceiptPolicy {
         return Ok(());
     }
     crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
         conn, event, commit, prepared,
     )
     .await?;
+    if matches!(event.scope_ref, arkret_wire::ScopeRef::Circle { .. }) {
+        crate::circle_current_results::require_active_author_in_connection(conn, event, commit)
+            .await?;
+    }
     commit_read_receipt_policy_current_result_in_connection(conn, event, commit).await
 }
 
@@ -289,37 +292,28 @@ pub(crate) async fn commit_read_receipt_policy_current_result_in_connection(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
 ) -> PersistenceResult<()> {
-    if event.kind != arkret_wire::EventKind::RealmReadReceiptPolicy {
+    if event.kind != arkret_wire::EventKind::ScopeReadReceiptPolicy {
         return Ok(());
     }
     arkret_schema::validate_event_for_submit(event)
-        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-    if event.kind != arkret_wire::EventKind::RealmReadReceiptPolicy
-        || event.scope_ref
-            != (arkret_wire::ScopeRef::Realm {
-                realm_id: event.realm_id.clone(),
-            })
-        || commit.stream_ref
-            != (arkret_wire::CommitStreamRef::Realm {
-                realm_id: event.realm_id.clone(),
-            })
-        || commit.realm_id != event.realm_id
-        || commit.event_ref != event.event_id
-    {
+        .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
+    if commit.realm_id != event.realm_id || commit.event_ref != event.event_id {
         return Err(PersistenceError::Conflict(
-            "read-receipt policy requires its exact Realm Event and covering Commit".to_owned(),
+            "read-receipt policy covering Event differs".into(),
         ));
     }
-    let policy = typed_payload(event, EventPayloadExt::as_realm_read_receipt_policy)?;
-    policy
-        .validate()
-        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-    advance_singleton(
+    let policy = typed_payload(event, EventPayloadExt::as_scope_read_receipt_policy)?;
+    crate::scope_read_receipt_policy_current_results::install(
         conn,
-        event,
-        commit,
-        "realm_read_receipt_policy",
+        &event.realm_id,
+        &event.scope_ref,
+        &commit.stream_ref,
+        &arkret_wire::CurrentRevision {
+            commit_id: commit.commit_id.clone(),
+            stream_position: commit.stream_position,
+        },
         &result_value(&policy)?,
+        commit.committed_at,
     )
     .await
 }
@@ -912,14 +906,14 @@ mod tests {
         ] {
             let request = ordinary_realm::next_request(
                 &previous,
-                arkret_wire::EventKind::RealmReadReceiptPolicy,
+                arkret_wire::EventKind::ScopeReadReceiptPolicy,
                 founder,
                 payload.clone(),
                 chrono::Utc::now(),
             );
             uow.commit_event(request.clone()).await.unwrap();
             let mut conn = pool.get().await.unwrap();
-            let current = diesel::sql_query("SELECT current_commit_id,value FROM realm_bootstrap_current_results WHERE realm_id=$1 AND result_family='realm_read_receipt_policy'")
+            let current = diesel::sql_query("SELECT current_commit_id,value FROM scope_read_receipt_policy_current_results WHERE realm_id=$1")
                 .bind::<Text, _>(request.authority_commit.event.realm_id.as_str()).get_result::<Row>(&mut *conn).await.unwrap();
             assert_eq!(
                 current.current_commit_id,
@@ -934,14 +928,14 @@ mod tests {
         let outsider = arkret_wire::DidCoreId::new("ak:did_core:web:outsider.example").unwrap();
         let denied = ordinary_realm::next_request(
             &previous,
-            arkret_wire::EventKind::RealmReadReceiptPolicy,
+            arkret_wire::EventKind::ScopeReadReceiptPolicy,
             &outsider,
             serde_json::json!({"disclosure":"disabled"}),
             chrono::Utc::now(),
         );
         assert!(uow.commit_event(denied.clone()).await.is_err());
         let mut conn = pool.get().await.unwrap();
-        let current = diesel::sql_query("SELECT current_commit_id,value FROM realm_bootstrap_current_results WHERE realm_id=$1 AND result_family='realm_read_receipt_policy'")
+        let current = diesel::sql_query("SELECT current_commit_id,value FROM scope_read_receipt_policy_current_results WHERE realm_id=$1")
             .bind::<Text, _>(previous.event.realm_id.as_str()).get_result::<Row>(&mut *conn).await.unwrap();
         assert_eq!(
             current.current_commit_id,

@@ -1559,7 +1559,7 @@ mod tests {
             .unwrap();
         assert_eq!(store.current(&scope).await.unwrap().unwrap(), seeded);
 
-        let policy = event(EventKind::RealmReadReceiptPolicy);
+        let policy = event(EventKind::ScopeReadReceiptPolicy);
         advance_key_access_revision_in_connection(&mut conn, &policy, &commit(&policy, 6))
             .await
             .unwrap();

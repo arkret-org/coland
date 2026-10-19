@@ -380,6 +380,8 @@ dependencies = [
  "chacha20poly1305 0.11.0",
  "chrono",
  "ed25519-dalek 3.0.0",
+ "futures",
+ "garth",
  "getrandom 0.4.3",
  "hex",
  "parking_lot",
@@ -9280,6 +9282,7 @@ version = "0.3.1"
 dependencies = [
  "anyhow",
  "arkret",
+ "arkret-bridge-runtime",
  "arkret-crypto",
  "arkret-models-collaboration",
  "arkret-models-crypto",

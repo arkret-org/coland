@@ -343,6 +343,8 @@ async fn seed_snapshot_families(conn: &mut AsyncPgConnection, first: i64, last: 
             .await.unwrap();
     }
     for (table, columns, expressions, value) in [
+        ("actor_profile_current_results", "actor_profile_id,actor_id,scope_ref", format!("'profile-' || {key},jsonb_build_object('kind','account','account_id',jsonb_build_object('principal_id','actor-' || {key},'station_id','station')),jsonb_build_object('kind','realm','realm_id',{realm})"), format!("jsonb_build_object('id','profile-' || {key},'realm_id',{realm},'schema','ak.schema.actor_profile.v1')")),
+        ("call_component_current_results", "call_id,selector,source_stream_ref", format!("'call-' || {key},jsonb_build_object('kind','call_focus','call_id','call-' || {key}),jsonb_build_object('kind','realm','realm_id',{realm})"), "'{}'::jsonb".to_owned()),
         ("applet_registration_current_results", "applet_id,instance_event_ref", format!("'applet-' || {key},'registration-event-' || {key}"), "'{}'::jsonb".to_owned()),
         ("member_identity_updates_current_results", "member_id,segment", "jsonb_build_object('member',m)::text,'member_identity'".to_owned(), "jsonb_build_object('assertions','[]'::jsonb)".to_owned()),
         ("circle_current_results", "circle_id,create_event_id,source_stream_ref,short_name_folded", format!("'circle-' || {key},'circle-event-' || {key},jsonb_build_object('kind','realm','realm_id',{realm}),'circle-' || m"), format!("jsonb_build_object('id','circle-' || {key},'realm_id',{realm})")),
@@ -380,7 +382,7 @@ async fn seed_snapshot_families(conn: &mut AsyncPgConnection, first: i64, last: 
     ] {
         let (covering, position) = if table == "moderation_report_current_results" {
             ("'capacity-' || r || '-' || (m-1)", "m-1")
-        } else if matches!(table, "schema_definition_current_results" | "pin_current_results") {
+        } else if matches!(table, "schema_definition_current_results" | "pin_current_results" | "actor_profile_current_results" | "call_component_current_results") {
             ("'capacity-' || r || '-1'", "1")
         } else {
             (commit, "0")
@@ -390,8 +392,13 @@ async fn seed_snapshot_families(conn: &mut AsyncPgConnection, first: i64, last: 
     }
     conn.batch_execute(&format!(
         "INSERT INTO realm_bootstrap_current_results(realm_id,result_family,current_commit_id,current_stream_position,value,updated_at)
-         SELECT {realm},f,{commit},0,'{{}}'::jsonb,now() FROM generate_series({first},{last}) r,
-         unnest(ARRAY['realm_genesis','realm_profile','realm_join_rule','realm_history_access','realm_discovery','realm_alias','realm_plaintext_visible_services','realm_read_receipt_policy']) f;
+         SELECT {realm},f,{commit},0,CASE WHEN f='realm_genesis' THEN jsonb_build_object('purpose','collaboration') ELSE '{{}}'::jsonb END,now() FROM generate_series({first},{last}) r,
+         unnest(ARRAY['realm_genesis','realm_profile','realm_join_rule','realm_history_access','realm_discovery','realm_alias','realm_plaintext_visible_services']) f;
+         INSERT INTO realm_media_service_current_results(realm_id,source_stream_ref,current_commit_id,current_stream_position,value,updated_at)
+         SELECT {realm},jsonb_build_object('kind','realm','realm_id',{realm}),'capacity-' || r || '-1',1,'{{}}'::jsonb,now() FROM generate_series({first},{last}) r;
+         INSERT INTO scope_read_receipt_policy_current_results(realm_id,scope_ref,source_stream_ref,current_commit_id,current_stream_position,value,updated_at)
+         SELECT {realm},jsonb_build_object('kind','realm','realm_id',{realm}),jsonb_build_object('kind','realm','realm_id',{realm}),
+                'capacity-' || r || '-1',1,jsonb_build_object('disclosure','optional'),now() FROM generate_series({first},{last}) r;
          INSERT INTO realm_authority_root_current_results(realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref,current_commit_id,current_stream_position,updated_at)
          SELECT {realm},'{{}}'::jsonb,0,0,'event',{commit},0,now() FROM generate_series({first},{last}) r;
          INSERT INTO realm_policy_bundle_current_results(realm_id,current_commit_id,current_stream_position,value,updated_at)
@@ -452,9 +459,14 @@ fn assert_each_snapshot_family_bounded(
         .filter(|table| table.ends_with("_current_results"))
     {
         observed.insert(table.to_owned());
+        let genesis_lookup =
+            table == "realm_bootstrap_current_results" && node["Alias"].as_str() == Some("g");
         let output = match table {
-            "realm_bootstrap_current_results" => 8.0,
-            "realm_authority_root_current_results"
+            "realm_bootstrap_current_results" if genesis_lookup => 1.0,
+            "realm_bootstrap_current_results" => 7.0,
+            "scope_read_receipt_policy_current_results"
+            | "realm_media_service_current_results"
+            | "realm_authority_root_current_results"
             | "realm_policy_bundle_current_results"
             | "realm_set_default_strand_current_results"
             | "direct_conversation_binding_current_results" => 1.0,
@@ -469,12 +481,15 @@ fn assert_each_snapshot_family_bounded(
         .filter_map(|field| node[field].as_f64())
         .sum::<f64>()
             * node["Actual Loops"].as_f64().unwrap_or(1.0);
-        assert_eq!(
-            node["Actual Rows"].as_f64().unwrap_or(0.0)
-                * node["Actual Loops"].as_f64().unwrap_or(1.0),
-            output,
-            "nonempty family {table}"
-        );
+        let produced = node["Actual Rows"].as_f64().unwrap_or(0.0)
+            * node["Actual Loops"].as_f64().unwrap_or(1.0);
+        if genesis_lookup {
+            // This is the exact genesis eligibility probe, not a union family.
+            // Its visits still count toward both existing scan budgets.
+            assert!(produced <= 1.0, "genesis eligibility probe: {node}");
+        } else {
+            assert_eq!(produced, output, "nonempty family {table}: {node}");
+        }
         // A small singleton table can fit in two heap pages at 100 Realms,
         // where a sequential scan is cheaper than an index probe. Its fixed
         // 128-row allowance stays independent of Realm count; 1000 Realms
@@ -534,16 +549,12 @@ async fn typed_current_and_self_reads_stay_bounded_across_one_hundred_and_one_th
                 .map(str::to_owned)
                 .collect::<std::collections::BTreeSet<_>>();
             assert_eq!(observed, expected);
-            // The union has 37 width-sized families: member, message and
-            // moderation plus the 33 seed_snapshot_families loop entries
-            // and the paired Calendar source stored with each Strand.
-            // Relation is seeded for the exact self-read matrix only and is
-            // absent from this union. StrandWatch contributes one family,
-            // not another row for each accepted replacement in its history.
-            // The other five tables emit eight bootstrap facets and four
-            // singleton rows per Realm.
-            assert_eq!(observed.len(), 41);
-            let output = 37.0 * width + 12.0;
+            // The current union has 39 width-sized branches, including the
+            // paired Calendar row on each Strand and the existing ordinary
+            // Actor Profile and Call component families. Its seven singleton
+            // tables emit seven bootstrap facets and six other rows.
+            assert_eq!(observed.len(), 45);
+            let output = 39.0 * width + 13.0;
             assert_eq!(plan[0]["Plan"]["Actual Rows"].as_f64(), Some(output));
             // Up to four visited rows per output permits the planner's
             // low-selectivity current-table scan, but never a history scan

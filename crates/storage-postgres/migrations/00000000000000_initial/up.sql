@@ -4436,6 +4436,21 @@ CREATE TABLE invite_directed_invitee_current_results (
  CHECK(jsonb_typeof(value->'invitee_account_id')='object')
 );
 
+-- Read-receipt policy is independent for each exact Realm or Circle scope.
+CREATE TABLE scope_read_receipt_policy_current_results (
+ realm_id TEXT NOT NULL,
+ scope_ref JSONB NOT NULL,
+ source_stream_ref JSONB NOT NULL,
+ current_commit_id TEXT NOT NULL,
+ current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
+ value JSONB NOT NULL,
+ updated_at TIMESTAMPTZ NOT NULL,
+ PRIMARY KEY(realm_id,scope_ref),
+ CHECK(scope_ref->>'kind' IN ('realm','circle')),
+ CHECK(scope_ref->>'realm_id'=realm_id),
+ CHECK(source_stream_ref=scope_ref)
+);
+
 -- Ordinary Realm bootstrap singleton families share one physical table. Each
 -- row is keyed by its registered typed-current-result selector kind and by
 -- the exact RealmCommit that first established it.
@@ -4623,6 +4638,9 @@ CREATE TABLE actor_profile_current_results (
  CHECK(value->>'realm_id'=realm_id),
  CHECK(value->>'schema'='ak.schema.actor_profile.v1')
 );
+
+CREATE INDEX actor_profile_current_results_realm
+ ON actor_profile_current_results(realm_id);
 
 -- The stored outcome of every accepted profile Event, so an exact replay
 -- returns the value that Event produced after later updates have moved the

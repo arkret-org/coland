@@ -290,10 +290,19 @@ impl ProjectionState {
         self.facet_value(realm_id, &FacetRef::singleton(facet))
     }
 
-    /// Effective `ak.realm.read_receipt_policy` value. `None` means no
-    /// accepted Event has set it.
-    pub fn read_receipt_policy_value(&self, realm_id: &str) -> Option<&Value> {
-        self.realm_facet_value(realm_id, facet::REALM_READ_RECEIPT_POLICY)
+    /// Cached value for this exact scope; absence is not an authorization proof.
+    pub fn read_receipt_policy_value(&self, scope: &arkret_wire::ScopeRef) -> Option<&Value> {
+        let realm = match scope {
+            arkret_wire::ScopeRef::Realm { realm_id }
+            | arkret_wire::ScopeRef::Circle { realm_id, .. } => realm_id,
+            _ => return None,
+        };
+        let subject =
+            String::from_utf8(arkret_canonical::canonical_json_bytes(scope).ok()?).ok()?;
+        self.facet_value(
+            realm.as_str(),
+            &FacetRef::new(facet::SCOPE_READ_RECEIPT_POLICY, subject),
+        )
     }
 
     // ── Realm lifecycle facet helpers ──

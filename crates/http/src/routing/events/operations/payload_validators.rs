@@ -130,13 +130,13 @@ pub(crate) fn validate_read_receipt_policy_payload(
     let payload_value = &operation.payload;
     let payload = payload_value
         .as_object()
-        .ok_or("ak.realm.read_receipt_policy payload must be an object")?;
+        .ok_or("ak.scope.read_receipt_policy payload must be an object")?;
     if payload.is_empty() {
-        return Err("ak.realm.read_receipt_policy payload must set at least one field");
+        return Err("ak.scope.read_receipt_policy payload must set at least one field");
     }
     operation
-        .typed_payload::<arkret_wire::event_spec::RealmReadReceiptPolicy>()
-        .map_err(|_| "ak.realm.read_receipt_policy payload violates SDK artifact schema")?;
+        .typed_payload::<arkret_wire::event_spec::ScopeReadReceiptPolicy>()
+        .map_err(|_| "ak.scope.read_receipt_policy payload violates SDK artifact schema")?;
     Ok(())
 }
 

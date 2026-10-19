@@ -7,6 +7,8 @@ use coland_storage::{
 use super::*;
 #[path = "e2ee_device_queue.rs"]
 mod queue;
+#[path = "managed_runtime_welcome.rs"]
+mod runtime;
 struct PrivateGroupFile(std::path::PathBuf);
 impl Drop for PrivateGroupFile {
     fn drop(&mut self) {

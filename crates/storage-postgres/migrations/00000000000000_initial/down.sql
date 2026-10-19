@@ -1,3 +1,4 @@
+DROP TABLE IF EXISTS scope_read_receipt_policy_current_results;
 DROP TABLE IF EXISTS consent_private_effect_cuts;
 DROP TABLE IF EXISTS consent_private_effect_fences;
 DROP TABLE IF EXISTS consent_private_effect_jobs;

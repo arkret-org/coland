@@ -367,6 +367,18 @@ fn exercise(ghost: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = (
             .await
             .unwrap();
         assert!(page.rows().unwrap().is_empty());
+        native_phase(|| {
+            exercise_stream(
+                &context,
+                &operation,
+                &device,
+                &runtime,
+                &reader,
+                &mut genesis,
+                &accepted,
+            )
+        })
+        .await;
         // A stale opaque cursor is a transport continuation failure, not an
         // MLS reset. Revocation/integrity refusals must never take this path.
         for code in [
@@ -389,7 +401,7 @@ fn exercise(ghost: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = (
                 );
                 assert!(reads[0].1.is_some());
             }
-            assert_eq!(runtime.installed_mls_epoch(&device).await.unwrap(), Some(1));
+            assert_eq!(runtime.installed_mls_epoch(&device).await.unwrap(), Some(2));
         }
         context.lost.queue_reads.lock().unwrap().clear();
         *context.lost.cursor_error_once.lock().unwrap() =
@@ -409,7 +421,7 @@ fn exercise(ghost: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = (
             assert_eq!(metadata.effective_scope, scope);
         }
         assert_ne!(reads[0].0.nonce, reads[1].0.nonce);
-        assert_eq!(runtime.installed_mls_epoch(&device).await.unwrap(), Some(1));
+        assert_eq!(runtime.installed_mls_epoch(&device).await.unwrap(), Some(2));
         // The actual persistent worker entry used by both production hosts
         // performs a real native queue read; its shutdown retires and joins
         // every per-Device task before the test removes private custody.
@@ -478,7 +490,7 @@ fn exercise(ghost: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = (
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(runtime.installed_mls_epoch(&device).await.unwrap(), Some(1));
+        assert_eq!(runtime.installed_mls_epoch(&device).await.unwrap(), Some(2));
         assert_eq!(
             runtime
                 .mls_key_package_inventory(&device)
@@ -502,4 +514,278 @@ fn exercise(ghost: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = (
         drop(store);
         crate::managed_runtime::retained(context).await;
     })
+}
+
+struct StreamCheckpointStore {
+    inner: Arc<dyn AuthoringStore>,
+    fail_next: AtomicBool,
+}
+impl AuthoringStore for StreamCheckpointStore {
+    fn load(&self, key: &str) -> arkret_bridge_runtime::Result<Option<String>> {
+        AuthoringStore::load(self.inner.as_ref(), key)
+    }
+    fn entries_with_prefix(
+        &self,
+        prefix: &str,
+    ) -> arkret_bridge_runtime::Result<Vec<(String, String)>> {
+        self.inner.entries_with_prefix(prefix)
+    }
+    fn compare_exchange_batch(
+        &self,
+        expected: &[(String, Option<String>)],
+        writes: &[(String, Option<String>)],
+    ) -> arkret_bridge_runtime::Result<bool> {
+        if expected
+            .iter()
+            .any(|(key, value)| key.starts_with("managed-device/v1/") && value.is_some())
+            && self.fail_next.swap(false, Ordering::SeqCst)
+        {
+            return Err(BridgeError::Database(
+                "injected stream checkpoint failure".into(),
+            ));
+        }
+        self.inner.compare_exchange_batch(expected, writes)
+    }
+}
+
+async fn remote_update(
+    fixture: &Fixture,
+    scope: &ScopeRef,
+    genesis: &mut MlsGenesisRuntime,
+    accepted_add: &arkret_wire::CommittedEventFullView,
+) -> arkret_wire::CommittedEventFullView {
+    genesis
+        .group
+        .install_recovered_own_commit(accepted_add, &genesis.accepted.event.event_id)
+        .unwrap();
+    let current = coland_storage_postgres::PgMlsGroupCurrentStore {
+        pool: fixture.pool.clone(),
+    }
+    .current(scope)
+    .await
+    .unwrap()
+    .unwrap();
+    let binding = arkret_models_crypto::MlsGovernanceBindingPayload::new(
+        scope.clone(),
+        Some(accepted_add.event.event_id.clone()),
+        1,
+        2,
+        current.value.current_key_access_revision,
+    )
+    .unwrap();
+    let envelope = genesis
+        .group
+        .self_update_commit_with_governance_binding(&binding)
+        .unwrap();
+    let payload = arkret_models_crypto::MlsCommitPayload::new(
+        accepted_add.event.event_id.clone(),
+        current.value.current_key_access_revision,
+        &envelope,
+        binding,
+    )
+    .unwrap();
+    let event = fixture.admin_event(
+        EventKind::MlsCommit,
+        scope.clone(),
+        serde_json::to_value(payload).unwrap(),
+    );
+    let event_id = event.event_id.clone();
+    let token = uuid::Uuid::now_v7();
+    let request =
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::MlsCommit(
+            arkret_wire::MlsCommitSubmission {
+                commit_event: event,
+                welcomes: vec![],
+                idempotency_key: arkret_wire::UuidV7::new(token).unwrap(),
+            },
+        );
+    let body = serde_json::to_value(request).unwrap();
+    let (status, outcome) = fixture
+        .admin_post(
+            "/_arkret/self/events",
+            ServiceOperationId::SelfEventsCommandSubmitV1.as_str(),
+            &body,
+            Some(&token.to_string()),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "real next remote MLS Commit: {outcome}"
+    );
+    let original = PgAuthorityCommitStore {
+        pool: fixture.pool.clone(),
+    }
+    .committed_event(&event_id)
+    .await
+    .unwrap()
+    .unwrap();
+    arkret_wire::CommittedEventFullView {
+        event: original.event,
+        commit: original.commit,
+    }
+}
+
+async fn exercise_stream(
+    context: &crate::managed_runtime::RuntimeContext,
+    operation: &str,
+    device: &arkret_bridge_runtime::managed_device::ManagedDevice,
+    runtime: &ManagedDeviceRuntime,
+    reader: &arkret_bridge_runtime::managed_device::ManagedDeviceReader,
+    genesis: &mut MlsGenesisRuntime,
+    accepted_add: &arkret_wire::CommittedEventFullView,
+) {
+    let scope = ScopeRef::Realm {
+        realm_id: context.fixture.realm.clone(),
+    };
+    let old_current = reader
+        .client()
+        .snapshot_head(scope.realm_id())
+        .await
+        .unwrap()
+        .value()
+        .unwrap()
+        .clone();
+    let update =
+        native_phase(|| remote_update(&context.fixture, &scope, genesis, accepted_add)).await;
+    assert!(update.commit.stream_position > accepted_add.commit.stream_position);
+    // Both originals predate the first stream checkpoint. A snapshot-head
+    // seed would silently skip the next epoch and the following state row.
+    native_phase(|| {
+        let event = context.fixture.admin_event(
+            EventKind::RealmJoinRule,
+            scope.clone(),
+            json!({"value":"invite"}),
+        );
+        accepted_admin_domain_event(&context.fixture, event)
+    })
+    .await;
+    let expected_head = reader
+        .client()
+        .snapshot_head(scope.realm_id())
+        .await
+        .unwrap()
+        .value()
+        .unwrap()
+        .visible_stream_heads[0]
+        .clone();
+    let store = FileAuthoringStore::shared(context.store_path.clone()).unwrap();
+    let failed = Arc::new(StreamCheckpointStore {
+        inner: store.clone(),
+        fail_next: AtomicBool::new(false),
+    });
+    let edge = crate::managed_runtime::host_with_retry(
+        context.config.clone(),
+        failed.clone(),
+        arkret_http_client::RetryConfig::standard(0),
+    );
+    let candidate = ManagedDeviceRuntime::new(edge).unwrap();
+    let mut candidate_device = candidate
+        .recover_initial_device(&device.account_id, operation, &scope)
+        .await
+        .unwrap()
+        .unwrap();
+    let candidate_reader = candidate.open_reader(&candidate_device).await.unwrap();
+    let before = store.entries_with_prefix("managed-device/v1/").unwrap();
+    let original_device = candidate_device.device_id.clone();
+    candidate_device.device_id =
+        arkret_wire::DeviceId::new_v7_at(chrono::Utc::now().timestamp_millis().try_into().unwrap());
+    let attempts = context.lost.attempts.lock().unwrap().len();
+    let mismatch = candidate
+        .poll_content_stream(&candidate_device, &candidate_reader)
+        .await
+        .unwrap_err();
+    assert!(
+        mismatch.to_string().contains("another original Device"),
+        "{mismatch}"
+    );
+    assert_eq!(
+        context.lost.attempts.lock().unwrap().len(),
+        attempts,
+        "reader confusion must fail before HTTP"
+    );
+    candidate_device.device_id = original_device;
+    failed.fail_next.store(true, Ordering::SeqCst);
+    let error = candidate
+        .poll_content_stream(&candidate_device, &candidate_reader)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("injected stream checkpoint failure"),
+        "{error}"
+    );
+    assert_eq!(
+        store.entries_with_prefix("managed-device/v1/").unwrap(),
+        before,
+        "head and merged private state must share one failed write"
+    );
+    assert_eq!(runtime.installed_mls_epoch(device).await.unwrap(), Some(1));
+    assert_eq!(
+        runtime
+            .durable_stream_progress(device)
+            .await
+            .unwrap()
+            .last_position,
+        None
+    );
+    drop(candidate_reader);
+    drop(candidate_device);
+    drop(candidate);
+    let progress = runtime.poll_content_stream(device, reader).await.unwrap();
+    assert!(progress.durable_events > 0);
+    assert_eq!(progress.epoch, Some(2));
+    assert_eq!(progress.last_position, Some(expected_head.stream_position));
+    assert_eq!(progress.pending_events, 1);
+    assert_eq!(runtime.installed_mls_epoch(device).await.unwrap(), Some(2));
+    let before = store.entries_with_prefix("managed-device/v1/").unwrap();
+    *context.lost.snapshot_once.lock().unwrap() = Some(old_current);
+    let stale = runtime
+        .poll_content_stream(device, reader)
+        .await
+        .unwrap_err();
+    assert!(stale.to_string().contains("current is behind"), "{stale}");
+    assert_eq!(
+        store.entries_with_prefix("managed-device/v1/").unwrap(),
+        before,
+        "a replayed valid old current must not bless a newer durable head"
+    );
+    let head = progress.last_position;
+    let cold_edge = crate::managed_runtime::host_with_retry(
+        context.config.clone(),
+        store.clone(),
+        arkret_http_client::RetryConfig::standard(0),
+    );
+    let cold = ManagedDeviceRuntime::new(cold_edge).unwrap();
+    let cold_device = cold
+        .recover_initial_device(&device.account_id, operation, &scope)
+        .await
+        .unwrap()
+        .unwrap();
+    let cold_reader = cold.open_reader(&cold_device).await.unwrap();
+    let before = store.entries_with_prefix("managed-device/v1/").unwrap();
+    let progress = cold
+        .poll_content_stream(&cold_device, &cold_reader)
+        .await
+        .unwrap();
+    assert_eq!(progress.durable_events, 0);
+    assert_eq!(progress.pending_events, 1);
+    assert_eq!(progress.last_position, head);
+    assert_eq!(progress.epoch, Some(2));
+    assert_eq!(
+        store.entries_with_prefix("managed-device/v1/").unwrap(),
+        before,
+        "an unchanged idle read must not rewrite encrypted custody"
+    );
+    cold_reader.retire();
+    assert!(
+        cold.poll_content_stream(&cold_device, &cold_reader)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store.entries_with_prefix("managed-device/v1/").unwrap(),
+        before
+    );
 }

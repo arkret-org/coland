@@ -19,6 +19,7 @@ mod mls;
 pub(crate) struct LostNativeReply {
     pub(crate) armed: std::sync::atomic::AtomicBool,
     pub(crate) cursor_error_once: Mutex<Option<arkret_wire::ErrorCode>>,
+    pub(crate) snapshot_once: Mutex<Option<arkret_wire::RealmStateSnapshot>>,
     pub(crate) queue_reads: Mutex<Vec<(arkret::AppletManagedDeviceMetadata, Option<String>)>>,
     pub(crate) attempts: Mutex<Vec<(arkret::AppletManagedDeviceMetadata, Vec<u8>, String)>>,
     pub(crate) responses: Mutex<
@@ -97,6 +98,17 @@ async fn lose_native_reply(
             }
         }
         ctrl.call_next(req, depot, res).await;
+        if response_path
+            == ServiceOperationId::SelfRealmStateSnapshotReadManifestHeadV1
+                .descriptor()
+                .http_path
+            && res.status_code == Some(StatusCode::OK)
+        {
+            if let Some(snapshot) = state.snapshot_once.lock().unwrap().take() {
+                res.body(arkret_canonical::canonical_json_bytes(&snapshot).unwrap());
+                res.headers_mut().remove("content-length");
+            }
+        }
         if res.status_code == Some(StatusCode::OK)
             && state.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
         {

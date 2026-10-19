@@ -1037,7 +1037,7 @@ async fn claim_keypackage_at_destination(
     let claim_request_id = body.claim_request_id.as_str();
     let request_digest = arkret_canonical::canonical_sha256(&body_value)
         .map_err(|error| AppError::internal(format!("peer claim digest: {error}")))?;
-    authorization.validate_request(body, &request_digest)?;
+    authorization.validate_request(&request_digest)?;
     revoke_expired_peer_claims(state).await?;
     if let Some(existing) = state
         .mls_key_packages()
@@ -1511,17 +1511,15 @@ impl VerifiedClaimAuthorization {
         })
     }
 
-    fn validate_request(
-        &self,
-        body: &PeerKeyPackagesClaimRequestBody,
-        request_digest: &str,
-    ) -> Result<(), AppError> {
+    fn validate_request(&self, request_digest: &str) -> Result<(), AppError> {
         if self.request_digest != request_digest {
             return Err(peer_claim_schema_violation(
                 "claim changed after source authentication",
             ));
         }
-        validate_peer_claim_time_window(body)
+        // The context authenticates exact bytes. Execution freshness belongs
+        // after the durable ledger lookup, including for native self callers.
+        Ok(())
     }
 }
 
@@ -2115,7 +2113,7 @@ fn replay_peer_claim(
     }
     if !matches!(
         record.state.as_str(),
-        "claimed" | "last_resort_claimed" | "consumed"
+        "claimed" | "last_resort_claimed" | "consumed" | "expired" | "revoked"
     ) {
         return Err(peer_claim_failed());
     }
@@ -2293,7 +2291,6 @@ async fn claim_keypackage_session(
     body.validate_shape()
         .map_err(|error| peer_claim_schema_violation(error.to_string()))?;
     let peer_body = PeerKeyPackagesClaimRequestBody::from(&body);
-    validate_peer_claim_time_window(&peer_body)?;
     let local_service_id = state.service_id();
     if body.service_binding.source_id.as_str() != local_service_id {
         return Err(peer_claim_schema_violation(
@@ -2320,6 +2317,23 @@ async fn claim_keypackage_session(
         ));
     }
     let authorization = VerifiedClaimAuthorization::for_verified_request(&peer_body)?;
+    let request_digest = arkret_canonical::canonical_sha256(&peer_body)
+        .map_err(|error| AppError::internal(format!("self claim digest: {error}")))?;
+    // The real session, exact Account/device, source and participant signature
+    // are authenticated above. Recovery reads the same durable ledger for a
+    // local destination and a completed remote relay, before new execution
+    // freshness and Realm policy. It cannot allocate another KeyPackage.
+    revoke_expired_peer_claims(state).await?;
+    if let Some(existing) = state
+        .mls_key_packages()
+        .peer_claim(local_service_id, body.claim_request_id.as_str())
+        .await
+        .map_err(|error| AppError::internal(format!("self claim replay ledger: {error}")))?
+    {
+        return replay_peer_claim(existing, &request_digest)
+            .map(|Json(outcome)| Json(outcome.into()));
+    }
+    validate_peer_claim_time_window(&peer_body)?;
     if body.claim_purpose == PeerKeyPackageClaimPurpose::RealmMembership
         && !state
             .authority_commits()
@@ -2361,19 +2375,6 @@ async fn claim_keypackage_session(
             return Err(AppError::capability_denied(
                 "destination Station must match the exact target account in the Realm",
             ));
-        }
-        let body_value = serde_json::to_value(&body)
-            .map_err(|error| AppError::internal(format!("remote claim serialize: {error}")))?;
-        let request_digest = arkret_canonical::canonical_sha256(&body_value)
-            .map_err(|error| AppError::internal(format!("remote claim digest: {error}")))?;
-        if let Some(existing) = state
-            .mls_key_packages()
-            .peer_claim(local_service_id, body.claim_request_id.as_str())
-            .await
-            .map_err(|error| AppError::internal(format!("remote claim relay ledger: {error}")))?
-        {
-            return replay_peer_claim(existing, &request_digest)
-                .map(|Json(outcome)| Json(outcome.into()));
         }
         let target =
             crate::routing::federation::resolved_peer_target(state, destination, "station", false)
@@ -4777,7 +4778,7 @@ mod trust_binding_tests {
     }
 
     #[test]
-    fn verified_claim_context_rejects_body_changes_and_expired_authorization() {
+    fn verified_claim_context_binds_bytes_independently_of_execution_freshness() {
         let source = arkret_wire::DidCoreId::new("ak:did_core:web:source.example").unwrap();
         let destination =
             arkret_wire::DidCoreId::new("ak:did_core:web:destination.example").unwrap();
@@ -4786,29 +4787,22 @@ mod trust_binding_tests {
             signed_claim_authorization_fixture(source, destination, &fixed_claim_requester(), &key);
         let authorization = VerifiedClaimAuthorization::for_verified_request(&body).unwrap();
         let digest = arkret_canonical::canonical_sha256(&body).unwrap();
-        authorization.validate_request(&body, &digest).unwrap();
+        authorization.validate_request(&digest).unwrap();
         let mut tampered = body.clone();
         tampered.service_binding.source_id =
             arkret_wire::DidCoreId::new("ak:did_core:web:other-source.example").unwrap();
         assert!(
             authorization
-                .validate_request(
-                    &tampered,
-                    &arkret_canonical::canonical_sha256(&tampered).unwrap()
-                )
+                .validate_request(&arkret_canonical::canonical_sha256(&tampered).unwrap())
                 .is_err()
         );
         tampered = body;
         tampered.expires_at = now() - chrono::Duration::seconds(1);
         let expired = VerifiedClaimAuthorization::for_verified_request(&tampered).unwrap();
-        assert!(
-            expired
-                .validate_request(
-                    &tampered,
-                    &arkret_canonical::canonical_sha256(&tampered).unwrap()
-                )
-                .is_err()
-        );
+        expired
+            .validate_request(&arkret_canonical::canonical_sha256(&tampered).unwrap())
+            .unwrap();
+        assert!(validate_peer_claim_time_window(&tampered).is_err());
     }
 
     #[tokio::test]

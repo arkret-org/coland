@@ -111,8 +111,6 @@ async fn issue_ice_config(
     if call_id.is_empty() {
         return Err(AppError::param_missing("call_id is required"));
     }
-    let actor_key = body.actor_id.to_string();
-    let actor_id = actor_key.as_str();
     let device_id = body.device_id.as_str();
 
     if !is_valid_webrtc_session_id(call_id) {
@@ -172,12 +170,16 @@ async fn issue_ice_config(
     let ice_bucket = ice_bucket(issued_at);
     let turn_required = body.turn_required;
     // `webrtc-signaling.md` §4.1 — REST-style (draft-uberti) TURN credential.
-    // username = `<expiry-unix>:<pairwise-pseudonym>`; the pseudonym keeps the
-    // existing private-key-derived `ak_pseudonym_call_<16hex>` form (does not
-    // leak identity), and `<expiry-unix>` is the credential's own expiry so
-    // coturn enforces TTL on its side.
-    let pseudonym =
-        pairwise_turn_username(state, realm_id, call_id, actor_id, device_id, ice_bucket);
+    // Each issuance has fresh private random input, including concurrent
+    // refreshes within the same signed time bucket.
+    let pseudonym = pairwise_turn_username(
+        state,
+        realm_id,
+        call_id,
+        &body.actor_id,
+        device_id,
+        ice_bucket,
+    )?;
     let turn_username = format!("{}:{}", credential_expires_at.timestamp(), pseudonym);
     // credential = base64( HMAC-SHA256(turn_shared_secret, username) ) — the
     // HMAC is taken over the full REST-style username (SHA256, never SHA1).
@@ -261,46 +263,37 @@ fn ice_bucket(timestamp: DateTime<Utc>) -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp(floored, 0).unwrap_or(timestamp)
 }
 
-/// Per-call pairwise TURN pseudonym (`webrtc-signaling.md` §4.1). The
-/// identity segment is `ak_pseudonym_call_<16-hex>` and MUST NOT leak the
-/// principal DID / handle / a stable cross-call id to the TURN operator.
-///
-/// Freshness (§4.1 lines 204/213): the pseudonym is HMAC-derived under the
-/// media-service private key (the notary signing seed) — *not* a plain hash
-/// of stable ids — bound to `(realm_id, call_id, actor_id, device_id,
-/// ice_bucket(issued_at))` plus a fresh per-bucket `nonce` derived from the same
-/// secret. Because the secret is private to this media service, the result is
-/// unlinkable to the TURN operator yet stable across refreshes within one
-/// bucket (§4.2 active-leg reuse) and rotates when the bucket advances.
+/// Issuer-private pairwise tag with a fresh 256-bit CSPRNG nonce per issuance.
+/// The full Actor includes its Station; neither the nonce nor input is exposed.
 fn pairwise_turn_username(
     state: &AppState,
     realm_id: &str,
     call_id: &str,
-    actor_id: &str,
+    actor_id: &arkret_wire::ActorId,
     device_id: &str,
     ice_bucket: DateTime<Utc>,
-) -> String {
-    let secret = state.notary_signing_key().to_bytes();
-    let bucket = ice_bucket.timestamp();
-    // Fresh per-(call,actor,device,bucket) nonce, derived from the private
-    // media-service secret so it is not recomputable off stable ids alone and
-    // not a deterministic function of the public identifiers.
-    let nonce_material = format!(
-        "coland-turn-pseudonym-nonce-v1\0{realm_id}\0{call_id}\0{actor_id}\0{device_id}\0{bucket}"
+) -> Result<String, AppError> {
+    let secret = hmac_sha256(
+        &state.notary_signing_key().to_bytes(),
+        b"ak.media.turn_pseudonym.v1",
     );
-    let nonce = hmac_sha256(&secret, nonce_material.as_bytes());
-    let pseudonym_input = json!({
+    let nonce = rand::random::<[u8; 32]>();
+    let input = json!({
         "realm_id": realm_id,
         "call_id": call_id,
         "actor_id": actor_id,
         "device_id": device_id,
-        "ice_bucket": bucket,
+        "ice_bucket": ice_bucket,
+        "media_service_id": state.service_id(),
         "nonce": URL_SAFE_NO_PAD.encode(nonce),
     });
-    let pseudonym_bytes = arkret_canonical::canonical_json_bytes(&pseudonym_input)
-        .unwrap_or_else(|_| pseudonym_input.to_string().into_bytes());
-    let tag = hmac_sha256(&secret, &pseudonym_bytes);
-    format!("ak_pseudonym_call_{}", hex::encode(&tag[..8]))
+    let canonical = arkret_canonical::canonical_json_bytes(&input)
+        .map_err(|error| AppError::internal(format!("TURN pseudonym canonicalization: {error}")))?;
+    let tag = hmac_sha256(&secret, &canonical);
+    Ok(format!(
+        "ak_pseudonym_call_{}",
+        URL_SAFE_NO_PAD.encode(&tag[..16])
+    ))
 }
 
 /// `webrtc-signaling.md` §4.1 — REST-style (draft-uberti) TURN credential:
@@ -1194,7 +1187,7 @@ pub(crate) async fn prepare_verified_roster_participant(
                 "media service current is unavailable".to_owned(),
             )
         })?;
-    let (_, keys) =
+    let (_, keys, history) =
         crate::routing::media_service_binding::resolve_issuer(state, &descriptor).await?;
     let key = keys
         .iter()
@@ -1209,6 +1202,7 @@ pub(crate) async fn prepare_verified_roster_participant(
             .map_err(|e| coland_services::ServiceError::SchemaViolation(e.to_string()))?,
     };
     arkret_signatures::media::VerifiedCallParticipant::verify(event, &descriptor.service_id, &key)
+        .map(|verified| verified.map(|verified| verified.with_issuer_history(history)))
         .map_err(|e| coland_services::ServiceError::Conflict(e.to_string()))
 }
 

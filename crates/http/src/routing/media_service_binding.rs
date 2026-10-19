@@ -1,6 +1,8 @@
 //! One authenticated issuer boundary for own-Station results and accepted roster joins.
 use arkret_models_collaboration::events_payloads::RealmMediaServiceValue;
-use arkret_models_identity::{ServiceResolutionProjection, ServiceSigningKey};
+use arkret_models_identity::{
+    AuthenticatedServiceResolution, ServiceResolutionProjection, ServiceSigningKey,
+};
 use arkret_wire::ServiceOperationId;
 use coland_services::{ServiceError, ServiceResult};
 
@@ -9,10 +11,14 @@ use crate::state::AppState;
 pub(crate) async fn resolve_issuer(
     state: &AppState,
     value: &RealmMediaServiceValue,
-) -> ServiceResult<(ServiceResolutionProjection, Vec<ServiceSigningKey>)> {
+) -> ServiceResult<(
+    ServiceResolutionProjection,
+    Vec<ServiceSigningKey>,
+    AuthenticatedServiceResolution,
+)> {
     let unavailable =
         |detail: &str| ServiceError::Conflict(format!("temporarily_unavailable: {detail}"));
-    let (route, description_profiles, bundles, document) =
+    let (route, description_profiles, bundles, evidence) =
         if value.service_id == state.service_core_id() {
             let evidence =
                 super::system::service_resolution::current_authenticated_service_resolution(state)
@@ -29,7 +35,7 @@ pub(crate) async fn resolve_issuer(
                 route,
                 describe.supported_profiles,
                 describe.supported_operation_bundles,
-                evidence.normalized_did_document,
+                evidence,
             )
         } else {
             let route = match super::federation::resolved_peer_route(
@@ -41,26 +47,29 @@ pub(crate) async fn resolve_issuer(
             .await
             {
                 Ok(route) => route,
-                Err(_) => super::federation::resolved_peer_route(
+                Err(station_error) => super::federation::resolved_peer_route(
                     state,
                     value.service_id.as_str(),
                     "media_service",
                     true,
                 )
                 .await
-                .map_err(|e| unavailable(&e))?,
+                .map_err(|media_error| {
+                    unavailable(&format!(
+                        "station issuer: {station_error}; media issuer: {media_error}"
+                    ))
+                })?,
             };
-            let document = route
+            let evidence = route
                 .authenticated_resolution
                 .as_ref()
                 .ok_or_else(|| unavailable("verified issuer method evidence is unavailable"))?
-                .normalized_did_document
                 .clone();
             (
                 route.route.projection,
                 route.supported_profiles,
                 route.supported_operation_bundles,
-                document,
+                evidence,
             )
         };
     if !description_profiles
@@ -122,6 +131,7 @@ pub(crate) async fn resolve_issuer(
             "ICE credential origin differs from the verified issuer",
         ));
     }
+    let document = &evidence.normalized_did_document;
     let mut signing_keys = Vec::new();
     for method in document.verification_methods.keys() {
         let method =
@@ -155,5 +165,5 @@ pub(crate) async fn resolve_issuer(
             "issuer current assertion key set is outside the closed bound",
         ));
     }
-    Ok((route, signing_keys))
+    Ok((route, signing_keys, evidence))
 }

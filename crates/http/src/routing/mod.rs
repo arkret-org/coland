@@ -104,7 +104,7 @@ pub use events::sync::acquire_native_message_reply_cut;
 pub use events::sync::{
     spawn_account_data_change_retention_sweeper, spawn_sync_cursor_ttl_sweeper,
 };
-pub(crate) use interop::{MAX_BLOB_UPLOAD_BYTES, push_target_privacy_derivation_claim};
+pub(crate) use interop::MAX_BLOB_UPLOAD_BYTES;
 pub use interop::{spawn_public_push_revoke_retry_worker, spawn_resumable_upload_ttl_sweeper};
 // Snapshot manifest builder reachable from children and other crate modules
 // via `crate::routing::*`.

@@ -264,29 +264,28 @@ async fn guard_snapshot_revisions(
                 let old=diesel::sql_query("SELECT current_commit_id,current_stream_position,source_stream_ref,value FROM call_component_current_results WHERE realm_id=$1 AND call_id=$2 AND selector=$3 FOR UPDATE")
                     .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(call_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(selector).map_err(malformed)?)
                     .get_result::<ExistingFrankingProofCurrent>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+                if !matches!(selector, S::CallFocus { .. }) {
+                    verify_retained_call_projection(
+                        conn,
+                        realm_id,
+                        call_id,
+                        selector,
+                        source_stream_ref,
+                        revision,
+                        value,
+                        old.as_ref(),
+                    )
+                    .await?;
+                }
                 if let Some(old) = old {
-                    let retained = match selector {
-                        S::CallFocus { .. } => true,
-                        _ => old
-                            .value
-                            .get("assertions")
-                            .and_then(Value::as_array)
-                            .is_some_and(|a| {
-                                value
-                                    .get("assertions")
-                                    .and_then(Value::as_array)
-                                    .is_some_and(|new| a.iter().all(|item| new.contains(item)))
-                            }),
-                    };
                     if old.source_stream_ref != source
                         || old.current_stream_position > incoming_position
-                        || !retained
                         || (old.current_stream_position == incoming_position
                             && (old.current_commit_id != revision.commit_id.as_str()
                                 || old.value != *value))
                     {
                         return Err(malformed(
-                            "Call snapshot regresses its source, revision or retained assertions",
+                            "Call snapshot regresses its source, revision or exact effective value",
                         ));
                     }
                 }
@@ -676,6 +675,75 @@ async fn upsert_member_state(
     require_one_current_write(changed)
 }
 
+/// Compare the exact locally retained original and its materialized axis.
+/// An unavailable original remains the authenticated Snapshot trust boundary;
+/// ordinary consumption never scans or replays the accepted history.
+async fn verify_retained_call_projection(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    call: &arkret_wire::CallId,
+    selector: &arkret_wire::CurrentSelector,
+    stream: &arkret_wire::CommitStreamRef,
+    revision: &arkret_wire::CurrentRevision,
+    candidate: &Value,
+    old: Option<&ExistingFrankingProofCurrent>,
+) -> PersistenceResult<()> {
+    #[derive(diesel::QueryableByName)]
+    struct Original {
+        #[diesel(sql_type=Jsonb)]
+        envelope: Value,
+        #[diesel(sql_type=Jsonb)]
+        commit_json: Value,
+    }
+    let claimed = candidate
+        .pointer("/last_source/source_commit")
+        .ok_or_else(|| malformed("Call axis omits its last source"))?;
+    let commit: arkret_wire::RealmCommit =
+        serde_json::from_value(claimed.clone()).map_err(malformed)?;
+    let original=diesel::sql_query("SELECT e.envelope,c.commit_json FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE c.commit_id=$1 AND c.realm_id=$2 AND c.stream_key=$3 AND e.state='committed'")
+        .bind::<Text,_>(commit.commit_id.as_str()).bind::<Text,_>(realm.as_str()).bind::<Text,_>(crate::authority_commit::stream_key(stream)?)
+        .get_result::<Original>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    let Some(original) = original else {
+        return Ok(());
+    };
+    let event: arkret_wire::Event = serde_json::from_value(original.envelope).map_err(malformed)?;
+    let payload = serde_json::to_value(&event.payload).map_err(malformed)?;
+    let member = match selector {
+        arkret_wire::CurrentSelector::CallRoster { .. } => "roster_delta",
+        arkret_wire::CurrentSelector::CallModeration { .. } => "moderation_delta",
+        _ => return Err(malformed("not an effective Call axis")),
+    };
+    if original.commit_json != *claimed
+        || event.kind != arkret_wire::EventKind::CallState
+        || event.event_id != commit.event_ref
+        || event.realm_id != *realm
+        || payload.get("call_id").and_then(Value::as_str) != Some(call.as_str())
+        || payload.get(member) != candidate.pointer("/last_source/value")
+    {
+        return Err(malformed(
+            "Call last source differs from its actual locally retained original",
+        ));
+    }
+    let held = crate::replica_authorization::verified_head(conn, stream).await?;
+    let already_materialized = old
+        .is_some_and(|old| old.current_stream_position == revision.stream_position as i64)
+        || held
+            .as_ref()
+            .is_some_and(|head| head.stream_position >= revision.stream_position);
+    if already_materialized
+        && old.is_none_or(|old| {
+            old.current_stream_position != revision.stream_position as i64
+                || old.current_commit_id != revision.commit_id.as_str()
+                || old.value != *candidate
+        })
+    {
+        return Err(malformed(
+            "retained Call materializer disagrees with Snapshot entries, last source or issuer key",
+        ));
+    }
+    Ok(())
+}
+
 /// Replace the member Station's typed current of `realm_id` with a verified
 /// bootstrap snapshot's rows. Every row must come from the Realm stream at or
 /// below `head`; a family this module does not keep is left out, and a
@@ -760,6 +828,20 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
     {
         return Err(PersistenceError::Conflict(
             "failed_precondition: snapshot cannot remove an accepted binding".into(),
+        ));
+    }
+    #[derive(diesel::QueryableByName)]
+    struct MissingCall {
+        #[diesel(sql_type=diesel::sql_types::Bool)]
+        present: bool,
+    }
+    let missing=diesel::sql_query("SELECT EXISTS(SELECT 1 FROM call_component_current_results c WHERE c.realm_id=$1 AND c.selector->>'kind' IN ('call_roster','call_moderation') AND EXISTS(SELECT 1 FROM jsonb_array_elements($3) h WHERE h->'stream_ref'=c.source_stream_ref) AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements($2) incoming WHERE incoming->'selector'=c.selector)) AS present")
+        .bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(entries).map_err(malformed)?)
+        .bind::<Jsonb,_>(serde_json::to_value(visible_heads).map_err(malformed)?)
+        .get_result::<MissingCall>(&mut *conn).await.map_err(PersistenceError::database)?.present;
+    if missing {
+        return Err(malformed(
+            "complete Snapshot omits an initialized Call axis",
         ));
     }
     crate::replica_authorization::guard_current_rows(conn, realm_id, entries).await?;
@@ -922,7 +1004,11 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
             }
             S::CallFocus{call_id} | S::CallRoster{call_id} | S::CallModeration{call_id} => {
                 match selector {
-                    S::CallRoster{..}=>serde_json::from_value::<arkret_models_collaboration::events_payloads::call::CallRosterCurrentValue>(value.clone()).map_err(malformed)?.validate_sources(source_stream_ref,revision).map_err(malformed)?,
+                    S::CallRoster{..}=>{
+                        let roster=serde_json::from_value::<arkret_models_collaboration::events_payloads::call::CallRosterCurrentValue>(value.clone()).map_err(malformed)?;
+                        roster.validate_sources(source_stream_ref,revision).map_err(malformed)?;
+                        crate::call_participant_issuer_sources::install_roster(conn,realm_id,call_id,&roster).await?;
+                    },
                     S::CallModeration{..}=>serde_json::from_value::<arkret_models_collaboration::events_payloads::call::CallModerationCurrentValue>(value.clone()).map_err(malformed)?.validate_sources(source_stream_ref,revision).map_err(malformed)?,
                     _=>{let _:arkret_models_collaboration::events_payloads::call::CallFocus=serde_json::from_value(value.clone()).map_err(malformed)?;},
                 }
@@ -1323,7 +1409,7 @@ pub(crate) async fn advance_in_connection(
                 )
                 .await?;
             }
-            crate::call_state_current_results::write_axes(conn, event, commit, &body).await?;
+            crate::call_state_current_results::write_axes(conn, event, commit, &body, None).await?;
         }
         arkret_wire::EventKind::RealmMediaService => {
             let body: arkret_models_collaboration::events_payloads::RealmMediaServicePayload =
@@ -1776,6 +1862,10 @@ mod circle_revision_tests;
 #[cfg(test)]
 #[path = "replica_current/current_integrity_tests.rs"]
 mod current_integrity_tests;
+
+#[cfg(test)]
+#[path = "replica_current/call_effective_tests.rs"]
+mod call_effective_tests;
 
 #[cfg(test)]
 mod tests {

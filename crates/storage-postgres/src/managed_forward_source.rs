@@ -159,7 +159,7 @@ pub(super) async fn prepare(
         current: ManagedIdentityCurrent {
             profile: ManagedProfileCurrent {
                 realm_id: authority.pcr_realm_id,
-                result: ManagedIdentityResult {
+                result: ManagedIdentityProjection {
                     selector: ManagedProfileSelector::ActorProfile {
                         actor_profile_id: profile_id,
                     },
@@ -174,7 +174,7 @@ pub(super) async fn prepare(
             },
             accountability: ManagedAccountabilityCurrent {
                 realm_id: accountability_commit.realm_id.clone(),
-                result: ManagedIdentityResult {
+                result: ManagedIdentityProjection {
                     selector: ManagedAccountabilitySelector::IdentityAccountability {
                         issuer_id: grant.issuer_id,
                         subject_id: grant.subject_id,

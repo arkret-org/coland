@@ -23,7 +23,7 @@ struct ValueRow {
 
 async fn footprint(pool: &PgPool) -> Value {
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("SELECT jsonb_build_object('events',(SELECT count(*) FROM canonical_events),'commits',(SELECT count(*) FROM realm_commits),'calls',(SELECT count(*) FROM call_state_current_results),'axes',(SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY realm_id,call_id,selector),'[]') FROM call_component_current_results t)) AS value")
+    diesel::sql_query("SELECT jsonb_build_object('events',(SELECT count(*) FROM canonical_events),'commits',(SELECT count(*) FROM realm_commits),'issuer_keys',(SELECT count(*) FROM call_participant_issuer_sources),'calls',(SELECT count(*) FROM call_state_current_results),'axes',(SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY realm_id,call_id,selector),'[]') FROM call_component_current_results t)) AS value")
         .get_result::<ValueRow>(&mut *conn).await.unwrap().value
 }
 
@@ -228,7 +228,7 @@ async fn joined_account_needs_call_join_grant_and_other_station_cannot_borrow_it
     let grant = ordinary_realm::next_request_for_actor(
         &head.authority_commit,
         EventKind::CapabilityGrant,
-        founder,
+        founder.clone(),
         json!({"grant":{
         "schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":discussion.unit.transactions[0].event.actor_id,
         "subject":ActorId::account(member.clone()),"actions":["ak.call.join"],"resources":[{"kind":"realm","realm_id":realm}],
@@ -266,7 +266,7 @@ async fn joined_account_needs_call_join_grant_and_other_station_cannot_borrow_it
     );
     assert_eq!(footprint(&pool).await, before);
     let other = arkret_wire::AccountId::new(
-        member.principal_id,
+        member.principal_id.clone(),
         arkret_wire::DidCoreId::new("ak:did_core:web:other-call-station.example").unwrap(),
     );
     refused(
@@ -281,10 +281,133 @@ async fn joined_account_needs_call_join_grant_and_other_station_cannot_borrow_it
         ),
     )
     .await;
+    // Exercise the actual storage final permission cut after accepted revokes.
+    // Voluntary ingress proof verification belongs to the real HTTP suite;
+    // this isolates membership and grants without a stale/missing roster leg.
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let call_id = arkret_wire::CallId::from_event_id(&call.authority_commit.event.event_id);
+    let issuer = ordinary_realm::station();
+    let media = ordinary_realm::next_request_for_actor(
+        &call.authority_commit,
+        EventKind::RealmMediaService,
+        founder.clone(),
+        json!({"value":{"service_id":issuer,"foci":[{
+            "focus_id":"permission-cut","focus_kind":"livekit",
+            "token_endpoint":"https://media.example/token","connect_url":"wss://media.example"
+        }]}}),
+        at,
+    );
+    uow.commit_event(media.clone()).await.unwrap();
+    let focus = ordinary_realm::next_request_for_actor(
+        &media.authority_commit,
+        EventKind::CallState,
+        founder.clone(),
+        json!({"call_id":call_id,"focus":{"mode":"sfu","session_focus":"permission-cut"}}),
+        at,
+    );
+    uow.commit_event(focus.clone()).await.unwrap();
+    let member_history = human_profile::fixture(&ordinary_realm::station(), "call-member").history;
+    assert_eq!(member_history.account, member);
+    let device = member_history.founding_device_id;
+    let key = ed25519_dalek::SigningKey::from_bytes(&member_history.founding_device_signing_seed);
+    let now = arkret_canonical::canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let mut request = arkret_models_collaboration::objects::media::CallMediaTokenExchangeRequestBody {
+        realm_id: realm.clone(), call_id, actor_id: ActorId::account(member.clone()), device_id: device,
+        focus_id: "permission-cut".to_owned(), capability_refs: Vec::new(), desired_media: None,
+        join_context: arkret_models_collaboration::call_invitation::CallMediaJoinContext::Voluntary(
+            arkret_models_collaboration::call_invitation::CallVoluntaryJoinContext {
+                kind: arkret_models_collaboration::call_invitation::CallVoluntaryJoinKind::Voluntary,
+                created_at: now, expires_at: now+chrono::Duration::seconds(60),
+                nonce: arkret_canonical::base64url_encode([71;32]),
+                proof: arkret_models_collaboration::call_invitation::CallVoluntaryJoinProof {
+                    verification_method: member_history.device_verification_method.to_string(),
+                    jws: "unused-at-storage-final-cut".to_owned(),
+                },
+            }),
+    };
+    arkret_signatures::call_invitation::sign_call_voluntary_join(&mut request, &key).unwrap();
+    assert!(
+        store
+            .check_call_media_release(&request, &issuer)
+            .await
+            .unwrap()
+    );
+    let revoked = ordinary_realm::next_request_for_actor(
+        &focus.authority_commit,
+        EventKind::CapabilityRevoke,
+        founder.clone(),
+        json!({"grant_id":arkret_wire::GrantId::from_event_id(&grant.authority_commit.event.event_id),
+            "expected_revision":{"commit_id":grant.authority_commit.commit.commit_id,
+                "stream_position":grant.authority_commit.commit.stream_position}}),
+        at,
+    );
+    uow.commit_event(revoked.clone()).await.unwrap();
+    if let arkret_models_collaboration::call_invitation::CallMediaJoinContext::Voluntary(intent) =
+        &mut request.join_context
+    {
+        intent.nonce = arkret_canonical::base64url_encode([72; 32]);
+    }
+    arkret_signatures::call_invitation::sign_call_voluntary_join(&mut request, &key).unwrap();
+    assert!(
+        !store
+            .check_call_media_release(&request, &issuer)
+            .await
+            .unwrap()
+    );
+    let renewed = ordinary_realm::next_request_for_actor(
+        &revoked.authority_commit,
+        EventKind::CapabilityGrant,
+        founder,
+        {
+            let mut payload = serde_json::to_value(&grant.authority_commit.event.payload).unwrap();
+            payload["grant"]["issued_at"] = json!(arkret_canonical::format_timestamp_canonical(
+                at + chrono::Duration::milliseconds(1),
+            ));
+            payload
+        },
+        at + chrono::Duration::milliseconds(1),
+    );
+    uow.commit_event(renewed.clone()).await.unwrap();
+    if let arkret_models_collaboration::call_invitation::CallMediaJoinContext::Voluntary(intent) =
+        &mut request.join_context
+    {
+        intent.nonce = arkret_canonical::base64url_encode([73; 32]);
+    }
+    arkret_signatures::call_invitation::sign_call_voluntary_join(&mut request, &key).unwrap();
+    assert!(
+        store
+            .check_call_media_release(&request, &issuer)
+            .await
+            .unwrap()
+    );
+    let membership = arkret_models_collaboration::governance::membership_invite::MembershipPayload::transition(
+        arkret_models_collaboration::governance::membership_invite::MembershipPayloadState::Leave,
+        ActorId::account(member), "Call final membership cut",
+    ).with_realm_id(realm).to_value().unwrap();
+    let left = ordinary_realm::next_request_for_actor(
+        &renewed.authority_commit,
+        EventKind::MemberState,
+        request.actor_id.clone(),
+        membership,
+        at + chrono::Duration::milliseconds(1),
+    );
+    uow.commit_event(left).await.unwrap();
+    if let arkret_models_collaboration::call_invitation::CallMediaJoinContext::Voluntary(intent) =
+        &mut request.join_context
+    {
+        intent.nonce = arkret_canonical::base64url_encode([74; 32]);
+    }
+    arkret_signatures::call_invitation::sign_call_voluntary_join(&mut request, &key).unwrap();
+    assert!(
+        !store
+            .check_call_media_release(&request, &issuer)
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
-async fn moderation_assertions_retain_bans_kicks_and_guard_the_whole_axis() {
+async fn moderation_entries_retain_bans_kicks_and_guard_the_whole_axis() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let discussion = ordinary_realm::open_human_discussion(&pool, "call-moderation-current").await;
@@ -360,20 +483,26 @@ async fn moderation_assertions_retain_bans_kicks_and_guard_the_whole_axis() {
             },
         )
         .unwrap();
-    assert_eq!(current.assertions.len(), 3);
+    assert_eq!(current.entries.len(), 1);
+    assert_eq!(
+        current.last_source.source_commit,
+        restored.authority_commit.commit
+    );
     let effective = current.effective_removals().unwrap();
     assert_eq!(effective.len(), 1);
     assert_eq!(
         effective[0].action,
         arkret_models_collaboration::events_payloads::call::CallParticipantRemovalAction::Kick
     );
+    assert_eq!(
+        current.entries[0].source_commit,
+        kick.authority_commit.commit
+    );
     for original in [&ban, &kick, &restored] {
-        assert!(
-            current
-                .assertions
-                .iter()
-                .any(|row| row.source_commit == original.authority_commit.commit)
-        );
+        let retained = diesel::sql_query("SELECT EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE c.commit_json->>'commit_id'=$1) AS found")
+            .bind::<Text,_>(original.authority_commit.commit.commit_id.as_str())
+            .get_result::<RetainedSource>(&mut *conn).await.unwrap();
+        assert!(retained.found);
     }
     drop(conn);
     let snapshot = PgAuthorityCommitStore { pool: pool.clone() }
@@ -389,6 +518,61 @@ async fn moderation_assertions_retain_bans_kicks_and_guard_the_whole_axis() {
             selector: arkret_wire::CurrentSelector::CallModeration { call_id: selected }, value, ..
         } if selected == &call_id && value == &serde_json::to_value(&current).unwrap()
     )));
+    // Keep one effective kick while repeated ban/restore history grows.
+    // The actual PG writer and read remain bounded by effective entries.
+    let mut latest = restored;
+    for index in 1..=16 {
+        let started = std::time::Instant::now();
+        let changed_at = at + chrono::Duration::seconds(index * 2);
+        let remove = ordinary_realm::next_request_for_actor(
+            &latest.authority_commit,
+            EventKind::CallState,
+            founder.clone(),
+            json!({"call_id":call_id,"moderation_delta":{"op":"remove_participant","removal":{
+                "actor_id":founder,"action":"ban","removed_by":founder.signing_principal_id(),
+                "removed_at":arkret_canonical::format_timestamp_canonical(changed_at)
+            }}}),
+            changed_at,
+        );
+        uow.commit_event(remove.clone()).await.unwrap();
+        let restore = ordinary_realm::next_request_for_actor(
+            &remove.authority_commit,
+            EventKind::CallState,
+            founder.clone(),
+            json!({"call_id":call_id,"moderation_delta":{"op":"restore_participant",
+                "actor_id":founder,"restored_by":founder.signing_principal_id(),
+                "restored_at":arkret_canonical::format_timestamp_canonical(changed_at),
+                "expected_revision":{"commit_id":remove.authority_commit.commit.commit_id,
+                    "stream_position":remove.authority_commit.commit.stream_position}
+            }}),
+            changed_at,
+        );
+        uow.commit_event(restore.clone()).await.unwrap();
+        let mut conn = pool.get().await.unwrap();
+        let value = diesel::sql_query("SELECT value FROM call_component_current_results WHERE realm_id=$1 AND call_id=$2 AND selector->>'kind'='call_moderation'")
+            .bind::<Text,_>(discussion.realm_id().as_str()).bind::<Text,_>(call_id.as_str())
+            .get_result::<ValueRow>(&mut *conn).await.unwrap().value;
+        assert_eq!(value["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            value["entries"][0]["source_commit"],
+            json!(kick.authority_commit.commit)
+        );
+        assert_eq!(
+            value["last_source"]["source_commit"],
+            json!(restore.authority_commit.commit)
+        );
+        let bytes = arkret_canonical::canonical_json_bytes(&value)
+            .unwrap()
+            .len();
+        assert!(bytes < 8192);
+        if matches!(index, 1 | 8 | 16) {
+            eprintln!(
+                "call_effective_moderation_cost ban_restore_pairs={index} entries=1 wire_bytes={bytes} actual_pg_us={}",
+                started.elapsed().as_micros()
+            );
+        }
+        latest = restore;
+    }
 }
 
 #[tokio::test]
@@ -425,10 +609,64 @@ async fn full_actor_roster_refresh_rejects_other_station_old_leg_kick_and_leave(
         .unwrap()
         .device_id;
     let key = ed25519_dalek::SigningKey::from_bytes(&[23; 32]);
-    let multibase =
-        arkret_canonical::ed25519_pubkey_to_did_key_multibase(key.verifying_key().as_bytes());
-    let issuer = arkret_wire::DidCoreId::new(format!("ak:did_core:key:{multibase}")).unwrap();
-    let issuer_kid = format!("did:key:{multibase}#{multibase}");
+    use rand_core::SeedableRng;
+    let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(2115);
+    let endpoint = url::Url::parse("https://media.example/").unwrap();
+    let inception = arkret_signatures::webvh::prepare_service_inception_with_did_key_seed(
+        &mut rng,
+        &arkret_signatures::webvh::ServiceInceptionInput {
+            principal_endpoint: &endpoint,
+            local_id: "service",
+            also_known_as: &[],
+            version_time: at - chrono::Duration::seconds(60),
+            did_key_fragment: Some("issuer"),
+        },
+        &[23; 32],
+    )
+    .unwrap();
+    let did = arkret_wire::Did::new(inception.did.clone()).unwrap();
+    let issuer = arkret_wire::project_did_to_core_id(&did).unwrap();
+    let issuer_kid = inception.did_key_id.clone();
+    let first_history = arkret_identity::build_authenticated_webvh_service_resolution(
+        issuer.clone(),
+        "media_service".into(),
+        serde_json::from_value(inception.log_entry["state"].clone()).unwrap(),
+        vec![inception.log_entry.clone()],
+        vec![],
+        at,
+    )
+    .unwrap();
+    let rotated_key = ed25519_dalek::SigningKey::from_bytes(&[24; 32]);
+    let mut rotated_state = inception.log_entry["state"].clone();
+    rotated_state["verificationMethod"][0]["publicKeyMultibase"] =
+        json!(arkret_canonical::ed25519_pubkey_to_did_key_multibase(
+            rotated_key.verifying_key().as_bytes()
+        ));
+    let next_update = ed25519_dalek::SigningKey::from_bytes(&[25; 32]);
+    let next_update_public = arkret_canonical::ed25519_pubkey_to_did_key_multibase(
+        next_update.verifying_key().as_bytes(),
+    );
+    let previous_entries = vec![inception.log_entry.clone()];
+    let rotation = arkret_signatures::webvh::prepare_service_rotation(
+        &arkret_signatures::webvh::ServiceRotationInput {
+            did: did.as_str(),
+            previous_entries: &previous_entries,
+            state: &rotated_state,
+            current_update_seed: &inception.next_update_key_seed,
+            next_update_public_key_multibase: &next_update_public,
+            version_time: at + chrono::Duration::seconds(2),
+        },
+    )
+    .unwrap();
+    let rotated_history = arkret_identity::build_authenticated_webvh_service_resolution(
+        issuer.clone(),
+        "media_service".into(),
+        serde_json::from_value(rotated_state).unwrap(),
+        vec![inception.log_entry.clone(), rotation.log_entry],
+        vec![],
+        at + chrono::Duration::seconds(3),
+    )
+    .unwrap();
     let service = ordinary_realm::next_request_for_actor(
         &call.authority_commit,
         EventKind::RealmMediaService,
@@ -442,6 +680,12 @@ async fn full_actor_roster_refresh_rejects_other_station_old_leg_kick_and_leave(
     uow.commit_event(service.clone()).await.unwrap();
     let realm_id = discussion.realm_id();
     let join = |previous: &coland_storage::AuthorityCommitTransaction, index: u32| {
+        let key = if index < 3 { &key } else { &rotated_key };
+        let history = if index < 3 {
+            &first_history
+        } else {
+            &rotated_history
+        };
         let participant = format!("ak:rtc_participant:01964137-0000-7000-8000-{index:012x}");
         let expires_at = at + chrono::Duration::seconds(300 + i64::from(index));
         let fields = arkret_signatures::media::ParticipantBindingContext {
@@ -482,14 +726,32 @@ async fn full_actor_roster_refresh_rejects_other_station_old_leg_kick_and_leave(
             arkret_signatures::media::VerifiedCallParticipant::verify(
                 &request.authority_commit.event,
                 &issuer,
-                &arkret_signatures::PublicKeyMaterial::Ed25519Multibase {
-                    value: multibase.clone(),
+                &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+                    bytes: key.verifying_key().to_bytes().to_vec(),
                 },
             )
-            .unwrap();
+            .unwrap()
+            .map(|verified| verified.with_issuer_history(history.clone()));
         request
     };
     let joined = join(&service.authority_commit, 1);
+    let mut missing_native_history = joined.clone();
+    missing_native_history.verified_media_participant =
+        arkret_signatures::media::VerifiedCallParticipant::verify(
+            &missing_native_history.authority_commit.event,
+            &issuer,
+            &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+                bytes: key.verifying_key().to_bytes().to_vec(),
+            },
+        )
+        .unwrap();
+    let before_missing_history = footprint(&pool).await;
+    assert!(uow.commit_event(missing_native_history).await.is_err());
+    assert_eq!(
+        footprint(&pool).await,
+        before_missing_history,
+        "missing native history must roll back the focus, issuer material and original Event/Commit together"
+    );
     uow.commit_event(joined.clone()).await.unwrap();
     let cut = store
         .call_current_cut(&discussion.realm_id(), &call_id, &founder)
@@ -589,19 +851,178 @@ async fn full_actor_roster_refresh_rejects_other_station_old_leg_kick_and_leave(
             .await
             .unwrap()
     );
-    let left = ordinary_realm::next_request_for_actor(
-        &rejoined.authority_commit,
+    let mut latest = rejoined;
+    for index in 4..=35 {
+        let next = join(&latest.authority_commit, index);
+        let started = std::time::Instant::now();
+        uow.commit_event(next.clone()).await.unwrap();
+        let mut conn = pool.get().await.unwrap();
+        let value=diesel::sql_query("SELECT value FROM call_component_current_results WHERE realm_id=$1 AND call_id=$2 AND selector->>'kind'='call_roster'")
+            .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(call_id.as_str()).get_result::<ValueRow>(&mut *conn).await.unwrap().value;
+        let projected: arkret_models_collaboration::events_payloads::call::CallRosterCurrentValue =
+            serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(projected.entries.len(), 1);
+        assert_eq!(
+            projected.last_source.source_commit,
+            next.authority_commit.commit
+        );
+        assert!(
+            arkret_canonical::canonical_json_bytes(&value)
+                .unwrap()
+                .len()
+                < 8192
+        );
+        if matches!(index, 4 | 11 | 19 | 35) {
+            eprintln!(
+                "call_effective_cost accepted_join={index} entries=1 wire_bytes={} actual_pg_us={}",
+                arkret_canonical::canonical_json_bytes(&value)
+                    .unwrap()
+                    .len(),
+                started.elapsed().as_micros()
+            );
+        }
+        latest = next;
+    }
+    let latest_cut = store
+        .call_current_cut(&realm_id, &call_id, &founder)
+        .await
+        .unwrap()
+        .unwrap();
+    if let CallMediaJoinContext::Refresh(context) = &mut refresh.join_context {
+        context.participant_id = latest_cut.participants[0].0.participant_id.clone().unwrap();
+    }
+    assert!(
+        store
+            .check_call_media_release(&refresh, &issuer)
+            .await
+            .unwrap()
+    );
+    let banned = ordinary_realm::next_request_for_actor(
+        &latest.authority_commit,
         EventKind::CallState,
         founder.clone(),
-        json!({"call_id":call_id,"roster_delta":{"op":"leave","actor_id":founder,
-            "device_id":device,"expected_revision":current.roster_revision.unwrap()}}),
-        at + chrono::Duration::seconds(4),
+        json!({"call_id":call_id,"moderation_delta":{"op":"remove_participant","removal":{
+            "actor_id":founder,"action":"ban","removed_by":founder.signing_principal_id(),
+            "removed_at":arkret_canonical::format_timestamp_canonical(at)
+        }}}),
+        at + chrono::Duration::seconds(36),
     );
-    uow.commit_event(left).await.unwrap();
+    uow.commit_event(banned.clone()).await.unwrap();
     assert!(
         !store
             .check_call_media_release(&refresh, &issuer)
             .await
             .unwrap()
     );
+    let restored = ordinary_realm::next_request_for_actor(
+        &banned.authority_commit,
+        EventKind::CallState,
+        founder.clone(),
+        json!({"call_id":call_id,"moderation_delta":{"op":"restore_participant",
+            "actor_id":founder,"restored_by":founder.signing_principal_id(),
+            "restored_at":arkret_canonical::format_timestamp_canonical(at),
+            "expected_revision":{"commit_id":banned.authority_commit.commit.commit_id,
+                "stream_position":banned.authority_commit.commit.stream_position}
+        }}),
+        at + chrono::Duration::seconds(37),
+    );
+    uow.commit_event(restored.clone()).await.unwrap();
+    assert!(
+        store
+            .check_call_media_release(&refresh, &issuer)
+            .await
+            .unwrap()
+    );
+    let moderation = store
+        .call_current_cut(&realm_id, &call_id, &founder)
+        .await
+        .unwrap()
+        .unwrap()
+        .moderation_current
+        .unwrap();
+    assert_eq!(moderation.entries.len(), 1);
+    assert_eq!(
+        moderation.entries[0].source_commit,
+        kick.authority_commit.commit
+    );
+    latest = restored;
+    let left = ordinary_realm::next_request_for_actor(
+        &latest.authority_commit,
+        EventKind::CallState,
+        founder.clone(),
+        json!({"call_id":call_id,"roster_delta":{"op":"leave","actor_id":founder,
+            "device_id":device,"expected_revision":latest_cut.roster_revision.unwrap()}}),
+        at + chrono::Duration::seconds(38),
+    );
+    uow.commit_event(left.clone()).await.unwrap();
+    let mut conn = pool.get().await.unwrap();
+    let retained=diesel::sql_query("SELECT jsonb_build_object('current',(SELECT value FROM call_component_current_results WHERE realm_id=$1 AND call_id=$2 AND selector->>'kind'='call_roster'),'original_keys',(SELECT count(*) FROM call_participant_issuer_sources WHERE realm_id=$1 AND call_id=$2)) AS value")
+        .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(call_id.as_str()).get_result::<ValueRow>(&mut *conn).await.unwrap().value;
+    assert_eq!(retained["current"]["entries"], json!([]));
+    assert_eq!(
+        retained["current"]["last_source"]["source_commit"],
+        json!(left.authority_commit.commit)
+    );
+    assert_eq!(retained["original_keys"], json!(34));
+    let original_key=diesel::sql_query("SELECT jsonb_build_object('key',public_key_b64u,'history',issuer_history) AS value FROM call_participant_issuer_sources WHERE source_commit_id=$1")
+        .bind::<Text,_>(joined.authority_commit.commit.commit_id.as_str()).get_result::<ValueRow>(&mut *conn).await.unwrap().value;
+    assert_eq!(
+        original_key["key"],
+        json!(arkret_canonical::base64url_encode(
+            key.verifying_key().as_bytes()
+        ))
+    );
+    assert_ne!(
+        original_key["key"],
+        json!(arkret_canonical::base64url_encode(
+            rotated_key.verifying_key().as_bytes()
+        ))
+    );
+    assert!(original_key["history"].is_object());
+
+    drop(conn);
+    assert!(
+        !store
+            .check_call_media_release(&refresh, &issuer)
+            .await
+            .unwrap()
+    );
+    // A new accepted leg is usable after leave, until the accepted lifecycle
+    // becomes terminal. This isolates the terminal gate from the missing leg.
+    let joined_again = join(&left.authority_commit, 39);
+    uow.commit_event(joined_again.clone()).await.unwrap();
+    let active = store
+        .call_current_cut(&realm_id, &call_id, &founder)
+        .await
+        .unwrap()
+        .unwrap();
+    if let CallMediaJoinContext::Refresh(context) = &mut refresh.join_context {
+        context.participant_id = active.participants[0].0.participant_id.clone().unwrap();
+    }
+    assert!(
+        store
+            .check_call_media_release(&refresh, &issuer)
+            .await
+            .unwrap()
+    );
+    let cancelled = ordinary_realm::next_request_for_actor(
+        &joined_again.authority_commit,
+        EventKind::CallState,
+        founder.clone(),
+        json!({"call_id":call_id,"state_transition":{"from":"ringing","to":"cancelled"}}),
+        at + chrono::Duration::seconds(40),
+    );
+    uow.commit_event(cancelled).await.unwrap();
+    assert!(
+        !store
+            .check_call_media_release(&refresh, &issuer)
+            .await
+            .unwrap()
+    );
+}
+
+#[derive(diesel::QueryableByName)]
+struct RetainedSource {
+    #[diesel(sql_type=diesel::sql_types::Bool)]
+    found: bool,
 }

@@ -1,3 +1,5 @@
+DROP TABLE IF EXISTS call_participant_issuer_sources;
+DROP TABLE IF EXISTS public.service_resolution_histories;
 DROP TABLE IF EXISTS consent_private_effect_cuts;
 DROP TABLE IF EXISTS consent_private_effect_fences;
 DROP TABLE IF EXISTS consent_private_effect_jobs;

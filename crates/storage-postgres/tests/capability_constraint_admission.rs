@@ -228,6 +228,121 @@ async fn quota_consumed(pool: &PgPool) -> i64 {
     .consumed
 }
 
+async fn durable_rows(pool: &PgPool) -> Vec<(String, i64, String)> {
+    #[derive(diesel::QueryableByName)]
+    struct Table {
+        #[diesel(sql_type = Text)]
+        tablename: String,
+    }
+    #[derive(diesel::QueryableByName)]
+    struct Contents {
+        #[diesel(sql_type = BigInt)]
+        rows: i64,
+        #[diesel(sql_type = Text)]
+        digest: String,
+    }
+    let mut conn = pool.get().await.unwrap();
+    let tables = diesel::sql_query(
+        "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename",
+    )
+    .load::<Table>(&mut conn)
+    .await
+    .unwrap();
+    let mut snapshot = Vec::new();
+    for table in tables {
+        let quoted = table.tablename.replace('"', "\"\"");
+        let query = format!(
+            "SELECT COUNT(*) AS rows, \
+             md5(COALESCE(string_agg(row_to_json(t)::text, '' ORDER BY row_to_json(t)::text), '')) AS digest \
+             FROM public.\"{quoted}\" t"
+        );
+        let contents = diesel::sql_query(query)
+            .get_result::<Contents>(&mut conn)
+            .await
+            .unwrap();
+        snapshot.push((table.tablename, contents.rows, contents.digest));
+    }
+    snapshot
+}
+
+#[tokio::test]
+async fn unknown_temporal_refusals_cannot_be_bleached_and_write_nothing() {
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    for (name, recurrence) in [
+        (
+            "timezone",
+            serde_json::json!({"frequency":"daily", "timezone":"Missing/Zone"}),
+        ),
+        (
+            "frequency",
+            serde_json::json!({"frequency":"monthly", "timezone":"UTC"}),
+        ),
+    ] {
+        for effect in ["deny", "quarantine", "require_review"] {
+            let label = format!("unknown-{name}-{effect}").replace('_', "-");
+            let member = local(&pool, &label).await;
+            let discussion = discussion(&pool, &label, &member).await;
+            let open = grant(
+                &pool,
+                &discussion,
+                &discussion.head.authority_commit,
+                &member,
+                &["ak.message.create"],
+                serde_json::json!([]),
+            )
+            .await;
+            uow.commit_event(open.clone()).await.unwrap();
+            let control = message(
+                &pool,
+                &discussion,
+                &open.authority_commit,
+                &member,
+                "allowed",
+            )
+            .await;
+            uow.commit_event(control.clone()).await.unwrap();
+            let refusing = grant(
+                &pool,
+                &discussion,
+                &control.authority_commit,
+                &member,
+                &["ak.message.create"],
+                serde_json::json!([{
+                    "constraint_kind":"temporal", "constraint_subkind":"window",
+                    "effect":effect, "recurrence":recurrence,
+                }]),
+            )
+            .await;
+            uow.commit_event(refusing.clone()).await.unwrap();
+            let request = message(
+                &pool,
+                &discussion,
+                &refusing.authority_commit,
+                &member,
+                "refused",
+            )
+            .await;
+            let before = durable_rows(&pool).await;
+            let quota_before = quota_consumed(&pool).await;
+            assert_refused(
+                &pool,
+                &uow,
+                request,
+                if effect == "deny" {
+                    ConflictCode::CapabilityDenied
+                } else {
+                    ConflictCode::FailedPrecondition
+                },
+            )
+            .await;
+            assert_eq!(durable_rows(&pool).await, before, "{name}: {effect}");
+            assert_eq!(quota_consumed(&pool).await, quota_before);
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_rate_quota_is_reserved_with_the_event_it_admits() {
     let database = TestDatabase::lease().await;

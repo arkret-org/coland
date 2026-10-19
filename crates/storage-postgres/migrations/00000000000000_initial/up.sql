@@ -2949,6 +2949,14 @@ CREATE TABLE public.service_method_states (
 
 
 
+CREATE TABLE public.service_resolution_histories (
+ service_id TEXT NOT NULL,
+ service_kind TEXT NOT NULL,
+ evidence JSONB NOT NULL,
+ verified_at TIMESTAMPTZ NOT NULL,
+ PRIMARY KEY(service_id,service_kind)
+);
+
 CREATE TABLE public.service_resolution_fork_quarantine (
     service_id text NOT NULL CHECK (service_id LIKE 'ak:did_core:%'),
     service_kind text NOT NULL,
@@ -3761,6 +3769,17 @@ CREATE TABLE call_component_current_results (
  CHECK(selector->>'kind' IN ('call_focus','call_roster','call_moderation','call_recording_state','call_recording_artifact','call_transcript_state','call_transcript_artifact')),
  CHECK(source_stream_ref->>'kind' IN ('realm','circle')),
  CHECK(source_stream_ref->>'realm_id'=realm_id)
+);
+
+-- Original issuer material is retained independently of the effective roster.
+CREATE TABLE call_participant_issuer_sources (
+ realm_id TEXT NOT NULL,
+ call_id TEXT NOT NULL,
+ source_commit_id TEXT NOT NULL,
+ issuer_kid TEXT NOT NULL,
+ public_key_b64u TEXT NOT NULL,
+ issuer_history JSONB,
+ PRIMARY KEY(realm_id,call_id,source_commit_id)
 );
 
 CREATE TABLE call_voluntary_join_nonces (

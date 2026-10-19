@@ -24,25 +24,6 @@ use crate::wire::{PushRegisterDeviceRequestBody, PushUnregisterDeviceRequestBody
 
 pub(crate) const PUSH_TARGET_SALT_ROTATION_SECONDS: i64 = 30 * 24 * 60 * 60;
 
-pub(crate) fn push_target_privacy_derivation_claim(
-    now: chrono::DateTime<chrono::Utc>,
-) -> arkret_models_discovery::service_description::PrivacyDerivation {
-    arkret_models_discovery::service_description::PrivacyDerivation {
-        push_target_id_derivation: Some(arkret_models_discovery::service_description::PushTargetPrivacyDerivation {
-            derivation_profile: arkret_models_discovery::service_description::PushTargetDerivationProfile::HmacSha256V1,
-            secret_scope: arkret_models_discovery::service_description::PushTargetSecretScope::PerService,
-            salt_epoch_id: push_target_salt_epoch_id_at(now),
-            salt_rotation_seconds: PUSH_TARGET_SALT_ROTATION_SECONDS as u64,
-            input_binding: Some(vec![
-                arkret_models_discovery::service_description::PushTargetInputBinding::AccountId,
-                arkret_models_discovery::service_description::PushTargetInputBinding::DeviceId,
-                arkret_models_discovery::service_description::PushTargetInputBinding::PushRouteId,
-                arkret_models_discovery::service_description::PushTargetInputBinding::SaltEpochId,
-            ]),
-        }),
-    }
-}
-
 pub(super) fn push_target_salt_epoch_id_at(now: chrono::DateTime<chrono::Utc>) -> String {
     let epoch = now
         .timestamp()

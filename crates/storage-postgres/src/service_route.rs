@@ -324,6 +324,8 @@ impl ServiceRouteStore for PgServiceRouteStore {
                     return Ok(MonotonicRouteWrite::Stale);
                 }
             }
+            sql_query("INSERT INTO service_resolution_histories(service_id,service_kind,evidence,verified_at) VALUES($1,$2,$3,$4) ON CONFLICT(service_id,service_kind) DO UPDATE SET evidence=EXCLUDED.evidence,verified_at=EXCLUDED.verified_at")
+                .bind::<Text,_>(state.service_id.as_str()).bind::<Text,_>(&state.service_kind).bind::<Jsonb,_>(encode(&evidence)?).bind::<Timestamptz,_>(state.verified_at).execute(conn).await?;
             sql_query("INSERT INTO service_method_states(service_id,service_kind,method_state,updated_at) VALUES($1,$2,$3,$4) ON CONFLICT(service_id,service_kind) DO UPDATE SET method_state=EXCLUDED.method_state,updated_at=EXCLUDED.updated_at").bind::<Text,_>(state.service_id.as_str()).bind::<Text,_>(&state.service_kind).bind::<Jsonb,_>(&state_value).bind::<Timestamptz,_>(state.verified_at).execute(conn).await?;
             sql_query("INSERT INTO service_route_cache(service_id,service_kind,entry,cache_expires_at,updated_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(service_id,service_kind) DO UPDATE SET entry=EXCLUDED.entry,cache_expires_at=EXCLUDED.cache_expires_at,updated_at=EXCLUDED.updated_at").bind::<Text,_>(route.service_id().as_str()).bind::<Text,_>(route.service_kind()).bind::<Jsonb,_>(&entry_value).bind::<Timestamptz,_>(route.cache_expires_at).bind::<Timestamptz,_>(route.verified_at).execute(conn).await?;
             Ok(MonotonicRouteWrite::Applied)

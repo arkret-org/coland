@@ -930,7 +930,7 @@ fn require_supported_policy(
     scope: &arkret_wire::ScopeRef,
 ) -> PersistenceResult<()> {
     use arkret_models_collaboration::governance::operation_wire::{
-        AgentPolicyOperation, PolicyResourceKind, PolicyRuleKind,
+        PolicyResourceKind, PolicyRuleKind,
     };
     use arkret_wire::PolicyEffect;
 
@@ -977,78 +977,20 @@ fn require_supported_policy(
     if document.policy_kind != PolicyKind::Agent {
         return Ok(());
     }
-    document.validate().map_err(schema)?;
-    if !matches!(scope,
-        arkret_wire::ScopeRef::Realm { realm_id }
-        | arkret_wire::ScopeRef::Circle { realm_id, .. }
-        if document.realm_id.as_ref() == Some(realm_id))
-    {
-        return Err(refused(
-            "Agent management Policy has no registered governance scope",
-        ));
-    }
-    let circle = matches!(scope, arkret_wire::ScopeRef::Circle { .. });
-    if (circle && document.default_effect == PolicyEffect::RequireReview)
-        || document.rules.iter().any(|rule| {
-            rule.kind != PolicyRuleKind::Agent
-                || (circle && rule.effect == PolicyEffect::RequireReview)
-                || rule.actions.as_ref().is_some_and(|actions| {
-                    actions.iter().any(|action| {
-                        arkret_schema::capability_action(action).is_none_or(|descriptor| {
-                            descriptor.event_mapping_kind == "aggregate_admin"
-                        }) || arkret_wire::ServiceOperationId::from_wire(action).is_some()
-                    })
-                })
-                || (rule.actions.is_some()
-                    && rule.agent_operations.as_ref().is_some_and(|ops| {
-                        ops.iter().any(|op| {
-                            matches!(
-                                op,
-                                AgentPolicyOperation::Join | AgentPolicyOperation::Publish
-                            )
-                        })
-                    }))
-                || rule.resources.as_ref().is_some_and(|resources| {
-                    resources.iter().any(|resource| {
-                        resource
-                            .realm_id
-                            .as_ref()
-                            .is_some_and(|realm| document.realm_id.as_ref() != Some(realm))
-                            || match resource.kind {
-                                PolicyResourceKind::Realm => {
-                                    resource.resource_ref.as_ref().is_some_and(|id| {
-                                        document
-                                            .realm_id
-                                            .as_ref()
-                                            .is_none_or(|realm| realm.as_str() != id)
-                                    })
-                                }
-                                PolicyResourceKind::Strand => resource
-                                    .resource_ref
-                                    .as_ref()
-                                    .is_some_and(|id| id.parse::<arkret_wire::StrandId>().is_err()),
-                                PolicyResourceKind::Space => resource
-                                    .resource_ref
-                                    .as_ref()
-                                    .is_some_and(|id| id.parse::<arkret_wire::SpaceId>().is_err()),
-                                PolicyResourceKind::Object => resource
-                                    .resource_ref
-                                    .as_ref()
-                                    .is_some_and(|id| !arkret_wire::is_object_ref(id)),
-                                // Service scope cannot be used as a content-resource selector.
-                                // No registered Agent management service matcher supplies its
-                                // facts.
-                                PolicyResourceKind::Service => true,
-                            }
-                    })
-                })
-        })
-    {
-        return Err(refused(
-            "Agent management configuration lacks a registered matcher or review carrier",
-        ));
-    }
-    Ok(())
+    use arkret_policy::agent_policy_support::{
+        AgentPolicySupportError, REFERENCE_AGENT_POLICY_SUPPORT, validate_agent_policy_support,
+    };
+    validate_agent_policy_support(document, scope, &REFERENCE_AGENT_POLICY_SUPPORT).map_err(
+        |error| match error {
+            AgentPolicySupportError::InvalidPolicy(error) => schema(error),
+            AgentPolicySupportError::GovernanceScope => {
+                refused("Agent management Policy has no registered governance scope")
+            }
+            _ => refused(
+                "Agent management configuration lacks a registered matcher or review carrier",
+            ),
+        },
+    )
 }
 
 #[cfg(test)]
@@ -1107,73 +1049,25 @@ mod admission_tests {
     }
 
     #[test]
-    fn realm_join_and_publish_policy_preserve_continuous_gate() {
-        use arkret_models_collaboration::governance::operation_wire::AgentPolicyOperation;
-        let policy = join_policy();
+    fn shared_agent_support_preserves_persistence_error_contract() {
+        let mut policy = join_policy();
         let scope = arkret_wire::ScopeRef::Realm {
             realm_id: policy.realm_id.clone().unwrap(),
         };
-        assert!(require_supported_policy(&policy, &scope).is_ok());
-        let mut publish = policy.clone();
-        publish.rules[0].agent_operations = Some(vec![AgentPolicyOperation::Publish]);
-        assert!(require_supported_policy(&publish, &scope).is_ok());
-        let mut reviewed = publish.clone();
-        reviewed.rules[0].effect = arkret_wire::PolicyEffect::RequireReview;
-        reviewed.rules[0].review_requirement = Some(
-            arkret_models_collaboration::governance::operation_wire::ManagementReviewRequirement {
-                approver_actor_ids: vec![arkret_wire::ActorId::account(
-                    arkret_wire::AccountId::new(
-                        "ak:did_core:web:administrator.example".parse().unwrap(),
-                        "ak:did_core:web:station.example".parse().unwrap(),
-                    ),
-                )],
-                threshold: 1,
-                max_age_seconds: 60,
-            },
-        );
-        reviewed.validate().unwrap();
-        assert!(require_supported_policy(&reviewed, &scope).is_ok());
-        for operation in [
-            AgentPolicyOperation::Authorize,
-            AgentPolicyOperation::Execute,
-            AgentPolicyOperation::Read,
-            AgentPolicyOperation::Deliver,
-            AgentPolicyOperation::Serve,
-        ] {
-            let mut other = policy.clone();
-            other.rules[0].agent_operations = Some(vec![operation]);
-            assert!(require_supported_policy(&other, &scope).is_ok());
-        }
-        publish.rules[0].agent_operations = Some(vec![
-            AgentPolicyOperation::Join,
-            AgentPolicyOperation::Publish,
-        ]);
-        assert!(require_supported_policy(&publish, &scope).is_ok());
-        for effect in [
-            arkret_wire::PolicyEffect::Deny,
-            arkret_wire::PolicyEffect::Quarantine,
-        ] {
-            let mut other = policy.clone();
-            other.default_effect = effect;
-            assert!(require_supported_policy(&other, &scope).is_ok());
-        }
-        let mut review = policy.clone();
-        review.rules[0].effect = arkret_wire::PolicyEffect::Quarantine;
-        assert!(require_supported_policy(&review, &scope).is_ok());
-        let mut actions = policy.clone();
-        actions.rules[0].actions = Some(vec!["ak.message.create".into()]);
-        assert!(require_supported_policy(&actions, &scope).is_err());
-        let circle = arkret_wire::ScopeRef::Circle {
-            realm_id: policy.realm_id.clone().unwrap(),
-            circle_id: "ak:circle:AT47eNekH0_aKZyIMsXq_s1FAWdYXC71_CUxQ5O478t-"
-                .parse()
-                .unwrap(),
-        };
-        assert!(require_supported_policy(&policy, &circle).is_ok());
-        assert!(require_supported_policy(&reviewed, &circle).is_err());
-        let mut applet = policy;
-        applet.policy_kind = arkret_wire::PolicyKind::Applet;
-        assert!(require_supported_policy(&applet, &scope).is_err());
+        let error =
+            require_supported_policy(&policy, &arkret_wire::ScopeRef::RealmGenesis).unwrap_err();
+        assert!(matches!(error, PersistenceError::Conflict(ref message)
+            if message == "failed_precondition: Agent management Policy has no registered governance scope"));
+        policy.rules.clear();
+        assert!(matches!(
+            require_supported_policy(&policy, &scope),
+            Err(PersistenceError::SchemaViolation(_))
+        ));
+        let mut policy = join_policy();
+        policy.rules[0].actions = Some(vec!["ak.message.create".into()]);
+        let error = require_supported_policy(&policy, &scope).unwrap_err();
+        assert!(matches!(error, PersistenceError::Conflict(ref message)
+            if message == "failed_precondition: Agent management configuration lacks a registered matcher or review carrier"));
     }
 
     #[test]

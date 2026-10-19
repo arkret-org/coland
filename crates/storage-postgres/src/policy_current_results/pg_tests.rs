@@ -1452,6 +1452,74 @@ async fn management_writer_all_operations_realm_circle_and_review_carrier_bounda
     sql_query("ROLLBACK").execute(&mut conn).await.unwrap();
 }
 
+/// Raw configuration bypasses the UI and still reaches the shared check inside
+/// the real admission transaction. Accepted-history fixtures isolate this hook.
+#[tokio::test]
+async fn management_support_rejects_raw_unsupported_configuration_without_effects() {
+    let database = TestDatabase::lease().await;
+    let mut conn = database.pool().get().await.unwrap();
+    sql_query("BEGIN").execute(&mut conn).await.unwrap();
+    seed_genesis(&mut conn).await;
+    let circle = seed_management_circle(&mut conn).await;
+    for in_circle in [false, true] {
+        let mut candidate = management_policy(None, "allow");
+        let PolicySetValue::Governance(document) = &mut candidate.value else {
+            unreachable!()
+        };
+        if in_circle {
+            document.rules[0].agent_operations = Some(vec![
+                arkret_models_collaboration::governance::operation_wire::AgentPolicyOperation::Join,
+            ]);
+            document.rules[0].effect = arkret_wire::PolicyEffect::RequireReview;
+            document.rules[0].review_requirement = Some(arkret_models_collaboration::governance::operation_wire::ManagementReviewRequirement {
+                approver_actor_ids: vec![document.created_by.clone()], threshold: 1, max_age_seconds: 60,
+            });
+        } else {
+            document.rules[0].actions = Some(vec!["ak.unknown.action".into()]);
+        }
+        candidate.validate().unwrap();
+        let scope = if in_circle {
+            arkret_wire::ScopeRef::Circle {
+                realm_id: realm(),
+                circle_id: circle.clone(),
+            }
+        } else {
+            arkret_wire::ScopeRef::Realm { realm_id: realm() }
+        };
+        let original = arkret_wire::test_support::raw_event_for_actor_at(
+            EventKind::PolicySet.as_str(),
+            scope,
+            event(EventKind::RealmCreate, json!({}), 0).actor_id,
+            json!(candidate),
+            chrono::DateTime::parse_from_rfc3339("2026-10-05T12:00:02Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        )
+        .unwrap();
+        let mut basis = commit(&original, 2);
+        if in_circle {
+            basis.stream_ref = CommitStreamRef::Circle {
+                realm_id: realm(),
+                circle_id: circle.clone(),
+            };
+            basis.stream_position = 0;
+            basis.previous_commit_ref = None;
+        }
+        let error = admit_in_connection(&mut conn, &original, &basis)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, PersistenceError::Conflict(ref message)
+            if message == "failed_precondition: Agent management configuration lacks a registered matcher or review carrier"),
+            "{error}"
+        );
+        let clean = sql_query("SELECT NOT EXISTS(SELECT 1 FROM policy_current_results) AND NOT EXISTS(SELECT 1 FROM canonical_events WHERE kind='ak.policy.set') AS present")
+            .get_result::<Present>(&mut conn).await.unwrap();
+        assert!(clean.present);
+    }
+    sql_query("ROLLBACK").execute(&mut conn).await.unwrap();
+}
+
 #[tokio::test]
 async fn management_authorize_full_selector_priority_and_circle_current_are_not_realm_anchor() {
     let database = TestDatabase::lease().await;

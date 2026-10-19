@@ -5565,6 +5565,23 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .await
     }
 
+    async fn issue_realm_state_snapshot_for_applet_device(
+        &self,
+        endpoint: &coland_storage::AppletManagedDeviceScopeGuard,
+        issuer: &arkret_wire::DidCoreId,
+        credential_expires_at: chrono::DateTime<chrono::Utc>,
+        sign: coland_storage::RealmStateSnapshotSigner<'_>,
+    ) -> PersistenceResult<Option<arkret_wire::RealmStateSnapshot>> {
+        crate::snapshot_disclosure_gate::issue_native_snapshot(
+            &self.pool,
+            endpoint,
+            issuer,
+            credential_expires_at,
+            sign,
+        )
+        .await
+    }
+
     async fn install_verified_account_snapshot(
         &self,
         account: &arkret_wire::AccountId,

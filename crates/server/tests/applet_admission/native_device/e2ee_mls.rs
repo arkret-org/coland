@@ -15,6 +15,8 @@ mod current_read;
 mod material_read;
 #[path = "e2ee_native_committer.rs"]
 mod native_committer;
+#[path = "snapshot_read.rs"]
+mod snapshot_read;
 
 pub(super) async fn public_material(fixture: &Fixture, bytes: Vec<u8>) -> arkret_wire::BlobRef {
     // Existing public objects are prerequisites here. Blob HTTP ingress is a
@@ -135,6 +137,7 @@ enum Case {
     Accepted,
     MaterialReads,
     ExactCurrentReads,
+    SnapshotReads,
     AddWelcome,
     QualifiedRefusal,
     MissingPair,
@@ -236,7 +239,7 @@ async fn originate(ghost: bool, case: Case, circle: bool) {
     } else {
         realm_scope.clone()
     };
-    let current_source = if case == Case::ExactCurrentReads {
+    let current_source = if matches!(case, Case::ExactCurrentReads | Case::SnapshotReads) {
         Some(native_phase(|| current_read::prepare_source(&fixture, &scope)).await)
     } else {
         None
@@ -348,6 +351,13 @@ async fn originate(ghost: bool, case: Case, circle: bool) {
         );
     }
     if let Some(source) = current_source {
+        if case == Case::SnapshotReads {
+            native_phase(|| {
+                snapshot_read::exercise(&fixture, &install, &authority, &key, &scope, source)
+            })
+            .await;
+            return;
+        }
         native_phase(|| {
             current_read::exercise(&fixture, &install, &authority, &key, &scope, source)
         })

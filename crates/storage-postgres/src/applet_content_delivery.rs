@@ -30,6 +30,8 @@ use crate::capability_grant_current_results::{
 mod exact_current;
 #[path = "applet_mls_material_delivery.rs"]
 mod mls_material;
+#[path = "applet_snapshot_delivery.rs"]
+mod snapshots;
 
 #[derive(QueryableByName)]
 struct JsonRow {
@@ -296,6 +298,7 @@ pub(crate) async fn acquire(
         !input.mls_group_material_reads.is_empty(),
         !input.mls_roster_reads.is_empty(),
         !input.exact_reads.is_empty(),
+        !input.snapshots.is_empty(),
     ]
     .into_iter()
     .filter(|active| *active)
@@ -311,6 +314,7 @@ pub(crate) async fn acquire(
         || input.mls_group_material_reads.len() > 1
         || input.mls_roster_reads.len() > 1
         || input.exact_reads.len() > 1
+        || input.snapshots.len() > 1
         || input.committed_events.len() > 64
         || lanes != 1
         || !input.current_views.is_empty()
@@ -320,7 +324,6 @@ pub(crate) async fn acquire(
         || !input.morph_absences.is_empty()
         || !input.account_status_observations.is_empty()
         || !input.realm_exports.is_empty()
-        || !input.snapshots.is_empty()
         || !input.future_materials.is_empty()
         || !input.notifications.is_empty()
         || !input.watch_reads.is_empty()
@@ -400,6 +403,23 @@ pub(crate) async fn acquire(
     .ok_or_else(|| refused("native read Device is unavailable"))?;
     if current != endpoint.authority {
         return Err(refused("native read Device instance changed"));
+    }
+    if let Some(snapshot) = input.snapshots.as_slice().first() {
+        let proofs = crate::boxed_future(|| {
+            snapshots::prepare(
+                held.connection(),
+                station,
+                endpoint,
+                credential_expiry,
+                snapshot,
+            )
+        })
+        .await?;
+        return Ok(Some(Box::new(NativeDeliveryGuard {
+            held,
+            proofs,
+            endpoint_windows: Vec::new(),
+        })));
     }
     let material_proof = if let Some(request) = input.mls_group_material_reads.as_slice().first() {
         Some(
@@ -945,4 +965,49 @@ pub(crate) async fn require_mls_scope_read(
     crate::boxed_future(|| mls_scope_read_proof(conn, endpoint, expires_at, strand))
         .await
         .map(|_| ())
+}
+
+/// Prove one native scope before snapshot signing in the caller's transaction.
+pub(crate) async fn snapshot_material_for_device(
+    conn: &mut diesel_async::AsyncPgConnection,
+    station: &DidCoreId,
+    endpoint: &AppletManagedDeviceScopeGuard,
+    expiry: chrono::DateTime<chrono::Utc>,
+    material: coland_storage::RealmStateSnapshotMaterial,
+) -> PersistenceResult<(coland_storage::RealmStateSnapshotMaterial, Vec<ReadProof>)> {
+    snapshots::restrict_material(conn, station, endpoint, expiry, material).await
+}
+
+/// Preserve the native reader's PCR/business authority barriers before the
+/// snapshot issuer establishes and signs its local governing cut.
+pub(crate) async fn lock_snapshot_device_authorities(
+    conn: &mut diesel_async::AsyncPgConnection,
+    station: &DidCoreId,
+    endpoint: &AppletManagedDeviceScopeGuard,
+) -> PersistenceResult<()> {
+    if &endpoint.authority.account_id.station_id != station {
+        return Err(refused("native snapshot is not at its Account Station"));
+    }
+    let mut realms = vec![
+        endpoint.authority.pcr_realm_id.clone(),
+        endpoint.effective_scope.realm_id().clone(),
+    ];
+    realms.sort();
+    realms.dedup();
+    for realm in realms {
+        let locked = sql_query(
+            "SELECT to_jsonb(a) AS value FROM realm_authorities a \
+             WHERE realm_id=$1 FOR SHARE NOWAIT",
+        )
+        .bind::<Text, _>(realm.as_str())
+        .get_result::<JsonRow>(&mut *conn)
+        .await
+        .map_err(PersistenceError::database)?;
+        if locked.value["service_id"].as_str() != Some(station.as_str()) {
+            return Err(refused(
+                "native snapshot has no current local governing barrier",
+            ));
+        }
+    }
+    Ok(())
 }

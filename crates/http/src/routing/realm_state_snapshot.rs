@@ -131,6 +131,83 @@ pub(crate) async fn issued_realm_state_snapshot_for_account(
     }
 }
 
+/// Native snapshots use the existing closed object and Account archive. Only
+/// a locally governed exact scope is signed; a foreign object is never clipped
+/// and resigned by its receiving Account Station.
+pub(crate) async fn native_snapshot(
+    state: &AppState,
+    device: &crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice,
+    realm: &str,
+    reference: Option<&arkret_wire::RealmSnapshotId>,
+) -> coland_http::result::GuardedJsonResult<arkret_wire::RealmStateSnapshot> {
+    use crate::routing::identity::applet_managed_device;
+    let denied = || {
+        coland_http::error::AppError::capability_denied(
+            "the Realm snapshot is not readable by this caller",
+        )
+    };
+    let hidden = || {
+        if reference.is_some() {
+            denied()
+        } else {
+            coland_http::error::AppError::not_found("not found")
+        }
+    };
+    let realm_id = arkret_wire::RealmId::new(realm.to_owned()).map_err(|_| hidden())?;
+    let operation = if reference.is_some() {
+        "ak.self.realm_state_snapshot.read.by_ref.v1"
+    } else {
+        "ak.self.realm_state_snapshot.read.manifest_head.v1"
+    };
+    if device.operation.as_str() != operation
+        || device.authority.account_id.station_id != state.service_core_id()
+        || device.metadata.effective_scope.realm_id() != &realm_id
+        || crate::routing::spaces::space::is_realm_deleted(state, realm_id.as_str()).await
+    {
+        return Err(hidden());
+    }
+    let endpoint = applet_managed_device::scope_guard(state, device).await?;
+    let issuer = state.service_core_id();
+    let snapshot = if let Some(reference) = reference {
+        issued_realm_state_snapshot_for_account(
+            state,
+            realm_id.as_str(),
+            reference,
+            &device.authority.account_id,
+        )
+        .await?
+    } else {
+        let method = state
+            .service_verification_method("notary-key")
+            .map_err(coland_http::error::AppError::internal)?;
+        let key = state.notary_signing_key();
+        state
+            .authority_commits()
+            .issue_realm_state_snapshot_for_applet_device(
+                &endpoint,
+                &issuer,
+                device.transport_expires_at,
+                &method,
+                key.as_ref(),
+                crate::wire::now(),
+            )
+            .await
+            .map_err(|error| {
+                if error.conflict_code() == Some(coland_storage::ConflictCode::CapabilityDenied) {
+                    hidden()
+                } else {
+                    map_issue_error(&realm_id, error)
+                }
+            })?
+            .ok_or_else(hidden)?
+    };
+    let input = coland_storage::AccountContentDeliveryInput::snapshot(&snapshot);
+    let guard = applet_managed_device::content_delivery_guard_for_input(state, device, input)
+        .await
+        .map_err(|error| if reference.is_some() { denied() } else { error })?;
+    coland_http::result::guarded_json_ok(snapshot, Some(guard))
+}
+
 #[cfg(test)]
 mod issue_error_tests {
     use super::*;

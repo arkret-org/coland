@@ -2200,6 +2200,37 @@ impl AuthorityCommitApplication {
             .await?)
     }
 
+    /// Sign only the complete exact-scope material proved for this Device by
+    /// the owning store's current PCR/business transaction.
+    pub async fn issue_realm_state_snapshot_for_applet_device(
+        &self,
+        endpoint: &coland_storage::AppletManagedDeviceScopeGuard,
+        issuer: &DidCoreId,
+        credential_expires_at: DateTime<Utc>,
+        verification_method: &DidUrl,
+        signing_key: &SigningKey,
+        created_at: DateTime<Utc>,
+    ) -> ServiceResult<Option<RealmStateSnapshot>> {
+        let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
+            build_signed_realm_state_snapshot(
+                material,
+                verification_method.clone(),
+                signing_key,
+                created_at,
+            )
+            .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
+        };
+        Ok(self
+            .store()
+            .issue_realm_state_snapshot_for_applet_device(
+                endpoint,
+                issuer,
+                credential_expires_at,
+                &sign,
+            )
+            .await?)
+    }
+
     /// Archive the original governing object after peer authority and
     /// cryptographic verification, without granting local signing authority.
     /// Return the retained original selected by the store's same-cut policy.

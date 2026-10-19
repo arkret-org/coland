@@ -431,6 +431,45 @@ pub async fn issue_account_snapshot(
     issuer: &arkret_wire::DidCoreId,
     sign: coland_storage::RealmStateSnapshotSigner<'_>,
 ) -> PersistenceResult<Option<arkret_wire::RealmStateSnapshot>> {
+    issue_snapshot(pool, realm_id, account, issuer, sign, None).await
+}
+
+/// Native scope selection is part of the material signed at this cut, never
+/// a rewritten foreign Snapshot or a client-supplied authorization assertion.
+pub(crate) async fn issue_native_snapshot(
+    pool: &PgPool,
+    endpoint: &coland_storage::AppletManagedDeviceScopeGuard,
+    issuer: &arkret_wire::DidCoreId,
+    expiry: chrono::DateTime<chrono::Utc>,
+    sign: coland_storage::RealmStateSnapshotSigner<'_>,
+) -> PersistenceResult<Option<arkret_wire::RealmStateSnapshot>> {
+    let result = issue_snapshot(
+        pool,
+        endpoint.effective_scope.realm_id(),
+        &endpoint.authority.account_id,
+        issuer,
+        sign,
+        Some((endpoint, expiry)),
+    )
+    .await;
+    tracing::debug!(target: "coland_storage_postgres::applet_content_delivery",
+        available = result.as_ref().is_ok_and(|value| value.is_some()),
+        reason = ?result.as_ref().err().map(ToString::to_string),
+        "native snapshot issuance finished");
+    result
+}
+
+async fn issue_snapshot(
+    pool: &PgPool,
+    realm_id: &RealmId,
+    account: &AccountId,
+    issuer: &arkret_wire::DidCoreId,
+    sign: coland_storage::RealmStateSnapshotSigner<'_>,
+    native: Option<(
+        &coland_storage::AppletManagedDeviceScopeGuard,
+        chrono::DateTime<chrono::Utc>,
+    )>,
+) -> PersistenceResult<Option<arkret_wire::RealmStateSnapshot>> {
     let mut conn =
         crate::issued_realm_snapshots::SnapshotIssuanceConnection::acquire(pool, realm_id).await?;
     let result = conn
@@ -438,6 +477,14 @@ pub async fn issue_account_snapshot(
             sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
                 .execute(&mut *conn)
                 .await?;
+            if let Some((endpoint, _)) = native {
+                crate::boxed_future(|| {
+                    crate::applet_content_delivery::lock_snapshot_device_authorities(
+                        conn, issuer, endpoint,
+                    )
+                })
+                .await?;
+            }
             // Issuance and issued-snapshot GC exclude each other (0441).
             crate::sync_cursor::retention::lock(conn, false).await?;
             let Some(tenure) = sql_query(
@@ -455,6 +502,17 @@ pub async fn issue_account_snapshot(
                 account_snapshot_material_in_connection(conn, realm_id, account).await?
             else {
                 return Ok(None);
+            };
+            let (material, native_proofs) = if let Some((endpoint, expiry)) = native {
+                let (material, proofs) = crate::boxed_future(|| {
+                    crate::applet_content_delivery::snapshot_material_for_device(
+                        conn, issuer, endpoint, expiry, material,
+                    )
+                })
+                .await?;
+                (material, Some(proofs))
+            } else {
+                (material, None)
             };
             if i64::try_from(material.governance_generation).ok() != Some(tenure.generation) {
                 return Err(rejected("material generation differs from the locked tenure").into());
@@ -497,6 +555,16 @@ pub async fn issue_account_snapshot(
                 conn, account, &material, snapshot,
             )
             .await?;
+            if native_proofs.as_ref().is_some_and(|proofs| {
+                proofs
+                    .iter()
+                    .any(|proof| !proof.permits_at(chrono::Utc::now()))
+            }) {
+                return Err(rejected(
+                    "native snapshot permission expired before issuance committed",
+                )
+                .into());
+            }
             Ok(Some(issued))
         })
         .await
@@ -1069,8 +1137,38 @@ fn disclose_snapshot_candidate_at_facts(
     candidate: Option<coland_storage::RealmStateSnapshotMaterial>,
     facts: &SnapshotCandidateDisclosureFacts,
 ) -> PersistenceResult<coland_storage::RealmStateSnapshotMaterial> {
-    let material = candidate.unwrap_or_else(|| authority_material.clone());
-    if let Some((controller_account, owner_facts)) = &facts.owner {
+    let original_rows = candidate
+        .as_ref()
+        .map(|material| material.current_state_entries.clone());
+    let mut material = candidate.unwrap_or_else(|| authority_material.clone());
+    if original_rows.is_some() {
+        // A historical exact slice may contain only Circle rows. Its current
+        // authorization basis is read from the real authority cut, never
+        // inferred from missing rows in the archived object. These internal
+        // Realm rows are removed before returning the original row slice.
+        for row in &authority_material.current_state_entries {
+            let TypedCurrentRow::Value { selector, .. } = row;
+            let required = matches!(
+                selector,
+                CurrentSelector::RealmGenesis
+                    | CurrentSelector::RealmAuthorityRoot
+                    | CurrentSelector::RealmHistoryAccess
+            ) || matches!(selector, CurrentSelector::MemberState { actor_id }
+                    if actor_id.as_account_id() == Some(account)
+                        || facts.owner.as_ref().is_some_and(|(owner, _)| actor_id.as_account_id() == Some(owner)));
+            if required
+                && !material.current_state_entries.iter().any(|present| {
+                    let TypedCurrentRow::Value {
+                        selector: actual, ..
+                    } = present;
+                    actual == selector
+                })
+            {
+                material.current_state_entries.push(row.clone());
+            }
+        }
+    }
+    let mut disclosed = if let Some((controller_account, owner_facts)) = &facts.owner {
         let owner_material =
             disclose_to_account(material.clone(), controller_account, owner_facts)?;
         let mut agent_material = disclose_to_account(material, account, &facts.caller)?;
@@ -1082,9 +1180,16 @@ fn disclose_snapshot_candidate_at_facts(
             .retain(|row| owner_material.current_state_entries.contains(row));
         // Even an exact row subset must independently retain its required
         // genesis, membership, subjects and complete current-family closure.
-        return disclose_to_account(agent_material, account, &facts.caller);
+        disclose_to_account(agent_material, account, &facts.caller)?
+    } else {
+        disclose_to_account(material, account, &facts.caller)?
+    };
+    if let Some(original_rows) = original_rows {
+        disclosed
+            .current_state_entries
+            .retain(|row| original_rows.contains(row));
     }
-    disclose_to_account(material, account, &facts.caller)
+    Ok(disclosed)
 }
 
 async fn disclosure_facts_in_connection(
@@ -1099,7 +1204,7 @@ async fn disclosure_facts_in_connection(
             OR EXISTS(SELECT 1 FROM mimi_room_binding_current_results WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM policy_current_results WHERE realm_id=$1 \
                 AND (value->>'schema' IS DISTINCT FROM 'ak.schema.policy.v1' \
-                    OR COALESCE(value->>'policy_kind','') NOT IN ('access','moderation','agent') \
+                    OR COALESCE(value->>'policy_kind','') NOT IN ('access','moderation','agent','applet') \
                     OR value->>'realm_id' IS DISTINCT FROM realm_id)) \
             OR EXISTS(SELECT 1 FROM agent_status_current_results WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM agent_key_current_results WHERE realm_id=$1) \
@@ -1659,6 +1764,7 @@ pub(crate) fn disclose_to_account(
             _ => None,
         })
         .collect::<std::collections::BTreeMap<_, _>>();
+    let mut private_applet_policies = std::collections::BTreeSet::new();
     for row in &material.current_state_entries {
         let TypedCurrentRow::Value {
             selector,
@@ -1751,12 +1857,30 @@ pub(crate) fn disclose_to_account(
                 )?;
                 Some(source_stream_ref.clone())
             }
-            CurrentSelector::Policy { .. } => {
+            CurrentSelector::Policy { policy_id } => {
                 crate::policy_current_results::management_policy_scope_target(
                     &material.realm_id,
                     source_stream_ref,
                 )
                 .map_err(rejected)?;
+                if value.get("policy_kind").and_then(serde_json::Value::as_str) == Some("applet") {
+                    use arkret_models_collaboration::governance::operation_wire::PolicySetValue;
+                    let document: PolicySetValue =
+                        serde_json::from_value(value.clone()).map_err(|_| {
+                            rejected("private Applet Policy has an invalid closed value")
+                        })?;
+                    document.validate().map_err(rejected)?;
+                    if !matches!(document, PolicySetValue::Governance(ref policy)
+                        if policy.id == *policy_id
+                            && policy.realm_id.as_ref() == Some(&material.realm_id)
+                            && policy.policy_kind == arkret_wire::PolicyKind::Applet)
+                    {
+                        return Err(rejected(
+                            "private Applet Policy has a different subject or scope",
+                        ));
+                    }
+                    private_applet_policies.insert(policy_id.clone());
+                }
                 Some(source_stream_ref.clone())
             }
             CurrentSelector::MessageRevision { message_id } => Some(
@@ -1835,6 +1959,14 @@ pub(crate) fn disclose_to_account(
                     // private. Snapshot §3 and current-results §3 include only
                     // rows disclosed to the requester, never a redacted value.
                     CurrentSelector::AgentActionApproval { .. } => false,
+                    // managed-governance section 1 restricts Applet Policy
+                    // reads to authorized writers. Ordinary member snapshots
+                    // must not enumerate these validated private rows.
+                    CurrentSelector::Policy { policy_id }
+                        if private_applet_policies.contains(policy_id) =>
+                    {
+                        false
+                    }
                     CurrentSelector::PolicyAction {
                         subject: arkret_wire::PolicyActionSelector::PolicyRef { .. },
                     } => false,
@@ -3217,6 +3349,132 @@ mod tests {
                     assert!(!outsider.current_state_entries.contains(&policy));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn circle_original_recheck_uses_current_realm_basis_without_disclosing_it() {
+        let (account, authority, caller) = circle_fixture();
+        let mut original = authority.clone();
+        original.current_state_entries.retain(|row| {
+            matches!(
+                row,
+                TypedCurrentRow::Value {
+                    source_stream_ref: CommitStreamRef::Circle { .. },
+                    selector: CurrentSelector::Strand { .. }
+                        | CurrentSelector::CircleMemberState { .. },
+                    ..
+                }
+            )
+        });
+        assert!(!original.current_state_entries.is_empty());
+        let frozen_rows = original.current_state_entries.clone();
+        let facts = SnapshotCandidateDisclosureFacts {
+            caller,
+            owner: None,
+        };
+        let disclosed = disclose_snapshot_candidate_at_facts(
+            &account,
+            &authority,
+            Some(original.clone()),
+            &facts,
+        )
+        .unwrap();
+        assert_eq!(disclosed.current_state_entries, frozen_rows);
+        assert_eq!(original.current_state_entries, frozen_rows);
+        let mut missing = authority.clone();
+        missing.current_state_entries.retain(|row| {
+            !matches!(
+                row,
+                TypedCurrentRow::Value {
+                    selector: CurrentSelector::RealmHistoryAccess,
+                    ..
+                }
+            )
+        });
+        assert!(
+            disclose_snapshot_candidate_at_facts(
+                &account,
+                &missing,
+                Some(original.clone()),
+                &facts
+            )
+            .is_err(),
+            "the historical slice cannot manufacture missing authority facts"
+        );
+        let (_, _, mut caller) = circle_fixture();
+        caller.caller_floor = None;
+        assert!(
+            disclose_snapshot_candidate_at_facts(
+                &account,
+                &authority,
+                Some(original),
+                &SnapshotCandidateDisclosureFacts {
+                    caller,
+                    owner: None
+                }
+            )
+            .is_err(),
+            "an archived slice never restores current membership"
+        );
+    }
+
+    #[test]
+    fn applet_policy_is_private_without_blocking_ordinary_member_snapshots() {
+        for circle in [false, true] {
+            let (caller, mut material, facts) = if circle {
+                circle_fixture()
+            } else {
+                joined_fixture()
+            };
+            let policy_id =
+                arkret_wire::PolicyId::new("ak:policy:0198ff00-0000-7000-8000-000000000001")
+                    .unwrap();
+            let scope = if circle {
+                let circle_id = facts.circle_floors.keys().next().unwrap().clone();
+                arkret_wire::ScopeRef::Circle {
+                    realm_id: realm_id(),
+                    circle_id,
+                }
+            } else {
+                arkret_wire::ScopeRef::Realm {
+                    realm_id: realm_id(),
+                }
+            };
+            let value = json!({"schema":"ak.schema.policy.v1","id":policy_id,
+                "realm_id":realm_id(),"policy_kind":"applet",
+                "rules":[{"rule_id":"execute","kind":"applet","effect":"deny",
+                    "applet_target":{"kind":"all"},"applet_operations":["execute"]}],
+                "default_effect":"allow","created_by":ActorId::account(caller.clone()),
+                "created_at":"2026-10-19T10:00:00.000Z"});
+            let mut policy = row(
+                CurrentSelector::Policy {
+                    policy_id: policy_id.clone(),
+                },
+                1,
+                value,
+            );
+            let TypedCurrentRow::Value {
+                source_stream_ref, ..
+            } = &mut policy;
+            *source_stream_ref = CommitStreamRef::from_scope(&scope, None).unwrap();
+            material.current_state_entries.push(policy);
+            let disclosed = disclose_to_account(material.clone(), &caller, &facts).unwrap();
+            assert!(
+                !disclosed
+                    .current_state_entries
+                    .iter()
+                    .any(|row| matches!(row,
+                TypedCurrentRow::Value { selector: CurrentSelector::Policy { policy_id: id }, .. }
+                    if id == &policy_id))
+            );
+            let TypedCurrentRow::Value { value, .. } =
+                material.current_state_entries.last_mut().unwrap();
+            value["id"] = json!("ak:policy:0198ff00-0000-7000-8000-000000000002");
+            assert!(
+                disclose_to_account(material, &caller, &facts).is_err(),
+                "private classification must not hide malformed authority state"
+            );
         }
     }
 

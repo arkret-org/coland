@@ -1772,6 +1772,16 @@ pub(super) async fn install_replica_anchor_in_connection(
     crate::sync_cursor::retention::lock(conn, false).await?;
     let realm_stream = install.snapshot_head.stream_ref.clone();
     let key = stream_key(&realm_stream)?;
+    // Committed replicas take authority before anchor. Bootstrap refresh must
+    // use the same order while retaining both locks through installation.
+    let current = locked_authority(conn, &install.realm_id)
+        .await?
+        .ok_or_else(|| {
+            conflict(
+                ConflictCode::DependencyMissing,
+                "replica authority is absent",
+            )
+        })?;
     let anchor = locked_anchor(conn, &key)
         .await?
         .map(anchor_from_row)
@@ -1780,14 +1790,6 @@ pub(super) async fn install_replica_anchor_in_connection(
             conflict(
                 ConflictCode::DependencyMissing,
                 "this Station holds no replica of the Realm stream",
-            )
-        })?;
-    let current = locked_authority(conn, &install.realm_id)
-        .await?
-        .ok_or_else(|| {
-            conflict(
-                ConflictCode::DependencyMissing,
-                "replica authority is absent",
             )
         })?;
     if current.generation != install.governance_generation {

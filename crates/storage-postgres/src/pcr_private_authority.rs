@@ -13,37 +13,88 @@ pub(crate) struct PrivateAuthorityCut {
     pub head: CommitStreamHead,
 }
 
-/// Native PCR genesis does not use the ordinary bootstrap materializer.
-/// Classify the actual accepted stream-zero original, never a missing projection.
-pub(crate) async fn native_inception(
+/// Read the immutable accepted origin, including the complete Human unit and
+/// receipt. Editable current/profile rows cannot reclassify a registered Human.
+pub(crate) async fn accepted_governance(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,
-) -> PersistenceResult<bool> {
+) -> PersistenceResult<arkret_wire::GenesisGovernance> {
     #[derive(diesel::QueryableByName)]
     struct Genesis {
         #[diesel(sql_type=Jsonb)]
         envelope: serde_json::Value,
+        #[diesel(sql_type=Jsonb)]
+        commit_json: serde_json::Value,
+        #[diesel(sql_type=diesel::sql_types::Nullable<diesel::sql_types::Binary>)]
+        exact_request_body: Option<Vec<u8>>,
+        #[diesel(sql_type=diesel::sql_types::Nullable<Jsonb>)]
+        result_json: Option<serde_json::Value>,
     }
-    let row=sql_query("SELECT e.envelope FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE c.realm_id=$1 AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',$1::text) AND c.stream_position=0 AND e.kind='ak.realm.create' AND e.state='committed'")
+    let row = sql_query("SELECT e.envelope,c.commit_json,g.exact_request_body,g.result_json FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk LEFT JOIN pcr_genesis_units g ON g.realm_id=c.realm_id WHERE c.realm_id=$1 AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',$1::text) AND c.stream_position=0 AND e.kind='ak.realm.create' AND e.state='committed'")
         .bind::<Text,_>(realm.as_str()).get_result::<Genesis>(&mut *conn).await.optional().map_err(PersistenceError::database)?
-        .ok_or_else(||unavailable("accepted inception original is missing"))?;
+        .ok_or_else(|| refused("accepted inception original is missing"))?;
     let event: arkret_wire::Event =
         serde_json::from_value(row.envelope).map_err(PersistenceError::database)?;
-    let payload: arkret_models_collaboration::events_payloads::RealmCreatePayload =
-        serde_json::from_value(
-            serde_json::to_value(event.payload).map_err(PersistenceError::database)?,
-        )
-        .map_err(PersistenceError::database)?;
-    if event.realm_id != *realm {
-        return Err(unavailable("inception belongs to another Realm"));
+    let commit: RealmCommit =
+        serde_json::from_value(row.commit_json).map_err(PersistenceError::database)?;
+    if event.realm_id != *realm
+        || commit.realm_id != *realm
+        || commit.event_ref != event.event_id
+        || RealmId::from_event_id(&event.event_id) != *realm
+    {
+        return Err(refused("inception original and covering Commit disagree"));
     }
-    use arkret_models_collaboration::events_payloads::RealmPurpose;
-    Ok(matches!(
-        payload.object.purpose,
-        RealmPurpose::PrincipalControl
-            | RealmPurpose::AgentControl
-            | RealmPurpose::AppletManagedControl
+    let governance = arkret_wire::GenesisGovernance::from_genesis(&event).map_err(refused)?;
+    if let arkret_wire::GenesisGovernance::Human(account) = &governance {
+        let input: arkret_models_collaboration::principal_operations::PcrGenesisAdmissionInput =
+            serde_json::from_slice(
+                row.exact_request_body
+                    .as_deref()
+                    .ok_or_else(|| refused("Human ordered genesis unit is missing"))?,
+            )
+            .map_err(refused)?;
+        let outcome: arkret_models_collaboration::principal_operations::PcrGenesisAdmissionOutcome =
+            serde_json::from_value(
+                row.result_json
+                    .ok_or_else(|| refused("Human accepted receipt is missing"))?,
+            )
+            .map_err(refused)?;
+        outcome.validate_against(&input).map_err(refused)?;
+        if input.genesis_unit.create() != &event
+            || outcome.commits[0] != commit
+            || account.station_id != input.account_authority_id
+            || account.principal_id != input.principal_id
+        {
+            return Err(refused(
+                "Human accepted unit, receipt and full Account differ",
+            ));
+        }
+    }
+    Ok(governance)
+}
+
+pub(crate) fn refused(detail: impl std::fmt::Display) -> PersistenceError {
+    PersistenceError::Conflict(format!("failed_precondition: PCR governance {detail}"))
+}
+
+pub(crate) async fn native_inception(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+) -> PersistenceResult<bool> {
+    Ok(!matches!(
+        accepted_governance(conn, realm).await?,
+        arkret_wire::GenesisGovernance::Collaboration
     ))
+}
+
+pub(crate) async fn require_transferable(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+) -> PersistenceResult<()> {
+    accepted_governance(conn, realm)
+        .await?
+        .require_transferable()
+        .map_err(refused)
 }
 
 /// The supported native export is deliberately closed. A PCR with a domain
@@ -53,6 +104,7 @@ pub(crate) async fn ensure_export_supported(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,
 ) -> PersistenceResult<()> {
+    require_transferable(conn, realm).await?;
     #[derive(diesel::QueryableByName)]
     struct Unsupported {
         #[diesel(sql_type=Bool)]
@@ -88,6 +140,7 @@ pub(crate) async fn admit_governance_change(
 ) -> Result<coland_storage::AuthorityCommitWriteOutcome, crate::PgTransactionError> {
     use crate::actor_profiles::{PcrSelfEventCut, verify_pcr_self_event};
     let event = &transaction.event;
+    require_transferable(conn, &event.realm_id).await?;
     if event.kind != arkret_wire::EventKind::RealmGovernanceStationChange
         || transaction.commit.producer_signer_fact_digest.is_some()
     {
@@ -177,7 +230,7 @@ fn unavailable(detail: impl std::fmt::Display) -> PersistenceError {
 }
 
 /// Acquire this before any holder account, policy, quota or private-cell lock.
-/// The Account's hosting Station and its PCR governor are independent identities.
+/// Human stays at its Account Station; only proven non-Human governance can split.
 pub(crate) async fn lock_holder(
     conn: &mut AsyncPgConnection,
     holder: &AccountId,
@@ -206,6 +259,18 @@ async fn lock_holder_mode(
         .get_result::<AuthorityRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(|| unavailable("has no complete accepted inception and root"))?;
     let service_id = DidCoreId::new(authority.service_id).map_err(unavailable)?;
+    let realm = RealmId::new(authority.realm_id.clone()).map_err(refused)?;
+    let governance = accepted_governance(conn, &realm).await?;
+    governance
+        .validate_current(
+            &service_id,
+            u64::try_from(authority.generation).map_err(refused)?,
+        )
+        .map_err(refused)?;
+    if require_frozen {
+        governance.require_transferable().map_err(refused)?;
+    }
+
     if expected_acceptor.is_some_and(|service| service != &service_id) {
         return Err(unavailable("is governed by another Station"));
     }
@@ -253,4 +318,22 @@ async fn lock_holder_mode(
             commit_id: head.commit_id,
         },
     })
+}
+
+/// Native Human private effects use the same current lifecycle boundary as
+/// the hosting projection. The authority lock precedes the account row lock.
+pub(crate) async fn require_active_human_account(
+    conn: &mut AsyncPgConnection,
+    holder: &AccountId,
+) -> PersistenceResult<()> {
+    #[derive(diesel::QueryableByName)]
+    struct Active {
+        #[diesel(sql_type=Bool)]
+        active: bool,
+    }
+    let row=sql_query("SELECT TRUE AS active FROM accounts a LEFT JOIN account_lifecycle l ON l.account_pk=a.pk WHERE a.principal_id=$1 AND a.station_id=$2 AND a.disabled_at IS NULL AND COALESCE(l.state NOT IN ('deactivated','erasure_pending'),TRUE) FOR SHARE OF a").bind::<Text,_>(holder.principal_id.as_str()).bind::<Text,_>(holder.station_id.as_str()).get_result::<Active>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    if !row.is_some_and(|r| r.active) {
+        return Err(unavailable("holder account is no longer active"));
+    }
+    Ok(())
 }

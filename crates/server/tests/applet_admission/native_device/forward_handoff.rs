@@ -77,8 +77,21 @@ async fn import_frozen(source: &PgPool, destination: &PgPool, realm: &RealmId, a
         if rows.as_array().unwrap().is_empty() {
             continue;
         }
-        let columns=diesel::sql_query("SELECT jsonb_agg(jsonb_build_object('name',column_name,'json_null',data_type='jsonb' AND is_nullable='NO') ORDER BY ordinal_position) AS value FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND is_generated='NEVER'")
+        let columns=diesel::sql_query("SELECT jsonb_agg(jsonb_build_object('name',column_name,'json_null',data_type='jsonb' AND is_nullable='NO','sequence',pg_get_serial_sequence(format('%I.%I',table_schema,table_name),column_name)) ORDER BY ordinal_position) AS value FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND is_generated='NEVER'")
             .bind::<Text,_>(&table).get_result::<JsonRow>(&mut from).await.unwrap().value;
+        let sequences = columns
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|column| {
+                column["sequence"].as_str().map(|sequence| {
+                    (
+                        column["name"].as_str().unwrap().to_owned(),
+                        sequence.to_owned(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
         let projection = columns
             .as_array()
             .unwrap()
@@ -102,16 +115,18 @@ async fn import_frozen(source: &PgPool, destination: &PgPool, realm: &RealmId, a
             .map(|v| format!("\"{}\"", v["name"].as_str().unwrap()))
             .collect::<Vec<_>>()
             .join(",");
-        captured.push((table, columns, projection, rows));
+        captured.push((table, columns, projection, rows, sequences));
     }
     to.transaction::<_,diesel::result::Error,_>(async |conn| {
-        for (table,columns,projection,rows) in &captured {
+        for (table,columns,projection,rows,_) in &captured {
             let query=format!("INSERT INTO {table} ({columns}) OVERRIDING SYSTEM VALUE SELECT {projection} FROM jsonb_populate_recordset(NULL::{table},$1) ON CONFLICT DO NOTHING");
             diesel::sql_query(query).bind::<Jsonb,_>(rows).execute(&mut *conn).await?;
         }
-        for table in ["canonical_realms","canonical_events"] {
-            diesel::sql_query(format!("SELECT setval(pg_get_serial_sequence('{table}','pk'),coalesce((SELECT max(pk) FROM {table}),1),true)"))
-                .execute(&mut *conn).await?;
+        for (table,_,_,_,sequences) in &captured {
+            for (column,sequence) in sequences {
+                diesel::sql_query(format!("SELECT setval($1::regclass,coalesce((SELECT max(\"{column}\") FROM {table}),1),true)"))
+                    .bind::<Text,_>(sequence).execute(&mut *conn).await?;
+            }
         }
         Ok(())
     }).await.unwrap();

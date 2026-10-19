@@ -54,6 +54,7 @@ pub(crate) async fn prepare(
     let mut conn = pg_conn(pool).await?;
     conn.transaction::<_,PgTransactionError,_>(async |conn| {
         let cut=crate::pcr_private_authority::lock_holder(conn,holder,Some(issuer)).await?;
+        crate::pcr_private_authority::require_transferable(conn,&cut.realm_id).await?;
         let job=sql_query("SELECT sequence FROM consent_private_effect_jobs WHERE holder_account_id=$1 AND realm_id=$2")
             .bind::<Jsonb,_>(serde_json::to_value(holder).map_err(PersistenceError::database)?).bind::<Text,_>(cut.realm_id.as_str())
             .get_result::<Sequence>(&mut *conn).await.optional()?;
@@ -86,4 +87,33 @@ pub(crate) async fn acknowledge(
     })
     .await
     .map_err(PgTransactionError::into_persistence)
+}
+
+/// Native cells already own their durable account journal. Draining this job
+/// sends a wakeup without constructing remote nonce or authority-cut state.
+pub(crate) async fn drain_native(
+    pool: &PgPool,
+    holder: &AccountId,
+    issuer: &DidCoreId,
+) -> PersistenceResult<Vec<coland_storage::AccountDataRecord>> {
+    let mut conn = pg_conn(pool).await?;
+    conn.transaction::<_,PgTransactionError,_>(async |conn| {
+  let cut=crate::pcr_private_authority::lock_holder(conn,holder,Some(issuer)).await?;
+  if holder.station_id != *issuer || !crate::pcr_private_authority::accepted_governance(conn,&cut.realm_id).await?.is_human() {return Err(crate::pcr_private_authority::refused("native effects require the Human account Station").into());}
+        crate::pcr_private_authority::require_active_human_account(conn,holder).await?;
+        crate::consent_current::records_in_connection(conn,holder,&cut.realm_id).await?;
+  let job=sql_query("DELETE FROM consent_private_effect_jobs WHERE holder_account_id=$1 RETURNING sequence").bind::<Jsonb,_>(serde_json::to_value(holder).map_err(PersistenceError::database)?).get_result::<Sequence>(&mut *conn).await.optional()?;
+  if job.is_none() {return Ok(Vec::new());}
+  #[derive(diesel::QueryableByName)]
+  struct NativeCell {
+   #[diesel(sql_type=Text)] account_data_key:String,
+   #[diesel(sql_type=BigInt)] revision:i64,
+   #[diesel(sql_type=Jsonb)] payload:serde_json::Value,
+   #[diesel(sql_type=diesel::sql_types::Timestamptz)] updated_at:chrono::DateTime<chrono::Utc>,
+  }
+  let actor=arkret_wire::ActorId::account(holder.clone()).to_string();
+  let cells=sql_query("SELECT account_data_key,revision,payload,updated_at FROM account_datas WHERE actor_id=$1 AND account_data_key IN ($2,$3) AND NOT tombstone AND account_data_source_current(actor_id,account_data_key)")
+   .bind::<Text,_>(&actor).bind::<Text,_>(arkret_wire::AccountDataKey::ACCOUNT_HOLDER_QUARANTINE).bind::<Text,_>(arkret_wire::AccountDataKey::ACCOUNT_INVITE_DELIVERY).get_results::<NativeCell>(&mut *conn).await?;
+  cells.into_iter().map(|c|Ok(coland_storage::AccountDataRecord{actor:actor.clone(),account_data_key:c.account_data_key,revision:u64::try_from(c.revision).map_err(PersistenceError::database)?,payload:c.payload,tombstone:false,updated_at:c.updated_at})).collect::<PersistenceResult<Vec<_>>>().map_err(Into::into)
+ }).await.map_err(PgTransactionError::into_persistence)
 }

@@ -37,7 +37,6 @@ const TABLES: &[(&str, &str)] = &[
     ("relation_current_results", "t.realm_id=v.realm_id"),
     ("governance_current_ready", "t.realm_id=v.realm_id"),
     ("realm_meta", "t.realm_id=v.realm_id"),
-    ("pcr_genesis_units", "t.realm_id=v.realm_id"),
     ("principal_resolutions", "t.pcr_realm_id=v.realm_id"),
     (
         "principal_resolution_events",
@@ -326,6 +325,28 @@ impl PgAuthorityCommitStore {
         {
             return Err(invalid("incomplete or unknown domain inventory"));
         }
+        let genesis = tables["canonical_events"]
+            .as_array()
+            .ok_or_else(|| invalid("genesis inventory missing"))?
+            .iter()
+            .filter_map(|row| row.get("envelope"))
+            .map(|value| {
+                serde_json::from_value::<arkret_wire::Event>(value.clone()).map_err(invalid)
+            })
+            .collect::<PersistenceResult<Vec<_>>>()?
+            .into_iter()
+            .find(|event| {
+                event.kind == arkret_wire::EventKind::RealmCreate
+                    && event.realm_id == manifest.realm_id
+            })
+            .ok_or_else(|| invalid("exact PCR inception missing"))?;
+        if RealmId::from_event_id(&genesis.event_id) != manifest.realm_id {
+            return Err(invalid("genesis does not derive the manifest Realm"));
+        }
+        arkret_wire::GenesisGovernance::from_genesis(&genesis)
+            .map_err(crate::pcr_private_authority::refused)?
+            .require_transferable()
+            .map_err(crate::pcr_private_authority::refused)?;
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_,PgTransactionError,_>(async |conn| {
             let lock=format!("pcr-native-import:{}",manifest.realm_id);

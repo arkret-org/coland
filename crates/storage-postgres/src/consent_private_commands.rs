@@ -126,6 +126,7 @@ pub(crate) async fn execute(
     let cut =
         crate::pcr_private_authority::lock_holder(conn, &request.holder_account_id, Some(acceptor))
             .await?;
+    crate::pcr_private_authority::require_transferable(conn, &cut.realm_id).await?;
     if cut.realm_id != request.realm_id || cut.generation != request.governance_generation {
         return Err(unavailable("request names an obsolete authority cut").into());
     }
@@ -163,14 +164,50 @@ pub(crate) async fn execute(
             return Ok(outcome);
         }
     }
-    let outcome = match &request.command {
+    let prepared = prepared.filter(|material| material.matches(request));
+    let outcome = apply_command(
+        conn,
+        &request.holder_account_id,
+        &cut.realm_id,
+        &request.command,
+        acceptor,
+        quota,
+        prepared,
+        now,
+    )
+    .await?;
+    let outcome = ConsentPrivateProxyOutcome {
+        request_digest: digest.clone(),
+        realm_id: cut.realm_id,
+        governance_generation: cut.generation,
+        effective_stream_head: cut.head,
+        evaluated_at: now,
+        expires_at: request.expires_at,
+        outcome,
+    };
+    if request.command.writes_private_state() {
+        sql_query("INSERT INTO consent_private_proxy_fences(holder_account_id,realm_id,governance_generation,nonce,expires_at,request_digest,outcome) VALUES($1,$2,$3,$4,$5,$6,$7)")
+            .bind::<Jsonb,_>(&holder).bind::<Text,_>(outcome.realm_id.as_str()).bind::<BigInt,_>(generation)
+            .bind::<Text,_>(&request.nonce).bind::<Timestamptz,_>(request.expires_at).bind::<Text,_>(&digest)
+            .bind::<Jsonb,_>(serde_json::to_value(&outcome).map_err(invalid)?).execute(&mut *conn).await?;
+    }
+    Ok(outcome)
+}
+
+async fn apply_command(
+    conn: &mut AsyncPgConnection,
+    holder: &AccountId,
+    realm: &arkret_wire::RealmId,
+    command: &ConsentPrivateCommand,
+    acceptor: &DidCoreId,
+    quota: &NewSourceQuotaConstraints,
+    prepared: Option<&coland_storage::PreparedPrivateInviteDelivery>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<ConsentPrivateCommandOutcome, PgTransactionError> {
+    Ok(match command {
         ConsentPrivateCommand::List(_) => {
-            let records = crate::consent_current::records_in_connection(
-                conn,
-                &request.holder_account_id,
-                &cut.realm_id,
-            )
-            .await?;
+            let records =
+                crate::consent_current::records_in_connection(conn, holder, realm).await?;
             ConsentPrivateCommandOutcome::List(ConsentPrivateListOutcome {
                 kind: ConsentPrivateListOutcomeKind::List,
                 body: arkret_models_collaboration::consent_operations::ConsentList {
@@ -187,8 +224,8 @@ pub(crate) async fn execute(
                 commit_json: Value,
             }
             let row=sql_query("SELECT v.value,c.commit_json FROM consent_result_versions v JOIN realm_commits c ON c.commit_id=v.commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE v.commit_id=$1 AND c.realm_id=$2 AND e.envelope->'actor_id'=$3 AND v.value->>'consent_id'=$4")
-                .bind::<Text,_>(command.body.commit_id.as_str()).bind::<Text,_>(cut.realm_id.as_str())
-                .bind::<Jsonb,_>(serde_json::to_value(ActorId::account(request.holder_account_id.clone())).map_err(invalid)?).bind::<Text,_>(command.body.consent_id.as_str())
+                .bind::<Text,_>(command.body.commit_id.as_str()).bind::<Text,_>(realm.as_str())
+                .bind::<Jsonb,_>(serde_json::to_value(ActorId::account(holder.clone())).map_err(invalid)?).bind::<Text,_>(command.body.consent_id.as_str())
                 .get_result::<Original>(&mut *conn).await.optional()?.ok_or_else(||unavailable("exact original Consent version is missing"))?;
             let value: arkret_models_collaboration::consent_operations::ConsentValue =
                 serde_json::from_value(row.value).map_err(invalid)?;
@@ -213,30 +250,23 @@ pub(crate) async fn execute(
         ConsentPrivateCommand::Effects(_) => {
             ConsentPrivateCommandOutcome::Effects(ConsentPrivateEffectsOutcome {
                 kind: ConsentPrivateEffectsOutcomeKind::Effects,
-                body: effects(conn, &request.holder_account_id).await?,
+                body: effects(conn, holder).await?,
             })
         }
         ConsentPrivateCommand::InvitePolicy(command) => {
             let policy = &command.body;
-            if policy.schema!=arkret_models_collaboration::governance::invite_addressing::InviteReceivePolicy::SCHEMA || policy.account_id!=request.holder_account_id {
+            if policy.schema!=arkret_models_collaboration::governance::invite_addressing::InviteReceivePolicy::SCHEMA || policy.account_id!=*holder {
                 return Err(invalid("private receive policy schema or holder mismatch").into());
             }
             quota
                 .effective(policy.new_source_quota.as_ref())
                 .map_err(invalid)?;
-            let previous = policy_cell(conn, &request.holder_account_id)
-                .await?
-                .map(|cell| cell.revision);
+            let previous = policy_cell(conn, holder).await?.map(|cell| cell.revision);
             let cell=sql_query("INSERT INTO invite_receive_policies(account_pk,policy_payload) SELECT pk,$3 FROM accounts WHERE principal_id=$1 AND station_id=$2 ON CONFLICT(account_pk) DO UPDATE SET revision=invite_receive_policies.revision+CASE WHEN invite_receive_policies.policy_payload IS DISTINCT FROM EXCLUDED.policy_payload THEN 1 ELSE 0 END,policy_payload=EXCLUDED.policy_payload,updated_at=CASE WHEN invite_receive_policies.policy_payload IS DISTINCT FROM EXCLUDED.policy_payload THEN now() ELSE invite_receive_policies.updated_at END RETURNING revision,policy_payload AS content")
-                .bind::<Text,_>(request.holder_account_id.principal_id.as_str()).bind::<Text,_>(request.holder_account_id.station_id.as_str())
+                .bind::<Text,_>(holder.principal_id.as_str()).bind::<Text,_>(holder.station_id.as_str())
                 .bind::<Jsonb,_>(serde_json::to_value(policy).map_err(invalid)?).get_result::<Cell>(&mut *conn).await?;
             if previous != Some(cell.revision) {
-                crate::consent_private_effects::mark_pending(
-                    conn,
-                    &request.holder_account_id,
-                    &cut.realm_id,
-                )
-                .await?;
+                crate::consent_private_effects::mark_pending(conn, holder, realm).await?;
             }
             ConsentPrivateCommandOutcome::InvitePolicy(ConsentPrivateInvitePolicyOutcome {
                 kind: ConsentPrivateInvitePolicyOutcomeKind::InvitePolicy,
@@ -255,7 +285,7 @@ pub(crate) async fn execute(
             crate::consent_request_quarantine::admit_in_connection(
                 conn,
                 &coland_storage::ConsentRequestQuarantineInput {
-                    holder: request.holder_account_id.clone(),
+                    holder: holder.clone(),
                     acceptor_service_id: acceptor.clone(),
                     requester: requester.clone(),
                     consent_scope: command.body.request.consent_scope,
@@ -272,14 +302,13 @@ pub(crate) async fn execute(
             })
         }
         ConsentPrivateCommand::InviteDelivery(command) => {
-            let verified = prepared
-                .filter(|material| material.matches(request))
-                .ok_or_else(|| {
-                    unavailable("original Invite receipt has not been independently verified")
-                })?;
+            let verified = prepared.ok_or_else(|| {
+                unavailable("original Invite receipt has not been independently verified")
+            })?;
             let body = crate::consent_private_invites::admit(
                 conn,
-                request,
+                holder,
+                realm,
                 &command.body,
                 verified,
                 quota,
@@ -291,21 +320,56 @@ pub(crate) async fn execute(
                 body,
             })
         }
-    };
-    let outcome = ConsentPrivateProxyOutcome {
-        request_digest: digest.clone(),
-        realm_id: cut.realm_id,
-        governance_generation: cut.generation,
-        effective_stream_head: cut.head,
-        evaluated_at: now,
-        expires_at: request.expires_at,
-        outcome,
-    };
-    if request.command.writes_private_state() {
-        sql_query("INSERT INTO consent_private_proxy_fences(holder_account_id,realm_id,governance_generation,nonce,expires_at,request_digest,outcome) VALUES($1,$2,$3,$4,$5,$6,$7)")
-            .bind::<Jsonb,_>(&holder).bind::<Text,_>(outcome.realm_id.as_str()).bind::<BigInt,_>(generation)
-            .bind::<Text,_>(&request.nonce).bind::<Timestamptz,_>(request.expires_at).bind::<Text,_>(&digest)
-            .bind::<Jsonb,_>(serde_json::to_value(&outcome).map_err(invalid)?).execute(&mut *conn).await?;
+    })
+}
+
+pub(crate) async fn execute_native(
+    conn: &mut AsyncPgConnection,
+    holder: &AccountId,
+    context: &ConsentPrivateContext,
+    command: &ConsentPrivateCommand,
+    acceptor: &DidCoreId,
+    quota: &NewSourceQuotaConstraints,
+    prepared: Option<&coland_storage::PreparedPrivateInviteDelivery>,
+) -> Result<ConsentPrivateCommandOutcome, PgTransactionError> {
+    command
+        .validate_context(holder, context, acceptor)
+        .map_err(invalid)?;
+    let cut = crate::pcr_private_authority::lock_holder(conn, holder, Some(acceptor)).await?;
+    if !crate::pcr_private_authority::accepted_governance(conn, &cut.realm_id)
+        .await?
+        .is_human()
+        || holder.station_id != *acceptor
+    {
+        return Err(invalid("native Human command requires its account Station").into());
     }
-    Ok(outcome)
+    crate::pcr_private_authority::require_active_human_account(conn, holder).await?;
+    let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    if let ConsentPrivateContext::HolderSession(context) = context {
+        let status =
+            crate::pcr_device_status_reader::confirmed_pcr_device_status_cut_in_connection(
+                conn,
+                holder,
+                &context.device_id,
+                now,
+            )
+            .await?;
+        if !status.is_some_and(|s| {
+            s.lifecycle == crate::pcr_device_status_fold::PcrDeviceLifecycle::Active
+        }) {
+            return Err(unavailable("holder Device is no longer active").into());
+        }
+    }
+    let prepared = prepared.filter(|material| material.matches_native(holder, command));
+    apply_command(
+        conn,
+        holder,
+        &cut.realm_id,
+        command,
+        acceptor,
+        quota,
+        prepared,
+        now,
+    )
+    .await
 }

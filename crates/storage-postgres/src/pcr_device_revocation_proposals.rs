@@ -286,6 +286,35 @@ pub(crate) async fn confirmed_pcr_device_cut_in_connection(
     .optional()
     .map_err(PersistenceError::database)?;
     let Some(row) = row else { return Ok(None) };
+    let realm =
+        arkret_wire::RealmId::new(row.pcr_realm_id.clone()).map_err(|e| invalid(e.to_string()))?;
+    if let arkret_wire::GenesisGovernance::Human(holder) =
+        crate::pcr_private_authority::accepted_governance(conn, &realm).await?
+    {
+        if holder != *account {
+            return Err(invalid("Human device cut belongs to another full Account"));
+        }
+        #[derive(diesel::QueryableByName)]
+        struct Governor {
+            #[diesel(sql_type=Text)]
+            service_id: String,
+            #[diesel(sql_type=diesel::sql_types::BigInt)]
+            generation: i64,
+        }
+        let current =
+            sql_query("SELECT service_id,generation FROM realm_authorities WHERE realm_id=$1")
+                .bind::<Text, _>(realm.as_str())
+                .get_result::<Governor>(&mut *conn)
+                .await
+                .map_err(PersistenceError::database)?;
+        arkret_wire::GenesisGovernance::Human(holder)
+            .validate_current(
+                &arkret_wire::DidCoreId::new(current.service_id)
+                    .map_err(|e| invalid(e.to_string()))?,
+                u64::try_from(current.generation).map_err(|e| invalid(e.to_string()))?,
+            )
+            .map_err(|e| invalid(e.to_string()))?;
+    }
     if row.generation_commit_id != row.latest_generation_commit_id
         || row.authorization_commit_id != row.latest_authorization_commit_id
         || row.authorization_stream_position != row.latest_authorization_stream_position

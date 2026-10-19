@@ -35,6 +35,20 @@ async fn fixture(pool: &PgPool) -> pcr_genesis::PcrGenesisFixture {
     diesel::sql_query("INSERT INTO device_inventory_station(singleton,station_id) VALUES(TRUE,$1) ON CONFLICT(singleton) DO NOTHING")
         .bind::<Text,_>(fixture.history.account.station_id.as_str()).execute(&mut conn).await.unwrap();
     drop(conn);
+    use coland_storage::{AccountPk, AccountRecord, AccountStore};
+    coland_storage_postgres::PgAccountStore { pool: pool.clone() }
+        .put(&AccountRecord {
+            pk: AccountPk(0),
+            principal_id: fixture.history.account.principal_id.clone(),
+            station_id: fixture.history.account.station_id.clone(),
+            localpart: String::new(),
+            display_name: None,
+            bio: None,
+            avatar_blob_ref: None,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
     fixture
         .admit_founding_device(&PgPersistenceStore::new(pool.clone()))
         .await
@@ -534,17 +548,14 @@ async fn consent_current_guards_invite_delivery_cas_and_rejects_a_pre_revoke_pro
 }
 
 #[tokio::test]
-async fn private_commands_and_scoped_native_import_preserve_one_authority_cut() {
+async fn native_human_policy_retry_and_durable_effect_drain_do_not_create_proxy_state() {
     use arkret_models_collaboration::consent_private::*;
-    use arkret_models_collaboration::governance::invite_addressing::InviteReceivePolicy;
-    use coland_storage::{AccountPk, AccountRecord, AccountStore, InviteNewSourceLedgerStore};
-    use coland_storage_postgres::{PgAccountStore, PgInviteNewSourceLedgerStore};
+    use coland_storage::{AccountPk, AccountRecord, AccountStore};
     let db = TestDatabase::lease().await;
     let pool = db.pool();
     let f = fixture(&pool).await;
-    let holder = f.history.account.clone();
-    let accounts = PgAccountStore { pool: pool.clone() };
-    accounts
+    let holder = &f.history.account;
+    coland_storage_postgres::PgAccountStore { pool: pool.clone() }
         .put(&AccountRecord {
             pk: AccountPk(0),
             principal_id: holder.principal_id.clone(),
@@ -558,184 +569,246 @@ async fn private_commands_and_scoped_native_import_preserve_one_authority_cut() 
         .await
         .unwrap();
     let store = PgConsentCurrentStore { pool: pool.clone() };
-    let authority = PgAuthorityCommitStore { pool: pool.clone() };
-    let mut request = ConsentPrivateProxyRequest {
-        holder_account_id: holder.clone(),
-        realm_id: f.unit.transactions[1].event.realm_id.clone(),
-        governance_generation: 0,
-        nonce: arkret_canonical::base64url_encode([21; 32]),
-        expires_at: arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now())
-            + chrono::Duration::seconds(30),
-        context: ConsentPrivateContext::HolderSession(ConsentPrivateHolderSessionContext {
-            kind: ConsentPrivateHolderSessionContextKind::HolderSession,
-            actor_id: ActorId::account(holder.clone()),
-            device_id: f.history.founding_device_id.clone(),
-        }),
-        command: ConsentPrivateCommand::InvitePolicy(ConsentPrivateInvitePolicyCommand {
-            kind: ConsentPrivateInvitePolicyCommandKind::InvitePolicy,
-            body: InviteReceivePolicy::spec_default(holder.clone()),
-        }),
-    };
-    let quota = arkret_wire::NewSourceQuotaConstraints::default();
+    let context = ConsentPrivateContext::HolderSession(ConsentPrivateHolderSessionContext {
+        kind: ConsentPrivateHolderSessionContextKind::HolderSession,
+        actor_id: ActorId::account(holder.clone()),
+        device_id: f.history.founding_device_id.clone(),
+    });
+    let command=ConsentPrivateCommand::InvitePolicy(ConsentPrivateInvitePolicyCommand{kind:ConsentPrivateInvitePolicyCommandKind::InvitePolicy,body:arkret_models_collaboration::governance::invite_addressing::InviteReceivePolicy::spec_default(holder.clone())});
     let first = store
-        .private_command(&request, &holder.station_id, &holder.station_id, &quota)
+        .native_command(
+            holder,
+            &context,
+            &command,
+            &holder.station_id,
+            &Default::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    let retry = store
+        .native_command(
+            holder,
+            &context,
+            &command,
+            &holder.station_id,
+            &Default::default(),
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(
-        first,
+        serde_json::to_value(first).unwrap(),
+        serde_json::to_value(retry).unwrap()
+    );
+    assert_eq!(
         store
-            .private_command(&request, &holder.station_id, &holder.station_id, &quota)
-            .await
-            .unwrap()
-    );
-    store.observe_private_cut(&request, &first).await.unwrap();
-    let mut rollback = first.clone();
-    rollback.effective_stream_head.stream_position -= 1;
-    assert!(
-        store
-            .observe_private_cut(&request, &rollback)
-            .await
-            .is_err()
-    );
-    let mut fork = first.clone();
-    fork.effective_stream_head.commit_id = RealmCommitId::from_digest([99; 32]);
-    assert!(store.observe_private_cut(&request, &fork).await.is_err());
-    let mut rebound = request.clone();
-    if let ConsentPrivateCommand::InvitePolicy(policy) = &mut rebound.command {
-        policy.body.holder_allowed_introduction_kinds.clear();
-    }
-    assert!(
-        store
-            .private_command(&rebound, &holder.station_id, &holder.station_id, &quota)
-            .await
-            .is_err()
-    );
-    let wrong: arkret_wire::DidCoreId = "ak:did_core:web:other-authority.example".parse().unwrap();
-    assert!(
-        store
-            .private_command(&request, &holder.station_id, &wrong, &quota)
-            .await
-            .is_err()
-    );
-    assert!(authority.export_pcr_private_state(&holder).await.is_err());
-    let tag = PgInviteNewSourceLedgerStore { pool: pool.clone() }
-        .source_digest(&holder, &holder.principal_id)
-        .await
-        .unwrap();
-    let change = write(
-        &f,
-        &f.unit.transactions[1].commit,
-        EventKind::RealmGovernanceStationChange,
-        serde_json::json!({"expected_governance_generation":0,"expected_realm_stream_commit_id":f.unit.transactions[1].commit.commit_id,"new_governance_station_id":wrong}),
-    );
-    assert!(matches!(
-        authority
-            .admit_pcr_governance_change(&change.transaction)
+            .pending_effect_holders(&holder.station_id)
             .await
             .unwrap(),
-        coland_storage::AuthorityCommitWriteOutcome::Committed
-    ));
-    request.nonce = arkret_canonical::base64url_encode([22; 32]);
+        vec![holder.clone()]
+    );
     assert!(
         store
-            .private_command(&request, &holder.station_id, &holder.station_id, &quota)
+            .prepare_effect_publication(
+                holder,
+                &holder.station_id,
+                arkret_canonical::base64url_encode([1; 32])
+            )
             .await
             .is_err()
     );
-    let (manifest, bytes) = authority.export_pcr_private_state(&holder).await.unwrap();
-    let target_db = TestDatabase::lease().await;
-    let target_pool = target_db.pool();
-    let other = arkret_wire::AccountId::new(wrong.clone(), wrong.clone());
-    let target_accounts = PgAccountStore {
-        pool: target_pool.clone(),
-    };
-    target_accounts
-        .put(&AccountRecord {
-            pk: AccountPk(0),
-            principal_id: other.principal_id.clone(),
-            station_id: other.station_id.clone(),
-            localpart: String::new(),
-            display_name: None,
-            bio: None,
-            avatar_blob_ref: None,
-            created_at: chrono::Utc::now(),
-        })
+    store
+        .drain_native_effects(holder, &holder.station_id)
         .await
         .unwrap();
-    let target = PgAuthorityCommitStore {
-        pool: target_pool.clone(),
-    };
-    let before = footprint(&target_pool).await;
-    let mut bad = manifest.clone();
-    bad.state_digest = arkret_wire::Hash::new(arkret_canonical::sha256_digest(b"wrong")).unwrap();
-    assert!(target.import_pcr_private_state(&bad, &bytes).await.is_err());
-    assert_eq!(before, footprint(&target_pool).await);
-    target
-        .import_pcr_private_state(&manifest, &bytes)
-        .await
-        .unwrap();
-    let (imported, reexported) = target.export_pcr_private_state(&holder).await.unwrap();
-    assert_eq!(imported.state_digest, manifest.state_digest);
-    assert_eq!(reexported, bytes);
-    assert!(target_accounts.get(&other).await.unwrap().is_some());
-    assert_eq!(
-        PgInviteNewSourceLedgerStore {
-            pool: target_pool.clone()
-        }
-        .source_digest(&holder, &holder.principal_id)
-        .await
-        .unwrap(),
-        tag
+    assert!(
+        store
+            .pending_effect_holders(&holder.station_id)
+            .await
+            .unwrap()
+            .is_empty()
     );
     assert!(
-        PgConsentCurrentStore {
-            pool: target_pool.clone()
-        }
-        .private_command(&request, &holder.station_id, &wrong, &quota)
-        .await
-        .is_err()
+        store
+            .drain_native_effects(holder, &holder.station_id)
+            .await
+            .unwrap()
+            .is_empty()
     );
-    let mut material = authority
-        .realm_state_snapshot_material(&manifest.realm_id)
+}
+
+#[tokio::test]
+async fn human_pcr_rejects_change_export_proxy_import_and_activation_without_any_effect() {
+    use arkret_models_collaboration::consent_private::*;
+    let db = TestDatabase::lease().await;
+    let pool = db.pool();
+    let f = fixture(&pool).await;
+    let account = &f.history.account;
+    let tail = &f.unit.transactions.last().unwrap().commit;
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let before = footprint(&pool).await;
+    let current = store
+        .current_authority(&tail.realm_id)
         .await
         .unwrap()
         .unwrap();
-    material
-        .visible_stream_heads
-        .sort_by(|a, b| a.stream_ref.cmp(&b.stream_ref));
-    let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let change = write(
+        &f,
+        tail,
+        EventKind::RealmGovernanceStationChange,
+        serde_json::json!({"expected_governance_generation":0,"expected_realm_stream_commit_id":tail.commit_id,"new_governance_station_id":"ak:did_core:web:other.example"}),
+    );
+    let error = store
+        .admit_pcr_governance_change(&change.transaction)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Human PCR"), "{error}");
+    assert!(store.export_pcr_private_state(account).await.is_err());
+    let commands = PgConsentCurrentStore { pool: pool.clone() };
+    let context = ConsentPrivateContext::HolderSession(ConsentPrivateHolderSessionContext {
+        kind: ConsentPrivateHolderSessionContextKind::HolderSession,
+        actor_id: ActorId::account(account.clone()),
+        device_id: f.history.founding_device_id.clone(),
+    });
+    let command = ConsentPrivateCommand::List(ConsentPrivateListCommand {
+        kind: ConsentPrivateListCommandKind::List,
+        body: ConsentPrivateEmptyBody {},
+    });
+    // The native read succeeds on the same accepted account and device. A peer
+    // envelope naming that very same Station still cannot proxy a Human PCR.
+    assert!(matches!(
+        commands
+            .native_command(
+                account,
+                &context,
+                &command,
+                &account.station_id,
+                &Default::default(),
+                None
+            )
+            .await
+            .unwrap(),
+        ConsentPrivateCommandOutcome::List(_)
+    ));
+    let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let request = ConsentPrivateProxyRequest {
+        holder_account_id: account.clone(),
+        realm_id: tail.realm_id.clone(),
+        governance_generation: 0,
+        nonce: arkret_canonical::base64url_encode([7u8; 24]),
+        expires_at: now + chrono::Duration::seconds(30),
+        context,
+        command,
+    };
+    let error = commands
+        .private_command(
+            &request,
+            &account.station_id,
+            &account.station_id,
+            &Default::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Human PCR"), "{error}");
+    let mut tables = serde_json::Map::new();
+    for table in [
+        "accounts",
+        "canonical_realms",
+        "canonical_events",
+        "realm_authorities",
+        "realm_commits",
+        "realm_commit_event_kinds",
+        "realm_authority_handoffs",
+        "pcr_private_handoff_imports",
+        "realm_state_snapshots",
+        "realm_bootstrap_current_results",
+        "realm_authority_root_current_results",
+        "realm_policy_bundle_current_results",
+        "member_state_current_results",
+        "current_result_heads",
+        "current_result_versions",
+        "relation_current_results",
+        "governance_current_ready",
+        "realm_meta",
+        "principal_resolutions",
+        "principal_resolution_events",
+        "pcr_device_generation_current_results",
+        "pcr_device_authorization_current_results",
+        "pcr_device_revocation_proposals",
+        "actor_profile_current_results",
+        "actor_profile_result_versions",
+        "consent_current_results",
+        "consent_result_versions",
+        "agent_producer_signer_keys",
+        "account_datas",
+        "actor_private_events",
+        "account_global_versions",
+        "invite_receive_policies",
+        "invite_new_source_hmac_keys",
+        "invite_new_source_ledgers",
+        "consent_private_effect_jobs",
+        "consent_private_proxy_fences",
+        "mimi_consent_correlations",
+    ] {
+        tables.insert(table.into(), serde_json::json!([]));
+    }
+    tables["canonical_events"] = serde_json::json!([{"envelope":f.unit.transactions[0].event}]);
+    let archive = serde_json::json!({"format":"postgres-native-v1","holder_account_id":account,"realm_id":tail.realm_id,"tables":tables});
+    let bytes = arkret_canonical::canonical_json_bytes(&archive).unwrap();
+    let manifest = arkret_models_collaboration::authority_commit::PcrPrivateHandoffManifest {
+        realm_id: tail.realm_id.clone(),
+        holder_account_id: account.clone(),
+        governance_generation: 0,
+        effective_stream_head: arkret_wire::CommitStreamHead {
+            stream_ref: tail.stream_ref.clone(),
+            stream_position: tail.stream_position,
+            commit_id: tail.commit_id.clone(),
+        },
+        nonce: arkret_canonical::base64url_encode([9u8; 32]),
+        state_digest: arkret_wire::Hash::new(arkret_canonical::sha256_digest(&bytes)).unwrap(),
+    };
+    let error = store
+        .import_pcr_private_state(&manifest, &bytes)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Human PCR"), "{error}");
+    // Even a content-addressed Snapshot, matching private manifest and both
+    // real Station signatures cannot activate a Human PCR at another Station.
+    let material = store
+        .realm_state_snapshot_material(&tail.realm_id)
+        .await
+        .unwrap()
+        .unwrap();
     let old_key = SigningKey::from_bytes(&device_authorization_history::STATION_AUTHORITY_SEED);
-    let new_key = SigningKey::from_bytes(&[41; 32]);
-    let old_method = DidUrl::new("did:web:coland.example#authority").unwrap();
-    let new_method = DidUrl::new("did:web:other-authority.example#authority").unwrap();
+    let old_method = f.history.authority_method();
     let snapshot = coland_services::authority_commit::build_signed_realm_state_snapshot(
         &material,
         old_method.clone(),
         &old_key,
-        at,
+        now,
     )
     .unwrap();
+    let heads = material.visible_stream_heads.clone();
+    let new_key = SigningKey::from_bytes(&[0xb2; 32]);
     let mut handoff = arkret_wire::RealmAuthorityHandoff {
-        handoff_id: arkret_wire::RealmAuthorityHandoffId::from_digest([42; 32]),
-        realm_id: manifest.realm_id.clone(),
+        pcr_private_state_digest: Some(manifest.digest().unwrap()),
+        handoff_id: arkret_wire::RealmAuthorityHandoffId::from_digest([0x43; 32]),
+        realm_id: tail.realm_id.clone(),
         from_generation: 0,
         to_generation: 1,
-        from_service_id: holder.station_id.clone(),
-        to_service_id: wrong.clone(),
+        from_service_id: account.station_id.clone(),
+        to_service_id: "ak:did_core:web:other.example".parse().unwrap(),
         change_event_ref: change.transaction.event.event_id.clone(),
         change_commit_id: change.transaction.commit.commit_id.clone(),
         final_stream_heads_digest: arkret_wire::Hash::new(
-            arkret_canonical::canonical_sha256(&material.visible_stream_heads).unwrap(),
+            arkret_canonical::canonical_sha256(&heads).unwrap(),
         )
         .unwrap(),
-        historical_signer_facts_digest: Some(
-            arkret_models_collaboration::authority_commit::historical_signer_facts_digest(&[])
-                .unwrap(),
-        ),
-        pcr_private_state_digest: Some(manifest.digest().unwrap()),
+        historical_signer_facts_digest: None,
         snapshot_ref: snapshot.snapshot_id.clone(),
-        old_authority_signature: change.transaction.commit.signature.clone(),
-        new_authority_acceptance_signature: change.transaction.commit.signature.clone(),
+        old_authority_signature: tail.signature.clone(),
+        new_authority_acceptance_signature: tail.signature.clone(),
     };
     let unsigned = arkret_canonical::unsigned_value(
         &handoff,
@@ -749,7 +822,7 @@ async fn private_commands_and_scoped_native_import_preserve_one_authority_cut() 
         &unsigned,
         DetachedSignatureContext::RealmAuthorityHandoffOld,
         old_method,
-        at,
+        now,
         &old_key,
     )
     .unwrap();
@@ -757,249 +830,97 @@ async fn private_commands_and_scoped_native_import_preserve_one_authority_cut() 
         arkret_signatures::detached_object::sign_detached_object(
             &unsigned,
             DetachedSignatureContext::RealmAuthorityHandoffNewAcceptance,
-            new_method,
-            at,
+            DidUrl::new("did:web:other.example#authority").unwrap(),
+            now,
             &new_key,
         )
         .unwrap();
-    // The old ordinary bootstrap reader has no native PCR purpose projection.
-    // Applicability is proved by the accepted stream-zero genesis original.
-    assert!(
-        target
-            .install_handoff(&handoff, &material.visible_stream_heads, &snapshot)
-            .await
-            .is_err()
-    );
-    target
-        .install_handoff_with_private_state(
-            &handoff,
-            &material.visible_stream_heads,
-            &snapshot,
-            Some(&manifest),
-        )
+    handoff.validate_shape().unwrap();
+    let refused = store
+        .install_handoff_with_private_state(&handoff, &heads, &snapshot, Some(&manifest))
         .await
-        .unwrap();
-    target
-        .install_handoff_with_private_state(
-            &handoff,
-            &material.visible_stream_heads,
-            &snapshot,
-            Some(&manifest),
-        )
-        .await
-        .unwrap();
-    request.governance_generation = 1;
-    request.command = ConsentPrivateCommand::List(ConsentPrivateListCommand {
-        kind: ConsentPrivateListCommandKind::List,
-        body: ConsentPrivateEmptyBody {},
-    });
+        .unwrap_err();
+    assert!(refused.to_string().contains("Human PCR"), "{refused}");
     assert_eq!(
-        PgConsentCurrentStore {
-            pool: target_pool.clone()
-        }
-        .private_command(&request, &holder.station_id, &wrong, &quota)
-        .await
-        .unwrap()
-        .governance_generation,
-        1
+        store
+            .current_authority(&tail.realm_id)
+            .await
+            .unwrap()
+            .unwrap(),
+        current
     );
+    assert_eq!(footprint(&pool).await, before);
+    let mut conn = pool.get().await.unwrap();
+    #[derive(diesel::QueryableByName)]
+    struct Empty {
+        #[diesel(sql_type=diesel::sql_types::BigInt)]
+        count: i64,
+    }
+    let row=diesel::sql_query("SELECT (SELECT count(*) FROM consent_private_proxy_fences)+(SELECT count(*) FROM consent_private_proxy_cuts)+(SELECT count(*) FROM consent_private_effect_fences)+(SELECT count(*) FROM consent_private_effect_cuts)+(SELECT count(*) FROM pcr_private_handoff_imports) AS count").get_result::<Empty>(&mut conn).await.unwrap();
+    assert_eq!(row.count, 0);
 }
 
 #[tokio::test]
-async fn private_effect_publication_is_atomic_recoverable_and_rejects_rebinding() {
+async fn disabled_human_account_cannot_execute_native_commands_or_drain_notifications() {
     use arkret_models_collaboration::consent_private::*;
-    use arkret_models_collaboration::governance::invite_addressing::InviteReceivePolicy;
-    use coland_storage::{AccountPk, AccountRecord, AccountStore};
-    use coland_storage_postgres::PgAccountStore;
     let db = TestDatabase::lease().await;
     let pool = db.pool();
     let f = fixture(&pool).await;
-    let holder = f.history.account.clone();
-    PgAccountStore { pool: pool.clone() }
-        .put(&AccountRecord {
-            pk: AccountPk(0),
-            principal_id: holder.principal_id.clone(),
-            station_id: holder.station_id.clone(),
-            localpart: String::new(),
-            display_name: None,
-            bio: None,
-            avatar_blob_ref: None,
-            created_at: chrono::Utc::now(),
-        })
-        .await
-        .unwrap();
+    let holder = &f.history.account;
     let store = PgConsentCurrentStore { pool: pool.clone() };
-    let mut request = ConsentPrivateProxyRequest {
-        holder_account_id: holder.clone(),
-        realm_id: f.unit.transactions[1].event.realm_id.clone(),
-        governance_generation: 0,
-        nonce: arkret_canonical::base64url_encode([71; 32]),
-        expires_at: arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now())
-            + chrono::Duration::seconds(30),
-        context: ConsentPrivateContext::HolderSession(ConsentPrivateHolderSessionContext {
-            kind: ConsentPrivateHolderSessionContextKind::HolderSession,
-            actor_id: ActorId::account(holder.clone()),
-            device_id: f.history.founding_device_id.clone(),
-        }),
-        command: ConsentPrivateCommand::InvitePolicy(ConsentPrivateInvitePolicyCommand {
-            kind: ConsentPrivateInvitePolicyCommandKind::InvitePolicy,
-            body: InviteReceivePolicy::spec_default(holder.clone()),
-        }),
-    };
+    let context = ConsentPrivateContext::HolderSession(ConsentPrivateHolderSessionContext {
+        kind: ConsentPrivateHolderSessionContextKind::HolderSession,
+        actor_id: ActorId::account(holder.clone()),
+        device_id: f.history.founding_device_id.clone(),
+    });
+    let command=ConsentPrivateCommand::InvitePolicy(ConsentPrivateInvitePolicyCommand{kind:ConsentPrivateInvitePolicyCommandKind::InvitePolicy,body:arkret_models_collaboration::governance::invite_addressing::InviteReceivePolicy::spec_default(holder.clone())});
     store
-        .private_command(
-            &request,
-            &holder.station_id,
+        .native_command(
+            holder,
+            &context,
+            &command,
             &holder.station_id,
             &Default::default(),
+            None,
         )
         .await
         .unwrap();
-    assert_eq!(
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query(
+        "UPDATE accounts SET disabled_at=now() WHERE principal_id=$1 AND station_id=$2",
+    )
+    .bind::<Text, _>(holder.principal_id.as_str())
+    .bind::<Text, _>(holder.station_id.as_str())
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    drop(conn);
+    let before = footprint(&pool).await;
+    assert!(
         store
-            .pending_effect_holders(&holder.station_id)
-            .await
-            .unwrap(),
-        vec![holder.clone()]
-    );
-    let first = store
-        .prepare_effect_publication(
-            &holder,
-            &holder.station_id,
-            arkret_canonical::base64url_encode([72; 32]),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    let authority = PgAuthorityCommitStore { pool: pool.clone() }
-        .current_authority(&request.realm_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let apply = |publication: ConsentPrivateEffectsPublishRequest| {
-        let store = PgConsentCurrentStore { pool: pool.clone() };
-        let holder = holder.clone();
-        let authority = authority.clone();
-        async move {
-            store
-                .project_effect_publication(
-                    &publication,
-                    &holder.station_id,
-                    &holder.station_id,
-                    &authority,
-                    &publication.effective_stream_head,
-                )
-                .await
-        }
-    };
-    let original = apply(first.request.clone()).await.unwrap();
-    assert!(original.updates.is_empty());
-    assert_eq!(
-        apply(first.request.clone()).await.unwrap().outcome,
-        original.outcome
-    );
-    let mut fork = first.request.clone();
-    fork.effects
-        .invite_receive_policy
-        .as_mut()
-        .unwrap()
-        .content
-        .holder_allowed_introduction_kinds
-        .clear();
-    assert!(apply(fork).await.is_err());
-    let mut expired = first.request.clone();
-    expired.expires_at = expired.evaluated_at - chrono::Duration::seconds(1);
-    assert!(apply(expired).await.is_err());
-    let mut wrong_generation = first.request.clone();
-    wrong_generation.governance_generation = 1;
-    assert!(apply(wrong_generation).await.is_err());
-    request.nonce = arkret_canonical::base64url_encode([73; 32]);
-    let requester = arkret_wire::AccountId::new(
-        "ak:did_core:web:requester.example".parse().unwrap(),
-        holder.station_id.clone(),
-    );
-    let actor = ActorId::account(requester);
-    request.context = ConsentPrivateContext::Station(ConsentPrivateStationContext {
-        kind: ConsentPrivateStationContextKind::Station,
-        actor_id: ActorId::service(holder.station_id.clone()),
-    });
-    request.command = ConsentPrivateCommand::Request(ConsentPrivateRequestCommand {
-        kind: ConsentPrivateRequestCommandKind::Request,
-        body: ConsentPrivateRequestBody {
-            requester_actor_id: actor,
-            request: serde_json::from_value(
-                serde_json::json!({"holder_account_id":holder,"consent_scope":"voice_call"}),
+            .native_command(
+                holder,
+                &context,
+                &command,
+                &holder.station_id,
+                &Default::default(),
+                None
             )
-            .unwrap(),
-        },
-    });
-    store
-        .private_command(
-            &request,
-            &holder.station_id,
-            &holder.station_id,
-            &Default::default(),
-        )
-        .await
-        .unwrap();
-    let second = store
-        .prepare_effect_publication(
-            &holder,
-            &holder.station_id,
-            arkret_canonical::base64url_encode([74; 32]),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(second.sequence > first.sequence);
-    assert!(second.request.effects.holder_quarantine.is_some());
-    // A stale network ACK cannot erase a later accepted private effect.
-    store
-        .acknowledge_effect_publication(&holder, &holder.station_id, first.sequence)
-        .await
-        .unwrap();
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .drain_native_effects(holder, &holder.station_id)
+            .await
+            .is_err()
+    );
+    assert_eq!(footprint(&pool).await, before);
     assert_eq!(
         store
             .pending_effect_holders(&holder.station_id)
             .await
             .unwrap(),
         vec![holder.clone()]
-    );
-    let accepted = apply(second.request.clone()).await.unwrap();
-    assert_eq!(accepted.updates.len(), 1);
-    assert!(
-        apply(second.request.clone())
-            .await
-            .unwrap()
-            .updates
-            .is_empty()
-    );
-    let recovered = store
-        .prepare_effect_publication(
-            &holder,
-            &holder.station_id,
-            arkret_canonical::base64url_encode([75; 32]),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(recovered.request.effects, second.request.effects);
-    assert!(
-        apply(recovered.request.clone())
-            .await
-            .unwrap()
-            .updates
-            .is_empty()
-    );
-    store
-        .acknowledge_effect_publication(&holder, &holder.station_id, recovered.sequence)
-        .await
-        .unwrap();
-    assert!(
-        store
-            .pending_effect_holders(&holder.station_id)
-            .await
-            .unwrap()
-            .is_empty()
     );
 }

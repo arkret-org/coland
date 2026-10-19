@@ -15,24 +15,39 @@ use crate::state::AppState;
 
 /// Admit the origin-derived selector, or classify why it could not be derived.
 ///
-/// The derivation-domain section of `device-lifecycle.md` makes this a two-way split,
-/// never a three-way one:
-///
-/// * the derivation is a partial function — an unknown device, a device that belongs to another
-///   account, a never-authorized device and an authorization that is no longer current all leave it
-///   undefined. On this authenticated peer surface every one of them MUST collapse into the same
-///   anti-enumeration `authority_mismatch` receipt, so the caller cannot tell them apart. That is
-///   expressed here as `Ok(None)`.
-/// * a projection row that claims current / active / verified while omitting its schema-required
-///   authorization Event id or generation ref is a projection integrity failure, not an ordinary
-///   "unauthorized" answer. It MUST surface as an internal availability fault and MUST NOT be
-///   returned as `allow`.
+/// Unknown or never-authorized devices have no selector. A native same-cut
+/// device refusal remains a refusal on this authenticated, deployment-private
+/// TCB channel; it is not an availability fault. Malformed or unavailable
+/// projections still fail as internal errors and can never become `allow`.
 fn admit_origin_current_selector(
     derived: Result<coland_storage::DeviceRevocationGateSelector, coland_services::ServiceError>,
 ) -> Result<Option<coland_storage::DeviceRevocationGateSelector>, AppError> {
     match derived {
         Ok(selector) => Ok(Some(selector)),
         Err(error) if matches!(error.kind(), ServiceErrorKind::NotFound) => Ok(None),
+        Err(error)
+            if matches!(
+                error.conflict_code(),
+                Some(
+                    coland_storage::ConflictCode::DeviceRevoked
+                        | coland_storage::ConflictCode::DeviceRevocationPending
+                        | coland_storage::ConflictCode::DeviceGenerationFenced
+                        | coland_storage::ConflictCode::DeviceUnauthorized
+                )
+            ) =>
+        {
+            let code = arkret_wire::ErrorCode::from_wire(
+                error
+                    .conflict_code()
+                    .expect("matched device refusal")
+                    .as_str(),
+            )
+            .expect("registered device refusal");
+            Err(AppError::from_rejection(
+                code,
+                "device is not admitted at the current PCR cut",
+            ))
+        }
         Err(error) => Err(AppError::internal(format!(
             "origin device authorization projection is unavailable: {error}"
         ))),
@@ -857,6 +872,28 @@ mod tests {
         )))
         .expect_err("a projection integrity failure must not be signed as a decision");
         assert_eq!(error.code, arkret_wire::ErrorCode::InternalError);
+    }
+
+    #[test]
+    fn native_device_refusals_remain_refusals_instead_of_availability_faults() {
+        for decision in [
+            DeviceRevocationAdmissionDecision::Revoked,
+            DeviceRevocationAdmissionDecision::RevocationPending,
+            DeviceRevocationAdmissionDecision::GenerationMismatch,
+            DeviceRevocationAdmissionDecision::AuthorityMismatch,
+        ] {
+            let refusal = ServiceError::device_admission_refusal(decision, "native PCR cut")
+                .expect("a denied decision has a registered code");
+            let error = admit_origin_current_selector(Err(refusal))
+                .expect_err("a native refusal cannot produce a current selector");
+            assert_eq!(Some(error.code), decision.error_code());
+        }
+        assert!(
+            admit_origin_current_selector(Err(ServiceError::Conflict(
+                "confirmed device history unavailable".into()
+            )))
+            .is_err()
+        );
     }
 
     /// No non-allow decision may leak the origin-derived selector, even when

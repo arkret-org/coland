@@ -1,7 +1,5 @@
 //! Native Invite private acceptance under the caller's locked PCR cut.
-use arkret_models_collaboration::consent_private::{
-    ConsentPrivateInviteDeliveryBody, ConsentPrivateProxyRequest,
-};
+use arkret_models_collaboration::consent_private::ConsentPrivateInviteDeliveryBody;
 use arkret_models_collaboration::governance::invite_addressing::*;
 use arkret_wire::{AccountDataKey, ActorId, InviteReceiveAction, NewSourceQuotaConstraints};
 use coland_storage::{
@@ -81,14 +79,14 @@ async fn save(
 }
 pub(crate) async fn admit(
     conn: &mut AsyncPgConnection,
-    request: &ConsentPrivateProxyRequest,
+    holder: &arkret_wire::AccountId,
+    realm: &arkret_wire::RealmId,
     body: &ConsentPrivateInviteDeliveryBody,
     prepared: &PreparedPrivateInviteDelivery,
     quota: &NewSourceQuotaConstraints,
     at: chrono::DateTime<chrono::Utc>,
 ) -> Result<InviteDeliveryOutcome, crate::PgTransactionError> {
     let delivery = &body.delivery;
-    let holder = &request.holder_account_id;
     delivery.validate_minimal().map_err(invalid)?;
     if &delivery.invite_address.account_id != holder {
         return Err(invalid("delivery belongs to another holder").into());
@@ -104,8 +102,7 @@ pub(crate) async fn admit(
         .actor_id
         .as_account_id()
         .ok_or_else(|| invalid("Invite producer is not a human Account"))?;
-    let records =
-        crate::consent_current::records_in_connection(conn, holder, &request.realm_id).await?;
+    let records = crate::consent_current::records_in_connection(conn, holder, realm).await?;
     let consent = match &delivery.introduction_evidence {
         IntroductionEvidence::ConsentGrant {
             consent_grant_ref,

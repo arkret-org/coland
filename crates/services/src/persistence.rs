@@ -244,6 +244,16 @@ impl PersistenceHandle {
             .historical_basis(holder, id, revision)
             .await
     }
+    pub async fn drain_native_consent_effects(
+        &self,
+        holder: &arkret_wire::AccountId,
+        issuer: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Vec<coland_storage::AccountDataRecord>> {
+        self.persistence
+            .consent_current()
+            .drain_native_effects(holder, issuer)
+            .await
+    }
     pub async fn pending_consent_effect_holders(
         &self,
         issuer: &arkret_wire::DidCoreId,
@@ -300,6 +310,21 @@ impl PersistenceHandle {
             .await
     }
 
+    pub async fn consent_native_command(
+        &self,
+        holder: &arkret_wire::AccountId,
+        context: &arkret_models_collaboration::consent_private::ConsentPrivateContext,
+        command: &arkret_models_collaboration::consent_private::ConsentPrivateCommand,
+        acceptor: &arkret_wire::DidCoreId,
+        quota: &arkret_wire::NewSourceQuotaConstraints,
+        prepared: Option<&coland_storage::PreparedPrivateInviteDelivery>,
+    ) -> PersistenceResult<arkret_models_collaboration::consent_private::ConsentPrivateCommandOutcome>
+    {
+        self.persistence
+            .consent_current()
+            .native_command(holder, context, command, acceptor, quota, prepared)
+            .await
+    }
     pub async fn consent_private_command_prepared(
         &self,
         request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,

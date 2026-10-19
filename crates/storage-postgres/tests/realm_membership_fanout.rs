@@ -3080,6 +3080,137 @@ fn snapshot_signer() -> impl Fn(
     }
 }
 
+/// A bootstrap waiting behind a replica writer leaves the anchor available,
+/// so the writer can finish without an authority/anchor lock cycle.
+#[tokio::test]
+async fn replica_bootstrap_waits_for_authority_without_holding_anchor() {
+    heap_future(replica_bootstrap_waits_for_authority_without_holding_anchor_case).await;
+}
+
+async fn replica_bootstrap_waits_for_authority_without_holding_anchor_case() {
+    use diesel_async::SimpleAsyncConnection as _;
+
+    #[derive(diesel::QueryableByName)]
+    struct Backend {
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        pid: i32,
+    }
+    #[derive(diesel::QueryableByName)]
+    struct Waiting {
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        waiting: bool,
+    }
+
+    let governor_db = TestDatabase::lease().await;
+    let member_db = TestDatabase::lease().await;
+    let pool = governor_db.pool();
+    let member_pool = member_db.pool();
+    let governor = PgAuthorityCommitStore { pool: pool.clone() };
+    let member = PgAuthorityCommitStore {
+        pool: member_pool.clone(),
+    };
+    let unit = heap_future(|| admit(&pool, "anchor-authority-lock-order", "public")).await;
+    let realm = unit.transactions[0].event.realm_id.clone();
+    let actor = remote_member("anchor-lock-reader");
+    let join = membership_request(
+        unit.transactions.last().unwrap(),
+        actor.clone(),
+        &actor,
+        "join",
+    );
+    let join = heap_future(|| ordinary_realm::source_request(&pool, join)).await;
+    PgEventCommitUnitOfWork::new(pool.clone())
+        .commit_event(join.clone())
+        .await
+        .unwrap();
+    member
+        .install_committed_replica(&replica(&unit, &join, true))
+        .await
+        .unwrap();
+    let material = governor
+        .member_station_bootstrap_material(
+            &realm,
+            actor.as_account_id().unwrap(),
+            &join.authority_commit.commit.commit_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let snapshot = snapshot_signer()(&material).unwrap();
+    let head = snapshot.visible_stream_heads[0].clone();
+    let install = ReplicaAnchorInstall {
+        realm_id: realm.clone(),
+        join_commit_id: join.authority_commit.commit.commit_id.clone(),
+        governance_generation: snapshot.governance_generation,
+        snapshot_head: head.clone(),
+        visible_stream_heads: snapshot.visible_stream_heads.clone(),
+        current_state_entries: snapshot.current_state_entries.clone(),
+        verified_snapshot: snapshot,
+    };
+
+    let mut writer = member_pool.get().await.unwrap();
+    let mut observer = member_pool.get().await.unwrap();
+    writer.batch_execute("BEGIN").await.unwrap();
+    let backend = diesel::sql_query("SELECT pg_backend_pid() AS pid")
+        .get_result::<Backend>(&mut *writer)
+        .await
+        .unwrap();
+    diesel::sql_query("SELECT realm_id FROM realm_authorities WHERE realm_id=$1 FOR UPDATE")
+        .bind::<Text, _>(realm.as_str())
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    let worker_pool = member_pool.clone();
+    let worker = tokio::spawn(async move {
+        PgAuthorityCommitStore { pool: worker_pool }
+            .install_replica_anchor(&install)
+            .await
+    });
+    // Observe a real blocked backend, rather than guessing at scheduler timing.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let blocked = diesel::sql_query(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid))) AS waiting",
+            )
+            .bind::<diesel::sql_types::Integer, _>(backend.pid)
+            .get_result::<Waiting>(&mut *observer)
+            .await
+            .unwrap();
+            if blocked.waiting {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("bootstrap must reach the held authority lock");
+    let anchor = diesel::sql_query(
+        "SELECT stream_key FROM replica_stream_anchors WHERE realm_id=$1 FOR UPDATE NOWAIT",
+    )
+    .bind::<Text, _>(realm.as_str())
+    .execute(&mut *writer)
+    .await;
+    writer.batch_execute("ROLLBACK").await.unwrap();
+    assert!(
+        anchor.is_ok(),
+        "bootstrap waiting for authority must not hold the anchor: {anchor:?}"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(10), worker)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        member
+            .replica_stream_anchor(&realm)
+            .await
+            .unwrap()
+            .unwrap()
+            .anchored_head,
+        Some(head)
+    );
+}
+
 /// Two real Stations preserve the original governance signature while the
 /// member serves an exact hosted Account cut and its reserved window basis.
 #[tokio::test]

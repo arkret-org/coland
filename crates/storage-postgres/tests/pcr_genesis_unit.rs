@@ -714,6 +714,51 @@ async fn misbound_genesis_commit_chain_is_rejected_with_no_durable_write() {
     }
 }
 
+/// A valid signed registration cannot be relayed as another full Account.
+#[tokio::test]
+async fn human_genesis_relay_cannot_replace_its_account_station_or_principal() {
+    let (pool, station) = contract_store().await;
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    for change_station in [true, false] {
+        let original = unit(station.clone());
+        original.validate().unwrap();
+        let mut request = original.clone();
+        if change_station {
+            request.submission.account_authority_id =
+                DidCoreId::new("ak:did_core:web:foreign.example").unwrap();
+        } else {
+            request.submission.principal_id =
+                DidCoreId::new("ak:did_core:web:other-principal.example").unwrap();
+        }
+        request.exact_request_body =
+            arkret_canonical::canonical_json_bytes(&request.submission).unwrap();
+        assert!(
+            request
+                .submission
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("Human genesis account differs")
+        );
+        let refused = store
+            .admit_pcr_genesis_unit(&request, request.transactions[0].commit.committed_at)
+            .await;
+        assert!(
+            matches!(refused, Err(PersistenceError::SchemaViolation(_))),
+            "{refused:?}"
+        );
+        assert_eq!(unit_footprint(&pool, &original).await, NO_FOOTPRINT);
+        assert_eq!(unit_footprint(&pool, &request).await, NO_FOOTPRINT);
+        assert!(
+            store
+                .pcr_genesis_replay(&request.submission, &request.exact_request_body)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
 /// `device-lifecycle.md` section 5: a `registration_anchor` authorize MUST
 /// carry `authorized_generation_ref = 1`, the value the genesis unit
 /// initializes. A fully re-signed unit claiming any other generation is

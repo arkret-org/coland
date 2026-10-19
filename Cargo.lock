@@ -1894,6 +1894,7 @@ dependencies = [
  "floria-contracts",
  "futures-util",
  "garth",
+ "getrandom 0.4.3",
  "hex",
  "hmac 0.13.0",
  "object_store",

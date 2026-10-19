@@ -407,9 +407,22 @@ pub(crate) async fn prepare_private_invite(
     state: &AppState,
     request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,
 ) -> Result<Option<coland_storage::PreparedPrivateInviteDelivery>, AppError> {
+    let prepared =
+        prepare_native_invite(state, &request.holder_account_id, &request.command).await?;
+    Ok(prepared
+        .map(|p| p.bind_proxy(request))
+        .transpose()
+        .map_err(|e| AppError::param_invalid(e.to_string()))?)
+}
+pub(crate) async fn prepare_native_invite(
+    state: &AppState,
+    holder: &arkret_wire::AccountId,
+    command: &arkret_models_collaboration::consent_private::ConsentPrivateCommand,
+) -> Result<Option<coland_storage::PreparedPrivateInviteDelivery>, AppError> {
+    let full_command = command;
     let arkret_models_collaboration::consent_private::ConsentPrivateCommand::InviteDelivery(
         command,
-    ) = &request.command
+    ) = command
     else {
         return Ok(None);
     };
@@ -420,7 +433,6 @@ pub(crate) async fn prepare_private_invite(
     arkret_schema::validate_event_for_submit(&delivery.invite_event)
         .map_err(|e| AppError::param_invalid(e.to_string()))?;
     let verified = verify_invite_commit(state, delivery).await?;
-    let holder = &request.holder_account_id;
     let locator_verified = match &delivery.introduction_evidence {
         IntroductionEvidence::LocatorRef { principal_locator } => verified_locator_for_recipient(
             state,
@@ -433,8 +445,9 @@ pub(crate) async fn prepare_private_invite(
     };
     let constraints = constraints_for_surface(state, ReceivePolicySurface::InviteDelivery).cloned();
     Ok(Some(
-        coland_storage::PreparedPrivateInviteDelivery::from_verified_receipt(
-            request,
+        coland_storage::PreparedPrivateInviteDelivery::from_verified_native_receipt(
+            holder,
+            full_command,
             &verified,
             locator_verified,
             constraints,

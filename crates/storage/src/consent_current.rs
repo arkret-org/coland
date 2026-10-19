@@ -96,6 +96,15 @@ pub trait ConsentCurrentStore: Send + Sync {
         id: &arkret_wire::ConsentId,
         revision: &CurrentRevision,
     ) -> PersistenceResult<Option<crate::CommittedEventRecord>>;
+    async fn drain_native_effects(
+        &self,
+        _holder: &AccountId,
+        _issuer: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Vec<crate::AccountDataRecord>> {
+        Err(crate::PersistenceError::Conflict(
+            "native effect recovery is unavailable".into(),
+        ))
+    }
     async fn pending_effect_holders(
         &self,
         _issuer: &arkret_wire::DidCoreId,
@@ -142,6 +151,20 @@ pub trait ConsentCurrentStore: Send + Sync {
     ) -> PersistenceResult<()> {
         Err(crate::PersistenceError::Conflict(
             "temporarily_unavailable: private proxy high water is unavailable".into(),
+        ))
+    }
+    async fn native_command(
+        &self,
+        _holder: &AccountId,
+        _context: &arkret_models_collaboration::consent_private::ConsentPrivateContext,
+        _command: &arkret_models_collaboration::consent_private::ConsentPrivateCommand,
+        _acceptor: &arkret_wire::DidCoreId,
+        _quota: &arkret_wire::NewSourceQuotaConstraints,
+        _prepared: Option<&PreparedPrivateInviteDelivery>,
+    ) -> PersistenceResult<arkret_models_collaboration::consent_private::ConsentPrivateCommandOutcome>
+    {
+        Err(crate::PersistenceError::Conflict(
+            "native Human commands are unavailable".into(),
         ))
     }
     async fn private_command_prepared(
@@ -196,7 +219,11 @@ pub trait ConsentCurrentStore: Send + Sync {
 /// command. It cannot be constructed by deserializing a caller-controlled flag.
 #[derive(Clone)]
 pub struct PreparedPrivateInviteDelivery {
-    request_digest: String,
+    request_digest: Option<String>,
+    native_command: Option<(
+        AccountId,
+        arkret_models_collaboration::consent_private::ConsentPrivateCommand,
+    )>,
     locator_verified: bool,
     constraints: Option<arkret_wire::ReceivePolicyConstraints>,
 }
@@ -207,9 +234,32 @@ impl PreparedPrivateInviteDelivery {
         locator_verified: bool,
         constraints: Option<arkret_wire::ReceivePolicyConstraints>,
     ) -> PersistenceResult<Self> {
+        let mut prepared = Self::from_verified_native_receipt(
+            &request.holder_account_id,
+            &request.command,
+            fact,
+            locator_verified,
+            constraints,
+        )?;
+        prepared.request_digest = Some(
+            request
+                .digest()
+                .map_err(|e| crate::PersistenceError::SchemaViolation(e.to_string()))?,
+        );
+        prepared.native_command = None;
+        Ok(prepared)
+    }
+    pub fn from_verified_native_receipt(
+        holder: &AccountId,
+        command: &arkret_models_collaboration::consent_private::ConsentPrivateCommand,
+        fact: &arkret_identity::account_device_signer_evidence::VerifiedAccountDeviceHistoricalSignerFact,
+        locator_verified: bool,
+        constraints: Option<arkret_wire::ReceivePolicyConstraints>,
+    ) -> PersistenceResult<Self> {
+        let full_command = command.clone();
         let arkret_models_collaboration::consent_private::ConsentPrivateCommand::InviteDelivery(
             command,
-        ) = &request.command
+        ) = command
         else {
             return Err(crate::PersistenceError::SchemaViolation(
                 "verified Invite material requires an Invite command".into(),
@@ -236,9 +286,8 @@ impl PreparedPrivateInviteDelivery {
             ));
         }
         Ok(Self {
-            request_digest: request
-                .digest()
-                .map_err(|e| crate::PersistenceError::SchemaViolation(e.to_string()))?,
+            request_digest: None,
+            native_command: Some((holder.clone(), full_command)),
             locator_verified,
             constraints,
         })
@@ -249,7 +298,33 @@ impl PreparedPrivateInviteDelivery {
     ) -> bool {
         request
             .digest()
-            .is_ok_and(|digest| digest == self.request_digest)
+            .is_ok_and(|digest| Some(digest) == self.request_digest)
+    }
+    pub fn bind_proxy(
+        mut self,
+        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,
+    ) -> PersistenceResult<Self> {
+        if !self.matches_native(&request.holder_account_id, &request.command) {
+            return Err(crate::PersistenceError::SchemaViolation(
+                "verified Invite changed before proxy binding".into(),
+            ));
+        }
+        self.request_digest = Some(
+            request
+                .digest()
+                .map_err(|e| crate::PersistenceError::SchemaViolation(e.to_string()))?,
+        );
+        self.native_command = None;
+        Ok(self)
+    }
+    pub fn matches_native(
+        &self,
+        holder: &AccountId,
+        command: &arkret_models_collaboration::consent_private::ConsentPrivateCommand,
+    ) -> bool {
+        self.native_command
+            .as_ref()
+            .is_some_and(|(h, c)| h == holder && c == command)
     }
     pub fn locator_verified(&self) -> bool {
         self.locator_verified

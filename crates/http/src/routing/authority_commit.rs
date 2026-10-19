@@ -1115,6 +1115,33 @@ async fn authority_bundle(req: &mut Request, depot: &Depot, res: &mut Response) 
             &validation_error(error),
         );
     }
+    if let Ok(app) = state(depot) {
+        match app
+            .persistence()
+            .principal_resolution_for_realm(&request.realm_id)
+            .await
+        {
+            Ok(Some(origin))
+                if arkret_wire::GenesisGovernance::from_genesis(&origin.genesis_event)
+                    .is_ok_and(|g| g.is_human()) =>
+            {
+                return crate::error::render_error_code(
+                    ErrorCode::NotFound,
+                    res,
+                    "Realm authority not found",
+                );
+            }
+            Err(error) => {
+                tracing::debug!(%error,"private inception lookup unavailable");
+                return crate::error::render_error_code(
+                    ErrorCode::NotFound,
+                    res,
+                    "Realm authority not found",
+                );
+            }
+            _ => {}
+        }
+    }
     let authority = match state(depot) {
         Ok(state) => state.authority(),
         Err(error) => {
@@ -1128,21 +1155,20 @@ async fn authority_bundle(req: &mut Request, depot: &Depot, res: &mut Response) 
             outcome
                 .validate_for_request(&request, chrono::Utc::now())
                 .map_err(invalid_application_output)?;
-            Ok(outcome)
+            match arkret_wire::GenesisGovernance::from_genesis(&outcome.genesis_event) {
+                Ok(governance) if !governance.is_human() => Ok(outcome),
+                _ => Err(ServiceError::NotFound("Realm authority not found".into())),
+            }
         });
     match result {
         Ok(bundle) => {
             no_store(res);
             res.render(Json(bundle));
         }
-        // A Realm this Station does not govern has no bundle here; the
-        // operation registers no `not_found`, so this is the universal
-        // non-enumerating refusal.
-        Err(ServiceError::NotFound(_)) => crate::error::render_error_code(
-            ErrorCode::CapabilityDenied,
-            res,
-            "no current authority bundle is available for this Realm here",
-        ),
+        // Human PCRs and absent Realms have the same non-enumerating refusal.
+        Err(ServiceError::NotFound(_)) => {
+            crate::error::render_error_code(ErrorCode::NotFound, res, "Realm authority not found")
+        }
         Err(error) => render_service_error(res, error),
     }
 }

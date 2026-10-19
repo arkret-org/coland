@@ -169,6 +169,7 @@ pub(crate) async fn project(
     let digest = request.digest().map_err(unavailable)?;
     let mut conn = pg_conn(pool).await?;
     conn.transaction::<_,PgTransactionError,_>(async |conn| {
+        crate::pcr_private_authority::require_transferable(conn,&request.realm_id).await?;
         let lock=format!("consent-private-host-cut:{}:{}",request.holder_account_id.principal_id,request.holder_account_id.station_id);
         sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))").bind::<Text,_>(lock).execute(&mut *conn).await?;
         let held=sql_query("SELECT generation,service_id,authority_ref,last_handoff_ref FROM realm_authorities WHERE realm_id=$1 FOR SHARE")

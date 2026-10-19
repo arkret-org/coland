@@ -223,24 +223,41 @@ impl GovernanceChain {
         let key_a = SigningKey::from_bytes(&[0xA1; 32]);
         let key_b = SigningKey::from_bytes(&[0xB2; 32]);
         let handoff_id = RealmAuthorityHandoffId::from_digest([0x21; 32]);
-        let realm_id = RealmId::from_event_id(&EventId::from_digest(
-            arkret_canonical::DigestSuite::Sha256,
-            arkret_canonical::sha256_bytes(uuid::Uuid::now_v7().as_bytes()),
-        ));
-        let event = |kind: EventKind, seconds: i64| {
-            arkret_wire::test_support::raw_event_at(
-                kind.as_str(),
-                ScopeRef::Realm {
-                    realm_id: realm_id.clone(),
-                },
-                DidCoreId::new("ak:did_core:web:founder.example").expect("founder"),
-                core_id(STATION_A),
-                json!({}),
-                at - Duration::seconds(10 - seconds),
-            )
-            .expect("fixture authority Event")
+        use arkret_models_collaboration::events_payloads::{
+            RealmCreatePayload, RealmGenesis, RealmPurpose,
         };
-        let genesis_event = event(EventKind::RealmCreate, 0);
+        let salt = arkret_wire::GenesisSalt::new(arkret_canonical::base64url_encode(
+            arkret_canonical::sha256_bytes(uuid::Uuid::now_v7().as_bytes()),
+        ))
+        .expect("fixture salt");
+        let payload = RealmCreatePayload::new(
+            RealmGenesis::new(
+                RealmPurpose::Collaboration,
+                salt,
+                arkret_wire::TrustDomainId::new("ak:trust_domain:fixture.example")
+                    .expect("trust domain"),
+                arkret_wire::SecurityClass::Standard,
+                core_id(STATION_A),
+                arkret_wire::JoinRule::Invite,
+                arkret_wire::HistoryAccess::SinceJoin,
+                arkret_wire::Discoverability::InviteOnly,
+                None,
+                None,
+            )
+            .expect("ordinary genesis"),
+        )
+        .to_value()
+        .expect("genesis payload");
+        let genesis_event = arkret_wire::test_support::raw_event_at(
+            EventKind::RealmCreate.as_str(),
+            ScopeRef::RealmGenesis,
+            DidCoreId::new("ak:did_core:web:founder.example").expect("founder"),
+            core_id(STATION_A),
+            payload,
+            at - Duration::seconds(10),
+        )
+        .expect("fixture genesis");
+        let realm_id = genesis_event.realm_id.clone();
         let genesis_commit = seal_commit(
             unsigned_commit(
                 &realm_id,
@@ -256,7 +273,12 @@ impl GovernanceChain {
             &key_a,
             at,
         );
-        let change_event = event(EventKind::MessageCreate, 1);
+        let change_event = arkret_wire::test_support::raw_event_at(
+            EventKind::RealmGovernanceStationChange.as_str(), ScopeRef::Realm { realm_id: realm_id.clone() },
+            DidCoreId::new("ak:did_core:web:founder.example").expect("founder"), core_id(STATION_A),
+            json!({"expected_governance_generation":0,"expected_realm_stream_commit_id":genesis_commit.commit_id,"new_governance_station_id":core_id(STATION_B)}),
+            at - Duration::seconds(9),
+        ).expect("fixture governance change");
         let change_commit = seal_commit(
             unsigned_commit(
                 &realm_id,
@@ -299,7 +321,17 @@ impl GovernanceChain {
             &key_b,
             at,
         );
-        let head_event = event(EventKind::MessageCreate, 2);
+        let head_event = arkret_wire::test_support::raw_event_at(
+            EventKind::MessageCreate.as_str(),
+            ScopeRef::Realm {
+                realm_id: realm_id.clone(),
+            },
+            DidCoreId::new("ak:did_core:web:founder.example").expect("founder"),
+            core_id(STATION_A),
+            json!({}),
+            at - Duration::seconds(8),
+        )
+        .expect("fixture head Event");
         let head = seal_commit(
             unsigned_commit(
                 &realm_id,

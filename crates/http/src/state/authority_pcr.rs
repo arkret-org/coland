@@ -30,6 +30,9 @@ pub(crate) async fn admit_forwarded(
         .principal_resolution_for_realm(&event.realm_id)
         .await?
         .ok_or_else(|| unavailable("inception is unavailable"))?;
+    arkret_wire::GenesisGovernance::from_genesis(&origin.genesis_event)
+        .and_then(|origin| origin.require_transferable())
+        .map_err(|e| ServiceError::Conflict(e.to_string()))?;
     if !request.is_native_pcr_candidate()
         || origin.account_id.station_id != peer.source_service_id
         || event.actor_id.as_account_id() != Some(&origin.account_id)

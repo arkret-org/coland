@@ -2058,6 +2058,10 @@ async fn commit_transaction_with_device_guard_inner(
         return Ok(AuthorityCommitWriteOutcome::StaleAuthority(current));
     }
 
+    if transaction.event.kind == arkret_wire::EventKind::RealmGovernanceStationChange {
+        crate::pcr_private_authority::require_transferable(conn, &transaction.event.realm_id)
+            .await?;
+    }
     if transaction.event.kind == arkret_wire::EventKind::RealmGovernanceStationChange
         && crate::pcr_private_authority::native_inception(conn, &transaction.event.realm_id).await?
         && verified_unit != VerifiedPcrUnit::PcrGovernanceChange
@@ -5970,6 +5974,7 @@ impl PgAuthorityCommitStore {
         let handoff_json = serde_json::to_value(handoff).map_err(PersistenceError::database)?;
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            crate::pcr_private_authority::require_transferable(conn, &handoff.realm_id).await?;
             let pcr=crate::pcr_private_authority::native_inception(conn,&handoff.realm_id).await?;
             if pcr!=manifest.is_some() {
                 return Err(invalid("private manifest applicability differs from durable inception").into());

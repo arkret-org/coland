@@ -49,11 +49,32 @@ async fn peer_proxy(
     json_ok(outcome)
 }
 
+pub(super) async fn require_peer_holder(
+    state: &AppState,
+    holder: &AccountId,
+) -> Result<(), AppError> {
+    let origin = state
+        .persistence()
+        .principal_resolution_by_account_id(holder)
+        .await
+        .map_err(unavailable)?
+        .ok_or_else(|| unavailable("accepted holder inception is missing"))?;
+    arkret_wire::GenesisGovernance::from_genesis(&origin.genesis_event)
+        .map_err(unavailable)?
+        .require_transferable()
+        .map_err(|e| {
+            AppError::from_rejection(
+                coland_http::error::ErrorCode::FailedPrecondition,
+                e.to_string(),
+            )
+        })
+}
 async fn execute_at_authority(
     state: &AppState,
     request: &ConsentPrivateProxyRequest,
     source: &arkret_wire::DidCoreId,
 ) -> Result<ConsentPrivateProxyOutcome, AppError> {
+    require_peer_holder(state, &request.holder_account_id).await?;
     let prepared = super::invites::prepare_private_invite(state, request).await?;
     state
         .persistence()
@@ -110,6 +131,30 @@ pub(crate) async fn execute(
         ));
     }
     let (realm, service) = super::call_admission::holder_location(state, holder).await?;
+    let origin = state
+        .persistence()
+        .principal_resolution_by_account_id(holder)
+        .await
+        .map_err(unavailable)?
+        .ok_or_else(|| unavailable("accepted holder inception is missing"))?;
+    if arkret_wire::GenesisGovernance::from_genesis(&origin.genesis_event)
+        .map_err(unavailable)?
+        .is_human()
+    {
+        let prepared = super::invites::prepare_native_invite(state, holder, &command).await?;
+        return state
+            .persistence()
+            .consent_native_command(
+                holder,
+                &context,
+                &command,
+                &state.service_core_id(),
+                &quota(state),
+                prepared.as_ref(),
+            )
+            .await
+            .map_err(unavailable);
+    }
     let located =
         super::realm_join::resolve_verified_authority_of_service(state, &realm, &service).await?;
     let request = ConsentPrivateProxyRequest {
@@ -273,6 +318,7 @@ async fn project_publication(
     request: &ConsentPrivateEffectsPublishRequest,
     source: &arkret_wire::DidCoreId,
 ) -> Result<ConsentPrivateEffectsPublishOutcome, AppError> {
+    require_peer_holder(state, &request.holder_account_id).await?;
     if request.holder_account_id.station_id != state.service_core_id() {
         return Err(invalid(
             "publication destination is not the holder hosting Station",
@@ -314,14 +360,22 @@ async fn project_verified_effects(
         )
         .await
         .map_err(unavailable)?;
-    for update in projection.updates {
+    fanout_native_updates(state, &request.holder_account_id, projection.updates).await;
+    Ok(projection.outcome)
+}
+async fn fanout_native_updates(
+    state: &AppState,
+    holder: &AccountId,
+    updates: Vec<coland_storage::AccountDataRecord>,
+) {
+    for update in updates {
         use super::identity::device_messages::{
             ActorPrivateAccountDataOperation, ActorPrivateAccountDataUpdate,
             ActorPrivateDeviceUpdate, fanout_actor_private_update, station_device_message_sender,
         };
         fanout_actor_private_update(
             state,
-            request.holder_account_id.principal_id.as_str(),
+            holder.principal_id.as_str(),
             ActorPrivateDeviceUpdate::AccountData {
                 sender: station_device_message_sender(state),
                 content: ActorPrivateAccountDataUpdate {
@@ -336,7 +390,6 @@ async fn project_verified_effects(
         )
         .await;
     }
-    Ok(projection.outcome)
 }
 async fn publish_pending(state: &AppState) -> Result<(), AppError> {
     // Development-only scheduler control; it never changes admission or durable state.
@@ -354,6 +407,24 @@ async fn publish_pending(state: &AppState) -> Result<(), AppError> {
         .map_err(unavailable)?;
     for holder in holders {
         let attempt = async {
+            let origin = state
+                .persistence()
+                .principal_resolution_by_account_id(&holder)
+                .await
+                .map_err(unavailable)?
+                .ok_or_else(|| unavailable("accepted holder inception is missing"))?;
+            if arkret_wire::GenesisGovernance::from_genesis(&origin.genesis_event)
+                .map_err(unavailable)?
+                .is_human()
+            {
+                let updates = state
+                    .persistence()
+                    .drain_native_consent_effects(&holder, &issuer)
+                    .await
+                    .map_err(unavailable)?;
+                fanout_native_updates(state, &holder, updates).await;
+                return Ok::<(), AppError>(());
+            }
             let Some(publication) = state
                 .persistence()
                 .prepare_consent_effect_publication(

@@ -71,6 +71,23 @@ pub(crate) async fn holder_location(
         .await
         .map_err(unavailable)?
         .ok_or_else(|| unavailable("accepted holder PCR origin is unavailable"))?;
+    let governance =
+        arkret_wire::GenesisGovernance::from_genesis(&origin.genesis_event).map_err(unavailable)?;
+    if let arkret_wire::GenesisGovernance::Human(account) = governance {
+        if account != *holder {
+            return Err(unavailable("Human inception differs from the full holder"));
+        }
+        let current = state
+            .authority_commits()
+            .current_authority(&origin.pcr_realm_id)
+            .await
+            .map_err(unavailable)?
+            .ok_or_else(|| unavailable("Human PCR authority is unavailable"))?;
+        arkret_wire::GenesisGovernance::Human(account)
+            .validate_current(&current.service_id, current.generation)
+            .map_err(unavailable)?;
+        return Ok((origin.pcr_realm_id, holder.station_id.clone()));
+    }
     let endpoint_url = if holder.station_id == state.service_core_id() {
         None
     } else {
@@ -182,6 +199,34 @@ async fn verify_verdict(
     bytes: &[u8],
 ) -> Result<(), AppError> {
     use arkret_identity::RealmAuthorityKeyDirectory;
+    if service == &state.service_core_id() {
+        let current = state
+            .authority_commits()
+            .current_authority(realm)
+            .await
+            .map_err(unavailable)?
+            .ok_or_else(|| unavailable("local PCR authority is unavailable"))?;
+        if current.service_id != *service || current.generation != generation {
+            return Err(unavailable("local PCR authority cut changed"));
+        }
+        let signer = arkret_wire::project_did_to_core_id(
+            &arkret_identity::verification_method_did(method.as_str()).map_err(unavailable)?,
+        )
+        .map_err(unavailable)?;
+        if signer != *service {
+            return Err(unavailable(
+                "verdict signer differs from the owning Station",
+            ));
+        }
+        let mut keys = arkret_identity::RealmAuthorityKeyMap::new();
+        super::realm_join::insert_method_key(state, &mut keys, method).await?;
+        let key = keys
+            .public_key(method)
+            .ok_or_else(|| unavailable("owning Station key is unavailable"))?;
+        return Ed25519DetachedJwsVerifier::new()
+            .verify_detached_jws(jws, bytes, &key)
+            .map_err(unavailable);
+    }
     let located =
         super::realm_join::resolve_verified_authority_of_service(state, realm, service).await?;
     if located.authority.current_generation() != generation {
@@ -272,6 +317,7 @@ async fn peer_current(
             "only exact holder hosting Station may read current",
         ));
     }
+    super::consent_private::require_peer_holder(state, &request.holder_account_id).await?;
     json_ok(current_at_authority(state, &request).await?)
 }
 

@@ -378,6 +378,13 @@ impl ConsentCurrentStore for PgConsentCurrentStore {
         }
         Ok(result)
     }
+    async fn drain_native_effects(
+        &self,
+        holder: &AccountId,
+        issuer: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Vec<coland_storage::AccountDataRecord>> {
+        crate::consent_private_effects::drain_native(&self.pool, holder, issuer).await
+    }
     async fn pending_effect_holders(
         &self,
         issuer: &arkret_wire::DidCoreId,
@@ -419,6 +426,26 @@ impl ConsentCurrentStore for PgConsentCurrentStore {
         outcome: &arkret_models_collaboration::consent_private::ConsentPrivateProxyOutcome,
     ) -> PersistenceResult<()> {
         crate::consent_private_cuts::observe(self, request, outcome).await
+    }
+    async fn native_command(
+        &self,
+        holder: &AccountId,
+        context: &arkret_models_collaboration::consent_private::ConsentPrivateContext,
+        command: &arkret_models_collaboration::consent_private::ConsentPrivateCommand,
+        acceptor: &arkret_wire::DidCoreId,
+        quota: &arkret_wire::NewSourceQuotaConstraints,
+        prepared: Option<&coland_storage::PreparedPrivateInviteDelivery>,
+    ) -> PersistenceResult<arkret_models_collaboration::consent_private::ConsentPrivateCommandOutcome>
+    {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::consent_private_commands::execute_native(
+                conn, holder, context, command, acceptor, quota, prepared,
+            )
+            .await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
     }
     async fn private_command_prepared(
         &self,

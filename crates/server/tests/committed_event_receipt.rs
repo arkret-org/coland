@@ -418,7 +418,9 @@ fn non_governance_receiver_verifies_original_human_fact_and_legacy_is_unavailabl
             foreign_pcr.history.founding_device_id.as_str(),
         );
         let mut tampered = commit.clone();
-        tampered.committed_at += Duration::seconds(1);
+        tampered.signature.sig =
+            arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode([0u8; 64]))
+                .unwrap();
         let wrong_governor = chain.seal(commit.clone(), GovernanceSigner::GenesisStation);
         let mut gap = commit.clone();
         gap.stream_position += 1;

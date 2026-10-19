@@ -5,6 +5,8 @@ mod e2ee;
 mod forward_governor;
 #[path = "native_device/forward_source.rs"]
 mod forward_source;
+#[path = "native_device/managed_forward_source.rs"]
+mod managed_forward_source;
 use arkret_models_integration::management_review::*;
 use arkret_wire::{DeviceId, ManagementOperation, ServiceOperationId};
 use coland_storage::DeviceRevocationStore as _;

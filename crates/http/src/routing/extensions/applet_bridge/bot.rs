@@ -254,6 +254,9 @@ pub(super) async fn provision(
             prior_service_signer_evidence: None,
             accepted_at: now,
         },
+        creation_service_resolution: Some(
+            super::install::managed_creation_service_resolution(state, &epoch).await?,
+        ),
         expected_identity: Some(identity.clone()),
         expected_installation: Some(expected.clone()),
         preview_subject_key: applet_authoring_preview_subject_key(&body.authoring_request)?,

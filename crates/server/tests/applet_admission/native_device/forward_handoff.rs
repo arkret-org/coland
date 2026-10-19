@@ -117,22 +117,30 @@ async fn import_frozen(source: &PgPool, destination: &PgPool, realm: &RealmId, a
     }).await.unwrap();
 }
 
+fn random_source_bytes() -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    bytes[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    bytes[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    bytes
+}
+
 async fn public_bundle(
     public: &PublicStation,
     realm: &RealmId,
 ) -> arkret_wire::RealmAuthorityBundle {
     let client = reqwest::Client::builder()
+        .tls_backend_rustls()
         .no_proxy()
-        .add_root_certificate(
-            reqwest::Certificate::from_pem(include_bytes!("../../fixtures/outbox-test-ca.pem"))
-                .unwrap(),
-        )
+        .tls_certs_only([reqwest::Certificate::from_pem(include_bytes!(
+            "../../fixtures/outbox-test-ca.pem"
+        ))
+        .unwrap()])
         .build()
         .unwrap();
     let request = arkret_wire::AuthorityBundleRequest {
         realm_id: realm.clone(),
         nonce: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
-            rand::random::<[u8; 32]>(),
+            random_source_bytes(),
         ))
         .unwrap(),
     };
@@ -434,7 +442,7 @@ pub(super) async fn prepare(creator: usize) -> Ready {
         )
     });
     let mut handoff = arkret_wire::RealmAuthorityHandoff {
-        handoff_id: arkret_wire::RealmAuthorityHandoffId::from_digest(rand::random()),
+        handoff_id: arkret_wire::RealmAuthorityHandoffId::from_digest(random_source_bytes()),
         realm_id: context.fixture.realm.clone(),
         from_generation: 0,
         to_generation: 1,

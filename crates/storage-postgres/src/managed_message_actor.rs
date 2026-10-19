@@ -741,13 +741,13 @@ async fn accepted_event(conn: &mut AsyncPgConnection, id: &EventId) -> Persisten
         .ok_or_else(||denied("managed identity anchor has no accepted Event/Commit"))?;
     serde_json::from_value(row.envelope).map_err(PersistenceError::database)
 }
-fn exact_ref(event: &Event, role: &str) -> PersistenceResult<EventId> {
+pub(crate) fn exact_ref(event: &Event, role: &str) -> PersistenceResult<EventId> {
     let refs = event
         .semantic_refs
         .iter()
-        .filter(|reference| reference.role == role && reference.critical)
+        .filter(|reference| reference.role == role)
         .collect::<Vec<_>>();
-    if refs.len() != 1 {
+    if refs.len() != 1 || !refs[0].critical {
         return Err(denied(
             "managed identity requires one exact critical anchor",
         ));
@@ -881,17 +881,8 @@ pub(crate) async fn require_managed_identity_in_connection(
     if grant.subject_id != account.principal_id || grant.issuer_id != registration.service_id {
         return Err(denied("managed accountability issuer or subject differs"));
     }
-    if !crate::actor_profiles::accountability_holds_in_connection(
-        conn,
-        std::slice::from_ref(&registration.service_id),
-        &account.principal_id,
-        at,
-    )
-    .await
-    .map_err(crate::PgTransactionError::into_persistence)?
-    {
-        return Err(denied("managed accountability is not current"));
-    }
+    crate::applet_managed_provenance::exact_accountability_current(conn, &accountability, at)
+        .await?;
     let provision_event = accepted_event(
         conn,
         &exact_ref(&accountability, "applet_managed_actor_provision")?,

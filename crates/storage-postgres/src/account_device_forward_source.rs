@@ -1,6 +1,8 @@
 //! Shared forward-only source from independently verified native Device roots.
 
-use arkret_models_collaboration::events_payloads::DeviceAuthorizationBindingKind;
+use arkret_models_collaboration::events_payloads::{
+    DeviceAuthorizationBindingKind, DeviceAuthorizePayload,
+};
 use arkret_models_crypto::{
     AccountDeviceEventAuthorization, DeviceAuthorizationWindow, DeviceStatus,
     ForwardDeviceProjectionAttestationCore,
@@ -14,6 +16,17 @@ pub(super) fn now() -> chrono::DateTime<chrono::Utc> {
 
 fn denied(detail: &str) -> PersistenceError {
     PersistenceError::Conflict(format!("device_unauthorized: {detail}"))
+}
+
+pub(super) struct PreparedForwardDeviceSource {
+    pub account: arkret_wire::AccountId,
+    pub device: arkret_wire::DeviceId,
+    pub payload: DeviceAuthorizePayload,
+    pub authorization_event_id: arkret_wire::EventId,
+    pub fact: arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact,
+    pub attested_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub managed: Option<coland_storage::AppletManagedDeviceAuthority>,
 }
 
 pub(crate) async fn current_cut(
@@ -30,13 +43,11 @@ pub(crate) async fn current_cut(
 
 /// Caller holds the actual PCR authority writer lock. The complete original
 /// source verifier proves role, lineage, Event bytes and the real Device key.
-pub(super) async fn prepare_in_connection(
+pub(super) async fn prepare_context_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
-    destination: &arkret_wire::DidCoreId,
-    body_digest: &arkret_wire::Hash,
     attested_at: chrono::DateTime<chrono::Utc>,
-) -> Result<Option<ForwardDeviceProjectionAttestationCore>, PgTransactionError> {
+) -> Result<Option<PreparedForwardDeviceSource>, PgTransactionError> {
     let producer = event
         .account_device_producer()
         .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?
@@ -74,7 +85,8 @@ pub(super) async fn prepare_in_connection(
     {
         return Err(denied("forward source differs from its exact native revision").into());
     }
-    if payload.authorization_binding_kind == DeviceAuthorizationBindingKind::AppletManagedDelegation
+    let managed = if payload.authorization_binding_kind
+        == DeviceAuthorizationBindingKind::AppletManagedDelegation
     {
         let authority = crate::pcr_applet_device_authority::for_event_in_connection(
             conn,
@@ -108,7 +120,10 @@ pub(super) async fn prepare_in_connection(
                 denied("forward Event exceeds its original managed scope/action pair").into(),
             );
         }
-    }
+        Some(authority)
+    } else {
+        None
+    };
     let expires_at = (attested_at + chrono::Duration::minutes(5)).min(
         payload
             .expires_at
@@ -118,33 +133,70 @@ pub(super) async fn prepare_in_connection(
     if expires_at <= chrono::Utc::now() {
         return Err(denied("forward source deadline elapsed").into());
     }
-    let core = ForwardDeviceProjectionAttestationCore {
-        account_id: producer.account_id,
-        device_id: producer.device_id,
-        device_signing_key_did: arkret_wire::DidKey::new(payload.device_public_key_did.to_string())
-            .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?,
-        hpke_key: payload.hpke_key.clone(),
-        device_authorize_event_id: accepted.event_id.clone(),
-        authorized_generation_ref: payload.authorized_generation_ref,
-        device_status: DeviceStatus::Active,
+    Ok(Some(PreparedForwardDeviceSource {
+        account: producer.account_id,
+        device: producer.device_id,
+        payload: payload.clone(),
+        authorization_event_id: accepted.event_id.clone(),
+        fact,
         attested_at,
         expires_at,
-        authorization_window: DeviceAuthorizationWindow {
-            not_before: payload.not_before,
-            expires_at: payload.expires_at.flatten(),
-        },
-        event_authorization: AccountDeviceEventAuthorization {
-            event_id: fact.event_id,
-            verification_method: fact.verification_method,
-            destination_service_id: destination.clone(),
-            forward_body_digest: body_digest.clone(),
-            authorization_ref: fact.key.authorization_ref,
-            revision: fact.key.revision,
-            governance_generation: fact.key.governance_generation,
-            accepted_at: fact.accepted_at,
-        },
-    };
-    core.validate_event_authorization()
-        .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
-    Ok(Some(core))
+        managed,
+    }))
+}
+
+impl PreparedForwardDeviceSource {
+    pub(super) fn attestation(
+        &self,
+        destination: &arkret_wire::DidCoreId,
+        body_digest: &arkret_wire::Hash,
+    ) -> Result<ForwardDeviceProjectionAttestationCore, PgTransactionError> {
+        let payload = &self.payload;
+        let fact = &self.fact;
+        let core = ForwardDeviceProjectionAttestationCore {
+            account_id: self.account.clone(),
+            device_id: self.device.clone(),
+            device_signing_key_did: arkret_wire::DidKey::new(
+                payload.device_public_key_did.to_string(),
+            )
+            .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?,
+            hpke_key: payload.hpke_key.clone(),
+            device_authorize_event_id: self.authorization_event_id.clone(),
+            authorized_generation_ref: payload.authorized_generation_ref,
+            device_status: DeviceStatus::Active,
+            attested_at: self.attested_at,
+            expires_at: self.expires_at,
+            authorization_window: DeviceAuthorizationWindow {
+                not_before: payload.not_before,
+                expires_at: payload.expires_at.flatten(),
+            },
+            event_authorization: AccountDeviceEventAuthorization {
+                event_id: fact.event_id.clone(),
+                verification_method: fact.verification_method.clone(),
+                destination_service_id: destination.clone(),
+                forward_body_digest: body_digest.clone(),
+                authorization_ref: fact.key.authorization_ref.clone(),
+                revision: fact.key.revision.clone(),
+                governance_generation: fact.key.governance_generation,
+                accepted_at: fact.accepted_at,
+            },
+        };
+        core.validate_event_authorization()
+            .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
+        Ok(core)
+    }
+}
+
+/// Existing Human callers retain exactly the same signed-core contract.
+pub(super) async fn prepare_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    destination: &arkret_wire::DidCoreId,
+    body_digest: &arkret_wire::Hash,
+    attested_at: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<ForwardDeviceProjectionAttestationCore>, PgTransactionError> {
+    prepare_context_in_connection(conn, event, attested_at)
+        .await?
+        .map(|prepared| prepared.attestation(destination, body_digest))
+        .transpose()
 }

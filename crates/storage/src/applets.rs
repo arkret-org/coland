@@ -247,6 +247,9 @@ pub struct AppletAuthoringCandidate {
 #[derive(Clone, Debug)]
 pub struct AppletAuthoringUnitWrite {
     pub candidate: AppletAuthoringCandidate,
+    /// Original method-native Service history, retained only for a fresh
+    /// managed creation. Installation and Ghost reuse create no new source.
+    pub creation_service_resolution: Option<arkret_models_identity::AuthenticatedServiceResolution>,
     pub expected_identity: Option<Value>,
     pub expected_installation: Option<Value>,
     pub preview_subject_key: String,

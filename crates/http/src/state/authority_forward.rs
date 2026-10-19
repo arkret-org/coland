@@ -46,6 +46,16 @@ pub(super) fn wire_refusal(error: arkret_wire::WireError) -> ServiceError {
     )
 }
 
+#[cfg(feature = "test-support")]
+pub(crate) async fn fresh_forward_request(
+    state: &AppState,
+    mut request: PeerAuthoritySubmitRequest,
+    destination: &DidCoreId,
+) -> ServiceResult<PeerAuthoritySubmitRequest> {
+    fresh_device_request(state, destination, &mut request).await?;
+    Ok(request)
+}
+
 /// Governance Station check of one forwarded Account Device producer.
 ///
 /// `evidence` has already passed the Event-decided presence rule, so `None`
@@ -538,49 +548,9 @@ async fn fresh_device_request_inner(
             "only the producer's Account Station may issue its forward source".into(),
         ));
     }
-    let history = match state
-        .persistence()
-        .applet_managed_event_producer(event, chrono::Utc::now())
-        .await?
-    {
-        Some(authority) => {
-            // This immutable local identity locates the original Service history.
-            // The foreign business installation belongs to the governor's cut.
-            let identity = crate::routing::extensions::applet_bridge::record::applet_identity(
-                state,
-                authority.applet_id.as_str(),
-                state.service_id(),
-            )
-            .await
-            .map_err(|e| temporarily_unavailable(e.message))?
-            .ok_or_else(|| temporarily_unavailable("original Applet identity is unavailable"))?;
-            if identity.initial_package.service_id != authority.source_service_id {
-                return Err(temporarily_unavailable(
-                    "original Applet Service identity differs",
-                ));
-            }
-            let epoch =
-                crate::routing::extensions::applet_bridge::registration_epoch_evidence_from_event(
-                    &identity.initial_registration_event,
-                )
-                .map_err(temporarily_unavailable)?;
-            let resolver = super::did_resolver_chain::build_coland_did_resolver(state.config());
-            Some(
-                resolver
-                    .fetch_authenticated_service_resolution(
-                        &epoch.did,
-                        authority.source_service_id,
-                        arkret_wire::ServiceKind::AppletService,
-                    )
-                    .await
-                    .map_err(temporarily_unavailable)?,
-            )
-        }
-        None => None,
-    };
     let prepared = state
         .persistence()
-        .prepare_forward_request(request, destination, history.as_ref())
+        .prepare_forward_request(request, destination)
         .await?
         .ok_or_else(|| temporarily_unavailable("locked origin source is unavailable"))?;
     let service_resolution =

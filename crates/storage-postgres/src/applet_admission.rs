@@ -580,30 +580,9 @@ pub(crate) fn validate_input(
             ));
         }
     }
-    let (_, logs, witnesses) = provision.method_history_evidence.webvh_material();
-    let mut bytes = Vec::new();
-    for l in logs {
-        bytes.extend(arkret_canonical::canonical_json_bytes(l).map_err(rejected)?);
-        bytes.push(b'\n');
-    }
-    let verified = arkret_identity::verify_did_webvh_v1_chain_and_witness_bytes(
-        &provision.initial_resolution.did,
-        &bytes,
-        Some(&serde_json::to_vec(witnesses).map_err(rejected)?),
-    )
-    .map_err(rejected)?;
-    let last = verified
-        .log
-        .raw_entries
-        .last()
-        .ok_or_else(|| rejected("empty managed DID history"))?;
-    if verified.log.head_version_id != provision.initial_resolution.version_id
-        || arkret_canonical::canonical_sha256(last).map_err(rejected)?
-            != provision.initial_resolution.method_history_head
-    {
-        return Err(rejected("managed history terminal differs from provision"));
-    }
-    let managed_document: arkret_identity::DidDocument = decode(verified.log.head_state.clone())?;
+    let managed_document =
+        arkret_identity::verify_applet_managed_initial_resolution(&provision, input.accepted_at)
+            .map_err(rejected)?;
     events.extend(four.into_iter().cloned());
     Ok(ValidatedAppletUnit {
         events,
@@ -822,6 +801,15 @@ async fn admit_in_connection(
     current_input.accepted_at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let input = &current_input;
     let mut validated = validate_candidate(input).await?;
+    crate::applet_managed_provenance::validate_creation_service_history(
+        input,
+        if bundle(input).is_some() {
+            &validated.events
+        } else {
+            &[]
+        },
+    )
+    .await?;
     let managed_request = match &input.request {
         coland_storage::AppletAdmissionRequest::Install(_) => None,
         _ => Some(request(input)?),
@@ -1114,6 +1102,14 @@ async fn admit_in_connection(
             stream_position: commit.stream_position,
         });
     }
+    if bundle(input).is_some() {
+        crate::applet_managed_provenance::retain_creation_service_history(
+            conn,
+            input,
+            &validated.events[0],
+        )
+        .await?;
+    }
     let finalization = finalize(&refs)?;
     validate_finalized_refs(input, &refs, provision, &finalization.response_body)?;
     if finalization.applet_record.applet_id != input.package.applet_id
@@ -1139,7 +1135,7 @@ async fn admit_in_connection(
         let managed_document = if let Some(doc) = validated.managed_document.as_ref() {
             doc.clone()
         } else {
-            verified_managed_document(provision)?
+            verified_managed_document(provision, input.accepted_at)?
         };
         let (managed_vm, managed_key) =
             managed_signing_key(provision, &managed_document, input.accepted_at)?;
@@ -1192,36 +1188,11 @@ async fn admit_in_connection(
 
 fn verified_managed_document(
     provision: &AppletManagedActorProvisionPayload,
+    at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<arkret_identity::DidDocument> {
-    let (_, logs, witnesses) = provision.method_history_evidence.webvh_material();
-    let mut bytes = Vec::new();
-    for l in logs {
-        bytes.extend(arkret_canonical::canonical_json_bytes(l).map_err(rejected)?);
-        bytes.push(b'\n');
-    }
-    let verified = arkret_identity::verify_did_webvh_v1_chain_and_witness_bytes(
-        &provision.initial_resolution.did,
-        &bytes,
-        Some(&serde_json::to_vec(witnesses).map_err(rejected)?),
-    )
-    .map_err(rejected)?;
-    if verified.log.head_version_id != provision.initial_resolution.version_id
-        || arkret_canonical::canonical_sha256(
-            verified
-                .log
-                .raw_entries
-                .last()
-                .ok_or_else(|| rejected("empty method history"))?,
-        )
-        .map_err(rejected)?
-            != provision.initial_resolution.method_history_head
-    {
-        return Err(rejected(
-            "managed method history differs from accepted provision",
-        ));
-    }
-    decode(verified.log.head_state)
+    arkret_identity::verify_applet_managed_initial_resolution(provision, at).map_err(rejected)
 }
+
 fn managed_signing_key(
     provision: &AppletManagedActorProvisionPayload,
     document: &arkret_identity::DidDocument,
@@ -1357,7 +1328,7 @@ async fn require_current_managed_method(
     .map_err(PersistenceError::database)?
     .ok_or_else(|| rejected("managed DID has no trusted current method state"))?;
     let stored: arkret_identity::DidDocument = decode(row.did_document)?;
-    let verified = verified_managed_document(provision)?;
+    let verified = verified_managed_document(provision, at)?;
     if row.expires_at <= at
         || row.key_log_head.as_deref()
             != Some(provision.initial_resolution.method_history_head.as_str())

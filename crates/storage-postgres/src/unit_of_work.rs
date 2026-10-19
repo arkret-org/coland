@@ -2590,8 +2590,8 @@ async fn commit_one_inner(
         return Ok(());
     }
 
-    if let Some(source) = request.forwarded_managed_source() {
-        source.ensure_event(event, chrono::Utc::now())?;
+    if let Some(retained) = request.forwarded_producer_evidence.as_ref() {
+        retained.ensure_managed_binding(event, chrono::Utc::now())?;
     }
     let prepared_human = if let Some(retained) = &request.forwarded_producer_evidence {
         let core = &retained.evidence.device_projection_attestation.attestation;
@@ -3343,6 +3343,9 @@ async fn commit_prepared_event_inner(
                 .await?;
             }
         }
+    }
+    if let Some(retained) = request.forwarded_producer_evidence.as_ref() {
+        retained.ensure_managed_binding(event, chrono::Utc::now())?;
     }
     if let Some(source) = forwarded_managed.as_ref() {
         source.ensure_event(event, chrono::Utc::now())?;

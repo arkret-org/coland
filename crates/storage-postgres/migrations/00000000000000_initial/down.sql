@@ -47,6 +47,8 @@ DROP TABLE IF EXISTS realm_state_snapshot_window_reservations;
 DROP TABLE IF EXISTS realm_commit_event_kinds;
 DROP TABLE IF EXISTS realm_state_snapshot_issuances;
 DROP TABLE IF EXISTS forwarded_producer_device_evidence;
+DROP TABLE IF EXISTS applet_managed_creation_service_sources;
+DROP TABLE IF EXISTS account_device_managed_forward_requests;
 DROP TABLE IF EXISTS account_device_signer_evidence;
 DROP TABLE IF EXISTS realm_state_snapshots CASCADE;
 DROP TABLE IF EXISTS realm_authority_handoffs CASCADE;

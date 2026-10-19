@@ -151,6 +151,7 @@ pub(super) async fn provision(
             prior_service_signer_evidence: None,
             accepted_at: now,
         },
+        creation_service_resolution: None,
         expected_identity: Some(identity.clone()),
         expected_installation: Some(expected.clone()),
         preview_subject_key: super::endpoints::applet_authoring_preview_subject_key(

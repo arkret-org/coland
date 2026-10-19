@@ -400,6 +400,25 @@ pub(super) async fn validate_managed_actor_current_method_evidence(
     Ok(())
 }
 
+pub(super) async fn managed_creation_service_resolution(
+    state: &AppState,
+    epoch: &AppletRegistrationEpochEvidence,
+) -> Result<arkret_models_identity::AuthenticatedServiceResolution, AppError> {
+    state
+        .dids()
+        .retained_service_resolution(
+            &epoch.did,
+            arkret_wire::ServiceKind::AppletService,
+            chrono::Utc::now(),
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, service_did=%epoch.did, "Applet Service history unavailable");
+            AppError::conflict("Applet Service identity evidence is unavailable")
+                .with_wire_code("temporarily_unavailable")
+        })
+}
+
 fn managed_actor_pinned_resolution_is_current(
     pinned: &coland_services::identity::PinnedDidDocumentState,
     expected_did: &arkret_identifiers::Did,
@@ -542,6 +561,7 @@ pub(super) async fn register_package_install(
             prior_service_signer_evidence: None,
             accepted_at: now,
         },
+        creation_service_resolution: None,
         expected_identity: expected_identity.clone(),
         expected_installation: None,
         preview_subject_key: String::new(),

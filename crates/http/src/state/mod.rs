@@ -54,7 +54,7 @@ pub(crate) use authority_contact::{commit_contact_event_unit, verify_contact_pro
 #[cfg(feature = "test-support")]
 pub(crate) use authority_forward::{
     admit_forwarded_event, admit_forwarded_mls, forward_self_event, fresh_device_request,
-    fresh_producer_agent_evidence, prepare_native_forward_request,
+    fresh_forward_request, fresh_producer_agent_evidence, prepare_native_forward_request,
 };
 pub use authority_franking::spawn_pending_franking_sweeper;
 #[cfg(feature = "test-support")]

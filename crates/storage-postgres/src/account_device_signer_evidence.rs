@@ -24,6 +24,9 @@ use crate::{
 #[path = "account_device_forward_source.rs"]
 pub(crate) mod forward_source;
 
+#[path = "account_device_managed_forward.rs"]
+mod managed_forward;
+
 fn retention_transaction_error(error: PgTransactionError) -> PersistenceError {
     match error {
         PgTransactionError::Diesel(diesel::result::Error::DatabaseError(
@@ -81,6 +84,17 @@ pub struct PgAccountDeviceSignerEvidenceArchive {
 
 #[async_trait::async_trait]
 impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
+    async fn get_managed_forward(
+        &self,
+        account: &AccountId,
+        device: &DeviceId,
+        reference: &SignerEvidenceRef,
+    ) -> PersistenceResult<
+        Option<arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest>,
+    > {
+        managed_forward::get(&self.pool, account, device, reference).await
+    }
+
     async fn prepare_non_managed_forward_current(
         &self,
         event: &arkret_wire::Event,
@@ -144,7 +158,6 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
         &self,
         request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
         destination: &arkret_wire::DidCoreId,
-        managed_service: Option<&arkret_models_identity::AuthenticatedServiceResolution>,
     ) -> PersistenceResult<Option<coland_storage::PreparedAccountDeviceForwardSource>> {
         let event = crate::managed_forward_source::event(request)?;
         if event
@@ -158,8 +171,23 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
         conn.transaction::<_, PgTransactionError, _>(async |conn| {
             crate::managed_forward_source::lock_source(conn, event).await?;
             let at = forward_source::now();
-            let managed =
-                crate::managed_forward_source::prepare(conn, event, managed_service, at).await?;
+            if crate::pcr_applet_device_authority::for_event_in_connection(
+                conn,
+                event,
+                chrono::Utc::now(),
+            )
+            .await?
+            .is_some()
+            {
+                let prepared =
+                    managed_forward::prepare_in_connection(conn, request, destination, at).await?;
+                let managed = managed_forward::parts(&prepared.request)?.2.cloned();
+                return Ok(Some(coland_storage::PreparedAccountDeviceForwardSource {
+                    device: prepared.core,
+                    managed,
+                }));
+            }
+            let managed = None;
             let bound = crate::managed_forward_source::bind(request, managed.clone());
             let digest = crate::managed_forward_source::digest(&bound)?;
             let device =
@@ -177,6 +205,9 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
         &self,
         request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
     ) -> PersistenceResult<SignerEvidenceRef> {
+        if crate::managed_forward_source::managed(request).is_some() {
+            return managed_forward::retain(&self.pool, request).await;
+        }
         request.validate().map_err(|error| {
             PersistenceError::Conflict(format!(
                 "{}: {error}",
@@ -205,9 +236,9 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
         conn.transaction::<_,PgTransactionError,_>(async |conn| {
             crate::managed_forward_source::lock_source(conn,event).await?;
             for final_check in [false,true] {
-                let prepared=crate::managed_forward_source::prepare(conn,event,managed.map(|v|&v.service_resolution),core.attested_at).await?;
+                crate::managed_forward_source::require_non_managed(conn,event).await?;
                 let current=forward_source::prepare_in_connection(conn,event,&source.destination_service_id,&digest,core.attested_at).await?;
-                if prepared.as_ref()!=managed || current.as_ref()!=Some(core) {
+                if managed.is_some() || current.as_ref()!=Some(core) {
                     return Err(PersistenceError::Conflict("device_unauthorized: origin Device or managed current changed before durable publication".into()).into());
                 }
                 if !final_check {
@@ -689,6 +720,7 @@ pub(crate) async fn retain_forwarded_producer_evidence_in_connection(
     commit: &arkret_wire::RealmCommit,
     retained: &ForwardedProducerDeviceEvidence,
 ) -> PersistenceResult<()> {
+    retained.ensure_managed_binding(event, commit.committed_at)?;
     let invalid = |message: &str| PersistenceError::SchemaViolation(message.to_owned());
     let producer = event
         .account_device_producer()

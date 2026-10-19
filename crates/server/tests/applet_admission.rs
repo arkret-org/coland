@@ -2813,9 +2813,9 @@ fn install_namespace(install: &Installed) -> &str {
         .as_str()
         .strip_prefix("did:webvh:")
         .and_then(|rest| rest.split_once(':'))
-        .and_then(|(_, host)| host.split_once('#'))
-        .and_then(|(host, _)| host.strip_suffix(".applet.example"))
-        .expect("fixture Service DID is did:webvh:<scid>:<namespace>.applet.example")
+        .and_then(|(_, rest)| rest.split([':', '#']).next())
+        .and_then(|host| host.strip_suffix(".applet.example"))
+        .expect("fixture Service DID authority is <namespace>.applet.example")
 }
 
 /// `ak.profile.create` is principal-scoped: the managed actor's Profile is
@@ -3648,6 +3648,10 @@ impl NativeAppletService {
         package.webhook_auth.key_ref =
             arkret_wire::DidUrl::new(inception.did_key_id.clone()).unwrap();
         resign_native_applet_package(&mut package);
+        native_applet_service_histories()
+            .lock()
+            .unwrap()
+            .insert(package.service_id.clone(), history.lock().unwrap().clone());
         let tls = Arc::new(
             rustls::ServerConfig::builder_with_provider(Arc::new(
                 rustls::crypto::ring::default_provider(),
@@ -3796,6 +3800,10 @@ impl NativeAppletService {
         entries.push(rotation.log_entry);
         let mut rotated = self.package.clone();
         rotated.webhook_auth.key_ref = arkret_wire::DidUrl::new(new_vm).unwrap();
+        native_applet_service_histories()
+            .lock()
+            .unwrap()
+            .insert(rotated.service_id.clone(), entries.clone());
         rotated
     }
 }
@@ -3815,7 +3823,9 @@ fn content_digest_header(bytes: &[u8]) -> String {
 }
 
 fn applet_service_signing_key(verification_method: &str) -> SigningKey {
-    if verification_method.ends_with("#applet-native-key") {
+    if verification_method.ends_with("#applet-native-key")
+        || verification_method.ends_with("#applet-service-key")
+    {
         return SigningKey::from_bytes(&[42; 32]);
     }
     if verification_method.ends_with("#applet-native-key-new") {
@@ -3841,12 +3851,9 @@ fn signed_applet_package(
     let controller_principal_id = arkret_wire::project_did_to_core_id(&controller_did).unwrap();
     // Registration epoch evidence admits only did:webvh / did:key; the Service
     // keeps its own SCID, distinct from every managed actor it provisions.
-    let service_did = Did::new(format!(
-        "did:webvh:zsvc{}:{}.applet.example",
-        namespace.replace(|ch: char| !ch.is_ascii_alphanumeric(), ""),
-        safe_did_token(namespace)
-    ))
-    .unwrap();
+    let authority = format!("{}.applet.example", safe_did_token(namespace));
+    let native = fixture_applet_service_inception(&authority);
+    let service_did = Did::new(native.did.clone()).unwrap();
     let service_id = arkret_wire::project_did_to_core_id(&service_did).unwrap();
     let mut package = AppletPackage::new(
         format!("package:{applet_id}"),
@@ -3878,7 +3885,7 @@ fn signed_applet_package(
     let registration_epoch_evidence =
         arkret_models_integration::applet::AppletRegistrationEpochEvidence::from_did_document(
             &service_document,
-            service_method_version_evidence(),
+            service_method_version_evidence(&package),
         )
         .unwrap();
     package.requested_scopes = vec![
@@ -3947,37 +3954,109 @@ fn applet_service_did(package: &AppletPackage) -> Did {
     did
 }
 
+fn fixture_applet_service_inception(
+    authority: &str,
+) -> arkret_signatures::webvh::PreparedInception {
+    use rand_chacha::rand_core::SeedableRng as _;
+    let endpoint: Url = format!("https://{authority}/").parse().unwrap();
+    let mut rng =
+        rand_chacha::ChaCha20Rng::from_seed(arkret_canonical::sha256_bytes(authority.as_bytes()));
+    arkret_signatures::webvh::prepare_service_inception_with_did_key_seed(
+        &mut rng,
+        &arkret_signatures::webvh::ServiceInceptionInput {
+            principal_endpoint: &endpoint,
+            local_id: "service",
+            also_known_as: &[],
+            version_time: "2026-01-01T00:00:00Z".parse().unwrap(),
+            did_key_fragment: Some("applet-service-key"),
+        },
+        &[42; 32],
+    )
+    .unwrap()
+}
+
+fn native_applet_service_histories() -> &'static Mutex<BTreeMap<arkret_wire::DidCoreId, Vec<Value>>>
+{
+    static HISTORIES: std::sync::OnceLock<Mutex<BTreeMap<arkret_wire::DidCoreId, Vec<Value>>>> =
+        std::sync::OnceLock::new();
+    HISTORIES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn fixture_applet_service_history(
+    package: &AppletPackage,
+) -> arkret_models_identity::AuthenticatedServiceResolution {
+    let did = applet_service_did(package);
+    let published = native_applet_service_histories()
+        .lock()
+        .unwrap()
+        .get(&package.service_id)
+        .cloned();
+    let entries = if let Some(entries) = published {
+        entries
+    } else if package
+        .webhook_auth
+        .key_ref
+        .as_str()
+        .contains("#applet-native-key")
+    {
+        vec![native_applet_service_inception(package).log_entry.clone()]
+    } else {
+        let authority = did
+            .as_str()
+            .strip_prefix("did:webvh:")
+            .unwrap()
+            .split(':')
+            .nth(1)
+            .unwrap()
+            .replace("%3A", ":")
+            .replace("%3a", ":");
+        let native = fixture_applet_service_inception(&authority);
+        assert_eq!(native.did, did.as_str());
+        vec![native.log_entry.clone()]
+    };
+    let document = serde_json::from_value(entries.last().unwrap()["state"].clone()).unwrap();
+    arkret_identity::build_authenticated_webvh_service_resolution(
+        package.service_id.clone(),
+        "applet_service".to_owned(),
+        document,
+        entries,
+        Vec::new(),
+        chrono::Utc::now(),
+    )
+    .unwrap()
+}
+
 fn applet_service_id_document(package: &AppletPackage) -> arkret_identity::DidDocument {
-    if package.webhook_auth.key_ref.ends_with("#applet-native-key") {
-        return serde_json::from_value(
-            native_applet_service_inception(package).log_entry["state"].clone(),
-        )
-        .unwrap();
-    }
-    let applet_signing_key = applet_service_signing_key(&package.webhook_auth.key_ref);
-    arkret_identity::DidDocument {
-        id: applet_service_did(package),
-        verification_methods: BTreeMap::from([(
-            package.webhook_auth.key_ref.to_string(),
-            arkret_canonical::ed25519_pubkey_to_did_key_multibase(
-                applet_signing_key.verifying_key().as_bytes(),
-            ),
-        )]),
-        also_known_as: Vec::new(),
-        updated_at: Some(package.created_at),
-        raw_properties: BTreeMap::new(),
-    }
+    fixture_applet_service_history(package).normalized_did_document
 }
 
 async fn ingest_applet_service_id_document(state: &AppState, package: &AppletPackage) {
     let now = chrono::Utc::now();
-    let document = applet_service_id_document(package);
+    let source = fixture_applet_service_history(package);
+    let document = source.normalized_did_document.clone();
+    let native_live_provider = package
+        .webhook_auth
+        .key_ref
+        .as_str()
+        .contains("#applet-native-key");
     let record = coland_storage::WebvhDocumentRecord {
         did: document.id.to_string(),
         did_document: serde_json::to_value(document).unwrap(),
-        key_log_head: None,
-        seq: 0,
-        method_evidence: serde_json::to_value(service_method_version_evidence()).unwrap(),
+        key_log_head: Some(
+            source
+                .method_history_evidence
+                .boundary()
+                .to_method_history_head
+                .clone(),
+        ),
+        seq: 1,
+        // Native HTTP scenarios acquire the complete source from their real
+        // TLS provider. Only the generic component fixture caches its full proof.
+        method_evidence: if native_live_provider {
+            serde_json::to_value(service_method_version_evidence(package)).unwrap()
+        } else {
+            serde_json::to_value(&source.method_history_evidence).unwrap()
+        },
         fetched_at: now,
         expires_at: now + chrono::Duration::minutes(15),
         updated_at: now,
@@ -4003,10 +4082,16 @@ async fn ingest_applet_service_id_document(state: &AppState, package: &AppletPac
 }
 
 /// The pinned `did:webvh` method version of the fixture Service DID.
-fn service_method_version_evidence() -> AppletDidMethodVersionEvidence {
+fn service_method_version_evidence(package: &AppletPackage) -> AppletDidMethodVersionEvidence {
     AppletDidMethodVersionEvidence::versioned(
         "did:webvh",
-        Some("1-QmFixtureAppletServiceVersion".to_owned()),
+        Some(
+            fixture_applet_service_history(package)
+                .method_history_evidence
+                .boundary()
+                .to_version_id
+                .clone(),
+        ),
         None,
     )
     .unwrap()
@@ -4017,16 +4102,7 @@ fn applet_registration_epoch_evidence(
 ) -> arkret_models_integration::AppletRegistrationEpochEvidence {
     arkret_models_integration::AppletRegistrationEpochEvidence::from_did_document(
         &applet_service_id_document(package),
-        if package.webhook_auth.key_ref.ends_with("#applet-native-key") {
-            AppletDidMethodVersionEvidence::versioned(
-                "did:webvh",
-                Some(native_applet_service_inception(package).version_id.clone()),
-                None,
-            )
-            .unwrap()
-        } else {
-            service_method_version_evidence()
-        },
+        service_method_version_evidence(package),
     )
     .unwrap()
 }
@@ -5451,6 +5527,7 @@ async fn replace_installation_closed_unit(
             prior_service_signer_evidence: None,
             accepted_at: at,
         },
+        creation_service_resolution: None,
         expected_identity: Some(identity.clone()),
         expected_installation: Some(old.clone()),
         preview_subject_key: String::new(),

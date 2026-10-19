@@ -364,6 +364,20 @@ impl PersistenceHandle {
             .read_cut(holder, peer, scope, device)
             .await
     }
+    pub async fn get_managed_forward(
+        &self,
+        account: &arkret_wire::AccountId,
+        device: &arkret_wire::DeviceId,
+        reference: &arkret_wire::SignerEvidenceRef,
+    ) -> PersistenceResult<
+        Option<arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest>,
+    > {
+        self.persistence
+            .account_device_signer_evidence()
+            .get_managed_forward(account, device, reference)
+            .await
+    }
+
     pub async fn prepare_non_managed_forward_current_signer_evidence(
         &self,
         event: &arkret_wire::Event,
@@ -381,11 +395,10 @@ impl PersistenceHandle {
         &self,
         request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
         destination: &arkret_wire::DidCoreId,
-        managed_service: Option<&arkret_models_identity::AuthenticatedServiceResolution>,
     ) -> PersistenceResult<Option<coland_storage::PreparedAccountDeviceForwardSource>> {
         self.persistence
             .account_device_signer_evidence()
-            .prepare_forward_request(request, destination, managed_service)
+            .prepare_forward_request(request, destination)
             .await
     }
     pub async fn retain_forward_request(

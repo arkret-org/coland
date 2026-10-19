@@ -4834,14 +4834,30 @@ CREATE TABLE account_device_signer_evidence (
 CREATE INDEX account_device_signer_evidence_subject_idx
  ON account_device_signer_evidence(principal_id,station_id,device_id,attested_at);
 
+-- Private exact first-forward bytes for a managed Device. The existing signed
+-- evidence content address binds this complete request, including its source.
+CREATE TABLE account_device_managed_forward_requests (
+ evidence_ref TEXT PRIMARY KEY REFERENCES account_device_signer_evidence(evidence_ref),
+ request_json JSONB NOT NULL CHECK(jsonb_typeof(request_json)='object')
+);
+
 -- Exact native regular Device root frozen with its original acceptance Commit.
 CREATE TABLE account_device_committed_evidence (
  commit_id TEXT PRIMARY KEY REFERENCES agent_producer_signer_keys(commit_id),
  evidence_ref TEXT NOT NULL REFERENCES account_device_signer_evidence(evidence_ref)
 );
 
+-- Original portable Service history retained in the same native creation
+-- transaction. It never overwrites a current DID floor or enters member history.
+CREATE TABLE applet_managed_creation_service_sources (
+ provision_event_pk BIGINT PRIMARY KEY REFERENCES canonical_events(pk),
+ service_id TEXT NOT NULL,
+ service_resolution JSONB NOT NULL CHECK(jsonb_typeof(service_resolution)='object'),
+ accepted_at TIMESTAMPTZ NOT NULL
+);
+
 -- Complete producer_device_evidence a governance Station verified for a
--- cross-Station human-device producer (device-lifecycle 8.2.2). One row per
+-- cross-Station Account Device producer (device-lifecycle 8.2.2). One row per
 -- accepted Event, written in the transaction that writes its RealmCommit;
 -- audit only, never read back as device authority.
 CREATE TABLE forwarded_producer_device_evidence (

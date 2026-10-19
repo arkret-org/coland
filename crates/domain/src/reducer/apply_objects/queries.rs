@@ -290,7 +290,7 @@ impl ProjectionState {
         self.facet_value(realm_id, &FacetRef::singleton(facet))
     }
 
-    /// Effective `ak.realm.read_receipt_policy` value. `None` means no
+    /// Effective `ak.scope.read_receipt_policy` value. `None` means no
     /// accepted Event has set it.
     pub fn read_receipt_policy_value(&self, realm_id: &str) -> Option<&Value> {
         self.realm_facet_value(realm_id, facet::REALM_READ_RECEIPT_POLICY)

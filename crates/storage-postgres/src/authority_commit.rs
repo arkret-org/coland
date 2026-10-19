@@ -1030,7 +1030,7 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
                 ("sidecar_context" | "agent_sidecar_exchange_controls", Some(selector)) => serde_json::from_value(selector).map_err(PersistenceError::database)?,
                 ("realm_join_rule", None) => arkret_wire::CurrentSelector::RealmJoinRule,
                 ("realm_history_access", None) => arkret_wire::CurrentSelector::RealmHistoryAccess,
-                ("realm_read_receipt_policy", None) => arkret_wire::CurrentSelector::RealmReadReceiptPolicy,
+                ("scope_read_receipt_policy", None) => arkret_wire::CurrentSelector::ScopeReadReceiptPolicy { scope_ref: arkret_wire::ScopeRef::Realm { realm_id: realm_id.clone() } },
                 ("realm_discovery", None) => arkret_wire::CurrentSelector::RealmDiscovery,
                 ("realm_alias", None) => arkret_wire::CurrentSelector::RealmAlias,
                 ("realm_plaintext_visible_services", None) => {

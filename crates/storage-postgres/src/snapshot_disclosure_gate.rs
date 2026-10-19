@@ -36,7 +36,7 @@ pub(crate) const DISCLOSED_EVENT_KINDS: &[EventKind] = &[
     EventKind::PolicySet,
     EventKind::RealmJoinRule,
     EventKind::RealmHistoryAccess,
-    EventKind::RealmReadReceiptPolicy,
+    EventKind::ScopeReadReceiptPolicy,
     EventKind::RealmPreviewPolicy,
     EventKind::RealmDiscovery,
     EventKind::RealmAlias,
@@ -2115,7 +2115,10 @@ pub(crate) fn disclose_to_account(
                         .map_err(PersistenceError::database)?,
                 );
             }
-            CurrentSelector::RealmReadReceiptPolicy => {
+            CurrentSelector::ScopeReadReceiptPolicy { scope_ref } => {
+                if scope_ref != &source_stream_ref.scope_ref() {
+                    return Err(rejected("receipt policy selector/source mismatch"));
+                }
                 let policy: arkret_models_collaboration::events_payloads::ReadReceiptPolicyPayload =
                     serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
                 policy.validate().map_err(PersistenceError::database)?;

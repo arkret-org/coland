@@ -169,25 +169,19 @@ impl ProjectionState {
         ProjectionEffect::RealmSearchPolicyProjected { realm_id }
     }
 
-    /// Project `ak.realm.read_receipt_policy` into the Realm read-receipt
+    /// Project `ak.scope.read_receipt_policy` into the Realm read-receipt
     /// policy facet.
     ///
     /// `discovery/read-receipts.md` section 2.5 makes this kind the sole
-    /// carrier of the `realm_read_receipt_policy` current result and keeps the
+    /// carrier of the `scope_read_receipt_policy` current result and keeps the
     /// value out of `ak.realm.policy_bundle`. The registry projects the whole
     /// accepted payload as the settled value, so the projection is the
     /// identity on it: the payload is a flat closed object with no `value`
     /// wrapper, and an absent field means the section 2.5 default rather than
     /// a cleared field.
     ///
-    /// An empty object is semantically identical to never writing the Event,
-    /// which is why the payload schema carries `minProperties: 1`; a Realm
-    /// that wants the defaults omits the Event. The parent/child privacy
-    /// comparison the same section requires is not repeated here: resolving a
-    /// Realm's parent needs the Realm link graph, which this projection does
-    /// not carry, and admission already runs
-    /// `ReadReceiptPolicy::validate_child_policy` before an Event of this kind
-    /// is accepted.
+    /// An empty object is invalid. Each accepted scope resolves only its
+    /// own absent fields; a parent policy never supplies this value.
     pub(crate) fn apply_realm_read_receipt_policy(
         &mut self,
         operation: &Operation,

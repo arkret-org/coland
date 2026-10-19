@@ -917,7 +917,16 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
                 let _: arkret_models_collaboration::events_payloads::preview::PreviewPolicyPayloadValue = serde_json::from_value(value.clone()).map_err(malformed)?;
                 Some("realm_preview_policy")
             }
-            S::RealmReadReceiptPolicy => {
+            S::ScopeReadReceiptPolicy { scope_ref } => {
+                if scope_ref
+                    != &(arkret_wire::ScopeRef::Realm {
+                        realm_id: realm_id.clone(),
+                    })
+                {
+                    return Err(malformed(
+                        "Circle receipt policy materialization is unavailable",
+                    ));
+                }
                 if source_stream_ref
                     != &(arkret_wire::CommitStreamRef::Realm {
                         realm_id: realm_id.clone(),
@@ -930,7 +939,7 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
                 let policy: arkret_models_collaboration::events_payloads::ReadReceiptPolicyPayload =
                     serde_json::from_value(value.clone()).map_err(malformed)?;
                 policy.validate().map_err(malformed)?;
-                Some("realm_read_receipt_policy")
+                Some("scope_read_receipt_policy")
             }
             S::RealmJoinRule => Some("realm_join_rule"),
             S::RealmHistoryAccess => Some("realm_history_access"),
@@ -1616,7 +1625,7 @@ pub(crate) async fn advance_in_connection(
         arkret_wire::EventKind::RealmHistoryAccess => {
             crate::realm_bootstrap_current_results::commit_realm_history_access_current_result_in_connection(conn, event, commit).await?;
         }
-        arkret_wire::EventKind::RealmReadReceiptPolicy => {
+        arkret_wire::EventKind::ScopeReadReceiptPolicy => {
             crate::realm_bootstrap_current_results::commit_read_receipt_policy_current_result_in_connection(conn, event, commit).await?;
         }
         arkret_wire::EventKind::RealmPlaintextVisibleServices => {
@@ -2511,7 +2520,7 @@ mod tests {
             "realm_profile",
             "realm_join_rule",
             "realm_history_access",
-            "realm_read_receipt_policy",
+            "scope_read_receipt_policy",
             "realm_preview_policy",
             "realm_discovery",
             "realm_alias",
@@ -3948,10 +3957,13 @@ mod tests {
             stream_position: 7,
             commit_id: commit_id.clone(),
         };
-        let policy =
-            json!({"disclosure":"required","visibility":"private","scope_overrides_allowed":false});
+        let policy = json!({"disclosure":"required","visibility":"private"});
         let entry = arkret_wire::TypedCurrentRow::Value {
-            selector: arkret_wire::CurrentSelector::RealmReadReceiptPolicy,
+            selector: arkret_wire::CurrentSelector::ScopeReadReceiptPolicy {
+                scope_ref: arkret_wire::ScopeRef::Realm {
+                    realm_id: realm.clone(),
+                },
+            },
             source_stream_ref: stream.clone(),
             revision: arkret_wire::CurrentRevision {
                 commit_id,
@@ -3970,7 +3982,7 @@ mod tests {
             .await
             .unwrap();
         }
-        let actual:ValueRow = diesel::sql_query("SELECT value FROM realm_bootstrap_current_results WHERE realm_id=$1 AND result_family='realm_read_receipt_policy'")
+        let actual:ValueRow = diesel::sql_query("SELECT value FROM realm_bootstrap_current_results WHERE realm_id=$1 AND result_family='scope_read_receipt_policy'")
             .bind::<Text,_>(realm.as_str()).get_result(&mut conn).await.unwrap();
         assert_eq!(actual.value, policy);
         for invalid in [
@@ -4037,7 +4049,7 @@ mod tests {
             arkret_wire::DidCoreId::new("ak:did_core:web:receipt-replica-station.example").unwrap(),
         ));
         let mut event = arkret_wire::test_support::raw_event_for_actor_at(
-            "ak.realm.read_receipt_policy",
+            "ak.scope.read_receipt_policy",
             arkret_wire::ScopeRef::Realm {
                 realm_id: realm.clone(),
             },
@@ -4093,7 +4105,7 @@ mod tests {
         advance_in_connection(&mut conn, &event, &commit)
             .await
             .unwrap();
-        let actual:ValueRow = diesel::sql_query("SELECT value FROM realm_bootstrap_current_results WHERE realm_id=$1 AND result_family='realm_read_receipt_policy'")
+        let actual:ValueRow = diesel::sql_query("SELECT value FROM realm_bootstrap_current_results WHERE realm_id=$1 AND result_family='scope_read_receipt_policy'")
             .bind::<Text,_>(realm.as_str()).get_result(&mut conn).await.unwrap();
         assert_eq!(actual.value, json!({"disclosure":"disabled"}));
     }

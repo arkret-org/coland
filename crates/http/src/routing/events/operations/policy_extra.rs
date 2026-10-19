@@ -10,7 +10,7 @@ pub(crate) async fn validate_read_receipt_policy_combination_write(
     operation: &Operation,
 ) -> Result<(), &'static str> {
     match kinds::canonical_kind_for_operation(operation) {
-        Some(arkret_wire::EventKind::RealmReadReceiptPolicy) => {
+        Some(arkret_wire::EventKind::ScopeReadReceiptPolicy) => {
             read_receipt_policy_projection_from_payload(&operation.payload).map(|_| ())
         }
         _ => Ok(()),
@@ -21,7 +21,7 @@ fn read_receipt_policy_projection_from_payload(
     payload: &Value,
 ) -> Result<ReadReceiptPolicy, &'static str> {
     serde_json::from_value(payload.clone())
-        .map_err(|_| "ak.realm.read_receipt_policy payload is invalid")
+        .map_err(|_| "ak.scope.read_receipt_policy payload is invalid")
 }
 
 /// The complete member ActorId named by a membership operation's closed payload.

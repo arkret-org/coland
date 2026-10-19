@@ -90,7 +90,7 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         | EventKind::PolicySet
         | EventKind::DirectConversationBound
         | EventKind::RealmSetDefaultStrand
-        | EventKind::RealmReadReceiptPolicy
+        | EventKind::ScopeReadReceiptPolicy
         | EventKind::RealmPlaintextVisibleServices
         | EventKind::RealmPreviewPolicy
         | EventKind::MemberIdentityUpdate
@@ -941,7 +941,7 @@ mod tests {
             EventKind::RealmJoinRule,
             EventKind::StrandCreate,
             EventKind::RealmProfile,
-            EventKind::RealmReadReceiptPolicy,
+            EventKind::ScopeReadReceiptPolicy,
             EventKind::RealmPlaintextVisibleServices,
             EventKind::RealmPreviewPolicy,
             EventKind::RealmTombstone,
@@ -1012,7 +1012,7 @@ mod tests {
             EventKind::RealmJoinRule,
             EventKind::StrandCreate,
             EventKind::RealmProfile,
-            EventKind::RealmReadReceiptPolicy,
+            EventKind::ScopeReadReceiptPolicy,
             EventKind::RealmPlaintextVisibleServices,
             EventKind::RealmPreviewPolicy,
             EventKind::RealmTombstone,

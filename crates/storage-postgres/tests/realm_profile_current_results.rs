@@ -138,12 +138,12 @@ async fn read_receipt_policy_replacement_snapshot_replay_and_denial_share_the_pg
     let mut head = discussion.head.authority_commit;
     let founder = head.event.actor_id.signing_principal_id().clone();
     for payload in [
-        json!({"disclosure":"required","visibility":"private","scope_overrides_allowed":false}),
+        json!({"disclosure":"required","visibility":"private"}),
         json!({"disclosure":"disabled"}),
     ] {
         let request = next_request(
             &head,
-            arkret_wire::EventKind::RealmReadReceiptPolicy,
+            arkret_wire::EventKind::ScopeReadReceiptPolicy,
             &founder,
             payload.clone(),
             head.commit.committed_at,
@@ -155,7 +155,7 @@ async fn read_receipt_policy_replacement_snapshot_replay_and_denial_share_the_pg
                 .unwrap()
                 .event_inserted
         );
-        let row = family_current(&pool, &realm, "realm_read_receipt_policy").await;
+        let row = family_current(&pool, &realm, "scope_read_receipt_policy").await;
         assert_eq!(row.value, payload);
         assert_eq!(
             row.current_commit_id,
@@ -185,7 +185,7 @@ async fn read_receipt_policy_replacement_snapshot_replay_and_denial_share_the_pg
                 matches!(
                     entry,
                     arkret_wire::TypedCurrentRow::Value {
-                        selector: arkret_wire::CurrentSelector::RealmReadReceiptPolicy,
+                        selector: arkret_wire::CurrentSelector::ScopeReadReceiptPolicy { .. },
                         ..
                     }
                 )
@@ -204,13 +204,13 @@ async fn read_receipt_policy_replacement_snapshot_replay_and_denial_share_the_pg
                 .event_inserted
         );
         assert_eq!(
-            family_current(&pool, &realm, "realm_read_receipt_policy").await,
+            family_current(&pool, &realm, "scope_read_receipt_policy").await,
             row
         );
         assert_eq!(commits(&pool, &realm).await, count);
         head = request.authority_commit;
     }
-    let before = family_current(&pool, &realm, "realm_read_receipt_policy").await;
+    let before = family_current(&pool, &realm, "scope_read_receipt_policy").await;
     let count = commits(&pool, &realm).await;
     let outsider = Box::pin(ordinary_realm::human_profile::admit(
         &pool,
@@ -238,7 +238,7 @@ async fn read_receipt_policy_replacement_snapshot_replay_and_denial_share_the_pg
     ] {
         let request = next_request(
             &head,
-            arkret_wire::EventKind::RealmReadReceiptPolicy,
+            arkret_wire::EventKind::ScopeReadReceiptPolicy,
             &actor,
             payload,
             head.commit.committed_at,
@@ -254,7 +254,7 @@ async fn read_receipt_policy_replacement_snapshot_replay_and_denial_share_the_pg
                 .is_none()
         );
         assert_eq!(
-            family_current(&pool, &realm, "realm_read_receipt_policy").await,
+            family_current(&pool, &realm, "scope_read_receipt_policy").await,
             before
         );
         assert_eq!(commits(&pool, &realm).await, count);

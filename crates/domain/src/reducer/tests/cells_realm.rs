@@ -1098,7 +1098,6 @@ fn read_receipt_policy_value_helper_extracts_canonical_value() {
         serde_json::json!({
             "disclosure": "required",
             "visibility": "members",
-            "scope_overrides_allowed": false,
         }),
     );
     let value = state
@@ -1112,12 +1111,7 @@ fn read_receipt_policy_value_helper_extracts_canonical_value() {
         value.get("visibility").and_then(Value::as_str),
         Some("members")
     );
-    assert_eq!(
-        value
-            .get("scope_overrides_allowed")
-            .and_then(Value::as_bool),
-        Some(false)
-    );
+    assert!(value.get("scope_overrides_allowed").is_none());
 }
 
 #[test]
@@ -1534,11 +1528,11 @@ fn every_bootstrap_facet_kind_is_reachable_through_the_dispatch_registry() {
     }
 }
 
-/// `ak.realm.read_receipt_policy` must reach its reducer through the dispatch
+/// `ak.scope.read_receipt_policy` must reach its reducer through the dispatch
 /// registry, not only through a direct call.
 ///
 /// `discovery/read-receipts.md` section 2.5 names this kind the sole carrier of
-/// the `realm_read_receipt_policy` current result, and the registry projects
+/// the `scope_read_receipt_policy` current result, and the registry projects
 /// the whole payload as the settled value. Before this registration the kind
 /// fell through to the registry's no-op fill, so every policy an author wrote
 /// was accepted on the wire and then silently dropped, leaving the parent
@@ -1549,12 +1543,11 @@ fn read_receipt_policy_reaches_the_reducer_and_replaces_the_previous_value() {
     let mut state = ProjectionState::new();
     let strict = serde_json::json!({
         "disclosure": "required",
-        "visibility": "private",
-        "scope_overrides_allowed": false
+        "visibility": "private"
     });
     let effect = state.apply(
         &make_operation(
-            arkret_wire::EventKind::RealmReadReceiptPolicy,
+            arkret_wire::EventKind::ScopeReadReceiptPolicy,
             realm_id,
             strict.clone(),
         ),
@@ -1576,7 +1569,7 @@ fn read_receipt_policy_reaches_the_reducer_and_replaces_the_previous_value() {
     let partial = serde_json::json!({ "disclosure": "disabled" });
     let effect = state.apply(
         &make_operation(
-            arkret_wire::EventKind::RealmReadReceiptPolicy,
+            arkret_wire::EventKind::ScopeReadReceiptPolicy,
             realm_id,
             partial.clone(),
         ),
@@ -1609,7 +1602,7 @@ fn read_receipt_policy_rejects_the_empty_object_and_unknown_fields() {
         let mut state = ProjectionState::new();
         let effect = state.apply(
             &make_operation(
-                arkret_wire::EventKind::RealmReadReceiptPolicy,
+                arkret_wire::EventKind::ScopeReadReceiptPolicy,
                 realm_id,
                 payload.clone(),
             ),

@@ -3,7 +3,7 @@
 use arkret_models_collaboration::authority_commit::{
     ForwardManagedActorProvenance, ManagedAccountabilityCurrent, ManagedAccountabilitySelector,
     ManagedCreationAcceptedEvent, ManagedCreationOriginals, ManagedIdentityCurrent,
-    ManagedIdentityResult, ManagedProfileCurrent, ManagedProfileSelector,
+    ManagedIdentityProjection, ManagedProfileCurrent, ManagedProfileSelector,
 };
 use arkret_models_collaboration::governance::accountability::{
     AccountabilityGrantPayload, AccountabilityProjection,
@@ -301,7 +301,7 @@ pub(crate) async fn prepare_managed_source(
         current: ManagedIdentityCurrent {
             profile: ManagedProfileCurrent {
                 realm_id: authority.pcr_realm_id.clone(),
-                result: ManagedIdentityResult {
+                result: ManagedIdentityProjection {
                     selector: ManagedProfileSelector::ActorProfile {
                         actor_profile_id: profile_id,
                     },
@@ -369,7 +369,7 @@ pub(crate) async fn exact_accountability_current(
     }
     Ok(ManagedAccountabilityCurrent {
         realm_id: original.realm_id.clone(),
-        result: ManagedIdentityResult {
+        result: ManagedIdentityProjection {
             selector: ManagedAccountabilitySelector::IdentityAccountability {
                 issuer_id: grant.issuer_id,
                 subject_id: grant.subject_id,

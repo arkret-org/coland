@@ -274,7 +274,7 @@ pub(crate) async fn commit_read_receipt_policy_authority_current_result_in_conne
     commit: &arkret_wire::RealmCommit,
     prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
-    if event.kind != arkret_wire::EventKind::RealmReadReceiptPolicy {
+    if event.kind != arkret_wire::EventKind::ScopeReadReceiptPolicy {
         return Ok(());
     }
     crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
@@ -289,12 +289,12 @@ pub(crate) async fn commit_read_receipt_policy_current_result_in_connection(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
 ) -> PersistenceResult<()> {
-    if event.kind != arkret_wire::EventKind::RealmReadReceiptPolicy {
+    if event.kind != arkret_wire::EventKind::ScopeReadReceiptPolicy {
         return Ok(());
     }
     arkret_schema::validate_event_for_submit(event)
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-    if event.kind != arkret_wire::EventKind::RealmReadReceiptPolicy
+    if event.kind != arkret_wire::EventKind::ScopeReadReceiptPolicy
         || event.scope_ref
             != (arkret_wire::ScopeRef::Realm {
                 realm_id: event.realm_id.clone(),
@@ -310,7 +310,7 @@ pub(crate) async fn commit_read_receipt_policy_current_result_in_connection(
             "read-receipt policy requires its exact Realm Event and covering Commit".to_owned(),
         ));
     }
-    let policy = typed_payload(event, EventPayloadExt::as_realm_read_receipt_policy)?;
+    let policy = typed_payload(event, EventPayloadExt::as_scope_read_receipt_policy)?;
     policy
         .validate()
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
@@ -318,7 +318,7 @@ pub(crate) async fn commit_read_receipt_policy_current_result_in_connection(
         conn,
         event,
         commit,
-        "realm_read_receipt_policy",
+        "scope_read_receipt_policy",
         &result_value(&policy)?,
     )
     .await
@@ -912,14 +912,14 @@ mod tests {
         ] {
             let request = ordinary_realm::next_request(
                 &previous,
-                arkret_wire::EventKind::RealmReadReceiptPolicy,
+                arkret_wire::EventKind::ScopeReadReceiptPolicy,
                 founder,
                 payload.clone(),
                 chrono::Utc::now(),
             );
             uow.commit_event(request.clone()).await.unwrap();
             let mut conn = pool.get().await.unwrap();
-            let current = diesel::sql_query("SELECT current_commit_id,value FROM realm_bootstrap_current_results WHERE realm_id=$1 AND result_family='realm_read_receipt_policy'")
+            let current = diesel::sql_query("SELECT current_commit_id,value FROM realm_bootstrap_current_results WHERE realm_id=$1 AND result_family='scope_read_receipt_policy'")
                 .bind::<Text, _>(request.authority_commit.event.realm_id.as_str()).get_result::<Row>(&mut *conn).await.unwrap();
             assert_eq!(
                 current.current_commit_id,
@@ -934,14 +934,14 @@ mod tests {
         let outsider = arkret_wire::DidCoreId::new("ak:did_core:web:outsider.example").unwrap();
         let denied = ordinary_realm::next_request(
             &previous,
-            arkret_wire::EventKind::RealmReadReceiptPolicy,
+            arkret_wire::EventKind::ScopeReadReceiptPolicy,
             &outsider,
             serde_json::json!({"disclosure":"disabled"}),
             chrono::Utc::now(),
         );
         assert!(uow.commit_event(denied.clone()).await.is_err());
         let mut conn = pool.get().await.unwrap();
-        let current = diesel::sql_query("SELECT current_commit_id,value FROM realm_bootstrap_current_results WHERE realm_id=$1 AND result_family='realm_read_receipt_policy'")
+        let current = diesel::sql_query("SELECT current_commit_id,value FROM realm_bootstrap_current_results WHERE realm_id=$1 AND result_family='scope_read_receipt_policy'")
             .bind::<Text, _>(previous.event.realm_id.as_str()).get_result::<Row>(&mut *conn).await.unwrap();
         assert_eq!(
             current.current_commit_id,

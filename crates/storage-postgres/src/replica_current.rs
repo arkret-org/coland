@@ -856,20 +856,6 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
         ));
     }
     #[derive(diesel::QueryableByName)]
-    struct PolicyOmitted {
-        #[diesel(sql_type=diesel::sql_types::Bool)]
-        present: bool,
-    }
-    let omitted = diesel::sql_query("SELECT EXISTS(SELECT 1 FROM scope_read_receipt_policy_current_results r WHERE r.realm_id=$1 AND EXISTS(SELECT 1 FROM jsonb_array_elements($3) h WHERE h->'stream_ref'=r.source_stream_ref) AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements($2) incoming WHERE incoming->'selector'->>'kind'='scope_read_receipt_policy' AND incoming->'selector'->'scope_ref'=r.scope_ref)) AS present")
-        .bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(entries).map_err(malformed)?)
-        .bind::<Jsonb,_>(serde_json::to_value(visible_heads).map_err(malformed)?)
-        .get_result::<PolicyOmitted>(&mut *conn).await.map_err(PersistenceError::database)?.present;
-    if omitted {
-        return Err(malformed(
-            "snapshot cannot erase a receipt policy in a still authorized scope",
-        ));
-    }
-    #[derive(diesel::QueryableByName)]
     struct MissingCall {
         #[diesel(sql_type=diesel::sql_types::Bool)]
         present: bool,
@@ -881,6 +867,20 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
     if missing {
         return Err(malformed(
             "complete Snapshot omits an initialized Call axis",
+        ));
+    }
+    #[derive(diesel::QueryableByName)]
+    struct PolicyOmitted {
+        #[diesel(sql_type=diesel::sql_types::Bool)]
+        present: bool,
+    }
+    let omitted = diesel::sql_query("SELECT EXISTS(SELECT 1 FROM scope_read_receipt_policy_current_results r WHERE r.realm_id=$1 AND EXISTS(SELECT 1 FROM jsonb_array_elements($3) h WHERE h->'stream_ref'=r.source_stream_ref) AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements($2) incoming WHERE incoming->'selector'->>'kind'='scope_read_receipt_policy' AND incoming->'selector'->'scope_ref'=r.scope_ref)) AS present")
+        .bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(entries).map_err(malformed)?)
+        .bind::<Jsonb,_>(serde_json::to_value(visible_heads).map_err(malformed)?)
+        .get_result::<PolicyOmitted>(&mut *conn).await.map_err(PersistenceError::database)?.present;
+    if omitted {
+        return Err(malformed(
+            "snapshot cannot erase a receipt policy in a still authorized scope",
         ));
     }
     crate::replica_authorization::guard_current_rows(conn, realm_id, entries).await?;

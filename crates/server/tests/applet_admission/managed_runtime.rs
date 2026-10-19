@@ -16,9 +16,18 @@ use super::*;
 mod mls;
 
 #[derive(Default)]
-struct LostNativeReply {
-    armed: std::sync::atomic::AtomicBool,
-    attempts: Mutex<Vec<(arkret::AppletManagedDeviceMetadata, Vec<u8>, String)>>,
+pub(crate) struct LostNativeReply {
+    pub(crate) armed: std::sync::atomic::AtomicBool,
+    pub(crate) cursor_error_once: Mutex<Option<arkret_wire::ErrorCode>>,
+    pub(crate) queue_reads: Mutex<Vec<(arkret::AppletManagedDeviceMetadata, Option<String>)>>,
+    pub(crate) attempts: Mutex<Vec<(arkret::AppletManagedDeviceMetadata, Vec<u8>, String)>>,
+    pub(crate) responses: Mutex<
+        Vec<(
+            arkret::AppletManagedDeviceMetadata,
+            String,
+            Option<StatusCode>,
+        )>,
+    >,
 }
 #[salvo::handler]
 async fn lose_native_reply(
@@ -34,6 +43,8 @@ async fn lose_native_reply(
         .and_then(|v| v.to_str().ok())
         .map(|v| arkret::AppletManagedDeviceMetadata::from_header_value(v).unwrap());
     if let Some(metadata) = native {
+        let response_identity = metadata.clone();
+        let response_path = req.uri().path().to_owned();
         let idempotency = req
             .headers()
             .get("Idempotency-Key")
@@ -45,6 +56,46 @@ async fn lose_native_reply(
             .lock()
             .unwrap()
             .push((metadata, body, idempotency));
+        if response_path == "/_arkret/self/device_messages"
+            && req.method() == salvo::http::Method::GET
+        {
+            let after = req.query::<String>("after");
+            state
+                .queue_reads
+                .lock()
+                .unwrap()
+                .push((response_identity.clone(), after.clone()));
+            let refusal = if after.is_some() {
+                state.cursor_error_once.lock().unwrap().take()
+            } else {
+                None
+            };
+            if let Some(code) = refusal {
+                let problem = arkret_wire::Problem::from_code(
+                    code.as_str(),
+                    "injected recipient cursor refusal",
+                );
+                res.status_code(StatusCode::from_u16(problem.status).unwrap());
+                res.render(salvo::prelude::Json(problem));
+                res.headers_mut().insert(
+                    "content-type",
+                    salvo::http::HeaderValue::from_static("application/problem+json"),
+                );
+                res.headers_mut().insert(
+                    "arkret-operation",
+                    salvo::http::HeaderValue::from_static(
+                        ServiceOperationId::SELF_DEVICE_MESSAGES_READ_LIST_V1,
+                    ),
+                );
+                ctrl.skip_rest();
+                state.responses.lock().unwrap().push((
+                    response_identity,
+                    response_path,
+                    res.status_code,
+                ));
+                return;
+            }
+        }
         ctrl.call_next(req, depot, res).await;
         if res.status_code == Some(StatusCode::OK)
             && state.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -52,14 +103,19 @@ async fn lose_native_reply(
             res.status_code(StatusCode::SERVICE_UNAVAILABLE);
             res.body("accepted response lost by the test transport");
         }
+        state
+            .responses
+            .lock()
+            .unwrap()
+            .push((response_identity, response_path, res.status_code));
     } else {
         ctrl.call_next(req, depot, res).await;
     }
 }
 
-struct FailOutcomeStore {
-    inner: Arc<dyn AuthoringStore>,
-    armed: std::sync::atomic::AtomicBool,
+pub(crate) struct FailOutcomeStore {
+    pub(crate) inner: Arc<dyn AuthoringStore>,
+    pub(crate) armed: std::sync::atomic::AtomicBool,
 }
 impl AuthoringStore for FailOutcomeStore {
     fn load(&self, key: &str) -> arkret_bridge_runtime::Result<Option<String>> {
@@ -89,17 +145,18 @@ impl AuthoringStore for FailOutcomeStore {
     }
 }
 
-fn host(config: Config, store: Arc<dyn AuthoringStore>) -> Arc<ArkretEdge> {
+pub(crate) fn host(config: Config, store: Arc<dyn AuthoringStore>) -> Arc<ArkretEdge> {
     host_with_retry(config, store, arkret_http_client::RetryConfig::standard(1))
 }
 
-fn host_with_retry(
+pub(crate) fn host_with_retry(
     config: Config,
     store: Arc<dyn AuthoringStore>,
     retry: arkret_http_client::RetryConfig,
 ) -> Arc<ArkretEdge> {
     let http = reqwest::Client::builder()
         .tls_backend_rustls()
+        .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .tls_certs_only([reqwest::Certificate::from_pem(include_bytes!(
             "../fixtures/outbox-test-ca.pem"
@@ -131,15 +188,15 @@ fn host_with_retry(
     )
 }
 
-struct RuntimeContext {
-    fixture: Box<Fixture>,
-    native: NativeAppletService,
-    config: Config,
-    store_path: std::path::PathBuf,
-    server: tokio::task::JoinHandle<()>,
-    server_handle: salvo::server::ServerHandle,
-    lost: Arc<LostNativeReply>,
-    accepted: Vec<(
+pub(crate) struct RuntimeContext {
+    pub(crate) fixture: Box<Fixture>,
+    pub(crate) native: NativeAppletService,
+    pub(crate) config: Config,
+    pub(crate) store_path: std::path::PathBuf,
+    pub(crate) server: tokio::task::JoinHandle<()>,
+    pub(crate) server_handle: salvo::server::ServerHandle,
+    pub(crate) lost: Arc<LostNativeReply>,
+    pub(crate) accepted: Vec<(
         arkret::AccountId,
         AppletAuthoringTransactionRequestBody,
         arkret::GrantId,
@@ -152,7 +209,7 @@ fn setup() -> std::pin::Pin<Box<dyn std::future::Future<Output = RuntimeContext>
     setup_with_mls(false)
 }
 
-fn setup_with_mls(
+pub(crate) fn setup_with_mls(
     mls: bool,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RuntimeContext> + Send>> {
     Box::pin(async move {
@@ -584,7 +641,7 @@ fn setup_with_mls(
     })
 }
 
-fn recover(
+pub(crate) fn recover(
     context: Box<RuntimeContext>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Box<RuntimeContext>> + Send>> {
     Box::pin(async move {
@@ -818,7 +875,7 @@ fn recover(
     })
 }
 
-fn retained(
+pub(crate) fn retained(
     mut context: Box<RuntimeContext>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(async move {

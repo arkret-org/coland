@@ -974,6 +974,11 @@ CREATE TABLE public.realm_commits (
 
 CREATE INDEX realm_commits_realm_stream_tail_idx
     ON public.realm_commits (realm_id, stream_key, stream_position DESC);
+-- The loose head scan orders opaque stream keys bytewise. Keep that order
+-- distinct from the global stream-position index: a Realm filter on that
+-- global index can otherwise walk the histories of unrelated Realms.
+CREATE INDEX realm_commits_realm_stream_head_idx
+    ON public.realm_commits (realm_id, stream_key COLLATE "C", stream_position DESC);
 CREATE INDEX realm_commits_chain_node_event_ref_idx
     ON public.realm_commits ((commit_json->>'event_ref')) WHERE event_pk IS NULL;
 
@@ -4662,6 +4667,9 @@ CREATE TABLE actor_profile_current_results (
  CHECK(value->>'realm_id'=realm_id),
  CHECK(value->>'schema'='ak.schema.actor_profile.v1')
 );
+
+CREATE INDEX actor_profile_current_results_realm
+ ON actor_profile_current_results(realm_id);
 
 -- The stored outcome of every accepted profile Event, so an exact replay
 -- returns the value that Event produced after later updates have moved the

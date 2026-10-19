@@ -423,28 +423,27 @@ pub(crate) async fn commit_mimi_room_binding_current_result_in_connection(
     Ok(())
 }
 
-/// The head of every commit stream of one Realm, as a loose index scan over
-/// `realm_commits_realm_stream_tail_idx`: one index probe per stream, never
-/// a walk over the Realm's history or other Realms' streams. The row
-/// comparisons keep each probe on the Realm-prefixed index.
+/// The head of every commit stream of one Realm, as a loose index scan.
+/// Bytewise stream ordering matches `realm_commits_realm_stream_head_idx`.
+/// It cannot be supplied by the global stream-position index with a Realm
+/// filter, which can walk unrelated history before finding a stream.
 pub(crate) const REALM_STREAM_HEADS_SQL: &str = "\
     WITH RECURSIVE stream_keys AS ( \
-      (SELECT stream_key FROM realm_commits \
-       WHERE (realm_id, stream_key) >= ($1, '') AND realm_id = $1 \
-       ORDER BY realm_id, stream_key LIMIT 1) \
-      UNION ALL \
-      SELECT (SELECT next_row.stream_key FROM realm_commits next_row \
-              WHERE (next_row.realm_id, next_row.stream_key) > ($1, stream_keys.stream_key) \
-                AND next_row.realm_id = $1 \
-              ORDER BY next_row.realm_id, next_row.stream_key LIMIT 1) \
-      FROM stream_keys WHERE stream_keys.stream_key IS NOT NULL \
+    (SELECT stream_key COLLATE \"C\" AS stream_key FROM realm_commits \
+    WHERE realm_id=$1 AND stream_key COLLATE \"C\" >= '' COLLATE \"C\" \
+    ORDER BY stream_key COLLATE \"C\" LIMIT 1) \
+    UNION ALL \
+    SELECT (SELECT next_row.stream_key COLLATE \"C\" FROM realm_commits next_row \
+    WHERE next_row.realm_id=$1 AND next_row.stream_key COLLATE \"C\" > stream_keys.stream_key \
+    ORDER BY next_row.stream_key COLLATE \"C\" LIMIT 1) \
+    FROM stream_keys WHERE stream_keys.stream_key IS NOT NULL \
     ) \
-    SELECT head.stream_ref, head.stream_position, head.commit_id \
+    SELECT head.stream_ref,head.stream_position,head.commit_id \
     FROM stream_keys CROSS JOIN LATERAL ( \
-      SELECT stream_ref, stream_position, commit_id FROM realm_commits \
-      WHERE realm_id = $1 AND stream_key = stream_keys.stream_key \
-      ORDER BY stream_position DESC LIMIT 1) head \
-    WHERE stream_keys.stream_key IS NOT NULL";
+    SELECT stream_ref,stream_position,commit_id FROM realm_commits \
+    WHERE realm_id=$1 AND stream_key COLLATE \"C\"=stream_keys.stream_key \
+    ORDER BY stream_position DESC LIMIT 1 \
+    ) head WHERE stream_keys.stream_key IS NOT NULL";
 
 #[derive(QueryableByName)]
 struct SnapshotRow {

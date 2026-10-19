@@ -75,6 +75,8 @@ pub(crate) async fn upsert_verified_current_in_connection(
     current
         .validate()
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+    arkret_canonical::canonical_json_bytes(current)
+        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
     let CurrentSelector::ScopeReadReceiptPolicy { scope_ref } = &current.selector else {
         return Err(PersistenceError::SchemaViolation(
             "receipt policy selector required".into(),
@@ -111,4 +113,122 @@ pub(crate) async fn upsert_verified_current_in_connection(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    async fn install(
+        conn: &mut AsyncPgConnection,
+        realm: &arkret_wire::RealmId,
+        scope: &ScopeRef,
+        stream: &arkret_wire::CommitStreamRef,
+        revision: &CurrentRevision,
+        value: &serde_json::Value,
+        at: DateTime<Utc>,
+    ) -> PersistenceResult<()> {
+        if scope.realm_id_opt() != Some(realm) {
+            return Err(PersistenceError::SchemaViolation(
+                "test current belongs to another Realm".into(),
+            ));
+        }
+        let current = ScopeReadReceiptPolicyCurrent {
+            selector: CurrentSelector::ScopeReadReceiptPolicy {
+                scope_ref: scope.clone(),
+            },
+            source_stream_ref: stream.clone(),
+            revision: revision.clone(),
+            value: serde_json::from_value(value.clone())
+                .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?,
+        };
+        upsert_verified_current_in_connection(conn, &current, at).await
+    }
+
+    #[tokio::test]
+    async fn independent_scope_values_reject_cross_stream_and_same_position_forks() {
+        let database = crate::test_database::TestDatabase::lease().await;
+        let pool = database.pool();
+        let mut conn = pool.get().await.unwrap();
+        let realm = arkret_wire::RealmId::from_event_id(&arkret_wire::EventId::from_digest(
+            arkret_canonical::DigestSuite::Sha256,
+            [81; 32],
+        ));
+        let circle = arkret_wire::CircleId::from_event_id(&arkret_wire::EventId::from_digest(
+            arkret_canonical::DigestSuite::Sha256,
+            [82; 32],
+        ));
+        let scopes = [
+            arkret_wire::ScopeRef::Realm {
+                realm_id: realm.clone(),
+            },
+            arkret_wire::ScopeRef::Circle {
+                realm_id: realm.clone(),
+                circle_id: circle,
+            },
+        ];
+        let at = chrono::Utc::now();
+        for (i, scope) in scopes.iter().enumerate() {
+            let stream = arkret_wire::CommitStreamRef::from_scope(scope, None).unwrap();
+            let revision = arkret_wire::CurrentRevision {
+                commit_id: arkret_wire::RealmCommitId::from_digest([i as u8 + 1; 32]),
+                stream_position: 1,
+            };
+            let value = serde_json::json!({"disclosure":if i==0 {"required"} else {"disabled"}});
+            install(&mut conn, &realm, scope, &stream, &revision, &value, at)
+                .await
+                .unwrap();
+            install(&mut conn, &realm, scope, &stream, &revision, &value, at)
+                .await
+                .unwrap();
+            assert!(
+                install(
+                    &mut conn,
+                    &realm,
+                    scope,
+                    &stream,
+                    &revision,
+                    &serde_json::json!({"visibility":"private"}),
+                    at
+                )
+                .await
+                .is_err()
+            );
+            let overflow = arkret_wire::CurrentRevision {
+                commit_id: revision.commit_id.clone(),
+                stream_position: 9_007_199_254_740_992,
+            };
+            assert!(matches!(
+                install(&mut conn, &realm, scope, &stream, &overflow, &value, at).await,
+                Err(PersistenceError::SchemaViolation(_))
+            ));
+            let other = arkret_wire::CommitStreamRef::from_scope(&scopes[1 - i], None).unwrap();
+            assert!(matches!(
+                install(&mut conn, &realm, scope, &other, &revision, &value, at).await,
+                Err(PersistenceError::SchemaViolation(_))
+            ));
+            for invalid in [
+                serde_json::json!({}),
+                serde_json::json!({"disclosure":null}),
+                serde_json::json!({"scope_overrides_allowed":false}),
+            ] {
+                assert!(matches!(
+                    install(&mut conn, &realm, scope, &stream, &revision, &invalid, at).await,
+                    Err(PersistenceError::SchemaViolation(_))
+                ));
+            }
+        }
+        #[derive(diesel::QueryableByName)]
+        struct Row {
+            #[diesel(sql_type=Jsonb)]
+            value: serde_json::Value,
+        }
+        for (i, scope) in scopes.iter().enumerate() {
+            let row:Row=diesel::sql_query("SELECT value FROM scope_read_receipt_policy_current_results WHERE realm_id=$1 AND scope_ref=$2")
+                .bind::<Text,_>(realm.as_str()).bind::<Jsonb,_>(serde_json::to_value(scope).unwrap()).get_result(&mut conn).await.unwrap();
+            assert_eq!(
+                row.value,
+                serde_json::json!({"disclosure":if i==0 {"required"} else {"disabled"}})
+            );
+        }
+    }
 }

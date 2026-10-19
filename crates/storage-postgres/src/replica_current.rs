@@ -32,6 +32,7 @@ const MEMBER_STATION_FAMILIES: &[&str] = &[
     "space_child_scope_policy_current_results",
     "space_current_results",
     "realm_bootstrap_current_results",
+    "scope_read_receipt_policy_current_results",
     "realm_policy_bundle_current_results",
     "realm_link_current_results",
     "member_state_current_results",
@@ -212,6 +213,30 @@ async fn guard_snapshot_revisions(
         let source = serde_json::to_value(source_stream_ref).map_err(malformed)?;
         let incoming_position = position(revision.stream_position)?;
         match selector {
+            S::ScopeReadReceiptPolicy { scope_ref } => {
+                let current =
+                    arkret_models_collaboration::events_payloads::ScopeReadReceiptPolicyCurrent {
+                        selector: selector.clone(),
+                        source_stream_ref: source_stream_ref.clone(),
+                        revision: revision.clone(),
+                        value: serde_json::from_value(value.clone()).map_err(malformed)?,
+                    };
+                current.validate().map_err(malformed)?;
+                let old = diesel::sql_query("SELECT current_commit_id,current_stream_position,source_stream_ref,value FROM scope_read_receipt_policy_current_results WHERE realm_id=$1 AND scope_ref=$2 FOR UPDATE")
+                    .bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(scope_ref).map_err(malformed)?)
+                    .get_result::<ExistingFrankingProofCurrent>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+                if old.is_some_and(|old| {
+                    old.source_stream_ref != source
+                        || old.current_stream_position > incoming_position
+                        || (old.current_stream_position == incoming_position
+                            && (old.current_commit_id != revision.commit_id.as_str()
+                                || old.value != *value))
+                }) {
+                    return Err(malformed(
+                        "scope receipt policy snapshot source, revision or value conflicts",
+                    ));
+                }
+            }
             S::Policy { policy_id } => {
                 crate::policy_current_results::validate_disclosed_shared_policy(
                     realm_id,
@@ -844,6 +869,20 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
             "complete Snapshot omits an initialized Call axis",
         ));
     }
+    #[derive(diesel::QueryableByName)]
+    struct PolicyOmitted {
+        #[diesel(sql_type=diesel::sql_types::Bool)]
+        present: bool,
+    }
+    let omitted = diesel::sql_query("SELECT EXISTS(SELECT 1 FROM scope_read_receipt_policy_current_results r WHERE r.realm_id=$1 AND EXISTS(SELECT 1 FROM jsonb_array_elements($3) h WHERE h->'stream_ref'=r.source_stream_ref) AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements($2) incoming WHERE incoming->'selector'->>'kind'='scope_read_receipt_policy' AND incoming->'selector'->'scope_ref'=r.scope_ref)) AS present")
+        .bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(entries).map_err(malformed)?)
+        .bind::<Jsonb,_>(serde_json::to_value(visible_heads).map_err(malformed)?)
+        .get_result::<PolicyOmitted>(&mut *conn).await.map_err(PersistenceError::database)?.present;
+    if omitted {
+        return Err(malformed(
+            "snapshot cannot erase a receipt policy in a still authorized scope",
+        ));
+    }
     crate::replica_authorization::guard_current_rows(conn, realm_id, entries).await?;
     guard_snapshot_revisions(conn, realm_id, entries).await?;
     for source_head in visible_heads {
@@ -901,6 +940,17 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
                 value,
             )?;
         }
+        if let S::ScopeReadReceiptPolicy { .. } = selector {
+            let current =
+                arkret_models_collaboration::events_payloads::ScopeReadReceiptPolicyCurrent {
+                    selector: selector.clone(),
+                    source_stream_ref: source_stream_ref.clone(),
+                    revision: revision.clone(),
+                    value: serde_json::from_value(value.clone()).map_err(malformed)?,
+                };
+            crate::scope_read_receipt_policy_current_results::upsert_verified_current_in_connection(conn, &current, installed_at).await?;
+            continue;
+        }
         let singleton = match selector {
             S::RealmGenesis => Some("realm_genesis"),
             S::RealmProfile => Some("realm_profile"),
@@ -916,30 +966,6 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
                 }
                 let _: arkret_models_collaboration::events_payloads::preview::PreviewPolicyPayloadValue = serde_json::from_value(value.clone()).map_err(malformed)?;
                 Some("realm_preview_policy")
-            }
-            S::ScopeReadReceiptPolicy { scope_ref } => {
-                if scope_ref
-                    != &(arkret_wire::ScopeRef::Realm {
-                        realm_id: realm_id.clone(),
-                    })
-                {
-                    return Err(malformed(
-                        "Circle receipt policy materialization is unavailable",
-                    ));
-                }
-                if source_stream_ref
-                    != &(arkret_wire::CommitStreamRef::Realm {
-                        realm_id: realm_id.clone(),
-                    })
-                {
-                    return Err(malformed(
-                        "read receipt policy requires the exact Realm source stream",
-                    ));
-                }
-                let policy: arkret_models_collaboration::events_payloads::ReadReceiptPolicyPayload =
-                    serde_json::from_value(value.clone()).map_err(malformed)?;
-                policy.validate().map_err(malformed)?;
-                Some("scope_read_receipt_policy")
             }
             S::RealmJoinRule => Some("realm_join_rule"),
             S::RealmHistoryAccess => Some("realm_history_access"),
@@ -1626,7 +1652,7 @@ pub(crate) async fn advance_in_connection(
             crate::realm_bootstrap_current_results::commit_realm_history_access_current_result_in_connection(conn, event, commit).await?;
         }
         arkret_wire::EventKind::ScopeReadReceiptPolicy => {
-            crate::realm_bootstrap_current_results::commit_read_receipt_policy_current_result_in_connection(conn, event, commit).await?;
+            crate::scope_read_receipt_policy_current_results::commit_read_receipt_policy_current_result_in_connection(conn, event, commit).await?;
         }
         arkret_wire::EventKind::RealmPlaintextVisibleServices => {
             crate::realm_bootstrap_current_results::commit_plaintext_services_current_result_in_connection(conn, event, commit).await?;
@@ -2520,7 +2546,6 @@ mod tests {
             "realm_profile",
             "realm_join_rule",
             "realm_history_access",
-            "scope_read_receipt_policy",
             "realm_preview_policy",
             "realm_discovery",
             "realm_alias",
@@ -3982,9 +4007,36 @@ mod tests {
             .await
             .unwrap();
         }
-        let actual:ValueRow = diesel::sql_query("SELECT value FROM realm_bootstrap_current_results WHERE realm_id=$1 AND result_family='scope_read_receipt_policy'")
+        let actual:ValueRow = diesel::sql_query("SELECT value FROM scope_read_receipt_policy_current_results WHERE realm_id=$1 AND scope_ref->>'kind'='realm'")
             .bind::<Text,_>(realm.as_str()).get_result(&mut conn).await.unwrap();
         assert_eq!(actual.value, policy);
+        let mut changed_revision = entry.clone();
+        let arkret_wire::TypedCurrentRow::Value { value, .. } = &mut changed_revision;
+        *value = json!({"visibility":"members"});
+        let mut regressed = entry.clone();
+        let arkret_wire::TypedCurrentRow::Value { revision, .. } = &mut regressed;
+        revision.stream_position = 6;
+        revision.commit_id = arkret_wire::RealmCommitId::from_digest([6; 32]);
+        for rows in [Vec::new(), vec![changed_revision], vec![regressed]] {
+            diesel::sql_query("BEGIN").execute(&mut conn).await.unwrap();
+            assert!(
+                install_snapshot_in_connection(&mut conn, &realm, &head, &rows, at)
+                    .await
+                    .is_err()
+            );
+            diesel::sql_query("ROLLBACK")
+                .execute(&mut conn)
+                .await
+                .unwrap();
+            let retained: ValueRow = diesel::sql_query(
+                "SELECT value FROM scope_read_receipt_policy_current_results WHERE realm_id=$1",
+            )
+            .bind::<Text, _>(realm.as_str())
+            .get_result(&mut conn)
+            .await
+            .unwrap();
+            assert_eq!(retained.value, policy);
+        }
         for invalid in [
             json!({}),
             json!({"disclosure":"sometimes"}),
@@ -4105,7 +4157,7 @@ mod tests {
         advance_in_connection(&mut conn, &event, &commit)
             .await
             .unwrap();
-        let actual:ValueRow = diesel::sql_query("SELECT value FROM realm_bootstrap_current_results WHERE realm_id=$1 AND result_family='scope_read_receipt_policy'")
+        let actual:ValueRow = diesel::sql_query("SELECT value FROM scope_read_receipt_policy_current_results WHERE realm_id=$1 AND scope_ref->>'kind'='realm'")
             .bind::<Text,_>(realm.as_str()).get_result(&mut conn).await.unwrap();
         assert_eq!(actual.value, json!({"disclosure":"disabled"}));
     }

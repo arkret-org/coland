@@ -4468,6 +4468,26 @@ CREATE TABLE realm_bootstrap_current_results (
  PRIMARY KEY(realm_id,result_family)
 );
 
+-- One whole-value receipt policy per exact, independently configured scope.
+CREATE TABLE scope_read_receipt_policy_current_results (
+ realm_id TEXT NOT NULL,
+ scope_ref JSONB NOT NULL,
+ source_stream_ref JSONB NOT NULL,
+ current_commit_id TEXT NOT NULL,
+ current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
+ value JSONB NOT NULL,
+ updated_at TIMESTAMPTZ NOT NULL,
+ PRIMARY KEY(realm_id,scope_ref),
+ CHECK(jsonb_typeof(scope_ref)='object' AND scope_ref ?& ARRAY['kind','realm_id'] AND scope_ref->>'realm_id'=realm_id),
+ CHECK((scope_ref->>'kind'='realm' AND scope_ref - 'kind' - 'realm_id'='{}'::jsonb)
+    OR (scope_ref->>'kind'='circle' AND scope_ref ? 'circle_id' AND jsonb_typeof(scope_ref->'circle_id')='string'
+        AND scope_ref - 'kind' - 'realm_id' - 'circle_id'='{}'::jsonb)),
+ CHECK(source_stream_ref=scope_ref),
+ CHECK(jsonb_typeof(value)='object' AND value<>'{}'::jsonb AND value - 'disclosure' - 'visibility'='{}'::jsonb),
+ CHECK(NOT value ? 'disclosure' OR (jsonb_typeof(value->'disclosure')='string' AND value->>'disclosure' IN ('required','optional','disabled'))),
+ CHECK(NOT value ? 'visibility' OR (jsonb_typeof(value->'visibility')='string' AND value->>'visibility' IN ('public','members','private')))
+);
+
 CREATE TABLE agent_interaction_current_results (
  realm_id TEXT NOT NULL,
  current_key TEXT NOT NULL,

@@ -83,6 +83,7 @@ DROP TABLE IF EXISTS circle_current_results;
 DROP TABLE IF EXISTS sidecar_exchange_controls_current_results;
 DROP TABLE IF EXISTS sidecar_context_current_results;
 DROP TABLE IF EXISTS sidecar_current_results;
+DROP TABLE IF EXISTS scope_read_receipt_policy_current_results;
 DROP TABLE IF EXISTS realm_bootstrap_current_results;
 DROP TABLE IF EXISTS agent_key_current_results;
 DROP TABLE IF EXISTS agent_interaction_current_results;

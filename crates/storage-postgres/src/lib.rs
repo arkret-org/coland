@@ -188,6 +188,7 @@ mod replica_current;
 mod replica_direct_mls;
 mod replica_stream_listing;
 mod rsvp_current_results;
+mod scope_read_receipt_policy_current_results;
 mod security_transactions;
 mod self_current_reads;
 mod service_identity;

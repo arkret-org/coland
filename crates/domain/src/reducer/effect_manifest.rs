@@ -685,7 +685,7 @@ const EFFECT_MANIFEST: &[EffectRegistration] = &[
         owner: EventEffectOwnership::TypedResultWriter,
         scope: EventWireScope::DurableEvent,
         reducer_input: true,
-        slot: CacheSlot::Shared(apply_realm_read_receipt_policy_dispatch),
+        slot: CacheSlot::Shared(apply_scope_read_receipt_policy_dispatch),
     },
     EffectRegistration {
         kind: arkret_wire::event_kind_str::REALM_RESTORE,

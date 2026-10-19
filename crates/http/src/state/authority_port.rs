@@ -209,6 +209,7 @@ pub(super) fn require_guarded_unit_event(request: &EventAdmissionSubmission) -> 
             && matches!(
                 event.kind,
                 arkret_wire::EventKind::CircleMemberState
+                    | arkret_wire::EventKind::ScopeReadReceiptPolicy
                     | arkret_wire::EventKind::CallCreate
                     | arkret_wire::EventKind::CallState
                     | arkret_wire::EventKind::StrandWatchSet

@@ -33,6 +33,11 @@ async fn family_current(
     realm: &arkret_wire::RealmId,
     family: &str,
 ) -> Current {
+    if family == "scope_read_receipt_policy" {
+        let mut conn = pool.get().await.unwrap();
+        return diesel::sql_query("SELECT current_commit_id,current_stream_position,value FROM scope_read_receipt_policy_current_results WHERE realm_id=$1 AND scope_ref->>'kind'='realm'")
+            .bind::<Text,_>(realm.as_str()).get_result(&mut conn).await.unwrap();
+    }
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
         "SELECT current_commit_id,current_stream_position,value \
@@ -185,7 +190,9 @@ async fn read_receipt_policy_replacement_snapshot_replay_and_denial_share_the_pg
                 matches!(
                     entry,
                     arkret_wire::TypedCurrentRow::Value {
-                        selector: arkret_wire::CurrentSelector::ScopeReadReceiptPolicy { .. },
+                        selector: arkret_wire::CurrentSelector::ScopeReadReceiptPolicy {
+                            scope_ref: arkret_wire::ScopeRef::Realm { .. }
+                        },
                         ..
                     }
                 )

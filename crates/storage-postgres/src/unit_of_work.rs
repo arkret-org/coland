@@ -3464,7 +3464,7 @@ async fn commit_scope_current_results_inner(
         conn, event, commit,
      prepared)).await?;
 
-    Box::pin(crate::realm_bootstrap_current_results::commit_read_receipt_policy_authority_current_result_in_connection(conn, event, commit, prepared)).await?;
+    Box::pin(crate::scope_read_receipt_policy_current_results::commit_read_receipt_policy_authority_current_result_in_connection(conn, event, commit, prepared)).await?;
     Box::pin(crate::realm_bootstrap_current_results::commit_preview_policy_authority_current_result_in_connection(conn, event, commit, prepared)).await?;
 
     Box::pin(

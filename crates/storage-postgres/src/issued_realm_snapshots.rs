@@ -703,6 +703,11 @@ pub(crate) async fn recheck_disclosure_in_connection(
     issuer: &arkret_wire::DidCoreId,
     snapshot: &arkret_wire::RealmStateSnapshot,
 ) -> PersistenceResult<()> {
+    if derived_snapshot_id(snapshot)? != snapshot.snapshot_id {
+        return Err(undisclosable(
+            "the Snapshot body differs from its content id",
+        ));
+    }
     let tenure =
         sql_query("SELECT service_id, generation FROM realm_authorities WHERE realm_id=$1")
             .bind::<Text, _>(snapshot.realm_id.as_str())

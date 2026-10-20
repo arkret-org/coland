@@ -323,6 +323,8 @@ pub(crate) async fn acquire(
         || !input.morph_documents.is_empty()
         || !input.morph_absences.is_empty()
         || !input.account_status_observations.is_empty()
+        || !input.realm_lifecycle_reads.is_empty()
+        || !input.realm_link_reads.is_empty()
         || !input.realm_exports.is_empty()
         || !input.future_materials.is_empty()
         || !input.notifications.is_empty()

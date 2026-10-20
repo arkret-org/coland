@@ -128,6 +128,16 @@ async fn content_delivery_guard_inner(
     })?;
     let mut input = input.clone();
     input.credential_expires_at = Some(session.expires_at);
+    if session.agent_session().is_none()
+        && (!input.realm_lifecycle_reads.is_empty()
+            || !input.realm_link_reads.is_empty()
+            || !input.realm_exports.is_empty())
+    {
+        input
+            .account_status_observations
+            .push(super::peer::refresh_current_account_status(state, account).await?);
+    }
+
     if let Some(agent_session) = session.agent_session() {
         let grant = session.session_grant.as_ref().ok_or_else(|| {
             crate::error::AppError::capability_denied("Agent delivery credential is unavailable")

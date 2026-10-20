@@ -22,7 +22,6 @@ use salvo::prelude::*;
 use serde_json::Value;
 
 use super::AuthArgs;
-use crate::JsonResult;
 use crate::state::AppState;
 #[cfg(test)]
 use crate::wire::now;
@@ -45,13 +44,27 @@ async fn get_realm(
     depot: &mut Depot,
     req: &mut Request,
     realm_id: PathParam<String>,
-) -> JsonResult<RealmLifecycleView> {
+) -> GuardedJsonResult<RealmLifecycleView> {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let _session = aa.authenticated_session(state, req).await?;
-    let realm_id = realm_id.into_inner();
-    realm_lifecycle_response(state, &realm_id)
+    let session = aa.authenticated_session(state, req).await?;
+    let actor =
+        crate::routing::identity::session_actor::validated_session_actor(state, &session).await?;
+    let realm_id = RealmId::new(realm_id.into_inner())
+        .map_err(|_| AppError::param_invalid("invalid realm_id"))?;
+    let view = state
+        .authority_commits()
+        .realm_lifecycle_for_actor(&realm_id, &actor)
         .await
-        .map(salvo::prelude::Json)
+        .map_err(|error| AppError::internal(error.to_string()))?
+        .ok_or_else(|| AppError::not_found("not found"))?;
+    let input = coland_storage::AccountContentDeliveryInput {
+        realms: vec![realm_id],
+        realm_lifecycle_reads: vec![view.clone()],
+        ..Default::default()
+    };
+    let guard =
+        crate::routing::events::sync::content_delivery_guard(state, &session, &input).await?;
+    guarded_json_ok(view, guard)
 }
 
 #[salvo::oapi::endpoint(operation_id = "ak.self.realm.read.export", tags("spaces"))]
@@ -89,58 +102,6 @@ async fn export_realm(
 //
 // Each is re-exported from `crate::routing::*` so sibling modules use the
 // same Realm metadata and membership checks.
-
-pub async fn realm_lifecycle_response(
-    state: &AppState,
-    realm_id: &str,
-) -> Result<RealmLifecycleView, AppError> {
-    let realm_id_value = RealmId::new(realm_id.to_owned())
-        .map_err(|_| AppError::param_invalid("invalid realm_id"))?;
-    // realm-read-operations.schema.json#/$defs/realm_lifecycle_view: the owner
-    // and the members are the accepted typed current rows held here, governed
-    // or a verified replica. The process-local reducer cache is not a source:
-    // cut-decided joins never advance it, and a member Station has none.
-    let roster = state
-        .authority_commits()
-        .accepted_realm_roster(&realm_id_value)
-        .await
-        .map_err(|error| AppError::internal(error.to_string()))?
-        .ok_or_else(|| AppError::not_found("not found"))?;
-    let (archived, frozen, terminal_state, successor_realm_id) = {
-        let projection = state.projections().snapshot();
-        projection
-            .realm_states
-            .get(realm_id)
-            .map(|realm| {
-                (
-                    projection.realm_is_archived(realm_id),
-                    projection.realm_is_frozen(realm_id),
-                    realm.terminal_state.clone(),
-                    realm
-                        .successor_realm_id
-                        .as_ref()
-                        .and_then(|id| RealmId::new(id.clone()).ok()),
-                )
-            })
-            .unwrap_or((false, false, None, None))
-    };
-    let deleted = state
-        .realms()
-        .realm_metadata(realm_id)
-        .await
-        .map_err(|error| AppError::internal(error.to_string()))?
-        .is_some_and(|record| record.deleted);
-    Ok(RealmLifecycleView {
-        realm_id: realm_id_value,
-        owner_id: roster.controller_actor_id.signing_principal_id().clone(),
-        member_ids: roster.joined_members,
-        deleted,
-        archived,
-        frozen,
-        terminal_state,
-        successor_realm_id,
-    })
-}
 
 // ── Visibility + membership query helpers ─────────────────────────────────
 

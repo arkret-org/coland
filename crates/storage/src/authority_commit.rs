@@ -1545,6 +1545,8 @@ pub struct AccountContentDeliveryInput {
     )>,
     pub morph_absences: Vec<(arkret_wire::RealmId, arkret_wire::MorphId)>,
     pub account_status_observations: Vec<AccountStatusCurrentObservation>,
+    pub realm_lifecycle_reads: Vec<arkret_models_collaboration::governance::realm_governance::RealmLifecycleView>,
+    pub realm_link_reads: Vec<(arkret_models_collaboration::governance::realm_governance::RealmLinkList, Option<Vec<String>>)>,
     pub realm_exports: Vec<arkret_models_collaboration::governance::realm_governance::RealmExport>,
     pub snapshots: Vec<arkret_wire::RealmStateSnapshot>,
     pub future_materials: Vec<arkret_wire::MlsWelcomeDelivery>,
@@ -2680,17 +2682,30 @@ pub trait AuthorityCommitStore: Send + Sync {
         ))
     }
 
-    /// Read the maximal-disclosure snapshot material from one consistent
-    /// durable cut. Implementations must sort every repeated field.
+    async fn realm_lifecycle_for_actor(
+        &self,
+        realm: &arkret_wire::RealmId,
+        actor: &arkret_wire::ActorId,
+    ) -> PersistenceResult<
+        Option<arkret_models_collaboration::governance::realm_governance::RealmLifecycleView>,
+    > {
+        let _ = (realm, actor);
+        Err(crate::PersistenceError::Internal(
+            "Realm lifecycle read is unavailable".into(),
+        ))
+    }
+
     async fn accepted_realm_links(
         &self,
         realm: &arkret_wire::RealmId,
+        actor: &arkret_wire::ActorId,
+        station: &arkret_wire::DidCoreId,
         direction: arkret_models_collaboration::governance::realm_governance::RealmLinkDirection,
         allow: Option<&[String]>,
     ) -> PersistenceResult<
-        Vec<arkret_models_collaboration::governance::realm_governance::RealmLinkEntry>,
+        Option<arkret_models_collaboration::governance::realm_governance::RealmLinkList>,
     > {
-        let _ = (realm, direction, allow);
+        let _ = (realm, actor, station, direction, allow);
         Err(crate::PersistenceError::Internal(
             "accepted Realm link read is unavailable".into(),
         ))

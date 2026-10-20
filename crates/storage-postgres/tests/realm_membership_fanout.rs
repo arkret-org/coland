@@ -4058,6 +4058,12 @@ async fn peer_scan_serves_joined_and_departed_member_intervals_case() {
 /// member's own scan is served from its join (`federation.md` §4.1.1).
 #[tokio::test]
 async fn member_station_anchors_on_the_bootstrap_snapshot_and_keeps_chain_nodes() {
+    tokio::spawn(heap_future(member_station_anchor_case))
+        .await
+        .unwrap();
+}
+
+async fn member_station_anchor_case() {
     use arkret_wire::StreamScanDirection::After;
     use coland_storage::AccountStreamScan;
 
@@ -4093,7 +4099,37 @@ async fn member_station_anchors_on_the_bootstrap_snapshot_and_keeps_chain_nodes(
     let bob = remote_member("member-anchor-bob");
     let alice_account = alice.as_account_id().unwrap().clone();
 
-    let join = membership_request(last, alice.clone(), &alice, "join");
+    // Reversible lifecycle state precedes the reader's history floor. A member
+    // must consume its verified current snapshot without the old Event bytes.
+    let freeze = heap_future(|| {
+        ordinary_realm::source_request(
+            &governance_pool,
+            sourced(next_request(
+                last,
+                arkret_wire::EventKind::RealmFreeze,
+                &founder(),
+                serde_json::json!({}),
+                at,
+            )),
+        )
+    })
+    .await;
+    uow.commit_event(freeze.clone()).await.unwrap();
+    let unfreeze = heap_future(|| {
+        ordinary_realm::source_request(
+            &governance_pool,
+            sourced(next_request(
+                &freeze.authority_commit,
+                arkret_wire::EventKind::RealmUnfreeze,
+                &founder(),
+                serde_json::json!({}),
+                at,
+            )),
+        )
+    })
+    .await;
+    uow.commit_event(unfreeze.clone()).await.unwrap();
+    let join = membership_request(&unfreeze.authority_commit, alice.clone(), &alice, "join");
     uow.commit_event(join.clone()).await.unwrap();
     let mut founder_previous = join.authority_commit.clone();
     founder_previous.producer_signer_fact = unit
@@ -4157,6 +4193,13 @@ async fn member_station_anchors_on_the_bootstrap_snapshot_and_keeps_chain_nodes(
             .await
             .unwrap_err(),
         ConflictCode::DependencyMissing,
+    );
+    assert!(
+        member
+            .realm_lifecycle_for_actor(&realm_id, &alice)
+            .await
+            .is_err(),
+        "a pending join without accepted snapshot evidence cannot expose current"
     );
     let pending_scan = member
         .scan_stream_for_account(
@@ -4246,6 +4289,29 @@ async fn member_station_anchors_on_the_bootstrap_snapshot_and_keeps_chain_nodes(
             .await
             .as_deref(),
         Some("Fixture Realm")
+    );
+
+    let lifecycle = member
+        .realm_lifecycle_for_actor(&realm_id, &alice)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!lifecycle.frozen && !lifecycle.archived && !lifecycle.deleted);
+    assert_eq!(lifecycle.owner_id, founder());
+    assert!(lifecycle.member_ids.contains(&alice));
+    assert!(
+        member
+            .committed_event(&unfreeze.authority_commit.event.event_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        member
+            .realm_lifecycle_for_actor(&realm_id, &remote_member("unknown-reader"))
+            .await
+            .unwrap()
+            .is_none()
     );
 
     // A chain node cannot skip the held head; the peer scan fills the prefix.

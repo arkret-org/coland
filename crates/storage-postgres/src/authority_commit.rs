@@ -2753,10 +2753,46 @@ struct RosterMemberRow {
     member_id: String,
 }
 
+/// Exact current membership/controller or the native owner of a Human PCR.
+pub(crate) async fn accepted_realm_reader_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm_id: &arkret_wire::RealmId,
+    actor: &arkret_wire::ActorId,
+) -> PersistenceResult<bool> {
+    if accepted_current_member_joined_in_connection(conn, realm_id, actor).await? {
+        if let Some(controller) = crate::agent_management_admission::read_controller_in_connection(
+            conn, realm_id, None, actor,
+        )
+        .await?
+        {
+            return Ok(
+                accepted_current_member_joined_in_connection(conn, realm_id, &controller).await?,
+            );
+        }
+        return Ok(true);
+    }
+    let Some(account) = actor.as_account_id() else {
+        return Ok(false);
+    };
+    // The owner Account's principal-control Realm, recorded in the same
+    // transaction as its PCR genesis.
+    Ok(sql_query(
+        "SELECT EXISTS (SELECT 1 FROM principal_resolutions \
+             WHERE pcr_realm_id = $1 AND principal_id = $2 AND station_id = $3) AS present",
+    )
+    .bind::<Text, _>(realm_id.as_str())
+    .bind::<Text, _>(account.principal_id.as_str())
+    .bind::<Text, _>(account.station_id.as_str())
+    .get_result::<PresenceRow>(&mut *conn)
+    .await
+    .map_err(PersistenceError::database)?
+    .present)
+}
+
 /// See [`AuthorityCommitStore::accepted_realm_roster`]. The governing Station
 /// (and a founding peer) holds the root as its own typed current row; a member
 /// Station holds the governing Station's verified root row.
-async fn accepted_realm_roster_in_connection(
+pub(crate) async fn accepted_realm_roster_in_connection(
     conn: &mut AsyncPgConnection,
     realm_id: &arkret_wire::RealmId,
 ) -> PersistenceResult<Option<coland_storage::AcceptedRealmRoster>> {
@@ -4461,38 +4497,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
                 .execute(&mut *conn)
                 .await?;
-            if accepted_current_member_joined_in_connection(conn, realm_id, actor).await? {
-                if let Some(controller) =
-                    crate::agent_management_admission::read_controller_in_connection(
-                        conn, realm_id, None, actor,
-                    )
-                    .await?
-                {
-                    return Ok(accepted_current_member_joined_in_connection(
-                        conn,
-                        realm_id,
-                        &controller,
-                    )
-                    .await?);
-                }
-                return Ok(true);
-            }
-            let Some(account) = actor.as_account_id() else {
-                return Ok(false);
-            };
-            // The owner Account's principal-control Realm, recorded in the same
-            // transaction as its PCR genesis.
-            Ok(sql_query(
-                "SELECT EXISTS (SELECT 1 FROM principal_resolutions \
-             WHERE pcr_realm_id = $1 AND principal_id = $2 AND station_id = $3) AS present",
-            )
-            .bind::<Text, _>(realm_id.as_str())
-            .bind::<Text, _>(account.principal_id.as_str())
-            .bind::<Text, _>(account.station_id.as_str())
-            .get_result::<PresenceRow>(&mut *conn)
-            .await
-            .map_err(PersistenceError::database)?
-            .present)
+            Ok(accepted_realm_reader_in_connection(conn, realm_id, actor).await?)
         })
         .await
         .map_err(PgTransactionError::into_persistence)
@@ -5261,15 +5266,51 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .map_err(PgTransactionError::into_persistence)
     }
 
+    async fn realm_lifecycle_for_actor(
+        &self,
+        realm: &arkret_wire::RealmId,
+        actor: &arkret_wire::ActorId,
+    ) -> PersistenceResult<
+        Option<arkret_models_collaboration::governance::realm_governance::RealmLifecycleView>,
+    > {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            if !accepted_realm_reader_in_connection(conn, realm, actor).await? {
+                return Ok(None);
+            }
+            crate::realm_authorization_cut::lock_realm_authorization_cut(conn, realm).await?;
+            Ok(crate::realm_reads::lifecycle_in_connection(conn, realm, actor).await?)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
     async fn accepted_realm_links(
         &self,
         realm: &arkret_wire::RealmId,
+        actor: &arkret_wire::ActorId,
+        station: &arkret_wire::DidCoreId,
         direction: arkret_models_collaboration::governance::realm_governance::RealmLinkDirection,
         allow: Option<&[String]>,
     ) -> PersistenceResult<
-        Vec<arkret_models_collaboration::governance::realm_governance::RealmLinkEntry>,
+        Option<arkret_models_collaboration::governance::realm_governance::RealmLinkList>,
     > {
-        crate::object_projection_reads::realm_link_list(&self.pool, realm, direction, allow).await
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            if !accepted_realm_reader_in_connection(conn, realm, actor).await? {
+                return Ok(None);
+            }
+            crate::realm_authorization_cut::lock_realm_authorization_cut(conn, realm).await?;
+            Ok(
+                crate::object_projection_reads::realm_link_list_in_connection(
+                    conn, realm, actor, station, direction, allow,
+                )
+                .await?
+                .map(|(list, _)| list),
+            )
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
     }
 
     async fn accepted_realm_organization_read(

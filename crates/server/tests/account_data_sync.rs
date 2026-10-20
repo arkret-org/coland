@@ -169,6 +169,18 @@ async fn spawn_introspection_mock(outcome: Value) -> String {
                         break;
                     }
                 }
+                let split = request
+                    .windows(4)
+                    .position(|part| part == b"\r\n\r\n")
+                    .unwrap();
+                let body = if String::from_utf8_lossy(&request[..split])
+                    .starts_with("POST /_arkret/peer/account-status/resolve ")
+                {
+                    let query: Value = serde_json::from_slice(&request[split + 4..]).unwrap();
+                    serde_json::to_vec(&json!({"account_authority_id":query["account_authority_id"], "account_id":query["account_id"], "records":[], "has_more":false})).unwrap()
+                } else {
+                    body
+                };
                 let headers = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                     body.len()
@@ -219,6 +231,9 @@ async fn account_grant_session_at(
                 arkret_wire::ServiceOperationId::SELF_ACCOUNT_DATA_RESOURCE_GET_V1,
                 arkret_wire::ServiceOperationId::SELF_ACCOUNT_DATA_RESOURCE_DELETE_V1,
                 arkret_wire::ServiceOperationId::SELF_ACCOUNT_DATA_READ_LIST_V1,
+                "ak.self.realm.resource.get.v1",
+                "ak.self.realm.read.export.v1",
+                "ak.self.realm_link.read.list.v1",
                 "ak.self.read_cursor.command.advance.v1",
                 "ak.self.read_cursor.read.list.v1",
             ],
@@ -864,3 +879,6 @@ async fn signed_read_cursor_round_trip_replays_without_entering_the_realm_log() 
             .is_none()
     );
 }
+
+#[path = "realm_read_cases/mod.rs"]
+mod realm_read_cases;

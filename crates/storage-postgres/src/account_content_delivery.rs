@@ -24,6 +24,13 @@ pub(crate) async fn realm_export_for_actor(
     use diesel_async::AsyncConnection as _;
     let mut conn = crate::pg_conn(pool).await?;
     conn.transaction::<_, crate::PgTransactionError, _>(async move |conn| {
+        if !crate::authority_commit::accepted_current_member_joined_in_connection(
+            conn, realm, actor,
+        )
+        .await?
+        {
+            return Ok(None);
+        }
         crate::realm_authorization_cut::lock_realm_authorization_cut(conn, realm).await?;
         Ok(realm_export_in_connection(
             conn,
@@ -365,7 +372,7 @@ pub(crate) async fn realm_export_in_connection(
     )))
 }
 
-async fn export_floor_in_connection(
+pub(crate) async fn export_floor_in_connection(
     conn: &mut AsyncPgConnection,
     stream: &arkret_wire::CommitStreamRef,
     actor: &ActorId,
@@ -1246,6 +1253,8 @@ async fn acquire_remote_watch_delivery(
         || !input.morph_lists.is_empty()
         || !input.morph_documents.is_empty()
         || !input.morph_absences.is_empty()
+        || !input.realm_lifecycle_reads.is_empty()
+        || !input.realm_link_reads.is_empty()
         || !input.realm_exports.is_empty()
         || !input.snapshots.is_empty()
         || !input.future_materials.is_empty()
@@ -1624,6 +1633,8 @@ pub(crate) async fn acquire_native_message_reply_preparation(
         || !input.morph_lists.is_empty()
         || !input.morph_documents.is_empty()
         || !input.morph_absences.is_empty()
+        || !input.realm_lifecycle_reads.is_empty()
+        || !input.realm_link_reads.is_empty()
         || !input.realm_exports.is_empty()
         || !input.snapshots.is_empty()
         || !input.future_materials.is_empty()
@@ -2032,6 +2043,56 @@ async fn revalidate_projection_inputs_in_connection(
         blob_scope_operations: _,
         blob_source_actions: _,
     } = facts;
+    if !input.realm_lifecycle_reads.is_empty() || !input.realm_link_reads.is_empty() {
+        let mut projection_input = input.clone();
+        projection_input.realm_exports.clear();
+        let sources = Box::pin(crate::realm_reads::revalidate_in_connection(
+            conn,
+            &actor,
+            station,
+            &projection_input,
+        ))
+        .await?;
+        for full in sources {
+            let source = CommittedEventView::Full(full);
+            if !input.committed_events.contains(&source) {
+                input.committed_events.push(source);
+            }
+        }
+        for realm in input
+            .realm_lifecycle_reads
+            .iter()
+            .map(|view| &view.realm_id)
+            .chain(
+                input
+                    .realm_link_reads
+                    .iter()
+                    .map(|(list, _)| &list.realm_id),
+            )
+        {
+            let controller = delivery_reader_in_connection(conn, realm, &actor, at)
+                .await?
+                .ok_or_else(|| unavailable("Realm read controller is unavailable"))?;
+            let owner = controller
+                .as_account_id()
+                .ok_or_else(|| unavailable("Realm read controller is not an Account"))?;
+            let resources = [arkret_models_collaboration::governance::operation_wire::PolicyResourceSelector { kind: arkret_models_collaboration::governance::operation_wire::PolicyResourceKind::Realm, realm_id: Some(realm.clone()), resource_ref: Some(realm.to_string()) }];
+            for operation in [AgentPolicyOperation::Read, AgentPolicyOperation::Deliver] {
+                Box::pin(require_delivery_policy_in_connection(
+                    conn,
+                    realm,
+                    None,
+                    owner,
+                    account,
+                    operation,
+                    CapabilityActionId::EventRead,
+                    &resources,
+                    at,
+                ))
+                .await?;
+            }
+        }
+    }
     for export in input.realm_exports.clone() {
         if !realms.contains(&export.realm_id) {
             continue;
@@ -2857,6 +2918,18 @@ async fn acquire_with_native_reply(
                 .map(|row| &row.commit().realm_id),
         )
         .chain(input.realm_exports.iter().map(|export| &export.realm_id))
+        .chain(
+            input
+                .realm_lifecycle_reads
+                .iter()
+                .map(|view| &view.realm_id),
+        )
+        .chain(
+            input
+                .realm_link_reads
+                .iter()
+                .map(|(list, _)| &list.realm_id),
+        )
         .chain(input.current_views.iter().map(|view| &view.realm_id))
         .chain(input.snapshots.iter().map(|snapshot| &snapshot.realm_id))
         .chain(
@@ -2905,6 +2978,13 @@ async fn acquire_with_native_reply(
     }
     if realms.is_empty() {
         guard.finish().await?;
+        if let Some(held) = Box::pin(crate::realm_reads::ordinary_delivery_guard(
+            pool, account, station, &input,
+        ))
+        .await?
+        {
+            return Ok(Some(held));
+        }
         return Box::pin(crate::morph_projection_reads::ordinary_delivery_guard(
             pool, account, station, &input,
         ))
@@ -3240,6 +3320,14 @@ async fn acquire_owned_delivery_guard(
                 .realm_exports
                 .iter()
                 .any(|export| &export.realm_id == realm)
+                || input
+                    .realm_lifecycle_reads
+                    .iter()
+                    .any(|view| &view.realm_id == realm)
+                || input
+                    .realm_link_reads
+                    .iter()
+                    .any(|(list, _)| &list.realm_id == realm)
             {
                 clock.scope_operations.push((
                     actor.clone(),
@@ -3373,6 +3461,14 @@ async fn acquire_owned_delivery_guard(
                     .realm_exports
                     .iter()
                     .any(|export| &export.realm_id == realm)
+                    || input
+                        .realm_lifecycle_reads
+                        .iter()
+                        .any(|view| &view.realm_id == realm)
+                    || input
+                        .realm_link_reads
+                        .iter()
+                        .any(|(list, _)| &list.realm_id == realm)
                 {
                     clock.scope_operations.push((
                         actor.clone(),

@@ -2141,6 +2141,16 @@ impl AuthorityCommitApplication {
             .await?)
     }
 
+    pub async fn realm_lifecycle_for_actor(
+        &self,
+        realm: &arkret_wire::RealmId,
+        actor: &arkret_wire::ActorId,
+    ) -> ServiceResult<
+        Option<arkret_models_collaboration::governance::realm_governance::RealmLifecycleView>,
+    > {
+        Ok(self.store().realm_lifecycle_for_actor(realm, actor).await?)
+    }
+
     pub async fn realm_export_for_actor(
         &self,
         realm_id: &arkret_wire::RealmId,

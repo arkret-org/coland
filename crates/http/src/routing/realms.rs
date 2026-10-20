@@ -9,7 +9,7 @@ use arkret_models_collaboration::governance::realm_governance::{
     RealmLinkDirection, RealmLinkKind, RealmLinkList,
 };
 use coland_http::error::AppError;
-use coland_http::result::{JsonResult, json_ok};
+use coland_http::result::{GuardedJsonResult, guarded_json_ok};
 use salvo::oapi::endpoint;
 use salvo::oapi::extract::{PathParam, QueryParam};
 use salvo::prelude::*;
@@ -37,7 +37,7 @@ pub(crate) async fn list_realm_links(
     link_kind_allow: QueryParam<String, false>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<RealmLinkList> {
+) -> GuardedJsonResult<RealmLinkList> {
     let session = {
         let state = depot.get_typed::<AppState>().expect("state injected");
         aa.authenticated_session(state, req).await?
@@ -57,21 +57,22 @@ pub(crate) async fn admin_list_realm_links(
     direction: QueryParam<String, false>,
     link_kind_allow: QueryParam<String, false>,
     depot: &mut Depot,
-) -> JsonResult<RealmLinkList> {
+) -> GuardedJsonResult<RealmLinkList> {
     let session = admin.session()?;
     list_realm_links_impl(session, realm_id, direction, link_kind_allow, depot).await
 }
 
-/// `_session` is the caller already authenticated by the wrapping endpoint
-/// (the self bearer path or the `RequireAdmin` gate).
+/// Administrative role does not grant access to private Realm contents.
 async fn list_realm_links_impl(
-    _session: coland_services::identity::SessionIdentityState,
+    session: coland_services::identity::SessionIdentityState,
     realm_id: PathParam<String>,
     direction: QueryParam<String, false>,
     link_kind_allow: QueryParam<String, false>,
     depot: &mut Depot,
-) -> JsonResult<RealmLinkList> {
+) -> GuardedJsonResult<RealmLinkList> {
     let state = depot.get_typed::<AppState>().expect("state injected");
+    let actor =
+        crate::routing::identity::session_actor::validated_session_actor(state, &session).await?;
     let realm_id = RealmId::new(realm_id.into_inner())
         .map_err(|e| AppError::param_invalid(format!("realm_id: {e}")))?;
     let direction_str = direction.into_inner().unwrap_or_else(|| "both".to_owned());
@@ -99,15 +100,26 @@ async fn list_realm_links_impl(
         })
         .transpose()?;
 
-    let entries = state
+    let list = state
         .persistence()
-        .accepted_realm_links(&realm_id, direction_enum, allow.as_deref())
+        .accepted_realm_links(
+            &realm_id,
+            &actor,
+            &state.service_core_id(),
+            direction_enum,
+            allow.as_deref(),
+        )
         .await
-        .map_err(|error| AppError::internal(error.to_string()))?;
-
-    json_ok(RealmLinkList {
-        realm_id,
-        direction: direction_enum,
-        links: entries,
-    })
+        .map_err(|error| AppError::internal(error.to_string()))?
+        .ok_or_else(|| AppError::not_found("not found"))?;
+    let input = coland_storage::AccountContentDeliveryInput {
+        realms: std::iter::once(realm_id)
+            .chain(list.links.iter().map(|link| link.realm_id.clone()))
+            .collect(),
+        realm_link_reads: vec![(list.clone(), allow)],
+        ..Default::default()
+    };
+    let guard =
+        crate::routing::events::sync::content_delivery_guard(state, &session, &input).await?;
+    guarded_json_ok(list, guard)
 }

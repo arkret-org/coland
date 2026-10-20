@@ -1368,12 +1368,52 @@ async fn query_claim_ledger(
     source_id: String,
 ) -> JsonResult<PeerKeyPackagesClaimQueryOutcome> {
     revoke_expired_peer_claims(state).await?;
-    let Some(record) = state
+    let mut source_id = source_id;
+    let mut record = state
         .mls_key_packages()
         .peer_claim(&source_id, body.claim_request_id.as_str())
         .await
-        .map_err(|error| AppError::internal(format!("peer claim query ledger: {error}")))?
-    else {
+        .map_err(|error| AppError::internal(format!("peer claim query ledger: {error}")))?;
+    if let Some(original) = state
+        .mls_key_packages()
+        .peer_claim_original(body.claim_request_id.as_str(), body.request_digest.as_str())
+        .await
+        .map_err(|error| AppError::internal(format!("peer claim query original: {error}")))?
+        && let Some(requester) = original
+            .requester_actor_id
+            .as_ref()
+            .and_then(arkret_wire::ActorId::as_realm_actor_id)
+    {
+        // The retained original supplied the requester identity. Neither the
+        // transport caller nor the query may choose a Realm or another source.
+        let source = arkret_wire::DidCoreId::new(source_id.clone())
+            .map_err(|error| AppError::internal(error.to_string()))?;
+        let located = crate::routing::realm_join::resolve_verified_authority_of_service(
+            state,
+            &requester.realm_id,
+            &source,
+        )
+        .await?;
+        let authority = &located.authority;
+        let original_source = &original.service_binding.source_id;
+        let PeerKeyPackageRequesterAuthorization::RealmDevice { signed_at, .. } =
+            &original.requester_authorization
+        else {
+            return Err(peer_claim_failed());
+        };
+        if requester.realm_id != original.intended_realm_id
+            || !authority.authorizes_issuer_at(original_source, None, *signed_at)
+        {
+            return Err(peer_claim_failed());
+        }
+        source_id = original_source.to_string();
+        record = state
+            .mls_key_packages()
+            .peer_claim(&source_id, body.claim_request_id.as_str())
+            .await
+            .map_err(|error| AppError::internal(format!("peer claim recovered ledger: {error}")))?;
+    }
+    let Some(record) = record else {
         return json_ok(PeerKeyPackagesClaimQueryOutcome {
             claim_request_id: body.claim_request_id,
             state: PeerKeyPackagesClaimQueryState::Unknown,
@@ -1452,7 +1492,7 @@ async fn query_claim_ledger(
         )?;
         let receipt_value = serde_json::to_value(&receipt)
             .map_err(|error| AppError::internal(format!("terminal receipt serialize: {error}")))?;
-        let _attached = state
+        let attached = state
             .mls_key_packages()
             .attach_peer_claim_terminal_receipt(
                 &source_id,
@@ -1466,7 +1506,14 @@ async fn query_claim_ledger(
             .ok_or_else(|| {
                 AppError::conflict("peer claim terminal state changed while persisting receipt")
             })?;
-        terminal_receipt = Some(receipt);
+        terminal_receipt = Some(
+            serde_json::from_value(attached.terminal_receipt.ok_or_else(|| {
+                AppError::internal("persisted terminal claim omitted its winning receipt")
+            })?)
+            .map_err(|error| {
+                AppError::internal(format!("persisted terminal receipt invalid: {error}"))
+            })?,
+        );
     }
     if record.state == "consumed" && consume_receipt.is_none() {
         return Err(AppError::internal(
@@ -2250,20 +2297,8 @@ async fn claim_keypackage(
         None
     };
     let (Json(outcome), credential_deadline) = if let Some(source) = &source {
-        let peer = PeerKeyPackagesClaimRequestBody::from(&body);
-        if body.service_binding.destination_id != state.service_core_id() {
-            return Err(crate::app_error!(
-                TemporarilyUnavailable,
-                "native claim requires a current governing delivery barrier"
-            ));
-        }
-        let authorization = VerifiedClaimAuthorization::for_verified_request(&peer)?;
         (
-            crate::boxed_future(|| {
-                claim_keypackage_at_destination(state, &peer, authorization, Some(source))
-            })
-            .await
-            .map(|Json(outcome)| Json(outcome.into()))?,
+            crate::boxed_future(|| mls_keypackage_native::claim(state, &body, source)).await?,
             source.1,
         )
     } else {
@@ -2273,6 +2308,17 @@ async fn claim_keypackage(
             crate::boxed_future(|| claim_keypackage_session(state, session, body)).await?,
             deadline,
         )
+    };
+    let credential_deadline = if source.is_some() {
+        mls_keypackage_native::verify_ordinary_target(
+            state,
+            &original_command,
+            &outcome,
+            credential_deadline,
+        )
+        .await?
+    } else {
+        credential_deadline
     };
     let peer_outcome = PeerKeyPackagesClaimOutcome {
         claim_request_id: outcome.claim_request_id.clone(),
@@ -2593,7 +2639,21 @@ async fn query_own_keypackage_claim(
         .transpose()
         .map_err(|error| AppError::internal(format!("stored claim outcome invalid: {error}")))?
         .ok_or_else(keypackage_claim_unknown)?;
-    let owned = outcome.claim_receipt.destination_id.as_str() == state.service_id()
+    let issuer_bound =
+        if native.is_some() && outcome.claim_receipt.request.target_actor_id.is_some() {
+            state
+                .mls_key_packages()
+                .realm_claim_issuer_resolution(
+                    outcome.claim_receipt.source_id.as_str(),
+                    outcome.claim_request_id.as_str(),
+                )
+                .await
+                .map_err(|_| keypackage_claim_unknown())?
+                .is_some()
+        } else {
+            outcome.claim_receipt.destination_id.as_str() == state.service_id()
+        };
+    let owned = issuer_bound
         && outcome
             .claims
             .iter()
@@ -2644,6 +2704,51 @@ async fn query_own_keypackage_claim(
     coland_http::result::guarded_json_ok(outcome.into(), guard)
 }
 
+async fn require_relay_source(
+    state: &AppState,
+    request: &KeyPackagesClaimRequestBody,
+) -> Result<(), String> {
+    if request.service_binding.source_id == state.service_core_id() {
+        return Ok(());
+    }
+    let requester = request
+        .requester_actor_id
+        .as_ref()
+        .and_then(arkret_wire::ActorId::as_realm_actor_id)
+        .ok_or_else(|| "ordinary claim source cannot change Station".to_owned())?;
+    let digest = arkret_canonical::canonical_sha256(request).map_err(|error| error.to_string())?;
+    let retained = state
+        .mls_key_packages()
+        .peer_claim_original(request.claim_request_id.as_str(), &digest)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "source successor lacks the imported original request".to_owned())?;
+    if arkret_canonical::canonical_json_bytes(&retained).map_err(|error| error.to_string())?
+        != arkret_canonical::canonical_json_bytes(request).map_err(|error| error.to_string())?
+    {
+        return Err("source successor original request differs".into());
+    }
+    let located = crate::routing::realm_join::resolve_verified_authority_of_service(
+        state,
+        &requester.realm_id,
+        &state.service_core_id(),
+    )
+    .await
+    .map_err(|error| error.message)?;
+    let PeerKeyPackageRequesterAuthorization::RealmDevice { signed_at, .. } =
+        &request.requester_authorization
+    else {
+        return Err("Realm requester lacks its original Device authorization".into());
+    };
+    if !located
+        .authority
+        .authorizes_issuer_at(&request.service_binding.source_id, None, *signed_at)
+    {
+        return Err("original source is outside the Realm governance history".into());
+    }
+    Ok(())
+}
+
 pub(crate) async fn capture_relayed_keypackage_claim_outcome(
     state: &AppState,
     destination_id: &str,
@@ -2657,14 +2762,39 @@ pub(crate) async fn capture_relayed_keypackage_claim_outcome(
     outcome
         .validate_shape()
         .map_err(|error| error.to_string())?;
+    require_relay_source(state, &request).await?;
     let receipt = &outcome.claim_receipt;
-    if request.service_binding.source_id.as_str() != state.service_id()
-        || request.service_binding.destination_id.as_str() != destination_id
-        || receipt.source_id != request.service_binding.source_id
+    if receipt.source_id != request.service_binding.source_id
         || receipt.destination_id != request.service_binding.destination_id
         || receipt.request != request.unsigned_request()
     {
         return Err("relayed KeyPackage claim outcome binding mismatch".to_owned());
+    }
+    if let Some(target) = request
+        .target_actor_id
+        .as_ref()
+        .and_then(arkret_wire::ActorId::as_realm_actor_id)
+    {
+        let destination = arkret_wire::DidCoreId::new(destination_id.to_owned())
+            .map_err(|error| error.to_string())?;
+        let located = crate::routing::realm_join::resolve_verified_authority_of_service(
+            state,
+            &target.realm_id,
+            &destination,
+        )
+        .await
+        .map_err(|error| error.message)?;
+        if receipt.claim_authority_ref.is_none()
+            || !located.authority.authorizes_issuer_at(
+                &receipt.destination_id,
+                receipt.claim_authority_ref.as_ref(),
+                receipt.claimed_at,
+            )
+        {
+            return Err("relayed claim lacks its original governing tenure".into());
+        }
+    } else if request.service_binding.destination_id.as_str() != destination_id {
+        return Err("ordinary claim destination cannot change Station".into());
     }
     let request_digest =
         arkret_canonical::canonical_sha256(&request).map_err(|error| error.to_string())?;
@@ -2682,7 +2812,7 @@ pub(crate) async fn capture_relayed_keypackage_claim_outcome(
     let signing_bytes =
         peer_keypackage_claim_receipt_signing_bytes(receipt).map_err(|error| error.to_string())?;
     crate::jws_verify::validate_verification_method_controller(
-        destination_id,
+        receipt.destination_id.as_str(),
         receipt.signature.kid.as_str(),
     )?;
     let verification_key = crate::jws_verify::resolve_ed25519_pubkey_at(
@@ -2703,7 +2833,7 @@ pub(crate) async fn capture_relayed_keypackage_claim_outcome(
         .iter()
         .any(|claim| claim.last_resort == Some(true));
     let record = PeerKeyPackageClaimLedgerRecord {
-        source_id: state.service_id().clone(),
+        source_id: request.service_binding.source_id.to_string(),
         claim_request_id: request.claim_request_id.as_str().to_owned(),
         request_digest,
         key_package_use: if is_last_resort {
@@ -2785,23 +2915,110 @@ pub(crate) async fn capture_relayed_keypackage_claim_query(
             .first()
             .filter(|_| outcome.claims.len() == 1)
             .ok_or_else(|| "consumed claim query has no unique claim".to_owned())?;
+        let durable = &consume.recipient_durable_receipt;
+        let recipient_matches = match &durable.recipient {
+            arkret_models_crypto::RecipientMlsDurableSigner::RealmDevice {
+                recipient_actor_id,
+                recipient_device_id,
+                ..
+            } => {
+                recipient_actor_id == &claim.actor_id
+                    && claim.device_id.as_ref() == Some(recipient_device_id)
+                    && request.target_actor_id.as_ref() == Some(recipient_actor_id)
+            }
+            arkret_models_crypto::RecipientMlsDurableSigner::Device {
+                recipient_account_id,
+                recipient_device_id,
+                ..
+            } => {
+                claim.actor_id.as_account_id() == Some(recipient_account_id)
+                    && claim.device_id.as_ref() == Some(recipient_device_id)
+                    && request.target_account_id.as_ref() == Some(recipient_account_id)
+            }
+            arkret_models_crypto::RecipientMlsDurableSigner::Agent {
+                recipient_agent_id,
+                recipient_agent_verification_method,
+                agent_key_authorize_event_id,
+            } => {
+                claim.agent_id.as_ref() == Some(recipient_agent_id)
+                    && claim.agent_verification_method.as_ref()
+                        == Some(recipient_agent_verification_method)
+                    && claim.agent_key_authorize_event_id.as_ref()
+                        == Some(agent_key_authorize_event_id)
+                    && request.target_agent_id.as_ref() == Some(recipient_agent_id)
+            }
+        };
         if consume.recipient_durable_receipt.claim_request_id != request.claim_request_id
-            || consume.recipient_durable_receipt.recipient_id.as_str() != destination_id
+            || consume.recipient_durable_receipt.recipient_id
+                != outcome.claim_receipt.destination_id
             || consume.claim_id.as_str() != claim.claim_id
             || consume.recipient_durable_receipt.key_package_ref.as_str() != claim.keypackage_ref
+            || !recipient_matches
+            || durable.realm_id != request.intended_realm_id
+            || durable.mls_group_id != request.mls_group_id
+            || durable.durable_at > consume.consumed_at
+            || consume.consumed_at < outcome.claim_receipt.claimed_at
+            || consume.consumed_at >= request.expires_at
         {
             return Err("consumed claim query receipt binding mismatch".to_owned());
         }
+        let consume_issuer = if let Some(target) = request
+            .target_actor_id
+            .as_ref()
+            .and_then(arkret_wire::ActorId::as_realm_actor_id)
+        {
+            let method_did = consume
+                .signature
+                .kid
+                .as_str()
+                .split('#')
+                .next()
+                .ok_or_else(|| "consume receipt has no method controller".to_owned())?;
+            let issuer = arkret_wire::Did::new(method_did.to_owned())
+                .and_then(|did| arkret_wire::project_did_to_core_id(&did))
+                .map_err(|error| error.to_string())?;
+            let current =
+                super::actor_delivery_station(state, request.target_actor_id.as_ref().unwrap())
+                    .await
+                    .map_err(|error| error.message)?;
+            let located = crate::routing::realm_join::resolve_verified_authority_of_service(
+                state,
+                &target.realm_id,
+                &current,
+            )
+            .await
+            .map_err(|error| error.message)?;
+            if !located
+                .authority
+                .authorizes_issuer_at(&issuer, None, consume.consumed_at)
+                || !located.authority.authorizes_issuer_at(
+                    &outcome.claim_receipt.destination_id,
+                    outcome.claim_receipt.claim_authority_ref.as_ref(),
+                    outcome.claim_receipt.claimed_at,
+                )
+            {
+                return Err(
+                    "consume and claim issuers are outside the verified Realm governance history"
+                        .into(),
+                );
+            }
+            issuer
+        } else {
+            consume.recipient_durable_receipt.recipient_id.clone()
+        };
         crate::jws_verify::validate_verification_method_controller(
-            consume.recipient_durable_receipt.recipient_id.as_str(),
+            consume_issuer.as_str(),
             consume.signature.kid.as_str(),
         )?;
         let signing_bytes = consume
             .canonical_signing_bytes()
             .map_err(|error| error.to_string())?;
-        let key =
-            crate::jws_verify::resolve_ed25519_pubkey_async(state, consume.signature.kid.as_str())
-                .await?;
+        let key = crate::jws_verify::resolve_ed25519_pubkey_at(
+            state,
+            consume.signature.kid.as_str(),
+            consume.consumed_at,
+        )
+        .await?;
         if !crate::routing::identity::device_signing::ed25519_verify(
             &key,
             &signing_bytes,
@@ -2814,7 +3031,7 @@ pub(crate) async fn capture_relayed_keypackage_claim_query(
         let attached = state
             .mls_key_packages()
             .transition_peer_claim_consumed(
-                state.service_id(),
+                request.service_binding.source_id.as_str(),
                 request.claim_request_id.as_str(),
                 &request_digest,
                 &outcome_value,
@@ -2826,7 +3043,10 @@ pub(crate) async fn capture_relayed_keypackage_claim_query(
         if attached.is_none() {
             let winner = state
                 .mls_key_packages()
-                .peer_claim(state.service_id(), request.claim_request_id.as_str())
+                .peer_claim(
+                    request.service_binding.source_id.as_str(),
+                    request.claim_request_id.as_str(),
+                )
                 .await
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| {

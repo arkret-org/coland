@@ -366,7 +366,10 @@ pub(crate) fn validate_operation_candidate(
 #[inline(never)]
 fn rejects_managed_self_join_context(event: Option<&Event>, facts: &OperationFacts) -> bool {
     event.is_none_or(|event| {
-        event.actor_id.as_account_id().is_none()
+        event
+            .actor_id
+            .as_realm_actor_id()
+            .is_none_or(|actor| actor.realm_id != event.realm_id)
             || event.executed_by.is_some()
             || event.applet_id.is_none()
             || event

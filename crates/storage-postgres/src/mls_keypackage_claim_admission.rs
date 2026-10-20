@@ -98,6 +98,129 @@ async fn member(
     Ok(())
 }
 
+/// Persist only the original command, not an invented remote result. The
+/// caller can query or retry these exact bytes after a lost response.
+pub(crate) async fn prepare_source(
+    conn: &mut AsyncPgConnection,
+    request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    source: &AppletManagedDeviceScopeGuard,
+    deadline: chrono::DateTime<Utc>,
+) -> PersistenceResult<bool> {
+    request.validate_shape().map_err(denied)?;
+    matches_scope(request, &source.effective_scope)?;
+    lock_cuts(conn, &[source], &[]).await?;
+    let PeerKeyPackageRequesterAuthorization::RealmDevice {
+        verification_method,
+        requester_device_id,
+        device_authorize_event_id,
+        signed_at,
+        signature,
+    } = &request.requester_authorization
+    else {
+        return Err(denied(
+            "outbound Realm claim needs its native Device signature",
+        ));
+    };
+    if request.requester_actor_id.as_ref() != Some(&source.authority.actor_id)
+        || requester_device_id != &source.authority.device_id
+        || device_authorize_event_id != &source.authority.authorization_ref.event_id
+        || verification_method.as_str()
+            != format!(
+                "{}#{}",
+                source.authority.native_did, source.authority.device_id
+            )
+    {
+        return Err(denied(
+            "outbound claim differs from its current native Device",
+        ));
+    }
+    let input = arkret_models_crypto::keypackage_claim_authorization_signing_bytes(
+        &request.unsigned_request(),
+        &request.service_binding,
+        &request.requester_authorization,
+    )
+    .map_err(denied)?;
+    arkret_signatures::keypackages::verify_keypackage_signing_input(
+        &source.authority.public_key,
+        verification_method.as_str(),
+        &input,
+        signature,
+    )
+    .map_err(denied)?;
+    crate::boxed_future(|| {
+        crate::applet_content_delivery::require_mls_scope_read(
+            conn,
+            source,
+            deadline,
+            request.strand_id.as_ref(),
+        )
+    })
+    .await?;
+    crate::mls_keypackage_publication::require_existing_group(conn, &source.effective_scope)
+        .await?;
+    member(conn, &source.effective_scope, &source.authority.actor_id).await?;
+    let target = match (
+        &request.target_actor_id,
+        &request.target_account_id,
+        &request.target_agent_id,
+    ) {
+        (Some(actor), None, None) => actor.clone(),
+        (None, Some(account), None) => ActorId::account(account.clone()),
+        (None, None, Some(agent)) => ActorId::account(arkret_wire::AccountId::new(
+            agent.clone(),
+            request.service_binding.destination_id.clone(),
+        )),
+        _ => return Err(denied("outbound claim target is incomplete")),
+    };
+    member(conn, &source.effective_scope, &target).await?;
+    let source_id = request.service_binding.source_id.as_str();
+    let digest = arkret_canonical::canonical_sha256(request).map_err(denied)?;
+    let body = serde_json::to_value(request).map_err(denied)?;
+    let prior = sql_query("SELECT jsonb_build_object('digest',request_digest,'body',request_body,'realm',governing_realm_id) AS payload FROM keypackage_claim_sources WHERE source_id=$1 AND claim_request_id=$2")
+        .bind::<Text,_>(source_id).bind::<Text,_>(request.claim_request_id.as_str())
+        .get_result::<JsonPayloadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    if let Some(prior) = prior {
+        if prior.payload["digest"].as_str() != Some(&digest)
+            || prior.payload["body"] != body
+            || prior.payload["realm"].as_str() != Some(source.authority.realm_id.as_str())
+        {
+            return Err(denied(
+                "outbound claim original conflicts with its imported ledger",
+            ));
+        }
+        crate::realm_management_history::require_issuer(
+            conn,
+            &source.authority.realm_id,
+            &request.service_binding.source_id,
+            None,
+            *signed_at,
+        )
+        .await?;
+        if Utc::now() >= deadline {
+            return Err(denied("outbound recovery credential expired"));
+        }
+        return Ok(false);
+    }
+    let at = Utc::now();
+    if request.service_binding.source_id != source.authority.governance_service_id
+        || at >= deadline
+        || at >= request.expires_at
+        || *signed_at > at + chrono::Duration::seconds(60)
+        || request.expires_at <= *signed_at
+        || request.expires_at - *signed_at > chrono::Duration::minutes(5)
+    {
+        return Err(denied(
+            "fresh outbound claim has no current issuing tenure and time window",
+        ));
+    }
+    sql_query("INSERT INTO keypackage_claim_sources(source_id,claim_request_id,request_digest,request_body,governing_realm_id) VALUES($1,$2,$3,$4,$5)")
+        .bind::<Text,_>(source_id).bind::<Text,_>(request.claim_request_id.as_str())
+        .bind::<Text,_>(digest).bind::<Jsonb,_>(body)
+        .bind::<Text,_>(source.authority.realm_id.as_str())
+        .execute(conn).await.map_err(PersistenceError::database)?;
+    Ok(true)
+}
+
 /// Checks local native requester facts, while remote participant key facts
 /// remain the authenticated origin Station's responsibility under section9.2.
 pub(crate) async fn require_admission(

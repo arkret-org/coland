@@ -57,6 +57,7 @@ struct RuntimeGuards {
     device_pairing_handoffs: Mutex<BTreeMap<String, WindowRecord>>,
     key_backup_downloads: Mutex<BTreeMap<String, WindowRecord>>,
     moderation_reports: Mutex<BTreeMap<String, WindowRecord>>,
+    peer_device_lookups: Mutex<BTreeMap<String, WindowRecord>>,
 }
 
 #[derive(Clone, Copy)]
@@ -74,12 +75,30 @@ impl Default for RuntimeGuardService {
                 device_pairing_handoffs: Mutex::new(BTreeMap::new()),
                 key_backup_downloads: Mutex::new(BTreeMap::new()),
                 moderation_reports: Mutex::new(BTreeMap::new()),
+                peer_device_lookups: Mutex::new(BTreeMap::new()),
             }),
         }
     }
 }
 
 impl RuntimeGuardService {
+    pub fn peer_device_lookup_rate_limited(
+        &self,
+        keys: &[String],
+        limit: u32,
+        window: Duration,
+    ) -> bool {
+        let mut records = self.inner.peer_device_lookups.lock();
+        let now = Utc::now();
+        prune_window_records(&mut records, now - window);
+        let mut limited = false;
+        for key in keys {
+            limited |=
+                record_window_attempt(&mut records, key.clone(), now, window, 32_768) > limit;
+        }
+        limited
+    }
+
     /// Charge one authenticated device-pairing handoff attempt (finalize or
     /// code claim) against all three tiers. Every tier is charged on every
     /// call so a caller cannot dodge the account ceiling by rotating devices.

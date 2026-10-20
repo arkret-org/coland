@@ -183,6 +183,33 @@ impl PgMlsKeyPackageStore {
 }
 #[async_trait]
 impl MlsKeyPackageStore for PgMlsKeyPackageStore {
+    async fn prepare_realm_claim_source(
+        &self,
+        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        source: &coland_storage::AppletManagedDeviceScopeGuard,
+        transport_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<bool> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            Ok(crate::mls_keypackage_claim_admission::prepare_source(
+                conn,
+                request,
+                source,
+                transport_expires_at,
+            )
+            .await?)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+    async fn peer_claim_original(
+        &self,
+        claim_request_id: &str,
+        request_digest: &str,
+    ) -> PersistenceResult<Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>> {
+        let mut conn = pg_conn(&self.pool).await?;
+        crate::realm_claim_history::original(&mut conn, claim_request_id, request_digest).await
+    }
     async fn realm_claim_issuer_resolution(
         &self,
         source_id: &str,
@@ -833,7 +860,8 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
         crate::realm_claim_history::lock_mutation(conn,source_id,claim_request_id).await?;
         let result=sql_query(
             "UPDATE peer_keypackage_claims \
-             SET terminal_receipt = $4, updated_at = $5 \
+             SET terminal_receipt = COALESCE(terminal_receipt, $4), \
+                 updated_at = CASE WHEN terminal_receipt IS NULL THEN $5 ELSE updated_at END \
              WHERE source_id = $1 AND claim_request_id = $2 \
                AND request_digest = $3 AND state IN ('expired', 'revoked') \
              RETURNING source_id, claim_request_id, request_digest, key_package_use, keypackage_id, \
@@ -992,7 +1020,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
             .await
             .map_err(PersistenceError::database)?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            let candidates=sql_query("SELECT COALESCE(jsonb_agg(DISTINCT outcome#>>'{claim_receipt,request,target_actor_id,realm_actor_id,realm_id}') FILTER (WHERE outcome#>>'{claim_receipt,request,target_actor_id,realm_actor_id,realm_id}' IS NOT NULL),'[]'::jsonb) AS payload FROM peer_keypackage_claims WHERE state IN ('claimed','last_resort_claimed') AND claim_expires_at_unix_ms<=$1")
+            let candidates=sql_query("SELECT COALESCE(jsonb_agg(DISTINCT s.governing_realm_id) FILTER (WHERE s.governing_realm_id IS NOT NULL),'[]'::jsonb) AS payload FROM peer_keypackage_claims c JOIN keypackage_claim_sources s ON s.source_id=c.source_id AND s.claim_request_id=c.claim_request_id WHERE c.keypackage_id IS NOT NULL AND c.state IN ('claimed','last_resort_claimed') AND c.claim_expires_at_unix_ms<=$1")
                 .bind::<BigInt,_>(now_unix_ms).get_result::<crate::JsonPayloadRow>(&mut *conn).await?;
             let realms:Vec<String>=serde_json::from_value(candidates.payload).map_err(PersistenceError::database)?;
             let mutable=crate::realm_management_archive::mutable_realms(conn,&realms).await?;
@@ -1000,9 +1028,9 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
             sql_query(
                 "UPDATE peer_keypackage_claims \
                  SET state = 'expired', updated_at = $1 / 1000 \
-                 WHERE key_package_use = 'last_resort' \
+                 WHERE keypackage_id IS NOT NULL AND key_package_use = 'last_resort' \
                    AND state = 'last_resort_claimed' \
-                   AND claim_expires_at_unix_ms <= $1 AND (outcome#>>'{claim_receipt,request,target_actor_id,realm_actor_id,realm_id}' IS NULL OR outcome#>>'{claim_receipt,request,target_actor_id,realm_actor_id,realm_id}'=ANY($2))",
+                   AND claim_expires_at_unix_ms <= $1 AND NOT EXISTS(SELECT 1 FROM keypackage_claim_sources s WHERE s.source_id=peer_keypackage_claims.source_id AND s.claim_request_id=peer_keypackage_claims.claim_request_id AND s.governing_realm_id IS NOT NULL AND NOT(s.governing_realm_id=ANY($2)))",
             )
             .bind::<BigInt, _>(now_unix_ms)
             .bind::<diesel::sql_types::Array<Text>,_>(&mutable)
@@ -1014,7 +1042,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
                    SELECT source_id, claim_request_id, keypackage_id \
                    FROM peer_keypackage_claims \
                    WHERE key_package_use = 'single_use' \
-                     AND state = 'claimed' AND claim_expires_at_unix_ms <= $1 AND (outcome#>>'{claim_receipt,request,target_actor_id,realm_actor_id,realm_id}' IS NULL OR outcome#>>'{claim_receipt,request,target_actor_id,realm_actor_id,realm_id}'=ANY($2)) \
+                     AND state = 'claimed' AND claim_expires_at_unix_ms <= $1 AND NOT EXISTS(SELECT 1 FROM keypackage_claim_sources s WHERE s.source_id=peer_keypackage_claims.source_id AND s.claim_request_id=peer_keypackage_claims.claim_request_id AND s.governing_realm_id IS NOT NULL AND NOT(s.governing_realm_id=ANY($2))) \
                  ), revoked AS ( \
                    UPDATE mls_key_packages kp \
                    SET claimed_by_mls_group_id = 'revoked', \

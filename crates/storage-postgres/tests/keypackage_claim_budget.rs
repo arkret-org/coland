@@ -51,7 +51,9 @@ fn request(
             destination_id: target.station_id.clone(),
         },
         target_account_id: Some(target),
+        target_actor_id: None,
         requester_account_id: Some(requester),
+        requester_actor_id: None,
         intended_realm_id: realm,
         mls_group_id: scope.canonical_mls_group_id().unwrap(),
         claim_purpose: arkret_models_crypto::PeerKeyPackageClaimPurpose::RealmMembership,
@@ -103,6 +105,11 @@ fn resign(body: &mut PeerKeyPackagesClaimRequestBody, key: &SigningKey) {
             verification_method,
             signature,
             ..
+        }
+        | PeerKeyPackageRequesterAuthorization::RealmDevice {
+            verification_method,
+            signature,
+            ..
         } => (verification_method, signature),
     };
     *signature = arkret_signatures::keypackages::keypackage_signature_from_bytes(
@@ -135,6 +142,168 @@ async fn limited_attempts(pool: &PgPool) -> i64 {
     }
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query("SELECT COUNT(*) AS count FROM keypackage_claim_attempts WHERE rejection_reason='keypackage_claim_rate_limited'").get_result::<Count>(&mut *conn).await.unwrap().count
+}
+
+#[tokio::test]
+async fn realm_requester_retains_exact_original_even_without_an_allocated_package() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    let pool = database.pool();
+    let worker = PgMlsKeyPackageStore { pool: pool.clone() };
+    let mut body = request(
+        account("requester", "source"),
+        account("target", "destination"),
+    );
+    let PeerKeyPackageRequesterAuthorization::Device {
+        requester_device_id,
+        device_authorize_event_id,
+        signed_at,
+        ..
+    } = body.requester_authorization.clone()
+    else {
+        unreachable!()
+    };
+    let method = format!(
+        "did:webvh:zRealmRequesterFixture:requester.example#{}",
+        requester_device_id
+    );
+    body.requester_authorization = PeerKeyPackageRequesterAuthorization::RealmDevice {
+        verification_method: arkret_wire::DidUrl::new(&method).unwrap(),
+        requester_device_id,
+        device_authorize_event_id,
+        signed_at,
+        signature: arkret_signatures::keypackages::keypackage_signature_from_bytes(
+            &method, &[0; 64],
+        )
+        .unwrap(),
+    };
+    body.requester_account_id = None;
+    body.requester_actor_id = Some(arkret_wire::ActorId::realm(arkret_wire::RealmActorId::new(
+        body.intended_realm_id.clone(),
+        arkret_wire::DidCoreId::new("ak:did_core:webvh:zRealmRequesterFixture").unwrap(),
+    )));
+    resign(&mut body, &SigningKey::from_bytes(&[171; 32]));
+    assert_eq!(
+        worker.record_peer_claim_attempt(&body).await.unwrap(),
+        Decision::Allowed
+    );
+    let digest = arkret_canonical::canonical_sha256(&body).unwrap();
+    let original = worker
+        .peer_claim_original(body.claim_request_id.as_str(), &digest)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        arkret_canonical::canonical_json_bytes(&original).unwrap(),
+        arkret_canonical::canonical_json_bytes(&body).unwrap()
+    );
+    assert!(
+        worker
+            .get_peer_claim(
+                body.service_binding.source_id.as_str(),
+                body.claim_request_id.as_str()
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut changed = body.clone();
+    changed.timeout_ms = Some(1);
+    resign(&mut changed, &SigningKey::from_bytes(&[171; 32]));
+    assert_eq!(
+        worker.record_peer_claim_attempt(&changed).await.unwrap(),
+        Decision::DuplicateConflict
+    );
+    assert!(
+        worker
+            .peer_claim_original(
+                body.claim_request_id.as_str(),
+                &arkret_canonical::canonical_sha256(&changed).unwrap()
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query("UPDATE keypackage_claim_sources SET request_body=jsonb_set(request_body,'{timeout_ms}','2'::jsonb)")
+        .execute(&mut *conn).await.unwrap();
+    assert!(
+        worker
+            .peer_claim_original(body.claim_request_id.as_str(), &digest)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_terminal_receipts_return_the_first_durable_bytes() {
+    use coland_storage::PeerKeyPackageClaimLedgerRecord;
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    let pool = database.pool();
+    let first = PgMlsKeyPackageStore { pool: pool.clone() };
+    let second = PgMlsKeyPackageStore { pool };
+    // This is a persistence race test, not a claim-signature admission fixture.
+    let row = PeerKeyPackageClaimLedgerRecord {
+        source_id: "ak:did_core:web:source.example".into(),
+        claim_request_id: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+        request_digest: format!("sha256:{}", "a".repeat(64)),
+        key_package_use: "single_use".into(),
+        keypackage_id: None,
+        outcome: Some(serde_json::json!({"original":"unchanged"})),
+        terminal_receipt: None,
+        consume_receipt: None,
+        claim_expires_at_unix_ms: Some(1000),
+        expires_at: 10000,
+        state: "expired".into(),
+        updated_at: 1,
+    };
+    first.record_peer_claim_terminal(&row).await.unwrap();
+    let a = serde_json::json!({"signature":"first-candidate"});
+    let b = serde_json::json!({"signature":"second-candidate"});
+    let (left, right) = tokio::join!(
+        first.attach_peer_claim_terminal_receipt(
+            &row.source_id,
+            &row.claim_request_id,
+            &row.request_digest,
+            &a,
+            2
+        ),
+        second.attach_peer_claim_terminal_receipt(
+            &row.source_id,
+            &row.claim_request_id,
+            &row.request_digest,
+            &b,
+            3
+        ),
+    );
+    let left = left.unwrap().unwrap();
+    let right = right.unwrap().unwrap();
+    assert_eq!(left, right);
+    let replay = second
+        .attach_peer_claim_terminal_receipt(
+            &row.source_id,
+            &row.claim_request_id,
+            &row.request_digest,
+            &serde_json::json!({"signature":"later-key"}),
+            4,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay, left);
+    assert_eq!(replay.outcome, row.outcome);
+    assert!(
+        second
+            .attach_peer_claim_terminal_receipt(
+                &row.source_id,
+                &row.claim_request_id,
+                "wrong-digest",
+                &a,
+                5
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

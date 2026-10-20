@@ -1944,6 +1944,7 @@ CREATE TABLE public.keypackage_claim_sources (
     claim_request_id text NOT NULL,
     request_digest text NOT NULL,
     request_body jsonb NOT NULL,
+    governing_realm_id text,
     PRIMARY KEY (source_id, claim_request_id)
 );
 

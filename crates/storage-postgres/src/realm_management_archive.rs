@@ -104,17 +104,14 @@ const TABLES: &[(&str, &str)] = &[
         "mls_key_packages",
         "t.owner_actor_id#>>'{realm_actor_id,realm_id}'=$1",
     ),
-    (
-        "keypackage_claim_sources",
-        "t.request_body#>>'{target_actor_id,realm_actor_id,realm_id}'=$1",
-    ),
+    ("keypackage_claim_sources", "t.governing_realm_id=$1"),
     (
         "keypackage_claim_attempts",
-        "EXISTS(SELECT 1 FROM keypackage_claim_sources s WHERE s.request_body#>>'{target_actor_id,realm_actor_id,realm_id}'=$1 AND s.source_id=t.source_id AND s.claim_request_id=t.claim_request_id)",
+        "EXISTS(SELECT 1 FROM keypackage_claim_sources s WHERE s.governing_realm_id=$1 AND s.source_id=t.source_id AND s.claim_request_id=t.claim_request_id)",
     ),
     (
         "peer_keypackage_claims",
-        "EXISTS(SELECT 1 FROM keypackage_claim_sources s WHERE s.request_body#>>'{target_actor_id,realm_actor_id,realm_id}'=$1 AND s.source_id=t.source_id AND s.claim_request_id=t.claim_request_id) OR EXISTS(SELECT 1 FROM mls_key_packages k WHERE k.owner_actor_id#>>'{realm_actor_id,realm_id}'=$1 AND k.id=t.keypackage_id)",
+        "EXISTS(SELECT 1 FROM keypackage_claim_sources s WHERE s.governing_realm_id=$1 AND s.source_id=t.source_id AND s.claim_request_id=t.claim_request_id) OR EXISTS(SELECT 1 FROM mls_key_packages k WHERE k.owner_actor_id#>>'{realm_actor_id,realm_id}'=$1 AND k.id=t.keypackage_id)",
     ),
     (
         "keypackage_claim_welcome_bindings",

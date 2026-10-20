@@ -321,6 +321,7 @@ pub(crate) async fn signer_fact(
     use arkret_models_collaboration::authority_commit::{
         RealmDeviceHistoricalSignerFact, RealmDeviceHistoricalSignerFactKind,
     };
+    let at = arkret_canonical::normalize_timestamp_canonical(at);
     let authority = for_event_in_connection(conn, event, at)
         .await?
         .ok_or_else(|| denied("Realm Device producer is unavailable"))?;

@@ -841,6 +841,21 @@ pub trait MlsKeyPackageStore: Send + Sync {
         source_id: &str,
         claim_request_id: &str,
     ) -> PersistenceResult<Option<PeerKeyPackageClaimLedgerRecord>>;
+    /// Exact retained original for authenticated governance succession.
+    /// A match is not permission to disclose the result.
+    async fn peer_claim_original(
+        &self,
+        claim_request_id: &str,
+        request_digest: &str,
+    ) -> PersistenceResult<Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>>;
+    /// Register an outbound Realm Device command under its current authority
+    /// cut before network I/O. False means an exact durable original exists.
+    async fn prepare_realm_claim_source(
+        &self,
+        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        source: &crate::AppletManagedDeviceScopeGuard,
+        transport_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<bool>;
     /// Resolve the ledger row whose stored success outcome issued the exact
     /// `KeypackageClaimId` a Welcome names (`keypackage_claim_ref`).
     async fn realm_claim_issuer_resolution(

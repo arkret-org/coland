@@ -1244,6 +1244,17 @@ pub trait MlsKeyPackageMaintenancePort: Send + Sync {
         source_id: &str,
         claim_request_id: &str,
     ) -> ServiceResult<Option<arkret_models_identity::AuthenticatedServiceResolution>>;
+    async fn peer_claim_original(
+        &self,
+        claim_request_id: &str,
+        request_digest: &str,
+    ) -> ServiceResult<Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>>;
+    async fn prepare_realm_claim_source(
+        &self,
+        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        source: &coland_storage::AppletManagedDeviceScopeGuard,
+        transport_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> ServiceResult<bool>;
     async fn peer_claim_by_claim_id(
         &self,
         claim_id: &str,
@@ -1391,6 +1402,25 @@ impl MlsKeyPackageService {
     }
     pub async fn prune_peer_claim_attempts(&self) -> ServiceResult<usize> {
         self.key_packages.prune_peer_claim_attempts().await
+    }
+    pub async fn prepare_realm_claim_source(
+        &self,
+        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        source: &coland_storage::AppletManagedDeviceScopeGuard,
+        transport_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> ServiceResult<bool> {
+        self.key_packages
+            .prepare_realm_claim_source(request, source, transport_expires_at)
+            .await
+    }
+    pub async fn peer_claim_original(
+        &self,
+        claim_request_id: &str,
+        request_digest: &str,
+    ) -> ServiceResult<Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>> {
+        self.key_packages
+            .peer_claim_original(claim_request_id, request_digest)
+            .await
     }
     pub async fn peer_claim(
         &self,

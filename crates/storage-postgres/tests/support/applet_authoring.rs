@@ -574,6 +574,7 @@ fn signed_applet_package(
         .unwrap();
     package.requested_scopes = vec![
         "ak.message.create".to_owned(),
+        "ak.applet.join".to_owned(),
         "ak.applet.bot.provision".to_owned(),
         "ak.applet.ghost.provision".to_owned(),
     ];
@@ -1240,6 +1241,7 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
         );
         let mut actions = vec![
             "ak.message.create",
+            "ak.applet.join",
             "ak.applet.bot.provision",
             "ak.applet.ghost.provision",
         ];
@@ -1995,6 +1997,73 @@ mod realm_native_fixture {
         )
     }
 
+    async fn managed_device_post(
+        fixture: &Fixture,
+        metadata: &arkret_models_integration::AppletManagedDeviceMetadata,
+        method: &DidUrl,
+        path: &str,
+        operation: arkret_wire::ServiceOperationId,
+        body: &Value,
+        seed: &[u8; 32],
+    ) -> (StatusCode, Value) {
+        let bytes = arkret_canonical::canonical_json_bytes(body).unwrap();
+        let digest = content_digest_header(&bytes);
+        let metadata = metadata.to_header_value().unwrap();
+        let scheme = fixture
+            .state
+            .config()
+            .public_base_url
+            .split_once("://")
+            .unwrap()
+            .0;
+        let parts = SignedRequestParts {
+            method: "POST".into(),
+            target_uri: format!("{scheme}://server{path}"),
+            authority: "server".into(),
+            path: path.into(),
+            headers: vec![
+                ("arkret-operation".into(), operation.as_str().into()),
+                ("content-type".into(), "application/json".into()),
+                ("content-digest".into(), digest.clone()),
+                (
+                    "destination-service-id".into(),
+                    fixture.state.service_id().into(),
+                ),
+                ("arkret-managed-device".into(), metadata),
+                ("idempotency-key".into(), uuid::Uuid::now_v7().to_string()),
+            ],
+            body_digest: Some(digest),
+        };
+        let signature = sign_http_message_for_scenario(
+            &parts,
+            HttpSignatureScenario::AppletManagedDeviceV1,
+            &["content-digest", "idempotency-key"],
+            "sig1",
+            method.as_str(),
+            chrono::Utc::now().timestamp(),
+            &SigningKey::from_bytes(seed),
+        )
+        .unwrap();
+        let mut request = TestClient::post(format!("http://server{path}"));
+        for (name, value) in parts.headers {
+            request = request.add_header(
+                salvo::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                value,
+                true,
+            );
+        }
+        let mut response = request
+            .add_header("signature-input", signature.signature_input_header, true)
+            .add_header("signature", signature.signature_header, true)
+            .body(bytes)
+            .send(&service(fixture.state.clone()))
+            .await;
+        (
+            response.status_code.unwrap(),
+            response.take_json().await.unwrap(),
+        )
+    }
+
     async fn peer_audit_post(
         source: &Fixture,
         destination: &Fixture,
@@ -2074,6 +2143,89 @@ mod realm_native_fixture {
         } else {
             bytes
         };
+        let mut response = request
+            .add_header("signature-input", signature.signature_input_header, true)
+            .add_header("signature", signature.signature_header, true)
+            .body(bytes)
+            .send(&service(destination.state.clone()))
+            .await;
+        (
+            response.status_code.unwrap(),
+            response.take_json().await.unwrap(),
+        )
+    }
+
+    async fn peer_keys_post(
+        source: &Fixture,
+        destination: &Fixture,
+        body: &arkret_models_crypto::PeerKeysQueryRequestBody,
+    ) -> (StatusCode, Value) {
+        let bytes = arkret_canonical::canonical_json_bytes(body).unwrap();
+        let digest = content_digest_header(&bytes);
+        let path = "/_arkret/peer/keys/query";
+        let request_url = format!(
+            "{}{path}",
+            destination
+                .state
+                .config()
+                .public_base_url
+                .trim_end_matches('/')
+        );
+        let target = url::Url::parse(&request_url).unwrap();
+        let parts = SignedRequestParts {
+            method: "POST".into(),
+            target_uri: request_url.clone(),
+            authority: target[url::Position::BeforeHost..url::Position::AfterPort].into(),
+            path: path.into(),
+            headers: vec![
+                (
+                    "arkret-operation".into(),
+                    arkret_wire::ServiceOperationId::PEER_KEYS_READ_LOOKUP_V1.into(),
+                ),
+                ("content-type".into(), "application/json".into()),
+                ("content-digest".into(), digest.clone()),
+                ("source-service-id".into(), source.state.service_id().into()),
+                (
+                    "destination-service-id".into(),
+                    destination.state.service_id().into(),
+                ),
+                (
+                    "source-trust-domain".into(),
+                    source.state.config().trust_domain.to_string(),
+                ),
+                (
+                    "destination-trust-domain".into(),
+                    destination.state.config().trust_domain.to_string(),
+                ),
+            ],
+            body_digest: Some(digest),
+        };
+        let signature = sign_http_message_for_scenario(
+            &parts,
+            HttpSignatureScenario::ServiceToServiceV1,
+            &[
+                "content-digest",
+                "source-trust-domain",
+                "destination-trust-domain",
+            ],
+            "sig1",
+            source
+                .state
+                .service_verification_method("notary-key")
+                .unwrap()
+                .as_str(),
+            chrono::Utc::now().timestamp(),
+            source.state.notary_signing_key().as_ref(),
+        )
+        .unwrap();
+        let mut request = TestClient::post(request_url);
+        for (name, value) in parts.headers {
+            request = request.add_header(
+                salvo::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                value,
+                true,
+            );
+        }
         let mut response = request
             .add_header("signature-input", signature.signature_input_header, true)
             .add_header("signature", signature.signature_header, true)
@@ -2207,7 +2359,7 @@ mod realm_native_fixture {
             "algorithms":["ak.hpke_x25519_aead_chacha20poly1305.v1"],
             "device_key_algorithm":"Ed25519",
             "authorized_by":candidate.actor_id.signing_principal_id(),
-            "scopes":[{"effective_scope":candidate.creation_scope,"actions":["ak.message.create"]}],
+            "scopes":[{"effective_scope":candidate.creation_scope,"actions":["ak.applet.join","ak.message.create"]}],
             "not_before":at, "expires_at":at+chrono::Duration::hours(1),
             "authorization_binding_kind":"realm_managed_delegation", "authorized_generation_ref":1,
             "device_signature":"unsigned", "applet_id":candidate.applet_id,
@@ -2289,6 +2441,106 @@ mod realm_native_fixture {
         assert_eq!(accepted.commit.previous_commit_ref, Some(head.commit_id));
         assert_eq!(accepted.commit.stream_ref, creation_commit.stream_ref);
         payload.device_id
+    }
+
+    async fn self_join(
+        fixture: &Fixture,
+        candidate: &RealmActorCreatePayload,
+        device: &arkret_wire::DeviceId,
+        installation: &Value,
+    ) {
+        use arkret_models_collaboration::authority_commit::{
+            SelfAuthoritySubmitOutcome, SelfAuthoritySubmitRequest,
+        };
+        let authority = fixture
+            .state
+            .test_persistence()
+            .device_revocations()
+            .applet_managed_device_authority(&candidate.actor_id, device, chrono::Utc::now())
+            .await
+            .unwrap()
+            .unwrap();
+        let grant: Event = serde_json::from_value(
+            installation["capability_grant_events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|event| {
+                    event["payload"]["grant"]["actions"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|action| action == "ak.applet.join")
+                })
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+        let payload =
+            serde_json::from_value(json!({"member_id":candidate.actor_id,"membership":"join"}))
+                .unwrap();
+        let intent =
+            arkret_event_draft::TypedEventDraft::<arkret_wire::event_spec::MemberState>::new(
+                candidate.creation_scope.clone(),
+                candidate.actor_id.clone(),
+                payload,
+            )
+            .unwrap()
+            .with_applet_id(candidate.applet_id.clone())
+            .with_authorization_ref(arkret_wire::GrantId::from_event_id(&grant.event_id).into())
+            .into_intent(at)
+            .unwrap();
+        let mut authored = intent
+            .author_with_digest_suite(arkret_canonical::DigestSuite::Sha256)
+            .unwrap();
+        let signer = Ed25519PayloadSigner::new(
+            SigningKey::from_bytes(&[79; 32]),
+            authority.native_did.clone(),
+            DidUrl::new(format!("{}#{}", authority.native_did, device)).unwrap(),
+        );
+        arkret_signatures::sign_event(
+            &mut authored,
+            &signer,
+            arkret_signatures::SignEventOptions::new().with_created_at(at),
+        )
+        .unwrap();
+        let event = authored.into_event();
+        let request = SelfAuthoritySubmitRequest::Event(
+            arkret_wire::EventAdmissionSubmission::new(event.clone()),
+        );
+        let metadata = arkret_models_integration::AppletManagedDeviceMetadata {
+            actor_id: candidate.actor_id.clone(),
+            device_id: device.clone(),
+            authorization_event_id: authority.authorization_ref.event_id,
+            applet_id: candidate.applet_id.clone(),
+            effective_scope: candidate.creation_scope.clone(),
+            nonce: arkret_canonical::base64url_encode(rand::random::<[u8; 32]>()),
+        };
+        let fingerprint =
+            arkret_canonical::ed25519_pubkey_to_did_key_multibase(&authority.public_key);
+        let (status, response) = managed_device_post(
+            fixture,
+            &metadata,
+            &DidUrl::new(format!("did:key:{fingerprint}#{fingerprint}")).unwrap(),
+            "/_arkret/self/events",
+            arkret_wire::ServiceOperationId::SelfEventsCommandSubmitV1,
+            &json!(request),
+            &[79; 32],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "Realm Device self join: {response}");
+        let outcome: SelfAuthoritySubmitOutcome = serde_json::from_value(response).unwrap();
+        outcome.validate_for_request(&request).unwrap();
+        let accepted = fixture
+            .state
+            .test_persistence()
+            .authority_commits()
+            .committed_event(&event.event_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(accepted.event, event);
     }
 
     fn realm_candidate(
@@ -4337,6 +4589,100 @@ mod realm_native_fixture {
         (fixture, NetworkStation(task))
     }
 
+    async fn realm_peer_device_lookup(
+        governor: &Fixture,
+        account_station: &Fixture,
+        candidate: &RealmActorCreatePayload,
+    ) {
+        use arkret_models_crypto::{
+            PeerKeysQueryOutcome, PeerKeysQueryPurpose, PeerKeysQueryRequestBody,
+            PeerKeysRelationshipBasis, QueryAccountDeviceSelector,
+        };
+        let request = PeerKeysQueryRequestBody {
+            request_id: arkret_wire::RequestId::new_v7_at(
+                chrono::Utc::now().timestamp_millis() as u64
+            ),
+            requester_account_id: None,
+            requester_actor_id: Some(candidate.actor_id.clone()),
+            purpose: PeerKeysQueryPurpose::MlsGroupAdmission,
+            relationship_basis: PeerKeysRelationshipBasis::RealmMembership {
+                realm_id: governor.realm.clone(),
+            },
+            device_keys: vec![QueryAccountDeviceSelector {
+                account_id: account_station.pcr.history.account.clone(),
+                device_ids: vec![account_station.pcr.history.founding_device_id.clone()],
+            }],
+        };
+        let (status, value) = peer_keys_post(governor, account_station, &request).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "Realm requester peer device query: {value}"
+        );
+        let outcome: PeerKeysQueryOutcome = serde_json::from_value(value).unwrap();
+        outcome.validate_for_request(&request).unwrap();
+        let row = outcome
+            .device_keys
+            .iter()
+            .find(|entry| entry.account_id == account_station.pcr.history.account)
+            .unwrap()
+            .device_keys
+            .get(&account_station.pcr.history.founding_device_id)
+            .unwrap();
+        row.validate_attestation_binding(
+            &account_station.pcr.history.account,
+            &account_station.pcr.history.founding_device_id,
+        )
+        .unwrap();
+        arkret_signatures::device_projection::verify_device_projection_attestation(
+            &row.device_projection_attestation,
+            &account_station.state.notary_signing_key().verifying_key(),
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let mut changed = request.clone();
+        changed.purpose = PeerKeysQueryPurpose::CallMedia;
+        assert_ne!(
+            peer_keys_post(governor, account_station, &changed).await.0,
+            StatusCode::OK
+        );
+        changed = request.clone();
+        changed.relationship_basis = PeerKeysRelationshipBasis::Contact {};
+        assert_ne!(
+            peer_keys_post(governor, account_station, &changed).await.0,
+            StatusCode::OK
+        );
+        changed = request.clone();
+        changed.requester_account_id = Some(governor.pcr.history.account.clone());
+        assert_ne!(
+            peer_keys_post(governor, account_station, &changed).await.0,
+            StatusCode::OK
+        );
+        // A real authenticated Station that does not govern this Realm is refused.
+        assert_ne!(
+            peer_keys_post(account_station, account_station, &request)
+                .await
+                .0,
+            StatusCode::OK
+        );
+        changed = request.clone();
+        if let Some(ActorId::Realm { realm_actor_id }) = &mut changed.requester_actor_id {
+            realm_actor_id.principal_id = governor.pcr.history.account.principal_id.clone();
+        }
+        let (status, value) = peer_keys_post(governor, account_station, &changed).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "nonmember indistinguishable directory outcome: {value}"
+        );
+        let unavailable: PeerKeysQueryOutcome = serde_json::from_value(value).unwrap();
+        assert!(unavailable.device_keys.is_empty());
+        assert!(unavailable.device_generations.is_empty());
+        let mut substituted = outcome;
+        substituted.requester_actor_id = changed.requester_actor_id;
+        assert!(substituted.validate_for_request(&request).is_err());
+    }
+
     async fn cross_station_audit(fixture: &Fixture, candidate: &RealmActorCreatePayload) {
         use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
         let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
@@ -4453,6 +4799,7 @@ mod realm_native_fixture {
                 json!({"registration":true,"private":false})
             );
         }
+        boxed_step(|| realm_peer_device_lookup(fixture, &account_station, candidate)).await;
         let request = || -> RealmActorMaterialRequest {
             serde_json::from_value(json!({
                 "purpose":"current", "actor_id":candidate.actor_id,
@@ -5024,6 +5371,8 @@ mod realm_native_fixture {
         Box::pin(private_material(&factory.fixture, &candidate, &before)).await;
         eprintln!("native lifecycle: first Device");
         let device = boxed_step(|| first_device(&factory.fixture, &candidate, &before)).await;
+        eprintln!("native lifecycle: Device-authored self join");
+        boxed_step(|| self_join(&factory.fixture, &candidate, &device, &record)).await;
         eprintln!("native lifecycle: independent Device revoke terminal");
         boxed_step(|| device_revoke(&factory.fixture, &candidate, &before)).await;
         eprintln!("native lifecycle: recovery");

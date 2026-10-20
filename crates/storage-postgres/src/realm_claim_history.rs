@@ -24,12 +24,37 @@ struct RealmRow {
     realm_id: String,
 }
 
+pub(crate) async fn original(
+    conn: &mut AsyncPgConnection,
+    claim_request_id: &str,
+    request_digest: &str,
+) -> PersistenceResult<Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>> {
+    let rows = sql_query("SELECT request_body AS payload FROM keypackage_claim_sources WHERE claim_request_id=$1 AND request_digest=$2 LIMIT 2")
+        .bind::<Text,_>(claim_request_id).bind::<Text,_>(request_digest)
+        .get_results::<crate::JsonPayloadRow>(conn).await.map_err(PersistenceError::database)?;
+    if rows.len() > 1 {
+        return Err(invalid("ambiguous original request"));
+    }
+    let Some(row) = rows.into_iter().next() else {
+        return Ok(None);
+    };
+    let request: arkret_models_crypto::PeerKeyPackagesClaimRequestBody =
+        serde_json::from_value(row.payload).map_err(invalid)?;
+    request.validate_shape().map_err(invalid)?;
+    if request.claim_request_id.as_str() != claim_request_id
+        || arkret_canonical::canonical_sha256(&request).map_err(invalid)? != request_digest
+    {
+        return Err(invalid("original request digest mismatch"));
+    }
+    Ok(Some(request))
+}
+
 pub(crate) async fn lock_mutation(
     conn: &mut AsyncPgConnection,
     source_id: &str,
     claim_request_id: &str,
 ) -> PersistenceResult<()> {
-    let row=sql_query("SELECT request_body#>>'{target_actor_id,realm_actor_id,realm_id}' AS realm_id FROM keypackage_claim_sources WHERE source_id=$1 AND claim_request_id=$2 AND request_body#>>'{target_actor_id,realm_actor_id,realm_id}' IS NOT NULL")
+    let row=sql_query("SELECT governing_realm_id AS realm_id FROM keypackage_claim_sources WHERE source_id=$1 AND claim_request_id=$2 AND governing_realm_id IS NOT NULL")
         .bind::<Text,_>(source_id).bind::<Text,_>(claim_request_id)
         .get_result::<RealmRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     if let Some(row) = row {

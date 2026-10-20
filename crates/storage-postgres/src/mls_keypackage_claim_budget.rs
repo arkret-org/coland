@@ -128,10 +128,11 @@ pub(crate) async fn record_attempt(
             || body.expires_at <= signed_at || body.expires_at - signed_at > chrono::Duration::seconds(300) {
             return Ok(PeerKeyPackageClaimRateDecision::Unavailable);
         }
-        if body.target_actor_id.as_ref().and_then(|actor|actor.as_realm_actor_id()).is_some() {
-        sql_query("INSERT INTO keypackage_claim_sources(source_id,claim_request_id,request_digest,request_body) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING")
+        if body.target_actor_id.is_some() || body.requester_actor_id.is_some() {
+        sql_query("INSERT INTO keypackage_claim_sources(source_id,claim_request_id,request_digest,request_body,governing_realm_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING")
             .bind::<Text,_>(source).bind::<Text,_>(identity).bind::<Text,_>(&digest)
             .bind::<Jsonb,_>(serde_json::to_value(body).map_err(PersistenceError::database)?)
+            .bind::<Nullable<Text>,_>(body.target_actor_id.as_ref().and_then(|actor|actor.as_realm_actor_id()).map(|actor|actor.realm_id.as_str()))
             .execute(&mut *conn).await?;
         let original=sql_query("SELECT request_digest,NULL::text AS rejection_reason FROM keypackage_claim_sources WHERE source_id=$1 AND claim_request_id=$2")
             .bind::<Text,_>(source).bind::<Text,_>(identity).get_result::<Attempt>(&mut *conn).await?;

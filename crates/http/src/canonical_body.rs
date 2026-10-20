@@ -6,7 +6,7 @@
 //! per-operation limits from the generated operation registry.
 
 use arkret_canonical::CanonicalError;
-use arkret_wire::{SERVICE_OPERATION_DESCRIPTORS, WireBodyClass, WireError};
+use arkret_wire::{SERVICE_OPERATION_DESCRIPTORS, ServiceOperationId, WireBodyClass, WireError};
 use salvo::prelude::*;
 
 use crate::content_encoding::is_canonical_json_request;
@@ -21,6 +21,81 @@ fn operation_canonical_body_limit(method: &str, path: &str) -> Option<usize> {
                 && http_path_matches(descriptor.http_path, path)
         })
         .and_then(|descriptor| descriptor.max_canonical_body_bytes)
+}
+
+fn requires_mimi_provider_signature(method: &str, path: &str) -> bool {
+    matches!(
+        ServiceOperationId::from_http_request(method, path),
+        Some(
+            ServiceOperationId::OpenMimiCommandNotifyV1
+                | ServiceOperationId::OpenMimiCommandProxyDownloadV1
+                | ServiceOperationId::OpenMimiCommandReportAbuseV1
+                | ServiceOperationId::OpenMimiCommandRequestConsentV1
+                | ServiceOperationId::OpenMimiCommandSubmitMessageV1
+                | ServiceOperationId::OpenMimiCommandUpdateConsentV1
+                | ServiceOperationId::OpenMimiCommandUpdateRoomV1
+                | ServiceOperationId::OpenMimiExchangeRequestKeyMaterialV1
+                | ServiceOperationId::OpenMimiReadIdentifiersV1
+        )
+    )
+}
+
+fn mimi_content_preflight(req: &Request, body: &[u8]) -> Result<(), AppError> {
+    if !req.headers().contains_key("signature") || !req.headers().contains_key("signature-input") {
+        return Err(crate::app_error!(
+            HttpSignatureRequired,
+            "MIMI requires provider Signature and Signature-Input"
+        ));
+    }
+    use arkret_signatures::http_signature::{
+        HttpSignatureScenario, http_signature_scenario_descriptor,
+    };
+    let mut required = http_signature_scenario_descriptor(HttpSignatureScenario::MimiProviderV1)
+        .required_headers
+        .to_vec();
+    if matches!(
+        ServiceOperationId::from_http_request(req.method().as_str(), req.uri().path()),
+        Some(
+            ServiceOperationId::OpenMimiCommandNotifyV1
+                | ServiceOperationId::OpenMimiCommandSubmitMessageV1
+                | ServiceOperationId::OpenMimiCommandUpdateRoomV1
+        )
+    ) {
+        required.push("MIMI-Room-URI");
+    }
+    for name in required {
+        let mut values = req.headers().get_all(name).iter();
+        let valid = values
+            .next()
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| !value.trim().is_empty());
+        if !valid || values.next().is_some() {
+            return Err(crate::app_error!(
+                HttpSignatureInvalid,
+                format!("MIMI requires one nonempty {name} header")
+            ));
+        }
+    }
+    let values = req
+        .headers()
+        .get_all("content-digest")
+        .iter()
+        .map(|value| value.to_str().map(|value| ("content-digest", value)))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| {
+            crate::app_error!(
+                HttpSignatureInvalid,
+                "MIMI Content-Digest is not a valid header"
+            )
+        })?;
+    arkret_signatures::http_signature::verify_http_content_digest(values, body, true)
+        .map(|_| ())
+        .map_err(|error| {
+            crate::app_error!(
+                HttpSignatureInvalid,
+                format!("MIMI exact content digest: {error}")
+            )
+        })
 }
 
 fn http_path_matches(template: &str, actual: &str) -> bool {
@@ -121,8 +196,9 @@ impl Handler for CanonicalJsonBodyLimitMiddleware {
         if is_canonical_json_request(req) {
             let method = req.method().as_str().to_owned();
             let path = req.uri().path().to_owned();
+            let mimi_provider = requires_mimi_provider_signature(&method, &path);
             let payload = match req.payload().await {
-                Ok(payload) => payload,
+                Ok(payload) => payload.clone(),
                 Err(salvo::http::ParseError::PayloadTooLarge) => {
                     write_payload_too_large(req, depot, res).await;
                     ctrl.skip_rest();
@@ -135,15 +211,20 @@ impl Handler for CanonicalJsonBodyLimitMiddleware {
                     return;
                 }
             };
+            // Representation integrity precedes JSON parsing for the closed MIMI
+            // provider surface. Transport encoding/byte guards already ran.
+            if mimi_provider {
+                if let Err(error) = mimi_content_preflight(req, &payload) {
+                    error.write(req, depot, res).await;
+                    ctrl.skip_rest();
+                    return;
+                }
+            }
             let class = WireBodyClass::NonStreamingJsonOperation {
                 max_canonical_body_bytes: operation_canonical_body_limit(&method, &path),
             };
-            match class.admit_canonical(payload) {
+            match class.admit_canonical(&payload) {
                 Ok(_) => {}
-                Err(WireError::Canonical(CanonicalError::CanonicalJson(_))) => {
-                    // Preserve the handler's operation-specific `json_invalid`
-                    // response for malformed syntax.
-                }
                 Err(
                     WireError::BodyWireBytesExceeded { .. }
                     | WireError::BodyCanonicalBytesExceeded { .. },
@@ -156,6 +237,19 @@ impl Handler for CanonicalJsonBodyLimitMiddleware {
                     error.write(req, depot, res).await;
                     ctrl.skip_rest();
                     return;
+                }
+                Err(error) if mimi_provider => {
+                    let error = crate::app_error!(
+                        HttpSignatureInvalid,
+                        format!("MIMI signed content is not canonical JSON: {error}")
+                    );
+                    error.write(req, depot, res).await;
+                    ctrl.skip_rest();
+                    return;
+                }
+                Err(WireError::Canonical(CanonicalError::CanonicalJson(_))) => {
+                    // Preserve the handler's operation-specific `json_invalid`
+                    // response for malformed syntax.
                 }
                 Err(error) => {
                     let error = crate::app_error!(
@@ -217,11 +311,17 @@ mod tests {
 
     fn canonical_body_test_service(max_wire_bytes: usize) -> Service {
         let router = Router::new()
+            .hoop(crate::content_encoding::RejectContentEncodingMiddleware)
             .hoop(SecureMaxSize::new(max_wire_bytes))
             .hoop(RequestWireSizeLimitMiddleware::new(max_wire_bytes))
             .hoop(CanonicalJsonBodyLimitMiddleware)
             .push(Router::with_path("_arkret/peer/signal").post(echo_raw_body))
-            .push(Router::with_path("_arkret/self/events").post(self_events_body_boundary));
+            .push(Router::with_path("_arkret/self/events").post(self_events_body_boundary))
+            .push(
+                Router::with_path("_arkret/open/mimi/strands/{strand_id}/notify")
+                    .post(echo_raw_body),
+            )
+            .push(Router::with_path("_arkret/open/mimi/provider-directory").get(echo_raw_body));
         Service::new(router)
     }
 
@@ -349,5 +449,122 @@ mod tests {
             .await;
         assert_eq!(admitted.status_code, Some(StatusCode::OK));
         assert_eq!(admitted.take_string().await.unwrap(), "{\"value\":1}");
+    }
+
+    #[test]
+    fn provider_preflight_matches_only_the_nine_registered_operations() {
+        let selected: Vec<_> = SERVICE_OPERATION_DESCRIPTORS
+            .iter()
+            .filter(|item| requires_mimi_provider_signature(item.http_method, item.http_path))
+            .collect();
+        assert_eq!(selected.len(), 9);
+        assert!(!requires_mimi_provider_signature(
+            "GET",
+            "/_arkret/open/mimi/provider-directory"
+        ));
+        assert!(!requires_mimi_provider_signature(
+            "POST",
+            "/_arkret/open/mimi/unknown"
+        ));
+        assert!(!requires_mimi_provider_signature(
+            "POST",
+            "/_arkret/self/events"
+        ));
+    }
+    #[tokio::test]
+    async fn mimi_body_preflight_keeps_exact_bytes_error_priority_and_public_exemption() {
+        let service = canonical_body_test_service(16 * 1024 * 1024);
+        for (body, digest, signature, expected) in [
+            (" {\"ok\":true}", "{}", true, "http_signature_invalid"),
+            (
+                " {\"ok\":true}",
+                " {\"ok\":true}",
+                true,
+                "http_signature_invalid",
+            ),
+            ("not json", "not json", true, "http_signature_invalid"),
+            ("not json", "{}", false, "http_signature_required"),
+        ] {
+            let mut request =
+                TestClient::post("http://server/_arkret/open/mimi/strands/room/notify")
+                    .add_header("content-type", "application/json", true)
+                    .add_header("arkret-operation", "ak.open.mimi.command.notify.v1", true)
+                    .add_header("source-service-id", "ak:did_core:web:source.example", true)
+                    .add_header(
+                        "destination-service-id",
+                        "ak:did_core:web:receiver.example",
+                        true,
+                    )
+                    .add_header("provider-id", "mimi://source.example", true)
+                    .add_header("mimi-room-uri", "mimi://receiver.example/rooms/room", true)
+                    .add_header(
+                        "content-digest",
+                        crate::http_signature::rfc9530_content_digest(digest.as_bytes()),
+                        true,
+                    )
+                    .body(body);
+            if signature {
+                request = request.add_header("signature", "present", true).add_header(
+                    "signature-input",
+                    "present",
+                    true,
+                );
+            }
+            let mut response = request.send(&service).await;
+            assert_eq!(response.status_code, Some(StatusCode::UNAUTHORIZED));
+            let value: serde_json::Value =
+                serde_json::from_str(&response.take_string().await.unwrap()).unwrap();
+            assert_eq!(
+                value["type"],
+                format!("https://arkret.org/problems/{expected}")
+            );
+        }
+        // The echo target only tests body admission, not provider authority.
+        let mut response = TestClient::post("http://server/_arkret/open/mimi/strands/room/notify")
+            .add_header("content-type", "application/json", true)
+            .add_header("arkret-operation", "ak.open.mimi.command.notify.v1", true)
+            .add_header("source-service-id", "ak:did_core:web:source.example", true)
+            .add_header(
+                "destination-service-id",
+                "ak:did_core:web:receiver.example",
+                true,
+            )
+            .add_header("provider-id", "mimi://source.example", true)
+            .add_header("mimi-room-uri", "mimi://receiver.example/rooms/room", true)
+            .add_header("signature", "present", true)
+            .add_header("signature-input", "present", true)
+            .add_header(
+                "content-digest",
+                crate::http_signature::rfc9530_content_digest(b"{}"),
+                true,
+            )
+            .body("{}")
+            .send(&service)
+            .await;
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        assert_eq!(response.take_string().await.unwrap(), "{}");
+        let response = TestClient::get("http://server/_arkret/open/mimi/provider-directory")
+            .send(&service)
+            .await;
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+    }
+    #[tokio::test]
+    async fn mimi_encoding_and_wire_limits_precede_signature_and_json() {
+        let service = canonical_body_test_service(128);
+        for (encoded, expected) in [
+            (false, StatusCode::PAYLOAD_TOO_LARGE),
+            (true, StatusCode::UNSUPPORTED_MEDIA_TYPE),
+        ] {
+            let mut request =
+                TestClient::post("http://server/_arkret/open/mimi/strands/room/notify")
+                    .add_header("content-type", "application/json", true)
+                    .add_header("content-length", "129", true)
+                    .body("{}");
+            if encoded {
+                request = request.add_header("content-encoding", "gzip", true);
+            }
+            let response = request.send(&service).await;
+            assert_eq!(response.status_code, Some(expected));
+        }
     }
 }

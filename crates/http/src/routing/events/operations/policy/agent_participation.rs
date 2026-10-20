@@ -153,7 +153,13 @@ async fn agent_grant_covers_operation(
 ) -> Result<(), &'static str> {
     let agent = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
         arkret_wire::DidCoreId::new(agent_id.to_owned()).map_err(|_| reasons.actor_invalid)?,
-        operation.context.sender.route_service_id().clone(),
+        operation
+            .context
+            .sender
+            .as_account_id()
+            .ok_or(reasons.actor_invalid)?
+            .station_id
+            .clone(),
     ));
     let authorization = crate::authz::actor_realm_authorization(
         state,

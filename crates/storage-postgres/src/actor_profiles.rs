@@ -592,7 +592,7 @@ pub(crate) async fn materialize_profile_at(
     at: chrono::DateTime<chrono::Utc>,
     subject: &AccountId,
 ) -> Result<ActorProfile, PgTransactionError> {
-    materialize_profile_at_with_source(conn, event, at, subject, None).await
+    materialize_profile_at_with_source(conn, event, at, subject).await
 }
 
 pub(crate) async fn materialize_profile_at_with_source(
@@ -600,7 +600,6 @@ pub(crate) async fn materialize_profile_at_with_source(
     event: &Event,
     at: chrono::DateTime<chrono::Utc>,
     subject: &AccountId,
-    forwarded: Option<&coland_storage::ForwardedManagedActorSource>,
 ) -> Result<ActorProfile, PgTransactionError> {
     const WHAT: &str = "Actor Profile";
     let current = locked_profile(conn, event).await?;
@@ -613,7 +612,7 @@ pub(crate) async fn materialize_profile_at_with_source(
                 ));
             }
             let create: ActorProfileCreatePayload = payload(event, WHAT)?;
-            if create.object.principal_id != subject.principal_id {
+            if create.object.principal_id.as_ref() != Some(&subject.principal_id) {
                 return Err(rejected(
                     ConflictCode::FailedPrecondition,
                     "ak.profile.create principal_id is not the submitting actor",
@@ -643,7 +642,7 @@ pub(crate) async fn materialize_profile_at_with_source(
                     "ak.profile.update target_ref is not the Account and scope accepted Actor Profile",
                 ));
             }
-            if current.principal_id != subject.principal_id {
+            if current.principal_id.as_ref() != Some(&subject.principal_id) {
                 return Err(rejected(
                     ConflictCode::FailedPrecondition,
                     "the accepted Actor Profile belongs to another principal",
@@ -677,30 +676,23 @@ pub(crate) async fn materialize_profile_at_with_source(
             next
         }
     };
-    if let Some(source) = forwarded {
-        source.ensure_event(event, at)?;
-        if next.accountable_principal_ids.as_slice() != [source.provision().service_id.clone()]
-            || next.principal_id != source.verified().account().principal_id
-        {
-            return Err(rejected(
-                ConflictCode::AccountabilityGrantMissing,
-                "Profile differs from its verified current accountability",
-            ));
-        }
-    } else {
-        if !accountability_holds_in_connection(
-            conn,
-            &next.accountable_principal_ids,
-            &next.principal_id,
-            at,
-        )
-        .await?
-        {
-            return Err(rejected(
-                ConflictCode::AccountabilityGrantMissing,
-                "an accountable principal has no active accountability record at the Commit",
-            ));
-        }
+
+    if !accountability_holds_in_connection(
+        conn,
+        next.accountable_principal_ids
+            .as_deref()
+            .unwrap_or_default(),
+        next.principal_id
+            .as_ref()
+            .ok_or_else(|| corrupt("Account Profile principal absent"))?,
+        at,
+    )
+    .await?
+    {
+        return Err(rejected(
+            ConflictCode::AccountabilityGrantMissing,
+            "an accountable principal has no active accountability record at the Commit",
+        ));
     }
 
     Ok(next)

@@ -16,15 +16,15 @@ pub(crate) async fn lock_cuts(
     let mut realms = Vec::new();
     for endpoint in endpoints {
         realms.push((
-            endpoint.authority.pcr_realm_id.clone(),
-            endpoint.authority.account_id.station_id.clone(),
+            endpoint.authority.realm_id.clone(),
+            endpoint.authority.governance_service_id.clone(),
         ));
         realms.push((
             endpoint.effective_scope.realm_id().clone(),
-            endpoint.authority.account_id.station_id.clone(),
+            endpoint.authority.governance_service_id.clone(),
         ));
     }
-    let station = &endpoints[0].authority.account_id.station_id;
+    let station = &endpoints[0].authority.governance_service_id;
     realms.extend(
         counterparts
             .iter()
@@ -145,7 +145,7 @@ pub(crate) async fn require_admission(
             conn,
             &outcome,
             Some(request),
-            &endpoints[0].authority.account_id.station_id,
+            &endpoints[0].authority.governance_service_id,
         )
     })
     .await?;
@@ -164,7 +164,7 @@ pub(crate) async fn require_admission(
         return Err(denied("new claim command expired"));
     }
     if let Some((source, deadline)) = &admission.requester {
-        let PeerKeyPackageRequesterAuthorization::Device {
+        let PeerKeyPackageRequesterAuthorization::RealmDevice {
             verification_method,
             requester_device_id,
             device_authorize_event_id,
@@ -174,10 +174,10 @@ pub(crate) async fn require_admission(
         else {
             return Err(denied("native requester must use its true Device branch"));
         };
-        if request.requester_account_id.as_ref() != Some(&source.authority.account_id)
-            || request.service_binding.source_id != source.authority.account_id.station_id
+        if request.requester_actor_id.as_ref() != Some(&source.authority.actor_id)
+            || request.service_binding.source_id != source.authority.governance_service_id
             || requester_device_id != &source.authority.device_id
-            || device_authorize_event_id != &source.authority.selector.authorization_ref.event_id
+            || device_authorize_event_id != &source.authority.authorization_ref.event_id
             || verification_method.as_str()
                 != format!(
                     "{}#{}",
@@ -217,8 +217,8 @@ pub(crate) async fn require_admission(
         .await?;
     }
     if let Some(target) = &attempt.applet_device_scope_guard {
-        if request.target_account_id.as_ref() != Some(&target.authority.account_id)
-            || request.service_binding.destination_id != target.authority.account_id.station_id
+        if request.target_actor_id.as_ref() != Some(&target.authority.actor_id)
+            || request.service_binding.destination_id != target.authority.governance_service_id
             || (!request.target_device_ids.is_empty()
                 && !request
                     .target_device_ids
@@ -254,14 +254,23 @@ pub(crate) async fn require_admission(
             requester_agent_id.clone(),
             request.service_binding.source_id.clone(),
         )),
+        (None, PeerKeyPackageRequesterAuthorization::RealmDevice { .. }) => request
+            .requester_actor_id
+            .clone()
+            .ok_or_else(|| denied("Realm requester is absent"))?,
         _ => return Err(denied("claim requester routing branch is incomplete")),
     };
-    let target = match (&request.target_account_id, &request.target_agent_id) {
-        (Some(account), None) => ActorId::account(account.clone()),
-        (None, Some(agent)) => ActorId::account(arkret_wire::AccountId::new(
+    let target = match (
+        &request.target_account_id,
+        &request.target_agent_id,
+        &request.target_actor_id,
+    ) {
+        (Some(account), None, None) => ActorId::account(account.clone()),
+        (None, Some(agent), None) => ActorId::account(arkret_wire::AccountId::new(
             agent.clone(),
             request.service_binding.destination_id.clone(),
         )),
+        (None, None, Some(actor)) => actor.clone(),
         _ => return Err(denied("claim target routing branch is incomplete")),
     };
     // Managed Device scopes are actual existing Realm/Circle scopes. Direct
@@ -296,11 +305,11 @@ pub(crate) async fn require_target(
     deadline: chrono::DateTime<Utc>,
 ) -> PersistenceResult<()> {
     if row.effective_scope.as_ref() != Some(&guard.effective_scope)
-        || row.owner_account_id != guard.authority.account_id
-        || row.actor_id != guard.authority.account_id.principal_id.as_str()
+        || row.owner_actor_id != guard.authority.actor_id
+        || row.actor_id != guard.authority.actor_id.signing_principal_id().as_str()
         || row.device_id.as_deref() != Some(guard.authority.device_id.as_str())
         || row.device_authorize_event_id.as_deref()
-            != Some(guard.authority.selector.authorization_ref.event_id.as_str())
+            != Some(guard.authority.authorization_ref.event_id.as_str())
         || row.agent_key_authorize_event_id.is_some()
         || row.endpoint_verification_method.is_some()
     {
@@ -316,7 +325,7 @@ pub(crate) async fn require_target(
     crate::mls_keypackage_publication::require_existing_group(conn, &guard.effective_scope).await?;
     let leaf = arkret_mls::author_leaf_from_key_package_bytes(&row.key_package_bytes, 0)
         .map_err(denied)?;
-    let actor = ActorId::account(row.owner_account_id.clone());
+    let actor = row.owner_actor_id.clone();
     let credential = arkret_models_crypto::mls_basic_credential_identity(&actor).map_err(denied)?;
     if !matches!(leaf.credential,arkret_mls::AuthorLeafCredential::Basic{identity} if identity==credential)
         || leaf.signature_key.as_slice() != guard.authority.public_key.as_slice()
@@ -352,7 +361,7 @@ fn outcome_matches_row(
     };
     if claim.keypackage_ref != row.keypackage_ref
         || claim.principal_id.as_str() != row.actor_id
-        || claim.actor_id.route_service_id() != &row.owner_account_id.station_id
+        || claim.actor_id != row.owner_actor_id
         || claim.device_id.as_ref().map(|id| id.as_str()) != row.device_id.as_deref()
         || claim
             .device_authorize_event_id
@@ -383,7 +392,7 @@ fn outcome_matches_row(
             "claim response differs from its actual durable publication",
         ));
     }
-    if row.device_id.is_some() && claim.actor_id.as_account_id() != Some(&row.owner_account_id) {
+    if row.device_id.is_some() && claim.actor_id != row.owner_actor_id {
         return Err(denied("claim response has another full owner Account"));
     }
     Ok(())
@@ -507,13 +516,13 @@ pub(crate) async fn require_stored_outcome(
             let guard = endpoints
                 .iter()
                 .find(|endpoint| {
-                    claim.actor_id.as_account_id() == Some(&endpoint.authority.account_id)
+                    claim.actor_id == endpoint.authority.actor_id
                         && claim.device_id.as_ref() == Some(&endpoint.authority.device_id)
                 })
                 .ok_or_else(|| denied("claim omits its true native target proof"))?;
             if &guard.effective_scope != scope
                 || claim.device_authorize_event_id.as_ref()
-                    != Some(&guard.authority.selector.authorization_ref.event_id)
+                    != Some(&guard.authority.authorization_ref.event_id)
             {
                 return Err(denied(
                     "claim target authorization instance or scope changed",
@@ -522,9 +531,9 @@ pub(crate) async fn require_stored_outcome(
         }
     }
     for endpoint in endpoints {
-        let actor = ActorId::account(endpoint.authority.account_id.clone());
+        let actor = endpoint.authority.actor_id.clone();
         let request = &outcome.claim_receipt.request;
-        if request.requester_account_id.as_ref() != Some(&endpoint.authority.account_id)
+        if request.requester_actor_id.as_ref() != Some(&endpoint.authority.actor_id)
             && !outcome.claims.iter().any(|claim| {
                 claim.actor_id == actor
                     && claim.device_id.as_ref() == Some(&endpoint.authority.device_id)

@@ -51,7 +51,7 @@ fn app_state<'a>(depot: &'a Depot, res: &mut Response) -> Option<&'a AppState> {
     }
 }
 
-async fn authenticated_reader(
+pub(crate) async fn authenticated_reader(
     state: &AppState,
     req: &mut Request,
     res: &mut Response,
@@ -171,7 +171,7 @@ async fn native_exact_current_results(
     res: &mut Response,
 ) {
     if device.operation != ServiceOperationId::SelfCurrentResultsReadExactV1
-        || device.authority.account_id.station_id != state.service_core_id()
+        || device.authority.governance_service_id != state.service_core_id()
     {
         return not_found(res);
     }
@@ -192,9 +192,9 @@ async fn native_exact_current_results(
     { return not_found(res); }
     let result = state
         .authority_commits()
-        .exact_current_result_for_account(
+        .exact_current_result_for_actor(
             &request,
-            &device.authority.account_id,
+            &device.authority.actor_id,
             &state.service_core_id(),
         )
         .await;

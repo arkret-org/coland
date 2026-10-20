@@ -52,7 +52,9 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         EventKind::IdentityAccountabilityGrant => Ok(SelfEventRoute::AccountabilityGrant),
         EventKind::ConsentGrant | EventKind::ConsentRevoke => Ok(SelfEventRoute::Consent),
         EventKind::MlsGenesis | EventKind::MlsCommit => Ok(SelfEventRoute::Mls),
-        EventKind::CircleCreate
+        EventKind::RealmActorStatusSet
+        | EventKind::RealmActorRecoverySet
+        | EventKind::CircleCreate
         | EventKind::AppletBridgeError
         | EventKind::SidecarCreate
         | EventKind::SidecarContextAttach
@@ -205,6 +207,14 @@ pub(super) fn require_guarded_unit_event(request: &EventAdmissionSubmission) -> 
         )));
     }
     if !matches!(event.scope_ref, arkret_wire::ScopeRef::Realm { .. })
+        && !(matches!(event.scope_ref, arkret_wire::ScopeRef::RealmControl { .. })
+            && event.actor_id.as_account_id().is_some()
+            && event.executed_by.is_none()
+            && matches!(
+                event.kind,
+                arkret_wire::EventKind::RealmActorStatusSet
+                    | arkret_wire::EventKind::RealmActorRecoverySet
+            ))
         && !(matches!(event.scope_ref, arkret_wire::ScopeRef::Circle { .. })
             && matches!(
                 event.kind,

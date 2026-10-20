@@ -128,7 +128,7 @@ pub(crate) async fn installation(
     ) && actual_action == CapabilityActionId::AppletJoin
         && encrypted.value.as_bool() != Some(false);
 
-    if event.actor_id != ActorId::account(authority.account_id.clone())
+    if event.actor_id != authority.actor_id
         || event.applet_id.as_ref() != Some(&authority.applet_id)
         || event.scope_ref != guard.effective_scope
     {
@@ -215,14 +215,13 @@ async fn installation_at_scope(
 ) -> PersistenceResult<(arkret_models_integration::AppletRegistrationPayload, Value)> {
     installation_identity(
         conn,
-        &authority.account_id,
+        &authority.actor_id,
         &authority.applet_id,
         &authority.source_service_id,
         scope,
         service_did_document,
         at,
         writer,
-        None,
     )
     .await
 }
@@ -231,16 +230,15 @@ async fn installation_at_scope(
     clippy::too_many_arguments,
     reason = "The same installation cut accepts a local PCR or one verified remote identity, without synthesizing Device scopes."
 )]
-async fn installation_identity(
+pub(crate) async fn installation_identity(
     conn: &mut AsyncPgConnection,
-    account: &arkret_wire::AccountId,
+    actor: &arkret_wire::ActorId,
     applet: &arkret_wire::AppletId,
     service: &arkret_wire::DidCoreId,
     scope: &ScopeRef,
     service_did_document: &arkret_identity::DidDocument,
     at: chrono::DateTime<chrono::Utc>,
     writer: bool,
-    forwarded: Option<&coland_storage::ForwardedManagedActorSource>,
 ) -> PersistenceResult<(arkret_models_integration::AppletRegistrationPayload, Value)> {
     let registration =
         crate::managed_message_actor::registration_for_scope(conn, scope.realm_id(), applet)
@@ -264,15 +262,12 @@ async fn installation_identity(
         "FOR SHARE OF i,m NOWAIT"
     };
     let query = format!(
-        "SELECT i.record AS value,(m.record->>'globally_fenced_at' IS NOT NULL) AS globally_fenced FROM applet_installations i JOIN applet_registration_current_results r ON r.realm_id=$3 AND r.applet_id=i.applet_id JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref AND a.registration_event_ref=i.record#>>'{{registration_event,event_id}}' JOIN applet_managed_identities m ON m.applet_id=i.applet_id AND m.target_station_id=i.record->>'target_station_id' WHERE i.applet_id=$1 AND i.effective_scope_key=$2 AND ($4::text IS NULL OR m.target_station_id=$4) {locking}"
+        "SELECT i.record AS value,(m.record->>'globally_fenced_at' IS NOT NULL) AS globally_fenced FROM applet_installations i JOIN applet_registration_current_results r ON r.realm_id=$3 AND r.applet_id=i.applet_id JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref AND a.registration_event_ref=i.record#>>'{{registration_event,event_id}}' JOIN applet_managed_identities m ON m.applet_id=i.applet_id AND m.target_station_id=i.record->>'target_station_id' WHERE i.applet_id=$1 AND i.effective_scope_key=$2 {locking}"
     );
     let row = sql_query(query)
         .bind::<Text, _>(applet.as_str())
         .bind::<Text, _>(key)
         .bind::<Text, _>(scope.realm_id().as_str())
-        .bind::<diesel::sql_types::Nullable<Text>, _>(
-            forwarded.is_none().then_some(account.station_id.as_str()),
-        )
         .get_result::<InstallationRow>(&mut *conn)
         .await
         .optional()
@@ -296,29 +291,16 @@ async fn installation_identity(
     {
         return Err(denied("native Applet exact installation is inactive"));
     }
-    if let Some(source) = forwarded {
-        source
-            .verified()
-            .ensure_live(at)
-            .map_err(|e| denied(&e.to_string()))?;
-        if source.verified().account() != account
-            || &source.provision().applet_id != applet
-            || &source.provision().service_id != service
-        {
-            return Err(denied(
-                "forwarded managed identity differs from the actual registration",
-            ));
-        }
-    } else {
-        crate::managed_message_actor::require_managed_identity_in_connection(
-            conn,
-            &ActorId::account(account.clone()),
-            applet,
-            &registration,
-            at,
-        )
-        .await?;
-    }
+
+    crate::managed_message_actor::require_managed_identity_in_connection(
+        conn,
+        actor,
+        applet,
+        &registration,
+        at,
+    )
+    .await?;
+
     Ok((registration, row.value))
 }
 
@@ -329,45 +311,7 @@ pub(crate) async fn installation_source(
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<(arkret_models_integration::AppletRegistrationPayload, Value)> {
     source.ensure_event(event, at)?;
-    match source {
-        Source::Local(guard) => installation(conn, event, guard, at).await,
-        Source::Forwarded(_) => {
-            let installed = installation_identity(
-                conn,
-                source.account(),
-                source.applet(),
-                source.service(),
-                &event.scope_ref,
-                source.document(),
-                at,
-                true,
-                source.forwarded(),
-            )
-            .await?;
-            if matches!(event.kind, EventKind::MlsGenesis | EventKind::MlsCommit)
-                || (matches!(
-                    event.kind,
-                    EventKind::MemberState | EventKind::CircleMemberState
-                ) && action(event)? == CapabilityActionId::AppletJoin)
-            {
-                let encrypted=sql_query("SELECT to_jsonb(EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.mls.genesis' AND c.realm_id=$1 AND e.envelope->'scope_ref'=$2)) AS value")
-                    .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(json!(event.scope_ref)).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-                if encrypted.value.as_bool() != Some(false)
-                    || matches!(event.kind, EventKind::MlsGenesis | EventKind::MlsCommit)
-                {
-                    crate::applet_e2ee::require_current_consent(
-                        conn,
-                        &installed.0,
-                        &installed.1,
-                        &event.scope_ref,
-                        at,
-                    )
-                    .await?;
-                }
-            }
-            Ok(installed)
-        }
-    }
+    installation(conn, event, source.guard(), at).await
 }
 
 /// Subject-only metadata binds an active accepted installation grant. It never
@@ -587,7 +531,6 @@ async fn business_basis_source(
         crate::realm_authorization_cut::RealmAuthorizationCut::read_for_event(conn, event)
     })
     .await?;
-    let cut = cut.with_forwarded_managed(source.forwarded());
     cut.require_open_lifecycle(event)?;
     cut.require_governed_member(&event.kind)?;
     let (target, mut facts) = cut.event_operation(event);
@@ -632,28 +575,15 @@ async fn business_basis_source(
             )),
         })
         .collect::<PersistenceResult<Vec<_>>>()?;
-    let provision = if let Some(source) = source.forwarded() {
-        source.provision().clone()
-    } else {
-        let sources=sql_query("SELECT e.envelope->'payload' AS value FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.applet.managed_actor.provision' AND e.envelope#>'{payload,actor_id}'=$1")
-        .bind::<Jsonb,_>(json!(event.actor_id)).load::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-        if sources.len() != 1 {
-            return Err(denied("native business has no unique accepted provision"));
-        }
-        let provision: arkret_models_integration::AppletManagedActorProvisionPayload =
-            serde_json::from_value(sources.into_iter().next().unwrap().value)
-                .map_err(PersistenceError::database)?;
-        provision
-    };
-    if provision.actor_id != event.actor_id
-        || provision.applet_id != registration.applet_id
-        || provision.service_id != registration.service_id
-    {
+    let provision = crate::realm_actor_control::creation_source(conn, &event.actor_id).await?;
+    if provision.actor_id != event.actor_id || provision.applet_id != registration.applet_id {
         return Err(denied("native business role source differs"));
     }
     let role = match provision.actor_role {
-        arkret_models_integration::AppletManagedActorRole::Bot => ManagedActorRole::Bot,
-        arkret_models_integration::AppletManagedActorRole::Ghost => ManagedActorRole::Ghost,
+        arkret_models_integration::RealmActorCreatePayloadActorRole::Bot => ManagedActorRole::Bot,
+        arkret_models_integration::RealmActorCreatePayloadActorRole::Ghost => {
+            ManagedActorRole::Ghost
+        }
     };
     let definition = CapabilityGrantCreateBody {
         schema: child.schema.clone(),
@@ -837,7 +767,8 @@ pub(crate) async fn require_mls_permission_source(
         ));
     }
     source.ensure_event(event, at)?;
-    if let Source::Local(guard) = source {
+    {
+        let Source::Local(guard) = source;
         let producer =
             coland_storage::SelfProducerCommitGuard::AppletManagedDevice(Box::new(guard.clone()));
         crate::authority_commit::check_self_producer_guard_in_connection(
@@ -865,7 +796,6 @@ pub(crate) async fn require_mls_permission_source(
         crate::realm_authorization_cut::RealmAuthorizationCut::read_for_event(conn, event)
     })
     .await?;
-    let cut = cut.with_forwarded_managed(source.forwarded());
     let mut reservations = cut.native_mls_reservations(event, action, &target, &facts, at)?;
     if crate::policy_action_admission::current_quorum(conn, event, action, &target, &facts, at)
         .await?

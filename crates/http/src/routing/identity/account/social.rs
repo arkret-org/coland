@@ -514,7 +514,12 @@ async fn contact_list_rows(
                 controller_account_id: arkret_wire::AccountId::new(
                     arkret_identifiers::DidCoreId::new(agent.controller_principal_id)
                         .expect("stored Agent controller DID is validated"),
-                    peer.route_service_id().clone(),
+                    peer.as_account_id()
+                        .ok_or_else(|| {
+                            AppError::internal("stored Contact Agent is not an Account")
+                        })?
+                        .station_id
+                        .clone(),
                 ),
             }
         } else {

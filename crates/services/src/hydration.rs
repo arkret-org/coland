@@ -440,9 +440,7 @@ async fn hydrate_canonical_realm_bootstraps(
             })?;
         if matches!(
             create_payload.object.purpose,
-            RealmPurpose::PrincipalControl
-                | RealmPurpose::AgentControl
-                | RealmPurpose::AppletManagedControl
+            RealmPurpose::PrincipalControl | RealmPurpose::AgentControl
         ) {
             continue;
         }
@@ -649,7 +647,7 @@ async fn confirmed_ordinary_bootstrap_facets(
 /// `ak.identity.resolution.update` successors are the sole source of current
 /// identity state. Replay therefore derives the same registered cells in
 /// confirmed command order. Agent lifecycle must be restored before
-/// ordinary Realm membership is replayed; Applet PCRs never gain Agent status.
+/// ordinary Realm membership is replayed.
 async fn hydrate_managed_pcr_identity(
     persistence: &dyn coland_storage::PersistenceStore,
     proj: &mut ProjectionState,
@@ -676,10 +674,7 @@ async fn hydrate_managed_pcr_identity(
                     "canonical Managed PCR create failed typed payload decode: {error}"
                 ))
             })?;
-        if matches!(
-            payload.object.purpose,
-            RealmPurpose::AppletManagedControl | RealmPurpose::AgentControl
-        ) {
+        if matches!(payload.object.purpose, RealmPurpose::AgentControl) {
             managed_pcr_realms.insert(record.realm_id.clone());
         }
     }

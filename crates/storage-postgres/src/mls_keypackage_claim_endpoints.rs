@@ -27,6 +27,9 @@ impl EndpointWindow {
     }
 }
 enum Endpoint {
+    RealmDevice {
+        authority: coland_storage::AppletManagedDeviceAuthority,
+    },
     Device {
         account: AccountId,
         device: DeviceId,
@@ -59,6 +62,19 @@ impl ClaimEndpoint {
             return Err(denied("claim endpoint authorization window ended"));
         }
         match &self.endpoint {
+            Endpoint::RealmDevice { authority } => {
+                let current = crate::realm_actor_device_authority::current_in_connection(
+                    conn,
+                    &authority.actor_id,
+                    &authority.device_id,
+                    at,
+                )
+                .await
+                .map_err(crate::PgTransactionError::into_persistence)?;
+                if current.as_ref() != Some(authority) {
+                    return Err(denied("Realm claim Device authorization instance changed"));
+                }
+            }
             Endpoint::Device {
                 account,
                 device,
@@ -177,6 +193,67 @@ async fn device(
         },
     })
 }
+async fn realm_device(
+    conn: &mut AsyncPgConnection,
+    actor: &ActorId,
+    id: &DeviceId,
+    event: &EventId,
+    station: &DidCoreId,
+    scope: &arkret_wire::ScopeRef,
+) -> PersistenceResult<ClaimEndpoint> {
+    let authority =
+        crate::realm_actor_device_authority::current_in_connection(conn, actor, id, Utc::now())
+            .await
+            .map_err(crate::PgTransactionError::into_persistence)?
+            .ok_or_else(|| denied("Realm claim Device authority is unavailable"))?;
+    if authority.authorization_ref.event_id != *event
+        || authority.governance_service_id != *station
+        || !authority.scopes.contains_scope(scope)
+        || &authority.realm_id != scope.realm_id()
+    {
+        return Err(denied(
+            "Realm claim Device scope, governor or original changed",
+        ));
+    }
+    Ok(ClaimEndpoint {
+        realm: authority.realm_id.clone(),
+        window: EndpointWindow {
+            not_before: Some(authority.not_before),
+            expires_at: Some(authority.expires_at),
+        },
+        endpoint: Endpoint::RealmDevice { authority },
+    })
+}
+
+async fn group_scope(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+    group: &arkret_wire::MlsGroupId,
+) -> PersistenceResult<arkret_wire::ScopeRef> {
+    #[derive(QueryableByName)]
+    struct Row {
+        #[diesel(sql_type = Jsonb)]
+        value: serde_json::Value,
+    }
+    let row = sql_query("SELECT value FROM mls_group_current_results WHERE realm_id=$1 AND mls_group_id=$2 FOR SHARE")
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(group.as_str())
+        .get_result::<Row>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+        .ok_or_else(|| denied("accepted MLS group scope unavailable"))?;
+    let current: arkret_wire::MlsGroupCurrent =
+        serde_json::from_value(row.value).map_err(denied)?;
+    let scope = current.effective_scope;
+    if scope.realm_id() != realm
+        || !matches!(
+            scope,
+            arkret_wire::ScopeRef::Realm { .. } | arkret_wire::ScopeRef::Circle { .. }
+        )
+        || scope.canonical_mls_group_id().map_err(denied)? != *group
+    {
+        return Err(denied("accepted MLS group scope differs from claim"));
+    }
+    Ok(scope)
+}
+
 async fn agent(
     conn: &mut AsyncPgConnection,
     id: &DidCoreId,
@@ -249,6 +326,29 @@ pub(crate) async fn prepare(
                         .await?,
                     );
                 }
+                PeerKeyPackageRequesterAuthorization::RealmDevice {
+                    requester_device_id,
+                    device_authorize_event_id,
+                    ..
+                } => {
+                    let scope =
+                        group_scope(conn, &command.intended_realm_id, &command.mls_group_id)
+                            .await?;
+                    result.push(
+                        realm_device(
+                            conn,
+                            command
+                                .requester_actor_id
+                                .as_ref()
+                                .ok_or_else(|| denied("Realm requester Actor absent"))?,
+                            requester_device_id,
+                            device_authorize_event_id,
+                            station,
+                            &scope,
+                        )
+                        .await?,
+                    );
+                }
                 PeerKeyPackageRequesterAuthorization::Agent {
                     requester_agent_id,
                     verification_method,
@@ -267,7 +367,30 @@ pub(crate) async fn prepare(
         }
     }
     for claim in &outcome.claims {
-        if claim.actor_id.route_service_id() != station {
+        if claim.actor_id.as_realm_actor_id().is_some() {
+            let request = &outcome.claim_receipt.request;
+            let scope =
+                group_scope(conn, &request.intended_realm_id, &request.mls_group_id).await?;
+            result.push(
+                realm_device(
+                    conn,
+                    &claim.actor_id,
+                    claim
+                        .device_id
+                        .as_ref()
+                        .ok_or_else(|| denied("Realm claim Device absent"))?,
+                    claim
+                        .device_authorize_event_id
+                        .as_ref()
+                        .ok_or_else(|| denied("Realm claim authorization absent"))?,
+                    station,
+                    &scope,
+                )
+                .await?,
+            );
+            continue;
+        }
+        if claim.actor_id.fixed_route_service_id() != Some(station) {
             return Err(denied("claim target has no local original barrier"));
         }
         match (

@@ -457,7 +457,7 @@ async fn hosted_member_basis(
             serde_json::from_str(&row.member_id).map_err(|error| {
                 PersistenceError::Internal(format!("replica member identity is malformed: {error}"))
             })?;
-        if member.route_service_id() == local_service_id {
+        if member.fixed_route_service_id() == Some(local_service_id) {
             return Ok(true);
         }
     }
@@ -869,7 +869,7 @@ async fn require_visible(
         for row in rows {
             let member: arkret_wire::ActorId =
                 serde_json::from_str(&row.member_id).map_err(PersistenceError::database)?;
-            if member.route_service_id() == local_service_id
+            if member.fixed_route_service_id() == Some(local_service_id)
                 && crate::replica_authorization::scope_moderator(
                     conn,
                     &event.realm_id,

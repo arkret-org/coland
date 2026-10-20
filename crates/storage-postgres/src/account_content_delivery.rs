@@ -1202,6 +1202,308 @@ impl AccountContentDeliveryGuard for RemoteWatchGuard {
     }
 }
 
+struct RealmActorMaterialGuard {
+    held: Box<DeliveryGuard>,
+    expires_at: chrono::DateTime<chrono::Utc>,
+    local_cut: Option<crate::realm_authorization_cut::RealmAuthorizationCut>,
+    target: arkret_wire::WireResourceSelector,
+}
+
+#[async_trait::async_trait]
+impl AccountContentDeliveryGuard for RealmActorMaterialGuard {
+    fn permits_handoff(&self) -> bool {
+        let now = chrono::Utc::now();
+        now < self.expires_at
+            && self
+                .held
+                .clock
+                .as_ref()
+                .is_none_or(|clock| clock.permits_at(now))
+            && self.local_cut.as_ref().is_none_or(|cut| {
+                !cut.evaluate(
+                    &[CapabilityActionId::REALM_ACTOR_AUDIT],
+                    &self.target,
+                    &coland_storage::OperationFacts::default(),
+                    now,
+                )
+                .unreserved()
+                .is_empty()
+            })
+    }
+    async fn finish(self: Box<Self>) -> PersistenceResult<()> {
+        self.held.finish().await
+    }
+}
+
+async fn acquire_realm_actor_material(
+    pool: &crate::PgPool,
+    account: &AccountId,
+    station: &DidCoreId,
+    input: &coland_storage::AccountContentDeliveryInput,
+) -> PersistenceResult<Option<Box<dyn AccountContentDeliveryGuard>>> {
+    use diesel::sql_types::{BigInt, Jsonb};
+    let (request, outcome, authority) = input
+        .realm_actor_material
+        .as_deref()
+        .ok_or_else(|| unavailable("missing material witness"))?;
+    let actor = ActorId::account(account.clone());
+    outcome
+        .validate_for_request(request, &actor, chrono::Utc::now())
+        .map_err(|_| unavailable("invalid material witness"))?;
+    if account.station_id != *station
+        || outcome.realm_id != authority.realm_id
+        || outcome.governance_generation != authority.generation
+        || outcome.authority_ref != authority.authority_ref
+        || input.applet_endpoint.is_some()
+        || input.remote_watch_read.is_some()
+        || input.audited_watch_read.is_some()
+        || !input.realms.is_empty()
+        || !input.committed_events.is_empty()
+        || !input.current_views.is_empty()
+        || !input.projection_lists.is_empty()
+        || !input.morph_lists.is_empty()
+        || !input.morph_documents.is_empty()
+        || !input.morph_absences.is_empty()
+        || !input.realm_exports.is_empty()
+        || !input.snapshots.is_empty()
+        || !input.future_materials.is_empty()
+        || !input.notifications.is_empty()
+        || !input.exact_reads.is_empty()
+        || !input.watch_reads.is_empty()
+        || !input.blobs.is_empty()
+        || !input.unresolved_content_realms.is_empty()
+        || !input.stream_scans.is_empty()
+        || !input.keypackage_claims.is_empty()
+        || !input.mls_group_material_reads.is_empty()
+        || !input.mls_roster_reads.is_empty()
+    {
+        return Err(unavailable("material delivery is not one exact response"));
+    }
+    let credential_expiry = input
+        .credential_expires_at
+        .ok_or_else(|| unavailable("material credential has no expiry"))?;
+    let mut held = Box::new(DeliveryGuard {
+        connection: Some(crate::pg_conn(pool).await?),
+        runtime: tokio::runtime::Handle::current(),
+        clock: None,
+    });
+    sql_query("BEGIN")
+        .execute(held.connection())
+        .await
+        .map_err(PersistenceError::database)?;
+    crate::realm_authorization_cut::lock_realm_authorization_cut(
+        held.connection(),
+        &authority.realm_id,
+    )
+    .await?;
+    #[derive(QueryableByName)]
+    struct Observed {
+        #[diesel(sql_type=BigInt)]
+        generation: i64,
+        #[diesel(sql_type=Text)]
+        service_id: String,
+        #[diesel(sql_type=Jsonb)]
+        authority_ref: serde_json::Value,
+    }
+    let observed = sql_query("SELECT generation,service_id,authority_ref FROM realm_authorities WHERE realm_id=$1 FOR SHARE")
+        .bind::<Text,_>(authority.realm_id.as_str()).get_result::<Observed>(held.connection()).await.optional().map_err(PersistenceError::database)?
+        .ok_or_else(|| unavailable("material authority observation is absent"))?;
+    if u64::try_from(observed.generation).ok() != Some(authority.generation)
+        || observed.service_id != authority.service_id.as_str()
+        || observed.authority_ref != serde_json::json!(authority.authority_ref)
+    {
+        return Err(unavailable("material authority changed before delivery"));
+    }
+    let target = arkret_wire::WireResourceSelector::realm_actor(request.actor_id().clone())
+        .map_err(PersistenceError::database)?;
+    let local_cut = if authority.service_id == *station {
+        crate::realm_actor_material::require_account_audit(
+            held.connection(),
+            request.actor_id(),
+            &actor,
+            chrono::Utc::now(),
+        )
+        .await?;
+        Some(
+            crate::realm_authorization_cut::RealmAuthorizationCut::read(
+                held.connection(),
+                &authority.realm_id,
+                &actor,
+            )
+            .await?,
+        )
+    } else {
+        let revoked = sql_query("SELECT EXISTS(SELECT 1 FROM member_state_current_results WHERE realm_id=$1 AND member_id=$2 AND membership<>'join' AND updated_at >= $3) AS present")
+            .bind::<Text,_>(authority.realm_id.as_str()).bind::<Text,_>(actor.to_string())
+            .bind::<diesel::sql_types::Timestamptz,_>(outcome.issued_at)
+            .get_result::<crate::ExistsRow>(held.connection()).await.map_err(PersistenceError::database)?.present;
+        if revoked {
+            return Err(PersistenceError::NotFound(
+                "material requester withdrawal observed".into(),
+            ));
+        }
+        let mut cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
+            held.connection(),
+            &authority.realm_id,
+            &actor,
+        )
+        .await?;
+        cut.require_no_observed_audit_revocation(held.connection(), &target, outcome.issued_at)
+            .await?;
+        None
+    };
+    validate_private_delivery_credentials(
+        &mut held,
+        account,
+        station,
+        input,
+        target.clone(),
+        coland_storage::OperationFacts::default(),
+        CapabilityActionId::RealmActorAudit,
+        credential_expiry,
+    )
+    .await?;
+    let guard = Box::new(RealmActorMaterialGuard {
+        held,
+        expires_at: std::cmp::min(credential_expiry, outcome.expires_at),
+        local_cut,
+        target,
+    });
+    if !guard.permits_handoff() {
+        return Err(unavailable("material expired before delivery"));
+    }
+    Ok(Some(guard))
+}
+
+async fn validate_private_delivery_credentials(
+    held: &mut DeliveryGuard,
+    account: &AccountId,
+    station: &DidCoreId,
+    input: &coland_storage::AccountContentDeliveryInput,
+    target: arkret_wire::WireResourceSelector,
+    facts: coland_storage::OperationFacts,
+    action: CapabilityActionId,
+    expires_at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<()> {
+    use diesel::sql_types::BigInt;
+    if let Some(endpoint) = &input.agent_endpoint {
+        if endpoint.agent_id != account.principal_id || input.watch_delivery_device.is_some() {
+            return Err(unavailable(
+                "remote Watch endpoint differs from its Agent credential",
+            ));
+        }
+        let evidence = input
+            .qualified_agent_scope_evidence
+            .as_ref()
+            .ok_or_else(|| unavailable("remote Watch lacks qualified Agent scope"))?;
+        let (_, details) = input
+            .agent_session_scope
+            .as_ref()
+            .ok_or_else(|| unavailable("remote Watch lacks the Agent session content ceiling"))?;
+        if details.get("controller_principal_id")
+            != Some(&serde_json::json!(
+                evidence.accepted_binding().controller_account.principal_id
+            ))
+            || details.get("agent_key_authorization_ref")
+                != Some(&serde_json::json!(endpoint.authorization_ref.event_id))
+        {
+            return Err(unavailable(
+                "remote Watch session controller or key differs",
+            ));
+        }
+        Box::pin(crate::agent_current_results::lock_agent_producer_current(
+            held.connection(),
+            &endpoint.pcr_realm_id,
+            &endpoint.agent_id,
+        ))
+        .await?;
+        let at = chrono::Utc::now();
+        Box::pin(
+            crate::authority_commit::check_agent_endpoint_current_in_connection(
+                held.connection(),
+                &endpoint.pcr_realm_id,
+                &endpoint.agent_id,
+                &endpoint.authorization_ref,
+                &endpoint.verification_method,
+                at,
+            ),
+        )
+        .await?;
+        let source = crate::committed_disclosure::accepted_full_event_in_connection(
+            held.connection(),
+            &endpoint.authorization_ref.event_id,
+        )
+        .await?
+        .ok_or_else(|| unavailable("remote Watch Agent key original is unavailable"))?;
+        let key: arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload =
+            serde_json::from_value(
+                serde_json::to_value(&source.event.payload).map_err(PersistenceError::database)?,
+            )
+            .map_err(PersistenceError::database)?;
+        let provision_scope = Box::pin(provision_scope_in_connection(
+            held.connection(),
+            endpoint,
+            evidence,
+            station,
+        ))
+        .await?;
+        held.clock = Some(DeliveryClockProof {
+            checked_at: at,
+            key_expiry: key.expires_at,
+            credential_expiry: Some(expires_at),
+            key_scope: key.agent_key_scope,
+            provision_scope,
+            session_scope: input.agent_session_scope.clone(),
+            scope_operations: vec![(ActorId::account(account.clone()), target, facts, action)],
+            accountability: Vec::new(),
+            policies: Vec::new(),
+            positive_actions: Vec::new(),
+            native_projection_reads: Vec::new(),
+            native_reply: None,
+            reads: Vec::new(),
+        });
+    } else {
+        if input.agent_session_scope.is_some() || input.qualified_agent_scope_evidence.is_some() {
+            return Err(unavailable(
+                "remote Watch Agent cannot use a Human endpoint",
+            ));
+        }
+        let device = input
+            .watch_delivery_device
+            .as_ref()
+            .ok_or_else(|| unavailable("remote Watch has no bound device"))?;
+        if device.principal_id != account.principal_id || device.station_id != account.station_id {
+            return Err(unavailable("remote Watch Device binds another Account"));
+        }
+        crate::device_revocations::lock_artifact_devices_in_transaction(
+            held.connection(),
+            &[device],
+        )
+        .await?;
+        crate::ensure_gate_allowed_in_transaction(held.connection(), device).await?;
+    }
+    if let Some((token, account_pk)) = &input.watch_local_session {
+        #[derive(QueryableByName)]
+        struct LiveSession {
+            #[diesel(sql_type=diesel::sql_types::Timestamptz)]
+            expires_at: chrono::DateTime<chrono::Utc>,
+        }
+        let device = input
+            .watch_delivery_device
+            .as_ref()
+            .ok_or_else(|| unavailable("local Watch session has no Device binding"))?;
+        let session = sql_query("SELECT s.expires_at FROM sessions s JOIN accounts a ON a.pk=s.account_pk WHERE s.id=$1 AND s.account_pk=$2 AND s.actor_id=$3 AND s.audience=$4 AND s.device_id=$5 AND s.revoked_at IS NULL AND a.principal_id=$3 AND a.station_id=$4 AND a.disabled_at IS NULL FOR SHARE OF s,a")
+            .bind::<Text,_>(token).bind::<BigInt,_>(account_pk.0).bind::<Text,_>(account.principal_id.as_str())
+            .bind::<Text,_>(account.station_id.as_str()).bind::<Text,_>(&device.device_id)
+            .get_result::<LiveSession>(held.connection()).await.optional().map_err(PersistenceError::database)?
+            .ok_or_else(|| PersistenceError::NotFound("local Watch session was withdrawn or changed".to_owned()))?;
+        if session.expires_at != expires_at || session.expires_at <= chrono::Utc::now() {
+            return Err(unavailable("local Watch session expiry changed"));
+        }
+    }
+    Ok(())
+}
+
 async fn acquire_remote_watch_delivery(
     pool: &crate::PgPool,
     account: &AccountId,
@@ -1411,139 +1713,30 @@ async fn acquire_remote_watch_delivery(
             ));
         }
     }
-    if let Some(endpoint) = &input.agent_endpoint {
-        if endpoint.agent_id != account.principal_id || input.watch_delivery_device.is_some() {
-            return Err(unavailable(
-                "remote Watch endpoint differs from its Agent credential",
-            ));
-        }
-        let evidence = input
-            .qualified_agent_scope_evidence
-            .as_ref()
-            .ok_or_else(|| unavailable("remote Watch lacks qualified Agent scope"))?;
-        let (_, details) = input
-            .agent_session_scope
-            .as_ref()
-            .ok_or_else(|| unavailable("remote Watch lacks the Agent session content ceiling"))?;
-        if details.get("controller_principal_id")
-            != Some(&serde_json::json!(
-                evidence.accepted_binding().controller_account.principal_id
-            ))
-            || details.get("agent_key_authorization_ref")
-                != Some(&serde_json::json!(endpoint.authorization_ref.event_id))
-        {
-            return Err(unavailable(
-                "remote Watch session controller or key differs",
-            ));
-        }
-        Box::pin(crate::agent_current_results::lock_agent_producer_current(
-            held.connection(),
-            &endpoint.pcr_realm_id,
-            &endpoint.agent_id,
-        ))
-        .await?;
-        let at = chrono::Utc::now();
-        Box::pin(
-            crate::authority_commit::check_agent_endpoint_current_in_connection(
-                held.connection(),
-                &endpoint.pcr_realm_id,
-                &endpoint.agent_id,
-                &endpoint.authorization_ref,
-                &endpoint.verification_method,
-                at,
-            ),
-        )
-        .await?;
-        let source = crate::committed_disclosure::accepted_full_event_in_connection(
-            held.connection(),
-            &endpoint.authorization_ref.event_id,
-        )
-        .await?
-        .ok_or_else(|| unavailable("remote Watch Agent key original is unavailable"))?;
-        let key: arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload =
-            serde_json::from_value(
-                serde_json::to_value(&source.event.payload).map_err(PersistenceError::database)?,
-            )
-            .map_err(PersistenceError::database)?;
-        let provision_scope = Box::pin(provision_scope_in_connection(
-            held.connection(),
-            endpoint,
-            evidence,
-            station,
-        ))
-        .await?;
-        let mut facts = coland_storage::OperationFacts::default();
-        facts.strand_id = Some(request.strand_id.to_string());
-        facts.object_kind = Some("strand".to_owned());
-        if let arkret_wire::CommitStreamRef::Circle { circle_id, .. } = &head.stream_ref {
-            facts.circle_id = Some(circle_id.to_string());
-        }
-        held.clock = Some(DeliveryClockProof {
-            checked_at: at,
-            key_expiry: key.expires_at,
-            credential_expiry: Some(expires_at),
-            key_scope: key.agent_key_scope,
-            provision_scope,
-            session_scope: input.agent_session_scope.clone(),
-            scope_operations: vec![(
-                actor,
-                arkret_wire::WireResourceSelector::strand(
-                    request.realm_id.clone(),
-                    request.strand_id.clone(),
-                ),
-                facts,
-                if audited.is_some() {
-                    CapabilityActionId::RealmNotificationAudit
-                } else {
-                    CapabilityActionId::ObjectRead
-                },
-            )],
-            accountability: Vec::new(),
-            policies: Vec::new(),
-            positive_actions: Vec::new(),
-            native_projection_reads: Vec::new(),
-            native_reply: None,
-            reads: Vec::new(),
-        });
-    } else {
-        if input.agent_session_scope.is_some() || input.qualified_agent_scope_evidence.is_some() {
-            return Err(unavailable(
-                "remote Watch Agent cannot use a Human endpoint",
-            ));
-        }
-        let device = input
-            .watch_delivery_device
-            .as_ref()
-            .ok_or_else(|| unavailable("remote Watch has no bound device"))?;
-        if device.principal_id != account.principal_id || device.station_id != account.station_id {
-            return Err(unavailable("remote Watch Device binds another Account"));
-        }
-        crate::device_revocations::lock_artifact_devices_in_transaction(
-            held.connection(),
-            &[device],
-        )
-        .await?;
-        crate::ensure_gate_allowed_in_transaction(held.connection(), device).await?;
+    let mut facts = coland_storage::OperationFacts::default();
+    facts.strand_id = Some(request.strand_id.to_string());
+    facts.object_kind = Some("strand".to_owned());
+    if let arkret_wire::CommitStreamRef::Circle { circle_id, .. } = &head.stream_ref {
+        facts.circle_id = Some(circle_id.to_string());
     }
-    if let Some((token, account_pk)) = &input.watch_local_session {
-        #[derive(QueryableByName)]
-        struct LiveSession {
-            #[diesel(sql_type=diesel::sql_types::Timestamptz)]
-            expires_at: chrono::DateTime<chrono::Utc>,
-        }
-        let device = input
-            .watch_delivery_device
-            .as_ref()
-            .ok_or_else(|| unavailable("local Watch session has no Device binding"))?;
-        let session = sql_query("SELECT s.expires_at FROM sessions s JOIN accounts a ON a.pk=s.account_pk WHERE s.id=$1 AND s.account_pk=$2 AND s.actor_id=$3 AND s.audience=$4 AND s.device_id=$5 AND s.revoked_at IS NULL AND a.principal_id=$3 AND a.station_id=$4 AND a.disabled_at IS NULL FOR SHARE OF s,a")
-            .bind::<Text,_>(token).bind::<BigInt,_>(account_pk.0).bind::<Text,_>(account.principal_id.as_str())
-            .bind::<Text,_>(account.station_id.as_str()).bind::<Text,_>(&device.device_id)
-            .get_result::<LiveSession>(held.connection()).await.optional().map_err(PersistenceError::database)?
-            .ok_or_else(|| PersistenceError::NotFound("local Watch session was withdrawn or changed".to_owned()))?;
-        if session.expires_at != expires_at || session.expires_at <= chrono::Utc::now() {
-            return Err(unavailable("local Watch session expiry changed"));
-        }
-    }
+    validate_private_delivery_credentials(
+        &mut held,
+        account,
+        station,
+        input,
+        arkret_wire::WireResourceSelector::strand(
+            request.realm_id.clone(),
+            request.strand_id.clone(),
+        ),
+        facts,
+        if audited.is_some() {
+            CapabilityActionId::RealmNotificationAudit
+        } else {
+            CapabilityActionId::ObjectRead
+        },
+        expires_at,
+    )
+    .await?;
     let guard = Box::new(RemoteWatchGuard { held, expires_at });
     if !guard.permits_handoff() {
         return Err(unavailable(
@@ -1559,11 +1752,13 @@ pub(crate) async fn acquire(
     station: &DidCoreId,
     input: &coland_storage::AccountContentDeliveryInput,
 ) -> PersistenceResult<Option<Box<dyn AccountContentDeliveryGuard>>> {
-    if let Some(endpoint) = &input.applet_endpoint {
-        return crate::boxed_future(|| {
-            crate::applet_content_delivery::acquire(pool, account, station, endpoint, input)
-        })
-        .await;
+    if input.realm_actor_material.is_some() {
+        return Box::pin(acquire_realm_actor_material(pool, account, station, input)).await;
+    }
+    if input.applet_endpoint.is_some() {
+        return Err(unavailable(
+            "Realm actor delivery requires its native Actor endpoint",
+        ));
     }
     if !input.stream_scans.is_empty()
         || !input.keypackage_claims.is_empty()

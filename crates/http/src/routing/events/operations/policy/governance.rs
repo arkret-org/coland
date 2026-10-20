@@ -81,10 +81,10 @@ pub(super) async fn validate_member_state_policy(
             let current_controller = projection
                 .member(operation.realm_id.as_str(), &actor_key)
                 .ok_or("not_member")?;
-            let current_authority = arkret_wire::AccountId::new(
-                actor.signing_principal_id().clone(),
-                actor.route_service_id().clone(),
-            );
+            let current_authority = actor
+                .as_account_id()
+                .ok_or("agent_controller_binding_invalid")?
+                .clone();
             if binding.controller_account_id != current_authority
                 || binding.controller_account_id.principal_id != *actor.signing_principal_id()
                 || current_controller.membership_event_ref.as_deref()
@@ -184,16 +184,15 @@ fn controller_has_bound_agent_memberships(state: &AppState, operation: &Operatio
     let Some(generation) = controller.membership_event_ref.as_deref() else {
         return false;
     };
-    let authority = arkret_wire::AccountId::new(
-        controller_actor_id.signing_principal_id().clone(),
-        controller_actor_id.route_service_id().clone(),
-    );
+    let Some(authority) = controller_actor_id.as_account_id() else {
+        return false;
+    };
     projection
         .agent_membership_bindings
         .iter()
         .any(|((realm_id, agent_id), binding)| {
             realm_id == operation.realm_id.as_str()
-                && binding.controller_account_id == authority
+                && &binding.controller_account_id == authority
                 && binding.controller_membership_generation_ref.as_str() == generation
                 && projection.effective_agent_membership_base(realm_id, agent_id)
         })

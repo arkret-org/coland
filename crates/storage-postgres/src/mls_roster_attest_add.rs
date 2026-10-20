@@ -80,6 +80,8 @@ struct InstalledRow {
     request_json: serde_json::Value,
     #[diesel(sql_type = Binary)]
     attestor_resolution_canonical_json: Vec<u8>,
+    #[diesel(sql_type = Binary)]
+    claim_issuer_resolution_canonical_json: Vec<u8>,
     #[diesel(sql_type = BigInt)]
     consumed_proposal_ordinal: i64,
 }
@@ -107,12 +109,20 @@ pub(crate) async fn install_in_connection(
     }
     if verified.attestor_resolution.service_id != attestation.attestor_station_id
         || verified.attestor_resolution.service_kind != "station"
-        || arkret::verify_mls_attest_add_request(request, &verified.attestor_resolution).is_err()
+        || arkret::verify_mls_attest_add_request(
+            request,
+            &verified.claim_issuer_resolution,
+            &verified.attestor_resolution,
+        )
+        .is_err()
     {
         return Err(refused(
             "Add proof lacks verified historical Station resolution",
         ));
     }
+    let claim_resolution_bytes =
+        arkret_canonical::canonical_json_bytes(&verified.claim_issuer_resolution)
+            .map_err(PersistenceError::database)?;
     let resolution_bytes = arkret_canonical::canonical_json_bytes(&verified.attestor_resolution)
         .map_err(PersistenceError::database)?;
     let key = String::from_utf8(
@@ -172,6 +182,16 @@ pub(crate) async fn install_in_connection(
                 .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?
     {
         return Err(refused("Add proof differs from accepted MLS Commit"));
+    }
+
+    if !crate::realm_actor_mls_route::matches_accepted_add(
+        &attestation.actor_id,
+        &attestation.attestor_station_id,
+        &commit,
+    ) {
+        return Err(refused(
+            "Add attestor differs from accepted recipient authority",
+        ));
     }
 
     let welcome = sql_query(
@@ -288,7 +308,7 @@ pub(crate) async fn install_in_connection(
     let digest = arkret_canonical::canonical_sha256(request).map_err(PersistenceError::database)?;
     let request_json = serde_json::to_value(request).map_err(PersistenceError::database)?;
     let existing = sql_query(
-        "SELECT attestation_digest,request_json,attestor_resolution_canonical_json,consumed_proposal_ordinal \
+        "SELECT attestation_digest,request_json,attestor_resolution_canonical_json,claim_issuer_resolution_canonical_json,consumed_proposal_ordinal \
          FROM mls_add_authority_attestations WHERE welcome_id=$1 FOR UPDATE",
     )
     .bind::<Text, _>(attestation.welcome_id.as_str())
@@ -310,7 +330,24 @@ pub(crate) async fn install_in_connection(
                 "installed Add historical resolution is not canonical",
             ));
         }
-        arkret::verify_mls_attest_add_request(request, &stored_resolution).map_err(|error| {
+        let stored_claim_resolution: arkret_models_identity::AuthenticatedServiceResolution =
+            serde_json::from_slice(&existing.claim_issuer_resolution_canonical_json)
+                .map_err(|_| refused("installed claim issuer resolution is damaged"))?;
+        if arkret_canonical::canonical_json_bytes(&stored_claim_resolution)
+            .ok()
+            .as_deref()
+            != Some(existing.claim_issuer_resolution_canonical_json.as_slice())
+        {
+            return Err(refused(
+                "installed claim issuer resolution is not canonical",
+            ));
+        }
+        arkret::verify_mls_attest_add_request(
+            request,
+            &stored_claim_resolution,
+            &stored_resolution,
+        )
+        .map_err(|error| {
             refused(&format!(
                 "installed Add historical signatures invalid: {error}"
             ))
@@ -318,6 +355,7 @@ pub(crate) async fn install_in_connection(
         if existing.attestation_digest != digest
             || existing.request_json != request_json
             || existing.attestor_resolution_canonical_json != resolution_bytes
+            || existing.claim_issuer_resolution_canonical_json != claim_resolution_bytes
             || existing.consumed_proposal_ordinal != ordinal
         {
             return Err(refused("replayed Add proof differs from installed history"));
@@ -332,8 +370,8 @@ pub(crate) async fn install_in_connection(
         "INSERT INTO mls_add_authority_attestations \
          (attestor_station_id,realm_id,scope_key,mls_group_id,genesis_event_ref,commit_event_ref, \
           commit_stream_position,epoch,welcome_id,claim_id,consumed_proposal_ordinal, \
-          attestation_digest,request_json,attestor_resolution_canonical_json,installed_at) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT DO NOTHING",
+          attestation_digest,request_json,attestor_resolution_canonical_json,claim_issuer_resolution_canonical_json,installed_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT DO NOTHING",
     )
     .bind::<Text, _>(attestation.attestor_station_id.as_str())
     .bind::<Text, _>(attestation.realm_id.as_str())
@@ -349,6 +387,7 @@ pub(crate) async fn install_in_connection(
     .bind::<Text, _>(&digest)
     .bind::<Jsonb, _>(&request_json)
     .bind::<Binary, _>(&resolution_bytes)
+    .bind::<Binary, _>(&claim_resolution_bytes)
     .bind::<diesel::sql_types::Timestamptz, _>(attestation.attested_at)
     .execute(&mut *conn)
     .await

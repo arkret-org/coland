@@ -42,8 +42,20 @@ async fn deliver(state: &AppState, request: &MlsAttestAddRequestBody) -> Result<
             )
             .await
             .map_err(|error| error.to_string())?;
-        arkret::verify_mls_attest_add_request(request, &resolution)
-            .map_err(|error| error.to_string())?;
+        let claim_issuer_resolution =
+            if request.claim_outcome.claim_receipt.destination_id == state.service_core_id() {
+                resolution.clone()
+            } else {
+                crate::routing::identity::agents::evidence::fetch_service_resolution(
+                    state,
+                    &request.claim_outcome.claim_receipt.destination_id,
+                    None,
+                )
+                .await
+                .map_err(|error| format!("{error:?}"))?
+            };
+        arkret::verify_mls_attest_add_request(request, &claim_issuer_resolution, &resolution)
+            .map_err(|error| format!("{error:?}"))?;
         state
             .authority_commits()
             .install_mls_add_authority_attestation(
@@ -51,6 +63,7 @@ async fn deliver(state: &AppState, request: &MlsAttestAddRequestBody) -> Result<
                     source_station_id: state.service_core_id(),
                     request: request.clone(),
                     attestor_resolution: resolution,
+                    claim_issuer_resolution,
                 },
                 &state.service_core_id(),
             )

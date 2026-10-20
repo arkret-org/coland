@@ -100,7 +100,7 @@ pub(crate) async fn current_device_authorization(
         arkret_models_collaboration::events_payloads::device_identity::DeviceAuthorizationBindingKind::RegistrationAnchor => "registration_anchor",
         arkret_models_collaboration::events_payloads::device_identity::DeviceAuthorizationBindingKind::AcceptedDevice => "accepted_device",
         arkret_models_collaboration::events_payloads::device_identity::DeviceAuthorizationBindingKind::PcrRecovery => "pcr_recovery",
-        arkret_models_collaboration::events_payloads::device_identity::DeviceAuthorizationBindingKind::AppletManagedDelegation => "applet_managed_delegation",
+        arkret_models_collaboration::events_payloads::device_identity::DeviceAuthorizationBindingKind::RealmManagedDelegation => "realm_managed_delegation",
     };
     let (verification_state, verification_source) =
         coland_services::identity::fold_device_verification_checkpoint(

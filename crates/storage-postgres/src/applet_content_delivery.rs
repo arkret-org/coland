@@ -1,8 +1,7 @@
-//! Session-free delivery at the real managed Account, PCR and resource cut.
+//! Session-free delivery at the Realm actor, Device and resource cut.
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use arkret_models_collaboration::governance::accountability::AccountabilityProjection;
 use arkret_models_collaboration::governance::grant_constraint::{
     CapabilityGrant, CapabilitySubject, IssuerAuthorityRef, ManagedActorRole,
 };
@@ -10,8 +9,8 @@ use arkret_models_collaboration::governance::operation_wire::{
     AppletPolicyOperation, Policy, PolicyResourceKind, PolicyResourceSelector,
 };
 use arkret_wire::{
-    AccountId, ActorId, CapabilityActionId, CommittedEventView, DidCoreId, EventKind, GrantId,
-    ScopeRef, WireResourceSelector,
+    ActorId, CapabilityActionId, CommittedEventView, DidCoreId, EventKind, GrantId, ScopeRef,
+    WireResourceSelector,
 };
 use coland_storage::{
     AccountContentDeliveryGuard, AccountContentDeliveryInput, AppletManagedDeviceScopeGuard,
@@ -56,7 +55,6 @@ struct ReadContext {
     grants: BTreeMap<GrantId, CapabilityGrant>,
     policies: Vec<Policy>,
     e2ee_consent: Option<crate::applet_e2ee::CurrentConsent>,
-    accountability: Vec<AccountabilityProjection>,
     cut: crate::realm_authorization_cut::RealmAuthorizationCut,
 }
 pub(crate) struct ReadProof {
@@ -83,11 +81,6 @@ impl ReadProof {
                     .permits_at(&self.context.grants, &self.context.root, at)
                     .unwrap_or(false)
             })
-            && self
-                .context
-                .accountability
-                .iter()
-                .any(|a| a.verifies_at(at))
             && self
                 .operations
                 .iter()
@@ -121,7 +114,7 @@ impl ReadProof {
             return Ok(false);
         }
         let service = ActorId::service(self.context.registration.service_id.clone());
-        let account = ActorId::account(self.context.endpoint.authority.account_id.clone());
+        let account = self.context.endpoint.authority.actor_id.clone();
         let action = operation.action.as_str();
         let actions = [action];
         for mode in [AppletPolicyOperation::Read, AppletPolicyOperation::Deliver] {
@@ -286,7 +279,7 @@ impl AccountContentDeliveryGuard for NativeDeliveryGuard {
 
 pub(crate) async fn acquire(
     pool: &crate::PgPool,
-    account: &AccountId,
+    actor: &ActorId,
     station: &DidCoreId,
     endpoint: &AppletManagedDeviceScopeGuard,
     input: &AccountContentDeliveryInput,
@@ -303,8 +296,11 @@ pub(crate) async fn acquire(
     .into_iter()
     .filter(|active| *active)
     .count();
-    if &endpoint.authority.account_id != account
-        || &account.station_id != station
+    if &endpoint.authority.actor_id != actor
+        || actor
+            .as_realm_actor_id()
+            .is_none_or(|subject| subject.realm_id != endpoint.authority.realm_id)
+        || &endpoint.authority.governance_service_id != station
         || !matches!(
             endpoint.effective_scope,
             ScopeRef::Realm { .. } | ScopeRef::Circle { .. }
@@ -328,6 +324,7 @@ pub(crate) async fn acquire(
         || !input.notifications.is_empty()
         || !input.watch_reads.is_empty()
         || input.remote_watch_read.is_some()
+        || input.realm_actor_material.is_some()
         || input.audited_watch_read.is_some()
         || input.watch_delivery_device.is_some()
         || input.watch_local_session.is_some()
@@ -350,7 +347,7 @@ pub(crate) async fn acquire(
         .ok_or_else(|| refused("native read transport expiry is unavailable"))?;
     let mut held = crate::account_content_delivery::DeliveryGuard::begin(pool).await?;
     let mut realms = vec![
-        endpoint.authority.pcr_realm_id.clone(),
+        endpoint.authority.realm_id.clone(),
         endpoint.effective_scope.realm_id().clone(),
     ];
     let counterparts = if let Some(claim) = input.keypackage_claims.as_slice().first() {
@@ -373,10 +370,10 @@ pub(crate) async fn acquire(
             return Err(refused("claim delivery omits its actual endpoint"));
         }
         for endpoint in endpoints {
-            if endpoint.authority.account_id.station_id != *station {
+            if endpoint.authority.governance_service_id != *station {
                 return Err(refused("native claim lacks local current authority"));
             }
-            realms.push(endpoint.authority.pcr_realm_id.clone());
+            realms.push(endpoint.authority.realm_id.clone());
             realms.push(endpoint.effective_scope.realm_id().clone());
         }
     }
@@ -392,9 +389,9 @@ pub(crate) async fn acquire(
         }
     }
     let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-    let current = crate::pcr_applet_device_authority::current_in_connection(
+    let current = crate::realm_actor_device_authority::current_in_connection(
         held.connection(),
-        account,
+        actor,
         &endpoint.authority.device_id,
         at,
     )
@@ -534,10 +531,10 @@ pub(crate) async fn acquire(
             return Err(refused("native scan differs from its authenticated scope"));
         }
         let fresh = crate::boxed_future(|| {
-            crate::account_stream_scan::scan_stream_for_account_in_connection(
+            crate::account_stream_scan::scan_stream_for_actor_in_connection(
                 held.connection(),
                 request,
-                account,
+                actor,
                 station,
             )
         })
@@ -616,9 +613,8 @@ async fn read_context(
     at: chrono::DateTime<chrono::Utc>,
     credential_expiry: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<ReadContext> {
-    let account = &endpoint.authority.account_id;
+    let actor = endpoint.authority.actor_id.clone();
     let scope = &endpoint.effective_scope;
-    let actor = ActorId::account(account.clone());
     let encrypted=sql_query("SELECT to_jsonb(EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.mls.genesis' AND c.realm_id=$1 AND e.envelope->'scope_ref'=$2)) AS value")
         .bind::<Text,_>(scope.realm_id().as_str()).bind::<Jsonb,_>(serde_json::json!(scope)).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let encrypted = encrypted.value.as_bool().ok_or_else(|| {
@@ -646,22 +642,15 @@ async fn read_context(
     } else {
         None
     };
-    let sources=sql_query("SELECT e.envelope->'payload' AS value FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.applet.managed_actor.provision' AND e.envelope#>'{payload,actor_id}'=$1")
-        .bind::<Jsonb,_>(serde_json::json!(actor)).get_results::<JsonRow>(conn).await.map_err(PersistenceError::database)?;
-    let [source] = sources.as_slice() else {
-        return Err(refused("native read provision is not unique"));
-    };
-    let provision: arkret_models_integration::AppletManagedActorProvisionPayload =
-        serde_json::from_value(source.value.clone()).map_err(PersistenceError::database)?;
-    if provision.actor_id != actor
-        || provision.service_id != registration.service_id
-        || provision.applet_id != registration.applet_id
-    {
-        return Err(refused("native read provision differs"));
+    let creation = crate::realm_actor_control::creation_source(conn, &actor).await?;
+    if creation.applet_id != registration.applet_id {
+        return Err(refused("native read creation belongs to another Applet"));
     }
-    let role = match provision.actor_role {
-        arkret_models_integration::AppletManagedActorRole::Bot => ManagedActorRole::Bot,
-        arkret_models_integration::AppletManagedActorRole::Ghost => ManagedActorRole::Ghost,
+    let role = match creation.actor_role {
+        arkret_models_integration::RealmActorCreatePayloadActorRole::Bot => ManagedActorRole::Bot,
+        arkret_models_integration::RealmActorCreatePayloadActorRole::Ghost => {
+            ManagedActorRole::Ghost
+        }
     };
     let root=sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1 FOR SHARE")
         .bind::<Text,_>(scope.realm_id().as_str()).get_result::<RealmAuthorityRootReadRow>(conn).await.map_err(PersistenceError::database)?;
@@ -684,9 +673,6 @@ async fn read_context(
             scope.circle_id(),
         )
         .await?;
-    let accountability=sql_query("SELECT value FROM identity_accountability_current_results WHERE subject_id=$1 AND issuer_id=$2 ORDER BY realm_id,scope_set_digest FOR SHARE")
-        .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(registration.service_id.as_str()).get_results::<JsonRow>(conn).await.map_err(PersistenceError::database)?
-        .into_iter().map(|row|serde_json::from_value(row.value).map_err(PersistenceError::database)).collect::<PersistenceResult<Vec<AccountabilityProjection>>>()?;
     Ok(ReadContext {
         checked_at: at,
         credential_expiry,
@@ -697,7 +683,6 @@ async fn read_context(
         grants,
         policies,
         e2ee_consent,
-        accountability,
         cut,
     })
 }
@@ -767,7 +752,7 @@ async fn event_proof(
     {
         return Err(refused("native Event differs from its authenticated scope"));
     }
-    let actor = ActorId::account(context.endpoint.authority.account_id.clone());
+    let actor = context.endpoint.authority.actor_id.clone();
     let reread = crate::boxed_future(|| {
         crate::account_stream_scan::committed_event_for_member_in_connection(
             conn,
@@ -892,9 +877,9 @@ pub(crate) async fn mls_scope_read_proof(
     if at >= expires_at {
         return Err(refused("native MLS read request expired"));
     }
-    let current = crate::pcr_applet_device_authority::current_in_connection(
+    let current = crate::realm_actor_device_authority::current_in_connection(
         conn,
-        &endpoint.authority.account_id,
+        &endpoint.authority.actor_id,
         &endpoint.authority.device_id,
         at,
     )
@@ -922,7 +907,7 @@ pub(crate) async fn mls_scope_read_proof(
                 conn,
                 realm_id,
                 circle_id,
-                &ActorId::account(endpoint.authority.account_id.clone()),
+                &endpoint.authority.actor_id.clone(),
             )
             .await?
         {
@@ -985,11 +970,11 @@ pub(crate) async fn lock_snapshot_device_authorities(
     station: &DidCoreId,
     endpoint: &AppletManagedDeviceScopeGuard,
 ) -> PersistenceResult<()> {
-    if &endpoint.authority.account_id.station_id != station {
+    if &endpoint.authority.governance_service_id != station {
         return Err(refused("native snapshot is not at its Account Station"));
     }
     let mut realms = vec![
-        endpoint.authority.pcr_realm_id.clone(),
+        endpoint.authority.realm_id.clone(),
         endpoint.effective_scope.realm_id().clone(),
     ];
     realms.sort();

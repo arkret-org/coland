@@ -667,7 +667,10 @@ pub fn verify_principal_authorized_event_proof_async<'a>(
         let envelope: Value = serde_json::from_slice(envelope_bytes)
             .map_err(|error| fail(format!("principal Event envelope is invalid: {error}")))?;
 
-        let station_id = actor_id.route_service_id();
+        let station_id = &actor_id
+            .as_account_id()
+            .ok_or_else(|| fail("Account producer required on this verifier".to_owned()))?
+            .station_id;
         if station_id.as_str() != state.service_id() {
             return Err(fail(
                 "principal Event is not addressed to this Station".to_owned(),

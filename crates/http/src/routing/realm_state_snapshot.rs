@@ -160,7 +160,7 @@ pub(crate) async fn native_snapshot(
         "ak.self.realm_state_snapshot.read.manifest_head.v1"
     };
     if device.operation.as_str() != operation
-        || device.authority.account_id.station_id != state.service_core_id()
+        || device.authority.governance_service_id != state.service_core_id()
         || device.metadata.effective_scope.realm_id() != &realm_id
         || crate::routing::spaces::space::is_realm_deleted(state, realm_id.as_str()).await
     {
@@ -169,13 +169,17 @@ pub(crate) async fn native_snapshot(
     let endpoint = applet_managed_device::scope_guard(state, device).await?;
     let issuer = state.service_core_id();
     let snapshot = if let Some(reference) = reference {
-        issued_realm_state_snapshot_for_account(
-            state,
-            realm_id.as_str(),
-            reference,
-            &device.authority.account_id,
-        )
-        .await?
+        state
+            .authority_commits()
+            .issued_realm_state_snapshot_for_actor(
+                &realm_id,
+                &device.authority.actor_id,
+                reference,
+                &issuer,
+            )
+            .await
+            .map_err(|error| map_issue_error(&realm_id, error))?
+            .ok_or_else(hidden)?
     } else {
         let method = state
             .service_verification_method("notary-key")

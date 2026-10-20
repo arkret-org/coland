@@ -2,14 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use arkret_models_collaboration::governance::accountability::AccountabilityGrantPayload;
 use arkret_models_collaboration::governance::grant_constraint::{
     CapabilitySubject, GrantConstraintKind, GrantConstraintSubkind,
 };
-use arkret_models_identity::ActorProfile;
-use arkret_models_integration::{
-    AppletManagedActorProvisionPayload, AppletManagedActorRole, AppletRegistrationPayload,
-};
+use arkret_models_integration::AppletRegistrationPayload;
 use arkret_wire::{ActorId, Event, EventId, EventKind, GrantId};
 use coland_storage::{AppletEventProducerGuard, PersistenceError, PersistenceResult};
 use diesel::sql_types::{Binary, Jsonb, Text};
@@ -86,7 +82,7 @@ pub(crate) fn prepare_applet_producer_in_connection<'a>(
     Box<
         dyn std::future::Future<
                 Output = PersistenceResult<
-                    arkret_models_collaboration::authority_commit::ServiceHistoricalSignerFact,
+                    arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact,
                 >,
             > + Send
             + 'a,
@@ -95,8 +91,14 @@ pub(crate) fn prepare_applet_producer_in_connection<'a>(
     crate::boxed_future(|| async move {
         // Preparation resolves the producer's immutable signing fact. The
         // accepting transaction checks business grants with its prepared votes.
+        if matches!(
+            event.kind,
+            EventKind::RealmActorRecoveryBegin | EventKind::RealmActorControlReset
+        ) {
+            return crate::realm_actor_control::recovery_service_fact(conn, event, guard, at).await;
+        }
         let (fact, _) = require_applet_producer_inner(conn, event, guard, at, None).await?;
-        Ok(fact)
+        Ok(fact.into())
     })
 }
 
@@ -110,21 +112,38 @@ pub(crate) fn require_applet_producer_in_connection<'a>(
     Box<
         dyn std::future::Future<
                 Output = PersistenceResult<(
-                    arkret_models_collaboration::authority_commit::ServiceHistoricalSignerFact,
+                    arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact,
                     Vec<crate::approval_admission::QualifiedApproval>,
                 )>,
             > + Send
             + 'a,
     >,
 > {
-    crate::boxed_future(|| {
-        require_applet_producer_inner(
+    crate::boxed_future(|| async move {
+        if matches!(
+            event.kind,
+            EventKind::RealmActorRecoveryBegin | EventKind::RealmActorControlReset
+        ) {
+            return Ok((
+                crate::realm_actor_control::recovery_service_fact(
+                    conn,
+                    event,
+                    guard,
+                    commit.committed_at,
+                )
+                .await?,
+                Vec::new(),
+            ));
+        }
+        let (fact, approvals) = require_applet_producer_inner(
             conn,
             event,
             guard,
             commit.committed_at,
             Some((commit, prepared)),
         )
+        .await?;
+        Ok((fact.into(), approvals))
     })
 }
 
@@ -142,29 +161,17 @@ async fn require_applet_producer_inner(
     Vec<crate::approval_admission::QualifiedApproval>,
 )> {
     let mut accepted = Vec::new();
+    let effective_scope = crate::realm_actor_control::effective_scope(event)?;
+    let creation = crate::realm_actor_control::creation(event)?;
     let registration = registration(conn, event).await?;
     let service = ActorId::service(registration.service_id.clone());
-    if let Some(account) = event.actor_id.as_account_id() {
-        let managed = sql_query("SELECT to_jsonb(c) AS value FROM managed_authority_claims c WHERE actor_id=$1 AND station_id=$2 FOR SHARE")
-            .bind::<Text, _>(account.principal_id.as_str())
-            .bind::<Text, _>(account.station_id.as_str())
-            .get_result::<ValueRow>(&mut *conn)
-            .await
-            .optional()
-            .map_err(PersistenceError::database)?;
-        if managed.is_some() {
-            return Err(denied(
-                "Service key cannot sign a managed Account's own Event",
-            ));
-        }
-    }
     let executor = registered_executor(event, &registration)?;
     registration
         .manifest
         .registration_epoch_evidence
         .validate_against_did_document(&guard.service_did_document)
         .map_err(denied)?;
-    let scope = coland_storage::applet_effective_scope_key(&event.scope_ref)?;
+    let scope = coland_storage::applet_effective_scope_key(&effective_scope)?;
     let install=sql_query("SELECT i.record AS value FROM applet_installations i JOIN applet_registration_current_results r ON r.realm_id=$3 AND r.applet_id=i.applet_id JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref AND a.registration_event_ref=i.record#>>'{registration_event,event_id}' WHERE i.applet_id=$1 AND i.effective_scope_key=$2 FOR UPDATE OF i")
         .bind::<Text,_>(registration.applet_id.as_str()).bind::<Text,_>(scope).bind::<Text,_>(event.realm_id.as_str())
         .get_result::<ValueRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
@@ -332,7 +339,7 @@ async fn require_applet_producer_inner(
             "Applet authorization grant does not authorize this Event action",
         ));
     }
-    let resource = match &event.scope_ref {
+    let resource = match &effective_scope {
         arkret_wire::ScopeRef::Realm { realm_id } => {
             arkret_wire::WireResourceSelector::realm(realm_id.clone())
         }
@@ -349,7 +356,7 @@ async fn require_applet_producer_inner(
     if !grant
         .resources
         .iter()
-        .any(|candidate| candidate.is_exact_scope(&event.scope_ref))
+        .any(|candidate| candidate.is_exact_scope(&effective_scope))
     {
         return Err(denied(
             "Applet authorization grant does not name its exact installation scope",
@@ -415,6 +422,43 @@ async fn require_applet_producer_inner(
                         &facts,
                     )
                 })
+                .await?,
+            );
+        }
+    }
+    if let Some(candidate) = creation.as_ref() {
+        let action = match candidate.actor_role {
+            arkret_models_integration::RealmActorCreatePayloadActorRole::Bot => {
+                "ak.applet.bot.provision"
+            }
+            arkret_models_integration::RealmActorCreatePayloadActorRole::Ghost => {
+                "ak.applet.ghost.provision"
+            }
+        };
+        if !native_service || !grant.actions.iter().any(|value| value == action) {
+            return Err(denied(
+                "creation requires its exact Service provisioning permission",
+            ));
+        }
+        let facts = coland_storage::OperationFacts {
+            applet_id: Some(registration.applet_id.to_string()),
+            executed_by: Some(service.clone()),
+            registration_epoch: Some(registration.registration_epoch.to_string()),
+            ..Default::default()
+        };
+        if let Some((commit, prepared)) = acceptance {
+            accepted.extend(
+                require_producer_grant(
+                    conn,
+                    event,
+                    commit,
+                    prepared,
+                    grant,
+                    &service,
+                    &[action],
+                    &resource,
+                    &facts,
+                )
                 .await?,
             );
         }
@@ -515,7 +559,7 @@ async fn require_applet_producer_inner(
             registration_epoch: registration.registration_epoch.clone(),
             registration_ref: coordinate(registration_commit)?,
             authorization_ref: coordinate(grant_commit)?,
-            effective_scope: event.scope_ref.clone(),
+            effective_scope: effective_scope.clone(),
         },
         accepted_at: arkret_canonical::normalize_timestamp_canonical(at),
     };
@@ -755,28 +799,6 @@ pub(crate) fn exact_ref(event: &Event, role: &str) -> PersistenceResult<EventId>
     refs[0].id.as_str().parse().map_err(denied)
 }
 
-pub(crate) async fn require_managed_actor_with_source(
-    conn: &mut AsyncPgConnection,
-    event: &Event,
-    at: chrono::DateTime<chrono::Utc>,
-    source: Option<&coland_storage::ForwardedManagedActorSource>,
-) -> PersistenceResult<()> {
-    let Some(source) = source else {
-        return require_managed_actor_in_connection(conn, event, at).await;
-    };
-    source.ensure_event(event, at)?;
-    let registration = registration(conn, event).await?;
-    if source.provision().applet_id != registration.applet_id
-        || source.provision().service_id != registration.service_id
-        || event.payload.contains_key("agent_context")
-    {
-        return Err(denied(
-            "verified managed provenance differs from current registration",
-        ));
-    }
-    Ok(())
-}
-
 pub(crate) async fn require_managed_actor_in_connection(
     conn: &mut AsyncPgConnection,
     event: &Event,
@@ -786,7 +808,7 @@ pub(crate) async fn require_managed_actor_in_connection(
     let service = ActorId::service(registration.service_id.clone());
     if event.executed_by.is_none() {
         let authority =
-            crate::pcr_applet_device_authority::for_event_in_connection(conn, event, at)
+            crate::realm_actor_device_authority::for_event_in_connection(conn, event, at)
                 .await
                 .map_err(crate::PgTransactionError::into_persistence)?
                 .ok_or_else(|| denied("managed Account has no accepted native Device producer"))?;
@@ -824,115 +846,33 @@ pub(crate) async fn require_managed_identity_in_connection(
     registration: &AppletRegistrationPayload,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
-    let account = actor_id
-        .as_account_id()
-        .ok_or_else(|| denied("managed Message actor is not an Account"))?;
-    let inactive=sql_query("SELECT to_jsonb(EXISTS(SELECT 1 FROM account_lifecycle l JOIN accounts a ON a.pk=l.account_pk WHERE a.principal_id=$1 AND a.station_id=$2 AND l.state<>'active')) AS value")
-        .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str()).get_result::<ValueRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    if inactive.value.as_bool() != Some(false) {
-        return Err(denied("managed Account lifecycle is not active"));
+    let subject = actor_id
+        .as_realm_actor_id()
+        .ok_or_else(|| denied("managed identity must be Realm-owned"))?;
+    let candidate = crate::realm_actor_control::creation_source(conn, actor_id).await?;
+    if &candidate.applet_id != applet_id || applet_id != &registration.applet_id {
+        return Err(denied("Realm identity differs from the current Applet"));
     }
-    let service = ActorId::service(registration.service_id.clone());
-    let profiles=sql_query("SELECT p.value FROM actor_profile_current_results p JOIN realm_commits c ON c.commit_id=p.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk JOIN realm_authorities a ON a.realm_id=p.realm_id WHERE p.value->>'principal_id'=$1 AND e.envelope->'actor_id'=$2 AND a.service_id=$3 AND p.realm_id=(SELECT pcr_realm_id FROM principal_resolutions WHERE principal_id=$1 AND station_id=$3) AND c.realm_id=p.realm_id AND c.stream_position=p.current_stream_position AND e.state='committed' FOR SHARE OF p")
-        .bind::<Text,_>(account.principal_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(actor_id).map_err(PersistenceError::database)?)
-        .bind::<Text,_>(account.station_id.as_str()).load::<ValueRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    if profiles.len() != 1 {
-        return Err(denied(
-            "managed Message requires one accepted current Profile",
-        ));
-    }
-    let profile: ActorProfile = serde_json::from_value(profiles.into_iter().next().unwrap().value)
-        .map_err(PersistenceError::database)?;
-    if !matches!(
-        profile.actor_kind,
-        arkret_wire::ActorKind::Bot | arkret_wire::ActorKind::Integration
-    ) || profile.principal_id != account.principal_id
-        || profile.accountable_principal_ids != vec![registration.service_id.clone()]
-        || profile
-            .profile_fields
-            .get("managed_by_applet")
-            .and_then(Value::as_str)
-            != Some(registration.applet_id.as_str())
-    {
-        return Err(denied(
-            "managed Message Profile is outside its exact Applet identity",
-        ));
-    }
-    let profile_id = profile
-        .id
-        .ok_or_else(|| denied("managed Profile has no creation Event"))?;
-    let created = accepted_event(
+    let (manager, _) = crate::realm_actor_control::current_source(
         conn,
-        &EventId::from_token_bytes(profile_id.token_bytes()).map_err(denied)?,
+        actor_id,
+        serde_json::json!({"kind":"realm_actor_manager","actor_id":actor_id}),
     )
     .await?;
-    let accountability = accepted_event(conn, &exact_ref(&created, "accountability")?).await?;
-    if created.kind != EventKind::ProfileCreate
-        || created.actor_id != *actor_id
-        || created.applet_id != Some(applet_id.clone())
-        || accountability.kind != EventKind::IdentityAccountabilityGrant
-    {
-        return Err(denied("managed Profile accountability anchors differ"));
+    if manager["service_id"] != serde_json::json!(registration.service_id) {
+        return Err(denied("Realm manager differs from current registration"));
     }
-    let grant: AccountabilityGrantPayload = serde_json::from_value(
-        serde_json::to_value(&accountability.payload).map_err(PersistenceError::database)?,
-    )
-    .map_err(PersistenceError::database)?;
-    if grant.subject_id != account.principal_id || grant.issuer_id != registration.service_id {
-        return Err(denied("managed accountability issuer or subject differs"));
-    }
-    crate::applet_managed_provenance::exact_accountability_current(conn, &accountability, at)
-        .await?;
-    let provision_event = accepted_event(
-        conn,
-        &exact_ref(&accountability, "applet_managed_actor_provision")?,
-    )
-    .await?;
-    let provision: AppletManagedActorProvisionPayload = serde_json::from_value(
-        serde_json::to_value(&provision_event.payload).map_err(PersistenceError::database)?,
-    )
-    .map_err(PersistenceError::database)?;
-    let profile_kind_matches_role = match provision.actor_role {
-        AppletManagedActorRole::Bot => profile.actor_kind == arkret_wire::ActorKind::Bot,
-        AppletManagedActorRole::Ghost => profile.actor_kind == arkret_wire::ActorKind::Integration,
-    };
-    if provision_event.kind != EventKind::AppletManagedActorProvision
-        || provision.actor_id != *actor_id
-        || provision.applet_id != registration.applet_id
-        || provision.service_id != registration.service_id
-        || !profile_kind_matches_role
-    {
-        return Err(denied(
-            "managed Message provision differs from its accepted actor role",
-        ));
-    }
-    if provision.actor_role == AppletManagedActorRole::Ghost {
-        let fields = arkret_models_integration::GhostActorProfileFields::from_profile_fields(
-            &profile.profile_fields,
+    for gate in ["owner", "governance"] {
+        let (status, _) = crate::realm_actor_control::current_source(
+            conn,
+            actor_id,
+            serde_json::json!({"kind":"realm_actor_status","actor_id":actor_id,"gate":gate}),
         )
-        .map_err(denied)?;
-        if provision.external_ref.as_ref() != Some(&fields.external_ref)
-            || fields.managed_by_applet != provision.applet_id
-        {
-            return Err(denied(
-                "current Ghost Profile external identity differs from its accepted provision",
-            ));
+        .await?;
+        if status != "active" {
+            return Err(denied(format!("Realm identity {gate} gate is not active")));
         }
     }
-    let genesis=sql_query("SELECT e.envelope FROM principal_resolutions p JOIN realm_commits c ON c.realm_id=p.pcr_realm_id AND c.commit_json->>'event_ref'=p.genesis_event_id JOIN canonical_events e ON e.pk=c.event_pk WHERE p.principal_id=$1 AND p.station_id=$2 AND c.stream_position=0 AND e.state='committed'")
-        .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str()).get_result::<EventRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
-        .ok_or_else(||denied("managed Message has no accepted PCR genesis"))?;
-    let genesis: Event =
-        serde_json::from_value(genesis.envelope).map_err(PersistenceError::database)?;
-    if genesis.kind != EventKind::RealmCreate
-        || genesis.actor_id != *actor_id
-        || genesis.applet_id != Some(applet_id.clone())
-        || genesis.executed_by.as_ref() != Some(&service)
-        || exact_ref(&genesis, "applet_managed_actor_provision")? != provision_event.event_id
-    {
-        return Err(denied(
-            "managed PCR genesis does not close its exact provision",
-        ));
-    }
+    let _ = (subject, at);
     Ok(())
 }

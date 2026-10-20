@@ -175,7 +175,7 @@ pub(super) fn resolve_service_producer(
             )
         })?;
         crate::jws_verify::validate_verification_method_controller(
-            event.actual_signer().route_service_id().as_str(),
+            event.actual_signer().signing_principal_id().as_str(),
             proof.verification_method.as_str(),
         )
         .map_err(|error| ServiceError::protocol(ErrorCode::SignatureInvalid, error))?;
@@ -268,46 +268,17 @@ pub(crate) async fn admit_forwarded_event(
         return Ok(outcome);
     }
     request.validate().map_err(wire_refusal)?;
-    let managed = super::authority_forward_managed::verify(
+    let (producer, key) = resolve_forwarded_producer(
         state,
         peer,
-        &PeerAuthoritySubmitRequest::AuthorityForwardEvent(request.clone()),
+        event,
+        request.producer_device_evidence.as_ref(),
+        request.producer_agent_evidence.as_ref(),
+        &arkret_models_collaboration::authority_commit::authority_forward_body_digest(&request)
+            .map_err(wire_refusal)?,
         now,
-    )
-    .await?;
-    let (producer, key) = if let Some(retained) = managed {
-        let key = forwarded_producer_key(Some(&retained.evidence))?;
-        (
-            super::authority_self_event_unit::AdmittedProducer::Forwarded(Box::new(retained)),
-            key,
-        )
-    } else {
-        resolve_forwarded_producer(
-            state,
-            peer,
-            event,
-            request.producer_device_evidence.as_ref(),
-            request.producer_agent_evidence.as_ref(),
-            &arkret_models_collaboration::authority_commit::authority_forward_body_digest(&request)
-                .map_err(wire_refusal)?,
-            now,
-        )?
-    };
+    )?;
 
-    if producer.is_managed_device()
-        && matches!(
-            event.kind,
-            arkret_wire::EventKind::ProfileCreate | arkret_wire::EventKind::ProfileUpdate
-        )
-    {
-        return super::authority_self_event_unit::commit_event_unit(
-            state,
-            &request.event_submission,
-            producer,
-            super::authority_self_event_unit::SelfEventUnitEffects::default(),
-        )
-        .await;
-    }
     if let Some(outcome) = super::authority_port::refuse_unrouted_event(state, event).await? {
         return Ok(outcome);
     }
@@ -376,31 +347,16 @@ pub(crate) async fn admit_forwarded_mls(
         return Ok(outcome);
     }
     request.validate().map_err(wire_refusal)?;
-    let managed = super::authority_forward_managed::verify(
+    let (producer, key) = resolve_forwarded_producer(
         state,
         peer,
-        &PeerAuthoritySubmitRequest::AuthorityForwardMls(request.clone()),
+        event,
+        request.producer_device_evidence.as_ref(),
+        request.producer_agent_evidence.as_ref(),
+        &arkret_models_collaboration::authority_commit::authority_forward_body_digest(&request)
+            .map_err(wire_refusal)?,
         now,
-    )
-    .await?;
-    let (producer, key) = if let Some(retained) = managed {
-        let key = forwarded_producer_key(Some(&retained.evidence))?;
-        (
-            super::authority_self_event_unit::AdmittedProducer::Forwarded(Box::new(retained)),
-            key,
-        )
-    } else {
-        resolve_forwarded_producer(
-            state,
-            peer,
-            event,
-            request.producer_device_evidence.as_ref(),
-            request.producer_agent_evidence.as_ref(),
-            &arkret_models_collaboration::authority_commit::authority_forward_body_digest(&request)
-                .map_err(wire_refusal)?,
-            now,
-        )?
-    };
+    )?;
 
     if native {
         super::authority_mls_unit::admit_native_mls_event(
@@ -517,7 +473,7 @@ async fn prepare_directory_device_evidence(
     Ok(Some(evidence))
 }
 
-/// Freeze managed originals and Device authorization together before signing the full body.
+/// Freeze Account Device authorization before signing the complete forward body.
 pub(crate) fn fresh_device_request<'a>(
     state: &'a AppState,
     destination: &'a DidCoreId,
@@ -572,12 +528,10 @@ async fn fresh_device_request_inner(
     };
     match request {
         PeerAuthoritySubmitRequest::AuthorityForwardEvent(v) => {
-            v.producer_managed_provenance = prepared.managed;
             v.producer_device_evidence = Some(evidence);
             v.validate().map_err(wire_refusal)?;
         }
         PeerAuthoritySubmitRequest::AuthorityForwardMls(v) => {
-            v.producer_managed_provenance = prepared.managed;
             v.producer_device_evidence = Some(evidence);
             v.validate().map_err(wire_refusal)?;
         }
@@ -975,7 +929,6 @@ async fn forward_self_event_inner(
         event_submission: submission.clone(),
         mls_genesis_material: material,
         producer_device_evidence: None,
-        producer_managed_provenance: None,
         producer_agent_evidence: None,
     };
     request.producer_agent_evidence =
@@ -1025,7 +978,6 @@ pub(super) async fn forward_self_mls(
             arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,
         mls_submission: submission.clone(),
         producer_device_evidence: None,
-        producer_managed_provenance: None,
         producer_agent_evidence: None,
     };
     request.producer_agent_evidence =
@@ -1078,118 +1030,15 @@ async fn prepare_native_forward_request_inner(
     let mut request=match submission {
         SelfAuthoritySubmitRequest::Event(v)=>PeerAuthoritySubmitRequest::AuthorityForwardEvent(PeerAuthorityForwardEventRequest{
             branch:arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,event_submission:v.clone(),
-            mls_genesis_material:forwarded_genesis_material(state,event).await?,producer_device_evidence:None,producer_managed_provenance:None,producer_agent_evidence:None,
+            mls_genesis_material:forwarded_genesis_material(state,event).await?,producer_device_evidence:None,producer_agent_evidence:None,
         }),
         SelfAuthoritySubmitRequest::MlsCommit(v)=>PeerAuthoritySubmitRequest::AuthorityForwardMls(PeerAuthorityForwardMlsRequest{
             branch:arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,mls_submission:v.clone(),
-            producer_device_evidence:None,producer_managed_provenance:None,producer_agent_evidence:None,
+            producer_device_evidence:None,producer_agent_evidence:None,
         }),_=>unreachable!("checked native forward branch"),
     };
     fresh_device_request(state, governance, &mut request).await?;
     Ok(request)
-}
-
-/// Session-free native ingress still sends the original Device-signed request.
-pub(super) async fn forward_managed(
-    state: &AppState,
-    governance: &DidCoreId,
-    submission: &SelfAuthoritySubmitRequest,
-) -> ServiceResult<AuthoritySubmitOutcome> {
-    let event = match submission {
-        SelfAuthoritySubmitRequest::Event(v) => &v.event,
-        SelfAuthoritySubmitRequest::MlsCommit(v) => &v.commit_event,
-        _ => {
-            return Err(ServiceError::SchemaViolation(
-                "native forward requires an ordinary Event or full MLS submission".into(),
-            ));
-        }
-    };
-    if let Some(queued) = state
-        .authority_commits()
-        .queued_event(&event.event_id)
-        .await?
-    {
-        if let Some(attempt) = queued.forward_attempt {
-            if attempt.original_submission.as_ref() != Some(submission) || queued.event != *event {
-                return Err(ServiceError::Conflict(
-                    "duplicate_conflict: native forward differs from its complete original".into(),
-                ));
-            }
-            if let Some(commit) = attempt.accepted_commit {
-                verify_forwarded_acknowledgement(state, governance, event, &commit).await?;
-                return Ok(AuthoritySubmitOutcome::Accepted {
-                    status: arkret_wire::AuthorityCommitStatus::Duplicate,
-                    commit,
-                });
-            }
-            if attempt.status != ForwardAttemptStatus::Rejected {
-                if let Some(request) = attempt.peer_request {
-                    return crate::boxed_future(|| {
-                        send_native_frozen(state, governance, event, &request)
-                    })
-                    .await;
-                }
-            }
-        }
-    }
-    require_live_forward(state, event).await?;
-    let request = prepare_native_forward_request(state, governance, submission).await?;
-    state
-        .authority_commits()
-        .queue_event(event, crate::wire::now())
-        .await?;
-    state
-        .authority_commits()
-        .retain_forwarded_submission(event, submission, crate::wire::now())
-        .await?;
-    require_live_forward(state, event).await?;
-    state.persistence().retain_forward_request(&request).await?;
-    let frozen = state
-        .authority_commits()
-        .freeze_forwarded_peer_request(event, &request, crate::wire::now())
-        .await?;
-    if frozen.as_ref() == &request {
-        if let Err(error) = state.persistence().retain_forward_request(&frozen).await {
-            let result = Err(ServiceError::from(error));
-            record_forward_result(state, event, &result, false).await?;
-            return result;
-        }
-    }
-    crate::boxed_future(|| send_native_frozen(state, governance, event, &frozen)).await
-}
-
-async fn send_native_frozen(
-    state: &AppState,
-    governance: &DidCoreId,
-    event: &Event,
-    request: &PeerAuthoritySubmitRequest,
-) -> ServiceResult<AuthoritySubmitOutcome> {
-    let mut accepted = false;
-    let result = async {
-        request.validate().map_err(wire_refusal)?;
-        let body =
-            arkret_canonical::canonical_json_bytes(request).map_err(temporarily_unavailable)?;
-        let response = crate::routing::federation::outbox::submit_authority_forward(
-            state,
-            governance.as_str(),
-            &body,
-        )
-        .await
-        .map_err(temporarily_unavailable)?;
-        let outcome = relay_governance_response(request, response)?;
-        if let AuthoritySubmitOutcome::Accepted { commit, .. } = &outcome {
-            accepted = true;
-            verify_forwarded_acknowledgement(state, governance, event, commit).await?;
-            state
-                .authority_commits()
-                .retain_forwarded_acceptance(event, commit, crate::wire::now())
-                .await?;
-        }
-        Ok(outcome)
-    }
-    .await;
-    record_forward_result(state, event, &result, accepted).await?;
-    result
 }
 
 /// Recover an exact frozen remote submission before today's producer admission.

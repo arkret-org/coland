@@ -89,7 +89,7 @@ async fn native_committed_event(
             "native operation differs from actual route",
         ));
     }
-    let caller = arkret_wire::ActorId::account(device.authority.account_id.clone());
+    let caller = device.authority.actor_id.clone();
     let view = match state
         .authority_commits()
         .committed_event_for_member(event_id, &caller, &state.service_core_id())
@@ -239,7 +239,10 @@ async fn caller_can_read_delivery_target_service(
             .member(&binding.realm_id, &member_key)
             .is_some_and(|member| {
                 member.state == "join"
-                    && witness.member_id.route_service_id().as_str() == recipient_id
+                    && witness
+                        .member_id
+                        .as_account_id()
+                        .is_some_and(|account| account.station_id.as_str() == recipient_id)
                     && member.membership_event_ref.as_deref()
                         == Some(witness.membership_event_ref.as_str())
             });

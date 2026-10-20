@@ -781,35 +781,26 @@ pub(crate) async fn managed_subject_role(
     let CapabilitySubject::Actor(subject) = subject else {
         return Ok(None);
     };
-    #[derive(QueryableByName)]
-    struct Accepted {
-        #[diesel(sql_type=Jsonb)]
-        envelope: serde_json::Value,
-    }
-    let rows=sql_query("SELECT e.envelope FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.applet.managed_actor.provision' AND e.envelope#>'{payload,actor_id}'=$1")
-        .bind::<Jsonb,_>(serde_json::to_value(subject).map_err(PersistenceError::database)?).load::<Accepted>(&mut *conn).await.map_err(PersistenceError::database)?;
-    if rows.is_empty() {
+    if subject.as_realm_actor_id().is_none() {
         return Ok(None);
     }
-    if rows.len() != 1 {
-        return Err(conflict("managed Account provision is ambiguous"));
-    }
-    let accepted: arkret_wire::Event =
-        serde_json::from_value(rows.into_iter().next().unwrap().envelope)
-            .map_err(PersistenceError::database)?;
-    let provision: arkret_models_integration::AppletManagedActorProvisionPayload =
-        serde_json::from_value(
-            serde_json::to_value(accepted.payload).map_err(PersistenceError::database)?,
-        )
-        .map_err(PersistenceError::database)?;
-    if issuer != &ActorId::service(provision.service_id.clone())
+    let provision = crate::realm_actor_control::creation_source(conn, subject).await?;
+    let (manager, _) = crate::realm_actor_control::current_source(
+        conn,
+        subject,
+        serde_json::json!({"kind":"realm_actor_manager","actor_id":subject}),
+    )
+    .await?;
+    let manager: arkret_models_integration::RealmActorManagerValue =
+        serde_json::from_value(manager).map_err(PersistenceError::database)?;
+    if issuer != &ActorId::service(manager.service_id)
         || event.applet_id.as_ref() != Some(&provision.applet_id)
     {
         return Err(conflict(
-            "managed Account cannot receive direct controller authority",
+            "Realm managed subject requires its current Service issuer",
         ));
     }
-    // Identity qualification reopens the accepted PCR/Profile/accountability chain.
+    // Identity qualification reopens the Realm creation, manager and status gates.
     let mut qualification = event.clone();
     qualification.actor_id = subject.clone();
     qualification.executed_by = Some(issuer.clone());
@@ -818,10 +809,10 @@ pub(crate) async fn managed_subject_role(
     })
     .await?;
     Ok(Some(match provision.actor_role {
-        arkret_models_integration::AppletManagedActorRole::Bot => {
+        arkret_models_integration::RealmActorCreatePayloadActorRole::Bot => {
             arkret_models_collaboration::governance::grant_constraint::ManagedActorRole::Bot
         }
-        arkret_models_integration::AppletManagedActorRole::Ghost => {
+        arkret_models_integration::RealmActorCreatePayloadActorRole::Ghost => {
             arkret_models_collaboration::governance::grant_constraint::ManagedActorRole::Ghost
         }
     }))

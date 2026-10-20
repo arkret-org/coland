@@ -2178,6 +2178,7 @@ dependencies = [
  "tokio-postgres",
  "tokio-tungstenite 0.30.0",
  "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
 ]
@@ -9283,7 +9284,6 @@ version = "0.3.1"
 dependencies = [
  "anyhow",
  "arkret",
- "arkret-bridge-runtime",
  "arkret-crypto",
  "arkret-models-collaboration",
  "arkret-models-crypto",

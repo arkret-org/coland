@@ -1,4 +1,4 @@
-use arkret_wire::{AccountId, MlsGroupId, RealmId, ScopeRef};
+use arkret_wire::{MlsGroupId, RealmId, ScopeRef};
 
 use super::{DeviceRevocationGateSelector, PersistenceResult, Value, async_trait};
 /// G3.S1 — durable KeyPackage row.
@@ -12,8 +12,8 @@ pub struct MlsKeyPackageRow {
     pub id: String,
     pub keypackage_ref: String,
     pub keypackage_digest: String,
-    /// Complete Account owner; Agent endpoints retain their real controller.
-    pub owner_account_id: AccountId,
+    /// Complete owner identity; Agent endpoints retain their real controller.
+    pub owner_actor_id: arkret_wire::ActorId,
     /// Immutable target binding for scope-restricted Device publication.
     pub effective_scope: Option<ScopeRef>,
     pub actor_id: String,
@@ -456,10 +456,10 @@ pub fn apply_key_package_claim(
     if !terminal_without_claim && let Some(scope) = &row.effective_scope {
         let guard = claim.applet_device_scope_guard.as_ref()?;
         if guard.effective_scope != *scope
-            || guard.authority.account_id != row.owner_account_id
+            || guard.authority.actor_id != row.owner_actor_id
             || row.device_id.as_deref() != Some(guard.authority.device_id.as_str())
             || row.device_authorize_event_id.as_deref()
-                != Some(guard.authority.selector.authorization_ref.event_id.as_str())
+                != Some(guard.authority.authorization_ref.event_id.as_str())
             || claim.device_authorize_event_id != row.device_authorize_event_id.as_deref()
         {
             return None;
@@ -558,7 +558,7 @@ mod key_package_claim_transition_tests {
         claimed.claim_expires_at_unix_ms = Some(20_000);
         assert!(claimed.same_publication(&original));
         let mut changed = original.clone();
-        changed.owner_account_id.station_id =
+        changed.owner_actor_id.station_id =
             arkret_wire::DidCoreId::new("ak:did_core:web:another-station.example").unwrap();
         assert!(!claimed.same_publication(&changed));
         changed = original.clone();

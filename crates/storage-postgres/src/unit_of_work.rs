@@ -1274,7 +1274,9 @@ async fn ensure_applet_admission_in_transaction(
     let Some(applet_id) = &event.applet_id else {
         return Ok(());
     };
-    let scope_key = coland_storage::applet_effective_scope_key(&event.scope_ref)?;
+    let scope_key = coland_storage::applet_effective_scope_key(
+        &crate::realm_actor_control::effective_scope(event)?,
+    )?;
     let install = sql_query(
         "SELECT record FROM applet_installations \
          WHERE applet_id = $1 AND effective_scope_key = $2 FOR UPDATE",
@@ -2331,30 +2333,11 @@ pub(crate) async fn commit_applet_record(
             "Applet package.namespaces are immutable".to_owned(),
         ));
     }
-    let managed_authorities = coland_storage::applet_managed_authorities_from_record(
-        &mutation.identity.record,
-        &mutation.record,
-    )?;
-    let previous_managed_authorities = mutation
-        .expected_record
-        .as_ref()
-        .map(|record| {
-            coland_storage::applet_managed_authorities_from_record(
-                &mutation.identity.record,
-                record,
-            )
-        })
-        .transpose()?
-        .unwrap_or_default();
-    if !previous_managed_authorities.is_subset(&managed_authorities) {
+    if mutation.record.get("bots").is_some() || mutation.record.get("ghosts").is_some() {
         return Err(PersistenceError::SchemaViolation(
-            "Applet managed authority anchors are immutable".to_owned(),
+            "Applet installation cannot contain managed identity inventories".to_owned(),
         ));
     }
-    let new_managed_authorities = managed_authorities
-        .difference(&previous_managed_authorities)
-        .cloned()
-        .collect::<Vec<_>>();
     let updated = if let Some(expected_record) = mutation.expected_record {
         sql_query(
             "UPDATE applet_installations SET record = $4, updated_at = NOW() \
@@ -2454,23 +2437,6 @@ pub(crate) async fn commit_applet_record(
         }
     }
 
-    for claim in new_managed_authorities {
-        let inserted = sql_query(
-            "INSERT INTO managed_authority_claims (actor_id, station_id, applet_id) \
-             VALUES ($1, $2, $3) \
-             ON CONFLICT (actor_id, station_id) DO UPDATE SET applet_id = EXCLUDED.applet_id \
-             WHERE managed_authority_claims.applet_id = EXCLUDED.applet_id",
-        )
-        .bind::<Text, _>(&claim.actor_id)
-        .bind::<Text, _>(&claim.station_id)
-        .bind::<Text, _>(mutation.applet_id.as_str())
-        .execute(&mut *conn)
-        .await
-        .map_err(PersistenceError::database)?;
-        if inserted != 1 {
-            return Err(conflict("applet_managed_authority_conflict"));
-        }
-    }
     Ok(())
 }
 
@@ -2502,14 +2468,11 @@ fn commit_one_in_connection<'a>(
 fn managed_device_source(
     request: &EventCommitRequest,
 ) -> Option<crate::managed_forward_admission::Source<'_>> {
-    if let Some(coland_storage::SelfProducerCommitGuard::AppletManagedDevice(guard)) =
-        request.self_producer_guard.as_ref()
-    {
-        Some(crate::managed_forward_admission::Source::Local(guard))
-    } else {
-        request
-            .forwarded_managed_source()
-            .map(crate::managed_forward_admission::Source::Forwarded)
+    match request.self_producer_guard.as_ref() {
+        Some(coland_storage::SelfProducerCommitGuard::AppletManagedDevice(guard)) => {
+            Some(crate::managed_forward_admission::Source::Local(guard))
+        }
+        _ => None,
     }
 }
 
@@ -2546,6 +2509,17 @@ async fn commit_one_inner(
         )
         .into());
     }
+    if matches!(event.scope_ref, arkret_wire::ScopeRef::RealmControl { .. })
+        && (!crate::realm_actor_governance::is_command(event)
+            || !request.projections.is_empty()
+            || !request.outbox.is_empty()
+            || request.realm_fanout_source.is_some())
+    {
+        return Err(PersistenceError::Conflict(
+            "private Realm control cannot enter member replication".into(),
+        )
+        .into());
+    }
     let producer_guards = usize::from(request.self_producer_guard.is_some())
         + usize::from(request.forwarded_producer_evidence.is_some())
         + usize::from(request.forwarded_agent_producer.is_some())
@@ -2569,6 +2543,7 @@ async fn commit_one_inner(
     if matches!(
         event.scope_ref,
         arkret_wire::ScopeRef::Realm { .. }
+            | arkret_wire::ScopeRef::RealmControl { .. }
             | arkret_wire::ScopeRef::Circle { .. }
             | arkret_wire::ScopeRef::Sidecar { .. }
     ) {
@@ -2590,9 +2565,6 @@ async fn commit_one_inner(
         return Ok(());
     }
 
-    if let Some(retained) = request.forwarded_producer_evidence.as_ref() {
-        retained.ensure_managed_binding(event, chrono::Utc::now())?;
-    }
     let prepared_human = if let Some(retained) = &request.forwarded_producer_evidence {
         let core = &retained.evidence.device_projection_attestation.attestation;
         let source = &core.event_authorization;
@@ -2714,33 +2686,6 @@ async fn commit_one_inner(
         )?;
         prepared_service = Some(fact);
     } else if let Some(source) = managed_device_source(&request) {
-        if source.forwarded().is_some() {
-            let (registration, _) = crate::applet_device_admission::installation_source(
-                conn,
-                event,
-                source,
-                request.authority_commit.commit.committed_at,
-            )
-            .await?;
-            let (_, decision) = crate::applet_device_admission::select_management(
-                conn,
-                event,
-                &registration,
-                request.authority_commit.commit.committed_at,
-            )
-            .await?;
-            let has_review = event_approvals.is_some_and(|v| {
-                v.methods.iter().any(|m| {
-                    matches!(
-                        m.signature.input.approval_context,
-                        arkret_wire::ApprovalContext::Management { .. }
-                    )
-                })
-            });
-            if !decision.review_requirements.is_empty() && !has_review {
-                return Err(PersistenceError::Conflict("approval_required: forwarded native action requires its current management review".into()).into());
-            }
-        }
         if matches!(
             event.kind,
             arkret_wire::EventKind::MessageCreate
@@ -2827,7 +2772,7 @@ fn commit_prepared_event<'a>(
         arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact,
     >,
     prepared_service: Option<
-        arkret_models_collaboration::authority_commit::ServiceHistoricalSignerFact,
+        arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact,
     >,
     service_approvals: Vec<crate::approval_admission::QualifiedApproval>,
     audit_unit: Option<&'a coland_storage::RegisteredAuditCommit>,
@@ -2864,13 +2809,15 @@ async fn commit_prepared_event_inner(
         arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact,
     >,
     prepared_service: Option<
-        arkret_models_collaboration::authority_commit::ServiceHistoricalSignerFact,
+        arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact,
     >,
     service_approvals: Vec<crate::approval_admission::QualifiedApproval>,
     audit_unit: Option<&coland_storage::RegisteredAuditCommit>,
 ) -> Result<(), PgTransactionError> {
-    let forwarded_managed = request.forwarded_managed_source().cloned();
     let event = &request.authority_commit.event;
+
+    crate::realm_actor_control::admit_creation(conn, event, &request.authority_commit.commit)
+        .await?;
 
     let scope_profile = if crate::applet_scope_profiles::is_profile(event) {
         let Some(source) = managed_device_source(&request) else {
@@ -3056,8 +3003,7 @@ async fn commit_prepared_event_inner(
         if profile.is_public() {
             let cut =
                 crate::realm_authorization_cut::RealmAuthorizationCut::read_for_event(conn, event)
-                    .await?
-                    .with_forwarded_managed(request.forwarded_managed_source());
+                    .await?;
             cut.require_managed_self_action_in_connection(
                 conn,
                 event,
@@ -3073,6 +3019,20 @@ async fn commit_prepared_event_inner(
             &request.authority_commit,
             event_approvals,
             profile,
+        )
+        .await?
+    } else if crate::realm_actor_governance::is_command(event) {
+        crate::authority_commit::commit_realm_actor_governance_in_connection(
+            conn,
+            &request.authority_commit,
+            event_approvals,
+        )
+        .await?
+    } else if event.kind == arkret_wire::EventKind::RealmActorCreate {
+        crate::authority_commit::commit_realm_actor_creation_in_connection(
+            conn,
+            &request.authority_commit,
+            event_approvals,
         )
         .await?
     } else {
@@ -3106,7 +3066,6 @@ async fn commit_prepared_event_inner(
                 &request.authority_commit.expected_authority.service_id,
                 audit_unit,
                 event_approvals,
-                request.forwarded_managed_source(),
             )
         })
         .await?;
@@ -3126,7 +3085,6 @@ async fn commit_prepared_event_inner(
                 &request.authority_commit.commit,
                 management_review.as_ref(),
                 event_approvals,
-                request.forwarded_managed_source(),
             )
         })
         .await?;
@@ -3158,7 +3116,7 @@ async fn commit_prepared_event_inner(
             .await?;
         }
         if let Some(fact) = prepared_service.as_ref() {
-            crate::agent_producer_signer_keys::retain_prepared_service_in_connection(
+            crate::agent_producer_signer_keys::retain_prepared_applet_in_connection(
                 conn, event, commit, fact,
             )
             .await?;
@@ -3175,6 +3133,8 @@ async fn commit_prepared_event_inner(
                 request.self_producer_guard.as_ref(),
             )
             .await?;
+        } else if let Some(fact @ arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact::RealmDevice(_)) = request.authority_commit.producer_signer_fact.as_ref() {
+            crate::agent_producer_signer_keys::retain_prepared_producer_in_connection(conn, event, commit, fact).await?;
         } else {
             crate::agent_producer_signer_keys::retain_in_connection(
                 conn,
@@ -3238,10 +3198,12 @@ async fn commit_prepared_event_inner(
         ))
         .await?;
 
-        if !matches!(
-            audit_unit,
-            Some(coland_storage::RegisteredAuditCommit::Pair { .. })
-        ) {
+        if !matches!(event.scope_ref, arkret_wire::ScopeRef::RealmControl { .. })
+            && !matches!(
+                audit_unit,
+                Some(coland_storage::RegisteredAuditCommit::Pair { .. })
+            )
+        {
             outcome.outbox_inserted += crate::realm_fanout::plan_realm_fanout_in_connection(
                 conn,
                 event,
@@ -3344,25 +3306,7 @@ async fn commit_prepared_event_inner(
             }
         }
     }
-    if let Some(retained) = request.forwarded_producer_evidence.as_ref() {
-        retained.ensure_managed_binding(event, chrono::Utc::now())?;
-    }
-    if let Some(source) = forwarded_managed.as_ref() {
-        source.ensure_event(event, chrono::Utc::now())?;
-        if matches!(
-            event.kind,
-            arkret_wire::EventKind::MlsGenesis | arkret_wire::EventKind::MlsCommit
-        ) {
-            crate::applet_device_admission::require_mls_permission_source(
-                conn,
-                event,
-                crate::managed_forward_admission::Source::Forwarded(source),
-                chrono::Utc::now(),
-                false,
-            )
-            .await?;
-        }
-    }
+
     Ok(())
 }
 
@@ -3565,6 +3509,13 @@ async fn commit_object_current_results_inner(
 ) -> Result<(), PgTransactionError> {
     let event = &request.authority_commit.event;
     let commit = &request.authority_commit.commit;
+    Box::pin(crate::realm_actor_governance::commit(
+        conn,
+        event,
+        commit,
+        event_approvals,
+    ))
+    .await?;
     Box::pin(commit_parent_membership_current_results(
         conn, event, commit,
     ))
@@ -3588,7 +3539,6 @@ async fn commit_object_current_results_inner(
             conn,
             &request.authority_commit,
             event_approvals,
-            request.forwarded_managed_source(),
         ),
     )
     .await?;
@@ -3730,7 +3680,6 @@ async fn commit_content_current_results_inner(
             event,
             commit,
             event_approvals,
-            request.forwarded_managed_source(),
         ),
     )
     .await?;

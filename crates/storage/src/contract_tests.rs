@@ -1364,13 +1364,6 @@ pub trait AppletFormalCommitFactory: Send + Sync {
         applet_id: &arkret_wire::AppletId,
         scope_label: &str,
     ) -> AppletFormalCommitUnit;
-    async fn prepare_ghost(
-        &self,
-        applet_id: &arkret_wire::AppletId,
-        scope: &arkret_wire::ScopeRef,
-        external: &str,
-        actor_label: &str,
-    ) -> AppletFormalCommitUnit;
 }
 
 pub type AppletFormalFinalizer = std::sync::Arc<
@@ -1503,7 +1496,6 @@ pub async fn assert_applet_formal_commit_transaction_contract(
                 .cloned()
                 .collect::<Vec<_>>()
         }
-        _ => panic!("factory must prepare the Service install branch"),
     };
     // The production guard precedes generic submission of registration Events.
     // An ordinary batch must not be able to acquire the private verified tag.
@@ -1580,13 +1572,15 @@ pub async fn assert_applet_formal_commit_transaction_contract(
         .await
         .expect("closed Service install must succeed after the rejected ordinary batch");
     assert_contract_event_group_visibility(stores.events, &install.event_ids, true).await;
-    assert_eq!(
-        contract_installation(&stores, &install).await["ghosts"],
-        serde_json::json!([])
+    assert!(
+        contract_installation(&stores, &install)
+            .await
+            .get("ghosts")
+            .is_none()
     );
 
-    // A structurally wrong managed Account in finalization must roll back the
-    // already authored fixed set as well as identity, installation and claims.
+    // An installation cannot inject an actor inventory. Its rejection rolls
+    // back the registration and grants together with the installation.
     for case in ["foreign-station", "service-actor", "scalar-principal"] {
         let invalid_id = contract_applet_id();
         let mut unit = stores
@@ -1625,21 +1619,12 @@ pub async fn assert_applet_formal_commit_transaction_contract(
         let error = unit
             .commit(stores.applets)
             .await
-            .expect_err("invalid Bot Account must reject complete transaction");
-        match case {
-            "foreign-station" => assert!(
-                matches!(error, PersistenceError::SchemaViolation(ref detail) if detail == "managed Account belongs to another Station"),
-                "{error:?}"
-            ),
-            "service-actor" => assert!(
-                matches!(error, PersistenceError::Conflict(ref detail) if detail == "schema_violation: durable Applet bot_actor_id must identify an Account"),
-                "{error:?}"
-            ),
-            _ => assert!(
-                matches!(error, PersistenceError::Conflict(ref detail) if detail.starts_with("schema_violation: durable Applet bot_actor_id is not a full ActorId:")),
-                "{error:?}"
-            ),
-        }
+            .expect_err("embedded identity inventory must reject complete transaction");
+        assert!(
+            matches!(error, PersistenceError::SchemaViolation(ref detail)
+            if detail == "Applet installation cannot contain managed identity inventories"),
+            "{error:?}"
+        );
         assert_contract_event_group_visibility(stores.events, &unit.event_ids, false).await;
         assert!(
             stores
@@ -1661,170 +1646,6 @@ pub async fn assert_applet_formal_commit_transaction_contract(
                 .is_none()
         );
     }
-
-    // Independent Ghost subjects retain their own signed current previews.
-    // Their record CAS must still reject a stale writer after all four Events
-    // were authored, without any prefix or hidden managed claim surviving.
-    let base = contract_installation(&stores, &install).await;
-    let winner = stores
-        .factory
-        .prepare_ghost(&id, &install.effective_scope, "committed", "stale-winner")
-        .await;
-    let mut stale = stores
-        .factory
-        .prepare_ghost(&id, &install.effective_scope, "stale", "stale-loser")
-        .await;
-    winner.commit(stores.applets).await.unwrap();
-    assert_eq!(stale.input.expected_installation, Some(base));
-    let accepted = contract_installation(&stores, &winner).await;
-    assert_eq!(
-        stale
-            .commit(stores.applets)
-            .await
-            .expect_err("stale exact record must fail")
-            .conflict_code(),
-        Some(super::ConflictCode::CasConflict)
-    );
-    assert_eq!(contract_installation(&stores, &winner).await, accepted);
-    assert_contract_event_group_visibility(stores.events, &stale.event_ids, false).await;
-    stale.refresh_expected(stores.applets).await;
-    stale
-        .commit(stores.applets)
-        .await
-        .expect("same frozen four Events must succeed against actual winner");
-    assert_contract_event_group_visibility(stores.events, &stale.event_ids, true).await;
-    let merged = contract_installation(&stores, &stale).await;
-    assert_eq!(merged["ghosts"].as_array().unwrap().len(), 2);
-    assert_eq!(merged["ghosts"][0], accepted["ghosts"][0]);
-
-    // Spec §9.1: the same external tuple has one exact current preview subject,
-    // not two independently valid requests. Issuing a replacement invalidates
-    // the old request; accepting it consumes that preview. Preserve one winner,
-    // zero loser prefix and exact idempotent replay instead of mislabeling the
-    // mandated preview rejection as a record CasConflict.
-    let same_id = contract_applet_id();
-    let same_install = stores
-        .factory
-        .prepare_install(&same_id, &format!("{namespace}:same"))
-        .await;
-    same_install.commit(stores.applets).await.unwrap();
-    let left = stores
-        .factory
-        .prepare_ghost(
-            &same_id,
-            &same_install.effective_scope,
-            "same-user",
-            "same-left",
-        )
-        .await;
-    let right = stores
-        .factory
-        .prepare_ghost(
-            &same_id,
-            &same_install.effective_scope,
-            "same-user",
-            "same-right",
-        )
-        .await;
-    assert_eq!(
-        left.input.preview_subject_key,
-        right.input.preview_subject_key
-    );
-    assert_ne!(
-        left.input.request_digest, right.input.request_digest,
-        "a changed display basis must issue a real replacement preview"
-    );
-    let (l, r) = tokio::join!(left.commit(stores.applets), right.commit(stores.applets));
-    assert!(r.is_ok(), "the actual current preview must win: {r:?}");
-    let error = l.expect_err("replaced preview must lose without a prefix");
-    assert!(
-        matches!(error, PersistenceError::Conflict(ref detail) if detail == "failed_precondition: issued preview was replaced or expired" || detail == "failed_precondition: issued preview missing"),
-        "{error:?}"
-    );
-    assert_contract_event_group_visibility(stores.events, &left.event_ids, false).await;
-    assert_contract_event_group_visibility(stores.events, &right.event_ids, true).await;
-    let same_record = contract_installation(&stores, &right).await;
-    assert_eq!(same_record["ghosts"].as_array().unwrap().len(), 1);
-    let replay = right.commit(stores.applets).await.unwrap();
-    assert!(replay.replayed);
-    assert_eq!(replay.committed_event_refs, r.unwrap().committed_event_refs);
-    assert_eq!(contract_installation(&stores, &right).await, same_record);
-    let reuse = stores
-        .factory
-        .prepare_ghost(
-            &same_id,
-            &same_install.effective_scope,
-            "same-user",
-            "unused-reuse-actor",
-        )
-        .await;
-    assert_eq!(
-        reuse.event_ids, right.event_ids,
-        "fresh reuse preview must name original accepted lineage"
-    );
-    let reused = reuse
-        .commit(stores.applets)
-        .await
-        .expect("fresh exact reuse preview must succeed");
-    assert_eq!(reused.committed_event_refs, replay.committed_event_refs);
-    assert_eq!(
-        contract_installation(&stores, &reuse).await["ghosts"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-
-    let different_id = contract_applet_id();
-    let different_install = stores
-        .factory
-        .prepare_install(&different_id, &format!("{namespace}:different"))
-        .await;
-    different_install.commit(stores.applets).await.unwrap();
-    let left = stores
-        .factory
-        .prepare_ghost(
-            &different_id,
-            &different_install.effective_scope,
-            "left-user",
-            "different-left",
-        )
-        .await;
-    let right = stores
-        .factory
-        .prepare_ghost(
-            &different_id,
-            &different_install.effective_scope,
-            "right-user",
-            "different-right",
-        )
-        .await;
-    let (l, r) = tokio::join!(left.commit(stores.applets), right.commit(stores.applets));
-    assert_eq!(
-        usize::from(l.is_ok()) + usize::from(r.is_ok()),
-        1,
-        "one exact CAS must win"
-    );
-    let (winner, mut loser, loser_error) = match l {
-        Ok(_) => (left, right, r.unwrap_err()),
-        Err(error) => (right, left, error),
-    };
-    assert_eq!(
-        loser_error.conflict_code(),
-        Some(super::ConflictCode::CasConflict)
-    );
-    assert_contract_event_group_visibility(stores.events, &winner.event_ids, true).await;
-    assert_contract_event_group_visibility(stores.events, &loser.event_ids, false).await;
-    let accepted = contract_installation(&stores, &winner).await;
-    loser.refresh_expected(stores.applets).await;
-    loser.commit(stores.applets).await.unwrap();
-    assert_contract_event_group_visibility(stores.events, &loser.event_ids, true).await;
-    let both = contract_installation(&stores, &loser).await;
-    assert_eq!(both["ghosts"].as_array().unwrap().len(), 2);
-    assert_eq!(
-        both["ghosts"][0], accepted["ghosts"][0],
-        "retry must not erase the winning Ghost"
-    );
 
     // Distinct scopes share a single insert-only identity winner. The losing
     // first install rolls back its registration/grants and retries with the
@@ -3129,10 +2950,10 @@ fn mls_keypackage_contract_row(
         keypackage_ref: format!("ak:mls:keypackage:{namespace}-{suffix}"),
         keypackage_digest:
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
-        owner_account_id,
+        owner_actor_id: arkret_wire::ActorId::account(owner_account_id),
         effective_scope: None,
         // The KeyPackage wire binds the cryptographic endpoint principal;
-        // the exact Station Account is carried by owner_account_id above.
+        // the exact Station Account is carried by owner_actor_id above.
         actor_id: device.principal_id.to_string(),
         device_id: Some(device.device_id.clone()),
         endpoint_verification_method: None,

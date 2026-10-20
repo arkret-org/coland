@@ -155,7 +155,7 @@ pub struct MlsKeyPackageProjection {
     pub keypackage_ref: String,
     pub keypackage_digest: String,
     /// Complete Account owner; the endpoint principal may instead be an Agent.
-    pub owner_account_id: arkret_wire::AccountId,
+    pub owner_actor_id: arkret_wire::ActorId,
     pub effective_scope: Option<arkret_wire::ScopeRef>,
     pub actor_id: String,
     pub device_id: Option<String>,

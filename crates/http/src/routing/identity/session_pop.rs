@@ -50,6 +50,16 @@ pub async fn verify_session_pop(
         .get_typed::<AppState>()
         .expect("state injected")
         .clone();
+    if req.headers().contains_key("arkret-realm-actor-control") {
+        match super::realm_actor_control::verify(&state, req).await {
+            Ok(verified) => {
+                depot.insert_typed(verified);
+                ctrl.call_next(req, depot, res).await;
+            }
+            Err(error) => error.write(req, depot, res).await,
+        }
+        return;
+    }
     if req.headers().contains_key("arkret-managed-device") {
         match super::applet_managed_device::verify(&state, req).await {
             Ok(verified) => {
@@ -112,6 +122,7 @@ async fn enforce_session_pop(state: &AppState, req: &mut Request) -> Result<(), 
     if req.headers().contains_key("source-service-id")
         && [
             arkret_wire::ServiceOperationId::SelfEventsCommandSubmitV1,
+            arkret_wire::ServiceOperationId::SelfRealmActorReadMaterialV1,
             arkret_wire::ServiceOperationId::SelfAgentResourceGetV1,
             arkret_wire::ServiceOperationId::SelfManagementReviewCommandRequestV1,
             arkret_wire::ServiceOperationId::SelfManagementReviewReadStatusV1,

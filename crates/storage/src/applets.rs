@@ -1,18 +1,6 @@
 use super::{PersistenceResult, Value, async_trait};
 #[async_trait]
 pub trait AppletStore: Send + Sync {
-    /// Station-private immutable creation closure, including delivered
-    /// completions. Rebuilding accepted history must not use today's install
-    /// key or require an undelivered notification.
-    async fn managed_pcr_creation_context(
-        &self,
-        _genesis: &arkret_wire::EventId,
-    ) -> PersistenceResult<Option<arkret_models_integration::AppletManagedActorAuthoringContext>>
-    {
-        Err(super::PersistenceError::Internal(
-            "retained managed PCR creation evidence is unavailable".into(),
-        ))
-    }
     async fn authority_material(
         &self,
         _applet: &arkret_wire::AppletId,
@@ -76,16 +64,6 @@ pub trait AppletStore: Send + Sync {
     ) -> PersistenceResult<AppletAuthoringUnitOutcome> {
         Err(super::PersistenceError::Conflict(
             "unsupported_feature: Applet authoring aggregate is unavailable".to_owned(),
-        ))
-    }
-    /// Station-private preparation of exact approval participant Accounts.
-    /// No RPC, vote qualification or business write occurs in this read.
-    async fn creation_approval_accounts(
-        &self,
-        _candidate: &AppletAuthoringCandidate,
-    ) -> PersistenceResult<Vec<arkret_wire::AccountId>> {
-        Err(super::PersistenceError::Conflict(
-            "unsupported_feature: creation approval preparation is unavailable".into(),
         ))
     }
     async fn get_identity(
@@ -219,7 +197,6 @@ pub fn applet_transaction_replay_select_sql() -> &'static str {
 #[serde(untagged)]
 pub enum AppletAdmissionRequest {
     Install(Box<arkret_models_integration::AppletInstallRequestBody>),
-    Managed(arkret_models_integration::AppletManagedActorCommittedRequest),
 }
 
 /// Original candidate and receiver-derived verification material. Pure

@@ -61,22 +61,22 @@ pub(crate) async fn consume(
     body.validate_shape()
         .map_err(|error| PersistenceError::SchemaViolation(error.into()))?;
     let receipt = &body.recipient_durable_receipt;
-    let RecipientMlsDurableSigner::Device {
-        recipient_account_id,
+    let RecipientMlsDurableSigner::RealmDevice {
+        recipient_actor_id,
         recipient_device_id,
         device_verification_method,
     } = &receipt.recipient
     else {
         return Err(denied("native consume has no Device signer"));
     };
-    if recipient_account_id != &authority.account_id
+    if recipient_actor_id != &authority.actor_id
         || recipient_device_id != &authority.device_id
         || !matches!(
             scope,
             arkret_wire::ScopeRef::Realm { .. } | arkret_wire::ScopeRef::Circle { .. }
         )
         || !authority.scopes.contains_scope(scope)
-        || receipt.recipient_id != authority.account_id.station_id
+        || receipt.recipient_id != authority.governance_service_id
         || &receipt.realm_id != scope.realm_id()
         || receipt.mls_group_id
             != scope
@@ -84,7 +84,7 @@ pub(crate) async fn consume(
                 .map_err(PersistenceError::database)?
     {
         return Err(denied(
-            "native consume differs from its original Account Device and scope",
+            "native consume differs from its original Realm Device and scope",
         ));
     }
     let method = device_verification_method.as_str();
@@ -95,7 +95,7 @@ pub(crate) async fn consume(
     let controller = method.split(['#', '?']).next().unwrap_or("");
     let account_method = arkret_wire::Did::new(controller.to_owned())
         .and_then(|did| arkret_wire::project_did_to_core_id(&did))
-        .is_ok_and(|core| core == authority.account_id.principal_id);
+        .is_ok_and(|core| &core == authority.actor_id.signing_principal_id());
     if !(method == key_did
         || method
             .strip_prefix(&key_did)
@@ -132,14 +132,14 @@ pub(crate) async fn consume(
     let mut conn = pg_conn(pool).await.map_err(PersistenceError::database)?;
     conn.transaction::<_,PgTransactionError,_>(async move |conn| {
         // The same order as own revoke: PCR, package, then exact claim ledger.
-        crate::realm_authorization_cut::lock_realm_authorization_cut(conn,&authority.pcr_realm_id).await?;
+        crate::realm_authorization_cut::lock_realm_authorization_cut(conn,&authority.realm_id).await?;
         let mut package=sql_query("SELECT id,keypackage_ref,keypackage_digest,owner_account_id,effective_scope,actor_id,device_id,endpoint_verification_method,key_package_bytes,capabilities,capabilities_digest,last_resort,last_resort_realm_id,lifetime_not_before,lifetime_not_after,claimed_by_mls_group_id,device_authorize_event_id,agent_key_authorize_event_id,claimed_at,claim_expires_at_unix_ms,consumed_at,created_at FROM mls_key_packages WHERE keypackage_ref=$1 FOR UPDATE")
             .bind::<Text,_>(receipt.key_package_ref.as_str()).get_result::<MlsKeyPackagePgRow>(&mut *conn).await.optional()?.map(validated_keypackage_row).transpose()?
             .ok_or_else(||conflict("consume package is unavailable"))?;
-        if package.owner_account_id!=authority.account_id
-            || package.actor_id!=authority.account_id.principal_id.as_str()
+        if package.owner_actor_id!=authority.actor_id
+            || package.actor_id!=authority.actor_id.signing_principal_id().as_str()
             || package.device_id.as_deref()!=Some(authority.device_id.as_str())
-            || package.device_authorize_event_id.as_deref()!=Some(authority.selector.authorization_ref.event_id.as_str())
+            || package.device_authorize_event_id.as_deref()!=Some(authority.authorization_ref.event_id.as_str())
             || package.agent_key_authorize_event_id.is_some() || package.endpoint_verification_method.is_some()
             || package.effective_scope.as_ref()!=Some(scope) {
             return Err(conflict("consume package has another original endpoint or scope").into());
@@ -151,7 +151,7 @@ pub(crate) async fn consume(
             .bind::<Text,_>(body.claim_id.as_str()).bind::<Text,_>(&ledger.source_id).bind::<Text,_>(&ledger.claim_request_id)
             .get_result::<Binding>(&mut *conn).await.optional()?.ok_or_else(||conflict("the accepted Welcome binding changed"))?;
         let at=clock(conn).await?;
-        let current=crate::boxed_future(||crate::pcr_applet_device_authority::current_in_connection(conn,&authority.account_id,&authority.device_id,at)).await?
+        let current=crate::boxed_future(||crate::realm_actor_device_authority::current_in_connection(conn,&authority.actor_id,&authority.device_id,at)).await?
             .ok_or_else(||denied("consume Device is unavailable"))?;
         if &current!=authority || at>=transport_expires_at || at>=authority.expires_at {
             return Err(denied("consume Device instance or credential window changed").into());
@@ -163,11 +163,11 @@ pub(crate) async fn consume(
             || outcome.claim_request_id.as_str()!=ledger.claim_request_id
             || outcome.claim_receipt.source_id.as_str()!=ledger.source_id
             || outcome.claim_receipt.request_digest.as_str()!=ledger.request_digest
-            || outcome.claim_receipt.destination_id!=authority.account_id.station_id
+            || outcome.claim_receipt.destination_id!=authority.governance_service_id
             || receipt.claim_request_id!=outcome.claim_request_id
-            || claim.actor_id.as_account_id()!=Some(&authority.account_id)
+            || claim.actor_id!=authority.actor_id
             || claim.device_id.as_ref()!=Some(&authority.device_id)
-            || claim.device_authorize_event_id.as_ref()!=Some(&authority.selector.authorization_ref.event_id)
+            || claim.device_authorize_event_id.as_ref()!=Some(&authority.authorization_ref.event_id)
             || claim.agent_id.is_some() || claim.agent_verification_method.is_some() || claim.agent_key_authorize_event_id.is_some()
             || claim.keypackage_ref!=package.keypackage_ref
             || claim.keypackage!=arkret_canonical::base64url_encode(&package.key_package_bytes)

@@ -13,7 +13,7 @@ pub(super) async fn requester(
 ) -> Result<NativeRequester, AppError> {
     body.validate_shape()
         .map_err(|error| peer_claim_schema_violation(error.to_string()))?;
-    let PeerKeyPackageRequesterAuthorization::Device {
+    let PeerKeyPackageRequesterAuthorization::RealmDevice {
         verification_method,
         requester_device_id,
         device_authorize_event_id,
@@ -24,10 +24,10 @@ pub(super) async fn requester(
         return Err(peer_claim_failed());
     };
     let authority = &native.authority;
-    if body.requester_account_id.as_ref() != Some(&authority.account_id)
+    if body.requester_actor_id.as_ref() != Some(&authority.actor_id)
         || body.service_binding.source_id != state.service_core_id()
         || requester_device_id != &authority.device_id
-        || device_authorize_event_id != &authority.selector.authorization_ref.event_id
+        || device_authorize_event_id != &authority.authorization_ref.event_id
         || verification_method.as_str()
             != format!("{}#{}", authority.native_did, authority.device_id)
         || body.intended_realm_id != *native.metadata.effective_scope.realm_id()
@@ -61,14 +61,14 @@ pub(super) async fn requester(
 
 async fn target(
     state: &AppState,
-    account: &arkret_wire::AccountId,
+    actor: &arkret_wire::ActorId,
     device: &arkret_wire::DeviceId,
     realm: &RealmId,
     group: &arkret_wire::MlsGroupId,
 ) -> Result<Option<AppletManagedDeviceScopeGuard>, AppError> {
     let Some(authority) = state
         .persistence()
-        .applet_managed_device_authority(account, device, Utc::now())
+        .applet_managed_device_authority(actor, device, Utc::now())
         .await
         .map_err(|_| peer_claim_failed())?
     else {
@@ -96,7 +96,7 @@ pub(super) async fn targets(
     state: &AppState,
     body: &PeerKeyPackagesClaimRequestBody,
 ) -> Result<BTreeMap<String, AppletManagedDeviceScopeGuard>, AppError> {
-    let Some(account) = &body.target_account_id else {
+    let Some(actor) = &body.target_actor_id else {
         return Ok(BTreeMap::new());
     };
     let mut devices = body
@@ -110,7 +110,7 @@ pub(super) async fn targets(
                 .projections()
                 .mls_key_package_records()
                 .iter()
-                .filter(|row| &row.owner_account_id == account)
+                .filter(|row| &row.owner_actor_id == actor)
                 .filter_map(|row| {
                     row.device_id
                         .as_ref()
@@ -122,7 +122,7 @@ pub(super) async fn targets(
     for device in devices {
         if let Some(guard) = target(
             state,
-            account,
+            actor,
             &device,
             &body.intended_realm_id,
             &body.mls_group_id,
@@ -147,12 +147,10 @@ pub(super) async fn delivery_guard(
         .map(|(guard, _)| vec![guard.clone()])
         .unwrap_or_default();
     for claim in &outcome.claims {
-        if let (Some(account), Some(device)) =
-            (claim.actor_id.as_account_id(), claim.device_id.as_ref())
-        {
+        if let Some(device) = claim.device_id.as_ref() {
             if let Some(guard) = target(
                 state,
-                account,
+                &claim.actor_id,
                 device,
                 &outcome.claim_receipt.request.intended_realm_id,
                 &outcome.claim_receipt.request.mls_group_id,
@@ -191,8 +189,8 @@ pub(super) async fn delivery_guard(
     };
     state
         .authority_commits()
-        .acquire_committed_content_delivery(
-            &primary.authority.account_id,
+        .acquire_realm_actor_content_delivery(
+            &primary.authority.actor_id,
             &state.service_core_id(),
             &input,
         )
@@ -231,8 +229,8 @@ pub(super) async fn consume(
     body.validate_shape().map_err(AppError::param_invalid)?;
     let receipt = &body.recipient_durable_receipt;
     let authority = &native.authority;
-    let arkret_models_crypto::RecipientMlsDurableSigner::Device {
-        recipient_account_id,
+    let arkret_models_crypto::RecipientMlsDurableSigner::RealmDevice {
+        recipient_actor_id,
         recipient_device_id,
         device_verification_method,
     } = &receipt.recipient
@@ -243,11 +241,11 @@ pub(super) async fn consume(
     };
     let fingerprint = arkret_canonical::ed25519_pubkey_to_did_key_multibase(&authority.public_key);
     if native.operation != arkret_wire::ServiceOperationId::SelfKeysKeypackagesCommandConsumeV1
-        || recipient_account_id != &authority.account_id
+        || recipient_actor_id != &authority.actor_id
         || recipient_device_id != &authority.device_id
         || !crate::routing::identity::device_signature_kid_points_to_device_key(
             device_verification_method.as_str(),
-            authority.account_id.principal_id.as_str(),
+            authority.actor_id.signing_principal_id().as_str(),
             &format!("did:key:{fingerprint}"),
         )
     {

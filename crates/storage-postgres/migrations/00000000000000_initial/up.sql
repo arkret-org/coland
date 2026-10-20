@@ -580,16 +580,6 @@ CREATE TABLE public.applet_namespace_claims (
 CREATE INDEX applet_namespace_claims_domain_pattern_idx
     ON public.applet_namespace_claims (domain, pattern);
 
-CREATE TABLE public.managed_authority_claims (
-    actor_id text NOT NULL,
-    station_id text NOT NULL,
-    applet_id text NOT NULL,
-    PRIMARY KEY (actor_id, station_id)
-);
-
-CREATE INDEX managed_authority_claims_applet_idx
-    ON public.managed_authority_claims (applet_id);
-
 CREATE TABLE public.applet_transactions (
     applet_id text NOT NULL,
     source_id text NOT NULL,
@@ -1882,7 +1872,7 @@ CREATE TABLE public.mls_key_packages (
     id text PRIMARY KEY,
     keypackage_ref text NOT NULL,
     keypackage_digest text NOT NULL,
-    owner_account_id jsonb NOT NULL CHECK (jsonb_typeof(owner_account_id)='object'),
+    owner_actor_id jsonb NOT NULL CHECK (owner_actor_id->>'kind' IN ('account','realm')),
     effective_scope jsonb,
     actor_id text NOT NULL,
     device_id text,
@@ -1919,7 +1909,7 @@ CREATE TABLE public.mls_key_packages (
 ALTER TABLE ONLY public.mls_key_packages
     ADD CONSTRAINT mls_key_packages_keypackage_ref_key UNIQUE (keypackage_ref);
 
-CREATE INDEX mls_key_packages_by_owner_endpoint ON public.mls_key_packages USING btree (owner_account_id, actor_id, device_id, endpoint_verification_method, claimed_by_mls_group_id);
+CREATE INDEX mls_key_packages_by_owner_endpoint ON public.mls_key_packages USING btree (owner_actor_id, actor_id, device_id, endpoint_verification_method, claimed_by_mls_group_id);
 
 -- Authenticated claim attempts share one database-clock budget across workers.
 -- Only identity digests and a short-lived first decision are retained; this
@@ -2809,15 +2799,61 @@ CREATE INDEX websocket_auth_replay_ledger_retain_until_idx ON public.websocket_a
 
 -- Private RFC 9421 replay state; not a session or business acceptance ledger.
 CREATE TABLE public.applet_managed_device_nonces (
-    principal_id text NOT NULL,
-    station_id text NOT NULL,
+    actor_id jsonb NOT NULL CHECK(actor_id->>'kind'='realm'),
     device_id text NOT NULL,
     nonce text NOT NULL CHECK(nonce ~ '^[A-Za-z0-9_-]{22,128}$'),
     consumed_at timestamptz NOT NULL,
     retain_until timestamptz NOT NULL CHECK(retain_until > consumed_at),
-    PRIMARY KEY (principal_id,station_id,device_id,nonce)
+    PRIMARY KEY (actor_id,device_id,nonce)
 );
 CREATE INDEX applet_managed_device_nonces_expiry_idx ON public.applet_managed_device_nonces (retain_until);
+
+CREATE TABLE public.realm_actor_control_nonces (
+    actor_id jsonb NOT NULL CHECK(actor_id->>'kind'='realm'),
+    nonce text NOT NULL CHECK(nonce ~ '^[A-Za-z0-9_-]{22,128}$'),
+    consumed_at timestamptz NOT NULL,
+    retain_until timestamptz NOT NULL CHECK(retain_until > consumed_at),
+    PRIMARY KEY (actor_id,nonce)
+);
+CREATE INDEX realm_actor_control_nonces_expiry_idx ON public.realm_actor_control_nonces(retain_until);
+
+CREATE TABLE public.realm_actor_recovery_intents (
+    realm_id text NOT NULL,
+    actor_id jsonb NOT NULL CHECK(actor_id->>'kind'='realm'),
+    manager_ref jsonb NOT NULL,
+    request_id text NOT NULL,
+    begin_event_id text NOT NULL UNIQUE,
+    outcome jsonb NOT NULL,
+    PRIMARY KEY(realm_id,actor_id,manager_ref,request_id)
+);
+
+CREATE TABLE public.realm_actor_mls_cleanup (
+    realm_id text NOT NULL,
+    actor_id jsonb NOT NULL CHECK(actor_id->>'kind'='realm'),
+    fenced_generation bigint NOT NULL CHECK(fenced_generation>0),
+    device_id text NOT NULL,
+    mls_group_id text NOT NULL,
+    leaf_index bigint NOT NULL CHECK(leaf_index>=0),
+    signature_key text NOT NULL,
+    authorization_ref jsonb NOT NULL,
+    begin_ref jsonb NOT NULL,
+    group_state_ref jsonb NOT NULL,
+    completion_ref jsonb,
+    queue_state text NOT NULL CHECK(queue_state IN ('pending','completed')),
+    PRIMARY KEY(actor_id,fenced_generation,device_id,mls_group_id,leaf_index),
+    CHECK((queue_state='completed')=(completion_ref IS NOT NULL))
+);
+
+CREATE TABLE public.realm_actor_operation_outcomes (
+    realm_id text NOT NULL,
+    actor_id jsonb NOT NULL CHECK(actor_id->>'kind'='realm'),
+    request_digest text NOT NULL,
+    requester_actor_id jsonb NOT NULL,
+    event_id text NOT NULL,
+    outcome jsonb NOT NULL,
+    recorded_at timestamptz NOT NULL,
+    PRIMARY KEY(realm_id,actor_id,request_digest)
+);
 
 CREATE TABLE public.websocket_connection_leases (
     connection_id text PRIMARY KEY,
@@ -4236,6 +4272,7 @@ CREATE TABLE mls_add_authority_attestations (
  attestation_digest TEXT NOT NULL,
  request_json JSONB NOT NULL CHECK(jsonb_typeof(request_json)='object'),
  attestor_resolution_canonical_json BYTEA NOT NULL CHECK(octet_length(attestor_resolution_canonical_json)>0),
+ claim_issuer_resolution_canonical_json BYTEA NOT NULL CHECK(octet_length(claim_issuer_resolution_canonical_json)>0),
  installed_at TIMESTAMPTZ NOT NULL,
  UNIQUE(scope_key,commit_event_ref,consumed_proposal_ordinal)
 );
@@ -4856,22 +4893,18 @@ CREATE TABLE account_device_signer_evidence (
  authorization_event_id TEXT NOT NULL,
  authorization_commit_id TEXT NOT NULL REFERENCES realm_commits(commit_id),
  attested_at TIMESTAMPTZ NOT NULL,
- evidence_json JSONB NOT NULL CHECK(jsonb_typeof(evidence_json)='object'),
- managed_provenance_json JSONB CHECK(managed_provenance_json IS NULL OR jsonb_typeof(managed_provenance_json)='object')
+ evidence_json JSONB NOT NULL CHECK(jsonb_typeof(evidence_json)='object')
 );
 CREATE INDEX account_device_signer_evidence_subject_idx
  ON account_device_signer_evidence(principal_id,station_id,device_id,attested_at);
 
 -- Private exact first-forward bytes for a managed Device. The existing signed
 -- evidence content address binds this complete request, including its source.
-CREATE TABLE account_device_managed_forward_requests (
- evidence_ref TEXT PRIMARY KEY REFERENCES account_device_signer_evidence(evidence_ref),
- request_json JSONB NOT NULL CHECK(jsonb_typeof(request_json)='object')
-);
+
 
 -- Exact native regular Device root frozen with its original acceptance Commit.
 CREATE TABLE account_device_committed_evidence (
- commit_id TEXT PRIMARY KEY REFERENCES agent_producer_signer_keys(commit_id),
+ commit_id TEXT PRIMARY KEY REFERENCES realm_commits(commit_id),
  evidence_ref TEXT NOT NULL REFERENCES account_device_signer_evidence(evidence_ref)
 );
 
@@ -4895,8 +4928,7 @@ CREATE TABLE forwarded_producer_device_evidence (
  station_id TEXT NOT NULL,
  device_id TEXT NOT NULL,
  attested_at TIMESTAMPTZ NOT NULL,
- evidence_json JSONB NOT NULL CHECK(jsonb_typeof(evidence_json)='object'),
- managed_provenance_json JSONB CHECK(managed_provenance_json IS NULL OR jsonb_typeof(managed_provenance_json)='object')
+ evidence_json JSONB NOT NULL CHECK(jsonb_typeof(evidence_json)='object')
 );
 
 -- Complete verified Agent producer closure, retained with its accepting Commit.
@@ -5025,3 +5057,76 @@ CREATE UNIQUE INDEX management_review_one_nonterminal_target ON management_revie
 
 -- Publication progress is distinct from reject-only response high water.
 CREATE TABLE public.consent_private_effect_cuts (LIKE public.consent_private_proxy_cuts INCLUDING ALL);
+
+-- Full Realm actor identities and immutable creation deduplication.
+CREATE TABLE public.realm_actor_creations (
+    realm_id text NOT NULL,
+    actor_id jsonb NOT NULL,
+    applet_id text NOT NULL,
+    request_id text NOT NULL,
+    candidate_bytes bytea NOT NULL,
+    external_ref jsonb,
+    event_id text NOT NULL UNIQUE,
+    commit_id text NOT NULL REFERENCES public.realm_commits(commit_id),
+    PRIMARY KEY (realm_id, actor_id),
+    UNIQUE (realm_id, applet_id, request_id),
+    CHECK (actor_id->>'kind' = 'realm' AND actor_id#>>'{realm_actor_id,realm_id}' = realm_id)
+);
+CREATE UNIQUE INDEX realm_actor_external_mapping ON public.realm_actor_creations(realm_id,applet_id,external_ref) WHERE external_ref IS NOT NULL;
+CREATE TABLE public.realm_actor_current_results (
+    realm_id text NOT NULL,
+    actor_id jsonb NOT NULL,
+    selector jsonb NOT NULL,
+    source_stream_ref jsonb NOT NULL,
+    current_commit_id text NOT NULL REFERENCES public.realm_commits(commit_id),
+    current_stream_position bigint NOT NULL CHECK (current_stream_position >= 0),
+    value jsonb NOT NULL,
+    PRIMARY KEY (realm_id, selector),
+    FOREIGN KEY (realm_id, actor_id) REFERENCES public.realm_actor_creations(realm_id,actor_id),
+    CHECK (selector->'actor_id'=actor_id),
+    CHECK (source_stream_ref->>'kind'='realm_control' AND source_stream_ref->>'realm_id'=realm_id)
+);
+
+-- Private control facts have no public signer-query outcome.
+CREATE TABLE realm_actor_private_signer_facts (
+    commit_id TEXT PRIMARY KEY REFERENCES realm_commits(commit_id),
+    realm_id TEXT NOT NULL,
+    event_id TEXT NOT NULL UNIQUE,
+    actor_id JSONB NOT NULL,
+    fact JSONB NOT NULL,
+    CHECK (actor_id->>'kind' = 'realm'),
+    CHECK ((fact->>'kind' IN ('realm_control', 'realm_recovery_service')) OR (fact ? 'actor' AND NOT fact ? 'kind'))
+);
+
+-- The command result is distinct from its immutable private revoke proposal.
+-- Absence is pending, never a successful revocation or an active override.
+CREATE TABLE public.realm_actor_device_revoke_results (
+    proposal_commit_id text PRIMARY KEY REFERENCES public.realm_commits(commit_id),
+    realm_id text NOT NULL,
+    actor_id jsonb NOT NULL CHECK(actor_id->>'kind'='realm'),
+    request_digest text NOT NULL,
+    command_result text NOT NULL CHECK(command_result IN ('pending','accepted','rejected')),
+    accepted_at timestamptz NOT NULL,
+    cleanup_digest text NOT NULL,
+    result_json jsonb NOT NULL CHECK(jsonb_typeof(result_json)='object'),
+    CHECK(result_json->>'status'='device_revoke'),
+    CHECK(result_json->>'state'=command_result),
+    CHECK((command_result='pending')=(result_json->'decided_at'='null'::jsonb)),
+    UNIQUE(realm_id,actor_id,request_digest)
+);
+
+CREATE TABLE public.realm_actor_device_revoke_cleanup (
+    proposal_commit_id text NOT NULL REFERENCES public.realm_actor_device_revoke_results(proposal_commit_id),
+    realm_id text NOT NULL,
+    actor_id jsonb NOT NULL,
+    fenced_generation bigint NOT NULL CHECK(fenced_generation>0),
+    device_id text NOT NULL,
+    mls_group_id text NOT NULL,
+    leaf_index bigint NOT NULL CHECK(leaf_index>=0),
+    signature_key text NOT NULL,
+    authorization_ref jsonb NOT NULL,
+    begin_ref jsonb NOT NULL,
+    group_state_ref jsonb NOT NULL,
+    completion_ref jsonb,
+    PRIMARY KEY(proposal_commit_id,mls_group_id,leaf_index)
+);

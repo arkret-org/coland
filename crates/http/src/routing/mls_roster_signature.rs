@@ -82,10 +82,14 @@ pub(super) async fn verify_peer_attest_add_signatures(
     state: &crate::state::AppState,
     source_id: &DidCoreId,
     request: &MlsAttestAddRequestBody,
-) -> Result<AuthenticatedServiceResolution, AppError> {
-    if &request.attestation.attestor_station_id != source_id
-        || &request.claim_outcome.claim_receipt.destination_id != source_id
-    {
+) -> Result<
+    (
+        AuthenticatedServiceResolution,
+        AuthenticatedServiceResolution,
+    ),
+    AppError,
+> {
+    if &request.attestation.attestor_station_id != source_id {
         return Err(signature_invalid());
     }
     request
@@ -97,14 +101,25 @@ pub(super) async fn verify_peer_attest_add_signatures(
     .await
     .map_err(|_| dependency_unavailable())?;
     let receipt = &request.claim_outcome.claim_receipt;
+    let claim_resolution = if &receipt.destination_id == source_id {
+        resolution.clone()
+    } else {
+        crate::routing::identity::agents::evidence::fetch_service_resolution(
+            state,
+            &receipt.destination_id,
+            None,
+        )
+        .await
+        .map_err(|_| dependency_unavailable())?
+    };
     let receipt_bytes =
         peer_keypackage_claim_receipt_signing_bytes(receipt).map_err(|_| signature_invalid())?;
     verify_station_signature(
-        source_id,
+        &receipt.destination_id,
         receipt.claimed_at,
         &receipt.signature,
         &receipt_bytes,
-        &resolution,
+        &claim_resolution,
     )?;
     let attestation = &request.attestation;
     let attestation_bytes = attestation
@@ -117,7 +132,7 @@ pub(super) async fn verify_peer_attest_add_signatures(
         &attestation_bytes,
         &resolution,
     )?;
-    Ok(resolution)
+    Ok((resolution, claim_resolution))
 }
 
 #[cfg(test)]

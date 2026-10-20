@@ -183,7 +183,6 @@ pub(crate) async fn commit_mls_group_current_result_in_connection(
     conn: &mut AsyncPgConnection,
     transaction: &AuthorityCommitTransaction,
     prepared: Option<&coland_storage::EventApprovalCommit>,
-    forwarded: Option<&coland_storage::ForwardedManagedActorSource>,
 ) -> PersistenceResult<()> {
     let event = &transaction.event;
     if !matches!(event.kind, EventKind::MlsGenesis | EventKind::MlsCommit) {
@@ -223,7 +222,7 @@ pub(crate) async fn commit_mls_group_current_result_in_connection(
     };
     if !controller_reconciliation {
         crate::realm_authorization_cut::authorize_capability_gated_event_with_source(
-            conn, event, commit, prepared, forwarded,
+            conn, event, commit, prepared,
         )
         .await?;
     }
@@ -365,6 +364,9 @@ pub(crate) async fn commit_mls_group_current_result_in_connection(
     .await?;
     if event.kind == EventKind::MlsCommit {
         freeze_consumed_proposals(conn, transaction, installation, &key).await?;
+        crate::realm_actor_recovery::complete_mls_cleanup(conn, transaction, installation)
+            .await
+            .map_err(crate::PgTransactionError::into_persistence)?;
     }
     store_public_blobs(conn, event, &installation.public_blobs, commit).await?;
     crate::direct_conversation_admission::record_group_state_in_connection(
@@ -466,8 +468,15 @@ pub(crate) async fn commit_mls_group_current_result_in_connection(
         .map_err(crate::PgTransactionError::into_persistence)?;
         let verified = coland_storage::VerifiedMlsAddAuthorityAttestation {
             source_station_id: transaction.expected_authority.service_id.clone(),
-            request,
+            request: request.clone(),
             attestor_resolution: resolution.clone(),
+            claim_issuer_resolution: if request.attestation.actor_id.as_realm_actor_id().is_some() {
+                witness.claim_issuer_resolution.clone().ok_or_else(|| {
+                    failed_precondition("Realm Add lacks its original claim issuer resolution")
+                })?
+            } else {
+                resolution.clone()
+            },
         };
         crate::mls_roster_attest_add::install_in_connection(
             conn,
@@ -688,7 +697,11 @@ async fn store_recipient_roster_outbox(
         || attestation.claim_id != delivery.keypackage_claim_ref
         || attestation.actor_id != delivery.recipient_actor_id
         || attestation.endpoint != delivery.recipient_endpoint
-        || attestation.attestor_station_id != *delivery.recipient_actor_id.route_service_id()
+        || !crate::realm_actor_mls_route::matches_accepted_add(
+            &delivery.recipient_actor_id,
+            &attestation.attestor_station_id,
+            commit,
+        )
     {
         return Err(PersistenceError::SchemaViolation(
             "MLS Add attestation differs from accepted Commit and Welcome".to_owned(),
@@ -1054,8 +1067,7 @@ pub(crate) async fn require_native_welcome_target(
     if serde_json::to_value(&guard.effective_scope).map_err(PersistenceError::database)?
         != package.effective_scope.unwrap()
         || welcome.delivery.effective_scope != guard.effective_scope
-        || welcome.delivery.recipient_actor_id
-            != arkret_wire::ActorId::account(guard.authority.account_id.clone())
+        || welcome.delivery.recipient_actor_id != guard.authority.actor_id.clone()
         || !matches!(&welcome.delivery.recipient_endpoint,arkret_wire::MlsWelcomeRecipientEndpoint::Device{device_id} if device_id==&guard.authority.device_id)
     {
         return Err(binding_mismatch(
@@ -1068,7 +1080,7 @@ pub(crate) async fn require_native_welcome_target(
     sql_query(
         "SELECT to_jsonb(a) AS value FROM realm_authorities a WHERE realm_id=$1 FOR UPDATE NOWAIT",
     )
-    .bind::<Text, _>(guard.authority.pcr_realm_id.as_str())
+    .bind::<Text, _>(guard.authority.realm_id.as_str())
     .get_result::<HistoryAccessRow>(&mut *conn)
     .await
     .map_err(|error| match error {

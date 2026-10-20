@@ -116,14 +116,6 @@ pub struct EventCommitRequest {
     pub realm_fanout_source: Option<arkret_wire::EventAdmissionSubmission>,
 }
 
-impl EventCommitRequest {
-    pub fn forwarded_managed_source(&self) -> Option<&crate::ForwardedManagedActorSource> {
-        self.forwarded_producer_evidence
-            .as_ref()
-            .and_then(|e| e.managed.as_deref())
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParentMembershipAdmissionCheck {
     pub expected_join_policy_digest: arkret_wire::Hash,
@@ -132,67 +124,6 @@ pub struct ParentMembershipAdmissionCheck {
     /// branch already passed, while the durable dependency cut still needs
     /// revalidation.
     pub require_joined_source: bool,
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn applet_managed_authorities_require_full_accounts_at_one_station() {
-        let station = arkret_wire::DidCoreId::new("ak:did_core:web:coland.example").unwrap();
-        let bot = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-            arkret_wire::DidCoreId::new("ak:did_core:web:bot.example").unwrap(),
-            station.clone(),
-        ));
-        let ghost = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-            arkret_wire::DidCoreId::new("ak:did_core:web:ghost.example").unwrap(),
-            station.clone(),
-        ));
-        let identity = serde_json::json!({"target_station_id": station});
-        let installation = serde_json::json!({"bots": [{"bot_actor_id": bot}], "ghosts": [{"ghost_actor_id": ghost}]});
-        let authorities =
-            super::applet_managed_authorities_from_record(&identity, &installation).unwrap();
-        assert_eq!(authorities.len(), 2);
-        assert!(
-            authorities
-                .iter()
-                .all(|claim| claim.station_id == station.as_str())
-        );
-        assert!(
-            super::applet_managed_authorities_from_record(
-                &identity,
-                &serde_json::json!({"bots": [], "ghosts": []})
-            )
-            .unwrap()
-            .is_empty()
-        );
-        for invalid in [
-            serde_json::json!(bot.signing_principal_id()),
-            serde_json::json!(arkret_wire::ActorId::service(
-                bot.signing_principal_id().clone()
-            )),
-        ] {
-            assert!(
-                super::applet_managed_authorities_from_record(
-                    &identity,
-                    &serde_json::json!({"bots": [{"bot_actor_id": invalid}], "ghosts": []})
-                )
-                .is_err()
-            );
-        }
-        let foreign = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-            ghost.signing_principal_id().clone(),
-            arkret_wire::DidCoreId::new("ak:did_core:web:foreign.example").unwrap(),
-        ));
-        assert!(
-            super::applet_managed_authorities_from_record(
-                &identity,
-                &serde_json::json!({"bots": [], "ghosts": [{"ghost_actor_id": foreign}]})
-            )
-            .is_err()
-        );
-        assert!(super::applet_managed_authorities_from_record(&identity,
-            &serde_json::json!({"bots": [{"bot_actor_id": bot}], "ghosts": [{"ghost_actor_id": bot}]})).is_err());
-    }
 }
 
 /// Applet projection mutation committed with a closed Event aggregate.
@@ -316,74 +247,6 @@ pub fn applet_namespaces_from_record(
             "schema_violation: durable Applet package.namespaces are invalid: {error}"
         ))
     })
-}
-
-fn applet_account_from_actor_field(
-    record: &serde_json::Value,
-    field: &str,
-) -> PersistenceResult<arkret_wire::AccountId> {
-    let actor = record.get(field).cloned().ok_or_else(|| {
-        PersistenceError::Conflict(format!(
-            "schema_violation: durable Applet record omits {field}"
-        ))
-    })?;
-    let actor: arkret_wire::ActorId = serde_json::from_value(actor).map_err(|error| {
-        PersistenceError::Conflict(format!(
-            "schema_violation: durable Applet {field} is not a full ActorId: {error}"
-        ))
-    })?;
-    actor.as_account_id().cloned().ok_or_else(|| {
-        PersistenceError::Conflict(format!(
-            "schema_violation: durable Applet {field} must identify an Account"
-        ))
-    })
-}
-
-/// Derive the closed independent managed Account set from the installation.
-pub fn applet_managed_authorities_from_record(
-    identity: &serde_json::Value,
-    installation: &serde_json::Value,
-) -> PersistenceResult<std::collections::BTreeSet<ManagedAuthorityClaim>> {
-    let station = identity
-        .get("target_station_id")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            PersistenceError::SchemaViolation(
-                "Applet Service identity has no target Station".to_owned(),
-            )
-        })?;
-    let mut authorities = std::collections::BTreeSet::new();
-    for (collection, field) in [("bots", "bot_actor_id"), ("ghosts", "ghost_actor_id")] {
-        let entries = installation
-            .get(collection)
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| {
-                PersistenceError::SchemaViolation(format!("Applet installation omits {collection}"))
-            })?;
-        for entry in entries {
-            let account = applet_account_from_actor_field(entry, field)?;
-            if account.station_id.as_str() != station {
-                return Err(PersistenceError::SchemaViolation(
-                    "managed Account belongs to another Station".to_owned(),
-                ));
-            }
-            if !authorities.insert(ManagedAuthorityClaim {
-                actor_id: account.principal_id.to_string(),
-                station_id: account.station_id.to_string(),
-            }) {
-                return Err(PersistenceError::Conflict(
-                    "applet_managed_authority_conflict".to_owned(),
-                ));
-            }
-        }
-    }
-    Ok(authorities)
-}
-
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct ManagedAuthorityClaim {
-    pub actor_id: String,
-    pub station_id: String,
 }
 
 /// All durable writes produced by accepting a closed multi-Event aggregate.

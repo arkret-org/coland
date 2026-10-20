@@ -65,9 +65,9 @@ pub(super) async fn prepare(
     snapshot: &RealmStateSnapshot,
 ) -> PersistenceResult<Vec<ReadProof>> {
     // Recheck the archived original instead of rebuilding or resigning it.
-    crate::issued_realm_snapshots::recheck_disclosure_in_connection(
+    crate::issued_realm_snapshots::recheck_actor_disclosure_in_connection(
         conn,
-        &endpoint.authority.account_id,
+        &endpoint.authority.actor_id,
         station,
         snapshot,
     )
@@ -170,7 +170,7 @@ fn current_resources(
 
 async fn prepare_material(
     conn: &mut diesel_async::AsyncPgConnection,
-    station: &DidCoreId,
+    _station: &DidCoreId,
     endpoint: &AppletManagedDeviceScopeGuard,
     expiry: chrono::DateTime<chrono::Utc>,
     material: &coland_storage::RealmStateSnapshotMaterial,
@@ -315,7 +315,7 @@ mod tests {
     fn free_occurrence_metadata_never_becomes_a_resource_match() {
         let realm = arkret_wire::RealmId::from_event_id(&event(201));
         let strand = arkret_wire::StrandId::from_event_id(&event(202));
-        let actor = ActorId::account(AccountId::new(
+        let actor = ActorId::account(arkret_wire::AccountId::new(
             DidCoreId::new("ak:did_core:web:reader.example").unwrap(),
             DidCoreId::new("ak:did_core:web:station.example").unwrap(),
         ));

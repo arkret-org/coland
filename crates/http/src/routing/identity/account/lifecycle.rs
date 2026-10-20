@@ -381,7 +381,10 @@ pub(crate) fn deactivation_peer_service_targets_for_account(
             let Ok(member_id) = serde_json::from_str::<arkret_wire::ActorId>(&member.member) else {
                 continue;
             };
-            let service_id = member_id.route_service_id().as_str();
+            let Some(account) = member_id.as_account_id() else {
+                continue;
+            };
+            let service_id = account.station_id.as_str();
             if service_id == state.service_id() {
                 continue;
             }

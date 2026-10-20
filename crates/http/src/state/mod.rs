@@ -18,7 +18,6 @@ pub(crate) mod authority_consent;
 mod authority_contact;
 mod authority_direct_conversation;
 mod authority_forward;
-mod authority_forward_managed;
 mod authority_franking;
 mod authority_handoff;
 mod authority_key_backup_pointer;

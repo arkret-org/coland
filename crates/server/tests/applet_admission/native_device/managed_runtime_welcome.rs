@@ -105,7 +105,7 @@ fn exercise(ghost: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = (
         let rows = native_phase(|| packages.snapshot_all()).await.unwrap();
         let package = rows
             .iter()
-            .find(|row| row.owner_account_id == device.account_id)
+            .find(|row| row.owner_actor_id == device.account_id)
             .unwrap();
         let device_store = coland_storage_postgres::PgDeviceRevocationStore {
             pool: context.fixture.pool.clone(),

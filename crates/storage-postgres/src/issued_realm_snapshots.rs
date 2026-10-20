@@ -184,6 +184,52 @@ impl PgIssuedRealmSnapshotArchive {
 
     /// Read only the object previously issued to this exact Account, then
     /// re-prove at the same read cut that it is still disclosable to it.
+    pub async fn by_actor_ref(
+        &self,
+        actor: &arkret_wire::ActorId,
+        realm_id: &arkret_wire::RealmId,
+        snapshot_id: &arkret_wire::RealmSnapshotId,
+        issuer: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Option<arkret_wire::RealmStateSnapshot>> {
+        let account_key = actor_key(actor)?;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *conn)
+                .await?;
+            let Some(row) = sql_query(
+                "SELECT snapshot.snapshot_json FROM realm_state_snapshots snapshot \
+                 JOIN realm_state_snapshot_issuances issued \
+                   ON issued.snapshot_id = snapshot.snapshot_id \
+                 WHERE snapshot.snapshot_id = $1 AND snapshot.realm_id = $2 \
+                   AND issued.account_id = $3",
+            )
+            .bind::<Text, _>(snapshot_id.as_str())
+            .bind::<Text, _>(realm_id.as_str())
+            .bind::<Text, _>(&account_key)
+            .get_result::<SnapshotJsonRow>(&mut *conn)
+            .await
+            .optional()?
+            else {
+                return Ok(None);
+            };
+            let snapshot: arkret_wire::RealmStateSnapshot =
+                serde_json::from_value(row.snapshot_json).map_err(PersistenceError::database)?;
+            if snapshot.snapshot_id != *snapshot_id
+                || snapshot.realm_id != *realm_id
+                || derived_snapshot_id(&snapshot)? != *snapshot_id
+            {
+                return Err(PersistenceError::Internal(
+                    "issued snapshot identity differs from stored index".to_owned(),
+                )
+                .into());
+            }
+            recheck_actor_disclosure_in_connection(conn, actor, issuer, &snapshot).await?;
+            Ok(Some(snapshot))
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
     pub async fn by_ref(
         &self,
         account: &arkret_wire::AccountId,
@@ -239,7 +285,20 @@ pub(crate) async fn issue_in_connection(
     account: &arkret_wire::AccountId,
     snapshot: &arkret_wire::RealmStateSnapshot,
 ) -> PersistenceResult<()> {
-    let account_key = account_key(account)?;
+    issue_actor_in_connection(
+        conn,
+        &arkret_wire::ActorId::account(account.clone()),
+        snapshot,
+    )
+    .await
+}
+
+pub(crate) async fn issue_actor_in_connection(
+    conn: &mut AsyncPgConnection,
+    actor: &arkret_wire::ActorId,
+    snapshot: &arkret_wire::RealmStateSnapshot,
+) -> PersistenceResult<()> {
+    let account_key = actor_key(actor)?;
     let body = serde_json::to_value(snapshot).map_err(PersistenceError::database)?;
     let generation = i64::try_from(snapshot.governance_generation).map_err(|_| {
         PersistenceError::SchemaViolation("snapshot generation exceeds storage range".to_owned())
@@ -306,7 +365,22 @@ pub(crate) async fn issue_head_in_connection(
     material: &coland_storage::RealmStateSnapshotMaterial,
     signed: arkret_wire::RealmStateSnapshot,
 ) -> PersistenceResult<arkret_wire::RealmStateSnapshot> {
-    let account_key = account_key(account)?;
+    issue_actor_head_in_connection(
+        conn,
+        &arkret_wire::ActorId::account(account.clone()),
+        material,
+        signed,
+    )
+    .await
+}
+
+pub(crate) async fn issue_actor_head_in_connection(
+    conn: &mut AsyncPgConnection,
+    actor: &arkret_wire::ActorId,
+    material: &coland_storage::RealmStateSnapshotMaterial,
+    signed: arkret_wire::RealmStateSnapshot,
+) -> PersistenceResult<arkret_wire::RealmStateSnapshot> {
+    let account_key = actor_key(actor)?;
     let generation = i64::try_from(material.governance_generation).map_err(|_| {
         PersistenceError::SchemaViolation("snapshot generation exceeds storage range".to_owned())
     })?;
@@ -356,7 +430,7 @@ pub(crate) async fn issue_head_in_connection(
     let issued = match issued {
         Some(existing) => existing,
         None => {
-            issue_in_connection(conn, account, &signed).await?;
+            issue_actor_in_connection(conn, actor, &signed).await?;
             signed
         }
     };
@@ -635,10 +709,27 @@ pub(crate) async fn require_snapshot_serving_cut(
     governance: &str,
     material: &coland_storage::RealmStateSnapshotMaterial,
 ) -> PersistenceResult<()> {
+    require_actor_snapshot_serving_cut(
+        conn,
+        &arkret_wire::ActorId::account(account.clone()),
+        issuer,
+        governance,
+        material,
+    )
+    .await
+}
+
+pub(crate) async fn require_actor_snapshot_serving_cut(
+    conn: &mut AsyncPgConnection,
+    actor: &arkret_wire::ActorId,
+    issuer: &arkret_wire::DidCoreId,
+    governance: &str,
+    material: &coland_storage::RealmStateSnapshotMaterial,
+) -> PersistenceResult<()> {
     if governance == issuer.as_str() {
         return Ok(());
     }
-    if &account.station_id != issuer {
+    if actor.fixed_route_service_id() != Some(issuer) {
         return Err(undisclosable(
             "the Account is not hosted by this member Station",
         ));
@@ -703,6 +794,21 @@ pub(crate) async fn recheck_disclosure_in_connection(
     issuer: &arkret_wire::DidCoreId,
     snapshot: &arkret_wire::RealmStateSnapshot,
 ) -> PersistenceResult<()> {
+    recheck_actor_disclosure_in_connection(
+        conn,
+        &arkret_wire::ActorId::account(account.clone()),
+        issuer,
+        snapshot,
+    )
+    .await
+}
+
+pub(crate) async fn recheck_actor_disclosure_in_connection(
+    conn: &mut AsyncPgConnection,
+    actor: &arkret_wire::ActorId,
+    issuer: &arkret_wire::DidCoreId,
+    snapshot: &arkret_wire::RealmStateSnapshot,
+) -> PersistenceResult<()> {
     let tenure =
         sql_query("SELECT service_id, generation FROM realm_authorities WHERE realm_id=$1")
             .bind::<Text, _>(snapshot.realm_id.as_str())
@@ -740,10 +846,10 @@ pub(crate) async fn recheck_disclosure_in_connection(
         retention_and_history_floor: snapshot.retention_and_history_floor.clone(),
     };
     let materials = crate::boxed_future(|| {
-        crate::snapshot_disclosure_gate::account_snapshot_candidates_in_connection(
+        crate::snapshot_disclosure_gate::actor_snapshot_candidates_in_connection(
             conn,
             &snapshot.realm_id,
-            account,
+            actor,
             vec![None, Some(original)],
         )
     })
@@ -752,7 +858,7 @@ pub(crate) async fn recheck_disclosure_in_connection(
     let [current_material, disclosed]: [coland_storage::RealmStateSnapshotMaterial; 2] = materials
         .try_into()
         .map_err(|_| undisclosable("the disclosure cut returned an unexpected candidate count"))?;
-    require_snapshot_serving_cut(conn, account, issuer, &tenure.service_id, &current_material)
+    require_actor_snapshot_serving_cut(conn, actor, issuer, &tenure.service_id, &current_material)
         .await?;
     let signer =
         arkret_identity::verification_method_did(snapshot.signature.verification_method.as_str())
@@ -801,7 +907,7 @@ pub(crate) async fn recheck_disclosure_in_connection(
             source_stream_ref,
             ..
         } = row
-            && watcher_actor_id != &arkret_wire::ActorId::account(account.clone())
+            && watcher_actor_id != &actor.clone()
             && !current_material.current_state_entries.iter().any(|current| matches!(
                 current,
                 arkret_wire::TypedCurrentRow::Value { selector: actual, source_stream_ref: source, .. }
@@ -2285,5 +2391,17 @@ mod tests {
                 .unwrap(),
             Some(handoff),
         );
+    }
+}
+
+fn actor_key(actor: &arkret_wire::ActorId) -> PersistenceResult<String> {
+    match actor {
+        arkret_wire::ActorId::Account { account_id } => account_key(account_id),
+        arkret_wire::ActorId::Realm { .. } => {
+            arkret_canonical::canonical_json_string(actor).map_err(PersistenceError::database)
+        }
+        _ => Err(undisclosable(
+            "Service actors do not receive member snapshots",
+        )),
     }
 }

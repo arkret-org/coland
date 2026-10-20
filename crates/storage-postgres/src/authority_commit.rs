@@ -1,3 +1,4 @@
+use chrono::Utc;
 use coland_storage::{
     AcceptedDeviceAuthorizationOutcome, AuthorityCommitStore, AuthorityCommitTransaction,
     AuthorityCommitWriteOutcome, CurrentRealmAuthority, ForwardAttemptRecord, ForwardAttemptStatus,
@@ -1400,7 +1401,7 @@ fn same_authority(left: &CurrentRealmAuthority, right: &CurrentRealmAuthority) -
 /// A committed change freezes every stream of its outgoing tenure. The
 /// authority row is already locked, so change admission and every writer
 /// have one linearization point; an exact accepted replay remains readable.
-async fn require_planned_handoff_write_in_connection(
+pub(crate) async fn require_planned_handoff_write_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     current: &CurrentRealmAuthority,
@@ -1813,6 +1814,11 @@ pub(crate) async fn commit_verified_pcr_typed_current_in_connection(
 /// connection. Generic admission is `None` and cannot write these kinds.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VerifiedPcrUnit {
+    RealmActorCreation,
+    RealmActorDevice,
+    RealmActorRecovery,
+    RealmActorOwner,
+    RealmActorGovernance,
     None,
     Device,
     RevokeProposal,
@@ -1912,8 +1918,33 @@ async fn commit_transaction_with_device_guard_inner(
     verified_unit: VerifiedPcrUnit,
     prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
-    let verified_pcr_device_unit = verified_unit == VerifiedPcrUnit::Device;
-    let verified_pcr_revoke_unit = verified_unit == VerifiedPcrUnit::RevokeProposal;
+    if transaction.event.kind == arkret_wire::EventKind::RealmActorCreate
+        && verified_unit != VerifiedPcrUnit::RealmActorCreation
+    {
+        return Err(PersistenceError::Conflict("realm_actor_creation_unit_required".into()).into());
+    }
+    if matches!(
+        transaction.event.scope_ref,
+        arkret_wire::ScopeRef::RealmControl { .. }
+    ) && !matches!(
+        verified_unit,
+        VerifiedPcrUnit::RealmActorCreation
+            | VerifiedPcrUnit::RealmActorDevice
+            | VerifiedPcrUnit::RealmActorRecovery
+            | VerifiedPcrUnit::RealmActorOwner
+            | VerifiedPcrUnit::RealmActorGovernance
+            | VerifiedPcrUnit::ManagedScopeProfile
+    ) {
+        return Err(PersistenceError::Conflict("realm_control_atomic_unit_required".into()).into());
+    }
+    let verified_pcr_device_unit = verified_unit == VerifiedPcrUnit::Device
+        || (verified_unit == VerifiedPcrUnit::RealmActorDevice
+            && transaction.event.kind == arkret_wire::EventKind::DeviceAuthorize
+            && transaction.event.actor_id.as_realm_actor_id().is_some());
+    let verified_pcr_revoke_unit = verified_unit == VerifiedPcrUnit::RevokeProposal
+        || (verified_unit == VerifiedPcrUnit::RealmActorOwner
+            && transaction.event.kind == arkret_wire::EventKind::DeviceRevoke
+            && transaction.event.actor_id.as_realm_actor_id().is_some());
     if matches!(
         transaction.event.kind,
         arkret_wire::EventKind::ConsentGrant | arkret_wire::EventKind::ConsentRevoke
@@ -1975,7 +2006,6 @@ async fn commit_transaction_with_device_guard_inner(
         || matches!(
             transaction.event.kind,
             arkret_wire::EventKind::AppletRegistration
-                | arkret_wire::EventKind::AppletManagedActorProvision
         ))
         && verified_unit != VerifiedPcrUnit::Applet
     {
@@ -2252,6 +2282,26 @@ pub(crate) async fn check_self_producer_guard_in_connection(
         )
         .await;
     }
+    if let SelfProducerCommitGuard::AppletManagedDevice(guard) = guard {
+        let current =
+            crate::realm_actor_device_authority::for_event_in_connection(conn, event, committed_at)
+                .await
+                .map_err(PgTransactionError::into_persistence)?
+                .ok_or_else(|| {
+                    PersistenceError::Conflict(
+                        "unauthenticated: native managed Device authority is absent".into(),
+                    )
+                })?;
+        if current != guard.authority
+            || event.scope_ref != guard.effective_scope
+            || event.applet_id.as_ref() != Some(&current.applet_id)
+        {
+            return Err(PersistenceError::Conflict(
+                "capability_denied: managed Device instance or exact scope changed".into(),
+            ));
+        }
+        return Ok(());
+    }
     let actor = event.actual_signer().as_account_id().ok_or_else(|| {
         PersistenceError::Conflict("self Event producer is not an account".to_owned())
     })?;
@@ -2264,28 +2314,8 @@ pub(crate) async fn check_self_producer_guard_in_connection(
         .verification_method;
     match guard {
         SelfProducerCommitGuard::MimiFacade { .. } => unreachable!("MIMI guard dispatched above"),
-        SelfProducerCommitGuard::AppletManagedDevice(guard) => {
-            let current = crate::pcr_applet_device_authority::for_event_in_connection(
-                conn,
-                event,
-                committed_at,
-            )
-            .await
-            .map_err(PgTransactionError::into_persistence)?
-            .ok_or_else(|| {
-                PersistenceError::Conflict(
-                    "unauthenticated: native managed Device authority is absent".into(),
-                )
-            })?;
-            if current != guard.authority
-                || event.scope_ref != guard.effective_scope
-                || event.applet_id.as_ref() != Some(&current.applet_id)
-            {
-                return Err(PersistenceError::Conflict(
-                    "capability_denied: managed Device instance or exact scope changed".into(),
-                ));
-            }
-            Ok(())
+        SelfProducerCommitGuard::AppletManagedDevice(_) => {
+            unreachable!("managed Device dispatched above")
         }
         SelfProducerCommitGuard::HumanDevice(selector)
         | SelfProducerCommitGuard::HumanDeviceEvidence { selector, .. } => {
@@ -2964,6 +2994,20 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         crate::account_content_delivery::acquire(&self.pool, account, station, input).await
     }
 
+    async fn acquire_realm_actor_content_delivery(
+        &self,
+        actor: &arkret_wire::ActorId,
+        station: &arkret_wire::DidCoreId,
+        input: &coland_storage::AccountContentDeliveryInput,
+    ) -> PersistenceResult<Option<Box<dyn coland_storage::AccountContentDeliveryGuard>>> {
+        let endpoint = input.applet_endpoint.as_ref().ok_or_else(|| {
+            PersistenceError::Conflict(
+                "capability_denied: native delivery endpoint is required".into(),
+            )
+        })?;
+        crate::applet_content_delivery::acquire(&self.pool, actor, station, endpoint, input).await
+    }
+
     async fn acquire_native_message_reply_preparation(
         &self,
         request: coland_storage::NativeMessageReplyPreparation<'_>,
@@ -3060,13 +3104,162 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         )
         .await
     }
+    async fn realm_actor_control_replay(
+        &self,
+        event: &arkret_wire::Event,
+        carrier: &coland_storage::AppletControlCarrier,
+        request_digest: &arkret_wire::Hash,
+    ) -> PersistenceResult<Option<arkret_wire::RealmCommit>> {
+        event.validate_for_submit_structural().map_err(invalid)?;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            if event.actor_id != carrier.actor_id
+                || event.scope_ref
+                    != (arkret_wire::ScopeRef::RealmControl {
+                        realm_id: event.realm_id.clone(),
+                    })
+            {
+                return Err(invalid("control replay subject differs").into());
+            }
+            let current = crate::realm_actor_control_transport::current_carrier(
+                conn,
+                &carrier.actor_id,
+                &carrier.governance_service_id,
+                Utc::now(),
+            )
+            .await?;
+            if &current != carrier {
+                return Err(invalid("control replay current changed").into());
+            }
+            let Some(original) = crate::committed_disclosure::accepted_full_event_in_connection(
+                conn,
+                &event.event_id,
+            )
+            .await?
+            else {
+                return Ok(None);
+            };
+            if original.event != *event {
+                return Err(invalid("duplicate_conflict: control replay original differs").into());
+            }
+            if crate::agent_producer_signer_keys::producer_source_for_commit_in_connection(
+                conn,
+                event,
+                &original.commit,
+            )
+            .await?
+            .is_none()
+            {
+                return Err(invalid("control replay has no retained signing original").into());
+            }
+            let outcome = arkret_wire::AuthoritySubmitOutcome::Accepted {
+                status: arkret_wire::AuthorityCommitStatus::Committed,
+                commit: original.commit.clone(),
+            };
+            crate::realm_actor_material::retain_outcome(
+                conn,
+                event,
+                &event.actor_id,
+                request_digest,
+                &outcome,
+                original.commit.committed_at,
+            )
+            .await?;
+            Ok(Some(original.commit))
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn read_realm_actor_material(
+        &self,
+        request: &arkret_models_integration::RealmActorMaterialRequest,
+        caller: &coland_storage::RealmActorMaterialCaller,
+        governor: &arkret_wire::DidCoreId,
+        sign: coland_storage::RealmActorMaterialSigner<'_>,
+    ) -> PersistenceResult<arkret_models_integration::RealmActorMaterialOutcome> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::realm_actor_material::read(conn, request, caller, governor, sign)
+                .await
+                .map_err(Into::into)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn applet_registration_for_realm(
+        &self,
+        realm: &arkret_wire::RealmId,
+        applet: &arkret_wire::AppletId,
+    ) -> PersistenceResult<arkret_models_integration::AppletRegistrationPayload> {
+        let mut conn = pg_conn(&self.pool).await?;
+        crate::managed_message_actor::registration_for_scope(&mut conn, realm, applet).await
+    }
+
+    async fn realm_actor_control_carrier(
+        &self,
+        metadata: &arkret_models_integration::RealmActorControlHttpMetadata,
+        governor: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<coland_storage::AppletControlCarrier> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::realm_actor_control_transport::carrier(conn, metadata, governor, Utc::now())
+                .await
+                .map_err(Into::into)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn consume_realm_actor_control_nonce(
+        &self,
+        expected: &coland_storage::AppletControlCarrier,
+        metadata: &arkret_models_integration::RealmActorControlHttpMetadata,
+        retain_until: chrono::DateTime<Utc>,
+    ) -> PersistenceResult<()> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::realm_actor_control_transport::consume_nonce(
+                conn,
+                expected,
+                metadata,
+                retain_until,
+            )
+            .await
+            .map_err(Into::into)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn prepare_realm_actor_control_signer_fact(
+        &self,
+        event: &arkret_wire::Event,
+        at: chrono::DateTime<Utc>,
+    ) -> PersistenceResult<
+        arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact,
+    > {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &event.realm_id)
+                .await?;
+            crate::realm_actor_control_source::signer_fact(conn, event, at)
+                .await
+                .map_err(Into::into)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
     async fn prepare_service_signer_fact(
         &self,
         event: &arkret_wire::Event,
         guard: &coland_storage::AppletEventProducerGuard,
         at: chrono::DateTime<chrono::Utc>,
-    ) -> PersistenceResult<arkret_models_collaboration::authority_commit::ServiceHistoricalSignerFact>
-    {
+    ) -> PersistenceResult<
+        arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact,
+    > {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             crate::managed_message_actor::prepare_applet_producer_in_connection(
@@ -3074,6 +3267,21 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             )
             .await
             .map_err(Into::into)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn prepare_realm_device_signer_fact(
+        &self,
+        event: &arkret_wire::Event,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<
+        arkret_models_collaboration::authority_commit::RealmDeviceHistoricalSignerFact,
+    > {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::realm_actor_device_authority::signer_fact(conn, event, at).await
         })
         .await
         .map_err(PgTransactionError::into_persistence)
@@ -3181,15 +3389,197 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         crate::mls_group_state_material_read::read(&self.pool, request, issuer, source_peer).await
     }
 
+    async fn applet_realm_actor_creations(
+        &self,
+        realm: &arkret_wire::RealmId,
+        applet: &arkret_wire::AppletId,
+    ) -> PersistenceResult<Vec<arkret_wire::CommittedEventFullView>> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::realm_actor_creation::inventory(conn, realm, applet).await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+    async fn realm_actor_creation_replay(
+        &self,
+        event: &arkret_wire::Event,
+        digest: &arkret_wire::Hash,
+        governor: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Option<arkret_wire::RealmCommit>> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::realm_actor_creation::replay(conn, event, digest, governor).await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+    async fn admit_realm_actor_creation(
+        &self,
+        transaction: &AuthorityCommitTransaction,
+        producer: &coland_storage::AppletEventProducerGuard,
+        prepared: Option<&coland_storage::EventApprovalCommit>,
+        digest: &arkret_wire::Hash,
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
+        transaction.validate().map_err(invalid)?;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::realm_actor_creation::admit(conn, transaction, producer, prepared, digest).await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn realm_actor_recovery_replay(
+        &self,
+        event: &arkret_wire::Event,
+        digest: &arkret_wire::Hash,
+        governor: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Option<arkret_wire::RealmCommit>> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::realm_actor_recovery::replay(conn, event, digest, governor).await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+    async fn admit_realm_actor_recovery(
+        &self,
+        transaction: &AuthorityCommitTransaction,
+        producer: &coland_storage::AppletEventProducerGuard,
+        publication: Option<&arkret_models_identity::ResolutionCommitment>,
+        digest: &arkret_wire::Hash,
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
+        transaction.validate().map_err(invalid)?;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::realm_actor_recovery::admit(conn, transaction, producer, publication, digest)
+                .await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn admit_realm_actor_owner_control(
+        &self,
+        transaction: &AuthorityCommitTransaction,
+        carrier: &coland_storage::AppletControlCarrier,
+        publication: Option<&arkret_models_identity::ResolutionCommitment>,
+        manager: Option<&coland_storage::AppletEventProducerGuard>,
+        prepared: Option<&coland_storage::EventApprovalCommit>,
+        digest: &arkret_wire::Hash,
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
+        transaction.validate().map_err(invalid)?;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::realm_actor_owner_control::admit(
+                conn,
+                transaction,
+                carrier,
+                publication,
+                manager,
+                prepared,
+                digest,
+            )
+            .await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn sweep_realm_actor_device_revocations(
+        &self,
+        governor: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<usize> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::realm_actor_device_revoke::sweep(conn, governor).await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn finish_realm_actor_device_revocation(
+        &self,
+        actor: &arkret_wire::ActorId,
+        authority: &CurrentRealmAuthority,
+        terminal: &arkret_models_integration::RealmActorOperationOutcome,
+    ) -> PersistenceResult<()> {
+        let subject = actor
+            .as_realm_actor_id()
+            .ok_or_else(|| invalid("Realm actor required"))?;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &subject.realm_id)
+                .await?;
+            crate::realm_actor_device_revoke::finish(conn, actor, authority, terminal).await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn admit_realm_actor_profile(
+        &self,
+        transaction: &AuthorityCommitTransaction,
+        carrier: &coland_storage::AppletControlCarrier,
+        prepared: Option<&coland_storage::EventApprovalCommit>,
+        request_digest: &arkret_wire::Hash,
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
+        transaction.validate().map_err(invalid)?;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            let outcome =
+                crate::applet_scope_profiles::admit_control(conn, transaction, carrier, prepared)
+                    .await?;
+            let arkret_wire::AuthoritySubmitOutcome::Accepted { commit, .. } = &outcome else {
+                return Err(invalid("Profile admission has no accepted Commit").into());
+            };
+            let stored = arkret_wire::AuthoritySubmitOutcome::Accepted {
+                status: arkret_wire::AuthorityCommitStatus::Committed,
+                commit: commit.clone(),
+            };
+            crate::realm_actor_material::retain_outcome(
+                conn,
+                &transaction.event,
+                &transaction.event.actor_id,
+                request_digest,
+                &stored,
+                commit.committed_at,
+            )
+            .await?;
+            Ok(outcome)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
     async fn admit_applet_managed_device_authorization(
         &self,
         transaction: &AuthorityCommitTransaction,
         carrier: &coland_storage::AppletControlCarrier,
+        request_digest: &arkret_wire::Hash,
     ) -> PersistenceResult<AcceptedDeviceAuthorizationOutcome> {
         transaction.validate().map_err(invalid)?;
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            crate::pcr_applet_device::admit(conn, transaction, carrier).await
+            let outcome =
+                crate::realm_actor_device_control::admit(conn, transaction, carrier).await?;
+            let (AcceptedDeviceAuthorizationOutcome::Committed(commit)
+            | AcceptedDeviceAuthorizationOutcome::Duplicate(commit)) = &outcome;
+            let stored = arkret_wire::AuthoritySubmitOutcome::Accepted {
+                status: arkret_wire::AuthorityCommitStatus::Committed,
+                commit: commit.clone(),
+            };
+            crate::realm_actor_material::retain_outcome(
+                conn,
+                &transaction.event,
+                &transaction.event.actor_id,
+                request_digest,
+                &stored,
+                commit.committed_at,
+            )
+            .await?;
+            Ok(outcome)
         })
         .await
         .map_err(PgTransactionError::into_persistence)
@@ -4785,7 +5175,6 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             let producer = native.and_then(|(source, _)| match source {
                 coland_storage::ManagedMlsRefusalSource::Local(guard) => Some(SelfProducerCommitGuard::AppletManagedDevice(Box::new(guard.clone()))),
-                coland_storage::ManagedMlsRefusalSource::Forwarded(_) => None,
             });
             crate::agent_management_review::lock_candidate_current_realms_in_connection(conn, event, None, producer.as_ref(), &[]).await?;
             let current = locked_authority(conn, &event.realm_id).await?
@@ -5599,6 +5988,18 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .await
     }
 
+    async fn issued_realm_state_snapshot_for_actor(
+        &self,
+        realm_id: &arkret_wire::RealmId,
+        actor: &arkret_wire::ActorId,
+        snapshot_id: &arkret_wire::RealmSnapshotId,
+        issuer: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Option<arkret_wire::RealmStateSnapshot>> {
+        crate::issued_realm_snapshots::PgIssuedRealmSnapshotArchive::new(self.pool.clone())
+            .by_actor_ref(actor, realm_id, snapshot_id, issuer)
+            .await
+    }
+
     async fn issued_realm_state_snapshot(
         &self,
         realm_id: &arkret_wire::RealmId,
@@ -5648,6 +6049,15 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     ) -> PersistenceResult<arkret_wire::StreamScanOutcome> {
         let mut conn = pg_conn(&self.pool).await?;
         stream_page_in_connection(&mut conn, request).await
+    }
+
+    async fn scan_stream_for_actor(
+        &self,
+        request: &arkret_wire::StreamScanRequest,
+        actor: &arkret_wire::ActorId,
+        issuer: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<coland_storage::AccountStreamScan> {
+        crate::account_stream_scan::scan_stream_for_actor(&self.pool, request, actor, issuer).await
     }
 
     async fn scan_stream_for_account(
@@ -5709,6 +6119,22 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     ) -> PersistenceResult<coland_storage::AccountRealmStreamAuthorizationCut> {
         crate::self_current_reads::realm_stream_subscription_cut(
             &self.pool, realm_id, account, issuer,
+        )
+        .await
+    }
+
+    async fn exact_current_result_for_actor(
+        &self,
+        request: &arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadRequestBody,
+        actor: &arkret_wire::ActorId,
+        issuer: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<
+        coland_storage::SelfExactCurrentRead<
+            arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadOutcome,
+        >,
+    > {
+        crate::self_current_reads::exact_current_result_for_actor(
+            &self.pool, request, actor, issuer,
         )
         .await
     }
@@ -6162,4 +6588,136 @@ impl PgAuthorityCommitStore {
         .await
         .map_err(PgTransactionError::into_persistence)
     }
+}
+
+/// The Service producer, grant, approvals and candidate have been checked at the locked Realm cut.
+pub(crate) async fn commit_realm_actor_creation_in_connection(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
+) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
+    if transaction.event.kind != arkret_wire::EventKind::RealmActorCreate {
+        return Err(invalid("Realm actor creation unit requires its exact Event kind").into());
+    }
+    let outcome = commit_transaction_in_connection_with_device_guard(
+        conn,
+        transaction,
+        VerifiedPcrUnit::RealmActorCreation,
+        prepared,
+    )
+    .await?;
+    if matches!(outcome, AuthorityCommitWriteOutcome::Committed) {
+        crate::realm_actor_control::commit_creation(conn, &transaction.event, &transaction.commit)
+            .await?;
+    }
+    Ok(outcome)
+}
+
+/// Called only after the Realm Device unit has checked the original control
+/// signature, possession proof, full current CAS and scope authorization.
+pub(crate) async fn commit_verified_realm_device_in_connection(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
+    if transaction.event.kind != arkret_wire::EventKind::DeviceAuthorize
+        || transaction.event.actor_id.as_realm_actor_id().is_none()
+        || !matches!(
+            transaction.event.scope_ref,
+            arkret_wire::ScopeRef::RealmControl { .. }
+        )
+    {
+        return Err(invalid("Realm Device unit requires its exact private authorization").into());
+    }
+    commit_transaction_in_connection_with_device_guard(
+        conn,
+        transaction,
+        VerifiedPcrUnit::RealmActorDevice,
+        None,
+    )
+    .await
+}
+
+/// The dedicated recovery unit has checked native proof, locked CAS and fences.
+pub(crate) async fn commit_verified_realm_recovery_in_connection(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
+    if !matches!(
+        transaction.event.kind,
+        arkret_wire::EventKind::RealmActorRecoveryBegin
+            | arkret_wire::EventKind::RealmActorControlReset
+    ) || !matches!(
+        transaction.event.scope_ref,
+        arkret_wire::ScopeRef::RealmControl { .. }
+    ) {
+        return Err(invalid("Realm recovery unit requires its exact private Event").into());
+    }
+    commit_transaction_in_connection_with_device_guard(
+        conn,
+        transaction,
+        VerifiedPcrUnit::RealmActorRecovery,
+        None,
+    )
+    .await
+}
+
+/// Only the owner-control unit can publish these private state transitions.
+pub(crate) async fn commit_verified_realm_owner_in_connection(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
+) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
+    if !matches!(
+        transaction.event.kind,
+        arkret_wire::EventKind::RealmActorStatusSet
+            | arkret_wire::EventKind::RealmActorDevicesReset
+            | arkret_wire::EventKind::RealmActorControlUpdate
+            | arkret_wire::EventKind::RealmActorManagerChange
+            | arkret_wire::EventKind::DeviceRevoke
+    ) || transaction.event.actor_id.as_realm_actor_id().is_none()
+        || !matches!(
+            transaction.event.scope_ref,
+            arkret_wire::ScopeRef::RealmControl { .. }
+        )
+    {
+        return Err(invalid("owner control unit requires its private command").into());
+    }
+    commit_transaction_in_connection_with_device_guard(
+        conn,
+        transaction,
+        VerifiedPcrUnit::RealmActorOwner,
+        prepared,
+    )
+    .await
+}
+
+/// Only the guarded Account unit may publish private governance effects.
+pub(crate) async fn commit_realm_actor_governance_in_connection(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
+) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
+    if !crate::realm_actor_governance::is_command(&transaction.event)
+        || transaction.event.executed_by.is_some()
+        || !matches!(
+            transaction.event.scope_ref,
+            arkret_wire::ScopeRef::RealmControl { .. }
+        )
+        || transaction
+            .producer_signer_fact
+            .as_ref()
+            .and_then(|f| f.as_account_device())
+            .is_none()
+    {
+        return Err(
+            invalid("private governance requires its real Account Device signer fact").into(),
+        );
+    }
+    commit_transaction_in_connection_with_device_guard(
+        conn,
+        transaction,
+        VerifiedPcrUnit::RealmActorGovernance,
+        prepared,
+    )
+    .await
 }

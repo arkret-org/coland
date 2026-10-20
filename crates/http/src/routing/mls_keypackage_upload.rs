@@ -2,7 +2,7 @@
 use super::*;
 
 pub(super) struct UploadAuthority {
-    pub owner_account_id: arkret_wire::AccountId,
+    pub owner_actor_id: arkret_wire::ActorId,
     pub device_id: Option<String>,
     pub trust_binding: Option<KeyPackageTrustBinding>,
     pub publish_trust_anchor: coland_domain::reducer::mls::MlsKeyPackagePublishTrustAnchor,
@@ -22,8 +22,8 @@ pub(super) async fn resolve(
     body.validate_shape().map_err(AppError::param_invalid)?;
     if let Some(native) = native {
         let authority = &native.authority;
-        if body.actor_id != arkret_wire::ActorId::account(authority.account_id.clone())
-            || body.principal_id != authority.account_id.principal_id
+        if body.actor_id != authority.actor_id
+            || &body.principal_id != authority.actor_id.signing_principal_id()
             || body.device_id.as_ref() != Some(&authority.device_id)
             || body.agent_verification_method.is_some()
             || body.agent_key_authorize_event_id.is_some()
@@ -50,7 +50,7 @@ pub(super) async fn resolve(
             arkret_canonical::ed25519_pubkey_to_did_key_multibase(&authority.public_key);
         if !crate::routing::identity::device_signature_kid_points_to_device_key(
             body.endpoint_signature.kid.as_str(),
-            authority.account_id.principal_id.as_str(),
+            authority.actor_id.signing_principal_id().as_str(),
             &format!("did:key:{fingerprint}"),
         ) {
             return Err(AppError::param_invalid(
@@ -68,9 +68,9 @@ pub(super) async fn resolve(
         .map_err(|_| AppError::param_invalid("device_signature_invalid"))?;
         let guard =
             crate::routing::identity::applet_managed_device::scope_guard(state, native).await?;
-        let original = authority.selector.authorization_ref.event_id.to_string();
+        let original = authority.authorization_ref.event_id.to_string();
         return Ok(UploadAuthority {
-            owner_account_id: authority.account_id.clone(),
+            owner_actor_id: authority.actor_id.clone(),
             device_id: Some(authority.device_id.to_string()),
             trust_binding: Some(KeyPackageTrustBinding::device_authorize(original.clone())),
             publish_trust_anchor:
@@ -121,15 +121,6 @@ pub(super) async fn resolve(
                 "device_id must match the calling session",
             ));
         }
-        // `device-lifecycle.md` 15: an Applet-managed principal's delegated
-        // device loses new KeyPackage publication the moment its install is
-        // fenced, without waiting for an `ak.device.revoke`. The accepted
-        // authorize still standing in the PCR is explicitly not enough.
-        crate::routing::extensions::applet_bridge::ensure_delegated_device_not_fenced(
-            state,
-            &principal_id,
-        )
-        .await?;
         let binding =
             current_keypackage_trust_binding(state, &principal_id, device_id.as_str()).await?;
         let anchor = match (
@@ -217,7 +208,7 @@ pub(super) async fn resolve(
     }
 
     Ok(UploadAuthority {
-        owner_account_id,
+        owner_actor_id: arkret_wire::ActorId::account(owner_account_id),
         device_id,
         trust_binding,
         publish_trust_anchor,

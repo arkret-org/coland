@@ -9,6 +9,7 @@ pub trait WebvhStore: Send + Sync {
     async fn get_embedded_webvh_document_by_local_id(
         &self,
         local_id: &str,
+        expected_log_url: &str,
     ) -> PersistenceResult<Option<WebvhDocumentRecord>>;
     async fn put_document(&self, record: WebvhDocumentRecord) -> PersistenceResult<()>;
     async fn append_log_event(&self, event: WebvhLogRecord) -> PersistenceResult<()>;

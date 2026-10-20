@@ -40,7 +40,7 @@ pub struct MlsKeyPackagePublishProjection {
     pub keypackage_ref: String,
     pub keypackage_digest: String,
     /// Complete Account owner; never a service-local SQL identity.
-    pub owner_account_id: arkret_wire::AccountId,
+    pub owner_actor_id: arkret_wire::ActorId,
     pub effective_scope: Option<arkret_wire::ScopeRef>,
     pub actor_id: String,
     pub device_id: Option<String>,
@@ -97,7 +97,7 @@ pub fn prepare_keypackage_upload_projection(
         id: projection.keypackage_id.clone(),
         keypackage_ref: projection.keypackage_ref.clone(),
         keypackage_digest: projection.keypackage_digest.clone(),
-        owner_account_id: projection.owner_account_id.clone(),
+        owner_actor_id: projection.owner_actor_id.clone(),
         effective_scope: projection.effective_scope.clone(),
         actor_id: projection.actor_id.clone(),
         device_id: projection.device_id.clone(),

@@ -96,12 +96,12 @@ pub(crate) fn member_shared_event_kind(kind: &EventKind) -> bool {
     }) && !matches!(
         kind.as_str(),
         arkret_wire::event_kind_str::IDENTITY_ACCOUNTABILITY_GRANT
-            | arkret_wire::event_kind_str::APPLET_MANAGED_ACTOR_PROVISION
             | arkret_wire::event_kind_str::AGENT_PROVISION
             | arkret_wire::CapabilityActionId::AGENT_KEY_AUTHORIZE
             | arkret_wire::CapabilityActionId::AGENT_KEY_REVOKE
             | arkret_wire::event_kind_str::SIDECAR_CREATE
-    ) && !kind.as_str().starts_with("ak.device.")
+    ) && !kind.as_str().starts_with("ak.realm.actor.")
+        && !kind.as_str().starts_with("ak.device.")
         && !kind.as_str().starts_with("ak.self.agent.")
         && !kind.as_str().starts_with("ak.consent.")
 }
@@ -110,6 +110,8 @@ pub(crate) fn member_shared_event_kind(kind: &EventKind) -> bool {
 /// written by an admitted Event, so it must be classified here before any
 /// Snapshot is signed again.
 const AUDITED_FAMILIES: &[&str] = &[
+    // Private control currents are excluded from ordinary snapshot SQL.
+    "realm_actor_current_results",
     "relation_current_results",
     // A reaction set is state disclosed with its target Message's exact scope.
     "message_reactions_current_results",
@@ -431,7 +433,15 @@ pub async fn issue_account_snapshot(
     issuer: &arkret_wire::DidCoreId,
     sign: coland_storage::RealmStateSnapshotSigner<'_>,
 ) -> PersistenceResult<Option<arkret_wire::RealmStateSnapshot>> {
-    issue_snapshot(pool, realm_id, account, issuer, sign, None).await
+    issue_snapshot(
+        pool,
+        realm_id,
+        &ActorId::account(account.clone()),
+        issuer,
+        sign,
+        None,
+    )
+    .await
 }
 
 /// Native scope selection is part of the material signed at this cut, never
@@ -446,7 +456,7 @@ pub(crate) async fn issue_native_snapshot(
     let result = issue_snapshot(
         pool,
         endpoint.effective_scope.realm_id(),
-        &endpoint.authority.account_id,
+        &endpoint.authority.actor_id,
         issuer,
         sign,
         Some((endpoint, expiry)),
@@ -462,7 +472,7 @@ pub(crate) async fn issue_native_snapshot(
 async fn issue_snapshot(
     pool: &PgPool,
     realm_id: &RealmId,
-    account: &AccountId,
+    actor: &ActorId,
     issuer: &arkret_wire::DidCoreId,
     sign: coland_storage::RealmStateSnapshotSigner<'_>,
     native: Option<(
@@ -499,7 +509,7 @@ async fn issue_snapshot(
                 return Ok(None);
             };
             let Some(material) =
-                account_snapshot_material_in_connection(conn, realm_id, account).await?
+                actor_snapshot_material_in_connection(conn, realm_id, actor).await?
             else {
                 return Ok(None);
             };
@@ -517,9 +527,9 @@ async fn issue_snapshot(
             if i64::try_from(material.governance_generation).ok() != Some(tenure.generation) {
                 return Err(rejected("material generation differs from the locked tenure").into());
             }
-            crate::issued_realm_snapshots::require_snapshot_serving_cut(
+            crate::issued_realm_snapshots::require_actor_snapshot_serving_cut(
                 conn,
-                account,
+                actor,
                 issuer,
                 &tenure.service_id,
                 &material,
@@ -527,7 +537,12 @@ async fn issue_snapshot(
             .await?;
             if tenure.service_id != issuer.as_str() {
                 return crate::issued_realm_snapshots::served_current_snapshot(
-                    conn, account, issuer, &material,
+                    conn,
+                    actor.as_account_id().ok_or_else(|| {
+                        rejected("Realm actor reads require the governing Station")
+                    })?,
+                    issuer,
+                    &material,
                 )
                 .await?
                 .map(Some)
@@ -551,8 +566,8 @@ async fn issue_snapshot(
                 .into());
             }
             coland_storage::enforce_inline_realm_state_snapshot_capacity(&snapshot)?;
-            let issued = crate::issued_realm_snapshots::issue_head_in_connection(
-                conn, account, &material, snapshot,
+            let issued = crate::issued_realm_snapshots::issue_actor_head_in_connection(
+                conn, actor, &material, snapshot,
             )
             .await?;
             if native_proofs.as_ref().is_some_and(|proofs| {
@@ -878,7 +893,15 @@ pub(crate) async fn account_snapshot_material_in_connection(
     realm_id: &RealmId,
     account: &AccountId,
 ) -> PersistenceResult<Option<coland_storage::RealmStateSnapshotMaterial>> {
-    account_snapshot_candidate_in_connection(conn, realm_id, account, None).await
+    actor_snapshot_material_in_connection(conn, realm_id, &ActorId::account(account.clone())).await
+}
+
+pub(crate) async fn actor_snapshot_material_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm_id: &RealmId,
+    actor: &ActorId,
+) -> PersistenceResult<Option<coland_storage::RealmStateSnapshotMaterial>> {
+    actor_snapshot_candidate_in_connection(conn, realm_id, actor, None).await
 }
 
 /// Reapply current authority to original rows without replacing their values.
@@ -890,8 +913,23 @@ pub(crate) async fn account_snapshot_candidate_in_connection(
     account: &AccountId,
     candidate: Option<coland_storage::RealmStateSnapshotMaterial>,
 ) -> PersistenceResult<Option<coland_storage::RealmStateSnapshotMaterial>> {
+    actor_snapshot_candidate_in_connection(
+        conn,
+        realm_id,
+        &ActorId::account(account.clone()),
+        candidate,
+    )
+    .await
+}
+
+pub(crate) async fn actor_snapshot_candidate_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm_id: &RealmId,
+    actor: &ActorId,
+    candidate: Option<coland_storage::RealmStateSnapshotMaterial>,
+) -> PersistenceResult<Option<coland_storage::RealmStateSnapshotMaterial>> {
     let materials = crate::boxed_future(|| {
-        account_snapshot_candidates_in_connection(conn, realm_id, account, vec![candidate])
+        actor_snapshot_candidates_in_connection(conn, realm_id, actor, vec![candidate])
     })
     .await?;
     match materials {
@@ -912,6 +950,21 @@ pub(crate) async fn account_snapshot_candidates_in_connection(
     account: &AccountId,
     candidates: Vec<Option<coland_storage::RealmStateSnapshotMaterial>>,
 ) -> PersistenceResult<Option<Vec<coland_storage::RealmStateSnapshotMaterial>>> {
+    actor_snapshot_candidates_in_connection(
+        conn,
+        realm_id,
+        &ActorId::account(account.clone()),
+        candidates,
+    )
+    .await
+}
+
+pub(crate) async fn actor_snapshot_candidates_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm_id: &RealmId,
+    actor: &ActorId,
+    candidates: Vec<Option<coland_storage::RealmStateSnapshotMaterial>>,
+) -> PersistenceResult<Option<Vec<coland_storage::RealmStateSnapshotMaterial>>> {
     if candidates.is_empty() {
         return Err(rejected("a disclosure cut requires at least one candidate"));
     }
@@ -919,7 +972,7 @@ pub(crate) async fn account_snapshot_candidates_in_connection(
         conn,
         realm_id,
         None,
-        &ActorId::account(account.clone()),
+        &actor.clone(),
     )
     .await?;
     let Some(authority_material) =
@@ -941,10 +994,11 @@ pub(crate) async fn account_snapshot_candidates_in_connection(
     {
         return Err(rejected("an unaudited typed-current family is installed"));
     }
-    let caller = ActorId::account(account.clone());
-    let controller = if crate::committed_disclosure::ordinary_agent_read_ceiling(
-        crate::account_stream_scan::realm_purpose(conn, realm_id).await?,
-    ) {
+    let caller = actor.clone();
+    let controller = if actor.as_account_id().is_some()
+        && crate::committed_disclosure::ordinary_agent_read_ceiling(
+            crate::account_stream_scan::realm_purpose(conn, realm_id).await?,
+        ) {
         crate::realm_authorization_cut::owned_controller_snapshot_in_connection(
             conn,
             realm_id,
@@ -987,12 +1041,7 @@ pub(crate) async fn account_snapshot_candidates_in_connection(
         });
         let (material, fresh_facts) = if let Some((_, facts)) = reusable {
             (
-                disclose_snapshot_candidate_at_facts(
-                    account,
-                    &authority_material,
-                    candidate,
-                    facts,
-                )?,
+                disclose_snapshot_candidate_at_facts(actor, &authority_material, candidate, facts)?,
                 None,
             )
         } else {
@@ -1000,7 +1049,7 @@ pub(crate) async fn account_snapshot_candidates_in_connection(
                 snapshot_candidate_disclosure_facts_in_connection(
                     conn,
                     realm_id,
-                    account,
+                    actor,
                     &authority_material,
                     candidate.as_ref().unwrap_or(&authority_material),
                     controller.as_ref(),
@@ -1008,7 +1057,7 @@ pub(crate) async fn account_snapshot_candidates_in_connection(
             })
             .await?;
             let material = disclose_snapshot_candidate_at_facts(
-                account,
+                actor,
                 &authority_material,
                 candidate,
                 &facts,
@@ -1047,7 +1096,9 @@ pub(crate) async fn account_snapshot_candidates_in_connection(
             conn,
             &sources,
             controller,
-            account,
+            actor
+                .as_account_id()
+                .ok_or_else(|| rejected("owned Agent reader must be an Account"))?,
             chrono::Utc::now(),
             arkret_wire::CapabilityActionId::ObjectRead,
         )
@@ -1064,19 +1115,18 @@ struct SnapshotCandidateDisclosureFacts {
 async fn snapshot_candidate_disclosure_facts_in_connection(
     conn: &mut AsyncPgConnection,
     realm_id: &RealmId,
-    account: &AccountId,
+    actor: &ActorId,
     authority_material: &coland_storage::RealmStateSnapshotMaterial,
     material: &coland_storage::RealmStateSnapshotMaterial,
     controller_account: Option<&AccountId>,
 ) -> PersistenceResult<SnapshotCandidateDisclosureFacts> {
     let mut facts =
-        disclosure_facts_in_connection(conn, realm_id, account, authority_material, material)
-            .await?;
+        disclosure_facts_in_connection(conn, realm_id, actor, authority_material, material).await?;
     let owner = if let Some(controller_account) = controller_account {
         let owner_facts = disclosure_facts_in_connection(
             conn,
             realm_id,
-            controller_account,
+            &ActorId::account(controller_account.clone()),
             authority_material,
             material,
         )
@@ -1132,7 +1182,7 @@ async fn snapshot_candidate_disclosure_facts_in_connection(
 }
 
 fn disclose_snapshot_candidate_at_facts(
-    account: &AccountId,
+    actor: &ActorId,
     authority_material: &coland_storage::RealmStateSnapshotMaterial,
     candidate: Option<coland_storage::RealmStateSnapshotMaterial>,
     facts: &SnapshotCandidateDisclosureFacts,
@@ -1154,7 +1204,7 @@ fn disclose_snapshot_candidate_at_facts(
                     | CurrentSelector::RealmAuthorityRoot
                     | CurrentSelector::RealmHistoryAccess
             ) || matches!(selector, CurrentSelector::MemberState { actor_id }
-                    if actor_id.as_account_id() == Some(account)
+                    if actor_id == actor
                         || facts.owner.as_ref().is_some_and(|(owner, _)| actor_id.as_account_id() == Some(owner)));
             if required
                 && !material.current_state_entries.iter().any(|present| {
@@ -1171,7 +1221,7 @@ fn disclose_snapshot_candidate_at_facts(
     let mut disclosed = if let Some((controller_account, owner_facts)) = &facts.owner {
         let owner_material =
             disclose_to_account(material.clone(), controller_account, owner_facts)?;
-        let mut agent_material = disclose_to_account(material, account, &facts.caller)?;
+        let mut agent_material = disclose_to_actor(material, actor, &facts.caller)?;
         agent_material
             .visible_stream_heads
             .retain(|head| owner_material.visible_stream_heads.contains(head));
@@ -1180,9 +1230,9 @@ fn disclose_snapshot_candidate_at_facts(
             .retain(|row| owner_material.current_state_entries.contains(row));
         // Even an exact row subset must independently retain its required
         // genesis, membership, subjects and complete current-family closure.
-        disclose_to_account(agent_material, account, &facts.caller)?
+        disclose_to_actor(agent_material, actor, &facts.caller)?
     } else {
-        disclose_to_account(material, account, &facts.caller)?
+        disclose_to_actor(material, actor, &facts.caller)?
     };
     if let Some(original_rows) = original_rows {
         disclosed
@@ -1195,7 +1245,7 @@ fn disclose_snapshot_candidate_at_facts(
 async fn disclosure_facts_in_connection(
     conn: &mut AsyncPgConnection,
     realm_id: &RealmId,
-    account: &AccountId,
+    actor: &ActorId,
     authority_material: &coland_storage::RealmStateSnapshotMaterial,
     material: &coland_storage::RealmStateSnapshotMaterial,
 ) -> PersistenceResult<DisclosureFacts> {
@@ -1245,7 +1295,7 @@ async fn disclosure_facts_in_connection(
     let caller_floor = crate::account_stream_scan::snapshot_realm_floor_in_connection(
         conn,
         realm_id,
-        &ActorId::account(account.clone()),
+        &actor.clone(),
     )
     .await?;
     let mut message_streams = std::collections::BTreeMap::new();
@@ -1298,7 +1348,7 @@ async fn disclosure_facts_in_connection(
             );
         }
     }
-    let caller = ActorId::account(account.clone());
+    let caller = actor.clone();
     // circle.md section 9.1: effective Circle membership compares the two
     // typed currents of this one cut -- the caller's parent Realm
     // member_state and each Circle join's bound parent revision.
@@ -1513,7 +1563,7 @@ async fn disclosure_facts_in_connection(
                     || serde_json::from_value::<AccountId>(value["controller_account_id"].clone())
                         .ok()
                         .as_ref()
-                        == Some(account)
+                        == actor.as_account_id()
                 {
                     owned_sidecars.insert(sidecar_id.clone());
                     if let Some(floor) = floor {
@@ -1674,8 +1724,16 @@ async fn call_creation_fact(
 /// it whole. Invisible families are omitted, and content rows respect the
 /// Account's independent readable floor on each disclosed stream.
 pub(crate) fn disclose_to_account(
-    mut material: coland_storage::RealmStateSnapshotMaterial,
+    material: coland_storage::RealmStateSnapshotMaterial,
     account: &AccountId,
+    facts: &DisclosureFacts,
+) -> PersistenceResult<coland_storage::RealmStateSnapshotMaterial> {
+    disclose_to_actor(material, &ActorId::account(account.clone()), facts)
+}
+
+pub(crate) fn disclose_to_actor(
+    mut material: coland_storage::RealmStateSnapshotMaterial,
+    actor: &ActorId,
     facts: &DisclosureFacts,
 ) -> PersistenceResult<coland_storage::RealmStateSnapshotMaterial> {
     if facts.undisclosed_family_row {
@@ -1688,7 +1746,7 @@ pub(crate) fn disclose_to_account(
             "accepted Event kind {kind} is outside the disclosure subset"
         )));
     }
-    let caller = ActorId::account(account.clone());
+    let caller = actor.clone();
     let Some(floor) = &facts.caller_floor else {
         return Err(rejected(
             "the Account is not a joined member with a provable readable floor",
@@ -3355,6 +3413,7 @@ mod tests {
     #[test]
     fn circle_original_recheck_uses_current_realm_basis_without_disclosing_it() {
         let (account, authority, caller) = circle_fixture();
+        let actor = ActorId::account(account);
         let mut original = authority.clone();
         original.current_state_entries.retain(|row| {
             matches!(
@@ -3374,7 +3433,7 @@ mod tests {
             owner: None,
         };
         let disclosed = disclose_snapshot_candidate_at_facts(
-            &account,
+            &actor,
             &authority,
             Some(original.clone()),
             &facts,
@@ -3393,20 +3452,15 @@ mod tests {
             )
         });
         assert!(
-            disclose_snapshot_candidate_at_facts(
-                &account,
-                &missing,
-                Some(original.clone()),
-                &facts
-            )
-            .is_err(),
+            disclose_snapshot_candidate_at_facts(&actor, &missing, Some(original.clone()), &facts)
+                .is_err(),
             "the historical slice cannot manufacture missing authority facts"
         );
         let (_, _, mut caller) = circle_fixture();
         caller.caller_floor = None;
         assert!(
             disclose_snapshot_candidate_at_facts(
-                &account,
+                &actor,
                 &authority,
                 Some(original),
                 &SnapshotCandidateDisclosureFacts {

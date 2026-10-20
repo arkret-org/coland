@@ -483,9 +483,12 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
             let Ok(actor) = serde_json::from_str::<arkret_wire::ActorId>(&row.candidate) else {
                 continue;
             };
+            let Some(station) = actor.fixed_route_service_id() else {
+                continue;
+            };
             push_unique_observation(
                 &mut observations,
-                actor.route_service_id().clone(),
+                station.clone(),
                 affected_source(&row.source)?,
                 observed_at,
             );

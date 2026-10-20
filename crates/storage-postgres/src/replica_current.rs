@@ -982,6 +982,15 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
             continue;
         }
         match selector {
+            S::AppletRegistration { applet_id } => {
+                let registration: arkret_models_integration::AppletRegistrationPayload =
+                    serde_json::from_value(value.clone()).map_err(malformed)?;
+                if registration.applet_id != *applet_id {
+                    return Err(malformed("Applet registration differs from its selector"));
+                }
+                // The signed row is retained in replica_authorization_rows.
+                // A replica must not invent the private accepted install instance.
+            }
             S::ActorProfile {actor_profile_id} => {
                 crate::applet_scope_profiles::validate_disclosed(actor_profile_id,source_stream_ref,value)?;
             }
@@ -1299,9 +1308,10 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
             | S::InviteDirectedInvitee { .. }
             | S::MlsGroup { .. } => {}
             _ => {
-                return Err(malformed(
-                    "a row family is outside the member bootstrap disclosure subset",
-                ));
+                return Err(malformed(format!(
+                    "row family {} is outside the member bootstrap disclosure subset",
+                    serde_json::to_value(selector).map_err(malformed)?["kind"]
+                )));
             }
         }
     }

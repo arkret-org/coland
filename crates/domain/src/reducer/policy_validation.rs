@@ -448,6 +448,7 @@ pub(crate) fn normalize_policy_did_method(value: &str) -> Option<&str> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PrincipalAdmissionSubjectClass {
+    RealmManaged,
     Human,
     Agent,
     Service,
@@ -488,7 +489,9 @@ pub(crate) fn principal_admission_gate_allows(
                 return false;
             }
         }
-        PrincipalAdmissionSubjectClass::Agent | PrincipalAdmissionSubjectClass::Service => {
+        PrincipalAdmissionSubjectClass::Agent
+        | PrincipalAdmissionSubjectClass::Service
+        | PrincipalAdmissionSubjectClass::RealmManaged => {
             if json_list_contains(gate, "denied_actor_ids", actor_value.as_ref())
                 || (gate.contains_key("allowed_actor_ids")
                     && !json_list_contains(gate, "allowed_actor_ids", actor_value.as_ref()))

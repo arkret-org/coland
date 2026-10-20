@@ -121,7 +121,7 @@ pub(super) async fn submit_signal(
             realm_id.as_str().to_owned(),
             envelope.signal_class,
         ));
-        relay_signal_to_remote_services(state, &envelope, &scope_authority.recipient_actors);
+        relay_signal_to_remote_services(state, &envelope, &scope_authority.recipient_actors).await;
     }
 
     coland_http::result::json_ok(SignalSubmitOutcome {
@@ -140,12 +140,15 @@ pub(super) async fn submit_signal(
 /// acknowledgement semantics. Each destination is attempted once in a
 /// detached task; failure is diagnostic-only and never changes the sender's
 /// opaque accepted outcome.
-fn relay_signal_to_remote_services(
+async fn relay_signal_to_remote_services(
     state: &AppState,
     envelope: &SignalEnvelope,
     recipients: &[arkret_wire::ActorId],
 ) {
-    for destination_id in remote_recipient_services(state, recipients) {
+    let Ok(destinations) = remote_recipient_services(state, recipients).await else {
+        return;
+    };
+    for destination_id in destinations {
         let state = state.clone();
         let request = SignalRelayRequest {
             realm_id: envelope.realm_id.clone(),
@@ -170,15 +173,18 @@ fn relay_signal_to_remote_services(
     }
 }
 
-fn remote_recipient_services(
+async fn remote_recipient_services(
     state: &AppState,
     recipients: &[arkret_wire::ActorId],
-) -> BTreeSet<String> {
-    recipients
-        .iter()
-        .filter(|actor| actor.route_service_id().as_str() != state.service_id().as_str())
-        .map(|actor| actor.route_service_id().to_string())
-        .collect()
+) -> Result<BTreeSet<String>, AppError> {
+    let mut destinations = BTreeSet::new();
+    for actor in recipients {
+        let station = crate::routing::actor_delivery_station(state, actor).await?;
+        if station != state.service_core_id() {
+            destinations.insert(station.to_string());
+        }
+    }
+    Ok(destinations)
 }
 
 pub(crate) async fn admit_signal(
@@ -732,7 +738,10 @@ pub(crate) async fn accept_peer_signal(
     let sender_actor = &envelope.sender_actor_id;
     let authority = verify_signal_scope_authority(state, envelope, sender_actor).await?;
     let has_local_recipient = authority.recipient_actors.iter().any(|actor| {
-        actor != sender_actor && actor.route_service_id().as_str() == state.service_id().as_str()
+        actor != sender_actor
+            && actor
+                .as_account_id()
+                .is_some_and(|account| account.station_id.as_str() == state.service_id().as_str())
     });
     if !has_local_recipient {
         return Ok(());
@@ -777,7 +786,10 @@ pub(crate) async fn admit_outbound_signal(
     let actor = &envelope.sender_actor_id;
     admit_signal_outer(state, state.service_id(), envelope).await?;
     let authority = verify_signal_scope_authority(state, envelope, actor).await?;
-    if !remote_recipient_services(state, &authority.recipient_actors).contains(destination_id) {
+    if !remote_recipient_services(state, &authority.recipient_actors)
+        .await?
+        .contains(destination_id)
+    {
         return Err(signal_invalid(
             "Signal destination has no current eligible member",
         ));
@@ -818,7 +830,11 @@ pub(crate) async fn admit_signal_outer(
         return Err(signal_invalid("signal envelope is already expired"));
     }
     let sender_actor = envelope.sender_actor_id.clone();
-    if sender_actor.route_service_id().as_str() != source_id {
+    if sender_actor
+        .as_account_id()
+        .map(|account| account.station_id.as_str())
+        != Some(source_id)
+    {
         return Err(signal_invalid(
             "Signal sender route does not match the authenticated source Station",
         ));
@@ -993,7 +1009,12 @@ pub(crate) async fn admitted_signal_frame(
         .ok_or_else(|| signal_invalid("recipient is not an account"))?;
     admit_signal_outer(
         state,
-        envelope.sender_actor_id.route_service_id().as_str(),
+        envelope
+            .sender_actor_id
+            .as_account_id()
+            .ok_or_else(|| signal_invalid("Signal requires an Account sender"))?
+            .station_id
+            .as_str(),
         &envelope,
     )
     .await?;
@@ -1010,7 +1031,8 @@ pub(crate) async fn admitted_signal_frame(
                 chrono::Utc::now().timestamp_millis() as u64
             ),
             realm_id: envelope.realm_id.clone(),
-            recipient_account_id: recipient.clone(),
+            recipient_account_id: Some(recipient.clone()),
+            recipient_actor_id: None,
             queries: vec![selector],
         };
         let outcome = crate::routing::identity::current_signer_evidence::resolve_self_signer_keys(
@@ -1037,7 +1059,12 @@ pub(crate) async fn admitted_signal_frame(
     // Re-check time/scope after a possible remote round trip and before emitting this frame.
     admit_signal_outer(
         state,
-        envelope.sender_actor_id.route_service_id().as_str(),
+        envelope
+            .sender_actor_id
+            .as_account_id()
+            .ok_or_else(|| signal_invalid("Signal requires an Account sender"))?
+            .station_id
+            .as_str(),
         &envelope,
     )
     .await?;
@@ -1081,7 +1108,12 @@ pub(crate) async fn admitted_signal_frame(
                 .await?;
         admit_signal_outer(
             state,
-            envelope.sender_actor_id.route_service_id().as_str(),
+            envelope
+                .sender_actor_id
+                .as_account_id()
+                .ok_or_else(|| signal_invalid("Signal requires an Account sender"))?
+                .station_id
+                .as_str(),
             &envelope,
         )
         .await?;

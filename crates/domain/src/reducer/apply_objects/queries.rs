@@ -631,6 +631,9 @@ impl ProjectionState {
                     let actor = serde_json::from_str::<arkret_wire::ActorId>(member)
                         .map_err(|_| "gate_check_failed")?;
                     let subject_class = match &actor {
+                        arkret_wire::ActorId::Realm { .. } => {
+                            PrincipalAdmissionSubjectClass::RealmManaged
+                        }
                         arkret_wire::ActorId::Service { .. } => {
                             PrincipalAdmissionSubjectClass::Service
                         }

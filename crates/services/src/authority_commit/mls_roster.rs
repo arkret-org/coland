@@ -220,6 +220,7 @@ fn verify_historical_proofs(facts: &MlsRosterAuthorityFacts) -> bool {
     for record in &facts.records {
         if let MlsRosterRecord::Add {
             attestation,
+            claim_issuer_resolution,
             attestor_resolution,
             ..
         } = record
@@ -236,7 +237,14 @@ fn verify_historical_proofs(facts: &MlsRosterAuthorityFacts) -> bool {
                     attestation.attested_at,
                 )
                 .is_err()
-                || arkret::verify_mls_attest_add_request(proof, attestor_resolution).is_err()
+                || arkret::verify_mls_attest_add_request(
+                    proof,
+                    claim_issuer_resolution
+                        .as_ref()
+                        .unwrap_or(attestor_resolution),
+                    attestor_resolution,
+                )
+                .is_err()
             {
                 return false;
             }

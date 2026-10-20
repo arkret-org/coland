@@ -104,6 +104,10 @@ pub(super) fn self_router() -> Router {
 /// `ak.peer.committed_event.read.scan.v1`, under the signed `peer` tree.
 pub(super) fn peer_router() -> Router {
     Router::new()
+        .push(
+            Router::with_path("realm-actors/material")
+                .post(super::identity::realm_actor_account_material::peer_read),
+        )
         .push(Router::with_path("streams/scan").post(peer_scan_stream))
         .push(Router::with_path("realm-authority/handoff").post(peer_handoff))
         .push(
@@ -539,13 +543,18 @@ pub(crate) async fn submit_self(req: &mut Request, depot: &Depot, res: &mut Resp
             return crate::error::render_error_code(ErrorCode::InternalError, res, &error);
         }
     };
-    if req.headers().contains_key("source-service-id") {
-        return submit_applet_control(app_state, req, res).await;
+    if let Ok(control) = depot
+        .get_typed::<crate::routing::identity::realm_actor_control::VerifiedRealmActorControl>(
+    ) {
+        return submit_applet_control(app_state, req, control, res).await;
     }
     if let Ok(device) = depot
         .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>(
     ) {
         return submit_managed_device(app_state, req, device, res).await;
+    }
+    if req.headers().contains_key("source-service-id") {
+        return submit_realm_actor_service(app_state, req, res).await;
     }
     let Some(session) = crate::routing::auth_or_render(app_state, req, res).await else {
         #[cfg(feature = "conformance-harness")]
@@ -679,22 +688,35 @@ pub(crate) async fn submit_self(req: &mut Request, depot: &Depot, res: &mut Resp
     render_result(res, result);
 }
 
-async fn submit_applet_control(app_state: &AppState, req: &mut Request, res: &mut Response) {
-    let source = match crate::routing::extensions::applet_bridge::verify_self_control_service(
-        app_state, req,
-    )
-    .await
+async fn submit_realm_actor_service(state: &AppState, req: &mut Request, res: &mut Response) {
+    let operation = arkret_wire::ServiceOperationId::SelfEventsCommandSubmitV1;
+    if req.headers().get_all("arkret-operation").iter().count() != 1
+        || req
+            .headers()
+            .get("arkret-operation")
+            .and_then(|value| value.to_str().ok())
+            != Some(operation.as_str())
     {
-        Ok(source) => source,
-        Err(error) => {
-            return crate::error::render_error(
-                res,
-                error.http_status(),
-                error.wire_code(),
-                &error.message,
-            );
-        }
-    };
+        return crate::error::render_error_code(
+            ErrorCode::CapabilityDenied,
+            res,
+            "creation operation differs from route",
+        );
+    }
+    let service =
+        match crate::routing::extensions::applet_bridge::verify_self_control_service(state, req)
+            .await
+        {
+            Ok(service) => service,
+            Err(error) => {
+                return crate::routing::render_error(
+                    res,
+                    error.http_status(),
+                    error.wire_code(),
+                    &error.message,
+                );
+            }
+        };
     let Some((request, _)) = parse_exact_closed_body::<SelfAuthoritySubmitRequest>(req, res).await
     else {
         return;
@@ -705,50 +727,141 @@ async fn submit_applet_control(app_state: &AppState, req: &mut Request, res: &mu
             .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
         let SelfAuthoritySubmitRequest::Event(submission) = &request else {
             return Err(ServiceError::SchemaViolation(
-                "Service control ingress requires one original Event submission".into(),
+                "Service creation requires one original Event".into(),
             ));
         };
-        if submission.approval_signatures.is_some()
-            || submission.event.kind != arkret_wire::EventKind::DeviceAuthorize
+        let event = &submission.event;
+        if !matches!(
+            event.kind,
+            arkret_wire::EventKind::RealmActorCreate
+                | arkret_wire::EventKind::RealmActorRecoveryBegin
+                | arkret_wire::EventKind::RealmActorControlReset
+        ) || event.actor_id != arkret_wire::ActorId::service(service.service_id.clone())
+            || event.executed_by.is_some()
+            || service.expires_at <= chrono::Utc::now()
         {
-            return Err(ServiceError::SchemaViolation(
-                "this Service control branch only admits managed device authorization".into(),
+            return Err(ServiceError::Conflict(
+                "capability_denied: creation does not match its authenticated Service".into(),
             ));
         }
-        let method = arkret_wire::DidUrl::new(
-            crate::routing::federation::federation_service_signature_key_id(
-                app_state.service_did().as_str(),
-            ),
+        let digest = arkret_wire::Hash::new(
+            arkret_canonical::canonical_sha256(&request)
+                .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?,
         )
         .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
-        let outcome = app_state
-            .authority_commits()
-            .admit_applet_managed_device_authorization(
-                &submission.event,
-                &source,
-                &app_state.service_core_id(),
-                method,
-                app_state.notary_signing_key().as_ref(),
+        let recovery = matches!(
+            event.kind,
+            arkret_wire::EventKind::RealmActorRecoveryBegin
+                | arkret_wire::EventKind::RealmActorControlReset
+        );
+        if recovery && submission.approval_signatures.is_some() {
+            return Err(ServiceError::SchemaViolation(
+                "recovery uses its registered maintenance authority".into(),
+            ));
+        }
+        let replay = if recovery {
+            state
+                .authority_commits()
+                .realm_actor_recovery_replay(event, &digest, &state.service_core_id())
+                .await?
+        } else {
+            state
+                .authority_commits()
+                .realm_actor_creation_replay(event, &digest, &state.service_core_id())
+                .await?
+        };
+        let outcome = if let Some(commit) = replay {
+            arkret_wire::AuthoritySubmitOutcome::Accepted {
+                status: arkret_wire::AuthorityCommitStatus::Duplicate,
+                commit,
+            }
+        } else {
+            let target = arkret_models_integration::ManagementReviewTarget::Event {
+                event: Box::new(event.clone()),
+            };
+            let current =
+                crate::routing::extensions::applet_bridge::prepare_event_current(state, &target)
+                    .await?
+                    .ok_or_else(|| {
+                        ServiceError::Conflict(
+                            "revision_unavailable: creation Service document absent".into(),
+                        )
+                    })?;
+            let producer = coland_storage::AppletEventProducerGuard {
+                service_did_document: current.service_did_document,
+            };
+            let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+            let approvals =
+                crate::approval_admission::prepare_event_approvals(state, submission, at).await?;
+            let method = arkret_wire::DidUrl::new(
+                crate::routing::federation::federation_service_signature_key_id(
+                    state.service_did().as_str(),
+                ),
             )
-            .await?;
-        use coland_services::authority_commit::AuthorityEventAdmissionOutcome;
-        let outcome = match outcome {
-            AuthorityEventAdmissionOutcome::Committed(commit) => {
-                arkret_wire::AuthoritySubmitOutcome::Accepted {
-                    status: arkret_wire::AuthorityCommitStatus::Committed,
-                    commit,
-                }
-            }
-            AuthorityEventAdmissionOutcome::Duplicate(commit) => {
-                arkret_wire::AuthoritySubmitOutcome::Accepted {
-                    status: arkret_wire::AuthorityCommitStatus::Duplicate,
-                    commit,
-                }
-            }
-            AuthorityEventAdmissionOutcome::NotCurrentAuthority => {
-                return Err(ServiceError::Conflict(
-                    "stale_realm_authority: managed PCR is not governed here".into(),
-                ));
+            .map_err(|e| ServiceError::Internal(e.to_string()))?;
+            if recovery {
+                use coland_services::identity::DidResolverPort as _;
+                let publication = if event.kind == arkret_wire::EventKind::RealmActorControlReset {
+                    let payload: arkret_models_integration::RealmActorControlResetPayload =
+                        serde_json::from_value(serde_json::json!(event.payload))
+                            .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
+                    let (_, entries, _) =
+                        payload.published_method_history_evidence.webvh_material();
+                    let did = entries
+                        .last()
+                        .and_then(|entry| entry.get("state"))
+                        .and_then(|state| state.get("id"))
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            ServiceError::SchemaViolation("published recovery DID absent".into())
+                        })?;
+                    let did = arkret_wire::Did::new(did.to_owned())
+                        .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
+                    let resolver =
+                        crate::state::did_resolver_chain::build_coland_did_resolver(state.config());
+                    let current = resolver
+                        .resolve_current_external_webvh_state(&did)
+                        .await
+                        .map_err(|e| {
+                            ServiceError::Conflict(format!(
+                                "temporarily_unavailable: recovery publication unavailable: {e}"
+                            ))
+                        })?;
+                    Some(arkret_models_identity::ResolutionCommitment {
+                        did: current.did,
+                        version_id: current.version_id,
+                        method_history_head: current.log_head_digest.to_string(),
+                    })
+                } else {
+                    None
+                };
+                state
+                    .authority_commits()
+                    .admit_realm_actor_recovery(
+                        event,
+                        &producer,
+                        publication.as_ref(),
+                        &state.service_core_id(),
+                        method,
+                        state.notary_signing_key().as_ref(),
+                        at,
+                        &digest,
+                    )
+                    .await?
+            } else {
+                state
+                    .authority_commits()
+                    .admit_realm_actor_creation(
+                        event,
+                        &producer,
+                        &state.service_core_id(),
+                        method,
+                        state.notary_signing_key().as_ref(),
+                        at,
+                        approvals.as_ref(),
+                        &digest,
+                    )
+                    .await?
             }
         };
         let outcome =
@@ -761,8 +874,230 @@ async fn submit_applet_control(app_state: &AppState, req: &mut Request, res: &mu
         Ok(outcome)
     }
     .await;
+    no_store(res);
+    render_result(res, result);
+}
+
+async fn submit_applet_control(
+    app_state: &AppState,
+    req: &mut Request,
+    control: &crate::routing::identity::realm_actor_control::VerifiedRealmActorControl,
+    res: &mut Response,
+) {
+    let source = &control.carrier;
+    let Some((request, _)) = parse_exact_closed_body::<SelfAuthoritySubmitRequest>(req, res).await
+    else {
+        return;
+    };
+    let result = async {
+        request
+            .validate()
+            .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
+        let SelfAuthoritySubmitRequest::Event(submission) = &request else {
+            return Err(ServiceError::SchemaViolation(
+                "Realm control ingress requires one original Event submission".into(),
+            ));
+        };
+        if control.operation != arkret_wire::ServiceOperationId::SelfEventsCommandSubmitV1
+            || control.expires_at <= chrono::Utc::now()
+            || submission.event.actor_id != source.actor_id
+            || !matches!(
+                submission.event.kind,
+                arkret_wire::EventKind::DeviceAuthorize
+                    | arkret_wire::EventKind::DeviceRevoke
+                    | arkret_wire::EventKind::RealmActorStatusSet
+                    | arkret_wire::EventKind::RealmActorDevicesReset
+                    | arkret_wire::EventKind::RealmActorControlUpdate
+                    | arkret_wire::EventKind::RealmActorManagerChange
+                    | arkret_wire::EventKind::ProfileCreate
+                    | arkret_wire::EventKind::ProfileUpdate
+            )
+            || (!matches!(
+                submission.event.kind,
+                arkret_wire::EventKind::ProfileCreate
+                    | arkret_wire::EventKind::ProfileUpdate
+                    | arkret_wire::EventKind::RealmActorManagerChange
+            ) && submission.approval_signatures.is_some())
+        {
+            return Err(ServiceError::SchemaViolation(
+                "this control command does not match the authenticated subject".into(),
+            ));
+        }
+        let method = arkret_wire::DidUrl::new(
+            crate::routing::federation::federation_service_signature_key_id(
+                app_state.service_did().as_str(),
+            ),
+        )
+        .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
+        let request_digest = arkret_wire::Hash::new(
+            arkret_canonical::canonical_sha256(&request)
+                .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?,
+        )
+        .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+        let replay = app_state
+            .authority_commits()
+            .realm_actor_control_replay(&submission.event, source, &request_digest)
+            .await?;
+        let outcome = if let Some(commit) = replay {
+            arkret_wire::AuthoritySubmitOutcome::Accepted {
+                status: arkret_wire::AuthorityCommitStatus::Duplicate,
+                commit,
+            }
+        } else if matches!(
+            submission.event.kind,
+            arkret_wire::EventKind::ProfileCreate | arkret_wire::EventKind::ProfileUpdate
+        ) {
+            let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+            let prepared =
+                crate::approval_admission::prepare_event_approvals(app_state, submission, at)
+                    .await?;
+            app_state
+                .authority_commits()
+                .admit_realm_actor_profile(
+                    &submission.event,
+                    source,
+                    &app_state.service_core_id(),
+                    method,
+                    app_state.notary_signing_key().as_ref(),
+                    at,
+                    prepared.as_ref(),
+                    &request_digest,
+                )
+                .await?
+        } else if matches!(
+            submission.event.kind,
+            arkret_wire::EventKind::RealmActorStatusSet
+                | arkret_wire::EventKind::RealmActorDevicesReset
+                | arkret_wire::EventKind::RealmActorControlUpdate
+                | arkret_wire::EventKind::RealmActorManagerChange
+                | arkret_wire::EventKind::DeviceRevoke
+        ) {
+            let publication = if matches!(
+                submission.event.kind,
+                arkret_wire::EventKind::RealmActorControlUpdate
+                    | arkret_wire::EventKind::RealmActorManagerChange
+            ) {
+                use coland_services::identity::DidResolverPort as _;
+                let next_resolution =
+                    if submission.event.kind == arkret_wire::EventKind::RealmActorManagerChange {
+                        serde_json::from_value::<
+                            arkret_models_integration::RealmActorManagerChangePayload,
+                        >(serde_json::json!(submission.event.payload))
+                        .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?
+                        .next_resolution
+                    } else {
+                        serde_json::from_value::<
+                            arkret_models_integration::RealmActorControlUpdatePayload,
+                        >(serde_json::json!(submission.event.payload))
+                        .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?
+                        .next_resolution
+                    };
+                let resolver =
+                    crate::state::did_resolver_chain::build_coland_did_resolver(app_state.config());
+                let current = resolver
+                    .resolve_current_external_webvh_state(&next_resolution.did)
+                    .await
+                    .map_err(|e| {
+                        ServiceError::Conflict(format!(
+                            "temporarily_unavailable: control publication unavailable: {e}"
+                        ))
+                    })?;
+                Some(arkret_models_identity::ResolutionCommitment {
+                    did: current.did,
+                    version_id: current.version_id,
+                    method_history_head: current.log_head_digest.to_string(),
+                })
+            } else {
+                None
+            };
+            let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+            let (manager, prepared) = if submission.event.kind
+                == arkret_wire::EventKind::RealmActorManagerChange
+            {
+                let target =
+                    arkret_models_integration::management_review::ManagementReviewTarget::Event {
+                        event: Box::new(submission.event.clone()),
+                    };
+                let current = crate::routing::extensions::applet_bridge::prepare_event_current(
+                    app_state, &target,
+                )
+                .await?
+                .ok_or_else(|| {
+                    ServiceError::Conflict("receiving Service document unavailable".into())
+                })?;
+                let prepared =
+                    crate::approval_admission::prepare_event_approvals(app_state, submission, at)
+                        .await?;
+                (
+                    Some(coland_storage::AppletEventProducerGuard {
+                        service_did_document: current.service_did_document,
+                    }),
+                    prepared,
+                )
+            } else {
+                (None, None)
+            };
+            app_state
+                .authority_commits()
+                .admit_realm_actor_owner_control(
+                    &submission.event,
+                    source,
+                    publication.as_ref(),
+                    manager.as_ref(),
+                    prepared.as_ref(),
+                    &app_state.service_core_id(),
+                    method,
+                    app_state.notary_signing_key().as_ref(),
+                    at,
+                    &request_digest,
+                )
+                .await?
+        } else {
+            let outcome = app_state
+                .authority_commits()
+                .admit_applet_managed_device_authorization(
+                    &submission.event,
+                    &source,
+                    &app_state.service_core_id(),
+                    method,
+                    app_state.notary_signing_key().as_ref(),
+                    &request_digest,
+                )
+                .await?;
+            use coland_services::authority_commit::AuthorityEventAdmissionOutcome;
+            let outcome = match outcome {
+                AuthorityEventAdmissionOutcome::Committed(commit) => {
+                    arkret_wire::AuthoritySubmitOutcome::Accepted {
+                        status: arkret_wire::AuthorityCommitStatus::Committed,
+                        commit,
+                    }
+                }
+                AuthorityEventAdmissionOutcome::Duplicate(commit) => {
+                    arkret_wire::AuthoritySubmitOutcome::Accepted {
+                        status: arkret_wire::AuthorityCommitStatus::Duplicate,
+                        commit,
+                    }
+                }
+                AuthorityEventAdmissionOutcome::NotCurrentAuthority => {
+                    return Err(ServiceError::Conflict(
+                        "stale_realm_authority: subject Realm is not governed here".into(),
+                    ));
+                }
+            };
+            outcome
+        };
+        let outcome =
+            arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::Ordinary(
+                outcome,
+            );
+        outcome
+            .validate_for_request(&request)
+            .map_err(invalid_application_output)?;
+        Ok(outcome)
+    }
+    .await;
     if let Err(error @ (ServiceError::Database(_) | ServiceError::Internal(_))) = &result {
-        tracing::error!(error = %error, "managed PCR control submission failed internally");
+        tracing::error!(error = %error, "Realm control submission failed internally");
     }
     render_result(res, result);
 }
@@ -893,8 +1228,12 @@ async fn native_stream_scan(
         return Err(unavailable());
     }
     let result = state
-        .authority()
-        .scan_stream_for_account(&device.authority.account_id, request.clone())
+        .authority_commits()
+        .scan_stream_for_actor(
+            &request,
+            &device.authority.actor_id,
+            &state.service_core_id(),
+        )
         .await
         .map_err(|_| unavailable())?;
     let coland_storage::AccountStreamScan::Page(outcome) = result else {

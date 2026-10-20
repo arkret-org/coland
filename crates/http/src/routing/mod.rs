@@ -145,3 +145,27 @@ mod operation_conformance_tests;
 mod canonical_conformance_vectors;
 
 pub use consent_private::spawn_effect_publication_worker;
+
+/// Account/Service routes are fixed; a Realm subject always uses its accepted current governor.
+pub(crate) async fn actor_delivery_station(
+    state: &crate::state::AppState,
+    actor: &arkret_wire::ActorId,
+) -> Result<arkret_wire::DidCoreId, coland_http::error::AppError> {
+    if let Some(station) = actor.fixed_route_service_id() {
+        return Ok(station.clone());
+    }
+    let subject = actor
+        .as_realm_actor_id()
+        .ok_or_else(|| coland_http::error::AppError::param_invalid("invalid Actor route"))?;
+    let authority = state
+        .authority_commits()
+        .current_authority(&subject.realm_id)
+        .await
+        .map_err(|_| {
+            crate::app_error!(TemporarilyUnavailable, "Realm governance route unavailable")
+        })?
+        .ok_or_else(|| {
+            crate::app_error!(TemporarilyUnavailable, "Realm governance route unavailable")
+        })?;
+    Ok(authority.service_id)
+}

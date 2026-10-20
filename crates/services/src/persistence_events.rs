@@ -931,7 +931,7 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
         let rows = self.0.mls_key_packages().snapshot_all().await?;
         let mut retired = 0;
         for row in rows.into_iter().filter(|row| {
-            row.owner_account_id == owner_account_id
+            row.owner_actor_id == arkret_wire::ActorId::account(owner_account_id.clone())
                 && row.claimed_by_mls_group_id.is_none()
                 && row.consumed_at.is_none()
         }) {

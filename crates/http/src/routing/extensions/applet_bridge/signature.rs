@@ -76,13 +76,21 @@ pub(super) async fn require_authority_material_signature(
     }
 }
 
+pub(crate) struct VerifiedAppletService {
+    pub service_id: arkret_wire::DidCoreId,
+    pub verification_method: arkret_wire::DidUrl,
+    pub public_key: [u8; 32],
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
 pub(crate) async fn verify_self_control_service(
     state: &AppState,
     req: &mut Request,
-) -> Result<coland_storage::AppletControlCarrier, AppError> {
+) -> Result<VerifiedAppletService, AppError> {
     if req.headers().contains_key("authorization")
         || req.headers().contains_key("dpop")
         || req.headers().contains_key("arkret-managed-device")
+        || req.headers().contains_key("arkret-realm-actor-control")
     {
         return Err(AppError::unauthenticated(
             "Service control authentication cannot mix credentials",
@@ -127,7 +135,7 @@ pub(crate) async fn verify_self_control_service(
     )
     .map_err(|e| applet_verification_error(HttpMessageVerificationError::Policy(e)))?;
     let key = authority_material_current_service_key(state, source.as_str(), &input.key_id).await?;
-    http_signature::verify_signed_canonical_json_request(
+    let verified = http_signature::verify_signed_canonical_json_request(
         req,
         &crate::routing::federation::signature_target_uri(req, state),
         &crate::routing::federation::signature_authority(req, state),
@@ -136,11 +144,13 @@ pub(crate) async fn verify_self_control_service(
         &policy,
     )
     .map_err(applet_verification_error)?;
-    Ok(coland_storage::AppletControlCarrier {
+    Ok(VerifiedAppletService {
         service_id: source,
         verification_method: arkret_wire::DidUrl::new(input.key_id)
             .map_err(|e| applet_signature_error_invalid(e.to_string()))?,
         public_key: key.to_bytes(),
+        expires_at: chrono::DateTime::from_timestamp(verified.signature_input.expires, 0)
+            .ok_or_else(|| applet_signature_error_invalid("invalid signature expiry"))?,
     })
 }
 

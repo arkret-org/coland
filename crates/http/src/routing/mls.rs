@@ -350,16 +350,18 @@ async fn peer_mls_attest_add(
     request.validate_claim_binding().map_err(|error| {
         super::events::peer::schema_violation(format!("invalid MLS Add attestation: {error}"))
     })?;
-    let attestor_resolution = mls_roster_signature::verify_peer_attest_add_signatures(
-        state,
-        &peer.source_service_id,
-        &request,
-    )
-    .await?;
+    let (attestor_resolution, claim_issuer_resolution) =
+        mls_roster_signature::verify_peer_attest_add_signatures(
+            state,
+            &peer.source_service_id,
+            &request,
+        )
+        .await?;
     let verified = coland_storage::VerifiedMlsAddAuthorityAttestation {
         source_station_id: peer.source_service_id,
         request,
         attestor_resolution,
+        claim_issuer_resolution,
     };
     let outcome = state
         .authority_commits()
@@ -405,8 +407,8 @@ async fn resolve_self_mls_group_state_material(
         crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice,
     >() {
         if device.operation != arkret_wire::ServiceOperationId::SelfMlsReadGroupStateMaterialV1
-            || request.caller_actor_id != arkret_wire::ActorId::account(device.authority.account_id.clone())
-            || request.caller_actor_id.route_service_id() != &state.service_core_id()
+            || request.caller_actor_id != device.authority.actor_id.clone()
+            || device.authority.governance_service_id != state.service_core_id()
             || request.effective_scope != device.metadata.effective_scope
             || request.effective_scope.realm_id() != &request.realm_id
         {
@@ -424,7 +426,7 @@ async fn resolve_self_mls_group_state_material(
     } else {
         let session = aa.authenticated_session(state, req).await?;
         let caller = crate::routing::identity::session_actor::validated_session_actor(state, &session).await?;
-        if request.caller_actor_id != caller || caller.route_service_id() != &state.service_core_id() {
+        if request.caller_actor_id != caller || caller.as_account_id().map(|account| &account.station_id) != Some(&state.service_core_id()) {
             return Err(mls_group_state_material_not_found());
         }
         None
@@ -540,7 +542,7 @@ async fn resolve_peer_mls_group_state_material(
     let event = if let Some(caller) = &request.caller_actor_id {
         use coland_storage::MlsMemberGroupStateMaterialRead as Read;
 
-        if caller.route_service_id() != &source {
+        if crate::routing::actor_delivery_station(state, caller).await? != source {
             return Err(mls_group_state_material_not_found());
         }
         match state
@@ -749,7 +751,7 @@ async fn upload_keypackage(
         .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>()
         .ok();
     let mls_keypackage_upload::UploadAuthority {
-        owner_account_id,
+        owner_actor_id,
         device_id,
         trust_binding,
         publish_trust_anchor,
@@ -867,7 +869,7 @@ async fn upload_keypackage(
             keypackage_id: keypackage_id.clone(),
             keypackage_ref: keypackage_ref.clone(),
             keypackage_digest,
-            owner_account_id: owner_account_id.clone(),
+            owner_actor_id: owner_actor_id.clone(),
             effective_scope: native
                 .as_ref()
                 .map(|(guard, _)| guard.effective_scope.clone()),
@@ -1107,12 +1109,7 @@ async fn claim_keypackage_at_destination(
                     (
                         device.clone(),
                         KeyPackageTrustBinding::device_authorize(
-                            guard
-                                .authority
-                                .selector
-                                .authorization_ref
-                                .event_id
-                                .to_string(),
+                            guard.authority.authorization_ref.event_id.to_string(),
                         ),
                     )
                 })
@@ -1206,12 +1203,16 @@ async fn claim_keypackage_at_destination(
         if predicted.effective_scope.is_some() != native_target.is_some() {
             continue;
         }
-        if native_target.is_none()
-            && ensure_keypackage_owner_account_active(state, &predicted.owner_account_id)
+        if native_target.is_none() {
+            let Some(account) = predicted.owner_actor_id.as_account_id() else {
+                continue;
+            };
+            if ensure_keypackage_owner_account_active(state, account)
                 .await
                 .is_err()
-        {
-            continue;
+            {
+                continue;
+            }
         }
         if target_keypackage_ref
             .is_some_and(|expected| predicted.keypackage_ref.as_str() != expected)
@@ -1618,6 +1619,7 @@ fn validate_peer_claim_time_window(body: &PeerKeyPackagesClaimRequestBody) -> Re
     let authorization = &body.requester_authorization;
     let signed_at = match authorization {
         PeerKeyPackageRequesterAuthorization::Device { signed_at, .. }
+        | PeerKeyPackageRequesterAuthorization::RealmDevice { signed_at, .. }
         | PeerKeyPackageRequesterAuthorization::Agent { signed_at, .. } => *signed_at,
     };
     let current = now();
@@ -1747,6 +1749,9 @@ async fn verify_local_claim_participant_authorization(
                 requester_device_id,
                 device_authorize_event_id,
             ),
+            PeerKeyPackageRequesterAuthorization::RealmDevice { .. } => {
+                return reject("realm_device_requires_native_authority");
+            }
             PeerKeyPackageRequesterAuthorization::Agent { .. } => unreachable!(),
         };
     if signature
@@ -1827,6 +1832,8 @@ async fn peer_claim_policy_authorized(
         .ok_or_else(|| peer_claim_schema_violation("claim requester identity is incomplete"))?;
     let target_authority_current = if native_target_current {
         true
+    } else if body.target_actor_id.is_some() {
+        false
     } else if let (Some(agent_id), Some(method), Some(event_id)) = (
         &body.target_agent_id,
         &body.target_agent_verification_method,
@@ -1862,20 +1869,35 @@ async fn peer_claim_policy_authorized(
             // through the authenticated source service.
             let source = arkret_wire::DidCoreId::new(source_id.to_owned())
                 .map_err(|_| AppError::param_invalid("invalid source_id"))?;
-            let requester_actor = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-                requester_id.clone(),
-                source,
-            ));
-            if body.requester_account_id.as_ref().is_some_and(|account| {
-                arkret_wire::ActorId::account(account.clone()) != requester_actor
-            }) {
-                return Ok(policy_refused("requester_route_unacceptable"));
-            }
-            let target_actor = match (&body.target_account_id, &body.target_agent_id) {
-                (Some(account), None) => arkret_wire::ActorId::account(account.clone()),
-                (None, Some(agent_id)) => arkret_wire::ActorId::account(
-                    arkret_wire::AccountId::new(agent_id.clone(), state.service_core_id()),
+            let requester_actor = if let Some(actor) = &body.requester_actor_id {
+                if super::actor_delivery_station(state, actor).await? != source {
+                    return Ok(policy_refused("requester_route_unacceptable"));
+                }
+                actor.clone()
+            } else {
+                let actor = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+                    requester_id.clone(),
+                    source,
+                ));
+                if body
+                    .requester_account_id
+                    .as_ref()
+                    .is_some_and(|account| actor.as_account_id() != Some(account))
+                {
+                    return Ok(policy_refused("requester_route_unacceptable"));
+                }
+                actor
+            };
+            let target_actor = match (
+                &body.target_account_id,
+                &body.target_agent_id,
+                &body.target_actor_id,
+            ) {
+                (Some(account), None, None) => arkret_wire::ActorId::account(account.clone()),
+                (None, Some(agent), None) => arkret_wire::ActorId::account(
+                    arkret_wire::AccountId::new(agent.clone(), state.service_core_id()),
                 ),
+                (None, None, Some(actor)) => actor.clone(),
                 _ => return Ok(policy_refused("target_not_routed_member")),
             };
             for (actor, reason) in [
@@ -1966,6 +1988,20 @@ async fn build_peer_claim_outcome(
         .map_err(|error| AppError::internal(format!("peer claims digest: {error}")))?;
     let service_did = state.service_resolution_commitment().did.clone();
     let verification_method = format!("{service_did}#notary-key");
+    let claim_authority_ref = if body.target_actor_id.is_some() {
+        let authority = state
+            .authority_commits()
+            .current_authority(&body.intended_realm_id)
+            .await
+            .map_err(|_| peer_claim_failed())?
+            .ok_or_else(peer_claim_failed)?;
+        if authority.service_id != state.service_core_id() {
+            return Err(peer_claim_failed());
+        }
+        Some(authority.authority_ref)
+    } else {
+        None
+    };
     let mut receipt = PeerKeyPackageClaimReceipt {
         claim_request_id: body.claim_request_id.clone(),
         request_digest: Hash::new(request_digest.to_owned())
@@ -1977,6 +2013,7 @@ async fn build_peer_claim_outcome(
         destination_id: arkret_wire::DidCoreId::new(state.service_id().clone())
             .map_err(|error| AppError::internal(format!("service id invalid: {error}")))?,
         request: body.unsigned_request(),
+        claim_authority_ref,
         claimed_at: unix_timestamp_datetime(
             claimed.claimed_at.unwrap_or_else(|| now().timestamp()),
         )?,
@@ -2350,19 +2387,29 @@ async fn claim_keypackage_session(
         // The destination is the exact target account's own Station, and that
         // account is a current joined member in this service's accepted
         // state; nothing is inferred from a principal or an endpoint.
-        let target_actor = match (&body.target_account_id, &body.target_agent_id) {
-            (Some(account), None) => arkret_wire::ActorId::account(account.clone()),
-            (None, Some(agent_id)) => arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-                agent_id.clone(),
-                body.service_binding.destination_id.clone(),
-            )),
+        let target_actor = match (
+            &body.target_account_id,
+            &body.target_agent_id,
+            &body.target_actor_id,
+        ) {
+            (Some(account), None, None) => arkret_wire::ActorId::account(account.clone()),
+            (None, Some(agent_id), None) => {
+                arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+                    agent_id.clone(),
+                    body.service_binding.destination_id.clone(),
+                ))
+            }
+            (None, None, Some(actor)) => actor.clone(),
             _ => {
                 return Err(AppError::capability_denied(
                     "target actor route is not current",
                 ));
             }
         };
-        if target_actor.route_service_id().as_str() != destination
+        if super::actor_delivery_station(state, &target_actor)
+            .await?
+            .as_str()
+            != destination
             || (body.claim_purpose == PeerKeyPackageClaimPurpose::RealmMembership
                 && !state
                     .authority_commits()
@@ -2519,7 +2566,7 @@ async fn query_own_keypackage_claim(
         .ok();
     let reader = if let Some(native) = native {
         ClaimReader::Device {
-            actor: arkret_wire::ActorId::account(native.authority.account_id.clone()),
+            actor: native.authority.actor_id.clone(),
             device_id: native.authority.device_id.to_string(),
         }
     } else {
@@ -2559,7 +2606,7 @@ async fn query_own_keypackage_claim(
             .find(|record| record.claim_id == body.claim_id.as_str())
             .ok_or_else(keypackage_claim_unknown)?;
         if record.device_authorize_event_id.as_ref()
-            != Some(&native.authority.selector.authorization_ref.event_id)
+            != Some(&native.authority.authorization_ref.event_id)
             || outcome.claim_receipt.request.intended_realm_id
                 != *native.metadata.effective_scope.realm_id()
             || native
@@ -3263,6 +3310,14 @@ async fn receipt_matches_welcome_binding(
             record.actor_id.as_account_id() == Some(recipient_account_id)
                 && record.device_id.as_ref() == Some(recipient_device_id)
         }
+        arkret_models_crypto::RecipientMlsDurableSigner::RealmDevice {
+            recipient_actor_id,
+            recipient_device_id,
+            ..
+        } => {
+            &record.actor_id == recipient_actor_id
+                && record.device_id.as_ref() == Some(recipient_device_id)
+        }
         arkret_models_crypto::RecipientMlsDurableSigner::Agent {
             recipient_agent_id,
             recipient_agent_verification_method,
@@ -3306,6 +3361,9 @@ async fn verify_keypackage_consumer_signature(
         ));
     }
     match consumer {
+        arkret_models_crypto::RecipientMlsDurableSigner::RealmDevice { .. } => Err(
+            AppError::capability_denied("Realm Device requires native authentication"),
+        ),
         arkret_models_crypto::RecipientMlsDurableSigner::Device {
             recipient_device_id,
             ..
@@ -3315,13 +3373,6 @@ async fn verify_keypackage_consumer_signature(
                     "durable recipient device must match the calling session",
                 ));
             }
-            // `device-lifecycle.md` 15: without this AND a revoked Applet's
-            // Bot keeps signing MLS durable receipts, because its delegated
-            // device's authorize is still accepted in the PCR.
-            crate::routing::extensions::applet_bridge::ensure_delegated_device_not_fenced(
-                state, owner,
-            )
-            .await?;
             verify_session_keypackage_write_signature(
                 state,
                 session,
@@ -3374,6 +3425,7 @@ fn keypackage_record_matches_consumer(
 ) -> bool {
     let receipt = &body.recipient_durable_receipt;
     match &receipt.recipient {
+        arkret_models_crypto::RecipientMlsDurableSigner::RealmDevice { .. } => false,
         arkret_models_crypto::RecipientMlsDurableSigner::Device {
             recipient_account_id,
             recipient_device_id,
@@ -3522,7 +3574,7 @@ async fn revoke_keypackages(
             arkret_canonical::ed25519_pubkey_to_did_key_multibase(&native.authority.public_key);
         if !crate::routing::identity::device_signature_kid_points_to_device_key(
             body.signature.kid.as_str(),
-            native.authority.account_id.principal_id.as_str(),
+            native.authority.actor_id.signing_principal_id().as_str(),
             &format!("did:key:{fingerprint}"),
         ) {
             return Err(AppError::param_invalid(
@@ -3585,7 +3637,8 @@ async fn revoke_keypackages(
             .await
         {
             Ok(Some(record))
-                if record.owner_account_id != session_owner_account_id
+                if record.owner_actor_id
+                    != arkret_wire::ActorId::account(session_owner_account_id.clone())
                     || record.actor_id != session.actor
                     || record.device_id.as_deref() != Some(device_id.as_str())
                     || record.agent_key_authorize_event_id.is_some() =>
@@ -4576,43 +4629,40 @@ async fn keypackage_claim_record(
     }
     let principal_id = arkret_wire::DidCoreId::new(record.actor_id.clone())
         .map_err(|error| AppError::internal(format!("invalid principal_id: {error}")))?;
-    let owner = &record.owner_account_id;
-    if record.agent_key_authorize_event_id.is_some() {
-        // Agent KeyPackages are stored under the controller's local Account
-        // row; the Agent has its own principal and no Human Account row.
-        // Recheck that exact controller relation before exposing the claim.
+    let owner = &record.owner_actor_id;
+    let actor_id = if record.agent_key_authorize_event_id.is_some() {
+        let controller_account = owner.as_account_id().ok_or_else(peer_claim_failed)?;
         let agent_actor = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
             principal_id.clone(),
-            owner.station_id.clone(),
+            controller_account.station_id.clone(),
         ));
         let agent =
             crate::routing::identity::agent_pcr::agent_record_for_actor(state, &agent_actor)
                 .await?
-                .ok_or_else(|| AppError::capability_denied("target Agent is unavailable"))?;
+                .ok_or_else(peer_claim_failed)?;
         let controller =
             crate::routing::identity::agent_pcr::agent_controller_account(state, &agent).await?;
-        if &controller != owner
+        if &controller != controller_account
             || request.target_account_id.is_some()
+            || request.target_actor_id.is_some()
             || request.target_agent_id.as_ref() != Some(&principal_id)
         {
-            return Err(AppError::capability_denied(
-                "Agent KeyPackage target differs from its durable controller binding",
-            ));
+            return Err(peer_claim_failed());
         }
-    } else if owner.principal_id != principal_id
-        || request
-            .target_account_id
-            .as_ref()
-            .is_some_and(|target| target != owner)
-    {
-        return Err(AppError::capability_denied(
-            "KeyPackage claim target account differs from its durable owner",
-        ));
-    }
-    let actor_id = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-        principal_id.clone(),
-        owner.station_id.clone(),
-    ));
+        agent_actor
+    } else {
+        let target_matches = if owner.as_realm_actor_id().is_some() {
+            request.target_actor_id.as_ref() == Some(owner)
+        } else {
+            request.target_account_id.as_ref() == owner.as_account_id()
+                && request.target_actor_id.is_none()
+                && request.target_agent_id.is_none()
+        };
+        if owner.signing_principal_id() != &principal_id || !target_matches {
+            return Err(peer_claim_failed());
+        }
+        owner.clone()
+    };
     let trust_binding = Some(trust_binding_from_row(record)?);
     let (device_id, agent_id, agent_verification_method) = if trust_binding
         .as_ref()

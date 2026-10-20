@@ -163,18 +163,9 @@ async fn admit_mls_event_inner(
         .as_ref()
         .map(|context| context.refusal_record(arkret_wire::ReasonCode::GOVERNANCE_BINDING_MISMATCH))
         .transpose()?;
-    let native_forwarded = match &producer {
-        AdmittedProducer::Forwarded(evidence) => evidence.managed.clone(),
-        _ => None,
-    };
     let refusal_source = native_guard
         .as_deref()
-        .map(coland_storage::ManagedMlsRefusalSource::Local)
-        .or_else(|| {
-            native_forwarded
-                .as_deref()
-                .map(coland_storage::ManagedMlsRefusalSource::Forwarded)
-        });
+        .map(coland_storage::ManagedMlsRefusalSource::Local);
     let native_refusal = refusal_source.zip(refusal_record.as_ref());
     let refusal_authority = if event.kind == EventKind::MlsCommit {
         state
@@ -358,6 +349,7 @@ pub(super) async fn attach_replicated_roster_witnesses(
                     signed_attest_add_request_canonical_json:
                         arkret_canonical::canonical_json_bytes(&request).map_err(schema)?,
                     local_attestor_resolution: None,
+                    claim_issuer_resolution: None,
                 });
         }
     }
@@ -473,6 +465,7 @@ async fn sign_local_roster_witnesses(
             )
             .map_err(schema)?,
             claim_receipt: outcome.claim_receipt.clone(),
+            claim_authority_ref: outcome.claim_receipt.claim_authority_ref.clone(),
             attested_at,
             signature: KeyOperationSignature {
                 kid: arkret_wire::NonEmptyString::new(method.clone()).map_err(schema)?,
@@ -493,7 +486,21 @@ async fn sign_local_roster_witnesses(
             claim_outcome: outcome,
         };
         request.validate_claim_binding().map_err(schema)?;
-        arkret::verify_mls_attest_add_request(&request, &resolution).map_err(schema)?;
+        let claim_resolution = if request.claim_outcome.claim_receipt.destination_id == station {
+            resolution.clone()
+        } else {
+            crate::routing::identity::agents::evidence::fetch_service_resolution(
+                state,
+                &request.claim_outcome.claim_receipt.destination_id,
+                None,
+            )
+            .await
+            .map_err(|error| {
+                failed_precondition(format!("claim issuer history unavailable: {error:?}"))
+            })?
+        };
+        arkret::verify_mls_attest_add_request(&request, &claim_resolution, &resolution)
+            .map_err(schema)?;
         welcome.roster_witness = Some(VerifiedMlsRecipientRosterWitness {
             accepted_genesis_event_ref: genesis.clone(),
             signed_attest_add_request_canonical_json: arkret_canonical::canonical_json_bytes(
@@ -501,6 +508,7 @@ async fn sign_local_roster_witnesses(
             )
             .map_err(schema)?,
             local_attestor_resolution: Some(resolution.clone()),
+            claim_issuer_resolution: Some(claim_resolution),
         });
     }
     Ok(())
@@ -1502,13 +1510,12 @@ pub(super) async fn native_welcome_target(
     let MlsWelcomeRecipientEndpoint::Device { device_id } = &welcome.recipient_endpoint else {
         return Ok(None);
     };
-    let account = welcome
-        .recipient_actor_id
-        .as_account_id()
-        .ok_or_else(|| failed_precondition("Welcome has no Account"))?;
+    if welcome.recipient_actor_id.as_realm_actor_id().is_none() {
+        return Ok(None);
+    }
     let Some(authority) = state
         .persistence()
-        .applet_managed_device_authority(account, device_id, chrono::Utc::now())
+        .applet_managed_device_authority(&welcome.recipient_actor_id, device_id, chrono::Utc::now())
         .await?
     else {
         return Ok(None);

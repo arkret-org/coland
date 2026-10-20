@@ -385,7 +385,6 @@ diesel::table! {
         authorization_commit_id -> Text,
         attested_at -> Timestamptz,
         evidence_json -> Jsonb,
-        managed_provenance_json -> Nullable<Jsonb>,
     }
 }
 
@@ -398,7 +397,6 @@ diesel::table! {
         device_id -> Text,
         attested_at -> Timestamptz,
         evidence_json -> Jsonb,
-        managed_provenance_json -> Nullable<Jsonb>,
     }
 }
 

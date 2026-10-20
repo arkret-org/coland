@@ -51,6 +51,17 @@ pub(crate) async fn record_attempt(
         ) => {
             format!("agent:{requester_agent_id}")
         }
+        (None, PeerKeyPackageRequesterAuthorization::RealmDevice { .. }) => {
+            let actor = body
+                .requester_actor_id
+                .as_ref()
+                .ok_or_else(|| PersistenceError::Conflict("Realm requester absent".into()))?;
+            format!(
+                "realm:{}",
+                arkret_canonical::canonical_json_string(actor)
+                    .map_err(PersistenceError::database)?
+            )
+        }
         _ => {
             return Err(PersistenceError::Conflict(
                 "claim budget requester branch".into(),
@@ -65,6 +76,13 @@ pub(crate) async fn record_attempt(
                 .map_err(PersistenceError::database)?
         ),
         (None, Some(agent)) => format!("agent:{agent}"),
+        (None, None) if body.target_actor_id.is_some() => {
+            format!(
+                "realm:{}",
+                arkret_canonical::canonical_json_string(body.target_actor_id.as_ref().unwrap())
+                    .map_err(PersistenceError::database)?
+            )
+        }
         _ => {
             return Err(PersistenceError::Conflict(
                 "claim budget target branch".into(),
@@ -76,7 +94,8 @@ pub(crate) async fn record_attempt(
     let target = arkret_canonical::canonical_sha256(&target).map_err(PersistenceError::database)?;
     let signed_at = match &body.requester_authorization {
         PeerKeyPackageRequesterAuthorization::Device { signed_at, .. }
-        | PeerKeyPackageRequesterAuthorization::Agent { signed_at, .. } => *signed_at,
+        | PeerKeyPackageRequesterAuthorization::Agent { signed_at, .. }
+        | PeerKeyPackageRequesterAuthorization::RealmDevice { signed_at, .. } => *signed_at,
     };
     let source = body.service_binding.source_id.as_str();
     let identity = body.claim_request_id.as_str();

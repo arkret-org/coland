@@ -118,12 +118,7 @@ fn target(
     request: &ManagementReviewRequestBody,
 ) -> PersistenceResult<(&Event, AccountId, AccountId)> {
     request.validate().map_err(invalid)?;
-    let ManagementReviewTarget::Event { event } = &request.target else {
-        return Err(refused(
-            "unsupported_feature",
-            "this Station reviews only Agent join and publish Events",
-        ));
-    };
+    let ManagementReviewTarget::Event { event } = &request.target;
     arkret_schema::validate_event_for_submit(event).map_err(invalid)?;
     event
         .verify_event_id_matches_content_with_digest_suite(
@@ -535,7 +530,7 @@ async fn lock_current_account_realms(
     let mut realms = std::collections::BTreeSet::from([realm.clone()]);
     realms.extend(extra_realms.iter().cloned());
     if let Some(event) = current.and_then(|current| current.applet_event.as_deref()) {
-        realms.insert(event.pcr_realm_id.clone());
+        realms.insert(event.realm_id.clone());
     }
     for account in accounts {
         let current = current.ok_or_else(|| {
@@ -565,14 +560,6 @@ async fn lock_current_account_realms(
         let pcr = observation.record().principal_control_realm_id.clone();
         realms.insert(pcr.clone());
         pcrs.insert(account.clone(), pcr);
-    }
-    if let Some(input) = current.and_then(|current| current.applet_candidate.as_deref())
-        && let coland_storage::AppletAdmissionRequest::Managed(
-            arkret_models_integration::AppletManagedActorCommittedRequest::Ghost(body),
-        ) = &input.request
-        && let Some(existing) = &body.existing_managed_actor
-    {
-        realms.insert(existing.principal_control_realm_id.clone());
     }
     for held in realms {
         crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &held).await?;
@@ -863,7 +850,12 @@ pub(crate) async fn request_in_connection(
         refresh(conn, &mut row, at, current).await?;
         return row.outcome();
     }
-    if let ManagementReviewTarget::Event { event } = &request.target {
+    let ManagementReviewTarget::Event { event } = &request.target;
+    if applet::creation(request) || crate::applet_scope_profiles::is_profile(event) {
+        if producer.is_some() {
+            return Err(hidden());
+        }
+    } else {
         crate::authority_commit::check_self_producer_guard_in_connection(
             conn,
             event,
@@ -871,8 +863,6 @@ pub(crate) async fn request_in_connection(
             at,
         )
         .await?;
-    } else if producer.is_some() {
-        return Err(hidden());
     }
     let (pins, requirements) = Box::pin(pins(conn, request, at, current)).await?;
     if requirements.is_empty() {
@@ -1000,21 +990,26 @@ async fn qualify(
             ManagementOperation::CreateBot => arkret_wire::CapabilityActionId::AppletBotProvision,
             ManagementOperation::MapGhost => arkret_wire::CapabilityActionId::AppletGhostProvision,
         };
-        match &request.target {
-            ManagementReviewTarget::Event {event} => arkret_identity::principal_control::verify_native_control_management_event_approval(
-                control,vote,event,arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,required_action,at,&binding),
-            _ => arkret_identity::principal_control::verify_native_control_management_operation_approval(
-                control,vote,&request.target.canonical_target_digest().map_err(invalid)?,
-                if request.management_operation==ManagementOperation::CreateBot {"ak.self.applet.bot.command.provision.v1"} else {"ak.self.applet.ghost.command.provision.v1"},
-                required_action,&request.requester_actor_id,at,&binding),
-        }.map_err(|_| refused("signature_invalid", "management approval does not bind original intent"))?;
+        let ManagementReviewTarget::Event { event } = &request.target;
+        arkret_identity::principal_control::verify_native_control_management_event_approval(
+            control,
+            vote,
+            event,
+            arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+            required_action,
+            at,
+            &binding,
+        )
+        .map_err(|_| {
+            refused(
+                "signature_invalid",
+                "management approval does not bind original intent",
+            )
+        })?;
         if vote.input.action != required_action {
             return Err(refused("signature_invalid", "management action differs"));
         }
-        let initiating_actor = match &request.target {
-            ManagementReviewTarget::Event { event } => event.actual_signer(),
-            _ => &request.requester_actor_id,
-        };
+        let initiating_actor = event.actual_signer();
         let principal = control.principal();
         if principal == request.requester_actor_id.signing_principal_id()
             || principal == initiating_actor.signing_principal_id()
@@ -1298,23 +1293,25 @@ pub(crate) async fn event_material_in_connection(
     if !applet::native_event(&request) || candidate_event(&request)? != event {
         return Err(hidden());
     }
-    let producer = event
-        .verify_producer_proof_self_consistency(event.realm_id.digest_suite_code().digest_suite())
-        .map_err(invalid)?
-        .ok_or_else(hidden)?;
-    let resolution =
-        crate::pcr_applet_device::current_resolution_in_connection(conn, &producer.account_id)
-            .await
-            .map_err(crate::PgTransactionError::into_persistence)?;
-    lock_current_account_realms(conn, &event.realm_id, &[], None, &[resolution.pcr_realm_id])
-        .await?;
-    let authority =
-        crate::pcr_applet_device_authority::for_event_in_connection(conn, event, Utc::now())
-            .await
-            .map_err(crate::PgTransactionError::into_persistence)?
-            .ok_or_else(hidden)?;
-    if request.requester_actor_id != ActorId::service(authority.source_service_id) {
-        return Err(hidden());
+    if applet::creation(&request) || crate::applet_scope_profiles::is_profile(event) {
+        let mut fact = row.immutable_pins["producer"].clone();
+        fact.as_object_mut()
+            .ok_or_else(hidden)?
+            .insert("accepted_at".into(), json!(row.created_at));
+        let fact: arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact =
+            serde_json::from_value(fact).map_err(invalid)?;
+        arkret_identity::account_device_signer_evidence::verify_historical_producer_event_signature(
+            event, &fact, event.realm_id.digest_suite_code().digest_suite(),
+        ).map_err(invalid)?;
+    } else {
+        let authority =
+            crate::realm_actor_device_authority::for_event_in_connection(conn, event, Utc::now())
+                .await
+                .map_err(crate::PgTransactionError::into_persistence)?
+                .ok_or_else(hidden)?;
+        if request.requester_actor_id != ActorId::service(authority.source_service_id) {
+            return Err(hidden());
+        }
     }
     Ok(coland_storage::ManagementReviewMaterial {
         request: request.as_ref().clone(),
@@ -1494,12 +1491,12 @@ pub(crate) async fn lock_candidate_current_realms_in_connection(
             welcome
                 .applet_device_scope_guard
                 .as_ref()
-                .map(|guard| guard.authority.pcr_realm_id.clone())
+                .map(|guard| guard.authority.realm_id.clone())
         })
         .collect::<Vec<_>>();
     extra_realms.extend(match producer {
         Some(coland_storage::SelfProducerCommitGuard::AppletManagedDevice(guard)) => {
-            vec![guard.authority.pcr_realm_id.clone()]
+            vec![guard.authority.realm_id.clone()]
         }
         _ => Vec::new(),
     });
@@ -1595,6 +1592,15 @@ pub(crate) async fn prepare_admission_in_connection(
             )
         })
     }) {
+        if event.kind == EventKind::RealmActorCreate {
+            let (_, decision) = applet::select_current_creation(conn, event, at).await?;
+            if !decision.review_requirements.is_empty() {
+                return Err(refused(
+                    "approval_required",
+                    "creation requires its current private management decision",
+                ));
+            }
+        }
         if let Some(coland_storage::SelfProducerCommitGuard::AppletManagedDevice(guard)) = producer
         {
             let (registration, _) =

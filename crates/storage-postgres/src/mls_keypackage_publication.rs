@@ -2,7 +2,7 @@
 use arkret_models_collaboration::governance::operation_wire::{
     AppletPolicyOperation, PolicyResourceKind, PolicyResourceSelector,
 };
-use arkret_wire::{ActorId, PolicyEffect, ScopeRef};
+use arkret_wire::{PolicyEffect, ScopeRef};
 use coland_storage::{
     AppletManagedDeviceScopeGuard, MlsKeyPackageRow, PersistenceError, PersistenceResult,
 };
@@ -28,11 +28,11 @@ async fn require_current(
     publication: Option<&arkret_models_crypto::KeyPackagesUploadRequestBody>,
 ) -> PersistenceResult<()> {
     if record.effective_scope.as_ref() != Some(&guard.effective_scope)
-        || record.owner_account_id != guard.authority.account_id
-        || record.actor_id != guard.authority.account_id.principal_id.as_str()
+        || record.owner_actor_id != guard.authority.actor_id
+        || record.actor_id != guard.authority.actor_id.signing_principal_id().as_str()
         || record.device_id.as_deref() != Some(guard.authority.device_id.as_str())
         || record.device_authorize_event_id.as_deref()
-            != Some(guard.authority.selector.authorization_ref.event_id.as_str())
+            != Some(guard.authority.authorization_ref.event_id.as_str())
         || record.agent_key_authorize_event_id.is_some()
         || record.endpoint_verification_method.is_some()
         || !matches!(
@@ -45,7 +45,7 @@ async fn require_current(
         ));
     }
     let mut realms = vec![
-        guard.authority.pcr_realm_id.clone(),
+        guard.authority.realm_id.clone(),
         guard.effective_scope.realm_id().clone(),
     ];
     realms.sort();
@@ -59,7 +59,7 @@ async fn require_current(
         .get_result::<Row>(&mut *conn)
         .await
         .map_err(PersistenceError::database)?;
-        if owner.value.as_str() != Some(guard.authority.account_id.station_id.as_str()) {
+        if owner.value.as_str() != Some(guard.authority.governance_service_id.as_str()) {
             return Err(PersistenceError::Conflict(
                 "temporarily_unavailable: native KeyPackage current cut is not local".into(),
             ));
@@ -69,9 +69,9 @@ async fn require_current(
     if at >= expires_at {
         return Err(denied("KeyPackage request authority expired"));
     }
-    let current = crate::pcr_applet_device_authority::current_in_connection(
+    let current = crate::realm_actor_device_authority::current_in_connection(
         conn,
-        &record.owner_account_id,
+        &record.owner_actor_id,
         &guard.authority.device_id,
         at,
     )
@@ -104,7 +104,7 @@ async fn require_current(
     .await?;
 
     let scope = &guard.effective_scope;
-    let actor = ActorId::account(record.owner_account_id.clone());
+    let actor = record.owner_actor_id.clone();
     let cut =
         crate::realm_authorization_cut::RealmAuthorizationCut::read(conn, scope.realm_id(), &actor)
             .await?;
@@ -231,8 +231,8 @@ pub(crate) async fn require_native_publication(
     body: &arkret_models_crypto::KeyPackagesUploadRequestBody,
 ) -> PersistenceResult<()> {
     body.validate_shape().map_err(denied)?;
-    if body.actor_id != ActorId::account(record.owner_account_id.clone())
-        || body.principal_id != record.owner_account_id.principal_id
+    if body.actor_id != record.owner_actor_id.clone()
+        || body.principal_id != *record.owner_actor_id.signing_principal_id()
         || body.device_id.as_ref().map(|value| value.as_str()) != record.device_id.as_deref()
         || body.agent_verification_method.is_some()
         || body.agent_key_authorize_event_id.is_some()

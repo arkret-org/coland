@@ -31,8 +31,14 @@ pub(super) async fn validate_accountability_profile_policy(
                 serde_json::from_value(operation.payload.clone())
                     .map_err(|_| arkret_wire::ErrorCode::SCHEMA_VIOLATION)?;
             (
-                create.object.principal_id,
-                create.object.accountable_principal_ids,
+                create
+                    .object
+                    .principal_id
+                    .ok_or(arkret_wire::ErrorCode::SCHEMA_VIOLATION)?,
+                create
+                    .object
+                    .accountable_principal_ids
+                    .ok_or(arkret_wire::ErrorCode::SCHEMA_VIOLATION)?,
             )
         }
         Some(arkret_wire::EventKind::ProfileUpdate) => {
@@ -65,7 +71,7 @@ pub(super) async fn validate_accountability_profile_policy(
                         .current_actor_profile(account)
                         .await
                         .map_err(|_| arkret_wire::ErrorCode::TEMPORARILY_UNAVAILABLE)?
-                        .map(|record| record.profile.accountable_principal_ids)
+                        .and_then(|record| record.profile.accountable_principal_ids)
                         .unwrap_or_default()
                 }
             };

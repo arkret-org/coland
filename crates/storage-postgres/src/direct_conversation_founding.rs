@@ -1021,7 +1021,7 @@ pub(crate) async fn materialize_peer_direct_conversation_founding_unit(
     unit.validate()
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
     if &facts.governance_station_id == local_station
-        || facts.peer_id.route_service_id() != local_station
+        || facts.peer_id.fixed_route_service_id() != Some(local_station)
     {
         return Err(conflict(
             ConflictCode::DirectConversationFoundingUnitInvalid,

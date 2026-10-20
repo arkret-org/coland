@@ -2,8 +2,7 @@
 
 use arkret_http_client::{Client, HttpMessageSigner, RetryConfig};
 use arkret_models_integration::{
-    AppletAuthoringTransactionRequestBody, AppletManagedActorCommittedRequest,
-    AppletTransactionRequestBody, AppletTransactionStatus,
+    AppletAuthoringTransactionRequestBody, AppletTransactionRequestBody, AppletTransactionStatus,
 };
 use coland_storage::AppletAuthoringCompletion;
 
@@ -63,75 +62,56 @@ async fn deliver_one(
         .context
         .validate()
         .map_err(|error| error.to_string())?;
-    let request = match &completion.context.committed_request {
-        AppletManagedActorCommittedRequest::Bot(request) => &request.authoring_request,
-        AppletManagedActorCommittedRequest::Ghost(request) => &request.authoring_request,
-    };
-    let applet_id = match &request.basis {
-        arkret_models_integration::AppletManagedActorAuthoringBasis::ProvisionBot(basis) => {
-            &basis.applet_id
-        }
-        arkret_models_integration::AppletManagedActorAuthoringBasis::ProvisionGhost(basis) => {
-            &basis.applet_id
-        }
-    };
+    let material = &completion.context.material;
     if completion.source_id != state.service_core_id()
-        || request.basis.target_station_id() != &completion.source_id
-        || request.basis.service_id() != &completion.destination_id
-        || applet_id != &completion.applet_id
+        || material.requester_actor_id
+            != arkret_wire::ActorId::service(completion.destination_id.clone())
         || completion.idempotency_key.is_empty()
     {
-        return Err(
-            "accepted Applet completion has inconsistent service or request identity".to_owned(),
-        );
+        return Err("accepted Applet completion has inconsistent service identity".into());
     }
-    let attestation = &completion.projection_attestation;
-    let evidence = &completion
-        .context
-        .managed_actor_signer_evidence
-        .attester_signer_evidence;
-    if attestation.attestation.account_id.station_id != completion.source_id
-        || attestation.attestation.account_id.principal_id
-            != completion
-                .context
-                .managed_actor_signer_evidence
-                .authenticated_signer_evidence
-                .subject_id
-        || evidence.subject_id != completion.source_id
-        || evidence.authority_commit_id != completion.context.principal_control_commit.commit_id
-        || attestation.proof.verification_method != evidence.verification_method
-        || attestation.proof.created_at != attestation.attestation.issued_at
-        || attestation.attestation.issued_at >= attestation.attestation.expires_at
+    let authority = state
+        .authority_commits()
+        .current_authority(&material.realm_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or("Realm authority unavailable")?;
+    if authority.service_id != completion.source_id
+        || authority.generation != material.governance_generation
+        || authority.authority_ref != material.authority_ref
     {
-        return Err(
-            "accepted Applet completion attestation differs from its frozen signer root".to_owned(),
-        );
+        return Err("accepted Applet completion must be refreshed at current governance".into());
     }
-    let jwk = evidence.public_key_jwk.as_map();
-    if jwk.get("kty").and_then(serde_json::Value::as_str) != Some("OKP")
-        || jwk.get("crv").and_then(serde_json::Value::as_str) != Some("Ed25519")
-    {
-        return Err("accepted Applet completion attester is not an Ed25519 key".to_owned());
-    }
-    let key = arkret_canonical::base64url_decode(
-        jwk.get("x")
-            .and_then(serde_json::Value::as_str)
-            .ok_or("accepted completion has no attester key")?,
+    let resolution =
+        crate::routing::system::service_resolution::current_authenticated_service_resolution(state)
+            .await
+            .map_err(|error| error.to_string())?;
+    let document = arkret_identity::authenticated_service_document_at(
+        &resolution,
+        &completion.source_id,
+        material.issued_at,
     )
     .map_err(|error| error.to_string())?;
-    if key.len() != 32 {
-        return Err("accepted Applet completion attester key has invalid size".to_owned());
-    }
-    // Verify the frozen historic proof; transport signs with the current key.
-    arkret_signatures::Ed25519DetachedJwsVerifier::new()
-        .verify_detached_jws(
-            &attestation.proof.jws,
-            &attestation
-                .proof_signing_bytes()
-                .map_err(|error| error.to_string())?,
-            &arkret_signatures::PublicKeyMaterial::Ed25519Raw { bytes: key },
-        )
-        .map_err(|error| error.to_string())?;
+    arkret_identity::validate_verification_method_relationship(
+        &document,
+        &material.signature.verification_method,
+        &document.id,
+        arkret_identity::DidVerificationRelationship::AssertionMethod,
+    )
+    .map_err(|error| error.to_string())?;
+    let key = arkret_identity::public_key_material_from_document(
+        &document,
+        &material.signature.verification_method,
+    )
+    .map_err(|error| error.to_string())?;
+    arkret_signatures::detached_object::verify_detached_object_signature(
+        &material.signature,
+        &arkret_canonical::unsigned_value(material, &["signature"])
+            .map_err(|error| error.to_string())?,
+        arkret_wire::DetachedSignatureContext::RealmActorMaterial,
+        &key,
+    )
+    .map_err(|error| error.to_string())?;
     let method = state.service_verification_method("notary-key")?;
     let (base, transport) = crate::security::validate_http_url_for_egress_with_pinned_client(
         &completion.endpoint,

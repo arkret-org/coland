@@ -447,58 +447,9 @@ pub(crate) async fn qualify_principal(
             allow_owner,
             None,
             registered_pair,
-            None,
         )
     })
     .await
-}
-
-/// Registered creation approval qualification never grants creation authority.
-pub(crate) async fn qualify_creation_principal(
-    conn: &mut AsyncPgConnection,
-    creation: &crate::applet_action_approval::CreationAuthority<'_>,
-    principal: &arkret_wire::DidCoreId,
-    current: &coland_storage::ManagementReviewCurrent,
-) -> PersistenceResult<Option<serde_json::Value>> {
-    let descriptor = arkret_schema::capability_action_descriptor(creation.action);
-    if descriptor
-        .required_evaluator_checks
-        .iter()
-        .any(|check| !creation.satisfies_evaluator_check(check))
-    {
-        return Err(error(
-            "capability_denied",
-            "creation operation invariant is not satisfied",
-        ));
-    }
-    let action = descriptor
-        .approver_capability_action
-        .unwrap_or(creation.action);
-    let administrator_facts = OperationFacts::default();
-    let facts = if descriptor.approver_capability_action.is_some() {
-        &administrator_facts
-    } else {
-        &creation.facts
-    };
-    let mut qualified = qualify_principal_or_actor(
-        conn,
-        None,
-        &creation.unit.portal_realm,
-        principal,
-        action,
-        &creation.target,
-        facts,
-        creation.input.accepted_at,
-        false,
-        None,
-        false,
-        Some((creation, current)),
-    )
-    .await?;
-    if let Some(basis) = &mut qualified {
-        basis["approved_creation_action"] = serde_json::json!(creation.action);
-    }
-    Ok(qualified)
 }
 
 /// Exact scope administrator qualification for an operation with no Event.
@@ -528,7 +479,6 @@ pub(crate) async fn qualify_management_administrator(
         true,
         Some(actor),
         false,
-        None,
     )
     .await
 }
@@ -549,16 +499,8 @@ async fn qualify_principal_or_actor(
     allow_owner: bool,
     exact_actor: Option<&ActorId>,
     registered_pair: bool,
-    creation: Option<(
-        &crate::applet_action_approval::CreationAuthority<'_>,
-        &coland_storage::ManagementReviewCurrent,
-    )>,
 ) -> PersistenceResult<Option<serde_json::Value>> {
-    if event.is_some_and(|event| principal == event.actor_id.signing_principal_id())
-        || creation.is_some_and(|(creation, _)| {
-            principal == creation.input.admin_actor_id.signing_principal_id()
-        })
-    {
+    if event.is_some_and(|event| principal == event.actor_id.signing_principal_id()) {
         return Ok(None);
     }
     let members = sql_query("SELECT member_id,jsonb_build_object('commit_id',current_commit_id,'stream_position',current_stream_position) AS membership_revision FROM member_state_current_results WHERE realm_id=$1 AND membership='join'")
@@ -572,31 +514,6 @@ async fn qualify_principal_or_actor(
         {
             continue;
         }
-        if let Some((_, current)) = creation
-            && let Some(account) = actor.as_account_id()
-        {
-            let mut records = current
-                .observations
-                .iter()
-                .filter(|observation| &observation.record().account_id == account);
-            let observation = records.next().ok_or_else(|| {
-                error(
-                    "revision_unavailable",
-                    "creation approver changed after current preparation",
-                )
-            })?;
-            if records.next().is_some() {
-                return Err(error(
-                    "revision_unavailable",
-                    "creation approver observation is ambiguous",
-                ));
-            }
-            if observation.record().status
-                != arkret_models_collaboration::objects::account_status::AccountStatus::Active
-            {
-                continue;
-            }
-        }
         let checks = arkret_schema::capability_action_descriptor(action).required_evaluator_checks;
         if checks.iter().any(|check| match *check {
             "applet_managed_self_join" => rejects_managed_self_join_context(event, facts),
@@ -607,7 +524,7 @@ async fn qualify_principal_or_actor(
                 .and_then(|v| serde_json::from_value::<ActorId>(v).ok())
                 .is_none_or(|watcher| event.is_none_or(|event| watcher == event.actor_id)),
             "audit_pair_required" => !registered_pair,
-            _ => creation.is_none_or(|(creation, _)| !creation.satisfies_evaluator_check(check)),
+            _ => true,
         }) {
             continue;
         }
@@ -627,18 +544,7 @@ async fn qualify_principal_or_actor(
                         .any(|row| row.action == CapabilityActionId::RealmOwner)
                 });
         let qualified = match authorization.evaluate(&actions, target, facts) {
-            GrantEvaluation::Allowed(ref satisfied) => {
-                if creation.is_some()
-                    && !satisfied.is_empty()
-                    && satisfied.iter().all(|grant| !grant.reservations.is_empty())
-                {
-                    return Err(error(
-                        "revision_unavailable",
-                        "creation approver quota eligibility is unresolved",
-                    ));
-                }
-                !satisfied.is_empty() || owner_covers
-            }
+            GrantEvaluation::Allowed(ref satisfied) => !satisfied.is_empty() || owner_covers,
             GrantEvaluation::Unnamed | GrantEvaluation::Unsatisfied => owner_covers,
             _ => false,
         };
@@ -659,20 +565,9 @@ async fn qualify_principal_or_actor(
                     })
                 })
                 .collect::<Vec<_>>();
-            let mut basis = serde_json::json!({"actor_id":actor,"membership":"join","membership_revision":member.membership_revision,
+            let basis = serde_json::json!({"actor_id":actor,"membership":"join","membership_revision":member.membership_revision,
                 "evaluated_at":arkret_canonical::format_timestamp_canonical(at),
                 "action":action,"target":target,"effective_grants":grants,"owner_aggregate":owner_covers,"realm_authority_root":root_basis.value});
-            if let Some((_, current)) = creation
-                && let Some(account) = actor.as_account_id()
-                && let Some(observation) = current
-                    .observations
-                    .iter()
-                    .find(|observation| &observation.record().account_id == account)
-            {
-                // Retain the original signed historical record, never the
-                // process-local freshness observation or its Instant.
-                basis["account_status_record"] = serde_json::json!(observation.record());
-            }
             return Ok(Some(basis));
         }
     }

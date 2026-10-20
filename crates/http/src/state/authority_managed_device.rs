@@ -1,9 +1,9 @@
-//! Native Account Device ingress, without a Session or Service producer substitution.
+//! Realm Device ingress, without a Session or Service producer substitution.
 use arkret_models_collaboration::authority_commit::{
     SelfAuthoritySubmitOutcome, SelfAuthoritySubmitRequest,
 };
 use arkret_models_integration::AppletManagedDeviceMetadata;
-use arkret_wire::{ActorId, EventKind};
+use arkret_wire::EventKind;
 use coland_services::{ServiceError, ServiceResult};
 use coland_storage::{
     AppletManagedDeviceAuthority, AppletManagedDeviceScopeGuard, SelfProducerCommitGuard,
@@ -41,7 +41,6 @@ async fn submit_inner(
         .validate()
         .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
     let native_mls = mls::NativeMlsRequest::from_request(&request)?;
-    let original_request = request.clone();
     let (submission, welcomes, typed_mls) = match request {
         SelfAuthoritySubmitRequest::Event(submission) => (submission, Vec::new(), false),
         SelfAuthoritySubmitRequest::MlsCommit(submission) => (
@@ -57,19 +56,22 @@ async fn submit_inner(
     };
     let event = &submission.event;
     unit::validate_replay_event_identity(event)?;
-    let producer = event
+    event
         .verify_producer_proof_self_consistency(event.realm_id.digest_suite_code().digest_suite())
-        .map_err(|e| ServiceError::Conflict(format!("signature_invalid: {e}")))?
+        .map_err(|e| ServiceError::Conflict(format!("signature_invalid: {e}")))?;
+    let proof = event
+        .producer_proof
+        .as_ref()
         .ok_or_else(|| denied("native Event has no Device producer"))?;
-    if metadata.account_id != authority.account_id
+    if metadata.actor_id != authority.actor_id
         || metadata.device_id != authority.device_id
         || metadata.applet_id != authority.applet_id
-        || metadata.authorization_event_id != authority.selector.authorization_ref.event_id
+        || metadata.authorization_event_id != authority.authorization_ref.event_id
         || metadata.effective_scope != event.scope_ref
-        || authority.account_id.station_id != state.service_core_id()
-        || producer.account_id != authority.account_id
-        || producer.device_id != authority.device_id
-        || event.actor_id != ActorId::account(authority.account_id.clone())
+        || authority.governance_service_id != state.service_core_id()
+        || proof.verification_method.as_str()
+            != format!("{}#{}", authority.native_did, authority.device_id)
+        || event.actor_id != authority.actor_id
         || event.executed_by.is_some()
         || event.applet_id.as_ref() != Some(&authority.applet_id)
     {
@@ -108,8 +110,6 @@ async fn submit_inner(
         event.kind,
         EventKind::MemberState
             | EventKind::CircleMemberState
-            | EventKind::ProfileCreate
-            | EventKind::ProfileUpdate
             | EventKind::MessageCreate
             | EventKind::MlsGenesis
             | EventKind::MlsCommit
@@ -118,19 +118,13 @@ async fn submit_inner(
             "native Event kind has no accepting domain unit".into(),
         ));
     }
-    if let Some(governance) =
-        super::authority_port::remote_governance(state, &event.realm_id).await?
+    if super::authority_port::remote_governance(state, &event.realm_id)
+        .await?
+        .is_some()
     {
-        let outcome = SelfAuthoritySubmitOutcome::Ordinary(
-            crate::boxed_future(|| {
-                super::authority_forward::forward_managed(state, &governance, &original_request)
-            })
-            .await?,
-        );
-        return match native_mls.as_ref() {
-            Some(context) => context.retain_outcome(state, outcome).await,
-            None => Ok(outcome),
-        };
+        return Err(ServiceError::Conflict(
+            "stale_authority: submit Realm Device originals to the current governor".into(),
+        ));
     }
     let current = state
         .persistence()

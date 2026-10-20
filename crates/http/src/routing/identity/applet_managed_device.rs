@@ -54,7 +54,12 @@ pub(crate) async fn verify(
     state: &AppState,
     req: &mut Request,
 ) -> Result<VerifiedAppletManagedDevice, AppError> {
-    for name in ["authorization", "dpop", "source-service-id"] {
+    for name in [
+        "authorization",
+        "dpop",
+        "source-service-id",
+        "arkret-realm-actor-control",
+    ] {
         if req.headers().contains_key(name) {
             return Err(refused("mixed authentication credentials"));
         }
@@ -81,10 +86,8 @@ pub(crate) async fn verify(
     let metadata =
         AppletManagedDeviceMetadata::from_header_value(one_header(req, "arkret-managed-device")?)
             .map_err(refused)?;
-    if one_header(req, "destination-service-id")? != state.service_id()
-        || metadata.account_id.station_id != state.service_core_id()
-    {
-        return Err(refused("target is not the Device's own Station"));
+    if one_header(req, "destination-service-id")? != state.service_id() {
+        return Err(refused("target is not this Station"));
     }
     http_signature::reject_content_encoding(req, || refused("Content-Encoding is not permitted"))?;
     let bytes = req.payload().await.map_err(refused)?.to_vec();
@@ -93,14 +96,15 @@ pub(crate) async fn verify(
     }
     let authority = coland_storage::DeviceRevocationStore::applet_managed_device_authority(
         state.persistence(),
-        &metadata.account_id,
+        &metadata.actor_id,
         &metadata.device_id,
         chrono::Utc::now(),
     )
     .await
     .map_err(authority_error)?
     .ok_or_else(|| refused("accepted identity unavailable"))?;
-    if metadata.authorization_event_id != authority.selector.authorization_ref.event_id
+    if metadata.authorization_event_id != authority.authorization_ref.event_id
+        || authority.governance_service_id != state.service_core_id()
         || metadata.applet_id != authority.applet_id
         || !authority.scopes.contains_scope(&metadata.effective_scope)
     {
@@ -171,7 +175,7 @@ pub(crate) fn test_service(state: AppState) -> salvo::Service {
         let verified = depot
             .get_typed::<VerifiedAppletManagedDevice>()
             .expect("production hoop identity");
-        assert_eq!(verified.authority.account_id, verified.metadata.account_id);
+        assert_eq!(verified.authority.actor_id, verified.metadata.actor_id);
         assert!(arkret_wire::applet_managed_device_scope_rule(verified.operation).is_some());
         res.render(Json(verified.metadata.clone()));
     }
@@ -208,8 +212,8 @@ pub(crate) async fn content_delivery_guard_for_input(
     input.credential_expires_at = Some(device.transport_expires_at);
     state
         .authority_commits()
-        .acquire_committed_content_delivery(
-            &device.authority.account_id,
+        .acquire_realm_actor_content_delivery(
+            &device.authority.actor_id,
             &state.service_core_id(),
             &input,
         )

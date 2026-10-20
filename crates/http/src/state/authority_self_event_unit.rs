@@ -99,7 +99,6 @@ impl AdmittedProducer {
                 guard.as_ref(),
                 SelfProducerCommitGuard::AppletManagedDevice(_)
             ),
-            Self::Forwarded(evidence) => evidence.managed.is_some(),
             _ => false,
         }
     }
@@ -122,7 +121,9 @@ pub(super) struct SelfEventUnitEffects {
 fn decided_at_commit_cut(kind: &arkret_wire::EventKind) -> bool {
     matches!(
         kind,
-        arkret_wire::EventKind::CircleCreate
+        arkret_wire::EventKind::RealmActorStatusSet
+            | arkret_wire::EventKind::RealmActorRecoverySet
+            | arkret_wire::EventKind::CircleCreate
             | arkret_wire::EventKind::ProfileCreate
             | arkret_wire::EventKind::ProfileUpdate
             | arkret_wire::EventKind::SidecarCreate
@@ -341,6 +342,21 @@ fn commit_event_unit_with_idempotency_impl<'a>(
     // Construct the large accepting state machine outside its caller's poll frame.
     Box::pin(async move {
         let event = &submission.event;
+        let private_governance =
+            matches!(event.scope_ref, arkret_wire::ScopeRef::RealmControl { .. });
+        if private_governance
+            && (!matches!(
+                event.kind,
+                arkret_wire::EventKind::RealmActorStatusSet
+                    | arkret_wire::EventKind::RealmActorRecoverySet
+            ) || event.actor_id.as_account_id().is_none()
+                || event.executed_by.is_some())
+        {
+            return Err(ServiceError::SchemaViolation(
+                "private governance requires a direct Account Device".into(),
+            ));
+        }
+
         if let Some(outcome) = Box::pin(exact_replay(state, event)).await? {
             return Ok(outcome);
         }
@@ -381,7 +397,10 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             coland_storage::DirectConversationAdmissionCut::Passed => true,
             coland_storage::DirectConversationAdmissionCut::NotDirectConversation => false,
         };
-        if !direct_conversation && event.kind != arkret_wire::EventKind::CallState {
+        if !private_governance
+            && !direct_conversation
+            && event.kind != arkret_wire::EventKind::CallState
+        {
             crate::routing::events::operations::validate_operation_semantics(
                 state,
                 std::slice::from_ref(&operation),
@@ -450,6 +469,11 @@ fn commit_event_unit_with_idempotency_impl<'a>(
                     .prepare_service_signer_fact(event, guard, committed_at)
                     .await?
                     .into(),
+            ),
+            AdmittedProducer::Local(guard) if matches!(guard.as_ref(), SelfProducerCommitGuard::AppletManagedDevice(_)) => Some(
+                arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact::RealmDevice(
+                    state.authority_commits().prepare_realm_device_signer_fact(event, committed_at).await?
+                )
             ),
             _ => None,
         };
@@ -565,21 +589,26 @@ fn commit_event_unit_with_idempotency_impl<'a>(
 
             device_revocation_transition: None,
             device_revocation_gate: None,
-            projections: vec![coland_services::events::ProjectedEvent {
-                event_id: event.event_id.to_string(),
-                realm_id: event.realm_id.to_string(),
-                event_kind: event.kind.clone(),
-                operation_kind: "create".to_owned(),
-                operation_id: Some(operation.operation_id.to_string()),
-                sender: Some(event.actor_id.to_string()),
-                payload: serde_json::to_value(&event.payload)
-                    .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?,
-                created_at: event.created_at,
-                received_at: committed_at,
-            }],
+            projections: if private_governance {
+                Vec::new()
+            } else {
+                vec![coland_services::events::ProjectedEvent {
+                    event_id: event.event_id.to_string(),
+                    realm_id: event.realm_id.to_string(),
+                    event_kind: event.kind.clone(),
+                    operation_kind: "create".to_owned(),
+                    operation_id: Some(operation.operation_id.to_string()),
+                    sender: Some(event.actor_id.to_string()),
+                    payload: serde_json::to_value(&event.payload)
+                        .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?,
+                    created_at: event.created_at,
+                    received_at: committed_at,
+                }]
+            },
             idempotency,
             deliveries: Vec::new(),
-            realm_fanout_source: Some(EventAdmissionSubmission::new(submission.event.clone())),
+            realm_fanout_source: (!private_governance)
+                .then(|| EventAdmissionSubmission::new(submission.event.clone())),
         };
         let invite_claim_proof =
             Box::pin(crate::invite_claim_admission::prepare_invite_claim_proof(
@@ -633,6 +662,12 @@ fn commit_event_unit_with_idempotency_impl<'a>(
                 return Ok(outcome);
             }
             return super::authority_direct_conversation::relay_direct_conversation_refusal(error);
+        }
+        if private_governance {
+            return Ok(AuthoritySubmitOutcome::Accepted {
+                status: AuthorityCommitStatus::Committed,
+                commit: transaction.commit,
+            });
         }
         // The Commit is durable. This Station's recipients' ordinary notification
         // rows are a derived projection; their failure never changes the outcome.

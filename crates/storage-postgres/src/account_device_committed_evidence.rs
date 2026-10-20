@@ -189,6 +189,12 @@ pub(crate) async fn read(
 ) -> PersistenceResult<Option<AccountDeviceSignerEvidence>> {
     let row = sql_query("SELECT e.evidence_ref,e.authorization_commit_id,e.evidence_json FROM account_device_committed_evidence a JOIN account_device_signer_evidence e ON e.evidence_ref=a.evidence_ref WHERE a.commit_id=$1")
         .bind::<Text,_>(commit.commit_id.as_str()).get_result::<Archived>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    let row = if row.is_some() {
+        row
+    } else {
+        sql_query("SELECT evidence_ref,authorization_commit_id,evidence_json FROM realm_account_device_evidence WHERE commit_id=$1")
+            .bind::<Text,_>(commit.commit_id.as_str()).get_result::<Archived>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+    };
     match row {
         Some(row) => {
             let evidence: AccountDeviceSignerEvidence =

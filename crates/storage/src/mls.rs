@@ -321,6 +321,8 @@ pub struct MlsWelcomeClaimBinding {
 /// acceptance inputs only; the target still has its own independent guard.
 #[derive(Clone)]
 pub struct MlsKeyPackageClaimAdmission {
+    /// Exact verified issuing Station history frozen with a Realm target claim.
+    pub claim_issuer_resolution: Option<arkret_models_identity::AuthenticatedServiceResolution>,
     pub request: arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
     pub requester: Option<(
         crate::AppletManagedDeviceScopeGuard,
@@ -841,6 +843,11 @@ pub trait MlsKeyPackageStore: Send + Sync {
     ) -> PersistenceResult<Option<PeerKeyPackageClaimLedgerRecord>>;
     /// Resolve the ledger row whose stored success outcome issued the exact
     /// `KeypackageClaimId` a Welcome names (`keypackage_claim_ref`).
+    async fn realm_claim_issuer_resolution(
+        &self,
+        source_id: &str,
+        claim_request_id: &str,
+    ) -> PersistenceResult<Option<arkret_models_identity::AuthenticatedServiceResolution>>;
     async fn get_peer_claim_by_claim_id(
         &self,
         claim_id: &str,

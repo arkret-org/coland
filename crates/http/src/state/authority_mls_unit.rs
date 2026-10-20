@@ -486,7 +486,21 @@ async fn sign_local_roster_witnesses(
             claim_outcome: outcome,
         };
         request.validate_claim_binding().map_err(schema)?;
-        let claim_resolution = if request.claim_outcome.claim_receipt.destination_id == station {
+        let claim_resolution = if request
+            .claim_outcome
+            .claim_receipt
+            .request
+            .target_actor_id
+            .is_some()
+        {
+            state
+                .mls_key_packages()
+                .realm_claim_issuer_resolution(&row.source_id, &row.claim_request_id)
+                .await?
+                .ok_or_else(|| {
+                    failed_precondition("original Realm claim issuer history was not imported")
+                })?
+        } else if request.claim_outcome.claim_receipt.destination_id == station {
             resolution.clone()
         } else {
             crate::routing::identity::agents::evidence::fetch_service_resolution(

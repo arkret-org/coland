@@ -822,7 +822,7 @@ diesel::table! {
         id -> Text,
         keypackage_ref -> Text,
         keypackage_digest -> Text,
-        owner_account_id -> Jsonb,
+        owner_actor_id -> Jsonb,
         effective_scope -> Nullable<Jsonb>,
         actor_id -> Text,
         device_id -> Nullable<Text>,

@@ -34,6 +34,7 @@ pub(crate) async fn lock_cuts(
     realms.dedup();
     for (realm, station) in realms {
         crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &realm).await?;
+        crate::realm_management_archive::require_unfrozen(conn, &realm).await?;
         let owner = sql_query(
             "SELECT to_jsonb(service_id) AS payload FROM realm_authorities WHERE realm_id=$1",
         )

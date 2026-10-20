@@ -79,7 +79,7 @@ pub(crate) async fn revoke(
         // package at another signed scope must not cause partial cleanup.
         let mut rows = BTreeMap::new();
         for reference in refs {
-            let row = sql_query("SELECT id,keypackage_ref,keypackage_digest,owner_account_id,effective_scope,actor_id,device_id,endpoint_verification_method,key_package_bytes,capabilities,capabilities_digest,last_resort,last_resort_realm_id,lifetime_not_before,lifetime_not_after,claimed_by_mls_group_id,device_authorize_event_id,agent_key_authorize_event_id,claimed_at,claim_expires_at_unix_ms,consumed_at,created_at FROM mls_key_packages WHERE keypackage_ref=$1 FOR UPDATE")
+            let row = sql_query("SELECT id,keypackage_ref,keypackage_digest,owner_actor_id,effective_scope,actor_id,device_id,endpoint_verification_method,key_package_bytes,capabilities,capabilities_digest,last_resort,last_resort_realm_id,lifetime_not_before,lifetime_not_after,claimed_by_mls_group_id,device_authorize_event_id,agent_key_authorize_event_id,claimed_at,claim_expires_at_unix_ms,consumed_at,created_at FROM mls_key_packages WHERE keypackage_ref=$1 FOR UPDATE")
                 .bind::<Text,_>(&reference).get_result::<MlsKeyPackagePgRow>(&mut *conn).await.optional()?
                 .map(validated_keypackage_row).transpose()?;
             let own = row.filter(|row| row.owner_actor_id == authority.actor_id

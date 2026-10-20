@@ -1239,6 +1239,11 @@ pub trait MlsKeyPackageMaintenancePort: Send + Sync {
         source_id: &str,
         claim_request_id: &str,
     ) -> ServiceResult<Option<PeerKeyPackageClaimLedgerState>>;
+    async fn realm_claim_issuer_resolution(
+        &self,
+        source_id: &str,
+        claim_request_id: &str,
+    ) -> ServiceResult<Option<arkret_models_identity::AuthenticatedServiceResolution>>;
     async fn peer_claim_by_claim_id(
         &self,
         claim_id: &str,
@@ -1398,6 +1403,15 @@ impl MlsKeyPackageService {
     }
     /// The ledger row that issued the exact `KeypackageClaimId` a Welcome
     /// names.
+    pub async fn realm_claim_issuer_resolution(
+        &self,
+        source_id: &str,
+        claim_request_id: &str,
+    ) -> ServiceResult<Option<arkret_models_identity::AuthenticatedServiceResolution>> {
+        self.key_packages
+            .realm_claim_issuer_resolution(source_id, claim_request_id)
+            .await
+    }
     pub async fn peer_claim_by_claim_id(
         &self,
         claim_id: &str,

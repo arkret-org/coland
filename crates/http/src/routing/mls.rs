@@ -1287,6 +1287,9 @@ async fn claim_keypackage_at_destination(
             .claim_peer_key_package(PeerKeyPackageClaimAttempt {
                 admission: Some(&coland_storage::MlsKeyPackageClaimAdmission {
                     request: body.clone(),
+                    claim_issuer_resolution: if body.target_actor_id.is_some() {
+                        Some(crate::routing::system::service_resolution::current_authenticated_service_resolution(state).await?)
+                    } else { None },
                     requester: native_requester.cloned(),
                 }),
                 applet_device_scope_guard: native_target,

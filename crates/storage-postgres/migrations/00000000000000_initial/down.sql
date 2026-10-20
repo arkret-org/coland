@@ -1,4 +1,7 @@
+DROP TABLE IF EXISTS public.realm_account_device_evidence;
+DROP TABLE IF EXISTS public.realm_claim_issuer_histories;
 DROP TABLE IF EXISTS public.realm_actor_device_revoke_cleanup;
+DROP TABLE IF EXISTS public.keypackage_claim_sources;
 DROP TABLE IF EXISTS public.realm_actor_mls_cleanup;
 DROP TABLE IF EXISTS public.realm_actor_recovery_intents;
 DROP TABLE IF EXISTS public.realm_actor_device_revoke_results;
@@ -11,6 +14,7 @@ DROP TABLE IF EXISTS consent_private_effect_cuts;
 DROP TABLE IF EXISTS consent_private_effect_fences;
 DROP TABLE IF EXISTS consent_private_effect_jobs;
 DROP TABLE IF EXISTS pcr_private_handoff_imports;
+DROP TABLE IF EXISTS management_private_handoff_imports;
 DROP TABLE IF EXISTS consent_private_proxy_cuts;
 DROP TABLE IF EXISTS consent_private_proxy_fences;
 DROP TABLE IF EXISTS invite_new_source_hmac_keys;

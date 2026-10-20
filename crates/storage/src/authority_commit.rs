@@ -3408,15 +3408,12 @@ pub trait AuthorityCommitStore: Send + Sync {
         final_stream_heads: &[CommitStreamHead],
         snapshot: &RealmStateSnapshot,
         manifest: Option<&arkret_models_collaboration::authority_commit::PcrPrivateHandoffManifest>,
+        management: &arkret_models_collaboration::authority_commit::ManagementPrivateHandoffManifest,
     ) -> PersistenceResult<()> {
-        if manifest.is_some() || handoff.pcr_private_state_digest.is_some() {
-            return Err(PersistenceError::Conflict(
-                "temporarily_unavailable: durable PCR private import verification is unavailable"
-                    .into(),
-            ));
-        }
-        self.install_handoff(handoff, final_stream_heads, snapshot)
-            .await
+        let _ = (handoff, final_stream_heads, snapshot, manifest, management);
+        Err(PersistenceError::Conflict(
+            "temporarily_unavailable: durable private import verification is unavailable".into(),
+        ))
     }
 
     async fn install_handoff(

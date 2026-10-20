@@ -183,10 +183,23 @@ async fn continuation(
             .and_then(|v| v.get("endpoint"))
             .cloned(),
     )?;
+    crate::realm_management_history::require_issuer(
+        conn,
+        &endpoint.authority.realm_id,
+        &stored.service_id,
+        None,
+        chrono::DateTime::from_timestamp_millis(stored.issued_at_ms).ok_or_else(|| {
+            cursor_error(
+                "cursor_integrity_invalid",
+                "cursor issuance time is invalid",
+            )
+        })?,
+    )
+    .await?;
     let expected = cursor_context(
         &subject(&endpoint.authority)?,
         Some(endpoint.authority.device_id.to_string()),
-        endpoint.authority.governance_service_id.clone(),
+        stored.service_id.clone(),
         operation,
         None,
         Some(endpoint_binding(endpoint)?),
@@ -291,11 +304,23 @@ async fn material_deadline(
     let package = crate::mls::key_package_for_delivery(conn, &claim.keypackage_ref)
         .await?
         .ok_or_else(|| denied("queued Welcome package is unavailable"))?;
+    let original_authority = outcome
+        .claim_receipt
+        .claim_authority_ref
+        .as_ref()
+        .ok_or_else(|| denied("Realm claim has no original authority reference"))?;
+    crate::realm_management_history::require_issuer(
+        conn,
+        &authority.realm_id,
+        &outcome.claim_receipt.destination_id,
+        Some(original_authority),
+        outcome.claim_receipt.claimed_at,
+    )
+    .await?;
     let request = &outcome.claim_receipt.request;
     if row.source_id != outcome.claim_receipt.source_id.as_str()
         || row.claim_request_id != outcome.claim_request_id.as_str()
         || row.request_digest != outcome.claim_receipt.request_digest.as_str()
-        || outcome.claim_receipt.destination_id != authority.governance_service_id
         || row.welcome_id != welcome.welcome_id.as_str()
         || row.welcome_digest
             != welcome
@@ -455,17 +480,11 @@ pub(super) async fn read(
         )
     })
     .await?;
-    let binding = super::queue_authority::current_binding(
-        held.connection(),
-        authority.actor_id.signing_principal_id().as_str(),
-        authority.device_id.as_str(),
-    )
-    .await?
-    .ok_or_else(|| denied("native queue original endpoint binding is absent"))?;
+    let binding = super::queue_authority::realm_device_binding(authority)?;
     let scope =
         serde_json::to_value(&endpoint.effective_scope).map_err(PersistenceError::database)?;
     let rows=sql_query("SELECT position,delivery_json FROM mls_welcome_deliveries WHERE recipient=$1 AND recipient_endpoint_kind='device' AND recipient_device_id=$2 AND recipient_device_authorization=$3 AND recipient_authorization_event_ref=$4 AND delivery_json->'effective_scope'=$5 AND state='queued' AND position>$6 ORDER BY position LIMIT $7 FOR SHARE")
-        .bind::<Text,_>(authority.actor_id.signing_principal_id().as_str()).bind::<Text,_>(authority.device_id.as_str()).bind::<Jsonb,_>(&binding)
+        .bind::<Text,_>(subject(authority)?).bind::<Text,_>(authority.device_id.as_str()).bind::<Jsonb,_>(&binding)
         .bind::<Text,_>(authority.authorization_ref.event_id.as_str()).bind::<Jsonb,_>(&scope).bind::<BigInt,_>(after).bind::<BigInt,_>((input.limit+1) as i64)
         .load::<QueueRow>(held.connection()).await.map_err(PersistenceError::database)?;
     let has_more = rows.len() > input.limit;
@@ -529,14 +548,14 @@ pub(super) async fn read(
                 position: i64,
             }
             sql_query("SELECT position FROM mls_welcome_deliveries WHERE recipient=$1 AND recipient_endpoint_kind='device' AND recipient_device_id=$2 AND recipient_device_authorization=$3 AND delivery_json->'effective_scope'=$4 AND position=ANY($5) AND state='queued' ORDER BY position FOR SHARE NOWAIT")
-                .bind::<Text,_>(authority.actor_id.signing_principal_id().as_str()).bind::<Text,_>(authority.device_id.as_str()).bind::<Jsonb,_>(&binding).bind::<Jsonb,_>(&scope).bind::<Array<BigInt>,_>(&prior)
+                .bind::<Text,_>(subject(authority)?).bind::<Text,_>(authority.device_id.as_str()).bind::<Jsonb,_>(&binding).bind::<Jsonb,_>(&scope).bind::<Array<BigInt>,_>(&prior)
                 .load::<Position>(held.connection()).await.map_err(PersistenceError::database)?.into_iter().map(|row|row.position).collect()
         } else {
             Vec::new()
         };
         cumulative.extend_from_slice(&positions);
         sql_query("INSERT INTO device_message_ack_tokens(ack_token,recipient,device_id,recipient_device_authorization,effective_scope,delivered_positions,queue_position,issued_at,expires_at,consumed_at) VALUES($1,$2,$3,$4,$5,$6,$7,NOW(),$8,NULL)")
-            .bind::<Text,_>(&token).bind::<Text,_>(authority.actor_id.signing_principal_id().as_str()).bind::<Text,_>(authority.device_id.as_str()).bind::<Jsonb,_>(&binding)
+            .bind::<Text,_>(&token).bind::<Text,_>(subject(authority)?).bind::<Text,_>(authority.device_id.as_str()).bind::<Jsonb,_>(&binding)
             .bind::<Jsonb,_>(&scope).bind::<Array<BigInt>,_>(&cumulative).bind::<BigInt,_>(position).bind::<Timestamptz,_>(Utc::now()+chrono::Duration::hours(24))
             .execute(held.connection()).await.map_err(PersistenceError::database)?;
         let cursor = arkret::hlc::Cursor::new_at(Utc::now(), 3_600_000)
@@ -601,18 +620,18 @@ pub(super) async fn ack(
     conn.transaction::<_,PgTransactionError,_>(async |conn|{
         crate::realm_authorization_cut::lock_realm_authorization_cut(conn,&authority.realm_id).await?;
         require_device(conn,authority,scope,input.transport_expires_at).await?;
-        let Some(binding)=super::queue_authority::current_binding(conn,authority.actor_id.signing_principal_id().as_str(),authority.device_id.as_str()).await? else{return Ok(None)};
+        let binding=super::queue_authority::realm_device_binding(authority)?;
         let stored=sql_query("SELECT recipient,device_id,recipient_device_authorization,effective_scope,delivered_positions,expires_at,consumed_at FROM device_message_ack_tokens WHERE ack_token=$1 AND effective_scope IS NOT NULL FOR UPDATE")
             .bind::<Text,_>(token).get_result::<AckRow>(&mut *conn).await.optional()?;
         let Some(stored)=stored else{return Ok(None)};
         let scope=serde_json::to_value(scope).map_err(PersistenceError::database)?;
-        if stored.recipient!=authority.actor_id.signing_principal_id().as_str() || stored.device_id!=authority.device_id.as_str()
+        if stored.recipient!=subject(authority)? || stored.device_id!=authority.device_id.as_str()
             || stored.recipient_device_authorization!=binding || stored.effective_scope!=scope || Utc::now()>=stored.expires_at
             || stored.delivered_positions.is_empty() || stored.delivered_positions[0]<=0 || !stored.delivered_positions.windows(2).all(|pair|pair[0]<pair[1]) {return Ok(None);}
         require_device(conn,authority,input.effective_scope,input.transport_expires_at).await?;
         if stored.consumed_at.is_some(){return Ok(Some(0));}
         let count=sql_query("UPDATE mls_welcome_deliveries SET state='delivered',delivered_at=NOW() WHERE recipient=$1 AND recipient_endpoint_kind='device' AND recipient_device_id=$2 AND recipient_device_authorization=$3 AND position=ANY($4) AND delivery_json->'effective_scope'=$5 AND state='queued'")
-            .bind::<Text,_>(authority.actor_id.signing_principal_id().as_str()).bind::<Text,_>(authority.device_id.as_str()).bind::<Jsonb,_>(binding).bind::<Array<BigInt>,_>(&stored.delivered_positions).bind::<Jsonb,_>(scope)
+            .bind::<Text,_>(subject(authority)?).bind::<Text,_>(authority.device_id.as_str()).bind::<Jsonb,_>(binding).bind::<Array<BigInt>,_>(&stored.delivered_positions).bind::<Jsonb,_>(scope)
             .execute(&mut *conn).await?;
         sql_query("UPDATE device_message_ack_tokens SET consumed_at=NOW() WHERE ack_token=$1 AND consumed_at IS NULL").bind::<Text,_>(token).execute(&mut *conn).await?;
         require_device(conn,authority,input.effective_scope,input.transport_expires_at).await?;

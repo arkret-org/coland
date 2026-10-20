@@ -32,13 +32,29 @@ pub(super) fn retain_outgoing_cut<'a>(
             return Ok(());
         }
         let at = chrono::Utc::now();
-        crate::replica_authorization::guard_current_rows(
-            conn,
-            &handoff.realm_id,
-            &snapshot.current_state_entries,
-        )
-        .await?;
+        let public_rows = snapshot
+            .current_state_entries
+            .iter()
+            .filter(|row| {
+                let arkret_wire::TypedCurrentRow::Value {
+                    source_stream_ref, ..
+                } = row;
+                !matches!(
+                    source_stream_ref,
+                    arkret_wire::CommitStreamRef::RealmControl { .. }
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        crate::replica_authorization::guard_current_rows(conn, &handoff.realm_id, &public_rows)
+            .await?;
         for head in &snapshot.visible_stream_heads {
+            if matches!(
+                head.stream_ref,
+                arkret_wire::CommitStreamRef::RealmControl { .. }
+            ) {
+                continue;
+            }
             crate::replica_authorization::install_verified_head(conn, head, at).await?;
         }
         // The full native handoff cut also retires stale rows retained from any
@@ -47,11 +63,12 @@ pub(super) fn retain_outgoing_cut<'a>(
             .bind::<Text, _>(handoff.realm_id.as_str())
             .execute(&mut *conn)
             .await?;
-        for row in &snapshot.current_state_entries {
+        for row in &public_rows {
             crate::replica_authorization::save_row(conn, &handoff.realm_id, row, at).await?;
         }
         for head in &snapshot.visible_stream_heads {
             let reader = match &head.stream_ref {
+                arkret_wire::CommitStreamRef::RealmControl { .. } => continue,
                 arkret_wire::CommitStreamRef::Realm { .. }
                 | arkret_wire::CommitStreamRef::Circle { .. } => {
                     super::replica::bootstrap_readers_in_connection(

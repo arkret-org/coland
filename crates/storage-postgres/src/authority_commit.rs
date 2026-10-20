@@ -6258,8 +6258,10 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         heads: &[arkret_wire::CommitStreamHead],
         snapshot: &arkret_wire::RealmStateSnapshot,
     ) -> PersistenceResult<()> {
-        self.install_handoff_inner(handoff, heads, snapshot, None)
-            .await
+        let _ = (handoff, heads, snapshot);
+        Err(invalid(
+            "handoff activation requires the complete management private manifest",
+        ))
     }
     async fn install_handoff_with_private_state(
         &self,
@@ -6267,8 +6269,9 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         heads: &[arkret_wire::CommitStreamHead],
         snapshot: &arkret_wire::RealmStateSnapshot,
         manifest: Option<&arkret_models_collaboration::authority_commit::PcrPrivateHandoffManifest>,
+        management: &arkret_models_collaboration::authority_commit::ManagementPrivateHandoffManifest,
     ) -> PersistenceResult<()> {
-        self.install_handoff_inner(handoff, heads, snapshot, manifest)
+        self.install_handoff_inner(handoff, heads, snapshot, manifest, management)
             .await
     }
 
@@ -6408,7 +6411,9 @@ impl PgAuthorityCommitStore {
         final_stream_heads: &[arkret_wire::CommitStreamHead],
         snapshot: &arkret_wire::RealmStateSnapshot,
         manifest: Option<&arkret_models_collaboration::authority_commit::PcrPrivateHandoffManifest>,
+        management: &arkret_models_collaboration::authority_commit::ManagementPrivateHandoffManifest,
     ) -> PersistenceResult<()> {
+        management.validate_handoff(handoff).map_err(invalid)?;
         match (manifest, handoff.pcr_private_state_digest.as_ref()) {
             (Some(manifest), Some(digest))
                 if manifest.realm_id == handoff.realm_id
@@ -6476,6 +6481,11 @@ impl PgAuthorityCommitStore {
                 if held.handoff_json != handoff_json || held_snapshot.snapshot_json != snapshot_json {
                     return Err(invalid("handoff replay differs from the installed original").into());
                 }
+                let held_management = sql_query("SELECT manifest FROM management_private_handoff_imports WHERE handoff_id=$1")
+                    .bind::<Text,_>(handoff.handoff_id.as_str()).get_result::<PcrManifestRow>(&mut *conn).await?;
+                if held_management.manifest != serde_json::to_value(management).map_err(invalid)? {
+                    return Err(invalid("management handoff replay differs from its original manifest").into());
+                }
                 let originals = handoff_originals_in_connection(conn, &handoff.realm_id).await?;
                 crate::registered_audit::verify_handoff_archive(conn, &originals).await?;
                 if let Some(manifest) = manifest {
@@ -6496,6 +6506,7 @@ impl PgAuthorityCommitStore {
             if let Some(manifest) = manifest {
                 crate::pcr_private_archive::verify_import(conn, manifest).await?;
             }
+            crate::realm_management_archive::verify_import(conn, management).await?;
 
             let rows = sql_query(
                 REALM_STREAM_HEADS_SQL,
@@ -6613,6 +6624,11 @@ impl PgAuthorityCommitStore {
                     .bind::<Jsonb,_>(serde_json::to_value(manifest).map_err(invalid)?).execute(&mut *conn).await?;
             }
             handoff_replica::retain_outgoing_cut(conn, handoff, snapshot, &originals).await?;
+            sql_query("INSERT INTO management_private_handoff_imports(handoff_id,realm_id,manifest) VALUES($1,$2,$3)")
+                .bind::<Text,_>(handoff.handoff_id.as_str()).bind::<Text,_>(handoff.realm_id.as_str())
+                .bind::<Jsonb,_>(serde_json::to_value(management).map_err(invalid)?).execute(&mut *conn).await?;
+            sql_query("UPDATE management_review_requests SET status='superseded' WHERE realm_id=$1 AND status IN ('pending','approved')")
+                .bind::<Text,_>(handoff.realm_id.as_str()).execute(&mut *conn).await?;
             sql_query(
                 "UPDATE realm_authorities SET generation = $2, service_id = $3, \
                  authority_ref = $4, last_handoff_ref = $5, updated_at = now() WHERE realm_id = $1",

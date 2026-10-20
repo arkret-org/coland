@@ -2,6 +2,9 @@
 //! Mirrors the registered HTTP fixture's signed prerequisites; commits always
 //! pass the production closed aggregate, never a synthetic verified flag.
 
+#[path = "management_archive_fixture.rs"]
+mod management_archive_fixture;
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -262,6 +265,7 @@ impl Fixture {
         .await
         .unwrap();
         self.authority_event_ref = Some(unit.transactions[0].event.event_id.clone());
+        self.state.hydrate().await.unwrap();
     }
 
     fn sign_admin(&self, mut event: Event) -> Event {
@@ -4680,6 +4684,218 @@ mod realm_native_fixture {
         );
     }
 
+    async fn independent_management_archive(
+        fixture: &Fixture,
+        manifest: &arkret_models_collaboration::authority_commit::ManagementPrivateHandoffManifest,
+        bytes: &[u8],
+        archive: &Value,
+    ) {
+        use diesel_async::{RunQueryDsl, SimpleAsyncConnection};
+        #[derive(diesel::QueryableByName)]
+        struct Count {
+            #[diesel(sql_type=diesel::sql_types::BigInt)]
+            count: i64,
+        }
+        let target = coland_storage_postgres::test_database::TestDatabase::lease().await;
+        let target_pool = target.pool();
+        boxed_step(|| {
+            management_archive_fixture::seed_ordinary(
+                &fixture.pool,
+                &target_pool,
+                archive["tables"].as_object().unwrap(),
+            )
+        })
+        .await;
+        let target_store = PgAuthorityCommitStore {
+            pool: target_pool.clone(),
+        };
+        let mut conn = target_pool.get().await.unwrap();
+        conn.batch_execute("CREATE FUNCTION test_private_archive_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'private archive write failure'; END $$; CREATE TRIGGER test_private_archive_failure BEFORE INSERT ON realm_actor_current_results FOR EACH ROW EXECUTE FUNCTION test_private_archive_failure();")
+            .await.unwrap();
+        assert!(
+            target_store
+                .import_management_private_state(manifest, bytes)
+                .await
+                .is_err()
+        );
+        let count=diesel::sql_query("SELECT (SELECT COUNT(*) FROM realm_actor_creations)+(SELECT COUNT(*) FROM canonical_events WHERE scope_ref->>'kind'='realm_control') AS count")
+            .get_result::<Count>(&mut *conn).await.unwrap();
+        assert_eq!(
+            count.count, 0,
+            "a mid-import writer failure rolls back original Events and creations"
+        );
+        conn.batch_execute("DROP TRIGGER test_private_archive_failure ON realm_actor_current_results; DROP FUNCTION test_private_archive_failure();").await.unwrap();
+        target_store
+            .import_management_private_state(manifest, bytes)
+            .await
+            .unwrap();
+        let (restored, actual) = target_store
+            .export_management_private_state(&fixture.realm)
+            .await
+            .unwrap();
+        assert_eq!(restored.state_digest, manifest.state_digest);
+        assert_eq!(
+            restored.final_stream_heads_digest,
+            manifest.final_stream_heads_digest
+        );
+        assert_eq!(
+            actual, bytes,
+            "independent database re-export preserves every private original"
+        );
+        let event = archive["tables"]["canonical_events"][0]["envelope"]["event_id"]
+            .as_str()
+            .unwrap();
+        let mut source = fixture.pool.get().await.unwrap();
+        let source_pk = diesel::sql_query(
+            "SELECT pk AS count FROM canonical_events WHERE envelope->>'event_id'=$1",
+        )
+        .bind::<diesel::sql_types::Text, _>(event)
+        .get_result::<Count>(&mut *source)
+        .await
+        .unwrap()
+        .count;
+        let target_pk = diesel::sql_query(
+            "SELECT pk AS count FROM canonical_events WHERE envelope->>'event_id'=$1",
+        )
+        .bind::<diesel::sql_types::Text, _>(event)
+        .get_result::<Count>(&mut *conn)
+        .await
+        .unwrap()
+        .count;
+        assert_ne!(
+            source_pk, target_pk,
+            "portable originals must not depend on the source database surrogate"
+        );
+        target_store
+            .import_management_private_state(manifest, bytes)
+            .await
+            .unwrap();
+    }
+
+    async fn private_management_archive(fixture: &Fixture) {
+        use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
+        let store = PgAuthorityCommitStore {
+            pool: fixture.pool.clone(),
+        };
+        assert!(
+            store
+                .export_management_private_state(&fixture.realm)
+                .await
+                .is_err(),
+            "a live governor must not export a supposedly frozen archive"
+        );
+        let stream = arkret_wire::CommitStreamRef::Realm {
+            realm_id: fixture.realm.clone(),
+        };
+        let head = store.stream_head(&stream).await.unwrap().unwrap();
+        let authority = store
+            .current_authority(&fixture.realm)
+            .await
+            .unwrap()
+            .unwrap();
+        let change = fixture.admin_event(
+            EventKind::RealmGovernanceStationChange,
+            ScopeRef::Realm {
+                realm_id: fixture.realm.clone(),
+            },
+            json!({
+                "expected_governance_generation":authority.generation,
+                "expected_realm_stream_commit_id":head.commit_id,
+                "new_governance_station_id":"ak:did_core:web:archive-next.example"
+            }),
+        );
+        let (status, response) = fixture
+            .admin_post(
+                "/_arkret/self/events",
+                arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                &json!(SelfAuthoritySubmitRequest::Event(
+                    arkret_wire::EventAdmissionSubmission::new(change)
+                )),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "freeze actual Realm: {response}");
+        let (manifest, bytes) = store
+            .export_management_private_state(&fixture.realm)
+            .await
+            .unwrap();
+        manifest.validate().unwrap();
+        let archive: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            archive["tables"]["realm_actor_creations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            !archive["tables"]["realm_actor_private_signer_facts"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !archive["tables"]["realm_actor_device_revoke_results"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        store
+            .import_management_private_state(&manifest, &bytes)
+            .await
+            .unwrap();
+        boxed_step(|| independent_management_archive(fixture, &manifest, &bytes, &archive)).await;
+        for fault in [
+            "missing_domain",
+            "extra_domain",
+            "changed_current",
+            "missing_event",
+        ] {
+            let mut changed = archive.clone();
+            match fault {
+                "missing_domain" => {
+                    changed["tables"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("realm_actor_control_nonces");
+                }
+                "extra_domain" => {
+                    changed["tables"]["private_keys"] = json!([]);
+                }
+                "changed_current" => {
+                    changed["tables"]["realm_actor_current_results"][0]["value"] = json!(null);
+                }
+                "missing_event" => {
+                    changed["tables"]["canonical_events"]
+                        .as_array_mut()
+                        .unwrap()
+                        .pop();
+                }
+                _ => unreachable!(),
+            }
+            let changed = arkret_canonical::canonical_json_bytes(&changed).unwrap();
+            let mut bad = manifest.clone();
+            bad.state_digest =
+                arkret_wire::Hash::new(arkret_canonical::sha256_digest(&changed)).unwrap();
+            assert!(
+                store
+                    .import_management_private_state(&bad, &changed)
+                    .await
+                    .is_err(),
+                "{fault}"
+            );
+            let (after, actual) = store
+                .export_management_private_state(&fixture.realm)
+                .await
+                .unwrap();
+            assert_eq!(
+                after.state_digest, manifest.state_digest,
+                "{fault} changed durable state"
+            );
+            assert_eq!(actual, bytes);
+        }
+    }
+
     #[inline(never)]
     fn boxed_step<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
     where
@@ -4828,6 +5044,8 @@ mod realm_native_fixture {
         boxed_step(|| cross_station_audit(&factory.fixture, &candidate)).await;
         eprintln!("native lifecycle: management Service handover");
         boxed_step(|| manager_handover(&factory, &native, &candidate)).await;
+        eprintln!("native lifecycle: frozen private management archive");
+        boxed_step(|| private_management_archive(&factory.fixture)).await;
         let store = PgAuthorityCommitStore { pool };
         let originals = store
             .applet_realm_actor_creations(&factory.fixture.realm, &id)

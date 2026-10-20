@@ -3100,6 +3100,11 @@ impl AuthorityCommitApplication {
                 &request.final_stream_heads,
                 &request.snapshot,
                 request.pcr_private_state.as_ref(),
+                request.management_private_state.as_ref().ok_or_else(|| {
+                    crate::ServiceError::SchemaViolation(
+                        "management private handoff manifest is required".into(),
+                    )
+                })?,
             )
             .await?;
         Ok(())

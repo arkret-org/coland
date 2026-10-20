@@ -1116,8 +1116,9 @@ CREATE TABLE public.mls_welcome_deliveries (
     welcome_id text PRIMARY KEY,
     realm_id text NOT NULL,
     commit_event_pk bigint NOT NULL REFERENCES public.canonical_events(pk) ON DELETE RESTRICT,
-    -- The recipient's queue owner: its signing principal, the same key
-    -- `device_messages.recipient` uses, so both branches share one queue.
+    -- Human/Agent queues use the signing principal. Realm Devices use the
+    -- canonical full ActorId so identities survive governance changes without
+    -- merging different Realms that happen to name the same DID.
     recipient text NOT NULL,
     recipient_endpoint_kind text NOT NULL CHECK (recipient_endpoint_kind IN ('device', 'agent_runtime')),
     recipient_device_id text,
@@ -1686,6 +1687,12 @@ CREATE TABLE public.pcr_private_handoff_imports (
     manifest jsonb NOT NULL
 );
 
+CREATE TABLE public.management_private_handoff_imports (
+    handoff_id text PRIMARY KEY,
+    realm_id text NOT NULL,
+    manifest jsonb NOT NULL
+);
+
 -- Reject-only hosting projection. This never authorizes a private acceptance.
 CREATE TABLE public.consent_private_proxy_cuts (
     holder_account_id jsonb PRIMARY KEY,
@@ -1930,6 +1937,15 @@ CREATE INDEX keypackage_claim_attempts_requester_idx ON public.keypackage_claim_
 CREATE INDEX keypackage_claim_attempts_target_idx ON public.keypackage_claim_attempts(target_identity,attempted_at);
 CREATE INDEX keypackage_claim_attempts_source_target_idx ON public.keypackage_claim_attempts(source_target_identity,attempted_at);
 CREATE INDEX keypackage_claim_attempts_expiry_idx ON public.keypackage_claim_attempts(expires_at);
+
+-- Preserve complete scope coordinates even when no package was allocated.
+CREATE TABLE public.keypackage_claim_sources (
+    source_id text NOT NULL,
+    claim_request_id text NOT NULL,
+    request_digest text NOT NULL,
+    request_body jsonb NOT NULL,
+    PRIMARY KEY (source_id, claim_request_id)
+);
 
 CREATE TABLE public.peer_keypackage_claims (
     source_id text NOT NULL,
@@ -5129,4 +5145,23 @@ CREATE TABLE public.realm_actor_device_revoke_cleanup (
     group_state_ref jsonb NOT NULL,
     completion_ref jsonb,
     PRIMARY KEY(proposal_commit_id,mls_group_id,leaf_index)
+);
+
+-- Frozen issuing Station history is private claim provenance, not a mutable DID cache.
+CREATE TABLE public.realm_claim_issuer_histories (
+    realm_id text NOT NULL,
+    source_id text NOT NULL,
+    claim_request_id text NOT NULL,
+    resolution jsonb NOT NULL,
+    PRIMARY KEY (source_id, claim_request_id),
+    FOREIGN KEY (source_id, claim_request_id) REFERENCES peer_keypackage_claims(source_id,claim_request_id)
+);
+
+-- Portable immutable regular Account Device evidence for private Realm history.
+-- The original PCR authorization address is historical provenance, not a local FK.
+CREATE TABLE realm_account_device_evidence (
+    commit_id text PRIMARY KEY REFERENCES realm_commits(commit_id),
+    evidence_ref text NOT NULL,
+    authorization_commit_id text NOT NULL,
+    evidence_json jsonb NOT NULL CHECK(jsonb_typeof(evidence_json)='object')
 );

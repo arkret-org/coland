@@ -36,6 +36,7 @@ pub(crate) async fn current_carrier(
         .as_realm_actor_id()
         .ok_or_else(|| denied("Realm actor required"))?;
     crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &subject.realm_id).await?;
+    crate::realm_management_archive::require_unfrozen(conn, &subject.realm_id).await?;
     #[derive(QueryableByName)]
     struct Authority {
         #[diesel(sql_type=Text)]

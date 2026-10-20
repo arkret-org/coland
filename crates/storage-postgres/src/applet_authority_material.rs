@@ -126,8 +126,8 @@ pub(crate) async fn read(
     }
     let realm = request.effective_scope.realm_id();
     let scope_key = coland_storage::applet_effective_scope_key(&request.effective_scope)?;
-    let install=sql_query("SELECT i.record AS value FROM applet_installations i JOIN applet_managed_identities d ON d.applet_id=i.applet_id AND d.target_station_id=$3 WHERE i.applet_id=$1 AND i.effective_scope_key=$2 AND d.record#>>'{initial_package,service_id}'=$4")
-        .bind::<Text,_>(applet.as_str()).bind::<Text,_>(scope_key).bind::<Text,_>(station.as_str()).bind::<Text,_>(service.as_str()).get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(unavailable)?;
+    let install=sql_query("SELECT record AS value FROM applet_installations WHERE applet_id=$1 AND effective_scope_key=$2")
+        .bind::<Text,_>(applet.as_str()).bind::<Text,_>(scope_key).get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(unavailable)?;
     if install
         .value
         .pointer("/package/service_id")

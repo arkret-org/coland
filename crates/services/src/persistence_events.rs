@@ -758,6 +758,17 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
             .get_peer_claim(source_id, claim_request_id)
             .await?)
     }
+    async fn realm_claim_issuer_resolution(
+        &self,
+        source_id: &str,
+        claim_request_id: &str,
+    ) -> crate::ServiceResult<Option<arkret_models_identity::AuthenticatedServiceResolution>> {
+        Ok(self
+            .0
+            .mls_key_packages()
+            .realm_claim_issuer_resolution(source_id, claim_request_id)
+            .await?)
+    }
     async fn peer_claim_by_claim_id(
         &self,
         claim_id: &str,

@@ -213,6 +213,7 @@ pub(crate) async fn finish(
     .bind::<Text, _>(subject.realm_id.as_str())
     .get_result::<Row>(&mut *conn)
     .await?;
+    crate::realm_management_archive::require_unfrozen(conn, &subject.realm_id).await?;
     if authority.realm_id != subject.realm_id
         || current.value["service_id"] != json!(authority.service_id)
         || current.value["generation"] != json!(authority.generation)

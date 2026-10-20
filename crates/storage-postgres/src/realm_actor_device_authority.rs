@@ -251,6 +251,7 @@ pub(crate) async fn current_in_connection(
             _ => return Err(invalid("invalid Realm Device command result")),
         }
     }
+    crate::realm_management_archive::require_unfrozen(conn, &subject.realm_id).await?;
     let current =
         sql_query("SELECT to_jsonb(a) AS value FROM realm_authorities a WHERE realm_id=$1")
             .bind::<Text, _>(subject.realm_id.as_str())

@@ -1,4 +1,4 @@
-//! Original native receipt cleanup under one current PCR and claim transaction.
+//! Original native receipt cleanup under one current Realm control and claim transaction.
 use arkret_models_crypto::{
     KeyPackageConsumeReceipt, KeyPackagesConsumeOutcome, RecipientMlsDurableSigner,
 };
@@ -76,7 +76,6 @@ pub(crate) async fn consume(
             arkret_wire::ScopeRef::Realm { .. } | arkret_wire::ScopeRef::Circle { .. }
         )
         || !authority.scopes.contains_scope(scope)
-        || receipt.recipient_id != authority.governance_service_id
         || &receipt.realm_id != scope.realm_id()
         || receipt.mls_group_id
             != scope
@@ -133,7 +132,7 @@ pub(crate) async fn consume(
     conn.transaction::<_,PgTransactionError,_>(async move |conn| {
         // The same order as own revoke: PCR, package, then exact claim ledger.
         crate::realm_authorization_cut::lock_realm_authorization_cut(conn,&authority.realm_id).await?;
-        let mut package=sql_query("SELECT id,keypackage_ref,keypackage_digest,owner_account_id,effective_scope,actor_id,device_id,endpoint_verification_method,key_package_bytes,capabilities,capabilities_digest,last_resort,last_resort_realm_id,lifetime_not_before,lifetime_not_after,claimed_by_mls_group_id,device_authorize_event_id,agent_key_authorize_event_id,claimed_at,claim_expires_at_unix_ms,consumed_at,created_at FROM mls_key_packages WHERE keypackage_ref=$1 FOR UPDATE")
+        let mut package=sql_query("SELECT id,keypackage_ref,keypackage_digest,owner_actor_id,effective_scope,actor_id,device_id,endpoint_verification_method,key_package_bytes,capabilities,capabilities_digest,last_resort,last_resort_realm_id,lifetime_not_before,lifetime_not_after,claimed_by_mls_group_id,device_authorize_event_id,agent_key_authorize_event_id,claimed_at,claim_expires_at_unix_ms,consumed_at,created_at FROM mls_key_packages WHERE keypackage_ref=$1 FOR UPDATE")
             .bind::<Text,_>(receipt.key_package_ref.as_str()).get_result::<MlsKeyPackagePgRow>(&mut *conn).await.optional()?.map(validated_keypackage_row).transpose()?
             .ok_or_else(||conflict("consume package is unavailable"))?;
         if package.owner_actor_id!=authority.actor_id
@@ -158,12 +157,17 @@ pub(crate) async fn consume(
         }
         let outcome:arkret_models_crypto::PeerKeyPackagesClaimOutcome=serde_json::from_value(ledger.outcome.clone().ok_or_else(||conflict("consume has no original claim outcome"))?).map_err(PersistenceError::database)?;
         outcome.validate_shape().map_err(|_|conflict("original claim outcome is invalid"))?;
+        let original_authority=outcome.claim_receipt.claim_authority_ref.as_ref()
+            .ok_or_else(||conflict("Realm claim has no original authority reference"))?;
+        crate::realm_management_history::require_issuer(conn,&authority.realm_id,
+            &outcome.claim_receipt.destination_id,Some(original_authority),outcome.claim_receipt.claimed_at).await?;
+
         let claim=outcome.claims.iter().find(|claim|claim.claim_id==body.claim_id.as_str()).ok_or_else(||conflict("claim id is not in its original outcome"))?;
         if ledger.keypackage_id.as_deref()!=Some(package.id.as_str())
             || outcome.claim_request_id.as_str()!=ledger.claim_request_id
             || outcome.claim_receipt.source_id.as_str()!=ledger.source_id
             || outcome.claim_receipt.request_digest.as_str()!=ledger.request_digest
-            || outcome.claim_receipt.destination_id!=authority.governance_service_id
+            || outcome.claim_receipt.destination_id!=receipt.recipient_id
             || receipt.claim_request_id!=outcome.claim_request_id
             || claim.actor_id!=authority.actor_id
             || claim.device_id.as_ref()!=Some(&authority.device_id)

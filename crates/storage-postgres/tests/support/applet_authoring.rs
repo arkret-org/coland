@@ -5389,9 +5389,55 @@ mod realm_native_fixture {
         use arkret_bridge_runtime::managed_actor_authoring::ManagedActorAuthoringService;
         use arkret_bridge_runtime::managed_device::ManagedDeviceRuntime;
         use arkret_bridge_runtime::{
-            ArkretEdge, AuthoringJournal, FileAuthoringStore, PreparedGhost,
+            ArkretEdge, AuthoringJournal, AuthoringStore, FileAuthoringStore, PreparedGhost,
         };
         use coland_storage::MlsGroupCurrentStore as _;
+        struct LostRevokeReceipt {
+            inner: FileAuthoringStore,
+            armed: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl AuthoringStore for LostRevokeReceipt {
+            fn load(&self, key: &str) -> arkret_bridge_runtime::Result<Option<String>> {
+                self.inner.load(key)
+            }
+            fn entries_with_prefix(
+                &self,
+                prefix: &str,
+            ) -> arkret_bridge_runtime::Result<Vec<(String, String)>> {
+                self.inner.entries_with_prefix(prefix)
+            }
+            fn compare_exchange_batch(
+                &self,
+                expected: &[(String, Option<String>)],
+                writes: &[(String, Option<String>)],
+            ) -> arkret_bridge_runtime::Result<bool> {
+                if expected.iter().any(|(key, value)| {
+                    key.starts_with("managed-device-revocation/v1/") && value.is_some()
+                }) && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(arkret_bridge_runtime::BridgeError::App(
+                        "injected crash before revoke receipt persistence".into(),
+                    ));
+                }
+                self.inner.compare_exchange_batch(expected, writes)
+            }
+        }
+        async fn control_nonce_count(pool: &PgPool, actor: &ActorId) -> i64 {
+            use diesel_async::RunQueryDsl as _;
+            #[derive(diesel::QueryableByName)]
+            struct Count {
+                #[diesel(sql_type = diesel::sql_types::BigInt)]
+                count: i64,
+            }
+            diesel::sql_query(
+                "SELECT COUNT(*) AS count FROM realm_actor_control_nonces WHERE actor_id=$1",
+            )
+            .bind::<diesel::sql_types::Jsonb, _>(json!(actor))
+            .get_result::<Count>(&mut pool.get().await.unwrap())
+            .await
+            .unwrap()
+            .count
+        }
         let (fixture, _governor_server) = boxed_step(|| network_fixture(pool.clone())).await;
         let factory = AppletAuthoringFactory {
             fixture,
@@ -5468,6 +5514,7 @@ mod realm_native_fixture {
             .http_client(http)
             .build()
             .unwrap();
+        let lost_receipt = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let make_edge = || {
             Arc::new(
                 ArkretEdge::new_outbound(
@@ -5478,7 +5525,10 @@ mod realm_native_fixture {
                         did.clone(),
                         package.webhook_auth.key_ref.clone(),
                     ),
-                    AuthoringJournal::new(Arc::new(FileAuthoringStore::new(path.clone()).unwrap())),
+                    AuthoringJournal::new(Arc::new(LostRevokeReceipt {
+                        inner: FileAuthoringStore::new(path.clone()).unwrap(),
+                        armed: lost_receipt.clone(),
+                    })),
                 )
                 .unwrap(),
             )
@@ -6042,6 +6092,101 @@ mod realm_native_fixture {
         assert_eq!(recovered.authorization_commit, device.authorization_commit);
         eprintln!("real Bridge runtime: restart, membership and native inventory verified");
         drop(recovered);
+        let revoke_operation = "retire-runtime-device";
+        let revoke_reason = Some("runtime_device_retired".to_owned());
+        lost_receipt.store(true, std::sync::atomic::Ordering::SeqCst);
+        let failure =
+            boxed_step(|| devices.revoke_device(&device, revoke_operation, revoke_reason.clone()))
+                .await
+                .unwrap_err();
+        assert!(
+            failure
+                .to_string()
+                .contains("injected crash before revoke receipt persistence"),
+            "{failure}",
+        );
+        let accepted_nonces = control_nonce_count(&factory.fixture.pool, &actor).await;
+        drop(devices);
+        drop(edge);
+        let edge = make_edge();
+        let devices = ManagedDeviceRuntime::new(edge.clone()).unwrap();
+        assert_eq!(
+            boxed_step(|| devices.revoke_device(&device, revoke_operation, revoke_reason.clone()))
+                .await
+                .unwrap(),
+            arkret::RealmActorDeviceRevokeState::Pending,
+        );
+        assert_eq!(
+            control_nonce_count(&factory.fixture.pool, &actor).await,
+            accepted_nonces,
+            "cold recovery reads the accepted original without another control-signed submission",
+        );
+        assert!(
+            !boxed_step(|| devices.erase_revoked_device(&device))
+                .await
+                .unwrap(),
+            "proposal acceptance must not erase any private Device custody",
+        );
+        let pending_custody = boxed_step(|| devices.device_for_actor(&actor))
+            .await
+            .unwrap();
+        assert_eq!(pending_custody.device_id, device.device_id);
+        assert_eq!(
+            pending_custody.authorization_event_id,
+            device.authorization_event_id
+        );
+        drop(pending_custody);
+        assert!(
+            boxed_step(|| devices.revoke_device(
+                &device,
+                revoke_operation,
+                Some("changed_intent".into())
+            ))
+            .await
+            .is_err(),
+            "an operation must not rewrite its frozen revoke intent",
+        );
+        assert_eq!(
+            coland_http::security_rotation_worker::sweep_realm_device_revocations(
+                &factory.fixture.state
+            )
+            .await
+            .unwrap(),
+            1,
+            "the production worker decides the accepted proposal",
+        );
+        drop(devices);
+        drop(edge);
+        let edge = make_edge();
+        let devices = ManagedDeviceRuntime::new(edge.clone()).unwrap();
+        assert_eq!(
+            boxed_step(|| devices.reconcile_device_revocations())
+                .await
+                .unwrap(),
+            vec![(actor.clone(), device.device_id.clone())],
+            "cold recovery reads and verifies the original terminal material",
+        );
+        assert!(
+            boxed_step(|| devices.erase_revoked_device(&device))
+                .await
+                .unwrap(),
+            "accepted terminal cleanup is idempotent",
+        );
+        assert!(
+            boxed_step(|| devices.device_for_actor(&actor))
+                .await
+                .is_err(),
+            "bootstrap cannot silently recreate a permanently retired Device operation",
+        );
+        assert_eq!(
+            boxed_step(|| devices.revoke_device(&device, revoke_operation, revoke_reason))
+                .await
+                .unwrap(),
+            arkret::RealmActorDeviceRevokeState::Accepted,
+        );
+        eprintln!(
+            "real Bridge runtime: native revoke terminal and cold private-key cleanup verified"
+        );
         drop(device);
         drop(devices);
         drop(edge);

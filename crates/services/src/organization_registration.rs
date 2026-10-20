@@ -326,27 +326,10 @@ impl OrganizationRegistrationService {
             .map_err(map_storage)
     }
 
-    pub async fn get(
-        &self,
-        organization_id: &DidCoreId,
-    ) -> Result<OrganizationRegistrationOutcome, OrganizationRegistrationError> {
-        let mut outcome = self
-            .current(organization_id)
-            .await?
-            .ok_or_else(|| {
-                OrganizationRegistrationError::new(
-                    OrganizationRegistrationErrorCode::DidNotFound,
-                    "organization registration not found",
-                )
-            })?
-            .outcome;
-        outcome.created = false;
-        Ok(outcome)
-    }
-
     pub async fn refresh(
         &self,
         request: OrganizationRegistrationRefreshRequestBody,
+        current: &OrganizationRegistrationCurrent,
         signer: &dyn OrganizationRegistrationReceiptSigner,
         now: DateTime<Utc>,
     ) -> Result<OrganizationRegistrationOutcome, OrganizationRegistrationError> {
@@ -367,20 +350,14 @@ impl OrganizationRegistrationService {
                 )
                 .await
                 .map_err(|error| OrganizationRegistrationError::proof(error.to_string()))?;
-            let current = self
-                .store()
-                .get_current(&request.organization_id)
-                .await
-                .map_err(map_storage)?;
-            validate_replay_current(&replay, current.as_ref())?;
-            self.require_current_authority(&pinned, current.as_ref(), signer, now, false)
+            validate_replay_current(&replay, Some(current))?;
+            self.require_current_authority(&pinned, Some(current), signer, now, false)
                 .await?;
             return Ok(replay);
         }
-        let current = self
-            .current(&request.organization_id)
-            .await?
-            .ok_or_else(|| not_found("organization registration not found"))?;
+        if current.generation.organization_id != request.organization_id {
+            return Err(not_found("authorized organization registration differs"));
+        }
         if current.generation.status == OrganizationRegistrationStatus::Revoked {
             return Err(OrganizationRegistrationError::new(
                 OrganizationRegistrationErrorCode::Revoked,
@@ -393,7 +370,7 @@ impl OrganizationRegistrationService {
             .await
             .map_err(map_storage)?
             .ok_or_else(|| OrganizationRegistrationError::challenge("challenge not found"))?;
-        validate_refresh_challenge_binding(&request, &challenge.challenge, &current, now)?;
+        validate_refresh_challenge_binding(&request, &challenge.challenge, current, now)?;
         let pinned = self
             .resolver
             .resolve_pinned_webvh_state(
@@ -403,10 +380,10 @@ impl OrganizationRegistrationService {
             )
             .await
             .map_err(|error| OrganizationRegistrationError::proof(error.to_string()))?;
-        self.require_current_authority(&pinned, Some(&current), signer, now, false)
+        self.require_current_authority(&pinned, Some(current), signer, now, false)
             .await?;
         let control_key_digest =
-            verify_refresh_control_proof(&request.control_proof, &request, &current, &pinned)?;
+            verify_refresh_control_proof(&request.control_proof, &request, current, &pinned)?;
         let outcome = sign_outcome(
             signer,
             &request.organization_id,
@@ -427,7 +404,7 @@ impl OrganizationRegistrationService {
                 challenge_id: request.challenge_id,
                 canonical_request_digest: request_digest,
                 expected_current_generation: current.generation.registration_generation,
-                expected_current_outcome_id: current.generation.current_outcome_id,
+                expected_current_outcome_id: current.generation.current_outcome_id.clone(),
                 outcome,
                 committed_at: canonical_time(now),
             })
@@ -438,15 +415,15 @@ impl OrganizationRegistrationService {
     pub async fn revoke(
         &self,
         request: OrganizationRegistrationRevokeRequestBody,
+        current: &OrganizationRegistrationCurrent,
         signer: &dyn OrganizationRegistrationReceiptSigner,
         now: DateTime<Utc>,
     ) -> Result<OrganizationRegistrationOutcome, OrganizationRegistrationError> {
-        let current = self
-            .current(&request.organization_id)
-            .await?
-            .ok_or_else(|| not_found("organization registration not found"))?;
+        if current.generation.organization_id != request.organization_id {
+            return Err(not_found("authorized organization registration differs"));
+        }
         if current.generation.status == OrganizationRegistrationStatus::Revoked {
-            let mut outcome = current.outcome;
+            let mut outcome = current.outcome.clone();
             outcome.created = false;
             return Ok(outcome);
         }
@@ -481,7 +458,7 @@ impl OrganizationRegistrationService {
             .revoke(OrganizationRegistrationLifecycleCommit {
                 organization_id: request.organization_id,
                 expected_current_generation: current.generation.registration_generation,
-                expected_current_outcome_id: current.generation.current_outcome_id,
+                expected_current_outcome_id: current.generation.current_outcome_id.clone(),
                 outcome,
                 reason,
                 committed_at: canonical_time(now),
@@ -2034,6 +2011,12 @@ mod tests {
                     organization_id: fixture.organization_id.clone(),
                     reason_code: None,
                 },
+                &fixture
+                    .service
+                    .current(&fixture.organization_id)
+                    .await
+                    .unwrap()
+                    .unwrap(),
                 &fixture.receipt_signer,
                 fixture.now + Duration::minutes(3),
             )
@@ -2069,6 +2052,12 @@ mod tests {
                     log_head_digest: fixture.pinned.log_head_digest.clone(),
                     control_proof: refresh_proof,
                 },
+                &fixture
+                    .service
+                    .current(&fixture.organization_id)
+                    .await
+                    .unwrap()
+                    .unwrap(),
                 &fixture.receipt_signer,
                 fixture.now + Duration::minutes(4),
             )
@@ -2167,6 +2156,12 @@ mod tests {
                     organization_id: fixture.organization_id.clone(),
                     reason_code: None,
                 },
+                &fixture
+                    .service
+                    .current(&fixture.organization_id)
+                    .await
+                    .unwrap()
+                    .unwrap(),
                 &fixture.receipt_signer,
                 fixture.now + Duration::minutes(7),
             )
@@ -2302,6 +2297,12 @@ mod tests {
                     log_head_digest: stale_fixture.pinned.log_head_digest.clone(),
                     control_proof: stale_recovery_proof,
                 },
+                &stale_fixture
+                    .service
+                    .current(&stale_fixture.organization_id)
+                    .await
+                    .unwrap()
+                    .unwrap(),
                 &stale_fixture.receipt_signer,
                 expired_at + Duration::minutes(3),
             )

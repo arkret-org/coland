@@ -1,4 +1,4 @@
-use arkret_identifiers::{Did, DidCoreId, project_did_to_core_id};
+use arkret_identifiers::DidCoreId;
 use arkret_models_identity::{
     OrganizationRegistrationChallenge, OrganizationRegistrationChallengeRequestBody,
     OrganizationRegistrationEnsureRequestBody, OrganizationRegistrationOutcome,
@@ -150,11 +150,8 @@ pub(crate) async fn get(
     if !authorized {
         return Err(indistinguishable_not_found());
     }
-    let outcome = state
-        .organization_registrations()
-        .get(&organization_id)
-        .await
-        .map_err(|_| indistinguishable_not_found())?;
+    let mut outcome = current.expect("authorized current registration").outcome;
+    outcome.created = false;
     json_ok(outcome)
 }
 
@@ -171,11 +168,11 @@ pub(crate) async fn refresh(
 ) -> JsonResult<OrganizationRegistrationOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let request = body.into_inner();
-    require_registration_manager(state, &aa, req, &request.organization_id).await?;
+    let current = require_registration_manager(state, &aa, req, &request.organization_id).await?;
     let signer = CurrentReceiptSigner::from_state(state)?;
     let outcome = state
         .organization_registrations()
-        .refresh(request, &signer, chrono::Utc::now())
+        .refresh(request, &current, &signer, chrono::Utc::now())
         .await
         .map_err(map_error)?;
     json_ok(outcome)
@@ -194,11 +191,11 @@ pub(crate) async fn revoke(
 ) -> JsonResult<OrganizationRegistrationOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let request = body.into_inner();
-    require_registration_manager(state, &aa, req, &request.organization_id).await?;
+    let current = require_registration_manager(state, &aa, req, &request.organization_id).await?;
     let signer = CurrentReceiptSigner::from_state(state)?;
     let outcome = state
         .organization_registrations()
-        .revoke(request, &signer, chrono::Utc::now())
+        .revoke(request, &current, &signer, chrono::Utc::now())
         .await
         .map_err(map_error)?;
     json_ok(outcome)
@@ -209,7 +206,7 @@ async fn require_registration_manager(
     aa: &AuthArgs,
     req: &mut Request,
     organization_id: &DidCoreId,
-) -> Result<(), AppError> {
+) -> Result<coland_storage::OrganizationRegistrationCurrent, AppError> {
     let actor = aa.authenticated_session(state, req).await?.actor;
     let current = state
         .organization_registrations()
@@ -221,14 +218,13 @@ async fn require_registration_manager(
         state.is_admin_principal(&actor)
             || actor_core_id.as_ref() == Some(&current.generation.local_admin_subject_id)
     }) {
-        return Ok(());
+        return Ok(current.expect("authorized current registration"));
     }
     Err(indistinguishable_not_found())
 }
 
 fn authenticated_actor_core_id(actor: &str) -> Option<DidCoreId> {
-    let did = Did::new(actor.to_owned()).ok()?;
-    project_did_to_core_id(&did).ok()
+    DidCoreId::new(actor.to_owned()).ok()
 }
 
 fn require_registry_admin(state: &AppState, actor: &str) -> Result<(), AppError> {
@@ -299,10 +295,10 @@ mod tests {
     use super::authenticated_actor_core_id;
 
     #[test]
-    fn authenticated_actor_is_projected_to_stable_core_id() {
-        let core = authenticated_actor_core_id("did:webvh:z6mkactor:alice.example")
-            .expect("active DID projects to a core id");
+    fn authenticated_actor_uses_the_session_principal_core() {
+        let core = authenticated_actor_core_id("ak:did_core:webvh:z6mkactor")
+            .expect("authenticated principal core");
         assert_eq!(core.as_str(), "ak:did_core:webvh:z6mkactor");
-        assert!(authenticated_actor_core_id("ak:did_core:webvh:z6mkactor").is_none());
+        assert!(authenticated_actor_core_id("did:webvh:z6mkactor:alice.example").is_none());
     }
 }

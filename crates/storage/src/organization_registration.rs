@@ -485,6 +485,11 @@ pub fn apply_organization_registration_lifecycle(
         ));
     }
     let current = state.current()?.clone();
+    validate_current_cas(
+        &current,
+        commit.expected_current_generation,
+        &commit.expected_current_outcome_id,
+    )?;
     if current.status == OrganizationRegistrationStatus::Revoked {
         let mut existing = outcomes
             .get(&current.current_outcome_id)
@@ -493,11 +498,6 @@ pub fn apply_organization_registration_lifecycle(
         existing.created = false;
         return Ok(existing);
     }
-    validate_current_cas(
-        &current,
-        commit.expected_current_generation,
-        &commit.expected_current_outcome_id,
-    )?;
     validate_same_generation_outcome(
         &commit.outcome,
         &current,

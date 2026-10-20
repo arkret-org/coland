@@ -882,3 +882,5 @@ async fn signed_read_cursor_round_trip_replays_without_entering_the_realm_log() 
 
 #[path = "realm_read_cases/mod.rs"]
 mod realm_read_cases;
+
+mod organization_registration_cases;

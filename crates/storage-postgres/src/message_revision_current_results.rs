@@ -236,6 +236,19 @@ pub(crate) async fn commit_message_create_current_result_in_connection(
         arkret_wire::BlobRef::new(reference.clone()).map_err(|_| {
             PersistenceError::SchemaViolation("Message attachment ref is not a BlobRef".to_owned())
         })?;
+        let same_scope = diesel::sql_query(
+            "SELECT NOT EXISTS(SELECT 1 FROM realm_actor_blob_uploads WHERE blob_ref=$1 AND effective_scope<>$2) AS present",
+        )
+        .bind::<Text, _>(reference)
+        .bind::<Jsonb, _>(serde_json::json!(event.scope_ref))
+        .get_result::<PresentRow>(&mut *conn)
+        .await
+        .map_err(PersistenceError::database)?;
+        if !same_scope.present {
+            return Err(conflict(
+                "Message attachment differs from its immutable upload scope",
+            ));
+        }
     }
     let mimi = payload.get("mimi_provenance");
     let mut carrier = payload.clone();
@@ -819,7 +832,12 @@ pub(crate) fn require_message_write_carrier(
     if event.payload.contains_key("mimi_provenance") {
         return Err(conflict("Message carrier needs a dedicated authority cut"));
     }
-    if event.executed_by.is_some() || event.applet_id.is_some() {
+    // A Realm actor's own Device retains its Applet marker. Its native
+    // producer guard and Service grant chain are checked by the enclosing
+    // unit; the marker must not turn a direct author into a Service proxy.
+    if event.executed_by.is_some()
+        || (event.applet_id.is_some() && event.actor_id.as_realm_actor_id().is_none())
+    {
         return Err(PersistenceError::Conflict(format!(
             "{}: a Message revise or redact must be directly authored by its actor",
             coland_storage::ConflictCode::CapabilityDenied

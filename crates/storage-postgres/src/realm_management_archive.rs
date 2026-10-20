@@ -49,6 +49,10 @@ const TABLES: &[(&str, &str)] = &[
     ("realm_actor_device_revoke_results", "t.realm_id=$1"),
     ("realm_actor_device_revoke_cleanup", "t.realm_id=$1"),
     (
+        "realm_actor_blob_uploads",
+        "t.effective_scope->>'realm_id'=$1",
+    ),
+    (
         "realm_actor_control_nonces",
         "t.actor_id#>>'{realm_actor_id,realm_id}'=$1",
     ),
@@ -251,6 +255,7 @@ async fn state(conn: &mut AsyncPgConnection, realm: &RealmId) -> PersistenceResu
         .map_err(PersistenceError::database)?;
 
     crate::realm_claim_source::validate_archive(conn, realm).await?;
+    validate_blob_uploads(conn, realm).await?;
     let claims = sql_query("SELECT jsonb_build_object('source_id',c.source_id,'claim_request_id',c.claim_request_id,'has_request',EXISTS(SELECT 1 FROM keypackage_claim_sources s WHERE s.source_id=c.source_id AND s.claim_request_id=c.claim_request_id AND s.request_body#>>'{target_actor_id,realm_actor_id,realm_id}'=$1)) AS value FROM peer_keypackage_claims c WHERE c.outcome#>>'{claim_receipt,request,target_actor_id,realm_actor_id,realm_id}'=$1")
         .bind::<Text,_>(realm.as_str()).get_results::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     for claim in claims {
@@ -356,6 +361,76 @@ async fn state(conn: &mut AsyncPgConnection, realm: &RealmId) -> PersistenceResu
         );
     }
     Ok(json!({"format":"realm-management-postgres-v1","realm_id":realm,"tables":tables}))
+}
+
+/// Handoff preserves historical upload authority, even after that Device expires
+/// or is revoked. Validate the original authorization, not today's Device current.
+async fn validate_blob_uploads(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+) -> PersistenceResult<()> {
+    use arkret_models_integration::RealmActorDeviceAuthorizationValue;
+    use arkret_wire::{ActorId, CommittedEventFullView, CommittedEventRef, ScopeRef};
+    let rows = sql_query("SELECT jsonb_build_object('binding',to_jsonb(u),'blob',to_jsonb(b),'event',e.envelope,'commit',c.commit_json) AS value FROM realm_actor_blob_uploads u LEFT JOIN blobs b ON b.id=u.blob_ref LEFT JOIN realm_commits c ON c.commit_id=u.authorization_ref->>'commit_id' LEFT JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE u.effective_scope->>'realm_id'=$1")
+        .bind::<Text,_>(realm.as_str()).get_results::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    for row in rows {
+        let binding = &row.value["binding"];
+        let scope: ScopeRef =
+            serde_json::from_value(binding["effective_scope"].clone()).map_err(invalid)?;
+        let actor: ActorId =
+            serde_json::from_value(binding["actor_id"].clone()).map_err(invalid)?;
+        let reference: CommittedEventRef =
+            serde_json::from_value(binding["authorization_ref"].clone()).map_err(invalid)?;
+        let accepted_at: chrono::DateTime<chrono::Utc> =
+            serde_json::from_value(binding["accepted_at"].clone()).map_err(invalid)?;
+        let original = CommittedEventFullView {
+            event: serde_json::from_value(row.value["event"].clone()).map_err(invalid)?,
+            commit: serde_json::from_value(row.value["commit"].clone()).map_err(invalid)?,
+        };
+        original.validate_shape().map_err(invalid)?;
+        let authorization =
+            RealmActorDeviceAuthorizationValue::from_event(&original.event).map_err(invalid)?;
+        let payload: arkret_models_collaboration::events_payloads::DeviceAuthorizePayload =
+            serde_json::from_value(json!(original.event.payload)).map_err(invalid)?;
+        let actual = CommittedEventRef {
+            event_id: original.event.event_id.clone(),
+            commit_id: original.commit.commit_id.clone(),
+            stream_ref: original.commit.stream_ref.clone(),
+            stream_position: original.commit.stream_position,
+        };
+        if actor
+            .as_realm_actor_id()
+            .is_none_or(|id| &id.realm_id != realm)
+            || scope.realm_id() != realm
+            || !matches!(scope, ScopeRef::Realm { .. } | ScopeRef::Circle { .. })
+            || actual != reference
+            || original.event.actor_id != actor
+            || json!(payload.device_id) != binding["device_id"]
+            || !authorization.scopes.permits(
+                &scope,
+                &[arkret_wire::CapabilityActionId::SelfBlobUploadCreateV1],
+            )
+            || accepted_at < authorization.not_before
+            || accepted_at >= authorization.expires_at
+            || row.value["blob"]["realm_id"] != json!(realm)
+            || row.value["blob"]["uploaded_by"] != json!(actor.to_string())
+        {
+            return Err(invalid(
+                "Blob upload binding differs from its historical authority",
+            ));
+        }
+    }
+    let missing = sql_query("SELECT to_jsonb(b.uploaded_by) AS value FROM blobs b LEFT JOIN realm_actor_blob_uploads u ON u.blob_ref=b.id WHERE b.realm_id=$1 AND u.blob_ref IS NULL")
+        .bind::<Text,_>(realm.as_str()).get_results::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    for row in missing {
+        if row.value.as_str().is_some_and(|raw| {
+            serde_json::from_str::<ActorId>(raw)
+                .is_ok_and(|actor| actor.as_realm_actor_id().is_some())
+        }) {
+            return Err(invalid("native Blob has no immutable upload binding"));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn verify_import(

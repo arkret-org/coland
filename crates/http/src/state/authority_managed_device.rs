@@ -76,7 +76,7 @@ async fn submit_inner(
         || event.applet_id.as_ref() != Some(&authority.applet_id)
     {
         return Err(denied(
-            "native Event differs from the authenticated Account, Device, Applet or exact scope",
+            "native Event differs from the authenticated Realm actor, Device, Applet or exact scope",
         ));
     }
     if event.kind == EventKind::MlsCommit && !typed_mls {
@@ -111,6 +111,8 @@ async fn submit_inner(
         EventKind::MemberState
             | EventKind::CircleMemberState
             | EventKind::MessageCreate
+            | EventKind::MessageRedact
+            | EventKind::StrandCreate
             | EventKind::MlsGenesis
             | EventKind::MlsCommit
     ) {

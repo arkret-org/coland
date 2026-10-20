@@ -38,3 +38,16 @@ async fn bridge_runtime_authors_realm_identity_and_device_over_real_https() {
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     Box::pin(applet_authoring::realm_bridge_runtime(database.pool())).await;
 }
+
+#[tokio::test]
+async fn bridge_runtime_circle_only_device_preserves_blob_scope_over_real_https() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_test_writer()
+        .try_init();
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_bridge_circle_runtime(
+        database.pool(),
+    ))
+    .await;
+}

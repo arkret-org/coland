@@ -112,7 +112,8 @@ fn request(
     serde_json::to_value(SignerKeysQueryRequestBody {
         request_id: RequestId::new(REQUEST_ID).unwrap(),
         realm_id: realm_id.clone(),
-        recipient_account_id,
+        recipient_account_id: Some(recipient_account_id),
+        recipient_actor_id: None,
         queries,
     })
     .unwrap()

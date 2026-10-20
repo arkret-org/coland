@@ -170,6 +170,8 @@ DROP TABLE IF EXISTS applet_managed_identities CASCADE;
 DROP TABLE IF EXISTS applet_transactions CASCADE;
 DROP TABLE IF EXISTS applet_authoring_previews CASCADE;
 DROP TABLE IF EXISTS audit_logs CASCADE;
+DROP TABLE IF EXISTS realm_actor_blob_uploads CASCADE;
+DROP FUNCTION IF EXISTS public.reject_realm_actor_blob_upload_rewrite();
 DROP TABLE IF EXISTS blobs CASCADE;
 DROP FUNCTION IF EXISTS public.enforce_blob_encryption_immutable();
 DROP TABLE IF EXISTS publication_evidence CASCADE;

@@ -3409,7 +3409,7 @@ impl RealmAuthorizationCut {
             };
         }
         let resource = self.timeline_target(event, target.strand_id.clone());
-        let facts = OperationFacts {
+        let mut facts = OperationFacts {
             strand_id: Some(target.strand_id.to_string()),
             circle_id: match &event.scope_ref {
                 arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id.to_string()),
@@ -3421,6 +3421,8 @@ impl RealmAuthorizationCut {
             target_owner: Some(target.author.clone()),
             ..OperationFacts::default()
         };
+        self.complete_event_facts_in_connection(conn, event, &mut facts)
+            .await?;
         let actions = Self::unconditional_actions(kind);
         let (admission, accepted, dependencies) = crate::boxed_future(|| {
             self.admit_approved_actions_in_connection(

@@ -15,6 +15,40 @@ pub(crate) async fn blob_for_delivery_in_connection(
         .bind::<Text,_>(blob_ref.as_str()).get_result::<BlobRow>(&mut *conn).await.optional()
         .map_err(PersistenceError::database).and_then(|row| row.map(BlobRecord::try_from).transpose())
 }
+
+pub(crate) async fn put_blob_if_absent_in_connection(
+    conn: &mut diesel_async::AsyncPgConnection,
+    blob_ref: &str,
+    record: &BlobRecord,
+) -> PersistenceResult<bool> {
+    crate::realm_identity::ensure_optional_realm_pk(conn, record.realm_id.as_deref()).await?;
+    let payload = serde_json::json!({"encryption": record.encryption.clone()});
+    let written = sql_query(
+        "INSERT INTO blobs \
+             (id,sha256,media_type,filename,uploaded_by,realm_id,size_bytes, \
+              storage_backend,storage_key,payload,legal_hold,redacted,visibility,created_at) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) \
+             ON CONFLICT (id) DO NOTHING",
+    )
+    .bind::<Text, _>(blob_ref)
+    .bind::<Text, _>(&record.sha256)
+    .bind::<Text, _>(&record.media_type)
+    .bind::<Nullable<Text>, _>(&record.filename)
+    .bind::<Text, _>(&record.uploaded_by)
+    .bind::<Nullable<Text>, _>(record.realm_id.as_deref())
+    .bind::<BigInt, _>(record.size_bytes)
+    .bind::<Text, _>(&record.storage_backend)
+    .bind::<Text, _>(&record.storage_key)
+    .bind::<Jsonb, _>(&payload)
+    .bind::<Bool, _>(record.legal_hold)
+    .bind::<Bool, _>(record.redacted)
+    .bind::<Text, _>(record.visibility.as_str())
+    .bind::<Timestamptz, _>(record.created_at)
+    .execute(&mut *conn)
+    .await
+    .map_err(PersistenceError::database)?;
+    Ok(written == 1)
+}
 #[async_trait]
 impl BlobStore for PgBlobStore {
     async fn get(&self, blob_ref: &str) -> PersistenceResult<Option<BlobRecord>> {
@@ -98,34 +132,7 @@ impl BlobStore for PgBlobStore {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
-        crate::realm_identity::ensure_optional_realm_pk(&mut conn, record.realm_id.as_deref())
-            .await?;
-        let payload = serde_json::json!({"encryption": record.encryption.clone()});
-        let written = sql_query(
-            "INSERT INTO blobs \
-             (id,sha256,media_type,filename,uploaded_by,realm_id,size_bytes, \
-              storage_backend,storage_key,payload,legal_hold,redacted,visibility,created_at) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) \
-             ON CONFLICT (id) DO NOTHING",
-        )
-        .bind::<Text, _>(blob_ref)
-        .bind::<Text, _>(&record.sha256)
-        .bind::<Text, _>(&record.media_type)
-        .bind::<Nullable<Text>, _>(&record.filename)
-        .bind::<Text, _>(&record.uploaded_by)
-        .bind::<Nullable<Text>, _>(record.realm_id.as_deref())
-        .bind::<BigInt, _>(record.size_bytes)
-        .bind::<Text, _>(&record.storage_backend)
-        .bind::<Text, _>(&record.storage_key)
-        .bind::<Jsonb, _>(&payload)
-        .bind::<Bool, _>(record.legal_hold)
-        .bind::<Bool, _>(record.redacted)
-        .bind::<Text, _>(record.visibility.as_str())
-        .bind::<Timestamptz, _>(record.created_at)
-        .execute(&mut *conn)
-        .await
-        .map_err(PersistenceError::database)?;
-        Ok(written == 1)
+        put_blob_if_absent_in_connection(&mut conn, blob_ref, record).await
     }
 
     async fn delete(&self, blob_ref: &str) -> PersistenceResult<()> {

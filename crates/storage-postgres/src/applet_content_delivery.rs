@@ -17,7 +17,7 @@ use coland_storage::{
     AuthorizationOperation, OperationFacts, PersistenceError, PersistenceResult,
 };
 use diesel::sql_types::{Jsonb, Text};
-use diesel::{QueryableByName, sql_query};
+use diesel::{OptionalExtension as _, QueryableByName, sql_query};
 use diesel_async::RunQueryDsl;
 
 use crate::capability_grant_current_results::{
@@ -25,6 +25,8 @@ use crate::capability_grant_current_results::{
     decode_authority_root, decode_row,
 };
 
+#[path = "applet_blob_delivery.rs"]
+mod blobs;
 #[path = "applet_exact_current_delivery.rs"]
 mod exact_current;
 #[path = "applet_mls_material_delivery.rs"]
@@ -117,7 +119,15 @@ impl ReadProof {
         let account = self.context.endpoint.authority.actor_id.clone();
         let action = operation.action.as_str();
         let actions = [action];
-        for mode in [AppletPolicyOperation::Read, AppletPolicyOperation::Deliver] {
+        let modes = if operation.action == CapabilityActionId::SelfBlobUploadCreateV1 {
+            [
+                AppletPolicyOperation::Authorize,
+                AppletPolicyOperation::Execute,
+            ]
+        } else {
+            [AppletPolicyOperation::Read, AppletPolicyOperation::Deliver]
+        };
+        for mode in modes {
             let decision = arkret_policy::applet_management::select_applet_management(
                 Some(&self.context.policies),
                 &arkret_policy::applet_management::AppletManagementContext {
@@ -137,6 +147,16 @@ impl ReadProof {
             if decision.effect != arkret_wire::PolicyEffect::Allow {
                 return Ok(false);
             }
+        }
+        if let Some(surface) = arkret_wire::ServiceOperationId::from_wire(action) {
+            // The original native Device scope authorizes the transport
+            // surface. Realm content sources are independent operations in
+            // the same proof, not invented grants for Station service scopes.
+            return Ok(matches!(
+                arkret_wire::applet_managed_device_scope_rule(surface),
+                Some(arkret_wire::ManagedDeviceScopeRule::AllActions(required))
+                    if required.contains(&operation.action)
+            ));
         }
         let mut candidates = BTreeMap::new();
         for target in &operation.targets {
@@ -255,6 +275,15 @@ struct NativeDeliveryGuard {
 }
 #[async_trait::async_trait]
 impl AccountContentDeliveryGuard for NativeDeliveryGuard {
+    async fn commit_native_blob_upload(
+        self: Box<Self>,
+        reference: &arkret_wire::BlobRef,
+        record: &coland_storage::BlobRecord,
+        max_actor_bytes: u64,
+        max_realm_bytes: u64,
+    ) -> PersistenceResult<coland_storage::BlobRecord> {
+        blobs::commit_upload(self, reference, record, max_actor_bytes, max_realm_bytes).await
+    }
     fn permits_handoff(&self) -> bool {
         let at = chrono::Utc::now();
         self.proofs.iter().all(|proof| proof.permits_at(at))
@@ -285,6 +314,8 @@ pub(crate) async fn acquire(
     input: &AccountContentDeliveryInput,
 ) -> PersistenceResult<Option<Box<dyn AccountContentDeliveryGuard>>> {
     let lanes = [
+        input.native_blob_upload.is_some(),
+        !input.blobs.is_empty(),
         !input.committed_events.is_empty(),
         !input.stream_scans.is_empty(),
         !input.keypackage_claims.is_empty(),
@@ -330,7 +361,7 @@ pub(crate) async fn acquire(
         || input.audited_watch_read.is_some()
         || input.watch_delivery_device.is_some()
         || input.watch_local_session.is_some()
-        || !input.blobs.is_empty()
+        || input.blobs.len() > 1
         || input.agent_session_scope.is_some()
         || input.agent_endpoint.is_some()
         || input.qualified_agent_scope_evidence.is_some()
@@ -403,6 +434,26 @@ pub(crate) async fn acquire(
     .ok_or_else(|| refused("native read Device is unavailable"))?;
     if current != endpoint.authority {
         return Err(refused("native read Device instance changed"));
+    }
+    if input.native_blob_upload.is_some() || !input.blobs.is_empty() {
+        let proof = blobs::prepare(
+            held.connection(),
+            station,
+            endpoint,
+            &current,
+            at,
+            credential_expiry,
+            input,
+        )
+        .await?;
+        if !proof.permits_at(chrono::Utc::now()) {
+            return Err(refused("native Blob current permission expired"));
+        }
+        return Ok(Some(Box::new(NativeDeliveryGuard {
+            held,
+            proofs: vec![proof],
+            endpoint_windows: Vec::new(),
+        })));
     }
     if let Some(snapshot) = input.snapshots.as_slice().first() {
         let proofs = crate::boxed_future(|| {
@@ -617,6 +668,25 @@ async fn read_context(
     at: chrono::DateTime<chrono::Utc>,
     credential_expiry: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<ReadContext> {
+    operation_context(
+        conn,
+        endpoint,
+        current,
+        at,
+        credential_expiry,
+        &[CapabilityActionId::EventRead],
+    )
+    .await
+}
+
+async fn operation_context(
+    conn: &mut diesel_async::AsyncPgConnection,
+    endpoint: &AppletManagedDeviceScopeGuard,
+    current: &coland_storage::AppletManagedDeviceAuthority,
+    at: chrono::DateTime<chrono::Utc>,
+    credential_expiry: chrono::DateTime<chrono::Utc>,
+    actions: &[CapabilityActionId],
+) -> PersistenceResult<ReadContext> {
     let actor = endpoint.authority.actor_id.clone();
     let scope = &endpoint.effective_scope;
     let encrypted=sql_query("SELECT to_jsonb(EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.mls.genesis' AND c.realm_id=$1 AND e.envelope->'scope_ref'=$2)) AS value")
@@ -630,7 +700,7 @@ async fn read_context(
             current,
             scope,
             &endpoint.service_did_document,
-            &[CapabilityActionId::EventRead],
+            actions,
             at,
             false,
         )

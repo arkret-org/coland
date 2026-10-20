@@ -2689,6 +2689,8 @@ async fn commit_one_inner(
         if matches!(
             event.kind,
             arkret_wire::EventKind::MessageCreate
+                | arkret_wire::EventKind::MessageRedact
+                | arkret_wire::EventKind::StrandCreate
                 | arkret_wire::EventKind::CircleMemberState
                 | arkret_wire::EventKind::MlsGenesis
                 | arkret_wire::EventKind::MlsCommit

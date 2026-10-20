@@ -211,7 +211,7 @@ impl Fixture {
             "directory_visibility":"members","join_rule":"public","history_access":"since_join","state":"active","created_by":ActorId::account(self.pcr.history.account.clone()),"created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())
         }}));
         let circle_id = arkret_wire::CircleId::from_event_id(&create.event_id);
-        accepted_admin_domain_event(self, create).await;
+        realm_native_fixture::boxed_step(|| accepted_admin_domain_event(self, create)).await;
         ScopeRef::Circle {
             realm_id: self.realm.clone(),
             circle_id,
@@ -996,7 +996,7 @@ impl AppletAuthoringFactory {
         // The original contract covers a Realm install and a distinct Circle
         // install under the same identity, including the last-scope fence race.
         let scope = if label.ends_with(":scope-right") || label.ends_with(":scope-conflict") {
-            self.fixture.new_circle_scope().await
+            realm_native_fixture::boxed_step(|| self.fixture.new_circle_scope()).await
         } else {
             ScopeRef::Realm {
                 realm_id: self.fixture.realm.clone(),
@@ -5104,6 +5104,51 @@ mod realm_native_fixture {
             "a mid-import writer failure rolls back original Events and creations"
         );
         conn.batch_execute("DROP TRIGGER test_private_archive_failure ON realm_actor_current_results; DROP FUNCTION test_private_archive_failure();").await.unwrap();
+        if !archive["tables"]["realm_actor_blob_uploads"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+        {
+            for fault in ["device", "scope", "missing_binding"] {
+                let mut changed = archive.clone();
+                let uploads = changed["tables"]["realm_actor_blob_uploads"]
+                    .as_array_mut()
+                    .unwrap();
+                match fault {
+                    "device" => {
+                        uploads[0]["device_id"] =
+                            json!(format!("ak:device:{}", uuid::Uuid::now_v7()));
+                    }
+                    "scope" => {
+                        uploads[0]["effective_scope"] = json!({
+                            "kind":"circle","realm_id":fixture.realm,
+                            "circle_id":format!("ak:circle:{}", uuid::Uuid::now_v7())
+                        });
+                    }
+                    "missing_binding" => {
+                        uploads.clear();
+                    }
+                    _ => unreachable!(),
+                }
+                let altered = arkret_canonical::canonical_json_bytes(&changed).unwrap();
+                let mut bad = manifest.clone();
+                bad.state_digest =
+                    arkret_wire::Hash::new(arkret_canonical::sha256_digest(&altered)).unwrap();
+                assert!(
+                    target_store
+                        .import_management_private_state(&bad, &altered)
+                        .await
+                        .is_err(),
+                    "a fresh target must reject {fault} without a prior binding"
+                );
+                let count =
+                    diesel::sql_query("SELECT COUNT(*) AS count FROM realm_actor_blob_uploads")
+                        .get_result::<Count>(&mut *conn)
+                        .await
+                        .unwrap();
+                assert_eq!(count.count, 0, "invalid import must roll back all bindings");
+            }
+        }
         target_store
             .import_management_private_state(manifest, bytes)
             .await
@@ -5151,7 +5196,7 @@ mod realm_native_fixture {
             .unwrap();
     }
 
-    async fn private_management_archive(fixture: &Fixture) {
+    async fn private_management_archive(fixture: &Fixture, has_blob: bool) {
         use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
         let store = PgAuthorityCommitStore {
             pool: fixture.pool.clone(),
@@ -5213,17 +5258,42 @@ mod realm_native_fixture {
                 .unwrap()
                 .is_empty()
         );
-        assert!(
-            !archive["tables"]["realm_actor_device_revoke_results"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
+        if has_blob {
+            assert!(
+                !archive["tables"]["realm_actor_blob_uploads"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+        } else {
+            assert!(
+                !archive["tables"]["realm_actor_device_revoke_results"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
         store
             .import_management_private_state(&manifest, &bytes)
             .await
             .unwrap();
         boxed_step(|| independent_management_archive(fixture, &manifest, &bytes, &archive)).await;
+        if has_blob {
+            let mut changed = archive.clone();
+            changed["tables"]["realm_actor_blob_uploads"][0]["device_id"] =
+                json!(format!("ak:device:{}", uuid::Uuid::now_v7()));
+            let bytes = arkret_canonical::canonical_json_bytes(&changed).unwrap();
+            let mut bad = manifest.clone();
+            bad.state_digest =
+                arkret_wire::Hash::new(arkret_canonical::sha256_digest(&bytes)).unwrap();
+            assert!(
+                store
+                    .import_management_private_state(&bad, &bytes)
+                    .await
+                    .is_err(),
+                "handoff must not rewrite an original upload binding"
+            );
+        }
         for fault in [
             "missing_domain",
             "extra_domain",
@@ -5275,12 +5345,53 @@ mod realm_native_fixture {
         }
     }
 
-    pub(super) async fn run_bridge(pool: PgPool) {
+    async fn blob_upload_guard(
+        fixture: &Fixture,
+        package: &AppletPackage,
+        device: &arkret_bridge_runtime::managed_device::ManagedDevice,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Box<dyn coland_storage::AccountContentDeliveryGuard> {
+        let persistence = fixture.state.test_persistence();
+        let authority = persistence
+            .device_revocations()
+            .applet_managed_device_authority(
+                &device.actor_id,
+                &device.device_id,
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let input = coland_storage::AccountContentDeliveryInput {
+            realms: vec![fixture.realm.clone()],
+            native_blob_upload: Some(fixture.realm.clone()),
+            credential_expires_at: Some(expires_at),
+            applet_endpoint: Some(coland_storage::AppletManagedDeviceScopeGuard {
+                authority,
+                effective_scope: device.effective_scope().clone(),
+                service_did_document: applet_service_id_document(package),
+            }),
+            ..Default::default()
+        };
+        persistence
+            .authority_commits()
+            .acquire_realm_actor_content_delivery(
+                &device.actor_id,
+                &fixture.state.service_core_id(),
+                &input,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    pub(super) async fn run_bridge(pool: PgPool, circle: bool) {
         use arkret_bridge_runtime::managed_actor_authoring::ManagedActorAuthoringService;
         use arkret_bridge_runtime::managed_device::ManagedDeviceRuntime;
         use arkret_bridge_runtime::{
             ArkretEdge, AuthoringJournal, FileAuthoringStore, PreparedGhost,
         };
+        use coland_storage::MlsGroupCurrentStore as _;
         let (fixture, _governor_server) = boxed_step(|| network_fixture(pool.clone())).await;
         let factory = AppletAuthoringFactory {
             fixture,
@@ -5295,8 +5406,24 @@ mod realm_native_fixture {
             .lock()
             .await
             .insert(id.to_string(), native.package.clone());
-        let install = boxed_step(|| factory.prepare_install(&id, "bridge-native-runtime")).await;
+        let install_label = if circle {
+            "bridge-native-runtime:scope-right"
+        } else {
+            "bridge-native-runtime"
+        };
+        let install = boxed_step(|| factory.prepare_install(&id, install_label)).await;
+        let content_scope = install.effective_scope.clone();
         install.commit(&PgAppletStore { pool }).await.unwrap();
+        if circle {
+            let parent =
+                boxed_step(|| factory.prepare_install(&id, "bridge-parent-admission")).await;
+            parent
+                .commit(&PgAppletStore {
+                    pool: factory.fixture.pool.clone(),
+                })
+                .await
+                .unwrap();
+        }
         let package = &native.package;
         let did = applet_service_did(package);
         let config: arkret_bridge_runtime::Config = serde_json::from_value(json!({
@@ -5309,7 +5436,7 @@ mod realm_native_fixture {
                 "verification_method_fragment":"#applet-service-key", "trusted_server_did":factory.fixture.state.service_did(),
                 "applet_namespaces":package.namespaces,
                 "managed_actor_authoring":{"principal_endpoint":package.base_url,"key_encryption_key_hex":"53".repeat(32),
-                    "device":{"actions":["ak.applet.join","ak.event.read","ak.message.create","ak.mls.commit","ak.object.read_content"],
+                    "device":{"actions":["ak.applet.join","ak.circle.member.add","ak.event.read","ak.message.create","ak.message.redact","ak.mls.commit","ak.object.read_content","ak.self.blob.resource.get.v1","ak.self.blob.command.presign.v1","ak.self.blob.upload.create.v1","ak.strand.create"],
                         "lifetime_seconds":3600,"mls":true,"key_package_inventory_target":2}}
             }
         })).unwrap();
@@ -5365,7 +5492,7 @@ mod realm_native_fixture {
         };
         eprintln!("real Bridge runtime: signed governance preview and independent native creation");
         let prepared =
-            boxed_step(|| author.prepare_ghost(&id, &factory.fixture.realm, &external, None))
+            boxed_step(|| author.prepare_ghost_in_scope(&id, &content_scope, &external, None))
                 .await
                 .unwrap();
         let PreparedGhost::Create(command) = prepared else {
@@ -5408,7 +5535,7 @@ mod realm_native_fixture {
         let edge = make_edge();
         let author = ManagedActorAuthoringService::new(edge.clone()).unwrap();
         assert!(matches!(
-            boxed_step(|| author.prepare_ghost(&id, &factory.fixture.realm, &external, None))
+            boxed_step(|| author.prepare_ghost_in_scope(&id, &content_scope, &external, None))
                 .await
                 .unwrap(),
             PreparedGhost::Reuse { .. }
@@ -5423,21 +5550,47 @@ mod realm_native_fixture {
             device.signer().verifying_key(),
             SigningKey::from_bytes(&[42; 32]).verifying_key()
         );
+        boxed_step(|| {
+            realm_actor_mls_fixture::business_parent(
+                &factory.fixture,
+                package,
+                &actor,
+                &content_scope,
+            )
+        })
+        .await;
+        if circle {
+            let parent_scope = ScopeRef::Realm {
+                realm_id: factory.fixture.realm.clone(),
+            };
+            let plan = arkret_bridge_runtime::managed_device::InitialManagedDevicePlan {
+                operation_id: "parent-membership-only".into(),
+                actor_id: actor.clone(),
+                scopes: serde_json::from_value(json!([{
+                    "effective_scope": parent_scope, "actions": ["ak.applet.join"]
+                }]))
+                .unwrap(),
+                not_before: chrono::Utc::now(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            };
+            let parent = boxed_step(|| devices.authorize_initial_device(plan, &parent_scope))
+                .await
+                .unwrap();
+            boxed_step(|| devices.join_circle_after_realm_join(&device, &parent))
+                .await
+                .unwrap();
+        }
         boxed_step(|| devices.ensure_realm_membership(&device))
             .await
             .unwrap();
         boxed_step(|| devices.maintain_mls_key_packages(&device, 2))
             .await
             .unwrap();
-        boxed_step(|| realm_actor_mls_fixture::business_parent(&factory.fixture, package, &actor))
-            .await;
         let reader = boxed_step(|| devices.open_reader(&device)).await.unwrap();
         let snapshot = boxed_step(|| reader.client().snapshot_head(&factory.fixture.realm))
             .await
             .unwrap();
         snapshot.value().unwrap();
-        let strand_id =
-            boxed_step(|| realm_actor_mls_fixture::human_strand(&factory.fixture)).await;
         eprintln!("real Bridge runtime: ordinary member MLS admission and private Welcome receive");
         let mut human_group =
             boxed_step(|| realm_actor_mls_fixture::human_admits_runtime(&factory.fixture, &device))
@@ -5448,11 +5601,322 @@ mod realm_native_fixture {
         assert_eq!(progress.durable_welcomes, 1);
         assert!(progress.acknowledged);
         assert_eq!(devices.installed_mls_epoch(&device).await.unwrap(), Some(1));
+        let location = json!({
+            "protocol":"fixture", "network_id":"bridge-native", "location_id":"portal-1"
+        });
+        assert!(
+            boxed_step(|| devices.find_portal_strand(&actor, &factory.fixture.realm, &location,))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let strand_id = boxed_step(|| {
+            devices.submit_portal_strand(&actor, &content_scope, "Native portal", &location)
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            boxed_step(|| devices.submit_portal_strand(
+                &actor,
+                &content_scope,
+                "Native portal",
+                &location,
+            ))
+            .await
+            .unwrap(),
+            strand_id
+        );
+        assert!(
+            boxed_step(|| devices.submit_portal_strand(
+                &actor,
+                &content_scope,
+                "Changed portal",
+                &location,
+            ))
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            boxed_step(|| devices.find_portal_strand(&actor, &factory.fixture.realm, &location,))
+                .await
+                .unwrap(),
+            Some(strand_id.clone())
+        );
+        let portal_original = device
+            .client()
+            .committed_event_get(
+                &arkret_wire::EventId::from_token_bytes(strand_id.token_bytes()).unwrap(),
+            )
+            .await
+            .unwrap();
+        let portal_event = portal_original.reducer_input().unwrap();
+        assert_eq!(portal_event.actor_id, actor);
+        assert!(portal_event.authorization_ref.is_some());
+        assert!(portal_event.payload["object"].get("id").is_none());
+        assert!(portal_event.payload["object"].get("metadata").is_none());
+        assert!(
+            portal_event.payload["object"]
+                .get("encrypted_metadata")
+                .is_some()
+        );
+        eprintln!("real Bridge runtime: encrypted attachments over native Device HTTP");
+        let attachment_plaintext = realm_actor_mls_fixture::attachment_plaintext();
+        let descriptor = boxed_step(|| {
+            devices.upload_attachment(
+                &actor,
+                &content_scope,
+                "attachment-1",
+                &attachment_plaintext,
+                "text/plain",
+            )
+        })
+        .await
+        .unwrap();
+        let original_blob = factory
+            .fixture
+            .state
+            .test_persistence()
+            .blobs()
+            .get(descriptor.blob_ref().as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        let replay = boxed_step(|| {
+            devices.upload_attachment(
+                &actor,
+                &content_scope,
+                "attachment-1",
+                &attachment_plaintext,
+                "text/plain",
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(descriptor, replay);
+        let replay_blob = factory
+            .fixture
+            .state
+            .test_persistence()
+            .blobs()
+            .get(descriptor.blob_ref().as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(original_blob.created_at, replay_blob.created_at);
+        assert_eq!(original_blob.uploaded_by, actor.to_string());
+        {
+            use diesel_async::RunQueryDsl as _;
+            #[derive(diesel::QueryableByName)]
+            struct Binding {
+                #[diesel(sql_type = diesel::sql_types::Jsonb)]
+                value: Value,
+            }
+            let mut conn = factory.fixture.pool.get().await.unwrap();
+            let binding = diesel::sql_query("SELECT jsonb_build_object('blob_ref',blob_ref,'effective_scope',effective_scope,'actor_id',actor_id,'device_id',device_id,'authorization_ref',authorization_ref,'accepted_at',accepted_at) AS value FROM realm_actor_blob_uploads WHERE blob_ref=$1")
+                .bind::<diesel::sql_types::Text,_>(descriptor.blob_ref().as_str())
+                .get_result::<Binding>(&mut *conn).await.unwrap().value;
+            assert_eq!(binding["effective_scope"], json!(content_scope));
+            assert_eq!(binding["actor_id"], json!(actor));
+            assert_eq!(binding["device_id"], json!(device.device_id));
+            assert!(binding["authorization_ref"]["event_id"].is_string());
+            assert!(binding["accepted_at"].is_string());
+            assert!(
+                diesel::sql_query(
+                    "UPDATE realm_actor_blob_uploads SET device_id=$2 WHERE blob_ref=$1"
+                )
+                .bind::<diesel::sql_types::Text, _>(descriptor.blob_ref().as_str())
+                .bind::<diesel::sql_types::Text, _>(format!("ak:device:{}", uuid::Uuid::now_v7()))
+                .execute(&mut *conn)
+                .await
+                .is_err(),
+                "the database must reject immutable binding rewrites"
+            );
+            if circle {
+                let authority = factory
+                    .fixture
+                    .state
+                    .test_persistence()
+                    .device_revocations()
+                    .applet_managed_device_authority(&actor, &device.device_id, chrono::Utc::now())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(authority.scopes.permits(
+                    &content_scope,
+                    &[arkret_wire::CapabilityActionId::SelfBlobUploadCreateV1]
+                ));
+                assert!(
+                    !authority.scopes.permits(
+                        &ScopeRef::Realm {
+                            realm_id: factory.fixture.realm.clone()
+                        },
+                        &[arkret_wire::CapabilityActionId::SelfBlobUploadCreateV1]
+                    ),
+                    "Circle fixture must not accidentally grant Realm upload"
+                );
+            }
+        }
+        // Exact replay consumes no new quota and retains the first metadata.
+        let guard = blob_upload_guard(
+            &factory.fixture,
+            package,
+            &device,
+            chrono::Utc::now() + chrono::Duration::seconds(30),
+        )
+        .await;
+        let retained = guard
+            .commit_native_blob_upload(descriptor.blob_ref(), &original_blob, 0, 0)
+            .await
+            .unwrap();
+        assert_eq!(retained, original_blob);
+        let mut rejected_blob = original_blob.clone();
+        rejected_blob.sha256 = arkret_canonical::sha256_hex(b"unpublished quota test");
+        let rejected_ref =
+            arkret::BlobRef::new(format!("ak:blob:sha256:{}", rejected_blob.sha256)).unwrap();
+        let guard = blob_upload_guard(
+            &factory.fixture,
+            package,
+            &device,
+            chrono::Utc::now() + chrono::Duration::seconds(30),
+        )
+        .await;
+        assert!(
+            matches!(guard.commit_native_blob_upload(&rejected_ref, &rejected_blob, 0, 0).await,
+            Err(PersistenceError::Conflict(reason)) if reason == "blob_quota_exceeded")
+        );
+        assert!(
+            factory
+                .fixture
+                .state
+                .test_persistence()
+                .blobs()
+                .get(rejected_ref.as_str())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let guard = blob_upload_guard(
+            &factory.fixture,
+            package,
+            &device,
+            chrono::Utc::now() + chrono::Duration::seconds(3),
+        )
+        .await;
+        {
+            use diesel_async::RunQueryDsl as _;
+            let mut blocker = factory.fixture.pool.get().await.unwrap();
+            diesel::sql_query("BEGIN")
+                .execute(&mut *blocker)
+                .await
+                .unwrap();
+            diesel::sql_query("LOCK TABLE blobs IN SHARE ROW EXCLUSIVE MODE")
+                .execute(&mut *blocker)
+                .await
+                .unwrap();
+            let reference = rejected_ref.clone();
+            let record = rejected_blob.clone();
+            let pending = tokio::spawn(async move {
+                guard
+                    .commit_native_blob_upload(&reference, &record, u64::MAX, u64::MAX)
+                    .await
+            });
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            diesel::sql_query("COMMIT")
+                .execute(&mut *blocker)
+                .await
+                .unwrap();
+            assert!(pending.await.unwrap().is_err());
+        }
+        assert!(
+            factory
+                .fixture
+                .state
+                .test_persistence()
+                .blobs()
+                .get(rejected_ref.as_str())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            device
+                .client()
+                .blob_download(descriptor.blob_ref(), None)
+                .await
+                .is_err(),
+            "upload ownership does not bypass the original content binding"
+        );
+        assert!(
+            boxed_step(|| devices.upload_attachment(
+                &actor,
+                &content_scope,
+                "attachment-1",
+                b"changed bytes",
+                "text/plain"
+            ))
+            .await
+            .is_err()
+        );
         eprintln!("real Bridge runtime: encrypted content, delivery failure and cold recovery");
         let (incoming, plaintext) = boxed_step(|| {
-            realm_actor_mls_fixture::human_message(&factory.fixture, &mut human_group, strand_id)
+            realm_actor_mls_fixture::human_message(
+                &factory.fixture,
+                &content_scope,
+                &mut human_group,
+                strand_id,
+                descriptor.clone(),
+            )
         })
         .await;
+        let ciphertext = device
+            .client()
+            .blob_download(descriptor.blob_ref(), None)
+            .await
+            .unwrap();
+        assert_ne!(ciphertext, attachment_plaintext);
+        let presign_error = device
+            .client()
+            .blob_presign(
+                &arkret_models_collaboration::objects::blob::BlobPresignRequestBody {
+                    blob_ref: descriptor.blob_ref().clone(),
+                    realm_id: Some(factory.fixture.realm.clone()),
+                    max_age_seconds: Some(30),
+                    purpose: Some("media_inline".into()),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            presign_error.error_code(),
+            Some(arkret_wire::ErrorCode::CapabilityDenied),
+            "native presign authenticates the Device but must refuse E2EE bearer delivery: {presign_error}"
+        );
+        let current = coland_storage_postgres::PgMlsGroupCurrentStore {
+            pool: factory.fixture.pool.clone(),
+        }
+        .current(&content_scope)
+        .await
+        .unwrap()
+        .unwrap()
+        .value;
+        let context = descriptor.content_key_context(
+            content_scope.clone(),
+            current.genesis_event_ref,
+            human_group.epoch(),
+        );
+        let secret = arkret_mls::derive_attachment_content_key(&human_group, &context).unwrap();
+        let resolver = |reference: &arkret::EncryptedAttachmentGroupStateRef| {
+            reference
+                .event_id()
+                .ok()
+                .filter(|id| id == &current.current_mls_commit_event_ref)
+                .map(|_| human_group.epoch())
+        };
+        assert_eq!(
+            arkret::crypto::blob_aead::decrypt_stream(&ciphertext, &descriptor, &secret, &resolver)
+                .unwrap(),
+            attachment_plaintext
+        );
         let sink = realm_actor_mls_fixture::ContentSink {
             event: incoming,
             plaintext: plaintext.clone(),
@@ -5462,6 +5926,16 @@ mod realm_native_fixture {
             .await
             .unwrap();
         assert_eq!(progress.pending_events, 1);
+        let text_only = boxed_step(|| {
+            devices.drain_content(&device, &reader, &realm_actor_mls_fixture::TextOnlySink)
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            text_only
+                .to_string()
+                .contains("leave the text-only delivery pending")
+        );
         assert!(
             boxed_step(|| devices.drain_content(&device, &reader, &sink))
                 .await
@@ -5490,11 +5964,8 @@ mod realm_native_fixture {
                 .unwrap()
         );
         assert_eq!(sink.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
-        let content_scope = ScopeRef::Realm {
-            realm_id: factory.fixture.realm.clone(),
-        };
         let mut outbound = plaintext;
-        outbound.content = Some(arkret::ContentBlock::text("Native Ghost to human"));
+        outbound.content.as_mut().unwrap().body = "Native Ghost to human".into();
         let external =
             json!({"protocol":"fixture","instance_id":"bridge-native","message_id":"reply-1"});
         let event_id = boxed_step(|| {
@@ -5508,6 +5979,7 @@ mod realm_native_fixture {
                 &mut human_group,
                 &event_id,
                 &actor,
+                outbound.content.as_ref().unwrap(),
             )
         })
         .await;
@@ -5522,6 +5994,35 @@ mod realm_native_fixture {
             boxed_step(|| devices.submit_message(&actor, &content_scope, outbound, external,))
                 .await
                 .is_err()
+        );
+        let redaction = arkret::MessageRedactPayload {
+            message_id: arkret::MessageId::from_event_id(&arkret::EventId::new(&event_id).unwrap()),
+            track_name: None,
+            reason: Some("External author withdrew this message".into()),
+            preserve: None,
+            mimi_provenance: None,
+        };
+        let external_delete = json!({"protocol":"fixture","message_id":"delete-reply-1"});
+        let redaction_id = boxed_step(|| {
+            devices.submit_redaction(
+                &actor,
+                &content_scope,
+                redaction.clone(),
+                external_delete.clone(),
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            boxed_step(|| devices.submit_redaction(
+                &actor,
+                &content_scope,
+                redaction,
+                external_delete,
+            ))
+            .await
+            .unwrap(),
+            redaction_id
         );
         let progress = boxed_step(|| devices.poll_content_stream(&device, &reader))
             .await
@@ -5545,6 +6046,7 @@ mod realm_native_fixture {
         drop(devices);
         drop(edge);
         std::fs::remove_file(path).unwrap();
+        boxed_step(|| private_management_archive(&factory.fixture, true)).await;
     }
 
     #[inline(never)]
@@ -5727,7 +6229,7 @@ mod realm_native_fixture {
         eprintln!("native lifecycle: management Service handover");
         boxed_step(|| manager_handover(&factory, &native, &candidate)).await;
         eprintln!("native lifecycle: frozen private management archive");
-        boxed_step(|| private_management_archive(&factory.fixture)).await;
+        boxed_step(|| private_management_archive(&factory.fixture, false)).await;
         let store = PgAuthorityCommitStore { pool };
         let originals = store
             .applet_realm_actor_creations(&factory.fixture.realm, &id)
@@ -5761,5 +6263,9 @@ pub async fn realm_native_mls(pool: PgPool) {
 }
 
 pub async fn realm_bridge_runtime(pool: PgPool) {
-    realm_native_fixture::run_bridge(pool).await;
+    realm_native_fixture::run_bridge(pool, false).await;
+}
+
+pub async fn realm_bridge_circle_runtime(pool: PgPool) {
+    realm_native_fixture::run_bridge(pool, true).await;
 }

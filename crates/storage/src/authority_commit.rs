@@ -1543,6 +1543,8 @@ impl AccountStatusCurrentObservation {
 /// This is not a wire object or a reusable authorization assertion.
 #[derive(Clone, Debug, Default)]
 pub struct AccountContentDeliveryInput {
+    /// New Blob bytes at an exact Realm upload boundary; never a read grant.
+    pub native_blob_upload: Option<arkret_wire::RealmId>,
     pub realms: Vec<arkret_wire::RealmId>,
     pub committed_events: Vec<arkret_wire::CommittedEventView>,
     /// Exact immutable claim response and the real native endpoints whose
@@ -1699,6 +1701,19 @@ impl AccountContentDeliveryInput {
 /// serialized, signed, cached or accepted as a reusable authorization token.
 #[async_trait]
 pub trait AccountContentDeliveryGuard: Send {
+    /// Publish native Blob metadata in the same transaction as its held
+    /// authorization cut. Ordinary read guards cannot perform this write.
+    async fn commit_native_blob_upload(
+        self: Box<Self>,
+        _reference: &arkret_wire::BlobRef,
+        _record: &crate::BlobRecord,
+        _max_actor_bytes: u64,
+        _max_realm_bytes: u64,
+    ) -> PersistenceResult<crate::BlobRecord> {
+        Err(crate::PersistenceError::Conflict(
+            "native Blob upload admission is unavailable".into(),
+        ))
+    }
     /// Recheck clock-dependent facts from the held cut immediately before the
     /// transport accepts bytes. Locks cannot prevent an expiry or time window.
     fn permits_handoff(&self) -> bool {

@@ -20,10 +20,13 @@ pub(super) fn enable(package: &mut AppletPackage) {
     package.claimed_profiles.sort();
     package.requested_scopes.extend(
         [
+            "ak.circle.member.add",
             "ak.event.read",
             "ak.mls.commit",
             "ak.mls.genesis",
             "ak.object.read_content",
+            "ak.strand.create",
+            "ak.message.redact",
         ]
         .map(str::to_owned),
     );
@@ -138,15 +141,25 @@ async fn read_service_grants(
 }
 
 async fn business_grant(fixture: &Fixture, package: &AppletPackage, actor: &ActorId) -> GrantId {
-    business_authority(fixture, package, actor, false).await
+    business_authority(
+        fixture,
+        package,
+        actor,
+        false,
+        &ScopeRef::Realm {
+            realm_id: fixture.realm.clone(),
+        },
+    )
+    .await
 }
 
 pub(super) async fn business_parent(
     fixture: &Fixture,
     package: &AppletPackage,
     actor: &ActorId,
+    scope: &ScopeRef,
 ) -> GrantId {
-    business_authority(fixture, package, actor, true).await
+    business_authority(fixture, package, actor, true, scope).await
 }
 
 async fn business_authority(
@@ -154,12 +167,11 @@ async fn business_authority(
     package: &AppletPackage,
     actor: &ActorId,
     parent_only: bool,
+    scope: &ScopeRef,
 ) -> GrantId {
     eprintln!("native MLS: Service business parent");
     let service_actor = ActorId::service(package.service_id.clone());
-    let scope = ScopeRef::Realm {
-        realm_id: fixture.realm.clone(),
-    };
+    let scope = scope.clone();
     let mut control = GrantConstraint::new(
         GrantConstraintKind::AuthorityControl,
         GrantConstraintEffect::Allow,
@@ -173,15 +185,22 @@ async fn business_authority(
         issuer_id: ActorId::account(fixture.pcr.history.account.clone()),
         subject: CapabilitySubject::Actor(service_actor.clone()),
         actions: vec![
+            "ak.circle.member.add".into(),
             "ak.event.read".into(),
             "ak.message.create".into(),
             "ak.mls.commit".into(),
             "ak.mls.genesis".into(),
             "ak.object.read_content".into(),
+            "ak.strand.create".into(),
+            "ak.message.redact".into(),
         ],
-        resources: vec![arkret_wire::WireResourceSelector::realm(
-            fixture.realm.clone(),
-        )],
+        resources: vec![match &scope {
+            ScopeRef::Circle {
+                realm_id,
+                circle_id,
+            } => arkret_wire::WireResourceSelector::circle(realm_id.clone(), circle_id.clone()),
+            _ => arkret_wire::WireResourceSelector::realm(fixture.realm.clone()),
+        }],
         constraints: vec![
             GrantConstraint::applet_authority(
                 package.applet_id.clone(),
@@ -639,37 +658,14 @@ async fn genesis(
     Box::new(group)
 }
 
-pub(super) async fn human_strand(fixture: &Fixture) -> arkret_wire::StrandId {
-    let scope = ScopeRef::Realm {
-        realm_id: fixture.realm.clone(),
-    };
-    let actor = ActorId::account(fixture.pcr.history.account.clone());
-    let mut strand = fixture.admin_event(
-        EventKind::StrandCreate,
-        scope.clone(),
-        json!({"object":{
-        "schema":"ak.schema.strand.v1","realm_id":fixture.realm,
-        "tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},
-        "metadata":{"title":"Native encrypted exchange"},"state":"active","created_by":actor,
-        "created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())}}),
-    );
-    strand.payload.get_mut("object").unwrap()["created_at"] = json!(
-        arkret_canonical::format_timestamp_canonical(strand.created_at)
-    );
-    let strand = fixture.sign_admin(strand);
-    let strand_id = arkret_wire::StrandId::from_event_id(&strand.event_id);
-    submit_human_event(fixture, strand).await;
-    strand_id
-}
-
 pub(super) async fn human_message(
     fixture: &Fixture,
+    scope: &ScopeRef,
     group: &mut arkret_mls::ArkretMlsGroup,
     strand_id: arkret_wire::StrandId,
+    attachment: arkret::EncryptedAttachment,
 ) -> (Event, arkret::MessageCreatePayload) {
-    let scope = ScopeRef::Realm {
-        realm_id: fixture.realm.clone(),
-    };
+    let scope = scope.clone();
     let current = coland_storage_postgres::PgMlsGroupCurrentStore {
         pool: fixture.pool.clone(),
     }
@@ -678,11 +674,18 @@ pub(super) async fn human_message(
     .unwrap()
     .unwrap()
     .value;
-    let plaintext = arkret::MessageCreatePayload::with_content(
+    let reference = attachment.blob_ref().to_string();
+    let mut plaintext = arkret::MessageCreatePayload::with_content(
         strand_id,
         "discussion",
-        arkret::ContentBlock::text("Human to native Ghost"),
+        arkret::ContentBlock::new(arkret::ContentBlockKind::File, "Human to native Ghost")
+            .with_field("blob_ref", json!(reference))
+            .with_field("filename", json!("private.txt"))
+            .with_field("mime_type", json!(attachment.media_type()))
+            .with_field("size_bytes", json!(attachment.size_bytes()))
+            .with_field("attachments", json!([attachment])),
     );
+    plaintext.blob_refs = vec![reference];
     let mut encrypted = plaintext.clone();
     let content = encrypted.content.take().unwrap();
     let header = arkret::EventContentPreEncryptionHeader::reconstruct(
@@ -738,6 +741,7 @@ pub(super) async fn verify_runtime_message(
     group: &mut arkret_mls::ArkretMlsGroup,
     event_id: &str,
     actor: &ActorId,
+    expected: &arkret::ContentBlock,
 ) {
     use arkret::EventPayloadExt as _;
     let original = fixture
@@ -828,10 +832,7 @@ pub(super) async fn verify_runtime_message(
         arkret_mls::encrypted_envelope_to_payload_with_verified_header(&envelope, header).unwrap();
     let plaintext: arkret::ContentBlock =
         serde_json::from_slice(&group.decrypt_payload(&encrypted).unwrap()).unwrap();
-    assert_eq!(
-        plaintext,
-        arkret::ContentBlock::text("Native Ghost to human")
-    );
+    assert_eq!(&plaintext, expected);
 }
 
 pub(super) struct ContentSink {
@@ -840,8 +841,34 @@ pub(super) struct ContentSink {
     pub attempts: std::sync::atomic::AtomicUsize,
 }
 
+pub(super) fn attachment_plaintext() -> Vec<u8> {
+    (0..96 * 1024).map(|index| (index % 256) as u8).collect()
+}
+
+pub(super) struct TextOnlySink;
+
+#[async_trait::async_trait]
+impl arkret_bridge_runtime::managed_device::NativeContentSink for TextOnlySink {
+    async fn deliver(
+        &self,
+        content: &arkret_bridge_runtime::managed_device::NativeContent,
+    ) -> arkret_bridge_runtime::Result<()> {
+        let message = content.message().unwrap();
+        assert!(!message.blob_refs.is_empty());
+        for reference in &message.blob_refs {
+            assert!(content.attachment_bytes(reference).is_none());
+        }
+        Err(arkret_bridge_runtime::BridgeError::App(
+            "leave the text-only delivery pending for the media consumer".into(),
+        ))
+    }
+}
+
 #[async_trait::async_trait]
 impl arkret_bridge_runtime::managed_device::NativeContentSink for ContentSink {
+    fn requires_attachments(&self) -> bool {
+        true
+    }
     async fn deliver(
         &self,
         content: &arkret_bridge_runtime::managed_device::NativeContent,
@@ -850,6 +877,20 @@ impl arkret_bridge_runtime::managed_device::NativeContentSink for ContentSink {
         assert_eq!(
             serde_json::to_value(content.message()).unwrap(),
             serde_json::to_value(&self.plaintext).unwrap()
+        );
+        let descriptor = self
+            .plaintext
+            .content
+            .as_ref()
+            .unwrap()
+            .rendered_encrypted_attachment()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            content
+                .attachment_bytes(descriptor.blob_ref().as_str())
+                .unwrap(),
+            attachment_plaintext()
         );
         if self
             .attempts
@@ -1428,10 +1469,31 @@ pub(super) async fn human_admits_runtime(
     device: &arkret_bridge_runtime::managed_device::ManagedDevice,
 ) -> Box<arkret_mls::ArkretMlsGroup> {
     let history = &fixture.pcr.history;
-    let scope = ScopeRef::Realm {
-        realm_id: fixture.realm.clone(),
-    };
+    let scope = device.effective_scope().clone();
     let actor = ActorId::account(history.account.clone());
+    if let ScopeRef::Circle { circle_id, .. } = &scope {
+        let snapshot = fixture
+            .state
+            .test_persistence()
+            .authority_commits()
+            .realm_state_snapshot_material(&fixture.realm)
+            .await
+            .unwrap()
+            .unwrap();
+        let parent = snapshot.current_state_entries.iter().find_map(|row| {
+            let arkret_wire::TypedCurrentRow::Value { selector, revision, value, .. } = row;
+            matches!(selector, arkret_wire::CurrentSelector::MemberState { actor_id } if actor_id == &actor)
+                .then_some((revision, value))
+        }).expect("the ordinary member has an accepted parent membership");
+        assert_eq!(parent.1["membership"], "join");
+        let join = fixture.admin_event(
+            EventKind::CircleMemberState,
+            scope.clone(),
+            json!({"circle_id":circle_id,"member_id":actor,"membership":"join",
+                "parent_membership_revision":parent.0}),
+        );
+        boxed_step(|| submit_human_event(fixture, join)).await;
+    }
     let key = SigningKey::from_bytes(&history.founding_device_signing_seed);
     let authorization = history
         .events

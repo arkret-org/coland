@@ -43,9 +43,33 @@ use crate::state::AppState;
 
 pub(super) fn router() -> Router {
     Router::new()
+        .hoop(native_blob_credentials)
         .push(Router::with_path("blob/upload").post(blob_upload))
         .push(Router::with_path("blob/presign").post(blob_presign))
         .push(Router::with_path("blob/get").get(blob_get).head(blob_get))
+}
+
+#[handler]
+async fn native_blob_credentials(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+    ctrl: &mut FlowCtrl,
+) {
+    if req.headers().contains_key("arkret-managed-device")
+        || req.headers().contains_key("arkret-realm-actor-control")
+    {
+        if req.method() == Method::POST && req.uri().path().ends_with("/blob/upload") {
+            // The signature verifier reads and caches the exact multipart
+            // body before the upload parser runs.
+            req.set_secure_max_size(MAX_BLOB_UPLOAD_FORM_BYTES);
+        }
+        crate::routing::identity::session_pop::verify_session_pop
+            .handle(req, depot, res, ctrl)
+            .await;
+    } else {
+        ctrl.call_next(req, depot, res).await;
+    }
 }
 
 pub(super) async fn blob_session_has_realm_membership(
@@ -111,8 +135,16 @@ pub(super) fn blob_upload_outcome(
 #[tracing::instrument(skip_all, fields(op = "org.arkret.coland.blob.upload"))]
 async fn blob_upload(depot: &mut Depot, req: &mut Request, res: &mut Response) {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let Some(session) = auth_or_render(state, req, res).await else {
-        return;
+    let native = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>()
+        .ok();
+    let session = if native.is_some() {
+        None
+    } else {
+        let Some(session) = auth_or_render(state, req, res).await else {
+            return;
+        };
+        Some(session)
     };
     let upload = match read_blob_upload_request(req).await {
         Ok(upload) => upload,
@@ -144,14 +176,17 @@ async fn blob_upload(depot: &mut Depot, req: &mut Request, res: &mut Response) {
     let realm_id = match upload.realm_id {
         Some(realm_id) => {
             let realm_id = realm_id.as_str().to_owned();
-            let is_member =
-                match blob_session_has_realm_membership(state, &realm_id, &session).await {
+            let is_member = if let Some(session) = session.as_ref() {
+                match blob_session_has_realm_membership(state, &realm_id, session).await {
                     Ok(is_member) => is_member,
                     Err(error) => {
                         render_error(res, error.http_status(), error.wire_code(), &error.message);
                         return;
                     }
-                };
+                }
+            } else {
+                true
+            };
             if !is_member {
                 render_error(
                     res,
@@ -165,7 +200,44 @@ async fn blob_upload(depot: &mut Depot, req: &mut Request, res: &mut Response) {
         }
         None => None,
     };
-    if let Err(message) = enforce_blob_quota(state, &session.actor, realm_id.as_deref(), size).await
+    let mut native_guard = if let Some(native) = native {
+        let Some(realm) = realm_id
+            .as_deref()
+            .and_then(|realm| RealmId::new(realm).ok())
+        else {
+            render_error(
+                res,
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "native upload needs an exact Realm",
+            );
+            return;
+        };
+        let input = coland_storage::AccountContentDeliveryInput {
+            realms: vec![realm.clone()],
+            native_blob_upload: Some(realm),
+            ..Default::default()
+        };
+        match crate::routing::identity::applet_managed_device::content_delivery_guard_for_input(
+            state, native, input,
+        )
+        .await
+        {
+            Ok(guard) => Some(guard),
+            Err(error) => {
+                render_error(res, error.http_status(), error.wire_code(), &error.message);
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let actor = native
+        .map(|native| native.authority.actor_id.to_string())
+        .or_else(|| session.as_ref().map(|session| session.actor.clone()))
+        .expect("authenticated uploader");
+    if native.is_none()
+        && let Err(message) = enforce_blob_quota(state, &actor, realm_id.as_deref(), size).await
     {
         render_error(res, StatusCode::FORBIDDEN, "blob_quota_exceeded", message);
         return;
@@ -198,6 +270,17 @@ async fn blob_upload(depot: &mut Depot, req: &mut Request, res: &mut Response) {
         return;
     }
     let storage_key = state.deliveries().object_key_for_sha256(&sha256);
+    if let Some(guard) = native_guard.as_mut()
+        && !guard.prepare_handoff().await
+    {
+        render_error(
+            res,
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "native upload authority expired",
+        );
+        return;
+    }
     if let Err(error) = state.deliveries().put_object(&storage_key, bytes).await {
         render_error(
             res,
@@ -224,10 +307,66 @@ async fn blob_upload(depot: &mut Depot, req: &mut Request, res: &mut Response) {
         } else {
             BlobVisibility::Public
         },
-        uploaded_by: session.actor,
+        uploaded_by: actor,
         created_at: received_at,
     };
-    if let Err(error) = state.deliveries().store_blob(&blob_ref, record).await {
+    if let Some(guard) = native_guard {
+        let reference = BlobRef::new(blob_ref.clone()).expect("computed BlobRef");
+        let retained = match guard
+            .commit_native_blob_upload(
+                &reference,
+                &record,
+                MAX_BLOB_ACCOUNT_BYTES as u64,
+                MAX_BLOB_REALM_BYTES as u64,
+            )
+            .await
+        {
+            Ok(retained) => retained,
+            Err(coland_storage::PersistenceError::Conflict(reason))
+                if reason == "blob_quota_exceeded" =>
+            {
+                render_error(
+                    res,
+                    StatusCode::FORBIDDEN,
+                    "blob_quota_exceeded",
+                    "Blob quota exceeded",
+                );
+                return;
+            }
+            Err(coland_storage::PersistenceError::Conflict(_)) => {
+                render_error(
+                    res,
+                    StatusCode::NOT_FOUND,
+                    "not_found",
+                    "native Blob binding is unavailable",
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "native Blob metadata commit failed");
+                render_error(
+                    res,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    "native Blob admission is unavailable",
+                );
+                return;
+            }
+        };
+        match blob_upload_outcome(
+            state,
+            blob_ref,
+            retained.size_bytes as u64,
+            retained.media_type,
+            retained.created_at,
+        ) {
+            Ok(outcome) => res.render(Json(outcome)),
+            Err(error) => render_error(res, error.http_status(), error.wire_code(), &error.message),
+        }
+        return;
+    }
+    let stored = state.deliveries().store_blob(&blob_ref, record).await;
+    if let Err(error) = stored {
         tracing::error!(%error, "failed to persist blob");
         if matches!(state.deliveries().blob(&blob_ref).await, Ok(None))
             && let Err(delete_error) = state.deliveries().delete_object(&storage_key).await
@@ -264,6 +403,9 @@ async fn blob_upload(depot: &mut Depot, req: &mut Request, res: &mut Response) {
 #[tracing::instrument(skip_all, fields(op = "org.arkret.coland.blob.get"))]
 async fn blob_get(depot: &mut Depot, req: &mut Request, res: &mut Response) {
     let state = depot.get_typed::<AppState>().expect("state injected");
+    let native = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>()
+        .ok();
     let Some(blob_ref) = query_param(req, "blob_ref") else {
         render_error(
             res,
@@ -307,6 +449,15 @@ async fn blob_get(depot: &mut Depot, req: &mut Request, res: &mut Response) {
         return;
     }
     let presign_present = query_param(req, "presign").is_some();
+    if presign_present && native.is_some() {
+        render_error(
+            res,
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "mixed Blob credentials",
+        );
+        return;
+    }
     if presign_present
         && req
             .headers()
@@ -331,7 +482,7 @@ async fn blob_get(depot: &mut Depot, req: &mut Request, res: &mut Response) {
     } else {
         None
     };
-    let session = if presign_payload.is_some() {
+    let session = if presign_payload.is_some() || native.is_some() {
         None
     } else {
         match authenticated_session(state, req).await {
@@ -441,7 +592,31 @@ async fn blob_get(depot: &mut Depot, req: &mut Request, res: &mut Response) {
                 render_error(res, StatusCode::NOT_FOUND, "not_found", "not found");
                 return;
             }
-            let delivery_guard = if let Some(session) = session.as_ref() {
+            let delivery_guard = if let Some(native) = native {
+                let input = coland_storage::AccountContentDeliveryInput {
+                    realms: vec![native.metadata.effective_scope.realm_id().clone()],
+                    blobs: vec![(
+                        match BlobRef::new(blob_ref.clone()) {
+                            Ok(reference) => reference,
+                            Err(_) => {
+                                render_error(res, StatusCode::NOT_FOUND, "not_found", "not found");
+                                return;
+                            }
+                        },
+                        blob.clone(),
+                        if req.method() == Method::HEAD {
+                            arkret_wire::CapabilityActionId::SelfBlobResourceHeadV1
+                        } else {
+                            arkret_wire::CapabilityActionId::SelfBlobResourceGetV1
+                        },
+                    )],
+                    ..Default::default()
+                };
+                match crate::routing::identity::applet_managed_device::content_delivery_guard_for_input(state, native, input).await {
+                    Ok(guard) => Some(guard),
+                    Err(_) => { render_error(res, StatusCode::NOT_FOUND, "not_found", "not found"); return; }
+                }
+            } else if let Some(session) = session.as_ref() {
                 let Some(realm) = blob.realm_id.as_deref().map(RealmId::new).transpose().ok()
                 else {
                     render_error(res, StatusCode::NOT_FOUND, "not_found", "not found");
@@ -483,13 +658,14 @@ async fn blob_get(depot: &mut Depot, req: &mut Request, res: &mut Response) {
             // local direct-serve URL that re-enters this handler without a
             // bearer session; the same gates + response headers apply here.
             let blob_value = presign_blob_policy_value(blob);
-            let actor = session
-                .as_ref()
-                .map(|session| session.actor.as_str())
+            let native_actor = native.map(|native| native.metadata.actor_id.to_string());
+            let actor = native_actor
+                .as_deref()
+                .or_else(|| session.as_ref().map(|session| session.actor.as_str()))
                 .unwrap_or("presigned");
             if let Some(block) = classify_presign_blob_block(&blob_value, actor) {
-                let direct_member_e2ee_download =
-                    session.is_some() && matches!(block, PresignBlobBlock::E2ee);
+                let direct_member_e2ee_download = (session.is_some() || native.is_some())
+                    && matches!(block, PresignBlobBlock::E2ee);
                 if !direct_member_e2ee_download {
                     let error = block.as_error();
                     render_error(
@@ -588,14 +764,15 @@ async fn blob_get(depot: &mut Depot, req: &mut Request, res: &mut Response) {
             }
             append_audit_log(
                 state,
-                session.as_ref().map(|session| session.actor.as_str()),
+                Some(actor),
                 "blob.get",
                 json!({
                     "blob_ref": blob_ref.clone(),
-                    "device_id": session.as_ref().and_then(|session| session.human_device_id().cloned()),
+                    "device_id": native.map(|native| native.metadata.device_id.to_string())
+                        .or_else(|| session.as_ref().and_then(|session| session.human_device_id().cloned())),
                     "purpose": purpose,
                     "realm_id": blob.realm_id.clone(),
-                    "presigned": session.is_none(),
+                    "presigned": presign_payload.is_some(),
                     "status": status.as_u16()
                 }),
                 "accepted",
@@ -746,7 +923,14 @@ async fn blob_presign(
     req: &mut Request,
 ) -> JsonResult<BlobPresignOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
+    let native = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>()
+        .ok();
+    let session = if native.is_some() {
+        None
+    } else {
+        Some(aa.authenticated_session(state, req).await?)
+    };
     let body = body.into_inner();
     let blob_ref = body.blob_ref.as_str();
     let purpose = body.purpose.as_deref().unwrap_or(DEFAULT_BLOB_PURPOSE);
@@ -760,17 +944,49 @@ async fn blob_presign(
         .ok()
         .flatten()
         .ok_or_else(|| AppError::not_found("blob not found"))?;
-    if !blob_visible_to_session(
-        state,
-        &blob,
-        &session,
-        body.realm_id.as_ref().map(|realm_id| realm_id.as_str()),
-    )
-    .await
-    {
-        return Err(AppError::not_found("blob not found"));
+    if let Some(session) = session.as_ref() {
+        if !blob_visible_to_session(
+            state,
+            &blob,
+            session,
+            body.realm_id.as_ref().map(|realm_id| realm_id.as_str()),
+        )
+        .await
+        {
+            return Err(AppError::not_found("blob not found"));
+        }
     }
-    if session.agent_session().is_some() {
+    let native_guard = if let Some(native) = native {
+        if body
+            .realm_id
+            .as_ref()
+            .is_some_and(|realm| realm != native.metadata.effective_scope.realm_id())
+        {
+            return Err(AppError::not_found("blob not found"));
+        }
+        let input = coland_storage::AccountContentDeliveryInput {
+            realms: vec![native.metadata.effective_scope.realm_id().clone()],
+            blobs: vec![(
+                body.blob_ref.clone(),
+                blob.clone(),
+                arkret_wire::CapabilityActionId::SelfBlobCommandPresignV1,
+            )],
+            ..Default::default()
+        };
+        Some(
+            crate::routing::identity::applet_managed_device::content_delivery_guard_for_input(
+                state, native, input,
+            )
+            .await
+            .map_err(|_| AppError::not_found("blob not found"))?,
+        )
+    } else {
+        None
+    };
+    if let Some(session) = session
+        .as_ref()
+        .filter(|session| session.agent_session().is_some())
+    {
         let realm = blob
             .realm_id
             .as_deref()
@@ -786,7 +1002,7 @@ async fn blob_presign(
             )],
             ..Default::default()
         };
-        let guard = crate::routing::events::sync::content_delivery_guard(state, &session, &input)
+        let guard = crate::routing::events::sync::content_delivery_guard(state, session, &input)
             .await
             .map_err(|_| AppError::not_found("blob not found"))?;
         if guard.is_some() {
@@ -799,10 +1015,15 @@ async fn blob_presign(
     if let Some(block) = classify_presign_blob_block(&blob_value, "presigned") {
         return Err(block.as_error());
     }
+    let native_actor = native.map(|native| native.metadata.actor_id.to_string());
+    let actor = native_actor
+        .as_deref()
+        .or_else(|| session.as_ref().map(|session| session.actor.as_str()))
+        .ok_or_else(|| AppError::not_found("blob not found"))?;
     if let Some(reason) = realm_presign_policy_block(state, blob.realm_id.as_deref()).await {
         append_audit_log(
             state,
-            Some(&session.actor),
+            Some(actor),
             reason,
             json!({
                 "blob_ref": blob_ref,
@@ -821,7 +1042,7 @@ async fn blob_presign(
         blob_ref,
         blob.realm_id.as_deref(),
         purpose,
-        &session.actor,
+        actor,
         issued_at,
         expires_at,
     )?;
@@ -832,6 +1053,15 @@ async fn blob_presign(
         query_escape(purpose),
         query_escape(&presign.token),
     );
+    if let Some(guard) = native_guard {
+        if !guard.permits_handoff() {
+            return Err(AppError::not_found("blob not found"));
+        }
+        guard
+            .finish()
+            .await
+            .map_err(|_| AppError::not_found("blob not found"))?;
+    }
     json_ok(BlobPresignOutcome {
         url,
         expires_at,

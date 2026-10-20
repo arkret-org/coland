@@ -219,6 +219,8 @@ pub(super) fn require_guarded_unit_event(request: &EventAdmissionSubmission) -> 
             && matches!(
                 event.kind,
                 arkret_wire::EventKind::CircleMemberState
+                    | arkret_wire::EventKind::CapabilityGrant
+                    | arkret_wire::EventKind::CapabilityRevoke
                     | arkret_wire::EventKind::ScopeReadReceiptPolicy
                     | arkret_wire::EventKind::CallCreate
                     | arkret_wire::EventKind::CallState
@@ -227,6 +229,7 @@ pub(super) fn require_guarded_unit_event(request: &EventAdmissionSubmission) -> 
                     | arkret_wire::EventKind::StrandCreate
                     | arkret_wire::EventKind::AppletBridgeError
                     | arkret_wire::EventKind::MessageCreate
+                    | arkret_wire::EventKind::MessageRedact
                     | arkret_wire::EventKind::ModerationDecision
                     | arkret_wire::EventKind::ModerationDecisionLift
                     | arkret_wire::EventKind::RelationCreate

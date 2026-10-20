@@ -744,6 +744,34 @@ CREATE TRIGGER blobs_encryption_immutable
     BEFORE UPDATE OF payload ON public.blobs
     FOR EACH ROW EXECUTE FUNCTION public.enforce_blob_encryption_immutable();
 
+-- Private creation-purpose evidence; this record grants no content access.
+CREATE TABLE public.realm_actor_blob_uploads (
+    blob_ref text PRIMARY KEY REFERENCES public.blobs(id) ON DELETE CASCADE,
+    effective_scope jsonb NOT NULL,
+    actor_id jsonb NOT NULL,
+    device_id text NOT NULL,
+    authorization_ref jsonb NOT NULL,
+    accepted_at timestamp with time zone NOT NULL,
+    CONSTRAINT realm_actor_blob_upload_scope CHECK (COALESCE(
+        effective_scope->>'kind' IN ('realm','circle') AND
+        actor_id->>'kind'='realm' AND
+        effective_scope->>'realm_id'=actor_id#>>'{realm_actor_id,realm_id}', false))
+);
+
+CREATE FUNCTION public.reject_realm_actor_blob_upload_rewrite() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW IS DISTINCT FROM OLD THEN
+        RAISE EXCEPTION 'Realm actor Blob upload binding is immutable' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER realm_actor_blob_upload_immutable
+    BEFORE UPDATE ON public.realm_actor_blob_uploads
+    FOR EACH ROW EXECUTE FUNCTION public.reject_realm_actor_blob_upload_rewrite();
+
 -- Durable publication evidence binds the exact accepted Event to its Commit.
 CREATE TABLE public.publication_evidence (
     event_id text PRIMARY KEY,

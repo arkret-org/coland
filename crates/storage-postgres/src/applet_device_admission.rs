@@ -1,4 +1,4 @@
-//! Native managed Device business gates at the accepting, locked PCR/Realm cut.
+//! Native managed Device business gates at the accepting, locked Realm cut.
 use arkret_models_collaboration::governance::grant_constraint::{
     CapabilitySubject, GrantConstraintEffect, GrantConstraintKind, GrantConstraintSubkind,
 };
@@ -41,6 +41,8 @@ pub(crate) fn action(event: &Event) -> PersistenceResult<CapabilityActionId> {
         match event.kind {
             EventKind::MlsGenesis => return Ok(CapabilityActionId::MlsGenesis),
             EventKind::MlsCommit => return Ok(CapabilityActionId::MlsCommit),
+            EventKind::StrandCreate => return Ok(CapabilityActionId::StrandCreate),
+            EventKind::MessageRedact => return Ok(CapabilityActionId::MessageRedact),
             _ => {}
         }
     }
@@ -423,6 +425,8 @@ pub(crate) async fn select_management(
             AppletPolicyOperation::Join
         }
         EventKind::MessageCreate
+        | EventKind::MessageRedact
+        | EventKind::StrandCreate
         | EventKind::CircleMemberState
         | EventKind::MlsGenesis
         | EventKind::MlsCommit => AppletPolicyOperation::Execute,
@@ -484,6 +488,8 @@ pub(crate) fn business_action(event: &Event) -> PersistenceResult<CapabilityActi
     action(event)?;
     match event.kind {
         EventKind::MessageCreate => Ok(CapabilityActionId::MessageCreate),
+        EventKind::MessageRedact => Ok(CapabilityActionId::MessageRedact),
+        EventKind::StrandCreate => Ok(CapabilityActionId::StrandCreate),
         EventKind::CircleMemberState => Ok(CapabilityActionId::CircleMemberAdd),
         EventKind::MlsGenesis => Ok(CapabilityActionId::MlsGenesis),
         EventKind::MlsCommit => Ok(CapabilityActionId::MlsCommit),

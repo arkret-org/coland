@@ -64,6 +64,47 @@ mod direct_mention_tests {
     const STATION: &str = "ak:did_core:web:bob.station.example";
 
     #[test]
+    fn message_admission_checks_the_complete_realm_mention_target() {
+        let realm = arkret_identifiers::RealmId::new(
+            "ak:realm:AQptIWDEF2d4jlsnzTQVXGqZs6h-vPkYXuYqwewKqIjr",
+        )
+        .unwrap();
+        let mut operation = arkret_event_draft::test_support::raw_projected_operation(
+            arkret_identifiers::OperationId::new(
+                "ak:operation:01904100-0000-7000-8000-57d7d85564c5",
+            )
+            .unwrap(),
+            realm.clone(),
+            arkret_wire::EventKind::MessageCreate.as_str(),
+            json!({
+                "strand_id": "ak:strand:AdkQ-RmB1a8zyc52yl9GWAsodQ_EUle1WAVZqbO7pc19",
+                "track_name":"discussion",
+                "content":{
+                    "kind":"ak.content.text",
+                    "body":"Hello @Helper",
+                    "mentions":[{
+                        "kind":"mention",
+                        "subject_actor_id":{
+                            "kind":"realm",
+                            "realm_actor_id":{
+                                "realm_id":realm,
+                                "principal_id":"ak:did_core:webvh:z6mkfixtureBot"
+                            }
+                        }
+                    }]
+                }
+            }),
+        );
+        validate_message_operation_payload(&operation).unwrap();
+        operation.payload["content"]["mentions"][0]["subject_actor_id"]["realm_actor_id"]["realm_id"] =
+            json!("ak:realm:AS8XThowW7JnZc80U10gJh-_lqkA-iSQ-LAvBXj6_9O5");
+        assert_eq!(
+            validate_message_operation_payload(&operation),
+            Err("mention subject belongs to another Realm"),
+        );
+    }
+
+    #[test]
     fn canonical_mention_accepts_complete_account_subject() {
         let content = json!({
             "kind": "ak.content.text",

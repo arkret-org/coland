@@ -101,7 +101,11 @@ pub fn validate_message_operation_payload(operation: &Operation) -> Result<(), &
         }
     } else if let Some(content) = operation.payload.get("content") {
         validate_content_blocks(content)?;
-        validate_mentions(content)?;
+        arkret_models_collaboration::events_payloads::validate_mentions_in_realm(
+            content,
+            &operation.realm_id,
+        )
+        .map_err(|error| error.message())?;
     }
     Ok(())
 }

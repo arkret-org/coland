@@ -664,16 +664,9 @@ pub(super) async fn human_message(
     group: &mut arkret_mls::ArkretMlsGroup,
     strand_id: arkret_wire::StrandId,
     attachment: arkret::EncryptedAttachment,
+    mentioned: &ActorId,
 ) -> (Event, arkret::MessageCreatePayload) {
     let scope = scope.clone();
-    let current = coland_storage_postgres::PgMlsGroupCurrentStore {
-        pool: fixture.pool.clone(),
-    }
-    .current(&scope)
-    .await
-    .unwrap()
-    .unwrap()
-    .value;
     let reference = attachment.blob_ref().to_string();
     let mut plaintext = arkret::MessageCreatePayload::with_content(
         strand_id,
@@ -683,11 +676,66 @@ pub(super) async fn human_message(
             .with_field("filename", json!("private.txt"))
             .with_field("mime_type", json!(attachment.media_type()))
             .with_field("size_bytes", json!(attachment.size_bytes()))
-            .with_field("attachments", json!([attachment])),
+            .with_field("attachments", json!([attachment]))
+            .with_direct_mention_nodes(vec![arkret::MentionNode::RealmMention(
+                arkret::RealmMention::new(mentioned.clone()).unwrap(),
+            )])
+            .unwrap(),
     );
     plaintext.blob_refs = vec![reference];
+    let event = submit_human_message_content(fixture, &scope, group, &plaintext, None, None).await;
+    (event, plaintext)
+}
+
+pub(super) async fn invalid_human_messages(
+    fixture: &Fixture,
+    scope: &ScopeRef,
+    group: &mut arkret_mls::ArkretMlsGroup,
+    strand_id: arkret_wire::StrandId,
+    mentioned: &ActorId,
+) -> Event {
+    let mut foreign = mentioned.as_realm_actor_id().unwrap().clone();
+    foreign.realm_id = arkret_wire::RealmId::from_event_id(&arkret_wire::EventId::from_digest(
+        arkret_canonical::DigestSuite::Sha256,
+        [0x93; 32],
+    ));
+    assert_ne!(&foreign.realm_id, scope.realm_id());
+    let content = arkret::ContentBlock::text("Authenticated but invalid target")
+        .with_direct_mention_nodes(vec![arkret::MentionNode::RealmMention(
+            arkret::RealmMention::new(ActorId::realm(foreign)).unwrap(),
+        )])
+        .unwrap();
+    let plaintext =
+        arkret::MessageCreatePayload::with_content(strand_id.clone(), "discussion", content);
+    submit_human_message_content(fixture, scope, group, &plaintext, None, None).await;
+    let valid = arkret::MessageCreatePayload::with_content(
+        strand_id,
+        "discussion",
+        arkret::ContentBlock::text("This body must not execute with malformed metadata"),
+    );
+    submit_human_message_content(fixture, scope, group, &valid, Some(b"{"), None).await;
+    submit_human_message_content(fixture, scope, group, &valid, None, Some(b"{")).await
+}
+
+async fn submit_human_message_content(
+    fixture: &Fixture,
+    scope: &ScopeRef,
+    group: &mut arkret_mls::ArkretMlsGroup,
+    plaintext: &arkret::MessageCreatePayload,
+    raw_content: Option<&[u8]>,
+    raw_metadata: Option<&[u8]>,
+) -> Event {
+    let current = coland_storage_postgres::PgMlsGroupCurrentStore {
+        pool: fixture.pool.clone(),
+    }
+    .current(scope)
+    .await
+    .unwrap()
+    .unwrap()
+    .value;
     let mut encrypted = plaintext.clone();
     let content = encrypted.content.take().unwrap();
+    let content = arkret_canonical::canonical_json_bytes(&content).unwrap();
     let header = arkret::EventContentPreEncryptionHeader::reconstruct(
         "1.0",
         arkret::MESSAGE_CONTENT_BLOCK_MLS_CONTENT_TYPE,
@@ -695,7 +743,7 @@ pub(super) async fn human_message(
         scope.clone(),
         EventKind::MessageCreate.as_str(),
         group.epoch(),
-        current.current_mls_commit_event_ref,
+        current.current_mls_commit_event_ref.clone(),
         group.local_content_sender_domain().unwrap(),
         arkret::EventContentRoutingContext::None,
     )
@@ -703,17 +751,34 @@ pub(super) async fn human_message(
     encrypted.encrypted_content = Some(
         arkret_mls::encrypted_envelope_from_payload(
             &group
-                .encrypt_payload(
-                    header,
-                    &arkret_canonical::canonical_json_bytes(&content).unwrap(),
-                )
+                .encrypt_payload(header, raw_content.unwrap_or(&content))
                 .unwrap(),
         )
         .unwrap(),
     );
-    let event = fixture.admin_event(EventKind::MessageCreate, scope, json!(encrypted));
+    if let Some(bytes) = raw_metadata {
+        let header = arkret::EventContentPreEncryptionHeader::reconstruct(
+            "1.0",
+            arkret::MESSAGE_METADATA_MLS_CONTENT_TYPE,
+            arkret::EncryptedPayloadScheme::MlsRfc9420,
+            scope.clone(),
+            EventKind::MessageCreate.as_str(),
+            group.epoch(),
+            current.current_mls_commit_event_ref,
+            group.local_content_sender_domain().unwrap(),
+            arkret::EventContentRoutingContext::None,
+        )
+        .unwrap();
+        encrypted.encrypted_metadata = Some(
+            arkret_mls::encrypted_envelope_from_payload(
+                &group.encrypt_payload(header, bytes).unwrap(),
+            )
+            .unwrap(),
+        );
+    }
+    let event = fixture.admin_event(EventKind::MessageCreate, scope.clone(), json!(encrypted));
     submit_human_event(fixture, event.clone()).await;
-    (event, plaintext)
+    event
 }
 
 async fn submit_human_event(fixture: &Fixture, event: Event) {

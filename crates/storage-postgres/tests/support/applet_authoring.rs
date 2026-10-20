@@ -5907,6 +5907,58 @@ mod realm_native_fixture {
             .await
             .is_err()
         );
+        eprintln!(
+            "real Bridge runtime: reject authenticated malformed content without blocking the stream"
+        );
+        let rejected = boxed_step(|| {
+            realm_actor_mls_fixture::invalid_human_messages(
+                &factory.fixture,
+                &content_scope,
+                &mut human_group,
+                strand_id.clone(),
+                &actor,
+            )
+        })
+        .await;
+        let progress = boxed_step(|| devices.poll_content_stream(&device, &reader))
+            .await
+            .unwrap();
+        assert_eq!(progress.pending_events, 0);
+        assert_eq!(
+            devices
+                .last_rejected_content(&device)
+                .await
+                .unwrap()
+                .unwrap()
+                .event,
+            rejected
+        );
+        assert!(
+            !boxed_step(|| devices.drain_content(
+                &device,
+                &reader,
+                &realm_actor_mls_fixture::TextOnlySink
+            ))
+            .await
+            .unwrap()
+        );
+        drop(reader);
+        drop(device);
+        drop(devices);
+        let devices = ManagedDeviceRuntime::new(edge.clone()).unwrap();
+        let device = boxed_step(|| devices.device_for_actor(&actor))
+            .await
+            .unwrap();
+        let reader = boxed_step(|| devices.open_reader(&device)).await.unwrap();
+        assert_eq!(
+            devices
+                .last_rejected_content(&device)
+                .await
+                .unwrap()
+                .unwrap()
+                .event,
+            rejected
+        );
         eprintln!("real Bridge runtime: encrypted content, delivery failure and cold recovery");
         let (incoming, plaintext) = boxed_step(|| {
             realm_actor_mls_fixture::human_message(
@@ -5915,6 +5967,7 @@ mod realm_native_fixture {
                 &mut human_group,
                 strand_id,
                 descriptor.clone(),
+                &actor,
             )
         })
         .await;
@@ -6018,6 +6071,27 @@ mod realm_native_fixture {
         outbound.content.as_mut().unwrap().body = "Native Ghost to human".into();
         let external =
             json!({"protocol":"fixture","instance_id":"bridge-native","message_id":"reply-1"});
+        let mut foreign_target = outbound.clone();
+        foreign_target
+            .content
+            .as_mut()
+            .unwrap()
+            .extra
+            .get_mut("mentions")
+            .unwrap()[0]["subject_actor_id"]["realm_actor_id"]["realm_id"] =
+            json!("ak:realm:AS8XThowW7JnZc80U10gJh-_lqkA-iSQ-LAvBXj6_9O5");
+        assert!(
+            boxed_step(|| devices.submit_message(
+                &actor,
+                &content_scope,
+                foreign_target,
+                external.clone(),
+            ))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("mention subject belongs to another Realm"),
+        );
         let event_id = boxed_step(|| {
             devices.submit_message(&actor, &content_scope, outbound.clone(), external.clone())
         })

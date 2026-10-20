@@ -1328,7 +1328,10 @@ impl PeerReadAuthz {
             .unwrap_or_default();
         match membership {
             "join" | "active" => {
-                if actor_id.route_service_id().as_str() != self.source_id {
+                if actor_id
+                    .fixed_route_service_id()
+                    .is_none_or(|station| station.as_str() != self.source_id)
+                {
                     self.remove_realm_member(&realm_id, &actor);
                     return;
                 }

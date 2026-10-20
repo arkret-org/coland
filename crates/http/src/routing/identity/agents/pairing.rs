@@ -2271,22 +2271,25 @@ mod requested_scope_tests {
 
     #[test]
     fn authorize_scope_may_narrow_but_cannot_widen_provision_ceiling() {
+        let approval = json!({
+            "constraint_kind":"claim_based",
+            "constraint_subkind":"approval",
+            "effect":"allow",
+            "controller_approval_required":true
+        });
         let ceiling = json!({
             "actions": ["ak.message.create", "ak.self.events.command.submit.v1"],
             "resources": [{
                 "kind": "operation",
                 "operation": "ak.self.events.command.submit.v1"
             }],
-            "constraints": [{"controller_approval_required": true}]
+            "constraints": [approval.clone()]
         });
         let payload = json!({
             "agent_key_scope": {
                 "actions": ["ak.self.events.command.submit.v1"],
                 "resources": ceiling["resources"].clone(),
-                "constraints": [
-                    {"controller_approval_required": true},
-                    {"rate_limit": {"max": 10}}
-                ]
+                "constraints": [approval]
             }
         });
         assert!(

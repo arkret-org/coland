@@ -405,7 +405,7 @@ mod tests {
     const RFC8037_THUMBPRINT: &str = "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k";
 
     #[tokio::test]
-    async fn agent_authority_projection_reaches_its_service_authenticator_without_a_session() {
+    async fn agent_authority_projection_rejects_an_unverified_service_without_a_session() {
         let state = AppState::new(
             crate::config::AppConfig::test_default(),
             coland_storage_postgres::Db { pool: None },
@@ -417,9 +417,9 @@ mod tests {
         request
             .headers_mut()
             .insert("source-service-id", "unverified-service".parse().unwrap());
-        // This only dispatches to the handler; its mandatory service verifier
-        // still rejects missing, partial, or unauthorized signatures.
-        assert!(enforce_session_pop(&state, &mut request).await.is_ok());
+        // The projection's mandatory service verifier precedes the generic
+        // dispatch exemption; an unsigned header is not authentication.
+        assert!(enforce_session_pop(&state, &mut request).await.is_err());
     }
 
     #[tokio::test]

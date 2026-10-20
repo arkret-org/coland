@@ -5298,10 +5298,10 @@ mod trust_binding_tests {
             id: "keypackage-fixture".into(),
             keypackage_ref: format!("sha256:{}", "1".repeat(64)),
             keypackage_digest: format!("sha256:{}", "2".repeat(64)),
-            owner_account_id: arkret_wire::AccountId::new(
+            owner_actor_id: arkret_wire::ActorId::account(arkret_wire::AccountId::new(
                 arkret_wire::DidCoreId::new("ak:did_core:web:controller.example").unwrap(),
                 arkret_wire::DidCoreId::new("ak:did_core:web:station.example").unwrap(),
-            ),
+            )),
             effective_scope: None,
             actor_id: "ak:did_core:web:agent.example".into(),
             device_id: None,

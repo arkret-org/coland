@@ -426,7 +426,7 @@ pub struct AppletRevokeRecordOutcome {
 
 #[cfg(test)]
 mod tests {
-    use arkret_wire::{DidUrl, ProducerEventProof};
+    use arkret_wire::{DidUrl, EventId, ProducerEventProof};
     use serde_json::json;
 
     use super::*;

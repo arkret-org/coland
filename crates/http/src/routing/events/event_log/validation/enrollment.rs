@@ -155,209 +155,115 @@ fn device_authorization_invalid(message: impl Into<String>) -> EventValidationEr
 }
 
 #[cfg(test)]
-mod applet_managed_delegation_tests {
-    use arkret_models_collaboration::events_payloads::SignatureMaterial;
-    use arkret_models_collaboration::events_payloads::device_identity::{
-        AppletManagedDeviceScope, AppletManagedDeviceScopes, DeviceAuthorizationBindingKind,
-        DeviceAuthorizationScopes, DeviceAuthorizePayload, DeviceOrPrincipalRef,
-    };
+mod realm_device_enrollment_isolation_tests {
+    use arkret_models_collaboration::events_payloads::{DeviceAuthorizePayload, SignatureMaterial};
     use ed25519_dalek::{Signer as _, SigningKey};
 
     use super::*;
 
-    const MANAGED_PRINCIPAL: &str = "ak:did_core:webvh:z6mkappletmanagedbot";
-    const OTHER_PRINCIPAL: &str = "ak:did_core:webvh:z6mkappletmanagedghost";
-    const STATION: &str = "ak:did_core:web:station.example";
-    const APPLET: &str = "ak:applet:01904100-0000-7000-8000-00000000a001";
-
-    fn signed_delegation_payload(
-        account: &arkret_wire::AccountId,
-        authorized_by: &arkret_wire::DidCoreId,
-    ) -> Value {
+    fn candidate(as_account: bool) -> arkret_wire::Event {
+        let realm = arkret_wire::RealmId::from_event_id(&arkret_identifiers::EventId::from_digest(
+            arkret_canonical::DigestSuite::Sha256,
+            [0x71; 32],
+        ));
+        let principal =
+            arkret_wire::DidCoreId::new("ak:did_core:webvh:z6mkappletmanagedbot").unwrap();
+        let native = arkret_wire::ActorId::realm(arkret_wire::RealmActorId::new(
+            realm.clone(),
+            principal.clone(),
+        ));
         let key = SigningKey::from_bytes(&[0x37; 32]);
         let public =
             arkret_canonical::ed25519_pubkey_to_did_key_multibase(key.verifying_key().as_bytes());
         let mut hpke = vec![0xec, 0x01];
         hpke.extend([0x44; 32]);
-        let mut payload = DeviceAuthorizePayload {
-            device_id: arkret_identifiers::DeviceId::new(
-                "ak:device:01904100-0000-7000-8000-00000000d001",
-            )
-            .unwrap(),
-            device_public_key_did: arkret_wire::NonEmptyString::new(format!("did:key:{public}"))
-                .unwrap(),
-            hpke_key: arkret_wire::NonEmptyString::new(
-                arkret_canonical::encode_multibase_base58btc(hpke),
-            )
-            .unwrap(),
-            algorithms: vec![
-                arkret_wire::NonEmptyString::new(
-                    arkret_wire::HpkeSuiteId::X25519_AEAD_CHACHA20POLY1305_V1,
-                )
-                .unwrap(),
-            ],
-            device_key_algorithm: arkret_wire::NonEmptyString::new("Ed25519").unwrap(),
-            authorized_by: DeviceOrPrincipalRef::Principal(authorized_by.clone()),
-            scopes: Some(DeviceAuthorizationScopes::AppletManaged(
-                AppletManagedDeviceScopes::new(vec![AppletManagedDeviceScope {
-                    effective_scope: arkret_wire::ScopeRef::Realm {
-                        realm_id: arkret_wire::RealmId::from_event_id(
-                            &arkret_identifiers::EventId::from_digest(
-                                arkret_canonical::DigestSuite::Sha256,
-                                [0x71; 32],
-                            ),
-                        ),
-                    },
-                    actions: vec![arkret_wire::CapabilityActionId::EventRead],
-                }])
-                .unwrap(),
-            )),
-            not_before: "2026-09-15T00:00:00.000Z".parse().unwrap(),
-            expires_at: Some(Some("2026-12-15T00:00:00.000Z".parse().unwrap())),
-            authorization_binding_kind: DeviceAuthorizationBindingKind::AppletManagedDelegation,
-            authorized_generation_ref: 1,
-            device_signature: SignatureMaterial::NonEmptyString(
-                arkret_wire::NonEmptyString::new("pending").unwrap(),
-            ),
-            recovery_session_id: None,
-            pairing_challenge_transcript_digest: None,
-            applet_id: Some(arkret_wire::AppletId::new(APPLET).unwrap()),
-        };
-        payload
-            .validate_wire_constraints()
-            .expect("5.2.3 payload shape");
-        // The transcript self-anchors against the signing account, so a
-        // cross-principal case has to sign under the principal it names.
-        let anchor = arkret_wire::AccountId::new(
-            authorized_by.clone(),
-            arkret_wire::DidCoreId::new(STATION.to_owned()).unwrap(),
-        );
+        let applet =
+            arkret_wire::AppletId::new("ak:applet:01904100-0000-7000-8000-00000000a001").unwrap();
+        let mut payload: DeviceAuthorizePayload = serde_json::from_value(serde_json::json!({
+            "device_id":"ak:device:01904100-0000-7000-8000-00000000d001",
+            "device_public_key_did":format!("did:key:{public}"),
+            "hpke_key":arkret_canonical::encode_multibase_base58btc(hpke),
+            "algorithms":[arkret_wire::HpkeSuiteId::X25519_AEAD_CHACHA20POLY1305_V1],
+            "device_key_algorithm":"Ed25519","authorized_by":principal,
+            "scopes":[{"effective_scope":{"kind":"realm","realm_id":realm},"actions":["ak.event.read"]}],
+            "not_before":"2026-10-20T00:00:00.000Z","expires_at":"2026-12-15T00:00:00.000Z",
+            "authorization_binding_kind":"realm_managed_delegation","authorized_generation_ref":1,
+            "device_signature":"AA","applet_id":applet,
+            "expected_control_revision":{"commit_id":arkret_wire::RealmCommitId::from_digest([42;32]),"stream_position":0},
+            "expected_device_revision":null
+        })).unwrap();
         let input = payload
-            .device_possession_signature_input(if authorized_by == &account.principal_id {
-                account
-            } else {
-                &anchor
-            })
-            .expect("possession transcript");
+            .realm_device_possession_signature_input(&native)
+            .unwrap();
         payload.device_signature = SignatureMaterial::NonEmptyString(
             arkret_wire::NonEmptyString::new(arkret_canonical::base64url_encode(
                 key.sign(&input).to_bytes(),
             ))
             .unwrap(),
         );
-        serde_json::to_value(payload).expect("payload serializes")
-    }
-
-    fn delegation_event(actor: &str, authorized_by: &str) -> arkret_wire::Event {
-        let station = arkret_wire::DidCoreId::new(STATION.to_owned()).unwrap();
-        let actor_id = arkret_wire::DidCoreId::new(actor.to_owned()).unwrap();
-        let account = arkret_wire::AccountId::new(actor_id.clone(), station.clone());
-        let payload = signed_delegation_payload(
-            &account,
-            &arkret_wire::DidCoreId::new(authorized_by.to_owned()).unwrap(),
-        );
-        arkret_wire::test_support::raw_event(
+        let (actor, scope) = if as_account {
+            (
+                arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+                    principal,
+                    arkret_wire::DidCoreId::new("ak:did_core:web:station.example").unwrap(),
+                )),
+                arkret_wire::ScopeRef::Realm { realm_id: realm },
+            )
+        } else {
+            (
+                native,
+                arkret_wire::ScopeRef::RealmControl { realm_id: realm },
+            )
+        };
+        let mut event = arkret_wire::test_support::raw_event_for_actor_at(
             arkret_wire::EventKind::DeviceAuthorize.as_str(),
-            arkret_wire::ScopeRef::Realm {
-                realm_id: arkret_wire::RealmId::from_event_id(
-                    &arkret_identifiers::EventId::from_digest(
-                        arkret_canonical::DigestSuite::Sha256,
-                        [0x71; 32],
-                    ),
-                ),
-            },
-            actor_id,
-            station,
-            payload,
+            scope,
+            actor,
+            serde_json::to_value(payload).unwrap(),
+            "2026-10-21T00:00:00.000Z".parse().unwrap(),
         )
-        .expect("fixture delegated device authorize")
-    }
-
-    fn envelope(event: &arkret_wire::Event) -> serde_json::Map<String, Value> {
-        serde_json::to_value(event)
-            .expect("envelope serializes")
-            .as_object()
-            .expect("envelope is an object")
-            .clone()
-    }
-
-    /// 5.2.3 precondition: without an accepted managed-actor provision and
-    /// `applet_managed_control` genesis there is no exact install to anchor to,
-    /// so the branch has to fail closed rather than fall through to the
-    /// possession check.
-    #[tokio::test]
-    async fn delegation_fails_closed_without_a_provisioned_managed_principal() {
-        let state = AppState::new(
-            crate::config::AppConfig::test_default(),
-            coland_storage_postgres::Db { pool: None },
-        );
-        let event = delegation_event(MANAGED_PRINCIPAL, MANAGED_PRINCIPAL);
-        let error = validate_device_authorization_binding(
-            &state,
-            &envelope(&event),
-            MANAGED_PRINCIPAL,
-            &[],
-        )
-        .await
-        .expect_err("an unprovisioned principal cannot delegate a device");
-        assert!(
-            format!("{error:?}").contains("Applet-managed principal"),
-            "unexpected rejection: {error:?}"
-        );
-    }
-
-    /// 15 / applet-integration.md 12: the authority is the principal's own
-    /// controller method, so this Event MUST NOT arrive dressed as an
-    /// Applet-delegated write.
-    #[tokio::test]
-    async fn delegation_rejects_borrowed_applet_envelope_authority() {
-        let state = AppState::new(
-            crate::config::AppConfig::test_default(),
-            coland_storage_postgres::Db { pool: None },
-        );
-        let mut event = delegation_event(MANAGED_PRINCIPAL, MANAGED_PRINCIPAL);
-        // The envelope schema pairs the two fields, so a borrowed Applet
-        // authority can only ever arrive as the complete pair.
-        event.applet_id = Some(arkret_wire::AppletId::new(APPLET).unwrap());
-        event.authorization_ref = Some(
-            arkret_wire::GrantId::new("ak:grant:ARELvWOpF6BRrks3DlbQy-9XIE6aAQQumDQp7fA4ApeM")
-                .unwrap()
+        .unwrap();
+        event.applet_id = Some(applet);
+        if as_account {
+            event.authorization_ref = Some(
+                arkret_wire::GrantId::from_event_id(&arkret_wire::EventId::from_digest(
+                    arkret_canonical::DigestSuite::Sha256,
+                    [43; 32],
+                ))
                 .into(),
-        );
-        let error = validate_device_authorization_binding(
-            &state,
-            &envelope(&event),
-            MANAGED_PRINCIPAL,
-            &[],
-        )
-        .await
-        .expect_err("a delegated device authorization is not an Applet-delegated write");
-        assert!(
-            format!("{error:?}").contains("Applet capability grant"),
-            "unexpected rejection: {error:?}"
-        );
+            );
+        }
+        event
     }
 
-    /// 5.2.3 self-anchor: `authorized_by` MUST be the Event's own principal,
-    /// never the Applet `service_id` or any other principal.
     #[tokio::test]
-    async fn delegation_rejects_a_cross_principal_authorizer() {
+    async fn ordinary_enrollment_never_accepts_realm_control_or_borrowed_account_identity() {
         let state = AppState::new(
             crate::config::AppConfig::test_default(),
             coland_storage_postgres::Db { pool: None },
         );
-        let event = delegation_event(MANAGED_PRINCIPAL, OTHER_PRINCIPAL);
-        let error = validate_device_authorization_binding(
-            &state,
-            &envelope(&event),
-            MANAGED_PRINCIPAL,
-            &[],
-        )
-        .await
-        .expect_err("applet_managed_delegation must self-anchor");
-        assert!(
-            format!("{error:?}").contains("self-anchor"),
-            "unexpected rejection: {error:?}"
-        );
+        for (as_account, reason) in [
+            (false, "device authorization requires an account actor"),
+            (
+                true,
+                "device authorization binding is not a closed v1 variant",
+            ),
+        ] {
+            let event = candidate(as_account);
+            let envelope = serde_json::to_value(&event)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .clone();
+            let error = validate_device_authorization_binding(
+                &state,
+                &envelope,
+                event.actor_id.signing_principal_id().as_str(),
+                &[],
+            )
+            .await
+            .unwrap_err();
+            assert!(format!("{error:?}").contains(reason), "{error:?}");
+        }
     }
 }

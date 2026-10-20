@@ -38,9 +38,10 @@ pub fn validate_content_blocks(content: &serde_json::Value) -> Result<(), &'stat
 /// Canonical mention admission for a Message Content Block tree.
 ///
 /// The only admissible shapes are the spec AST nodes — `{"kind":"mention"}`
-/// with a complete `AccountId` `subject_account_id` and
+/// with a complete `AccountId` `subject_account_id` or Realm `subject_actor_id`, and
 /// `{"kind":"audience_mention"}` with a closed `audience` — both parsed by the
 /// SDK models that own the wire types.
+#[cfg(test)]
 pub fn validate_mentions(content: &serde_json::Value) -> Result<(), &'static str> {
     arkret_models_collaboration::events_payloads::collect_mention_nodes(content)
         .map(|_| ())

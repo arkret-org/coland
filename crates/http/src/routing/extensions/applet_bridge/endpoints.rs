@@ -1984,6 +1984,8 @@ async fn third_party_locations_endpoint(
 
 #[cfg(test)]
 mod revoke_saga_tests {
+    use arkret_wire::Hash;
+
     use super::*;
 
     const APPLET_ID: &str = "ak:applet:01904100-0000-7000-8000-000000000001";
@@ -2003,18 +2005,24 @@ mod revoke_saga_tests {
         }
     }
 
+    fn managed_actor(principal: &str) -> arkret_wire::ActorId {
+        arkret_wire::ActorId::realm(arkret_wire::RealmActorId::new(
+            arkret_wire::RealmId::new(REALM_ID).unwrap(),
+            arkret_wire::DidCoreId::new(principal).unwrap(),
+        ))
+    }
+
     fn current_join_event(
         scope: arkret_wire::ScopeRef,
         member: &arkret_wire::ActorId,
         grant: &str,
     ) -> arkret_wire::Event {
-        let actor = admin_actor("ak:did_core:web:service-a.example");
-        let mut event = arkret_wire::test_support::raw_event(
+        let mut event = arkret_wire::test_support::raw_event_for_actor_at(
             EventKind::MemberState.as_str(),
             scope,
-            actor.signing_principal_id().clone(),
-            actor.route_service_id().clone(),
+            member.clone(),
             json!({"member_id": member, "membership": "join"}),
+            "2026-10-21T00:00:00.000Z".parse().unwrap(),
         )
         .unwrap();
         event.applet_id = Some(arkret_wire::AppletId::new(APPLET_ID).unwrap());
@@ -2025,10 +2033,7 @@ mod revoke_saga_tests {
     #[test]
     fn exact_current_membership_generation_is_removed_but_another_scope_is_not() {
         let target_scope = realm_scope();
-        let member = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-            arkret_wire::DidCoreId::new("ak:did_core:web:bot.example").unwrap(),
-            arkret_wire::DidCoreId::new("ak:did_core:web:service-a.example").unwrap(),
-        ));
+        let member = managed_actor("ak:did_core:webvh:z6mkfixtureBot");
         let managed = std::collections::BTreeSet::from([member.clone()]);
         let reason = arkret_wire::ReasonCode::from_wire("requested_by_admin");
         let event = current_join_event(target_scope.clone(), &member, TARGET_GRANT);
@@ -2072,23 +2077,17 @@ mod revoke_saga_tests {
     #[test]
     fn managed_actor_invite_acceptance_is_a_current_join_generation() {
         let scope = realm_scope();
-        let bot = arkret_wire::DidCoreId::new("ak:did_core:web:bot.example").unwrap();
-        let station = arkret_wire::DidCoreId::new("ak:did_core:web:service-a.example").unwrap();
-        let member = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-            bot.clone(),
-            station.clone(),
-        ));
+        let member = managed_actor("ak:did_core:webvh:z6mkfixtureBot");
         let reason = arkret_wire::ReasonCode::from_wire("requested_by_admin");
-        let mut accept = arkret_wire::test_support::raw_event(
+        let mut accept = arkret_wire::test_support::raw_event_for_actor_at(
             EventKind::InviteAccept.as_str(),
             scope.clone(),
-            bot,
-            station,
+            member.clone(),
             json!({
                 "invite_id": "ak:invite:AXqIXbu56hFXteZXtkBsqJxy_puV4mhSv1U0ZkUldxAL",
                 "previous_state": "pending",
-                "invitee_account_id": member.as_account_id().unwrap(),
             }),
+            "2026-10-21T00:00:00.000Z".parse().unwrap(),
         )
         .unwrap();
         accept.applet_id = Some(arkret_wire::AppletId::new(APPLET_ID).unwrap());
@@ -2133,10 +2132,7 @@ mod revoke_saga_tests {
     #[test]
     fn exact_install_membership_rejects_missing_ghost_projection_and_ignores_other_applet() {
         let scope = realm_scope();
-        let ghost = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-            arkret_wire::DidCoreId::new("ak:did_core:web:ghost.example").unwrap(),
-            arkret_wire::DidCoreId::new("ak:did_core:web:service-a.example").unwrap(),
-        ));
+        let ghost = managed_actor("ak:did_core:webvh:z6mkfixtureGhost");
         let reason = arkret_wire::ReasonCode::from_wire("requested_by_admin");
         let event = current_join_event(scope.clone(), &ghost, TARGET_GRANT);
         assert!(
@@ -2175,10 +2171,7 @@ mod revoke_saga_tests {
     #[test]
     fn revoke_submissions_bind_the_full_admin_and_member_actors() {
         let actor = admin_actor("ak:did_core:web:service-a.example");
-        let member = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-            arkret_wire::DidCoreId::new("ak:did_core:web:bot.example").unwrap(),
-            actor.route_service_id().clone(),
-        ));
+        let member = managed_actor("ak:did_core:webvh:z6mkfixtureBot");
         let scope = arkret_wire::ScopeRef::Realm {
             realm_id: arkret_wire::RealmId::new(
                 "ak:realm:AXqIXbu56hFXteZXtkBsqJxy_puV4mhSv1U0ZkUldxAL",
@@ -2189,7 +2182,7 @@ mod revoke_saga_tests {
             EventKind::MemberState.as_str(),
             scope.clone(),
             actor.signing_principal_id().clone(),
-            actor.route_service_id().clone(),
+            actor.as_account_id().unwrap().station_id.clone(),
             json!({"member_id": member, "membership": "leave", "reason": "requested_by_admin"}),
         )
         .unwrap();
@@ -2278,7 +2271,7 @@ mod revoke_saga_tests {
             EventKind::CapabilityRevoke.as_str(),
             realm_scope(),
             actor.signing_principal_id().clone(),
-            actor.route_service_id().clone(),
+            actor.as_account_id().unwrap().station_id.clone(),
             json!({
                 "grant_id": TARGET_GRANT,
                 "expected_revision": expected_revision,

@@ -308,15 +308,15 @@ pub(super) async fn require_provision_preview_signature(
     ctrl: &mut FlowCtrl,
 ) {
     let verification = async {
-        let state = depot
-            .get_typed::<AppState>()
-            .expect("state injected")
-            .clone();
         if !inbound_transaction_signature_present(req) {
             return Err(applet_signature_error_required(
                 "Applet preview requires RFC 9421 Service authentication",
             ));
         }
+        let state = depot
+            .get_typed::<AppState>()
+            .expect("state injected")
+            .clone();
         let verified = verify_self_control_service(&state, req).await?;
         let bytes = req
             .payload()

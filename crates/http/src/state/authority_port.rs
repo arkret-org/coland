@@ -1011,6 +1011,11 @@ mod tests {
     #[test]
     fn every_other_active_kind_is_unsupported_event_kind_not_internal() {
         let routed = [
+            EventKind::CallState,
+            EventKind::RealmMediaService,
+            EventKind::AgentActionApprove,
+            EventKind::RealmActorStatusSet,
+            EventKind::RealmActorRecoverySet,
             EventKind::AppletBridgeError,
             EventKind::ConsentGrant,
             EventKind::ConsentRevoke,

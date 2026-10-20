@@ -431,7 +431,7 @@ pub(crate) async fn prepare_native_invite(
         serde_json::to_value(delivery).map_err(|e| AppError::param_invalid(e.to_string()))?;
     validate_invite_delivery_event_binding(&body, delivery)?;
     arkret_schema::validate_event_for_submit(&delivery.invite_event)
-        .map_err(|e| AppError::param_invalid(e.to_string()))?;
+        .map_err(|e| super::events::peer::schema_violation(e.to_string()))?;
     let verified = verify_invite_commit(state, delivery).await?;
     let locator_verified = match &delivery.introduction_evidence {
         IntroductionEvidence::LocatorRef { principal_locator } => verified_locator_for_recipient(
@@ -1609,34 +1609,32 @@ mod invite_locator_security_tests {
     /// holder-private writes, zero outbox entries and zero quota charged.
     ///
     /// A malformed notification fails before any holder-private lookup or write.
+    async fn prepare_test_invite_source(
+        state: &AppState,
+        delivery: &InviteDeliveryRequestBody,
+    ) -> Result<Option<coland_storage::PreparedPrivateInviteDelivery>, AppError> {
+        use arkret_models_collaboration::consent_private::{
+            ConsentPrivateCommand, ConsentPrivateInviteDeliveryBody,
+            ConsentPrivateInviteDeliveryCommand, ConsentPrivateInviteDeliveryCommandKind,
+        };
+        let command = ConsentPrivateCommand::InviteDelivery(ConsentPrivateInviteDeliveryCommand {
+            kind: ConsentPrivateInviteDeliveryCommandKind::InviteDelivery,
+            body: ConsentPrivateInviteDeliveryBody {
+                notification_source_service_id: state.service_core_id(),
+                delivery: delivery.clone(),
+            },
+        });
+        prepare_native_invite(state, &delivery.invite_address.account_id, &command).await
+    }
+
     #[tokio::test]
     async fn a_step_four_rejection_writes_nothing_holder_private() {
         let state = production_holder_state().await;
         let delivery = production_invite_delivery(&state);
-        let body = serde_json::to_value(&delivery).unwrap();
-        let session = SessionRecord {
-            token_hash: "peer-invite:test".to_owned(),
-            account_pk: None,
-            actor: PRODUCTION_INVITER.to_owned(),
-            endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
-                device_id: "peer-invite:test".to_owned(),
-            },
-            audience: state.service_id().clone(),
-            session_public_key: None,
-            session_grant: None,
-            expires_at: now() + Duration::minutes(5),
-            created_at: now(),
-            revoked_at: None,
-        };
-        let error = receive_private_invite_delivery(
-            &state,
-            &delivery,
-            &body,
-            state.service_id(),
-            "peer.invites.submit",
-        )
-        .await
-        .expect_err("a malformed notification fails authentication");
+        let error = prepare_test_invite_source(&state, &delivery)
+            .await
+            .err()
+            .expect("a malformed notification fails authentication");
         assert_eq!(error.wire_code(), "schema_violation");
 
         let holder_actor =
@@ -1783,36 +1781,16 @@ mod invite_locator_security_tests {
             &mut legacy.invite_commit,
             &pcr.history.station_did,
         );
-        let session = SessionRecord {
-            token_hash: "fixture-peer-invite".into(),
-            account_pk: None,
-            actor: pcr.history.account.principal_id.to_string(),
-            endpoint: coland_services::identity::SessionEndpointState::HumanDevice {
-                device_id: pcr.history.founding_device_id.to_string(),
-            },
-            audience: state.service_id().clone(),
-            session_public_key: None,
-            session_grant: None,
-            expires_at: now() + Duration::minutes(5),
-            created_at: now(),
-            revoked_at: None,
-        };
         for (name, delivery, code) in [
             ("missing", missing, "schema_violation"),
             ("wrong_digest", wrong_digest, "signature_invalid"),
             ("wrong_real_key", wrong_key, "signature_invalid"),
             ("legacy", legacy, "temporarily_unavailable"),
         ] {
-            let body = serde_json::to_value(&delivery).unwrap();
-            let error = receive_private_invite_delivery(
-                &state,
-                &delivery,
-                &body,
-                state.service_id(),
-                "peer.invites.submit",
-            )
-            .await
-            .unwrap_err();
+            let error = prepare_test_invite_source(&state, &delivery)
+                .await
+                .err()
+                .unwrap();
             assert_eq!(error.wire_code(), code, "{name}");
             let holder = arkret_wire::ActorId::account(delivery.invite_address.account_id.clone())
                 .to_string();

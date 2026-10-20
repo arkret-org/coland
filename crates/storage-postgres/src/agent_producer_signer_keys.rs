@@ -1018,10 +1018,11 @@ pub(crate) async fn read(
         serde_json::from_value(row.envelope).map_err(PersistenceError::database)?;
     let commit: arkret_wire::RealmCommit =
         serde_json::from_value(row.commit_json).map_err(PersistenceError::database)?;
-    if (event
-        .account_device_producer()
-        .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?
-        .is_some()
+    if (event.actor_id.as_realm_actor_id().is_some()
+        || event
+            .account_device_producer()
+            .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?
+            .is_some()
         || (event.applet_id.is_some()
             && matches!(event.actual_signer(), arkret_wire::ActorId::Service { .. })))
         && !native_control_target_in_connection(&mut conn, &event.realm_id).await?
@@ -1059,6 +1060,7 @@ pub(crate) async fn read(
             outcome,
             SignerKeyQueryOutcome::HistoricalResolved { .. }
                 | SignerKeyQueryOutcome::HistoricalServiceResolved { .. }
+                | SignerKeyQueryOutcome::HistoricalRealmDeviceResolved { .. }
         );
     historical_fact_diagnostic(
         "ordinary_read",

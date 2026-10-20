@@ -123,6 +123,7 @@ async fn enforce_session_pop(state: &AppState, req: &mut Request) -> Result<(), 
         && [
             arkret_wire::ServiceOperationId::SelfEventsCommandSubmitV1,
             arkret_wire::ServiceOperationId::SelfRealmActorReadMaterialV1,
+            arkret_wire::ServiceOperationId::SelfAuthzGrantsReadEffectiveV1,
             arkret_wire::ServiceOperationId::SelfAgentResourceGetV1,
             arkret_wire::ServiceOperationId::SelfManagementReviewCommandRequestV1,
             arkret_wire::ServiceOperationId::SelfManagementReviewReadStatusV1,

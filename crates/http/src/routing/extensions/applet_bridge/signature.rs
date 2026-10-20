@@ -9,6 +9,7 @@ use arkret_signatures::http_signature::{
 };
 use coland_http::error::AppError;
 use coland_http::http_signature;
+use salvo::http::Method;
 use salvo::prelude::*;
 
 use super::record::{applet_id_param, applet_records};
@@ -17,7 +18,6 @@ use crate::state::AppState;
 
 #[derive(Clone, Debug)]
 pub(super) struct VerifiedAppletServiceSignature {
-    pub(super) install: AppletRecord,
     pub(super) request_digest: String,
     pub(super) delivery_authentication_record: serde_json::Value,
     pub(super) delivery_authentication_record_digest: String,
@@ -87,6 +87,32 @@ pub(crate) async fn verify_self_control_service(
     state: &AppState,
     req: &mut Request,
 ) -> Result<VerifiedAppletService, AppError> {
+    verify_self_service(state, req, false).await
+}
+
+pub(crate) async fn verify_self_service_grant_read(
+    state: &AppState,
+    req: &mut Request,
+) -> Result<VerifiedAppletService, AppError> {
+    if req.method() != Method::GET
+        || req
+            .headers()
+            .get("arkret-operation")
+            .and_then(|h| h.to_str().ok())
+            != Some(arkret_wire::ServiceOperationId::SELF_AUTHZ_GRANTS_READ_EFFECTIVE_V1)
+    {
+        return Err(AppError::unauthenticated(
+            "Service grant read operation differs",
+        ));
+    }
+    verify_self_service(state, req, true).await
+}
+
+async fn verify_self_service(
+    state: &AppState,
+    req: &mut Request,
+    read: bool,
+) -> Result<VerifiedAppletService, AppError> {
     if req.headers().contains_key("authorization")
         || req.headers().contains_key("dpop")
         || req.headers().contains_key("arkret-managed-device")
@@ -125,7 +151,16 @@ pub(crate) async fn verify_self_control_service(
         .await
         .map_err(|e| AppError::json_invalid(e.to_string()))?
         .to_vec();
-    let mut conditional = vec!["content-digest"];
+    if read && !bytes.is_empty() {
+        return Err(AppError::param_invalid(
+            "Service GET must have an empty body",
+        ));
+    }
+    let mut conditional = if read {
+        Vec::new()
+    } else {
+        vec!["content-digest"]
+    };
     if req.headers().contains_key("idempotency-key") {
         conditional.push("idempotency-key");
     }
@@ -135,14 +170,25 @@ pub(crate) async fn verify_self_control_service(
     )
     .map_err(|e| applet_verification_error(HttpMessageVerificationError::Policy(e)))?;
     let key = authority_material_current_service_key(state, source.as_str(), &input.key_id).await?;
-    let verified = http_signature::verify_signed_canonical_json_request(
-        req,
-        &crate::routing::federation::signature_target_uri(req, state),
-        &crate::routing::federation::signature_authority(req, state),
-        &bytes,
-        &key,
-        &policy,
-    )
+    let verified = if read {
+        http_signature::verify_signed_http_request(
+            req,
+            &crate::routing::federation::signature_target_uri(req, state),
+            &crate::routing::federation::signature_authority(req, state),
+            &[],
+            &key,
+            &policy,
+        )
+    } else {
+        http_signature::verify_signed_canonical_json_request(
+            req,
+            &crate::routing::federation::signature_target_uri(req, state),
+            &crate::routing::federation::signature_authority(req, state),
+            &bytes,
+            &key,
+            &policy,
+        )
+    }
     .map_err(applet_verification_error)?;
     Ok(VerifiedAppletService {
         service_id: source,
@@ -247,58 +293,61 @@ pub(super) async fn require_inbound_transaction_signature(
     }
 }
 
-/// Ghost provisioning is a service-to-service formal operation. Authenticate
-/// the installed Applet service with the same RFC 9421 registration key and
-/// exact request transcript used by transaction delivery; a bearer session is
-/// neither required nor accepted as the actor authority.
+/// Provision previews authenticate an installed Service without inventing the
+/// transaction delivery's mandatory idempotency header or delivery record.
+#[derive(Clone, Debug)]
+pub(super) struct VerifiedAppletProvisionService {
+    pub(super) install: AppletRecord,
+}
+
 #[handler]
-pub(super) async fn require_ghost_provision_signature(
+pub(super) async fn require_provision_preview_signature(
     req: &mut Request,
     depot: &mut Depot,
     res: &mut Response,
     ctrl: &mut FlowCtrl,
 ) {
     let verification = async {
-        if !inbound_transaction_signature_present(req) {
-            return Err(applet_signature_error_required(
-                "Ghost provisioning MUST carry an RFC 9421 Signature / Signature-Input",
-            ));
-        }
         let state = depot
             .get_typed::<AppState>()
             .expect("state injected")
             .clone();
-        let idempotency_key = applet_required_header(req, "idempotency-key")?;
-        http_signature::reject_content_encoding(req, || {
-            applet_signature_error_invalid(
-                "applet signed JSON requests must not use Content-Encoding",
-            )
-        })?;
-        let payload = req
+        if !inbound_transaction_signature_present(req) {
+            return Err(applet_signature_error_required(
+                "Applet preview requires RFC 9421 Service authentication",
+            ));
+        }
+        let verified = verify_self_control_service(&state, req).await?;
+        let bytes = req
             .payload()
             .await
-            .map_err(|error| {
-                AppError::json_invalid(format!("unable to read Ghost provisioning body: {error}"))
-            })?
-            .to_vec();
-        let is_preview = req.uri().path().ends_with("/provision/preview");
-        verify_inbound_applet_service_signature(
-            &state,
-            req,
-            &payload,
-            &idempotency_key,
-            (!is_preview).then_some("/authoring_request/basis/service_id"),
-            (!is_preview).then_some("/authoring_request/basis/applet_id"),
-            SignedAppletScopeCarrier::ScopePointer(if is_preview {
-                "/effective_scope"
-            } else {
-                "/authoring_request/basis/effective_scope"
-            }),
-        )
-        .await
+            .map_err(|e| AppError::json_invalid(e.to_string()))?;
+        let body: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|e| AppError::json_invalid(e.to_string()))?;
+        let scope = signed_applet_scope_selector(
+            &body,
+            SignedAppletScopeCarrier::ScopePointer("/effective_scope"),
+        )?;
+        let applet = applet_id_param(req)?;
+        let install =
+            active_install_for_service_id(&state, verified.service_id.as_str(), &applet, &scope)
+                .await?
+                .ok_or_else(|| {
+                    AppError::capability_denied(
+                        "source Service has no active installation for this Applet and scope",
+                    )
+                    .with_wire_code("applet_registration_unauthorized")
+                })?;
+        let method =
+            applet_registration_verification_method(&install, verified.service_id.as_str())?;
+        if method != verified.verification_method.as_str() {
+            return Err(applet_signature_error_invalid(
+                "preview differs from the installed Service method",
+            ));
+        }
+        Ok(VerifiedAppletProvisionService { install })
     }
     .await;
-
     match verification {
         Ok(verified) => {
             depot.insert_typed(verified);
@@ -469,7 +518,6 @@ async fn verify_inbound_applet_service_signature(
             &verified.signature_input,
         )?;
     Ok(VerifiedAppletServiceSignature {
-        install,
         request_digest,
         delivery_authentication_record,
         delivery_authentication_record_digest,

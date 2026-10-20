@@ -1186,6 +1186,10 @@ async fn claim_keypackage_at_destination(
         });
         candidates
     };
+    tracing::debug!(
+        count = candidate_ids.len(),
+        "eligible KeyPackage candidates"
+    );
 
     for (priority, _, candidate_id, binding) in candidate_ids {
         let binding = binding.map_err(|_| peer_claim_failed())?;

@@ -39,8 +39,8 @@ use super::record::{
     persist_applet_record, query_value,
 };
 use super::signature::{
-    VerifiedAppletServiceSignature, require_ghost_provision_signature,
-    require_inbound_transaction_signature,
+    VerifiedAppletProvisionService, VerifiedAppletServiceSignature,
+    require_inbound_transaction_signature, require_provision_preview_signature,
 };
 use super::transaction::process_verified_transaction;
 use super::types::{AppletRecord, COLAND_EDGE_APPLET_ID};
@@ -90,12 +90,12 @@ pub(in crate::routing::extensions) fn protocol_router() -> Router {
                             )
                             .push(
                                 Router::with_path("bots/provision")
-                                    .hoop(require_ghost_provision_signature)
+                                    .hoop(require_provision_preview_signature)
                                     .push(Router::with_path("preview").post(super::bot::preview)),
                             )
                             .push(
                                 Router::with_path("ghosts/provision")
-                                    .hoop(require_ghost_provision_signature)
+                                    .hoop(require_provision_preview_signature)
                                     .push(
                                         Router::with_path("preview")
                                             .post(preview_ghost_actor_endpoint),
@@ -1581,7 +1581,7 @@ async fn preview_ghost_actor_endpoint(
     req: &mut Request,
 ) -> JsonResult<GhostPreviewOutcome> {
     let verified = depot
-        .remove_typed::<VerifiedAppletServiceSignature>()
+        .remove_typed::<VerifiedAppletProvisionService>()
         .map_err(|_| AppError::unauthenticated("Applet service signature verification missing"))?;
     let state = depot.get_typed::<AppState>().expect("state injected");
     let path_applet_id = applet_id_param(req)?;

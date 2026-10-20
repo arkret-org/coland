@@ -476,7 +476,7 @@ async fn target(
         .persistence()
         .applet_managed_device_authority(actor, device, Utc::now())
         .await
-        .map_err(|_| peer_claim_failed())?
+        .map_err(claim_error)?
     else {
         return Ok(None);
     };
@@ -495,7 +495,10 @@ async fn target(
     applet_managed_device::scope_guard_for_authority(state, &authority, &scope)
         .await
         .map(Some)
-        .map_err(|_| peer_claim_failed())
+        .map_err(|error| {
+            tracing::debug!(%error, "native KeyPackage target scope refused");
+            peer_claim_failed()
+        })
 }
 
 pub(super) async fn targets(
@@ -612,6 +615,7 @@ pub(super) async fn delivery_guard(
 }
 
 pub(super) fn claim_error(error: coland_services::ServiceError) -> AppError {
+    tracing::debug!(%error, "native KeyPackage admission refused");
     match error {
         coland_services::ServiceError::Conflict(_)
         | coland_services::ServiceError::NotFound(_)

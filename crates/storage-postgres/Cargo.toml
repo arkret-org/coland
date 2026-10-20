@@ -58,6 +58,7 @@ url.workspace = true
 uuid = { workspace = true }
 
 [dev-dependencies]
+arkret-bridge-runtime = { path = "../../../bridges-realm-actors/crates/runtime", default-features = false, features = ["managed-authoring"] }
 arkret = { workspace = true, features = ["mls"] }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 tracing-subscriber.workspace = true

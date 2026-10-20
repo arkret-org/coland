@@ -18,9 +18,15 @@ pub(super) fn enable(package: &mut AppletPackage) {
         .claimed_profiles
         .push(arkret_wire::ProfileId::APPLET_E2EE_JOIN_V1.into());
     package.claimed_profiles.sort();
-    package
-        .requested_scopes
-        .extend(["ak.event.read", "ak.mls.commit", "ak.mls.genesis"].map(str::to_owned));
+    package.requested_scopes.extend(
+        [
+            "ak.event.read",
+            "ak.mls.commit",
+            "ak.mls.genesis",
+            "ak.object.read_content",
+        ]
+        .map(str::to_owned),
+    );
     package.requested_scopes.sort();
     package
         .stamp_registration_epoch(&applet_registration_epoch_evidence(package))
@@ -65,7 +71,90 @@ fn signed_event(
     authored.into_event()
 }
 
+async fn read_service_grants(
+    fixture: &Fixture,
+    package: &AppletPackage,
+    subject: &ActorId,
+    tamper_subject: Option<&ActorId>,
+) -> (StatusCode, Value) {
+    let path = "/_arkret/self/authz/effective-grants";
+    let operation = ServiceOperationId::SELF_AUTHZ_GRANTS_READ_EFFECTIVE_V1;
+    let mut url = url::Url::parse(&format!("http://server{path}")).unwrap();
+    url.query_pairs_mut()
+        .append_pair("realm_id", fixture.realm.as_str())
+        .append_pair("subject_actor_id", &subject.to_string());
+    let scheme = fixture
+        .state
+        .config()
+        .public_base_url
+        .split_once("://")
+        .unwrap()
+        .0;
+    let mut signed_url = url.clone();
+    signed_url.set_scheme(scheme).unwrap();
+    let parts = SignedRequestParts {
+        method: "GET".into(),
+        target_uri: signed_url.to_string(),
+        authority: "server".into(),
+        path: path.into(),
+        headers: vec![
+            ("arkret-operation".into(), operation.into()),
+            ("source-service-id".into(), package.service_id.to_string()),
+            (
+                "destination-service-id".into(),
+                fixture.state.service_id().to_owned(),
+            ),
+        ],
+        body_digest: None,
+    };
+    let signature = sign_http_message_for_scenario(
+        &parts,
+        HttpSignatureScenario::ServiceToServiceV1,
+        &[],
+        "sig1",
+        package.webhook_auth.key_ref.as_str(),
+        chrono::Utc::now().timestamp(),
+        &applet_service_signing_key(&package.webhook_auth.key_ref),
+    )
+    .unwrap();
+    if let Some(other) = tamper_subject {
+        url.set_query(None);
+        url.query_pairs_mut()
+            .append_pair("realm_id", fixture.realm.as_str())
+            .append_pair("subject_actor_id", &other.to_string());
+    }
+    let mut response = TestClient::get(url.as_str())
+        .add_header("Arkret-Operation", operation, true)
+        .add_header("Source-Service-ID", package.service_id.as_str(), true)
+        .add_header("Destination-Service-ID", fixture.state.service_id(), true)
+        .add_header("Signature-Input", signature.signature_input_header, true)
+        .add_header("Signature", signature.signature_header, true)
+        .send(&service(fixture.state.clone()))
+        .await;
+    (
+        response.status_code.unwrap(),
+        response.take_json().await.unwrap(),
+    )
+}
+
 async fn business_grant(fixture: &Fixture, package: &AppletPackage, actor: &ActorId) -> GrantId {
+    business_authority(fixture, package, actor, false).await
+}
+
+pub(super) async fn business_parent(
+    fixture: &Fixture,
+    package: &AppletPackage,
+    actor: &ActorId,
+) -> GrantId {
+    business_authority(fixture, package, actor, true).await
+}
+
+async fn business_authority(
+    fixture: &Fixture,
+    package: &AppletPackage,
+    actor: &ActorId,
+    parent_only: bool,
+) -> GrantId {
     eprintln!("native MLS: Service business parent");
     let service_actor = ActorId::service(package.service_id.clone());
     let scope = ScopeRef::Realm {
@@ -85,8 +174,10 @@ async fn business_grant(fixture: &Fixture, package: &AppletPackage, actor: &Acto
         subject: CapabilitySubject::Actor(service_actor.clone()),
         actions: vec![
             "ak.event.read".into(),
+            "ak.message.create".into(),
             "ak.mls.commit".into(),
             "ak.mls.genesis".into(),
+            "ak.object.read_content".into(),
         ],
         resources: vec![arkret_wire::WireResourceSelector::realm(
             fixture.realm.clone(),
@@ -125,6 +216,32 @@ async fn business_grant(fixture: &Fixture, package: &AppletPackage, actor: &Acto
         )
         .await;
     assert_eq!(status, StatusCode::OK, "real business parent: {value}");
+    let (status, grants) =
+        boxed_step(|| read_service_grants(fixture, package, &service_actor, None)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "actual Service effective grant read: {grants}"
+    );
+    let grants: arkret_models_collaboration::governance::authorization::GrantList =
+        serde_json::from_value(grants).unwrap();
+    assert!(grants.grants.iter().any(|row| row.grant.id == parent_id));
+    let (status, _) = boxed_step(|| read_service_grants(fixture, package, actor, None)).await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "Service must not read another subject's grants"
+    );
+    let (status, _) =
+        boxed_step(|| read_service_grants(fixture, package, &service_actor, Some(actor))).await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "query substitution must fail the real HTTP signature"
+    );
+    if parent_only {
+        return parent_id;
+    }
     let mut child = parent;
     child.issuer_id = service_actor.clone();
     child.subject = CapabilitySubject::Actor(actor.clone());
@@ -522,6 +639,231 @@ async fn genesis(
     Box::new(group)
 }
 
+pub(super) async fn human_strand(fixture: &Fixture) -> arkret_wire::StrandId {
+    let scope = ScopeRef::Realm {
+        realm_id: fixture.realm.clone(),
+    };
+    let actor = ActorId::account(fixture.pcr.history.account.clone());
+    let mut strand = fixture.admin_event(
+        EventKind::StrandCreate,
+        scope.clone(),
+        json!({"object":{
+        "schema":"ak.schema.strand.v1","realm_id":fixture.realm,
+        "tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},
+        "metadata":{"title":"Native encrypted exchange"},"state":"active","created_by":actor,
+        "created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())}}),
+    );
+    strand.payload.get_mut("object").unwrap()["created_at"] = json!(
+        arkret_canonical::format_timestamp_canonical(strand.created_at)
+    );
+    let strand = fixture.sign_admin(strand);
+    let strand_id = arkret_wire::StrandId::from_event_id(&strand.event_id);
+    submit_human_event(fixture, strand).await;
+    strand_id
+}
+
+pub(super) async fn human_message(
+    fixture: &Fixture,
+    group: &mut arkret_mls::ArkretMlsGroup,
+    strand_id: arkret_wire::StrandId,
+) -> (Event, arkret::MessageCreatePayload) {
+    let scope = ScopeRef::Realm {
+        realm_id: fixture.realm.clone(),
+    };
+    let current = coland_storage_postgres::PgMlsGroupCurrentStore {
+        pool: fixture.pool.clone(),
+    }
+    .current(&scope)
+    .await
+    .unwrap()
+    .unwrap()
+    .value;
+    let plaintext = arkret::MessageCreatePayload::with_content(
+        strand_id,
+        "discussion",
+        arkret::ContentBlock::text("Human to native Ghost"),
+    );
+    let mut encrypted = plaintext.clone();
+    let content = encrypted.content.take().unwrap();
+    let header = arkret::EventContentPreEncryptionHeader::reconstruct(
+        "1.0",
+        arkret::MESSAGE_CONTENT_BLOCK_MLS_CONTENT_TYPE,
+        arkret::EncryptedPayloadScheme::MlsRfc9420,
+        scope.clone(),
+        EventKind::MessageCreate.as_str(),
+        group.epoch(),
+        current.current_mls_commit_event_ref,
+        group.local_content_sender_domain().unwrap(),
+        arkret::EventContentRoutingContext::None,
+    )
+    .unwrap();
+    encrypted.encrypted_content = Some(
+        arkret_mls::encrypted_envelope_from_payload(
+            &group
+                .encrypt_payload(
+                    header,
+                    &arkret_canonical::canonical_json_bytes(&content).unwrap(),
+                )
+                .unwrap(),
+        )
+        .unwrap(),
+    );
+    let event = fixture.admin_event(EventKind::MessageCreate, scope, json!(encrypted));
+    submit_human_event(fixture, event.clone()).await;
+    (event, plaintext)
+}
+
+async fn submit_human_event(fixture: &Fixture, event: Event) {
+    let (status, value) = boxed_step(|| {
+        account_request(
+            fixture,
+            reqwest::Method::POST,
+            "/_arkret/self/events",
+            ServiceOperationId::SelfEventsCommandSubmitV1,
+            Some(json!(SelfAuthoritySubmitRequest::Event(
+                arkret_wire::EventAdmissionSubmission::new(event)
+            ))),
+        )
+    })
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ordinary member original accepted: {value}"
+    );
+}
+
+pub(super) async fn verify_runtime_message(
+    fixture: &Fixture,
+    group: &mut arkret_mls::ArkretMlsGroup,
+    event_id: &str,
+    actor: &ActorId,
+) {
+    use arkret::EventPayloadExt as _;
+    let original = fixture
+        .state
+        .test_persistence()
+        .authority_commits()
+        .committed_event(&event_id.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&original.event.actor_id, actor);
+    assert!(original.event.executed_by.is_none());
+    let method = original
+        .event
+        .producer_proof
+        .as_ref()
+        .unwrap()
+        .verification_method
+        .clone();
+    let selector = arkret::SignerKeyQuerySelector::HistoricalRealmDevice {
+        sender_kind: arkret_models_identity::RealmDeviceSignerKind::RealmDevice,
+        actor_id: actor.clone(),
+        device_id: method.as_str().rsplit_once('#').unwrap().1.parse().unwrap(),
+        verification_method: method,
+        committed_event_ref: arkret_wire::CommittedEventRef {
+            event_id: original.event.event_id.clone(),
+            commit_id: original.commit.commit_id.clone(),
+            stream_ref: original.commit.stream_ref.clone(),
+            stream_position: original.commit.stream_position,
+        },
+    };
+    let mut wrong = selector.clone();
+    if let arkret::SignerKeyQuerySelector::HistoricalRealmDevice {
+        committed_event_ref,
+        ..
+    } = &mut wrong
+    {
+        committed_event_ref.stream_position += 1;
+    }
+    let request = arkret::SignerKeysQueryRequestBody {
+        request_id: format!("ak:request:{}", uuid::Uuid::now_v7())
+            .parse()
+            .unwrap(),
+        realm_id: fixture.realm.clone(),
+        recipient_account_id: Some(fixture.pcr.history.account.clone()),
+        recipient_actor_id: None,
+        queries: vec![selector, wrong],
+    };
+    let (status, value) = boxed_step(|| {
+        account_request(
+            fixture,
+            reqwest::Method::POST,
+            "/_arkret/self/signer-keys/query",
+            ServiceOperationId::SelfSignerKeysReadResolveV1,
+            Some(json!(request)),
+        )
+    })
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ordinary reader verifies native author: {value}"
+    );
+    let keys: arkret::SignerKeysQueryOutcome = serde_json::from_value(value).unwrap();
+    keys.validate_for_request(&request).unwrap();
+    assert!(matches!(
+        keys.results[0],
+        arkret::SignerKeyQueryOutcome::HistoricalRealmDeviceResolved { .. }
+    ));
+    assert!(matches!(
+        keys.results[1],
+        arkret::SignerKeyQueryOutcome::Unavailable { .. }
+    ));
+    let payload = original.event.as_message_create().unwrap();
+    assert!(payload.content.is_none());
+    let envelope = payload.encrypted_content.unwrap();
+    let sender = String::from_utf8(arkret::mls_basic_credential_identity(actor).unwrap()).unwrap();
+    let header = envelope
+        .reconstruct_pre_encryption_header(
+            arkret::EncryptedPayloadScheme::MlsRfc9420,
+            original.event.scope_ref,
+            EventKind::MessageCreate.as_str(),
+            &sender,
+            None,
+        )
+        .unwrap();
+    let encrypted =
+        arkret_mls::encrypted_envelope_to_payload_with_verified_header(&envelope, header).unwrap();
+    let plaintext: arkret::ContentBlock =
+        serde_json::from_slice(&group.decrypt_payload(&encrypted).unwrap()).unwrap();
+    assert_eq!(
+        plaintext,
+        arkret::ContentBlock::text("Native Ghost to human")
+    );
+}
+
+pub(super) struct ContentSink {
+    pub event: Event,
+    pub plaintext: arkret::MessageCreatePayload,
+    pub attempts: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl arkret_bridge_runtime::managed_device::NativeContentSink for ContentSink {
+    async fn deliver(
+        &self,
+        content: &arkret_bridge_runtime::managed_device::NativeContent,
+    ) -> arkret_bridge_runtime::Result<()> {
+        assert_eq!(content.original().event, self.event);
+        assert_eq!(
+            serde_json::to_value(content.message()).unwrap(),
+            serde_json::to_value(&self.plaintext).unwrap()
+        );
+        if self
+            .attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            == 0
+        {
+            return Err(arkret_bridge_runtime::BridgeError::App(
+                "external delivery temporarily unavailable".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 async fn claim_remote(
     fixture: &Fixture,
     recipient: &Fixture,
@@ -837,6 +1179,10 @@ async fn account_request(
         .header("dpop", dpop.header_value)
         .header("arkret-operation", operation.as_str());
     if let Some(body) = body {
+        if operation == ServiceOperationId::SelfKeysKeypackagesCommandClaimV1 {
+            let claim: KeyPackagesClaimRequestBody = serde_json::from_value(body.clone()).unwrap();
+            request = request.header("idempotency-key", claim.claim_request_id.as_str());
+        }
         request = request
             .header("content-type", "application/json")
             .body(arkret_canonical::canonical_json_bytes(&body).unwrap());
@@ -1073,4 +1419,245 @@ async fn install_received_roster(
     );
     let material = serde_json::from_value(material).unwrap();
     arkret::install_verified_mls_self_roster_bindings(group, &pages, &request, &material).unwrap();
+}
+
+/// A real ordinary member admits the runtime Device through the same MLS
+/// membership flow as any other admitted member; no Bot-only permission exists.
+pub(super) async fn human_admits_runtime(
+    fixture: &Fixture,
+    device: &arkret_bridge_runtime::managed_device::ManagedDevice,
+) -> Box<arkret_mls::ArkretMlsGroup> {
+    let history = &fixture.pcr.history;
+    let scope = ScopeRef::Realm {
+        realm_id: fixture.realm.clone(),
+    };
+    let actor = ActorId::account(history.account.clone());
+    let key = SigningKey::from_bytes(&history.founding_device_signing_seed);
+    let authorization = history
+        .events
+        .iter()
+        .find(|e| e.kind == EventKind::DeviceAuthorize)
+        .unwrap()
+        .event_id
+        .clone();
+    let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
+        actor.clone(),
+        history.founding_device_id.clone(),
+        arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone()),
+    )
+    .unwrap();
+    let binding = MlsGovernanceBindingPayload::new(scope.clone(), None, 0, 0, 0).unwrap();
+    let mut group = identity
+        .create_group_with_governance_binding(&scope, &binding)
+        .unwrap();
+    let (info, tree) = group.public_group_state_bytes().unwrap();
+    let info = boxed_step(|| public_material(fixture, info)).await;
+    let tree = boxed_step(|| public_material(fixture, tree)).await;
+    let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let raw = arkret_wire::test_support::raw_event_for_actor_at(EventKind::MlsGenesis.as_str(), scope.clone(), actor.clone(), json!({
+        "cipher_suite":"MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519", "group_info_ref":info,"ratchet_tree_ref":tree,
+        "creator_leaf_authority":{"leaf_signature_key_b64u":arkret_canonical::base64url_encode(key.verifying_key().as_bytes()),
+            "endpoint":{"kind":"device","device_id":history.founding_device_id},"authorization_event_ref":authorization},
+        "governance_binding":binding,"created_at":at
+    }),at).unwrap();
+    let genesis = fixture.sign_admin(raw);
+    let (status, value) = boxed_step(|| {
+        account_request(
+            fixture,
+            reqwest::Method::POST,
+            "/_arkret/self/events",
+            ServiceOperationId::SelfEventsCommandSubmitV1,
+            Some(json!(SelfAuthoritySubmitRequest::Event(
+                arkret_wire::EventAdmissionSubmission::new(genesis)
+            ))),
+        )
+    })
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ordinary member creates actual MLS group: {value}"
+    );
+    group
+        .install_local_creator_binding(actor.clone(), Some(authorization.clone()))
+        .unwrap();
+    let mut claim = KeyPackagesClaimRequestBody {
+        claim_request_id: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
+            rand::random::<[u8; 32]>(),
+        ))
+        .unwrap(),
+        target_account_id: None,
+        target_actor_id: Some(device.actor_id.clone()),
+        requester_account_id: Some(history.account.clone()),
+        requester_actor_id: None,
+        intended_realm_id: fixture.realm.clone(),
+        mls_group_id: scope.canonical_mls_group_id().unwrap(),
+        claim_purpose: PeerKeyPackageClaimPurpose::RealmMembership,
+        required_capabilities: vec![arkret_wire::NonEmptyString::new("ak.content.v1").unwrap()],
+        expires_at: at + chrono::Duration::minutes(4),
+        target_device_ids: vec![device.device_id.clone()],
+        target_keypackage_ref: None,
+        target_agent_id: None,
+        target_agent_verification_method: None,
+        target_agent_key_authorize_event_id: None,
+        timeout_ms: None,
+        strand_id: None,
+        pair_key: None,
+        last_resort_allowed: None,
+        service_binding: KeyPackagesClaimServiceBinding {
+            source_id: fixture.state.service_core_id(),
+            destination_id: fixture.state.service_core_id(),
+        },
+        requester_authorization: PeerKeyPackageRequesterAuthorization::Device {
+            verification_method: history.device_verification_method.clone(),
+            requester_device_id: history.founding_device_id.clone(),
+            device_authorize_event_id: authorization,
+            signed_at: at,
+            signature: arkret_signatures::keypackages::keypackage_signature_from_bytes(
+                history.device_verification_method.as_str(),
+                &[0; 64],
+            )
+            .unwrap(),
+        },
+    };
+    let input = keypackage_claim_authorization_signing_bytes(
+        &claim.unsigned_request(),
+        &claim.service_binding,
+        &claim.requester_authorization,
+    )
+    .unwrap();
+    let PeerKeyPackageRequesterAuthorization::Device { signature, .. } =
+        &mut claim.requester_authorization
+    else {
+        unreachable!()
+    };
+    *signature = arkret_signatures::keypackages::sign_keypackage_signing_input(
+        &history.founding_device_signing_seed,
+        history.device_verification_method.as_str(),
+        &input,
+    )
+    .unwrap();
+    let (status, value) = boxed_step(|| {
+        account_request(
+            fixture,
+            reqwest::Method::POST,
+            "/_arkret/self/keys/keypackages/claim",
+            ServiceOperationId::SelfKeysKeypackagesCommandClaimV1,
+            Some(json!(claim)),
+        )
+    })
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ordinary member claims admitted Realm Device: {value}"
+    );
+    let claim: KeyPackagesClaimOutcome = serde_json::from_value(value).unwrap();
+    assert_eq!(claim.claims.len(), 1);
+    let current = coland_storage_postgres::PgMlsGroupCurrentStore {
+        pool: fixture.pool.clone(),
+    }
+    .current(&scope)
+    .await
+    .unwrap()
+    .unwrap()
+    .value;
+    let binding = MlsGovernanceBindingPayload::new(
+        scope.clone(),
+        Some(current.current_mls_commit_event_ref.clone()),
+        current.epoch,
+        current.epoch + 1,
+        current.current_key_access_revision,
+    )
+    .unwrap();
+    let added = group
+        .add_member_with_governance_binding(
+            &arkret_mls::mls_key_package_record_from_claim(&claim.claims[0]).unwrap(),
+            &binding,
+        )
+        .unwrap();
+    let event = fixture.admin_event(
+        EventKind::MlsCommit,
+        scope.clone(),
+        json!(
+            MlsCommitPayload::new(
+                current.current_mls_commit_event_ref.clone(),
+                current.current_key_access_revision,
+                &added.commit,
+                binding
+            )
+            .unwrap()
+        ),
+    );
+    let at = event.created_at;
+    let mut welcome = arkret_wire::MlsWelcomeDelivery {
+        welcome_id: arkret_wire::MlsWelcomeDeliveryId::new(format!(
+            "ak:mls_welcome_delivery:{}",
+            uuid::Uuid::now_v7()
+        ))
+        .unwrap(),
+        realm_id: fixture.realm.clone(),
+        effective_scope: scope,
+        commit_event_ref: event.event_id.clone(),
+        recipient_actor_id: device.actor_id.clone(),
+        recipient_endpoint: arkret_wire::MlsWelcomeRecipientEndpoint::Device {
+            device_id: device.device_id.clone(),
+        },
+        keypackage_claim_ref: added.welcome.keypackage_claim_ref,
+        ciphertext_b64: added.welcome.ciphertext_b64,
+        producer_proof: arkret_signatures::detached_object::sign_detached_object(
+            &Value::Null,
+            arkret_wire::DetachedSignatureContext::MlsWelcomeDelivery,
+            history.device_verification_method.clone(),
+            at,
+            &key,
+        )
+        .unwrap(),
+    };
+    welcome.producer_proof = arkret_signatures::detached_object::sign_detached_object(
+        &arkret_canonical::unsigned_value(&welcome, &["producer_proof"]).unwrap(),
+        arkret_wire::DetachedSignatureContext::MlsWelcomeDelivery,
+        history.device_verification_method.clone(),
+        at,
+        &key,
+    )
+    .unwrap();
+    let submission = SelfAuthoritySubmitRequest::MlsCommit(arkret_wire::MlsCommitSubmission {
+        commit_event: event.clone(),
+        welcomes: vec![welcome],
+        idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
+    });
+    let (status, value) = boxed_step(|| {
+        account_request(
+            fixture,
+            reqwest::Method::POST,
+            "/_arkret/self/events",
+            ServiceOperationId::SelfEventsCommandSubmitV1,
+            Some(json!(submission)),
+        )
+    })
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ordinary member admits runtime with actual Add/Welcome: {value}"
+    );
+    let accepted = fixture
+        .state
+        .test_persistence()
+        .authority_commits()
+        .committed_event(&event.event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    group
+        .install_accepted_commit(
+            &arkret_wire::CommittedEventFullView {
+                event: accepted.event,
+                commit: accepted.commit,
+            },
+            &current,
+        )
+        .unwrap();
+    Box::new(group)
 }

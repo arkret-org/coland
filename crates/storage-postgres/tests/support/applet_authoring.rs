@@ -1902,7 +1902,7 @@ mod realm_native_fixture {
                         }
                         let request=String::from_utf8_lossy(&bytes);
                         let path=request.lines().next().unwrap().split_whitespace().nth(1).unwrap();
-                        let entries = if path.contains("/ghost-1/") { published_actor.lock().unwrap().clone() } else { vec![entry] };
+                        let entries = if path.contains("/webvh/") && !path.contains("/service/") { published_actor.lock().unwrap().clone() } else { vec![entry] };
                         let body=if path.ends_with("did.jsonl") {entries.iter().map(|entry|serde_json::to_string(entry).unwrap()+"\n").collect::<String>()}
                             else if path.ends_with("did.json") {entries.last().map(|entry|serde_json::to_string(&entry["state"]).unwrap()).unwrap_or_default()}
                             else {String::new()};
@@ -5275,6 +5275,278 @@ mod realm_native_fixture {
         }
     }
 
+    pub(super) async fn run_bridge(pool: PgPool) {
+        use arkret_bridge_runtime::managed_actor_authoring::ManagedActorAuthoringService;
+        use arkret_bridge_runtime::managed_device::ManagedDeviceRuntime;
+        use arkret_bridge_runtime::{
+            ArkretEdge, AuthoringJournal, FileAuthoringStore, PreparedGhost,
+        };
+        let (fixture, _governor_server) = boxed_step(|| network_fixture(pool.clone())).await;
+        let factory = AppletAuthoringFactory {
+            fixture,
+            packages: Default::default(),
+            scopes: Default::default(),
+        };
+        let id = AppletId::new(format!("ak:applet:{}", uuid::Uuid::now_v7())).unwrap();
+        let mut native = NativeService::new(&id, &factory.fixture.state.service_core_id());
+        realm_actor_mls_fixture::enable(&mut native.package);
+        factory
+            .packages
+            .lock()
+            .await
+            .insert(id.to_string(), native.package.clone());
+        let install = boxed_step(|| factory.prepare_install(&id, "bridge-native-runtime")).await;
+        install.commit(&PgAppletStore { pool }).await.unwrap();
+        let package = &native.package;
+        let did = applet_service_did(package);
+        let config: arkret_bridge_runtime::Config = serde_json::from_value(json!({
+            "bridge":{"bridge_id":"native-runtime"},
+            "arkret": {
+                "server_url":factory.fixture.state.config().public_base_url,
+                "applet_base_url":package.base_url,
+                "service_did":did, "trust_domain":factory.fixture.state.config().trust_domain,
+                "applet_id":id,"signing_key_seed_hex":"2a".repeat(32),
+                "verification_method_fragment":"#applet-service-key", "trusted_server_did":factory.fixture.state.service_did(),
+                "applet_namespaces":package.namespaces,
+                "managed_actor_authoring":{"principal_endpoint":package.base_url,"key_encryption_key_hex":"53".repeat(32),
+                    "device":{"actions":["ak.applet.join","ak.event.read","ak.message.create","ak.mls.commit","ak.object.read_content"],
+                        "lifetime_seconds":3600,"mls":true,"key_package_inventory_target":2}}
+            }
+        })).unwrap();
+        let path =
+            std::env::temp_dir().join(format!("arkret-bridge-real-{}.redb", uuid::Uuid::now_v7()));
+        let http = reqwest::Client::builder()
+            .add_root_certificate(
+                reqwest::Certificate::from_pem(include_bytes!(
+                    "../../../server/tests/fixtures/outbox-test-ca.pem"
+                ))
+                .unwrap(),
+            )
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let station_url: url::Url = factory
+            .fixture
+            .state
+            .config()
+            .public_base_url
+            .parse()
+            .unwrap();
+        let client = arkret::ClientBuilder::new(station_url.clone())
+            .loopback_service_discovery(
+                station_url.host_str().unwrap(),
+                station_url.port().unwrap(),
+            )
+            .unwrap()
+            .http_client(http)
+            .build()
+            .unwrap();
+        let make_edge = || {
+            Arc::new(
+                ArkretEdge::new_outbound(
+                    Arc::new(config.clone()),
+                    client.clone(),
+                    Ed25519PayloadSigner::new(
+                        SigningKey::from_bytes(&[42; 32]),
+                        did.clone(),
+                        package.webhook_auth.key_ref.clone(),
+                    ),
+                    AuthoringJournal::new(Arc::new(FileAuthoringStore::new(path.clone()).unwrap())),
+                )
+                .unwrap(),
+            )
+        };
+        let edge = make_edge();
+        let author = ManagedActorAuthoringService::new(edge.clone()).unwrap();
+        let external = arkret::GhostExternalTuple {
+            protocol: "fixture".into(),
+            instance_id: "bridge-native".into(),
+            external_id: "user-1".into(),
+        };
+        eprintln!("real Bridge runtime: signed governance preview and independent native creation");
+        let prepared =
+            boxed_step(|| author.prepare_ghost(&id, &factory.fixture.realm, &external, None))
+                .await
+                .unwrap();
+        let PreparedGhost::Create(command) = prepared else {
+            panic!("new Ghost must create");
+        };
+        let candidate: RealmActorCreatePayload =
+            serde_json::from_value(serde_json::to_value(&command.create_event.payload).unwrap())
+                .unwrap();
+        *native.actor_log.lock().unwrap() = candidate
+            .method_history_evidence
+            .webvh_material()
+            .1
+            .to_vec();
+        let first = boxed_step(|| edge.submit_managed_creation(&command))
+            .await
+            .unwrap();
+        let arkret_wire::AuthoritySubmitOutcome::Accepted { commit, .. } = first else {
+            panic!("creation must be accepted");
+        };
+        assert_eq!(commit.stream_position, 0);
+        assert!(matches!(
+            commit.stream_ref,
+            CommitStreamRef::RealmControl { .. }
+        ));
+        let second = boxed_step(|| edge.submit_managed_creation(&command))
+            .await
+            .unwrap();
+        let arkret_wire::AuthoritySubmitOutcome::Accepted { commit: replay, .. } = second else {
+            panic!("creation replay must be accepted");
+        };
+        assert_eq!(commit, replay);
+        let actor = candidate.actor_id;
+        assert!(
+            edge.installed_managed_authoring(&candidate.creation_scope, &actor)
+                .unwrap()
+                .is_some()
+        );
+        drop(author);
+        drop(edge);
+        let edge = make_edge();
+        let author = ManagedActorAuthoringService::new(edge.clone()).unwrap();
+        assert!(matches!(
+            boxed_step(|| author.prepare_ghost(&id, &factory.fixture.realm, &external, None))
+                .await
+                .unwrap(),
+            PreparedGhost::Reuse { .. }
+        ));
+        eprintln!("real Bridge runtime: current private control and native Device");
+        let devices = ManagedDeviceRuntime::new(edge.clone()).unwrap();
+        let device = boxed_step(|| devices.device_for_actor(&actor))
+            .await
+            .unwrap();
+        assert_eq!(device.actor_id, actor);
+        assert_ne!(
+            device.signer().verifying_key(),
+            SigningKey::from_bytes(&[42; 32]).verifying_key()
+        );
+        boxed_step(|| devices.ensure_realm_membership(&device))
+            .await
+            .unwrap();
+        boxed_step(|| devices.maintain_mls_key_packages(&device, 2))
+            .await
+            .unwrap();
+        boxed_step(|| realm_actor_mls_fixture::business_parent(&factory.fixture, package, &actor))
+            .await;
+        let reader = boxed_step(|| devices.open_reader(&device)).await.unwrap();
+        let snapshot = boxed_step(|| reader.client().snapshot_head(&factory.fixture.realm))
+            .await
+            .unwrap();
+        snapshot.value().unwrap();
+        let strand_id =
+            boxed_step(|| realm_actor_mls_fixture::human_strand(&factory.fixture)).await;
+        eprintln!("real Bridge runtime: ordinary member MLS admission and private Welcome receive");
+        let mut human_group =
+            boxed_step(|| realm_actor_mls_fixture::human_admits_runtime(&factory.fixture, &device))
+                .await;
+        let progress = boxed_step(|| devices.poll_welcome_queue(&device, &reader))
+            .await
+            .unwrap();
+        assert_eq!(progress.durable_welcomes, 1);
+        assert!(progress.acknowledged);
+        assert_eq!(devices.installed_mls_epoch(&device).await.unwrap(), Some(1));
+        eprintln!("real Bridge runtime: encrypted content, delivery failure and cold recovery");
+        let (incoming, plaintext) = boxed_step(|| {
+            realm_actor_mls_fixture::human_message(&factory.fixture, &mut human_group, strand_id)
+        })
+        .await;
+        let sink = realm_actor_mls_fixture::ContentSink {
+            event: incoming,
+            plaintext: plaintext.clone(),
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let progress = boxed_step(|| devices.poll_content_stream(&device, &reader))
+            .await
+            .unwrap();
+        assert_eq!(progress.pending_events, 1);
+        assert!(
+            boxed_step(|| devices.drain_content(&device, &reader, &sink))
+                .await
+                .is_err()
+        );
+        drop(reader);
+        drop(device);
+        drop(devices);
+        drop(author);
+        drop(edge);
+        let edge = make_edge();
+        let devices = ManagedDeviceRuntime::new(edge.clone()).unwrap();
+        let device = boxed_step(|| devices.device_for_actor(&actor))
+            .await
+            .unwrap();
+        let reader = boxed_step(|| devices.open_reader(&device)).await.unwrap();
+        assert_eq!(devices.installed_mls_epoch(&device).await.unwrap(), Some(1));
+        assert!(
+            boxed_step(|| devices.drain_content(&device, &reader, &sink))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !boxed_step(|| devices.drain_content(&device, &reader, &sink))
+                .await
+                .unwrap()
+        );
+        assert_eq!(sink.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let content_scope = ScopeRef::Realm {
+            realm_id: factory.fixture.realm.clone(),
+        };
+        let mut outbound = plaintext;
+        outbound.content = Some(arkret::ContentBlock::text("Native Ghost to human"));
+        let external =
+            json!({"protocol":"fixture","instance_id":"bridge-native","message_id":"reply-1"});
+        let event_id = boxed_step(|| {
+            devices.submit_message(&actor, &content_scope, outbound.clone(), external.clone())
+        })
+        .await
+        .unwrap();
+        boxed_step(|| {
+            realm_actor_mls_fixture::verify_runtime_message(
+                &factory.fixture,
+                &mut human_group,
+                &event_id,
+                &actor,
+            )
+        })
+        .await;
+        let replay = boxed_step(|| {
+            devices.submit_message(&actor, &content_scope, outbound.clone(), external.clone())
+        })
+        .await
+        .unwrap();
+        assert_eq!(event_id, replay);
+        outbound.content = Some(arkret::ContentBlock::text("Conflicting replacement"));
+        assert!(
+            boxed_step(|| devices.submit_message(&actor, &content_scope, outbound, external,))
+                .await
+                .is_err()
+        );
+        let progress = boxed_step(|| devices.poll_content_stream(&device, &reader))
+            .await
+            .unwrap();
+        assert_eq!(
+            progress.pending_events, 0,
+            "own publication never decrypts or echoes itself"
+        );
+        drop(reader);
+        boxed_step(|| devices.ensure_realm_membership(&device))
+            .await
+            .unwrap();
+        let recovered = boxed_step(|| devices.device_for_actor(&actor))
+            .await
+            .unwrap();
+        assert_eq!(recovered.device_id, device.device_id);
+        assert_eq!(recovered.authorization_commit, device.authorization_commit);
+        eprintln!("real Bridge runtime: restart, membership and native inventory verified");
+        drop(recovered);
+        drop(device);
+        drop(devices);
+        drop(edge);
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[inline(never)]
     pub(super) fn boxed_step<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
     where
@@ -5486,4 +5758,8 @@ pub async fn realm_native_creation(pool: PgPool) {
 
 pub async fn realm_native_mls(pool: PgPool) {
     realm_native_fixture::run(pool, true).await;
+}
+
+pub async fn realm_bridge_runtime(pool: PgPool) {
+    realm_native_fixture::run_bridge(pool).await;
 }

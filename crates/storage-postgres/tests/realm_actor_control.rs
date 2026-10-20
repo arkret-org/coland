@@ -28,3 +28,13 @@ async fn realm_actor_control_lifecycle_and_account_audit_preserve_identity() {
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     Box::pin(applet_authoring::realm_native_creation(database.pool())).await;
 }
+
+#[tokio::test]
+async fn bridge_runtime_authors_realm_identity_and_device_over_real_https() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_test_writer()
+        .try_init();
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_bridge_runtime(database.pool())).await;
+}

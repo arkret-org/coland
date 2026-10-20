@@ -13,7 +13,7 @@ use salvo::prelude::*;
 use super::endpoints::issue_applet_authoring_preview;
 use super::install::registration_epoch_evidence_from_event;
 use super::record::{applet_id_param, applet_record, ensure_not_revoked};
-use super::signature::VerifiedAppletServiceSignature;
+use super::signature::VerifiedAppletProvisionService;
 use crate::state::AppState;
 
 fn authorization(record: &super::types::AppletRecord) -> Result<arkret_wire::GrantId, AppError> {
@@ -46,7 +46,7 @@ pub(super) async fn preview(
     req: &mut Request,
 ) -> JsonResult<AppletBotPreviewOutcome> {
     let verified = depot
-        .remove_typed::<VerifiedAppletServiceSignature>()
+        .remove_typed::<VerifiedAppletProvisionService>()
         .map_err(|_| AppError::unauthenticated("Applet Service signature missing"))?;
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body = body.into_inner();

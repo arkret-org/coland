@@ -1015,7 +1015,7 @@ async fn require_joined_recipient(
 /// same request and a live claim (device-lifecycle.md, claim ledger rules).
 /// A historical claim cannot authorize a new native Welcome after a scope
 /// fence. Discover the immutable package from the original ledger, then check
-/// its exact original Account/Device and all current sources at the held cut.
+/// its exact original Actor/Device and all current sources at the held cut.
 pub(crate) async fn require_native_welcome_target(
     conn: &mut AsyncPgConnection,
     welcome: &coland_storage::VerifiedMlsWelcome,
@@ -1033,17 +1033,24 @@ pub(crate) async fn require_native_welcome_target(
         #[diesel(sql_type=Nullable<BigInt>)]
         claim_expires_at_unix_ms: Option<i64>,
     }
-    // Preserve the existing non-native verified ledger path. Native identity
-    // is independent of a caller-supplied guard and survives Device revocation
-    // and removal of unused material.
-    let account = welcome
-        .delivery
-        .recipient_actor_id
-        .as_account_id()
-        .ok_or_else(|| failed_precondition("Welcome has no Account"))?;
-    let native=sql_query("SELECT g.envelope AS value FROM principal_resolutions p JOIN canonical_events g ON g.envelope->>'event_id'=p.genesis_event_id WHERE p.principal_id=$1 AND p.station_id=$2 AND g.state='committed' AND g.envelope #>> '{payload,object,purpose}'='applet_managed_control'")
-        .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str())
-        .get_result::<HistoryAccessRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.is_some();
+    // Native identity is the complete Realm Actor, never an Account/PCR
+    // inference. It remains native after revocation or package removal.
+    let native = match &welcome.delivery.recipient_actor_id {
+        actor if actor.as_realm_actor_id().is_some() => {
+            if actor.as_realm_actor_id().unwrap().realm_id != welcome.delivery.realm_id {
+                return Err(binding_mismatch(
+                    "Realm Welcome recipient belongs to another Realm",
+                ));
+            }
+            true
+        }
+        actor if actor.as_account_id().is_some() => false,
+        _ => {
+            return Err(failed_precondition(
+                "Welcome recipient is not an Account or Realm Actor",
+            ));
+        }
+    };
     let package=sql_query("SELECT p.keypackage_ref,p.effective_scope,l.claim_expires_at_unix_ms FROM peer_keypackage_claims l JOIN mls_key_packages p ON p.id=l.keypackage_id WHERE l.source_id=$1 AND l.claim_request_id=$2 AND l.request_digest=$3")
         .bind::<Text,_>(&claim.source_id).bind::<Text,_>(&claim.claim_request_id).bind::<Text,_>(&claim.request_digest)
         .get_result::<Package>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
@@ -1074,9 +1081,9 @@ pub(crate) async fn require_native_welcome_target(
             "Welcome differs from its native recipient proof",
         ));
     }
-    // Local UOWs planned this PCR in their ordered current cut. A replica may
+    // Local UOWs planned this control Realm in their ordered current cut. A replica may
     // already hold its business cut: avoid an inverse-order wait and drop this
-    // delivery at its savepoint if another transaction owns the PCR.
+    // delivery at its savepoint if another transaction owns the control cut.
     sql_query(
         "SELECT to_jsonb(a) AS value FROM realm_authorities a WHERE realm_id=$1 FOR UPDATE NOWAIT",
     )
@@ -1087,7 +1094,9 @@ pub(crate) async fn require_native_welcome_target(
         diesel::result::Error::DatabaseError(_, ref info)
             if info.message().contains("could not obtain lock") =>
         {
-            PersistenceError::Conflict("temporarily_unavailable: native Welcome PCR is busy".into())
+            PersistenceError::Conflict(
+                "temporarily_unavailable: native Welcome control cut is busy".into(),
+            )
         }
         other => PersistenceError::database(other),
     })?;

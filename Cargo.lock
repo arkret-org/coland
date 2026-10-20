@@ -2132,6 +2132,7 @@ dependencies = [
  "anyhow",
  "arkret",
  "arkret-bootstrap",
+ "arkret-bridge-runtime",
  "arkret-canonical",
  "arkret-event-draft",
  "arkret-identifiers",

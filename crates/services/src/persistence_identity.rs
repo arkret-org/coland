@@ -391,6 +391,18 @@ impl crate::identity::MimiConsentCorrelationPort for PersistenceMimiConsentCorre
 
 #[async_trait::async_trait]
 impl crate::identity::ContactPort for PersistenceContacts {
+    async fn save_contact_with_result(
+        &self,
+        expected_updated_at: chrono::DateTime<chrono::Utc>,
+        contact: crate::identity::ContactRecord,
+        result: coland_storage::IdempotencyRecord,
+    ) -> crate::ServiceResult<bool> {
+        Ok(self
+            .0
+            .contacts()
+            .put_if_updated_at_with_result(expected_updated_at, &contact, &result)
+            .await?)
+    }
     async fn contact_any(
         &self,
         requester_id: &arkret_wire::ActorId,

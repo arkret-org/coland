@@ -241,6 +241,12 @@ pub struct ConsentService {
 
 #[async_trait]
 pub trait ContactPort: Send + Sync {
+    async fn save_contact_with_result(
+        &self,
+        expected_updated_at: DateTime<Utc>,
+        contact: ContactRecord,
+        result: coland_storage::IdempotencyRecord,
+    ) -> ServiceResult<bool>;
     async fn contact_any(
         &self,
         requester_id: &arkret_wire::ActorId,
@@ -326,6 +332,17 @@ impl ContactService {
 
     pub async fn save_contact(&self, contact: ContactRecord) -> ServiceResult<()> {
         self.contacts.save_contact(contact).await
+    }
+
+    pub async fn save_contact_with_result(
+        &self,
+        expected_updated_at: DateTime<Utc>,
+        contact: ContactRecord,
+        result: coland_storage::IdempotencyRecord,
+    ) -> ServiceResult<bool> {
+        self.contacts
+            .save_contact_with_result(expected_updated_at, contact, result)
+            .await
     }
 
     pub async fn save_contact_if_updated_at(

@@ -279,9 +279,8 @@ pub(super) async fn finalize(
 /// successor's refreshed directional current proof. A current proof must name
 /// the row's exact directional head.
 ///
-/// `counterpart_proof` is the requester direction's proof this Station issued
-/// itself when both pair members are its holders; a normal round is complete
-/// only with both directions.
+/// `counterpart_proof` confirms the other local direction when this Station
+/// hosts both pair members, for normal acceptance or a terminal fence.
 async fn install_evidence(
     conn: &mut AsyncPgConnection,
     intent: &ContactCompletionIntent,
@@ -414,6 +413,28 @@ async fn install_evidence(
                     "Contact current head changed before signature publication".into(),
                 ));
             }
+            if let Some(counterpart) = counterpart_proof {
+                let counterpart_head = head_of(&record, &peer_actor)
+                    .ok_or_else(|| invalid("Contact counterpart committed head is absent"))?;
+                if !terminal
+                    || !counterpart.terminal
+                    || counterpart.peer != intent.plan.holder
+                    || counterpart.contact_round_id != current_proof.contact_round_id
+                    || counterpart.head_event_ref != current_proof.head_event_ref
+                    || counterpart.issuer_id != *peer.delivery_station_id()
+                    || peer.delivery_station_id() != intent.plan.holder.delivery_station_id()
+                    || !counterpart
+                        .accepted_commit_event_ids
+                        .contains(&counterpart_head)
+                    || !counterpart
+                        .accepted_commit_event_ids
+                        .contains(&current_proof.head_event_ref)
+                {
+                    return Err(invalid(
+                        "Contact counterpart terminal proof changed its committed fence",
+                    ));
+                }
+            }
             let bundle = record
                 .contact_round_evidence
                 .as_mut()
@@ -422,6 +443,12 @@ async fn install_evidence(
                 .current_proofs
                 .retain(|proof| proof.peer != current_proof.peer);
             bundle.current_proofs.push(current_proof.clone());
+            if let Some(counterpart) = counterpart_proof {
+                bundle
+                    .current_proofs
+                    .retain(|proof| proof.peer != counterpart.peer);
+                bundle.current_proofs.push(counterpart.clone());
+            }
             bundle
                 .current_proofs
                 .sort_by_key(|proof| proof.peer.contact_actor_id());

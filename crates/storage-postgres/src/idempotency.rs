@@ -62,6 +62,27 @@ pub(crate) async fn record_native_mls_idempotency_in_connection(
     Ok(())
 }
 
+/// A completed command cannot be replaced by a later worker's response.
+pub(crate) async fn record_exact_idempotency_in_connection(
+    conn: &mut diesel_async::AsyncPgConnection,
+    record: &IdempotencyRecord,
+) -> PersistenceResult<()> {
+    record_idempotency_in_connection(conn, record).await?;
+    let stored = sql_query("SELECT authenticated_actor,operation_id,idempotency_key,request_hash,response_status,response_body,created_at,expires_at FROM idempotency_keys WHERE actor_key=$1 AND operation_id=$2 AND idempotency_key=$3 FOR UPDATE")
+        .bind::<Text,_>(actor_key(&record.authenticated_actor)?)
+        .bind::<Text,_>(&record.operation_id).bind::<Text,_>(&record.idempotency_key)
+        .get_result::<IdempotencyRow>(conn).await.map_err(PersistenceError::database)?;
+    if stored.request_hash != record.request_hash
+        || stored.response_status != record.response_status
+        || stored.response_body != record.response_body
+    {
+        return Err(PersistenceError::Conflict(
+            "duplicate_conflict: accepted command response changed".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(QueryableByName)]
 struct IdempotencyRow {
     #[diesel(sql_type = Jsonb)]

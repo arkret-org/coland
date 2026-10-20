@@ -595,3 +595,92 @@ async fn exact_replay_of_the_accepting_unit_installs_nothing_twice() {
     assert_eq!(row.updated_at, requested.row.updated_at);
     assert_eq!(row.request_slot_states, requested.row.request_slot_states);
 }
+
+#[tokio::test]
+async fn checkpoint_contact_cas_and_frozen_response_rollback_together_on_conflicting_result() {
+    use coland_storage::IdempotencyStore;
+    let database = TestDatabase::lease().await;
+    let requested = requested(&database).await;
+    let contacts = PgContactStore {
+        pool: requested.pool.clone(),
+    };
+    let keys = coland_storage_postgres::PgIdempotencyStore {
+        pool: requested.pool.clone(),
+    };
+    let original = contacts
+        .get(&requested.row.requester_id, &requested.row.target_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let result = coland_storage::IdempotencyRecord {
+        authenticated_actor: original.requester_id.clone(),
+        operation_id: "ak.self.contact.command.checkpoint".into(),
+        idempotency_key: "checkpoint-result-atomicity".into(),
+        request_hash: format!("sha256:{}", "a".repeat(64)),
+        response_status: 200,
+        response_body: serde_json::json!({"frozen":"accepted-response"}),
+        created_at: at,
+        expires_at: at + chrono::Duration::days(1),
+    };
+    keys.record(&result).await.unwrap();
+    let mut candidate = original.clone();
+    candidate.updated_at += chrono::Duration::milliseconds(1);
+    candidate.message = Some("result transaction".into());
+    for wrong_body in [false, true] {
+        let mut conflicting = result.clone();
+        if wrong_body {
+            conflicting.response_body = serde_json::json!({"replacement":true});
+        } else {
+            conflicting.request_hash = format!("sha256:{}", "b".repeat(64));
+        }
+        assert!(
+            contacts
+                .put_if_updated_at_with_result(original.updated_at, &candidate, &conflicting)
+                .await
+                .is_err()
+        );
+        let reopened = PgContactStore {
+            pool: requested.pool.clone(),
+        };
+        let observed = reopened
+            .get(&original.requester_id, &original.target_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(observed.updated_at, original.updated_at);
+        assert_eq!(observed.message, original.message);
+        assert_eq!(
+            keys.get(
+                &result.authenticated_actor,
+                &result.operation_id,
+                &result.idempotency_key
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+            result
+        );
+    }
+    assert!(
+        contacts
+            .put_if_updated_at_with_result(original.updated_at, &candidate, &result)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !contacts
+            .put_if_updated_at_with_result(original.updated_at, &candidate, &result)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        contacts
+            .get(&original.requester_id, &original.target_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .message,
+        candidate.message
+    );
+}

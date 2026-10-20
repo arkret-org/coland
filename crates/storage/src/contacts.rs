@@ -273,8 +273,8 @@ pub trait ContactStore: Send + Sync {
     /// never treats the local decision as a transferable authorization.
     /// Atomically freeze HTTP results, source evidence, optional outbox and intent.
     ///
-    /// `counterpart_proof` is the requester direction's current proof this
-    /// Station issued when it hosts both members of a normally accepted pair.
+    /// `counterpart_proof` is the other local direction's current proof for
+    /// normal acceptance or a terminal fence when this Station hosts both members.
     async fn finalize_completion_intent(
         &self,
         ready: &CommittedContactCompletionIntent,
@@ -299,6 +299,13 @@ pub trait ContactStore: Send + Sync {
         &self,
         expected_updated_at: chrono::DateTime<chrono::Utc>,
         record: &ContactRecord,
+    ) -> PersistenceResult<bool>;
+    /// Accept a checkpoint and its immutable response in one transaction.
+    async fn put_if_updated_at_with_result(
+        &self,
+        expected_updated_at: chrono::DateTime<chrono::Utc>,
+        record: &ContactRecord,
+        result: &crate::IdempotencyRecord,
     ) -> PersistenceResult<bool>;
     async fn list_for_actor(&self, actor_id: &ActorId) -> PersistenceResult<Vec<ContactRecord>>;
     async fn delete(&self, requester_id: &ActorId, target_id: &ActorId) -> PersistenceResult<()>;

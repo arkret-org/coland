@@ -1392,17 +1392,28 @@ struct RealmLinkCurrentRow {
 
 /// Registered link lists consume the durable latest row and its original
 /// accepted Event/Commit. Missing provenance is unavailable, never an empty list.
-pub(crate) async fn realm_link_list(
-    pool: &PgPool,
+pub(crate) async fn realm_link_list_in_connection(
+    conn: &mut diesel_async::AsyncPgConnection,
     realm: &RealmId,
+    actor: &ActorId,
+    station: &arkret_wire::DidCoreId,
     direction: arkret_models_collaboration::governance::realm_governance::RealmLinkDirection,
     allow: Option<&[String]>,
-) -> PersistenceResult<Vec<arkret_models_collaboration::governance::realm_governance::RealmLinkEntry>>
-{
+) -> PersistenceResult<
+    Option<(
+        arkret_models_collaboration::governance::realm_governance::RealmLinkList,
+        Vec<arkret_wire::CommittedEventFullView>,
+    )>,
+> {
     use arkret_models_collaboration::governance::realm_governance::{
-        RealmLinkDirection, RealmLinkEntry, RealmLinkPayload,
+        RealmLinkDirection, RealmLinkEntry, RealmLinkList, RealmLinkPayload,
     };
-    let mut conn = pool.get().await.map_err(PersistenceError::database)?;
+    if !crate::authority_commit::accepted_realm_reader_in_connection(conn, realm, actor).await? {
+        return Ok(None);
+    }
+    crate::realm_authorization_cut::RealmAuthorizationCut::read_accepted(conn, realm, actor)
+        .await?
+        .require_realm_projection_read(chrono::Utc::now())?;
     let rows = diesel::sql_query(
         "SELECT l.realm_id,l.target_realm_id,l.link_kind,l.status,l.value,e.envelope,c.commit_json \
          FROM realm_link_current_results l \
@@ -1420,12 +1431,20 @@ pub(crate) async fn realm_link_list(
         RealmLinkDirection::Inbound => "inbound",
         RealmLinkDirection::Both => "both",
     })
-    .load::<RealmLinkCurrentRow>(&mut conn)
+    .load::<RealmLinkCurrentRow>(&mut *conn)
     .await
     .map_err(PersistenceError::database)?;
     let mut result = Vec::new();
+    let mut sources = Vec::new();
     for row in rows {
         if allow.is_some_and(|allow| !allow.contains(&row.link_kind)) {
+            continue;
+        }
+        let source_realm =
+            RealmId::new(row.realm_id.clone()).map_err(PersistenceError::database)?;
+        if !crate::authority_commit::accepted_realm_reader_in_connection(conn, &source_realm, actor)
+            .await?
+        {
             continue;
         }
         let corrupt = || {
@@ -1449,6 +1468,55 @@ pub(crate) async fn realm_link_list(
         {
             return Err(corrupt());
         }
+        event
+            .verify_event_id_matches_content_with_digest_suite(
+                event.event_id.digest_suite_code().digest_suite(),
+            )
+            .map_err(|_| corrupt())?;
+        commit
+            .verify_commit_id_matches_content()
+            .map_err(|_| corrupt())?;
+        let full = arkret_wire::CommittedEventFullView {
+            event: event.clone(),
+            commit: commit.clone(),
+        };
+        let disclosed =
+            crate::committed_disclosure::disclose_in_connection(conn, vec![full.clone()]).await?;
+        #[derive(diesel::QueryableByName)]
+        struct Governor {
+            #[diesel(sql_type=Text)]
+            service_id: String,
+        }
+        let governor =
+            diesel::sql_query("SELECT service_id FROM realm_authorities WHERE realm_id=$1")
+                .bind::<Text, _>(source_realm.as_str())
+                .get_result::<Governor>(&mut *conn)
+                .await
+                .map_err(PersistenceError::database)?;
+        let governs = governor.service_id == station.as_str();
+        let floor = crate::account_content_delivery::export_floor_in_connection(
+            conn,
+            &full.commit.stream_ref,
+            actor,
+            governs,
+        )
+        .await?;
+        if floor.is_none_or(|floor| full.commit.stream_position < floor)
+            || !matches!(
+                disclosed.as_slice(),
+                [arkret_wire::CommittedEventView::Full(_)]
+            )
+            || !crate::committed_disclosure::full_event_for_member_in_connection(
+                conn,
+                &full,
+                actor,
+                chrono::Utc::now(),
+            )
+            .await?
+        {
+            continue;
+        }
+        sources.push(full);
         result.push(RealmLinkEntry {
             realm_id: event.realm_id,
             target_realm_id: value.target_realm_id,
@@ -1460,7 +1528,14 @@ pub(crate) async fn realm_link_list(
             updated_at: std::cmp::max(event.created_at, commit.committed_at),
         });
     }
-    Ok(result)
+    Ok(Some((
+        RealmLinkList {
+            realm_id: realm.clone(),
+            direction,
+            links: result,
+        },
+        sources,
+    )))
 }
 
 /// Organization visibility and its accepted statements use one read cut.

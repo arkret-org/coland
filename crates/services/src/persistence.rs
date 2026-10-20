@@ -171,18 +171,19 @@ impl PersistenceHandle {
             .await
     }
 
-    /// Registered Realm links retain their durable accepted Event/Commit source.
     pub async fn accepted_realm_links(
         &self,
         realm: &arkret_wire::RealmId,
+        actor: &arkret_wire::ActorId,
+        station: &arkret_wire::DidCoreId,
         direction: arkret_models_collaboration::governance::realm_governance::RealmLinkDirection,
         allow: Option<&[String]>,
     ) -> PersistenceResult<
-        Vec<arkret_models_collaboration::governance::realm_governance::RealmLinkEntry>,
+        Option<arkret_models_collaboration::governance::realm_governance::RealmLinkList>,
     > {
         self.persistence
             .authority_commits()
-            .accepted_realm_links(realm, direction, allow)
+            .accepted_realm_links(realm, actor, station, direction, allow)
             .await
     }
 

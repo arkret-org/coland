@@ -67,6 +67,9 @@ use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+pub(crate) mod contact_checkpoint;
+use contact_checkpoint::contact_continuity_checkpoint;
+
 use self::social::direct::direct_founder_for_pair;
 use super::auth::{
     purge_device_delivery_state, revoke_devices_for_actor, revoke_sessions_for_actor,
@@ -152,8 +155,7 @@ pub(crate) use social::{
     accepted_contact_for_pair, canonical_contact_digest, contact_assertion_signer,
     contact_detached_jws, direction_version, local_direction_current,
     local_requester_current_proof, materialize_contact_completions,
-    validate_request_receipt_cryptography, verify_contact_service_signature,
-    verify_contact_service_signature_bytes,
+    validate_request_receipt_cryptography, verify_contact_service_signature_bytes,
 };
 pub(crate) mod lifecycle;
 // Re-export the lifecycle surface used by sibling routing modules.

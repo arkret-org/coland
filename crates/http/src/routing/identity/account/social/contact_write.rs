@@ -876,38 +876,63 @@ async fn persist_final(
         .map_err(|error| AppError::internal(format!("Contact outcome store: {error}")))
 }
 
+struct PrepareContext<K> {
+    holder: ContactPeer,
+    request_hash: String,
+    kind: std::marker::PhantomData<K>,
+}
+
+/// Freeze the caller's canonical command identity before selecting mutable
+/// server continuity material. An exact retry returns its original draft.
+async fn prepare_context<K: arkret_event_draft::EventSpec, T: Serialize>(
+    state: &AppState,
+    session: &SessionRecord,
+    request: &T,
+    idempotency_key: &IdempotencyKey,
+    peer: &ContactPeer,
+) -> Result<(PrepareContext<K>, Option<ContactOperationOutcome>), AppError> {
+    let holder = holder_peer(state, session).await?;
+    validate_distinct_peer(&holder, peer)?;
+    let request_hash = arkret_canonical::canonical_sha256(&json!({
+        "event_kind": K::KIND,
+        "request": request,
+    }))
+    .map_err(|error| AppError::internal(format!("Contact prepare digest: {error}")))?;
+    let outcome = replay::<ContactOperationOutcome>(
+        state,
+        &session.actor,
+        "org.arkret.coland.contact.prepare.v1",
+        &contact_phase_idempotency_key("prepare", idempotency_key),
+        &request_hash,
+    )
+    .await?;
+    Ok((
+        PrepareContext {
+            holder,
+            request_hash,
+            kind: std::marker::PhantomData,
+        },
+        outcome,
+    ))
+}
+
 async fn prepare<K: arkret_event_draft::EventSpec>(
     state: &AppState,
     session: &SessionRecord,
+    context: PrepareContext<K>,
     operation_id: ProtocolOperationId,
     idempotency_key: IdempotencyKey,
     branch: ContactReservationBranch,
     payload: K::Payload,
 ) -> JsonResult<ContactOperationOutcome> {
-    let holder = holder_peer(state, session).await?;
+    let PrepareContext {
+        holder,
+        request_hash,
+        ..
+    } = context;
     validate_distinct_peer(&holder, branch.peer())?;
-    let request_value = json!({
-        "operation_id": operation_id,
-        "idempotency_key": idempotency_key,
-        "branch": branch,
-        "payload": payload,
-        "event_kind": K::KIND,
-    });
-    let request_hash = arkret_canonical::canonical_sha256(&request_value)
-        .map_err(|error| AppError::internal(format!("Contact prepare digest: {error}")))?;
-    if let Some(outcome) = replay::<ContactOperationOutcome>(
-        state,
-        &session.actor,
-        "org.arkret.coland.contact.prepare.v1",
-        &contact_phase_idempotency_key("prepare", &idempotency_key),
-        &request_hash,
-    )
-    .await?
-    {
-        return json_ok(outcome);
-    }
     // A fresh prepare must reject a stale cursor before persisting a reservation.
-    // Exact idempotent replays above retain their original outcome; commit also
+    // Exact idempotent replays retain their original outcome; commit also
     // rechecks the lineage to close the prepare/commit race.
     match &branch {
         ContactReservationBranch::ScopeUpdate {
@@ -2692,7 +2717,19 @@ pub(super) async fn request(
 ) -> JsonResult<ContactOperationOutcome> {
     match body {
         ContactOperationRequestBody::Prepare(body) => {
-            let session_actor_id = holder_peer(state, session).await?.contact_actor_id();
+            let (context, replayed) =
+                prepare_context::<arkret_wire::event_spec::ContactRequested, _>(
+                    state,
+                    session,
+                    &body,
+                    &body.idempotency_key,
+                    &body.peer,
+                )
+                .await?;
+            if let Some(outcome) = replayed {
+                return json_ok(outcome);
+            }
+            let session_actor_id = context.holder.contact_actor_id();
             let prior = state
                 .contacts()
                 .contact_any(&session_actor_id, &body.peer.contact_actor_id())
@@ -2787,6 +2824,7 @@ pub(super) async fn request(
             prepare::<arkret_wire::event_spec::ContactRequested>(
                 state,
                 session,
+                context,
                 body.operation_id,
                 body.idempotency_key,
                 ContactReservationBranch::Request {
@@ -2875,7 +2913,19 @@ pub(super) async fn respond(
 ) -> JsonResult<ContactOperationOutcome> {
     match body {
         ContactAcceptRequestBody::Prepare(body) => {
-            let holder = holder_peer(state, session).await?;
+            let (context, replayed) =
+                prepare_context::<arkret_wire::event_spec::ContactAccepted, _>(
+                    state,
+                    session,
+                    &body,
+                    &body.idempotency_key,
+                    &body.peer,
+                )
+                .await?;
+            if let Some(outcome) = replayed {
+                return json_ok(outcome);
+            }
+            let holder = context.holder.clone();
             let peer = body.peer.clone();
             let record = state
                 .contacts()
@@ -2903,6 +2953,7 @@ pub(super) async fn respond(
             prepare::<arkret_wire::event_spec::ContactAccepted>(
                 state,
                 session,
+                context,
                 body.operation_id,
                 body.idempotency_key,
                 ContactReservationBranch::Response {
@@ -2926,7 +2977,19 @@ pub(super) async fn reject(
 ) -> JsonResult<ContactOperationOutcome> {
     match body {
         ContactRejectRequestBody::Prepare(body) => {
-            let holder = holder_peer(state, session).await?;
+            let (context, replayed) =
+                prepare_context::<arkret_wire::event_spec::ContactRejected, _>(
+                    state,
+                    session,
+                    &body,
+                    &body.idempotency_key,
+                    &body.peer,
+                )
+                .await?;
+            if let Some(outcome) = replayed {
+                return json_ok(outcome);
+            }
+            let holder = context.holder.clone();
             let peer = body.peer.clone();
             let record = state
                 .contacts()
@@ -2946,6 +3009,7 @@ pub(super) async fn reject(
             prepare::<arkret_wire::event_spec::ContactRejected>(
                 state,
                 session,
+                context,
                 body.operation_id,
                 body.idempotency_key,
                 ContactReservationBranch::Reject {
@@ -2967,6 +3031,16 @@ pub(super) async fn scope_update(
 ) -> JsonResult<ContactOperationOutcome> {
     match body {
         ContactScopeUpdateRequestBody::Prepare(body) => {
+            let (context, replayed) = prepare_context::<
+                arkret_wire::event_spec::ContactScopeUpdate,
+                _,
+            >(
+                state, session, &body, &body.idempotency_key, &body.peer
+            )
+            .await?;
+            if let Some(outcome) = replayed {
+                return json_ok(outcome);
+            }
             let payload = ContactScopeUpdatePayload {
                 schema: ContactScopeUpdateSchema::V1,
                 peer: body.peer.clone(),
@@ -2978,6 +3052,7 @@ pub(super) async fn scope_update(
             prepare::<arkret_wire::event_spec::ContactScopeUpdate>(
                 state,
                 session,
+                context,
                 body.operation_id,
                 body.idempotency_key,
                 ContactReservationBranch::ScopeUpdate {
@@ -3002,6 +3077,18 @@ pub(super) async fn tombstone(
 ) -> JsonResult<ContactOperationOutcome> {
     match body {
         ContactTombstoneRequestBody::Prepare(body) => {
+            let (context, replayed) =
+                prepare_context::<arkret_wire::event_spec::ContactTombstone, _>(
+                    state,
+                    session,
+                    &body,
+                    &body.idempotency_key,
+                    &body.peer,
+                )
+                .await?;
+            if let Some(outcome) = replayed {
+                return json_ok(outcome);
+            }
             let payload = ContactTombstonedPayload {
                 peer: body.peer.clone(),
                 contact_round_id: body.contact_round_id.clone(),
@@ -3012,6 +3099,7 @@ pub(super) async fn tombstone(
             prepare::<arkret_wire::event_spec::ContactTombstone>(
                 state,
                 session,
+                context,
                 body.operation_id,
                 body.idempotency_key,
                 ContactReservationBranch::Tombstone {

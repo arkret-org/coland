@@ -169,6 +169,18 @@ async fn spawn_introspection_mock(outcome: Value) -> String {
                         break;
                     }
                 }
+                let split = request
+                    .windows(4)
+                    .position(|part| part == b"\r\n\r\n")
+                    .unwrap();
+                let body = if String::from_utf8_lossy(&request[..split])
+                    .starts_with("POST /_arkret/peer/account-status/resolve ")
+                {
+                    let query: Value = serde_json::from_slice(&request[split + 4..]).unwrap();
+                    serde_json::to_vec(&json!({"account_authority_id":query["account_authority_id"], "account_id":query["account_id"], "records":[], "has_more":false})).unwrap()
+                } else {
+                    body
+                };
                 let headers = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                     body.len()
@@ -188,6 +200,13 @@ struct GrantSession {
 }
 
 async fn account_grant_session(fixture: &PcrGenesisFixture) -> GrantSession {
+    account_grant_session_at(fixture, None).await
+}
+
+async fn account_grant_session_at(
+    fixture: &PcrGenesisFixture,
+    base: Option<String>,
+) -> GrantSession {
     let holder_key = SigningKey::from_bytes(&Sha256::digest(b"account-data-sync").into());
     let token = format!("account-data-grant.{}", uuid::Uuid::now_v7().simple());
     let holder_jwk =
@@ -211,6 +230,10 @@ async fn account_grant_session(fixture: &PcrGenesisFixture) -> GrantSession {
                 arkret_wire::ServiceOperationId::SELF_ACCOUNT_DATA_RESOURCE_REPLACE_V1,
                 arkret_wire::ServiceOperationId::SELF_ACCOUNT_DATA_RESOURCE_GET_V1,
                 arkret_wire::ServiceOperationId::SELF_ACCOUNT_DATA_RESOURCE_DELETE_V1,
+                arkret_wire::ServiceOperationId::SELF_ACCOUNT_DATA_READ_LIST_V1,
+                "ak.self.realm.resource.get.v1",
+                "ak.self.realm.read.export.v1",
+                "ak.self.realm_link.read.list.v1",
                 "ak.self.read_cursor.command.advance.v1",
                 "ak.self.read_cursor.read.list.v1",
             ],
@@ -234,6 +257,9 @@ async fn account_grant_session(fixture: &PcrGenesisFixture) -> GrantSession {
     }))
     .await;
     let mut config = test_config();
+    if let Some(base) = base {
+        config.public_base_url = base;
+    }
     config.session_grant_introspection_url = Some(format!("{origin}{INTROSPECTION_PATH}"));
     config.account_authority_url = Some(origin);
     config.register_test_internal_authority_channel("account-data-sync".to_owned());
@@ -259,6 +285,125 @@ async fn account_grant_session(fixture: &PcrGenesisFixture) -> GrantSession {
         token,
         holder_key,
     }
+}
+
+/// Exercise the public SDK over TCP against the production router and real PG.
+/// Service-owned cells have no holder Event and must still be enumerable.
+#[tokio::test]
+async fn sdk_lists_live_cas_only_and_encrypted_registers_without_disclosing_internal_or_other_holder_rows()
+ {
+    use salvo::conn::Listener;
+    let acceptor = salvo::conn::TcpListener::new("127.0.0.1:0")
+        .try_bind()
+        .await
+        .unwrap();
+    let address = acceptor.local_addr().unwrap();
+    let base = format!("http://{address}");
+    let mut config = test_config();
+    config.public_base_url = base.clone();
+    let service_did = coland_test_support::fixture_service_identity(&config)
+        .identity()
+        .unwrap()
+        .did
+        .clone();
+    let fixture = PcrGenesisFixture::new(service_did);
+    let session = account_grant_session_at(&fixture, Some(base.clone())).await;
+    let persistence = session.state.test_persistence();
+    let holder = arkret_wire::ActorId::account(fixture.history.account.clone()).to_string();
+    let other = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+        arkret_wire::DidCoreId::new("ak:did_core:web:other.example").unwrap(),
+        fixture.history.account.station_id.clone(),
+    ))
+    .to_string();
+    let now = chrono::Utc::now();
+    for (actor, key, tombstone) in [
+        (holder.as_str(), "ak.account.invite_delivery", false),
+        (holder.as_str(), "ak.account.holder_quarantine", true),
+        (holder.as_str(), "ak.internal.test", false),
+        (other.as_str(), "ak.account.invite_delivery", false),
+    ] {
+        persistence
+            .account_data()
+            .compare_and_set(
+                &coland_storage::AccountDataRecord {
+                    actor: actor.into(),
+                    account_data_key: key.into(),
+                    revision: 1,
+                    payload: if key == "ak.account.invite_delivery" {
+                        serde_json::to_value(
+                            arkret_models_collaboration::governance::invite_addressing::InviteDelivery::new(now, Vec::new()),
+                        ).unwrap()
+                    } else { Value::Null },
+                    tombstone,
+                    updated_at: now,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+    }
+    let event = signed_account_data_event(&session.state, &fixture, "ak.push_rules");
+    let (status, _) = session
+        .request(
+            "PUT",
+            arkret_wire::ServiceOperationId::SELF_ACCOUNT_DATA_RESOURCE_REPLACE_V1,
+            Some(json!({"set_event":arkret_wire::EventAdmissionSubmission::new(event.clone())})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let position = persistence
+        .account_data()
+        .latest_change_position(&holder)
+        .await
+        .unwrap();
+    let state = session.state.clone();
+    let server = tokio::spawn(async move {
+        salvo::Server::new(acceptor).serve(service(state)).await;
+    });
+    let token = session.token.clone();
+    let key = session.holder_key.clone();
+    let client = arkret_http_client::Client::builder(url::Url::parse(&base).unwrap())
+        .allow_insecure_localhost()
+        .auth(arkret_http_client::Auth::Dpop(
+            arkret_http_client::DpopAuth::with_dpop_token(token.clone(), move |request| {
+                arkret_signatures::dpop::build_dpop_proof(&request, &key)
+                    .map(|proof| proof.header_value)
+                    .map_err(|error| arkret_http_client::Error::Protocol(error.to_string()))
+            }),
+        ))
+        .build()
+        .unwrap();
+    for _ in 0..2 {
+        let list = client.account_data_list().await.unwrap();
+        assert_eq!(list.account_data_entries.len(), 2, "{list:?}");
+        let cas = list
+            .account_data_entries
+            .iter()
+            .find(|row| row.account_data_key == "ak.account.invite_delivery")
+            .unwrap();
+        let read = client
+            .account_data_get(&cas.account_data_key)
+            .await
+            .unwrap();
+        assert_eq!(&read, cas);
+        let encrypted = list
+            .account_data_entries
+            .iter()
+            .find(|row| row.account_data_key == "ak.push_rules")
+            .unwrap();
+        assert_eq!(encrypted.content, event.payload["body"]);
+        assert_eq!(encrypted.revision, 1);
+    }
+    assert_eq!(
+        persistence
+            .account_data()
+            .latest_change_position(&holder)
+            .await
+            .unwrap(),
+        position
+    );
+    server.abort();
+    let _ = server.await;
 }
 
 impl GrantSession {
@@ -734,3 +879,6 @@ async fn signed_read_cursor_round_trip_replays_without_entering_the_realm_log() 
             .is_none()
     );
 }
+
+#[path = "realm_read_cases/mod.rs"]
+mod realm_read_cases;

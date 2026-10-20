@@ -90,6 +90,7 @@ async fn materialize_one(
     let outcome = sign_outcome(state, &ready.intent).await?;
     // A normal round whose requester is also this Station's holder completes
     // both directions here: the requester's own request is its direction head.
+    // A local tombstone also confirms the opposite direction's terminal fence.
     let counterpart_proof = match &outcome {
         ContactAcceptedOutcome::Response {
             normal_response_acceptance_receipt,
@@ -101,6 +102,33 @@ async fn materialize_one(
                 &normal_response_acceptance_receipt.request_receipt,
             )
             .await?
+        }
+        ContactAcceptedOutcome::Tombstone { current_proof, .. }
+            if !ready.intent.requires_delivery() =>
+        {
+            let peer = &ready.intent.plan.target.contact_address.recipient;
+            let holder = &ready.intent.plan.event.actor_id;
+            let record = state
+                .contacts()
+                .contact_any(holder, &peer.contact_actor_id())
+                .await
+                .map_err(|error| AppError::internal(error.to_string()))?
+                .ok_or_else(|| {
+                    crate::app_error!(
+                        TemporarilyUnavailable,
+                        "Contact terminal source projection is unavailable"
+                    )
+                })?;
+            Some(
+                crate::routing::identity::contact_federation::terminal_ack_contact_current_proof(
+                    state,
+                    &record,
+                    &peer.contact_actor_id(),
+                    ready.intent.plan.holder.clone(),
+                    current_proof,
+                )
+                .await?,
+            )
         }
         _ => None,
     };

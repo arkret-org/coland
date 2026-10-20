@@ -1,12 +1,12 @@
 use diesel::sql_types::Binary;
 
 use super::{
-    BTreeMap, BTreeSet, BigInt, Bool, HandleReleaseStore, Jsonb, Nullable, OptionalExtension,
-    OrganizationRecord, OrganizationStore, PersistenceError, PersistenceResult, PgPool,
-    QueryableByName, RealmOrganizationStatementRecord, RealmOrganizationStatementStore,
-    RealmOrganizationStore, RetentionPolicyRecord, RetentionPolicyStore, RetentionTombstoneRecord,
-    RetentionTombstoneStore, RunQueryDsl, Text, Timestamptz, Value, async_trait, ids,
-    json_string_array, pg_conn, sql_query,
+    AsyncConnection, BTreeMap, BTreeSet, BigInt, Bool, HandleReleaseStore, Jsonb, Nullable,
+    OptionalExtension, OrganizationRecord, OrganizationStore, PersistenceError, PersistenceResult,
+    PgPool, PgTransactionError, QueryableByName, RealmOrganizationStatementRecord,
+    RealmOrganizationStatementStore, RealmOrganizationStore, RetentionPolicyRecord,
+    RetentionPolicyStore, RetentionTombstoneRecord, RetentionTombstoneStore, RunQueryDsl, Text,
+    Timestamptz, Value, async_trait, ids, json_string_array, pg_conn, sql_query,
 };
 pub struct PgHandleReleaseStore {
     pub pool: PgPool,
@@ -161,8 +161,50 @@ impl RetentionTombstoneStore for PgRetentionTombstoneStore {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
-        sql_query(
-            "INSERT INTO retention_tombstones \
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            #[derive(QueryableByName)]
+            struct RealmRow {
+                #[diesel(sql_type=Text)]
+                realm_id: String,
+            }
+            let token =
+                ids::event_token_part_or_schema_violation(&record.event_id, "event")?.to_vec();
+            let source = sql_query("SELECT realm_id FROM canonical_events WHERE id=$1")
+                .bind::<Binary, _>(&token)
+                .get_result::<RealmRow>(&mut *conn)
+                .await
+                .optional()?;
+            let previous = sql_query("SELECT realm_id FROM retention_tombstones WHERE event_id=$1")
+                .bind::<Binary, _>(&token)
+                .get_result::<RealmRow>(&mut *conn)
+                .await
+                .optional()?;
+            if source
+                .iter()
+                .chain(previous.iter())
+                .any(|row| row.realm_id != record.realm_id)
+            {
+                return Err(PersistenceError::SchemaViolation(
+                    "retention target Realm differs from its accepted source".into(),
+                )
+                .into());
+            }
+            // Active delivery holds this same Realm cut through body handoff.
+            // An orphan can still be cleaned up when no authority row remains.
+            let held =
+                sql_query("SELECT realm_id FROM realm_authorities WHERE realm_id=$1 FOR UPDATE")
+                    .bind::<Text, _>(&record.realm_id)
+                    .get_result::<RealmRow>(&mut *conn)
+                    .await
+                    .optional()?;
+            if held
+                .as_ref()
+                .is_some_and(|row| row.realm_id != record.realm_id)
+            {
+                return Err(PersistenceError::Internal("retention cut differs".into()).into());
+            }
+            sql_query(
+                "INSERT INTO retention_tombstones \
              (event_id, realm_id, reason, policy_ttl_seconds, expired_at, tombstoned_at, sealed) \
              VALUES ($1, $2, $3, $4, $5, $6, $7) \
              ON CONFLICT (event_id) DO UPDATE SET \
@@ -172,20 +214,22 @@ impl RetentionTombstoneStore for PgRetentionTombstoneStore {
                expired_at = EXCLUDED.expired_at, \
                tombstoned_at = EXCLUDED.tombstoned_at, \
                sealed = EXCLUDED.sealed",
-        )
-        .bind::<Binary, _>(
-            ids::event_token_part_or_schema_violation(&record.event_id, "event")?.to_vec(),
-        )
-        .bind::<Text, _>(&record.realm_id)
-        .bind::<Text, _>(&record.reason)
-        .bind::<BigInt, _>(record.policy_ttl_seconds)
-        .bind::<Timestamptz, _>(record.expired_at)
-        .bind::<Timestamptz, _>(record.tombstoned_at)
-        .bind::<Bool, _>(record.sealed)
-        .execute(&mut *conn)
+            )
+            .bind::<Binary, _>(
+                ids::event_token_part_or_schema_violation(&record.event_id, "event")?.to_vec(),
+            )
+            .bind::<Text, _>(&record.realm_id)
+            .bind::<Text, _>(&record.reason)
+            .bind::<BigInt, _>(record.policy_ttl_seconds)
+            .bind::<Timestamptz, _>(record.expired_at)
+            .bind::<Timestamptz, _>(record.tombstoned_at)
+            .bind::<Bool, _>(record.sealed)
+            .execute(&mut *conn)
+            .await?;
+            Ok(())
+        })
         .await
-        .map(|_| ())
-        .map_err(PersistenceError::database)
+        .map_err(PgTransactionError::into_persistence)
     }
 
     async fn snapshot_all(&self) -> PersistenceResult<Vec<RetentionTombstoneRecord>> {

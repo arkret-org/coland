@@ -2210,6 +2210,35 @@ impl RealmAuthorizationCut {
             .collect()
     }
 
+    /// A current Realm projection uses membership as its independent read source.
+    /// Global grant refusals apply even though no historical Event is exposed.
+    pub(crate) fn require_realm_projection_read(
+        &self,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<()> {
+        // The caller proves accepted_realm_reader on the same held cut.
+        let target = WireResourceSelector::realm(self.realm_id.clone());
+        let facts = OperationFacts::default();
+        let operation = AuthorizationOperation {
+            actor: &self.actor,
+            actions: &[CapabilityActionId::EventRead.as_str()],
+            target: &target,
+            facts: &facts,
+            at,
+        };
+        if evaluate_grants(
+            &operation,
+            self.effective_grants(at).map(|(_, grant)| grant),
+        )
+        .is_refusal()
+        {
+            return Err(capability_denied(
+                "a current grant refuses Realm projection disclosure",
+            ));
+        }
+        Ok(())
+    }
+
     /// Current content reads retain their own membership and disclosure gates.
     pub(crate) fn require_open_content_read(&self) -> PersistenceResult<()> {
         self.require_membership_basis("current content read")?;

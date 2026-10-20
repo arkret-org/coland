@@ -352,6 +352,69 @@ pub(crate) async fn lock_pair_contact_at_in_connection(
     .transpose()
 }
 
+pub(crate) async fn put_if_updated_at_in_connection(
+    conn: &mut AsyncPgConnection,
+    expected_updated_at: chrono::DateTime<chrono::Utc>,
+    record: &ContactRecord,
+) -> PersistenceResult<bool> {
+    if record.updated_at <= expected_updated_at {
+        return Ok(false);
+    }
+    let request_slot_states =
+        encode_contact_json(&record.request_slot_states, "request_slot_states")?;
+    let request_receipts = encode_contact_json(&record.request_receipts, "request_receipts")?;
+    let request_mirror_receipts =
+        encode_contact_json(&record.request_mirror_receipts, "request_mirror_receipts")?;
+    let contact_round_evidence = record
+        .contact_round_evidence
+        .as_ref()
+        .map(|value| encode_contact_json(value, "contact_round_evidence"))
+        .transpose()?;
+    let contact_round_evidence_history = encode_contact_json(
+        &record.contact_round_evidence_history,
+        "contact_round_evidence_history",
+    )?;
+    let control_outcomes = encode_contact_json(&record.control_outcomes, "control_outcomes")?;
+    let affected = sql_query(
+            "UPDATE contacts SET requester_id = $1, target_id = $2, \
+                contact_round_id = $3, granted_to_target_scopes = $4, \
+                granted_to_requester_scopes = $5, status = $6, pending_incoming_admitted = $7, request_event_ref = $8, \
+                request_slot_states = $9, request_receipts = $10, request_mirror_receipts = $11, \
+                contact_round_evidence = $12, contact_round_evidence_history = $13, \
+                control_outcomes = $14, response_event_ref = $15, tombstone_event_ref = $16, \
+                message = $17, peer_id = $18, peer_service_resolution = $19, updated_at = $20 \
+             WHERE ((requester_id = $1 AND target_id = $2) OR \
+                    (requester_id = $2 AND target_id = $1)) AND updated_at = $21",
+        )
+        .bind::<Text, _>(record.requester_id.to_string())
+        .bind::<Text, _>(record.target_id.to_string())
+        .bind::<Nullable<Text>, _>(record.contact_round_id.as_ref())
+        .bind::<Array<Text>, _>(&record.granted_to_target_scopes)
+        .bind::<Array<Text>, _>(&record.granted_to_requester_scopes)
+        .bind::<Text, _>(&record.status)
+        .bind::<diesel::sql_types::Bool, _>(record.pending_incoming_admitted)
+        .bind::<Nullable<Binary>, _>(parse_contact_event_ref(record.request_event_ref.as_ref())?)
+        .bind::<Jsonb, _>(&request_slot_states)
+        .bind::<Jsonb, _>(&request_receipts)
+        .bind::<Jsonb, _>(&request_mirror_receipts)
+        .bind::<Nullable<Jsonb>, _>(contact_round_evidence.as_ref())
+        .bind::<Jsonb, _>(&contact_round_evidence_history)
+        .bind::<Jsonb, _>(&control_outcomes)
+        .bind::<Nullable<Binary>, _>(parse_contact_event_ref(record.response_event_ref.as_ref())?)
+        .bind::<Nullable<Binary>, _>(parse_contact_event_ref(
+            record.tombstone_event_ref.as_ref(),
+        )?)
+        .bind::<Nullable<Text>, _>(record.message.as_deref())
+        .bind::<Nullable<Text>, _>(record.peer_host_id.as_ref())
+        .bind::<Nullable<Jsonb>, _>(record.peer_service_resolution.as_ref())
+        .bind::<Timestamptz, _>(record.updated_at)
+        .bind::<Timestamptz, _>(expected_updated_at)
+        .execute(&mut *conn)
+        .await
+        .map_err(PersistenceError::database)?;
+    Ok(affected == 1)
+}
+
 #[async_trait]
 impl ContactStore for PgContactStore {
     async fn completion_for_request(
@@ -480,65 +543,27 @@ impl ContactStore for PgContactStore {
         expected_updated_at: chrono::DateTime<chrono::Utc>,
         record: &ContactRecord,
     ) -> PersistenceResult<bool> {
-        if record.updated_at <= expected_updated_at {
-            return Ok(false);
-        }
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
-        let request_slot_states =
-            encode_contact_json(&record.request_slot_states, "request_slot_states")?;
-        let request_receipts = encode_contact_json(&record.request_receipts, "request_receipts")?;
-        let request_mirror_receipts =
-            encode_contact_json(&record.request_mirror_receipts, "request_mirror_receipts")?;
-        let contact_round_evidence = record
-            .contact_round_evidence
-            .as_ref()
-            .map(|value| encode_contact_json(value, "contact_round_evidence"))
-            .transpose()?;
-        let contact_round_evidence_history = encode_contact_json(
-            &record.contact_round_evidence_history,
-            "contact_round_evidence_history",
-        )?;
-        let control_outcomes = encode_contact_json(&record.control_outcomes, "control_outcomes")?;
-        let affected = sql_query(
-            "UPDATE contacts SET requester_id = $1, target_id = $2, \
-                contact_round_id = $3, granted_to_target_scopes = $4, \
-                granted_to_requester_scopes = $5, status = $6, pending_incoming_admitted = $7, request_event_ref = $8, \
-                request_slot_states = $9, request_receipts = $10, request_mirror_receipts = $11, \
-                contact_round_evidence = $12, contact_round_evidence_history = $13, \
-                control_outcomes = $14, response_event_ref = $15, tombstone_event_ref = $16, \
-                message = $17, peer_id = $18, peer_service_resolution = $19, updated_at = $20 \
-             WHERE ((requester_id = $1 AND target_id = $2) OR \
-                    (requester_id = $2 AND target_id = $1)) AND updated_at = $21",
-        )
-        .bind::<Text, _>(record.requester_id.to_string())
-        .bind::<Text, _>(record.target_id.to_string())
-        .bind::<Nullable<Text>, _>(record.contact_round_id.as_ref())
-        .bind::<Array<Text>, _>(&record.granted_to_target_scopes)
-        .bind::<Array<Text>, _>(&record.granted_to_requester_scopes)
-        .bind::<Text, _>(&record.status)
-        .bind::<diesel::sql_types::Bool, _>(record.pending_incoming_admitted)
-        .bind::<Nullable<Binary>, _>(parse_contact_event_ref(record.request_event_ref.as_ref())?)
-        .bind::<Jsonb, _>(&request_slot_states)
-        .bind::<Jsonb, _>(&request_receipts)
-        .bind::<Jsonb, _>(&request_mirror_receipts)
-        .bind::<Nullable<Jsonb>, _>(contact_round_evidence.as_ref())
-        .bind::<Jsonb, _>(&contact_round_evidence_history)
-        .bind::<Jsonb, _>(&control_outcomes)
-        .bind::<Nullable<Binary>, _>(parse_contact_event_ref(record.response_event_ref.as_ref())?)
-        .bind::<Nullable<Binary>, _>(parse_contact_event_ref(
-            record.tombstone_event_ref.as_ref(),
-        )?)
-        .bind::<Nullable<Text>, _>(record.message.as_deref())
-        .bind::<Nullable<Text>, _>(record.peer_host_id.as_ref())
-        .bind::<Nullable<Jsonb>, _>(record.peer_service_resolution.as_ref())
-        .bind::<Timestamptz, _>(record.updated_at)
-        .bind::<Timestamptz, _>(expected_updated_at)
-        .execute(&mut *conn)
+        let mut conn = pg_conn(&self.pool).await?;
+        put_if_updated_at_in_connection(&mut conn, expected_updated_at, record).await
+    }
+
+    async fn put_if_updated_at_with_result(
+        &self,
+        expected_updated_at: chrono::DateTime<chrono::Utc>,
+        record: &ContactRecord,
+        result: &crate::IdempotencyRecord,
+    ) -> PersistenceResult<bool> {
+        use diesel_async::AsyncConnection as _;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, crate::PgTransactionError, _>(async |conn| {
+            if !put_if_updated_at_in_connection(conn, expected_updated_at, record).await? {
+                return Ok(false);
+            }
+            crate::idempotency::record_exact_idempotency_in_connection(conn, result).await?;
+            Ok(true)
+        })
         .await
-        .map_err(PersistenceError::database)?;
-        Ok(affected == 1)
+        .map_err(crate::PgTransactionError::into_persistence)
     }
 
     async fn list_for_actor(&self, actor_id: &ActorId) -> PersistenceResult<Vec<ContactRecord>> {

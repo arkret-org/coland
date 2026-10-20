@@ -1243,6 +1243,34 @@ pub(crate) fn next_continuity_checkpoint_core(
     record: &ContactRecord,
     local_principal_id: &str,
 ) -> Result<BilateralContinuityCheckpointCore, AppError> {
+    let index = record
+        .contact_round_evidence_history
+        .len()
+        .saturating_sub(1)
+        .min(16);
+    let boundary = record
+        .contact_round_evidence_history
+        .get(index)
+        .ok_or_else(|| {
+            crate::app_error!(
+                FailedPrecondition,
+                "Contact continuity has no terminal prefix to compact"
+            )
+        })?;
+    checkpoint_core_at_boundary(
+        state,
+        record,
+        local_principal_id,
+        &boundary.contact_round_id,
+    )
+}
+
+fn checkpoint_core_at_boundary(
+    state: &AppState,
+    record: &ContactRecord,
+    local_principal_id: &str,
+    boundary: &Hash,
+) -> Result<BilateralContinuityCheckpointCore, AppError> {
     let current = record.contact_round_evidence.as_ref().ok_or_else(|| {
         crate::app_error!(FailedPrecondition, "Contact round evidence is unavailable",)
     })?;
@@ -1260,9 +1288,9 @@ pub(crate) fn next_continuity_checkpoint_core(
     }
     let tail_to_keep = record
         .contact_round_evidence_history
-        .len()
-        .saturating_sub(1)
-        .min(16);
+        .iter()
+        .position(|entry| &entry.contact_round_id == boundary)
+        .ok_or_else(|| continuity_invalid("checkpoint prefix boundary is not accepted history"))?;
     let extension_newest_to_oldest = &record.contact_round_evidence_history[tail_to_keep..];
     let covered_through = extension_newest_to_oldest
         .first()
@@ -1374,13 +1402,15 @@ pub(crate) fn create_continuity_checkpoint_proposal(
     })
 }
 
-pub(crate) fn committed_continuity_evidence(
+pub(crate) fn checkpoint_tail(
     record: &ContactRecord,
-) -> Option<ContactContinuityEvidence> {
-    let checkpoint = latest_continuity_checkpoint(record)?;
-    let current = record.contact_round_evidence.clone()?;
-    let boundary = &checkpoint.core.covered_through_contact_round_id;
-    let mut tail = vec![uncheckpointed_bundle(&current)];
+    boundary: &Hash,
+) -> Result<Vec<ContactRoundEvidenceBundle>, AppError> {
+    let current = record
+        .contact_round_evidence
+        .as_ref()
+        .ok_or_else(|| continuity_invalid("checkpoint current round unavailable"))?;
+    let mut tail = vec![uncheckpointed_bundle(current)];
     for predecessor in &record.contact_round_evidence_history {
         if tail
             .last()
@@ -1391,6 +1421,25 @@ pub(crate) fn committed_continuity_evidence(
         }
         tail.push(uncheckpointed_bundle(predecessor));
     }
+    if tail.len() > 64
+        || tail
+            .last()
+            .and_then(|bundle| bundle.previous_terminal_contact_round_id.as_ref())
+            != Some(boundary)
+    {
+        return Err(continuity_invalid(
+            "checkpoint tail does not terminate at the accepted boundary",
+        ));
+    }
+    Ok(tail)
+}
+
+pub(crate) fn committed_continuity_evidence(
+    record: &ContactRecord,
+) -> Option<ContactContinuityEvidence> {
+    let checkpoint = latest_continuity_checkpoint(record)?;
+    let mut tail =
+        checkpoint_tail(record, &checkpoint.core.covered_through_contact_round_id).ok()?;
     tail.first_mut()?.continuity_checkpoint = Some(checkpoint.clone());
     arkret_models_collaboration::contact_operations::validate_recontact_continuity(
         &tail[0],
@@ -1423,20 +1472,24 @@ fn prune_history_to_checkpoint(
     record
         .contact_round_evidence_history
         .truncate(boundary_index);
+    // Checkpoint attachments are unsigned carrier metadata. The new current
+    // bundle owns the committed checkpoint; retained predecessors must not
+    // keep an older checkpoint that conflicts with this bounded tail.
+    for predecessor in &mut record.contact_round_evidence_history {
+        predecessor.continuity_checkpoint = None;
+    }
     Ok(())
 }
 
-pub(crate) async fn commit_same_service_continuity_checkpoint(
+pub(crate) fn complete_same_service_checkpoint(
     state: &AppState,
-    record: &ContactRecord,
-    local_principal_id: &str,
-) -> Result<ContactContinuityEvidence, AppError> {
-    let proposal = create_continuity_checkpoint_proposal(state, record, local_principal_id)?;
+    proposal: &BilateralContinuityCheckpointProposal,
+) -> Result<BilateralContinuityCheckpoint, AppError> {
     let peer_signer = proposal
         .core
         .participants
         .iter()
-        .find(|participant| participant.principal_id.as_str() != local_principal_id)
+        .find(|participant| *participant != &proposal.proposer_signature.signer)
         .cloned()
         .ok_or_else(|| AppError::internal("same-service checkpoint peer authority missing"))?;
     if peer_signer.station_id.as_str() != state.service_id() {
@@ -1456,37 +1509,65 @@ pub(crate) async fn commit_same_service_continuity_checkpoint(
     ];
     signatures.sort_by(|left, right| left.signer.cmp(&right.signer));
     let checkpoint = BilateralContinuityCheckpoint {
-        core: proposal.core,
-        checkpoint_digest: proposal.checkpoint_digest,
+        core: proposal.core.clone(),
+        checkpoint_digest: proposal.checkpoint_digest.clone(),
         signatures,
     };
     checkpoint
         .validate_contact_shape()
         .map_err(|error| AppError::internal(format!("same-service checkpoint: {error}")))?;
+    Ok(checkpoint)
+}
+
+pub(crate) async fn install_checkpoint_with_result(
+    state: &AppState,
+    holder: &arkret_wire::ActorId,
+    peer: &arkret_wire::ActorId,
+    checkpoint: &BilateralContinuityCheckpoint,
+    result: coland_services::jobs::IdempotencyState,
+) -> Result<bool, AppError> {
     let contacts = state.contacts();
-    let mut current = contacts
-        .contact_any(&record.requester_id, &record.target_id)
+    let mut record = contacts
+        .contact_any(holder, peer)
         .await
-        .map_err(|error| AppError::internal(error.to_string()))?
-        .ok_or_else(
-            || crate::app_error!(FailedPrecondition, "same-service Contact disappeared",),
+        .map_err(|e| AppError::internal(e.to_string()))?
+        .ok_or_else(|| continuity_invalid("checkpoint Contact disappeared"))?;
+    let peer_account = peer
+        .as_account_id()
+        .ok_or_else(|| continuity_invalid("checkpoint peer is not an Account"))?;
+    if record
+        .peer_host_id
+        .as_ref()
+        .is_some_and(|id| id != &peer_account.station_id)
+        || (peer_account.station_id != state.service_core_id() && record.peer_host_id.is_none())
+    {
+        return Err(continuity_invalid("checkpoint peer service changed"));
+    }
+    let already_installed = latest_continuity_checkpoint(&record)
+        .is_some_and(|old| old.checkpoint_digest == checkpoint.checkpoint_digest);
+    if !already_installed {
+        let expected = checkpoint_core_at_boundary(
+            state,
+            &record,
+            holder.signing_principal_id().as_str(),
+            &checkpoint.core.covered_through_contact_round_id,
         )?;
-    let expected_updated_at = current.updated_at;
-    current
-        .contact_round_evidence
-        .as_mut()
-        .ok_or_else(|| {
-            crate::app_error!(
-                FailedPrecondition,
-                "same-service Contact evidence disappeared",
-            )
-        })?
-        .continuity_checkpoint = Some(checkpoint.clone());
-    prune_history_to_checkpoint(&mut current, &checkpoint)?;
-    advance_contact_revision(&mut current, expected_updated_at);
-    save_contact_cas(contacts, expected_updated_at, current.clone()).await?;
-    committed_continuity_evidence(&current)
-        .ok_or_else(|| AppError::internal("same-service continuity export is invalid"))
+        if expected != checkpoint.core {
+            return Err(continuity_invalid("checkpoint frozen prefix changed"));
+        }
+        record
+            .contact_round_evidence
+            .as_mut()
+            .ok_or_else(|| continuity_invalid("checkpoint current missing"))?
+            .continuity_checkpoint = Some(checkpoint.clone());
+        prune_history_to_checkpoint(&mut record, checkpoint)?;
+    }
+    let previous = record.updated_at;
+    advance_contact_revision(&mut record, previous);
+    contacts
+        .save_contact_with_result(previous, record, result)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))
 }
 
 pub(crate) async fn accept_outbound_continuity_checkpoint_outcome(
@@ -1498,7 +1579,7 @@ pub(crate) async fn accept_outbound_continuity_checkpoint_outcome(
     let PeerContactSubmitRequestBody::ContinuityCheckpoint {
         proposal,
         contact_address,
-        ..
+        idempotency_key,
     } = request
     else {
         return Err(AppError::internal(
@@ -1521,6 +1602,9 @@ pub(crate) async fn accept_outbound_continuity_checkpoint_outcome(
     ) || control_receipt.request_kind != PeerContactControlKind::ContinuityCheckpoint
         || control_receipt.outcome != *status
         || control_receipt.issuer_id.as_str() != peer_id
+        || control_receipt.recipient_id.as_str() != peer_id
+        || control_receipt.result_digest
+            != Some(super::account::canonical_contact_digest(checkpoint)?)
         || checkpoint.checkpoint_digest != proposal.checkpoint_digest
         || canonical::canonical_json_bytes(&checkpoint.core)
             .map_err(|error| AppError::internal(error.to_string()))?
@@ -1529,6 +1613,11 @@ pub(crate) async fn accept_outbound_continuity_checkpoint_outcome(
     {
         return Err(continuity_invalid(
             "peer continuity outcome does not bind the proposal",
+        ));
+    }
+    if control_receipt.request_digest != super::account::canonical_contact_digest(request)? {
+        return Err(continuity_invalid(
+            "checkpoint receipt names another request",
         ));
     }
     verify_contact_evidence_signature(
@@ -1555,60 +1644,50 @@ pub(crate) async fn accept_outbound_continuity_checkpoint_outcome(
     }
     let local_actor = arkret_wire::ActorId::account(proposal.proposer_signature.signer.clone());
     let remote_actor = contact_address.recipient.contact_actor_id();
-    let contacts = state.contacts();
-    let mut record = contacts
-        .contact_any(&local_actor, &remote_actor)
-        .await
-        .map_err(|error| AppError::internal(error.to_string()))?
-        .ok_or_else(|| {
-            crate::app_error!(
-                FailedPrecondition,
-                "outbound checkpoint Contact disappeared",
-            )
-        })?;
-    if record.peer_host_id.as_ref().map(|value| value.as_str()) != Some(peer_id) {
-        return Err(continuity_invalid(
-            "outbound checkpoint peer service changed",
-        ));
-    }
-    if let Some(existing) = latest_continuity_checkpoint(&record) {
-        if existing.checkpoint_digest == checkpoint.checkpoint_digest {
-            return Ok(());
-        }
-        if existing.core.sequence >= checkpoint.core.sequence {
+    let original =
+        arkret_models_collaboration::contact_operations::ContactContinuityCheckpointRequestBody {
+            idempotency_key: idempotency_key.clone(),
+            peer: contact_address.recipient.clone(),
+        };
+    if let Some(completed) = super::account::contact_checkpoint::completed_request(
+        state,
+        &proposal.proposer_signature.signer,
+        &original,
+    )
+    .await?
+    {
+        if completed.checkpoint_digest != proposal.checkpoint_digest {
             return Err(continuity_invalid(
-                "outbound continuity checkpoint rollback or fork",
+                "completed checkpoint changed its frozen core",
             ));
         }
+        return Ok(());
     }
-    let expected_core = next_continuity_checkpoint_core(
-        state,
-        &record,
-        local_actor.signing_principal_id().as_str(),
-    )?;
-    if canonical::canonical_json_bytes(&expected_core)
-        .map_err(|error| AppError::internal(error.to_string()))?
-        != canonical::canonical_json_bytes(&checkpoint.core)
-            .map_err(|error| AppError::internal(error.to_string()))?
+    let plan = super::account::contact_checkpoint::frozen_outbound_plan(state, request).await?;
+    let outcome = plan.outcome(checkpoint.clone())?;
+    let result = plan.result_record(&outcome)?;
+    if state
+        .jobs()
+        .scoped_idempotency_record(
+            &result.authenticated_actor,
+            &result.operation_id,
+            &result.idempotency_key,
+        )
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+        .is_some()
     {
-        return Err(continuity_invalid(
-            "outbound checkpoint no longer matches durable history",
+        return Ok(());
+    }
+    if !install_checkpoint_with_result(state, &local_actor, &remote_actor, checkpoint, result)
+        .await?
+    {
+        return Err(crate::app_error!(
+            TemporarilyUnavailable,
+            "checkpoint changed during acceptance"
         ));
     }
-    let expected_updated_at = record.updated_at;
-    record
-        .contact_round_evidence
-        .as_mut()
-        .ok_or_else(|| {
-            crate::app_error!(
-                FailedPrecondition,
-                "outbound checkpoint current evidence disappeared",
-            )
-        })?
-        .continuity_checkpoint = Some(checkpoint.clone());
-    prune_history_to_checkpoint(&mut record, checkpoint)?;
-    advance_contact_revision(&mut record, expected_updated_at);
-    save_contact_cas(contacts, expected_updated_at, record).await
+    Ok(())
 }
 
 fn sign_checkpoint_participant(
@@ -1674,10 +1753,11 @@ async fn finalize_continuity_checkpoint(
     ) {
         return Ok(outcome);
     }
-    let expected_core = next_continuity_checkpoint_core(
+    let expected_core = checkpoint_core_at_boundary(
         state,
         &record,
         local_actor.signing_principal_id().as_str(),
+        &proposal.core.covered_through_contact_round_id,
     )?;
     if bilateral_checkpoint_digest(&expected_core)
         .map_err(|error| AppError::internal(error.to_string()))?
@@ -2125,16 +2205,13 @@ fn verify_contact_service_signature_bytes(
     signing_bytes: &[u8],
     evidence_field: &str,
 ) -> Result<(), AppError> {
-    let signed_value: Value = serde_json::from_slice(signing_bytes).map_err(|error| {
-        AppError::internal(format!(
-            "{evidence_field} canonical signing transcript is invalid JSON: {error}"
-        ))
-    })?;
-    super::account::verify_contact_service_signature(
+    // Checkpoint transcripts include a domain prefix; verify the exact SDK
+    // bytes rather than parsing and reserializing them as a JSON value.
+    super::account::verify_contact_service_signature_bytes(
         state,
         expected_service_id,
         signature,
-        &signed_value,
+        signing_bytes,
         evidence_field,
     )
 }
@@ -2494,7 +2571,7 @@ async fn sign_contact_assertion_evidence_bytes(
 /// shared source tombstone head and retains the local direction's last
 /// confirmed version, read from this Station's own committed direction head.
 /// Without that committed local material no completeness proof is signed.
-async fn terminal_ack_contact_current_proof(
+pub(crate) async fn terminal_ack_contact_current_proof(
     state: &AppState,
     row: &ContactRecord,
     local_holder: &arkret_wire::ActorId,
@@ -4725,13 +4802,24 @@ mod tests {
     /// `requester_id` to federate the reverse `respond` delivery.
     #[tokio::test]
     async fn delivered_request_records_originating_peer_id() {
-        let state = AppState::new(test_config(), Db { pool: None });
-        let requester_id = "ak:did_core:web:remote-alice.example"; // issuer, on source PS
-        let target = "ak:did_core:web:local-bob.example"; // subject_id, this holder
-        // A first contact now meters the shared new-source quota before the
-        // pending_incoming row is established (consent-model.md 6.1.1.3), and the
-        // ledger is keyed by a real holder account row. Without one the delivery
-        // never reaches the projection this test is about.
+        use coland_test_support::AppStateTestExt as _;
+        let config = test_config();
+        let service_did = AppState::new(config.clone(), Db { pool: None }).service_did();
+        let persisted = coland_test_support::app_state_with_service_did(
+            coland_test_support::app_config(),
+            service_did,
+        );
+        let state =
+            AppState::new_with_persistence(config, Db { pool: None }, persisted.test_persistence());
+        let holder = coland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
+        holder
+            .admit_into(state.test_persistence().as_ref())
+            .await
+            .expect("accepted holder PCR");
+        let requester_id = "ak:did_core:web:remote-alice.example"; // issuer, on source Station
+        let target = holder.history.account.principal_id.as_str();
+        // The private new-source quota is rooted in the holder's accepted PCR;
+        // an account projection alone supplies no private authority.
         state
             .identities()
             .save_account(coland_services::identity::AccountProfileState {

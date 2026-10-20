@@ -179,6 +179,7 @@ mod realm_default_strand_current_results;
 mod realm_fanout;
 mod realm_identity;
 mod realm_lifecycle_current_results;
+mod realm_reads;
 mod recovery;
 mod registry;
 mod relation_current_results;

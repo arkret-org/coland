@@ -1559,37 +1559,13 @@ mod typed_replay_tests {
         .unwrap()
     }
     fn commit(event: &arkret_wire::Event, position: u64) -> arkret_wire::RealmCommit {
-        arkret_wire::RealmCommit {
-            producer_signer_fact_digest: None,
-            commit_id: arkret_wire::RealmCommitId::from_digest([position as u8; 32]),
-            realm_id: realm_id(),
-            stream_ref: arkret_wire::CommitStreamRef::Realm {
-                realm_id: realm_id(),
-            },
-            stream_position: position,
-            previous_commit_ref: Some(arkret_wire::RealmCommitId::from_digest([0x09; 32])),
-            event_ref: event.event_id.clone(),
-            governance_generation: 0,
-            authority_ref: arkret_wire::RealmCommitAuthorityRef::GenesisOrChangeEvent(
-                arkret_wire::EventId::from_digest(
-                    arkret_canonical::DigestSuite::Sha256,
-                    [0x61; 32],
-                ),
-            ),
-            committed_at: at(),
-            signature: arkret_wire::DetachedObjectSignature {
-                context: arkret_wire::DetachedSignatureContext::RealmCommit,
-                signature_algorithm: arkret_wire::DetachedSignatureAlgorithm::Ed25519,
-                verification_method: arkret_wire::DidUrl::new(
-                    "did:web:mls-bump-station.example#authority",
-                )
-                .unwrap(),
-                signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "3".repeat(64)))
-                    .unwrap(),
-                created_at: at(),
-                sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
-            },
-        }
+        arkret_wire::test_support::structural_realm_commit_at(
+            event,
+            realm_id(),
+            position,
+            arkret_wire::DidUrl::new("did:web:mls-bump-station.example#authority").unwrap(),
+            at(),
+        )
     }
 
     #[test]

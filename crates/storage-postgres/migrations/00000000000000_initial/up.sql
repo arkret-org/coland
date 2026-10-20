@@ -1948,6 +1948,20 @@ CREATE TABLE public.keypackage_claim_sources (
     PRIMARY KEY (source_id, claim_request_id)
 );
 
+-- Source progress follows the requester Realm even when an ordinary recipient
+-- remains on the outgoing Station. It never owns or consumes a KeyPackage.
+CREATE TABLE public.realm_keypackage_claim_sources (
+    source_id text NOT NULL,
+    claim_request_id text NOT NULL,
+    request_digest text NOT NULL,
+    request_body jsonb NOT NULL,
+    governing_realm_id text NOT NULL,
+    result jsonb,
+    issuer_histories jsonb NOT NULL DEFAULT '[]'::jsonb,
+    PRIMARY KEY (source_id, claim_request_id)
+);
+CREATE INDEX realm_keypackage_claim_sources_realm_idx ON public.realm_keypackage_claim_sources (governing_realm_id);
+
 CREATE TABLE public.peer_keypackage_claims (
     source_id text NOT NULL,
     claim_request_id text NOT NULL,

@@ -58,6 +58,8 @@ url.workspace = true
 uuid = { workspace = true }
 
 [dev-dependencies]
+arkret = { workspace = true, features = ["mls"] }
+reqwest = { workspace = true, features = ["json", "rustls"] }
 tracing-subscriber.workspace = true
 bytes.workspace = true
 futures-util.workspace = true

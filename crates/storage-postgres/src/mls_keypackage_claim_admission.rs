@@ -176,7 +176,7 @@ pub(crate) async fn prepare_source(
     let source_id = request.service_binding.source_id.as_str();
     let digest = arkret_canonical::canonical_sha256(request).map_err(denied)?;
     let body = serde_json::to_value(request).map_err(denied)?;
-    let prior = sql_query("SELECT jsonb_build_object('digest',request_digest,'body',request_body,'realm',governing_realm_id) AS payload FROM keypackage_claim_sources WHERE source_id=$1 AND claim_request_id=$2")
+    let prior = sql_query("SELECT jsonb_build_object('digest',request_digest,'body',request_body,'realm',governing_realm_id) AS payload FROM realm_keypackage_claim_sources WHERE source_id=$1 AND claim_request_id=$2")
         .bind::<Text,_>(source_id).bind::<Text,_>(request.claim_request_id.as_str())
         .get_result::<JsonPayloadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     if let Some(prior) = prior {
@@ -213,7 +213,7 @@ pub(crate) async fn prepare_source(
             "fresh outbound claim has no current issuing tenure and time window",
         ));
     }
-    sql_query("INSERT INTO keypackage_claim_sources(source_id,claim_request_id,request_digest,request_body,governing_realm_id) VALUES($1,$2,$3,$4,$5)")
+    sql_query("INSERT INTO realm_keypackage_claim_sources(source_id,claim_request_id,request_digest,request_body,governing_realm_id) VALUES($1,$2,$3,$4,$5)")
         .bind::<Text,_>(source_id).bind::<Text,_>(request.claim_request_id.as_str())
         .bind::<Text,_>(digest).bind::<Jsonb,_>(body)
         .bind::<Text,_>(source.authority.realm_id.as_str())
@@ -270,6 +270,7 @@ pub(crate) async fn require_admission(
             &outcome,
             Some(request),
             &endpoints[0].authority.governance_service_id,
+            &[],
         )
     })
     .await?;
@@ -558,6 +559,7 @@ pub(crate) async fn require_stored_outcome(
     operation: arkret_wire::ServiceOperationId,
     outcome: &arkret_models_crypto::PeerKeyPackagesClaimOutcome,
     endpoints: &[AppletManagedDeviceScopeGuard],
+    remote_devices: &[coland_storage::MlsClaimRemoteDeviceEvidence],
 ) -> PersistenceResult<chrono::DateTime<Utc>> {
     use arkret_wire::ServiceOperationId;
     // Peer command/query recover the original signed result and its closed
@@ -582,11 +584,61 @@ pub(crate) async fn require_stored_outcome(
         #[diesel(sql_type=Nullable<BigInt>)]
         claim_expires_at_unix_ms: Option<i64>,
     }
-    let ledger=sql_query("SELECT outcome AS payload,state,expires_at,claim_expires_at_unix_ms FROM peer_keypackage_claims WHERE source_id=$1 AND claim_request_id=$2 AND request_digest=$3 FOR SHARE NOWAIT")
+    let source = (operation == ServiceOperationId::SelfKeysKeypackagesCommandClaimV1)
+        .then(|| {
+            endpoints.iter().find(|endpoint| {
+                outcome.claim_receipt.request.requester_actor_id.as_ref()
+                    == Some(&endpoint.authority.actor_id)
+            })
+        })
+        .flatten();
+    let ledger = if let Some(source) = source {
+        use arkret_models_crypto::PeerKeyPackagesClaimQueryState;
+        let locked = sql_query("SELECT request_body AS payload FROM realm_keypackage_claim_sources WHERE source_id=$1 AND claim_request_id=$2 AND request_digest=$3 FOR SHARE NOWAIT")
+            .bind::<Text,_>(outcome.claim_receipt.source_id.as_str())
+            .bind::<Text,_>(outcome.claim_request_id.as_str())
+            .bind::<Text,_>(outcome.claim_receipt.request_digest.as_str())
+            .get_result::<JsonPayloadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+        let stored = crate::realm_claim_source::read(
+            conn,
+            outcome.claim_receipt.source_id.as_str(),
+            outcome.claim_request_id.as_str(),
+        )
+        .await?
+        .ok_or_else(|| denied("Realm source ledger absent"))?;
+        if arkret_canonical::canonical_json_bytes(&stored.request).map_err(denied)?
+            != arkret_canonical::canonical_json_bytes(&locked.payload).map_err(denied)?
+        {
+            return Err(denied("Realm source ledger changed"));
+        }
+        let query = stored
+            .result
+            .ok_or_else(|| denied("Realm source has no original result"))?;
+        let state = match query.state {
+            PeerKeyPackagesClaimQueryState::Claimed => "claimed",
+            PeerKeyPackagesClaimQueryState::Consumed => "consumed",
+            _ => return Err(denied("Realm source material is terminally unavailable")),
+        };
+        let original = query
+            .claim_outcome
+            .ok_or_else(|| denied("Realm source claim absent"))?;
+        member(conn, &source.effective_scope, &source.authority.actor_id).await?;
+        for claim in &outcome.claims {
+            member(conn, &source.effective_scope, &claim.actor_id).await?;
+        }
+        DeliveryLedger {
+            payload: serde_json::to_value(&original).map_err(denied)?,
+            state: state.into(),
+            expires_at: (stored.request.expires_at + chrono::Duration::minutes(10)).timestamp(),
+            claim_expires_at_unix_ms: Some(original.claim_receipt.expires_at.timestamp_millis()),
+        }
+    } else {
+        sql_query("SELECT outcome AS payload,state,expires_at,claim_expires_at_unix_ms FROM peer_keypackage_claims WHERE source_id=$1 AND claim_request_id=$2 AND request_digest=$3 FOR SHARE NOWAIT")
         .bind::<Text,_>(outcome.claim_receipt.source_id.as_str())
         .bind::<Text,_>(outcome.claim_request_id.as_str())
         .bind::<Text,_>(outcome.claim_receipt.request_digest.as_str())
-        .get_result::<DeliveryLedger>(&mut *conn).await.map_err(PersistenceError::database)?;
+        .get_result::<DeliveryLedger>(&mut *conn).await.map_err(PersistenceError::database)?
+    };
     if arkret_canonical::canonical_json_bytes(&ledger.payload).map_err(denied)?
         != arkret_canonical::canonical_json_bytes(outcome).map_err(denied)?
     {
@@ -612,6 +664,15 @@ pub(crate) async fn require_stored_outcome(
         }
     }
     for claim in &outcome.claims {
+        if source.is_some_and(|source| {
+            claim
+                .actor_id
+                .fixed_route_service_id()
+                .is_some_and(|station| station != &source.authority.governance_service_id)
+        }) {
+            crate::mls_keypackage_claim_endpoints::remote_device_window(claim, remote_devices)?;
+            continue;
+        }
         let row = crate::mls::key_package_for_delivery(conn, &claim.keypackage_ref)
             .await?
             .ok_or_else(|| denied("original claim package is unavailable"))?;

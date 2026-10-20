@@ -6,6 +6,15 @@ mod applet_authoring;
 #[allow(dead_code)]
 mod ordinary_realm;
 #[tokio::test]
+async fn realm_device_claims_remote_ordinary_device_and_commits_mls_add() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_test_writer()
+        .try_init();
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_native_mls(database.pool())).await;
+}
+#[tokio::test]
 async fn realm_actor_control_lifecycle_and_account_audit_preserve_identity() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)

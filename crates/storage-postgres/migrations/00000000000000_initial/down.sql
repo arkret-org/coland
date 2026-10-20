@@ -2,6 +2,7 @@ DROP TABLE IF EXISTS public.realm_account_device_evidence;
 DROP TABLE IF EXISTS public.realm_claim_issuer_histories;
 DROP TABLE IF EXISTS public.realm_actor_device_revoke_cleanup;
 DROP TABLE IF EXISTS public.keypackage_claim_sources;
+DROP TABLE IF EXISTS public.realm_keypackage_claim_sources;
 DROP TABLE IF EXISTS public.realm_actor_mls_cleanup;
 DROP TABLE IF EXISTS public.realm_actor_recovery_intents;
 DROP TABLE IF EXISTS public.realm_actor_device_revoke_results;

@@ -818,7 +818,13 @@ pub(crate) async fn realm_mls_device_projection(
     requester: &arkret_wire::ActorId,
     account: &arkret_wire::AccountId,
     device: &arkret_wire::DeviceId,
-) -> Result<QueryDeviceRecord, AppError> {
+) -> Result<
+    (
+        QueryDeviceRecord,
+        coland_storage::MlsClaimRemoteDeviceEvidence,
+    ),
+    AppError,
+> {
     let realm = requester
         .as_realm_actor_id()
         .ok_or_else(|| AppError::param_invalid("MLS requester must be a Realm actor"))?;
@@ -849,9 +855,23 @@ pub(crate) async fn realm_mls_device_projection(
         .find(|entry| entry.account_id == *account)
         .and_then(|entry| entry.device_keys.get(device))
         .ok_or_else(unavailable)?;
-    verified_remote_device_projection(state, account, device, record, generation)
+    let projection = verified_remote_device_projection(state, account, device, record, generation)
         .await
-        .ok_or_else(unavailable)
+        .ok_or_else(unavailable)?;
+    let issuer_resolution =
+        super::agents::evidence::fetch_service_resolution(state, &account.station_id, None)
+            .await
+            .map_err(|_| unavailable())?;
+    Ok((
+        projection,
+        coland_storage::MlsClaimRemoteDeviceEvidence {
+            account_id: account.clone(),
+            device_id: device.clone(),
+            generation: generation.clone(),
+            record: record.clone(),
+            issuer_resolution,
+        },
+    ))
 }
 
 /// Reuse the exact-device directory gate for the query-local signer surface.

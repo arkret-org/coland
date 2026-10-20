@@ -183,6 +183,31 @@ impl PgMlsKeyPackageStore {
 }
 #[async_trait]
 impl MlsKeyPackageStore for PgMlsKeyPackageStore {
+    async fn realm_claim_source(
+        &self,
+        source_id: &str,
+        claim_request_id: &str,
+    ) -> PersistenceResult<Option<coland_storage::RealmKeyPackageClaimSource>> {
+        let mut conn = pg_conn(&self.pool).await?;
+        crate::realm_claim_source::read(&mut conn, source_id, claim_request_id).await
+    }
+    async fn retain_realm_claim_source_result(
+        &self,
+        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        result: &arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome,
+        histories: &[arkret_models_identity::AuthenticatedServiceResolution],
+        governor: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            Ok(
+                crate::realm_claim_source::retain(conn, request, result, histories, governor)
+                    .await?,
+            )
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
     async fn prepare_realm_claim_source(
         &self,
         request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
@@ -241,6 +266,10 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
         let owner = body
             .target_account_id
             .as_ref()
+            .cloned()
+            .map(arkret_wire::ActorId::account)
+            .or_else(|| body.target_actor_id.clone())
+            .as_ref()
             .map(serde_json::to_value)
             .transpose()
             .map_err(PersistenceError::database)?;
@@ -256,8 +285,8 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
-        // A Device belongs to the complete Account, whereas an Agent has its
-        // own principal and stores its package under its controller Account.
+        // A Device belongs to the complete Account or Realm Actor, whereas an
+        // Agent has its own principal and stores its package under its controller.
         // An exact-reference command cannot fall back to another package.
         sql_query(
             "SELECT id,keypackage_ref,keypackage_digest,owner_actor_id,effective_scope,actor_id,device_id,endpoint_verification_method, \

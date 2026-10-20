@@ -1249,6 +1249,18 @@ pub trait MlsKeyPackageMaintenancePort: Send + Sync {
         claim_request_id: &str,
         request_digest: &str,
     ) -> ServiceResult<Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>>;
+    async fn realm_claim_source(
+        &self,
+        source_id: &str,
+        claim_request_id: &str,
+    ) -> ServiceResult<Option<coland_storage::RealmKeyPackageClaimSource>>;
+    async fn retain_realm_claim_source_result(
+        &self,
+        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        result: &arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome,
+        histories: &[arkret_models_identity::AuthenticatedServiceResolution],
+        governor: &arkret_wire::DidCoreId,
+    ) -> ServiceResult<arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome>;
     async fn prepare_realm_claim_source(
         &self,
         request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
@@ -1402,6 +1414,26 @@ impl MlsKeyPackageService {
     }
     pub async fn prune_peer_claim_attempts(&self) -> ServiceResult<usize> {
         self.key_packages.prune_peer_claim_attempts().await
+    }
+    pub async fn realm_claim_source(
+        &self,
+        source_id: &str,
+        claim_request_id: &str,
+    ) -> ServiceResult<Option<coland_storage::RealmKeyPackageClaimSource>> {
+        self.key_packages
+            .realm_claim_source(source_id, claim_request_id)
+            .await
+    }
+    pub async fn retain_realm_claim_source_result(
+        &self,
+        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        result: &arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome,
+        histories: &[arkret_models_identity::AuthenticatedServiceResolution],
+        governor: &arkret_wire::DidCoreId,
+    ) -> ServiceResult<arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome> {
+        self.key_packages
+            .retain_realm_claim_source_result(request, result, histories, governor)
+            .await
     }
     pub async fn prepare_realm_claim_source(
         &self,

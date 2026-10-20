@@ -965,6 +965,7 @@ async fn peer_claim_keypackage(
             None,
             mls_keypackage_native::peer_deadline(req)?,
             Some(&command),
+            Vec::new(),
         )
         .await?
     } else {
@@ -1337,6 +1338,7 @@ async fn peer_query_keypackage_claim(
             None,
             mls_keypackage_native::peer_deadline(req)?,
             None,
+            Vec::new(),
         )
         .await?
     } else {
@@ -2309,7 +2311,7 @@ async fn claim_keypackage(
             deadline,
         )
     };
-    let credential_deadline = if source.is_some() {
+    let (credential_deadline, remote_devices) = if source.is_some() {
         mls_keypackage_native::verify_ordinary_target(
             state,
             &original_command,
@@ -2318,7 +2320,7 @@ async fn claim_keypackage(
         )
         .await?
     } else {
-        credential_deadline
+        (credential_deadline, Vec::new())
     };
     let peer_outcome = PeerKeyPackagesClaimOutcome {
         claim_request_id: outcome.claim_request_id.clone(),
@@ -2332,6 +2334,7 @@ async fn claim_keypackage(
         source.as_ref(),
         credential_deadline,
         Some(&original_command),
+        remote_devices,
     )
     .await?;
     coland_http::result::guarded_json_ok(outcome, guard)
@@ -2695,6 +2698,7 @@ async fn query_own_keypackage_claim(
             Some(&source),
             source.1,
             None,
+            Vec::new(),
         )
         .await
         .map_err(|_| keypackage_claim_unknown())?
@@ -2759,6 +2763,28 @@ pub(crate) async fn capture_relayed_keypackage_claim_outcome(
         serde_json::from_str(request_body).map_err(|error| error.to_string())?;
     let outcome: KeyPackagesClaimOutcome =
         serde_json::from_str(response_body).map_err(|error| error.to_string())?;
+    if request.requester_actor_id.is_some() {
+        let query = PeerKeyPackagesClaimQueryOutcome {
+            claim_request_id: request.claim_request_id.clone(),
+            state: PeerKeyPackagesClaimQueryState::Claimed,
+            claim_outcome: Some(
+                serde_json::from_value(serde_json::to_value(&outcome).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?,
+            ),
+            consume_receipt: None,
+            terminal_receipt: None,
+            retry_after_ms: None,
+            error_code: None,
+        };
+        mls_keypackage_native::capture_source_result(
+            state,
+            &PeerKeyPackagesClaimRequestBody::from(&request),
+            &query,
+        )
+        .await
+        .map_err(|e| e.message)?;
+        return Ok(());
+    }
     outcome
         .validate_shape()
         .map_err(|error| error.to_string())?;
@@ -2882,6 +2908,14 @@ pub(crate) async fn capture_relayed_keypackage_claim_query(
     request_body: &str,
     query: &PeerKeyPackagesClaimQueryOutcome,
 ) -> Result<(), String> {
+    let original: PeerKeyPackagesClaimRequestBody =
+        serde_json::from_str(request_body).map_err(|e| e.to_string())?;
+    if original.requester_actor_id.is_some() {
+        mls_keypackage_native::capture_source_result(state, &original, query)
+            .await
+            .map_err(|e| e.message)?;
+        return Ok(());
+    }
     query.validate_shape().map_err(|error| error.to_string())?;
     if matches!(
         query.state,

@@ -4,6 +4,8 @@
 
 #[path = "management_archive_fixture.rs"]
 mod management_archive_fixture;
+#[path = "realm_actor_mls_fixture.rs"]
+mod realm_actor_mls_fixture;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -1245,6 +1247,9 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
             "ak.applet.bot.provision",
             "ak.applet.ghost.provision",
         ];
+        if package.e2ee_policy.enabled {
+            actions.extend(["ak.event.read", "ak.mls.commit", "ak.mls.genesis"]);
+        }
         if scope_label.contains("registered-audit") {
             actions.extend(["ak.strand.watch.set.others", "ak.audit.accessed"]);
         }
@@ -1305,8 +1310,8 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
             "schema":AppletInstallAuthoringRequestBasis::SCHEMA,"purpose":"install_service","target_station_id":self.fixture.state.service_core_id(),
             "install_actor_id":registration.actor_id,"applet_id":package.applet_id,"service_id":package.service_id,"package_digest":package.package_digest,
             "effective_scope":scope,"approval_request":{"approve_actions":actions,
-                "ghost_actor_mode":"policy_declared","delegated_native_actors_allowed":false,"e2ee_join_allowed":false,"widget_allowed":false},
-            "actor_policy":{"ghost_actor_mode":"policy_declared"},"e2ee_policy":{"mls_join_allowed":false},"widget_policy":{"widget_allowed":false},
+                "ghost_actor_mode":"policy_declared","delegated_native_actors_allowed":false,"e2ee_join_allowed":package.e2ee_policy.enabled,"widget_allowed":false},
+            "actor_policy":{"ghost_actor_mode":"policy_declared"},"e2ee_policy":{"mls_join_allowed":package.e2ee_policy.enabled},"widget_policy":{"widget_allowed":false},
             "registration_event":registration,"capability_grant_events":grants,
         })).unwrap();
         let preview_body = serde_json::to_value(AppletInstallPreviewRequestBody {
@@ -1395,7 +1400,9 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
                     registration_event_ref: accepted_ref(refs, registration)?.event_id,
                     registration_epoch: package.registration_epoch.clone(),
                     capability_grant_refs: grant_refs.clone(),
-                    e2ee_authorization_refs: vec![],
+                    e2ee_authorization_refs: body
+                        .e2ee_join_authorization_refs()
+                        .map_err(|error| PersistenceError::Conflict(error.to_string()))?,
                     widget_policy_ref: None,
                     effective_status: AppletInstallEffectiveStatus::Installed,
                     rejections: vec![],
@@ -1997,7 +2004,7 @@ mod realm_native_fixture {
         )
     }
 
-    async fn managed_device_post(
+    pub(super) async fn managed_device_post(
         fixture: &Fixture,
         metadata: &arkret_models_integration::AppletManagedDeviceMetadata,
         method: &DidUrl,
@@ -2009,17 +2016,21 @@ mod realm_native_fixture {
         let bytes = arkret_canonical::canonical_json_bytes(body).unwrap();
         let digest = content_digest_header(&bytes);
         let metadata = metadata.to_header_value().unwrap();
-        let scheme = fixture
-            .state
-            .config()
-            .public_base_url
-            .split_once("://")
-            .unwrap()
-            .0;
+        let idempotency = body
+            .get("claim_request_id")
+            .or_else(|| body.get("idempotency_key"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        let request_url = format!(
+            "{}{path}",
+            fixture.state.config().public_base_url.trim_end_matches('/')
+        );
+        let target = url::Url::parse(&request_url).unwrap();
         let parts = SignedRequestParts {
             method: "POST".into(),
-            target_uri: format!("{scheme}://server{path}"),
-            authority: "server".into(),
+            target_uri: request_url.clone(),
+            authority: target[url::Position::BeforeHost..url::Position::AfterPort].into(),
             path: path.into(),
             headers: vec![
                 ("arkret-operation".into(), operation.as_str().into()),
@@ -2030,7 +2041,7 @@ mod realm_native_fixture {
                     fixture.state.service_id().into(),
                 ),
                 ("arkret-managed-device".into(), metadata),
-                ("idempotency-key".into(), uuid::Uuid::now_v7().to_string()),
+                ("idempotency-key".into(), idempotency),
             ],
             body_digest: Some(digest),
         };
@@ -2044,24 +2055,28 @@ mod realm_native_fixture {
             &SigningKey::from_bytes(seed),
         )
         .unwrap();
-        let mut request = TestClient::post(format!("http://server{path}"));
+        let client = reqwest::Client::builder()
+            .add_root_certificate(
+                reqwest::Certificate::from_pem(include_bytes!(
+                    "../../../server/tests/fixtures/outbox-test-ca.pem"
+                ))
+                .unwrap(),
+            )
+            .build()
+            .unwrap();
+        let mut request = client.post(request_url);
         for (name, value) in parts.headers {
-            request = request.add_header(
-                salvo::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
-                value,
-                true,
-            );
+            request = request.header(name, value);
         }
-        let mut response = request
-            .add_header("signature-input", signature.signature_input_header, true)
-            .add_header("signature", signature.signature_header, true)
+        let response = request
+            .header("signature-input", signature.signature_input_header)
+            .header("signature", signature.signature_header)
             .body(bytes)
-            .send(&service(fixture.state.clone()))
-            .await;
-        (
-            response.status_code.unwrap(),
-            response.take_json().await.unwrap(),
-        )
+            .send()
+            .await
+            .unwrap();
+        let status = StatusCode::from_u16(response.status().as_u16()).unwrap();
+        (status, response.json().await.unwrap())
     }
 
     async fn peer_audit_post(
@@ -2335,6 +2350,23 @@ mod realm_native_fixture {
         creation_commit: &arkret_wire::RealmCommit,
         key_seed: u8,
     ) -> arkret_wire::DeviceId {
+        Box::pin(authorize_device_with_actions(
+            fixture,
+            candidate,
+            creation_commit,
+            key_seed,
+            &["ak.applet.join", "ak.message.create"],
+        ))
+        .await
+    }
+
+    async fn authorize_device_with_actions(
+        fixture: &Fixture,
+        candidate: &RealmActorCreatePayload,
+        creation_commit: &arkret_wire::RealmCommit,
+        key_seed: u8,
+        actions: &[&str],
+    ) -> arkret_wire::DeviceId {
         use arkret_models_collaboration::authority_commit::{
             SelfAuthoritySubmitOutcome, SelfAuthoritySubmitRequest,
         };
@@ -2359,7 +2391,7 @@ mod realm_native_fixture {
             "algorithms":["ak.hpke_x25519_aead_chacha20poly1305.v1"],
             "device_key_algorithm":"Ed25519",
             "authorized_by":candidate.actor_id.signing_principal_id(),
-            "scopes":[{"effective_scope":candidate.creation_scope,"actions":["ak.applet.join","ak.message.create"]}],
+            "scopes":[{"effective_scope":candidate.creation_scope,"actions":actions}],
             "not_before":at, "expires_at":at+chrono::Duration::hours(1),
             "authorization_binding_kind":"realm_managed_delegation", "authorized_generation_ref":1,
             "device_signature":"unsigned", "applet_id":candidate.applet_id,
@@ -4518,14 +4550,14 @@ mod realm_native_fixture {
         }
     }
 
-    struct NetworkStation(tokio::task::JoinHandle<()>);
+    pub(super) struct NetworkStation(tokio::task::JoinHandle<()>);
     impl Drop for NetworkStation {
         fn drop(&mut self) {
             self.0.abort();
         }
     }
 
-    async fn network_fixture(pool: PgPool) -> (Fixture, NetworkStation) {
+    pub(super) async fn network_fixture(pool: PgPool) -> (Fixture, NetworkStation) {
         use salvo::conn::rustls::{Keycert, RustlsConfig};
         use salvo::conn::{Acceptor, Listener, TcpListener};
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -5244,7 +5276,7 @@ mod realm_native_fixture {
     }
 
     #[inline(never)]
-    fn boxed_step<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
+    pub(super) fn boxed_step<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future,
@@ -5252,7 +5284,7 @@ mod realm_native_fixture {
         Box::pin(make())
     }
 
-    pub(super) async fn run(pool: PgPool) {
+    pub(super) async fn run(pool: PgPool, mls: bool) {
         use arkret_models_collaboration::authority_commit::{
             SelfAuthoritySubmitOutcome, SelfAuthoritySubmitRequest,
         };
@@ -5263,7 +5295,10 @@ mod realm_native_fixture {
             scopes: Default::default(),
         };
         let id = AppletId::new(format!("ak:applet:{}", uuid::Uuid::now_v7())).unwrap();
-        let native = NativeService::new(&id, &factory.fixture.state.service_core_id());
+        let mut native = NativeService::new(&id, &factory.fixture.state.service_core_id());
+        if mls {
+            realm_actor_mls_fixture::enable(&mut native.package);
+        }
         factory
             .packages
             .lock()
@@ -5370,9 +5405,35 @@ mod realm_native_fixture {
         eprintln!("native lifecycle: private material");
         Box::pin(private_material(&factory.fixture, &candidate, &before)).await;
         eprintln!("native lifecycle: first Device");
-        let device = boxed_step(|| first_device(&factory.fixture, &candidate, &before)).await;
+        let device = if mls {
+            boxed_step(|| {
+                authorize_device_with_actions(
+                    &factory.fixture,
+                    &candidate,
+                    &before,
+                    79,
+                    &[
+                        "ak.applet.join",
+                        "ak.event.read",
+                        "ak.message.create",
+                        "ak.mls.commit",
+                        "ak.mls.genesis",
+                    ],
+                )
+            })
+            .await
+        } else {
+            boxed_step(|| first_device(&factory.fixture, &candidate, &before)).await
+        };
         eprintln!("native lifecycle: Device-authored self join");
         boxed_step(|| self_join(&factory.fixture, &candidate, &device, &record)).await;
+        if mls {
+            boxed_step(|| {
+                realm_actor_mls_fixture::run(&factory.fixture, &package, &candidate, &device)
+            })
+            .await;
+            return;
+        }
         eprintln!("native lifecycle: independent Device revoke terminal");
         boxed_step(|| device_revoke(&factory.fixture, &candidate, &before)).await;
         eprintln!("native lifecycle: recovery");
@@ -5420,5 +5481,9 @@ mod realm_native_fixture {
 }
 
 pub async fn realm_native_creation(pool: PgPool) {
-    realm_native_fixture::run(pool).await;
+    realm_native_fixture::run(pool, false).await;
+}
+
+pub async fn realm_native_mls(pool: PgPool) {
+    realm_native_fixture::run(pool, true).await;
 }

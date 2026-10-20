@@ -105,6 +105,7 @@ const TABLES: &[(&str, &str)] = &[
         "t.owner_actor_id#>>'{realm_actor_id,realm_id}'=$1",
     ),
     ("keypackage_claim_sources", "t.governing_realm_id=$1"),
+    ("realm_keypackage_claim_sources", "t.governing_realm_id=$1"),
     (
         "keypackage_claim_attempts",
         "EXISTS(SELECT 1 FROM keypackage_claim_sources s WHERE s.governing_realm_id=$1 AND s.source_id=t.source_id AND s.claim_request_id=t.claim_request_id)",
@@ -249,6 +250,7 @@ async fn state(conn: &mut AsyncPgConnection, realm: &RealmId) -> PersistenceResu
         .await
         .map_err(PersistenceError::database)?;
 
+    crate::realm_claim_source::validate_archive(conn, realm).await?;
     let claims = sql_query("SELECT jsonb_build_object('source_id',c.source_id,'claim_request_id',c.claim_request_id,'has_request',EXISTS(SELECT 1 FROM keypackage_claim_sources s WHERE s.source_id=c.source_id AND s.claim_request_id=c.claim_request_id AND s.request_body#>>'{target_actor_id,realm_actor_id,realm_id}'=$1)) AS value FROM peer_keypackage_claims c WHERE c.outcome#>>'{claim_receipt,request,target_actor_id,realm_actor_id,realm_id}'=$1")
         .bind::<Text,_>(realm.as_str()).get_results::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     for claim in claims {

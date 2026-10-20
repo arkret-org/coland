@@ -224,6 +224,38 @@ async fn realm_requester_retains_exact_original_even_without_an_allocated_packag
             .is_none()
     );
     let mut conn = pool.get().await.unwrap();
+    // A source recovery row and an ordinary recipient row may coexist on one
+    // Station. This fixture tests persistence ownership, not Device admission.
+    diesel::sql_query("INSERT INTO realm_keypackage_claim_sources(source_id,claim_request_id,request_digest,request_body,governing_realm_id) VALUES($1,$2,$3,$4,$5)")
+        .bind::<diesel::sql_types::Text,_>(body.service_binding.source_id.as_str())
+        .bind::<diesel::sql_types::Text,_>(body.claim_request_id.as_str())
+        .bind::<diesel::sql_types::Text,_>(&digest)
+        .bind::<diesel::sql_types::Jsonb,_>(serde_json::to_value(&body).unwrap())
+        .bind::<diesel::sql_types::Text,_>(body.intended_realm_id.as_str())
+        .execute(&mut *conn).await.unwrap();
+    drop(conn);
+    let source = worker
+        .realm_claim_source(
+            body.service_binding.source_id.as_str(),
+            body.claim_request_id.as_str(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(source.result.is_none());
+    assert_eq!(
+        serde_json::to_value(&source.request).unwrap(),
+        serde_json::to_value(&body).unwrap()
+    );
+    assert!(
+        worker
+            .peer_claim_original(body.claim_request_id.as_str(), &digest)
+            .await
+            .unwrap()
+            .is_some(),
+        "identical source and recipient originals are one original, not ambiguous"
+    );
+    let mut conn = pool.get().await.unwrap();
     diesel::sql_query("UPDATE keypackage_claim_sources SET request_body=jsonb_set(request_body,'{timeout_ms}','2'::jsonb)")
         .execute(&mut *conn).await.unwrap();
     assert!(

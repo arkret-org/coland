@@ -303,6 +303,15 @@ pub struct PeerKeyPackageClaimLedgerRecord {
     pub updated_at: i64,
 }
 
+/// Requester-side recovery material, independently owned by its Realm. The
+/// recipient's allocation/consume ledger stays at the recipient authority.
+#[derive(Clone, Debug)]
+pub struct RealmKeyPackageClaimSource {
+    pub request: arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    pub result: Option<arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome>,
+    pub issuer_histories: Vec<arkret_models_identity::AuthenticatedServiceResolution>,
+}
+
 /// The one Welcome a claim destination queued for one claim, recorded on
 /// that claim's ledger row in the queueing transaction (device-lifecycle.md
 /// §9.2.3, decision 0121). Consume is checked against it alone.
@@ -340,6 +349,18 @@ pub struct MlsKeyPackageClaimDelivery {
     pub outcome: arkret_models_crypto::PeerKeyPackagesClaimOutcome,
     pub endpoints: Vec<crate::AppletManagedDeviceScopeGuard>,
     pub command: Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>,
+    pub remote_devices: Vec<MlsClaimRemoteDeviceEvidence>,
+}
+
+/// Original peer evidence retained through the final local delivery cut.
+/// Storage revalidates its signature, binding, lifetime and actual MLS leaf.
+#[derive(Clone, Debug)]
+pub struct MlsClaimRemoteDeviceEvidence {
+    pub account_id: arkret_wire::AccountId,
+    pub device_id: arkret_wire::DeviceId,
+    pub generation: arkret_models_crypto::AccountDeviceGenerationEntry,
+    pub record: arkret_models_crypto::PeerQueryDeviceRecord,
+    pub issuer_resolution: arkret_models_identity::AuthenticatedServiceResolution,
 }
 
 /// Private attempt accounting, never a claim receipt or business authority.
@@ -856,6 +877,20 @@ pub trait MlsKeyPackageStore: Send + Sync {
         source: &crate::AppletManagedDeviceScopeGuard,
         transport_expires_at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<bool>;
+    async fn realm_claim_source(
+        &self,
+        source_id: &str,
+        claim_request_id: &str,
+    ) -> PersistenceResult<Option<RealmKeyPackageClaimSource>>;
+    /// Retain an independently verified destination result under the current
+    /// requester Realm lock. Exact retry returns the first durable bytes.
+    async fn retain_realm_claim_source_result(
+        &self,
+        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        result: &arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome,
+        histories: &[arkret_models_identity::AuthenticatedServiceResolution],
+        governor: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome>;
     /// Resolve the ledger row whose stored success outcome issued the exact
     /// `KeypackageClaimId` a Welcome names (`keypackage_claim_ref`).
     async fn realm_claim_issuer_resolution(

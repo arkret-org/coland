@@ -758,6 +758,30 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
             .get_peer_claim(source_id, claim_request_id)
             .await?)
     }
+    async fn realm_claim_source(
+        &self,
+        source_id: &str,
+        claim_request_id: &str,
+    ) -> crate::ServiceResult<Option<coland_storage::RealmKeyPackageClaimSource>> {
+        Ok(self
+            .0
+            .mls_key_packages()
+            .realm_claim_source(source_id, claim_request_id)
+            .await?)
+    }
+    async fn retain_realm_claim_source_result(
+        &self,
+        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        result: &arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome,
+        histories: &[arkret_models_identity::AuthenticatedServiceResolution],
+        governor: &arkret_wire::DidCoreId,
+    ) -> crate::ServiceResult<arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome> {
+        Ok(self
+            .0
+            .mls_key_packages()
+            .retain_realm_claim_source_result(request, result, histories, governor)
+            .await?)
+    }
     async fn prepare_realm_claim_source(
         &self,
         request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,

@@ -909,11 +909,10 @@ async fn verify_welcomes(
                 "the Welcome does not name the exact Commit Event",
             ));
         }
-        let recipient_account = welcome
-            .recipient_actor_id
-            .as_account_id()
-            .ok_or_else(|| failed_precondition("a Welcome recipient is an Account actor"))?;
-        if recipient_account.station_id != local {
+        let owner = crate::routing::actor_delivery_station(state, &welcome.recipient_actor_id)
+            .await
+            .map_err(|error| failed_precondition(error.to_string()))?;
+        if owner != local {
             continue;
         }
         let (claim, record) = resolve_claim(state, event, welcome).await?;
@@ -1006,10 +1005,6 @@ pub(super) async fn resolve_claim(
     welcome: &MlsWelcomeDelivery,
 ) -> ServiceResult<(MlsWelcomeClaimLedgerKey, KeyPackageClaimRecord)> {
     let local = state.service_core_id();
-    let recipient_account = welcome
-        .recipient_actor_id
-        .as_account_id()
-        .ok_or_else(|| failed_precondition("a Welcome recipient is an Account actor"))?;
     let row = state
         .mls_key_packages()
         .peer_claim_by_claim_id(welcome.keypackage_claim_ref.as_str())
@@ -1028,8 +1023,8 @@ pub(super) async fn resolve_claim(
         .ok_or_else(|| failed_precondition("the claim ledger row holds no success outcome"))
         .and_then(|outcome| serde_json::from_value(outcome).map_err(schema))?;
     let receipt = &outcome.claim_receipt;
-    if receipt.destination_id != local
-        || receipt.source_id.as_str() != row.source_id
+    outcome.validate_shape().map_err(schema)?;
+    if receipt.source_id.as_str() != row.source_id
         || receipt.claim_request_id.as_str() != row.claim_request_id
         || receipt.request_digest.as_str() != row.request_digest
     {
@@ -1037,35 +1032,105 @@ pub(super) async fn resolve_claim(
             "the stored claim receipt does not bind its ledger row",
         ));
     }
-    let transcript = arkret_models_crypto::peer_keypackage_claim_receipt_signing_bytes(receipt)
-        .map_err(|error| ServiceError::Internal(error.to_string()))?;
-    let signature = arkret_canonical::base64url_decode(receipt.signature.sig.as_str())
-        .ok()
-        .and_then(|bytes| ed25519_dalek::Signature::from_slice(&bytes).ok())
-        .ok_or_else(|| failed_precondition("the stored claim receipt signature is malformed"))?;
-    state
-        .notary_signing_key()
-        .verifying_key()
-        .verify_strict(&transcript, &signature)
-        .map_err(|_| failed_precondition("the stored claim receipt signature does not verify"))?;
+    let original = state
+        .mls_key_packages()
+        .peer_claim_original(&row.claim_request_id, &row.request_digest)
+        .await?
+        .ok_or_else(|| failed_precondition("the original participant command is absent"))?;
+    if original.service_binding.source_id != receipt.source_id
+        || original.service_binding.destination_id != receipt.destination_id
+        || original.unsigned_request() != receipt.request
+    {
+        return Err(failed_precondition(
+            "the original participant command differs from the claim",
+        ));
+    }
+    let owner = crate::routing::actor_delivery_station(state, &welcome.recipient_actor_id)
+        .await
+        .map_err(|error| failed_precondition(error.to_string()))?;
+    if owner != local {
+        return Err(failed_precondition("the recipient is not governed here"));
+    }
+    let resolution = if let Some(actor) = welcome.recipient_actor_id.as_realm_actor_id() {
+        if actor.realm_id != event.realm_id {
+            return Err(failed_precondition(
+                "Realm recipient belongs to another Realm",
+            ));
+        }
+        let authority = crate::routing::realm_join::resolve_verified_authority_of_service(
+            state,
+            &actor.realm_id,
+            &local,
+        )
+        .await
+        .map_err(|error| failed_precondition(error.to_string()))?;
+        if !authority.authority.authorizes_issuer_at(
+            &receipt.destination_id,
+            receipt.claim_authority_ref.as_ref(),
+            receipt.claimed_at,
+        ) {
+            return Err(failed_precondition(
+                "claim issuer has no original governing tenure",
+            ));
+        }
+        state
+            .mls_key_packages()
+            .realm_claim_issuer_resolution(&row.source_id, &row.claim_request_id)
+            .await?
+            .ok_or_else(|| failed_precondition("original claim issuer history is absent"))?
+    } else {
+        if receipt.destination_id != local {
+            return Err(failed_precondition(
+                "ordinary recipient changed its origin Station",
+            ));
+        }
+        crate::routing::system::service_resolution::current_authenticated_service_resolution(state)
+            .await
+            .map_err(|error| failed_precondition(error.to_string()))?
+    };
+    arkret::verify_peer_keypackage_claim_receipt_signature(receipt, &resolution)
+        .map_err(|error| failed_precondition(error.to_string()))?;
     let request = &receipt.request;
     let group_id = event.scope_ref.canonical_mls_group_id().map_err(schema)?;
     let target_matches = match (
         &welcome.recipient_endpoint,
         &request.target_account_id,
+        &request.target_actor_id,
         &request.target_agent_id,
     ) {
-        (MlsWelcomeRecipientEndpoint::Device { .. }, Some(account), None) => {
-            account == recipient_account
+        (MlsWelcomeRecipientEndpoint::Device { .. }, Some(account), None, None) => {
+            welcome.recipient_actor_id.as_account_id() == Some(account)
         }
-        (MlsWelcomeRecipientEndpoint::AgentRuntime { .. }, None, Some(agent_id)) => {
-            agent_id == &recipient_account.principal_id
+        (MlsWelcomeRecipientEndpoint::Device { .. }, None, Some(actor), None) => {
+            actor == &welcome.recipient_actor_id
         }
+        (MlsWelcomeRecipientEndpoint::AgentRuntime { .. }, None, None, Some(agent_id)) => welcome
+            .recipient_actor_id
+            .as_account_id()
+            .is_some_and(|account| {
+                agent_id == &account.principal_id && account.station_id == receipt.destination_id
+            }),
         _ => false,
+    };
+    let requester = match &original.requester_authorization {
+        arkret_models_crypto::PeerKeyPackageRequesterAuthorization::Device { .. } => original
+            .requester_account_id
+            .clone()
+            .map(arkret_wire::ActorId::account),
+        arkret_models_crypto::PeerKeyPackageRequesterAuthorization::RealmDevice { .. } => {
+            original.requester_actor_id.clone()
+        }
+        arkret_models_crypto::PeerKeyPackageRequesterAuthorization::Agent {
+            requester_agent_id,
+            ..
+        } => Some(arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+            requester_agent_id.clone(),
+            original.service_binding.source_id.clone(),
+        ))),
     };
     if request.intended_realm_id != event.realm_id
         || request.mls_group_id != group_id
-        || request.requester_account_id.as_ref() != event.actor_id.as_account_id()
+        || requester.as_ref() != Some(&event.actor_id)
         || !target_matches
     {
         return Err(failed_precondition(

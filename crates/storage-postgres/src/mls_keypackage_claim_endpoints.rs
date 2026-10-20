@@ -1,4 +1,7 @@
 //! Current local claim endpoints, derived from their accepted SDK originals.
+#[cfg(test)]
+#[path = "mls_keypackage_claim_endpoints_tests.rs"]
+mod tests;
 use arkret_models_collaboration::events_payloads::DeviceAuthorizePayload;
 use arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload;
 use arkret_models_crypto::{
@@ -27,6 +30,7 @@ impl EndpointWindow {
     }
 }
 enum Endpoint {
+    RemoteDevice,
     RealmDevice {
         authority: coland_storage::AppletManagedDeviceAuthority,
     },
@@ -62,6 +66,9 @@ impl ClaimEndpoint {
             return Err(denied("claim endpoint authorization window ended"));
         }
         match &self.endpoint {
+            // The origin-signed evidence was checked in prepare; only its
+            // unchanged bounded window can be held across this local cut.
+            Endpoint::RemoteDevice => {}
             Endpoint::RealmDevice { authority } => {
                 let current = crate::realm_actor_device_authority::current_in_connection(
                     conn,
@@ -293,6 +300,7 @@ pub(crate) async fn prepare(
     outcome: &PeerKeyPackagesClaimOutcome,
     command: Option<&PeerKeyPackagesClaimRequestBody>,
     station: &DidCoreId,
+    remote_devices: &[coland_storage::MlsClaimRemoteDeviceEvidence],
 ) -> PersistenceResult<Vec<ClaimEndpoint>> {
     outcome.validate_shape().map_err(denied)?;
     let mut result = Vec::new();
@@ -391,7 +399,25 @@ pub(crate) async fn prepare(
             continue;
         }
         if claim.actor_id.fixed_route_service_id() != Some(station) {
-            return Err(denied("claim target has no local original barrier"));
+            let request = &outcome.claim_receipt.request;
+            if request
+                .requester_actor_id
+                .as_ref()
+                .and_then(ActorId::as_realm_actor_id)
+                .is_none_or(|actor| actor.realm_id != request.intended_realm_id)
+                || command.is_none()
+            {
+                return Err(denied(
+                    "remote target requires its original Realm source command",
+                ));
+            }
+            let window = remote_device_window(claim, remote_devices)?;
+            result.push(ClaimEndpoint {
+                realm: request.intended_realm_id.clone(),
+                endpoint: Endpoint::RemoteDevice,
+                window,
+            });
+            continue;
         }
         match (
             &claim.device_id,
@@ -414,4 +440,105 @@ pub(crate) async fn prepare(
         }
     }
     Ok(result)
+}
+
+pub(crate) fn remote_device_window(
+    claim: &arkret_models_crypto::KeyPackageClaimRecord,
+    evidence: &[coland_storage::MlsClaimRemoteDeviceEvidence],
+) -> PersistenceResult<EndpointWindow> {
+    let account = claim
+        .actor_id
+        .as_account_id()
+        .ok_or_else(|| denied("remote claim must target an ordinary Account Device"))?;
+    let device = claim
+        .device_id
+        .as_ref()
+        .ok_or_else(|| denied("remote claim Device is absent"))?;
+    let mut matches = evidence
+        .iter()
+        .filter(|e| &e.account_id == account && &e.device_id == device);
+    let evidence = matches
+        .next()
+        .ok_or_else(|| denied("remote claim evidence absent"))?;
+    if matches.next().is_some() {
+        return Err(denied("remote claim evidence is ambiguous"));
+    }
+    evidence
+        .record
+        .validate_attestation_binding(account, device)
+        .map_err(denied)?;
+    let attestation = &evidence.record.device_projection_attestation;
+    let core = &attestation.attestation;
+    if &evidence.generation.account_id != account
+        || evidence
+            .generation
+            .generation_state
+            .current_device_generation_ref
+            != core.authorized_generation_ref
+        || claim.device_authorize_event_id.as_ref() != Some(&core.device_authorize_event_id)
+        || evidence.issuer_resolution.service_kind != "station"
+    {
+        return Err(denied(
+            "remote claim generation or exact authorization differs",
+        ));
+    }
+    let document = arkret_identity::authenticated_service_document_at(
+        &evidence.issuer_resolution,
+        &account.station_id,
+        core.attested_at,
+    )
+    .map_err(denied)?;
+    arkret_identity::validate_verification_method_relationship(
+        &document,
+        &attestation.proof.verification_method,
+        &document.id,
+        arkret_identity::DidVerificationRelationship::AssertionMethod,
+    )
+    .map_err(denied)?;
+    let key = arkret_identity::jws::resolve_ed25519_pubkey_from_document(
+        &document,
+        attestation.proof.verification_method.as_str(),
+    )
+    .map_err(denied)?;
+    arkret_signatures::device_projection::verify_device_projection_attestation(
+        attestation,
+        &key,
+        Utc::now(),
+    )
+    .map_err(denied)?;
+    let device_key = arkret_canonical::decode_ed25519_multibase(
+        core.device_signing_key_did
+            .as_str()
+            .strip_prefix("did:key:")
+            .ok_or_else(|| denied("remote Device key is not did:key"))?,
+    )
+    .map_err(denied)?;
+    let bytes = arkret_canonical::base64url_decode(&claim.keypackage).map_err(denied)?;
+    let leaf = arkret_mls::author_leaf_from_key_package_bytes(&bytes, 0).map_err(denied)?;
+    let credential =
+        arkret_models_crypto::mls_basic_credential_identity(&claim.actor_id).map_err(denied)?;
+    if !matches!(leaf.credential, arkret_mls::AuthorLeafCredential::Basic { identity } if identity == credential)
+        || leaf.signature_key.as_slice() != device_key.as_slice()
+        || arkret_canonical::sha256_digest(&bytes) != claim.keypackage_ref
+    {
+        return Err(denied(
+            "remote claim leaf differs from original device evidence",
+        ));
+    }
+    arkret_mls::validate_keypackage_capability_binding(&bytes, &claim.capabilities)
+        .map_err(denied)?;
+    let window = EndpointWindow {
+        not_before: Some(core.authorization_window.not_before.max(core.attested_at)),
+        expires_at: Some(
+            core.expires_at.min(
+                core.authorization_window
+                    .expires_at
+                    .unwrap_or(core.expires_at),
+            ),
+        ),
+    };
+    if !window.permits_at(Utc::now()) {
+        return Err(denied("remote claim device window ended"));
+    }
+    Ok(window)
 }

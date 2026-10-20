@@ -1773,6 +1773,7 @@ async fn stored_recovery_delivery(
                 operation,
                 outcome: outcome.clone(),
                 endpoints: vec![endpoint.clone()],
+                remote_devices: Vec::new(),
                 command: (operation == ServiceOperationId::PeerKeysKeypackagesCommandClaimV1)
                     .then(|| arkret_models_crypto::PeerKeyPackagesClaimRequestBody::from(command)),
             }],

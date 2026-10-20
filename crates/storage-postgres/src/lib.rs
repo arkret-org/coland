@@ -176,6 +176,7 @@ mod realm_actor_device_revoke;
 mod realm_authorization_cut;
 mod realm_bootstrap_current_results;
 mod realm_claim_history;
+mod realm_claim_source;
 mod realm_default_strand_current_results;
 mod realm_fanout;
 mod realm_identity;

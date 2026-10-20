@@ -1,0 +1,1076 @@
+//! Real Realm Device transport, remote Account keys and accepted MLS writes.
+use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
+use arkret_models_collaboration::governance::grant_constraint::{
+    GrantConstraintEffect, GrantConstraintKind, GrantConstraintSubkind, ManagedActorRole,
+};
+use arkret_models_crypto::*;
+use arkret_wire::{DeviceId, DidUrl, GrantId, ServiceOperationId};
+use coland_storage::MlsGroupCurrentStore as _;
+
+use super::realm_native_fixture::boxed_step;
+use super::*;
+
+pub(super) fn enable(package: &mut AppletPackage) {
+    let method = package.proof.as_ref().unwrap().verification_method.clone();
+    package.e2ee_policy.enabled = true;
+    package.e2ee_policy.mls_join_requested = Some(true);
+    package
+        .claimed_profiles
+        .push(arkret_wire::ProfileId::APPLET_E2EE_JOIN_V1.into());
+    package.claimed_profiles.sort();
+    package
+        .requested_scopes
+        .extend(["ak.event.read", "ak.mls.commit", "ak.mls.genesis"].map(str::to_owned));
+    package.requested_scopes.sort();
+    package
+        .stamp_registration_epoch(&applet_registration_epoch_evidence(package))
+        .unwrap();
+    package.stamp_package_digest().unwrap();
+    let did = arkret_identity::verification_method_did(method.as_str()).unwrap();
+    package
+        .sign(
+            &Ed25519PayloadSigner::from_did_key_seed([13; 32], did, method.clone()),
+            &method,
+        )
+        .unwrap();
+}
+
+fn signed_event(
+    package: &AppletPackage,
+    actor: ActorId,
+    scope: ScopeRef,
+    kind: EventKind,
+    payload: Value,
+    grant: Option<&GrantId>,
+    signer: &Ed25519PayloadSigner,
+) -> Event {
+    let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let mut event =
+        arkret_wire::test_support::raw_event_for_actor_at(kind.as_str(), scope, actor, payload, at)
+            .unwrap();
+    event.applet_id = Some(package.applet_id.clone());
+    event.authorization_ref = grant.cloned().map(Into::into);
+    event.producer_proof = None;
+    let mut authored = arkret_wire::AuthoredEvent::finalize_with_digest_suite(
+        event,
+        arkret_canonical::DigestSuite::Sha256,
+    )
+    .unwrap();
+    arkret_signatures::sign_event(
+        &mut authored,
+        signer,
+        arkret_signatures::SignEventOptions::new().with_created_at(at),
+    )
+    .unwrap();
+    authored.into_event()
+}
+
+async fn business_grant(fixture: &Fixture, package: &AppletPackage, actor: &ActorId) -> GrantId {
+    eprintln!("native MLS: Service business parent");
+    let service_actor = ActorId::service(package.service_id.clone());
+    let scope = ScopeRef::Realm {
+        realm_id: fixture.realm.clone(),
+    };
+    let mut control = GrantConstraint::new(
+        GrantConstraintKind::AuthorityControl,
+        GrantConstraintEffect::Allow,
+    );
+    control.authority_regrant_allowed = Some(false);
+    control.max_authority_depth = Some(0);
+    control.allowed_managed_actor_roles = vec![ManagedActorRole::Bot, ManagedActorRole::Ghost];
+    let parent = CapabilityGrantCreateBody {
+        schema: arkret_wire::SchemaId::CAPABILITY_V1.into(),
+        realm_id: Some(fixture.realm.clone()),
+        issuer_id: ActorId::account(fixture.pcr.history.account.clone()),
+        subject: CapabilitySubject::Actor(service_actor.clone()),
+        actions: vec![
+            "ak.event.read".into(),
+            "ak.mls.commit".into(),
+            "ak.mls.genesis".into(),
+        ],
+        resources: vec![arkret_wire::WireResourceSelector::realm(
+            fixture.realm.clone(),
+        )],
+        constraints: vec![
+            GrantConstraint::applet_authority(
+                package.applet_id.clone(),
+                service_actor.clone(),
+                package.registration_epoch.clone(),
+            ),
+            control,
+        ],
+        issuer_authority_refs: vec![IssuerAuthorityRef::RealmRoot {
+            realm_id: fixture.realm.clone(),
+            authority_event_ref: fixture.authority_event_ref.clone().unwrap(),
+            authority_generation: 0,
+        }],
+        issued_at: chrono::Utc::now(),
+    };
+    let event = fixture.admin_event(
+        EventKind::CapabilityGrant,
+        scope.clone(),
+        json!(CapabilityGrantPayload {
+            grant: parent.clone()
+        }),
+    );
+    let parent_id = GrantId::from_event_id(&event.event_id);
+    let (status, value) = fixture
+        .admin_post(
+            "/_arkret/self/events",
+            ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+            &json!(SelfAuthoritySubmitRequest::Event(
+                arkret_wire::EventAdmissionSubmission::new(event)
+            )),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "real business parent: {value}");
+    let mut child = parent;
+    child.issuer_id = service_actor.clone();
+    child.subject = CapabilitySubject::Actor(actor.clone());
+    child.issuer_authority_refs = vec![IssuerAuthorityRef::Grant {
+        grant_id: parent_id.clone(),
+    }];
+    child.issued_at = chrono::Utc::now();
+    for constraint in &mut child.constraints {
+        if constraint.constraint_subkind == Some(GrantConstraintSubkind::AppletAuthority) {
+            constraint.executed_by = Some(actor.clone());
+        } else if constraint.constraint_kind == GrantConstraintKind::AuthorityControl {
+            constraint.allowed_managed_actor_roles.clear();
+        }
+    }
+    let signer = Ed25519PayloadSigner::new(
+        applet_service_signing_key(&package.webhook_auth.key_ref),
+        applet_service_did(package),
+        package.webhook_auth.key_ref.clone(),
+    );
+    let event = signed_event(
+        package,
+        service_actor,
+        scope,
+        EventKind::CapabilityGrant,
+        json!(CapabilityGrantPayload { grant: child }),
+        Some(&parent_id),
+        &signer,
+    );
+    let child_id = GrantId::from_event_id(&event.event_id);
+    eprintln!("native MLS: Service terminal child");
+    let (status, value) = fixture
+        .service_post(
+            package,
+            "/_arkret/edge/applet/transactions",
+            ServiceOperationId::EDGE_APPLET_COMMAND_TRANSACTION_V1,
+            &json!(AppletEventTransactionRequestBody {
+                applet_id: package.applet_id.clone(),
+                source_id: package.service_id.clone(),
+                events: vec![event],
+                committed_events: vec![],
+                signals: vec![],
+            }),
+            "realm-mls-business-child",
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "real terminal business child: {value}"
+    );
+    let result: AppletTransactionOutcome = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        result.status(),
+        AppletTransactionStatus::Accepted,
+        "{result:?}"
+    );
+    eprintln!("native MLS: terminal child accepted");
+    child_id
+}
+
+async fn device_post(
+    fixture: &Fixture,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    path: &str,
+    operation: ServiceOperationId,
+    body: Value,
+) -> (StatusCode, Value) {
+    let metadata = AppletManagedDeviceMetadata {
+        actor_id: authority.actor_id.clone(),
+        device_id: authority.device_id.clone(),
+        authorization_event_id: authority.authorization_ref.event_id.clone(),
+        applet_id: authority.applet_id.clone(),
+        effective_scope: ScopeRef::Realm {
+            realm_id: fixture.realm.clone(),
+        },
+        nonce: arkret_canonical::base64url_encode(rand::random::<[u8; 32]>()),
+    };
+    let key = arkret_canonical::ed25519_pubkey_to_did_key_multibase(&authority.public_key);
+    super::realm_native_fixture::managed_device_post(
+        fixture,
+        &metadata,
+        &DidUrl::new(format!("did:key:{key}#{key}")).unwrap(),
+        path,
+        operation,
+        &body,
+        &[79; 32],
+    )
+    .await
+}
+
+async fn public_material(fixture: &Fixture, bytes: Vec<u8>) -> arkret_wire::BlobRef {
+    let digest = arkret_canonical::sha256_digest(&bytes);
+    let sha256 = digest.strip_prefix("sha256:").unwrap();
+    let reference = arkret_wire::BlobRef::new(format!("ak:blob:{digest}")).unwrap();
+    let storage_key = fixture.state.test_object_key_for_sha256(sha256);
+    let record = coland_storage::BlobRecord {
+        sha256: sha256.into(),
+        size_bytes: bytes.len() as i64,
+        storage_backend: "memory".into(),
+        storage_key: storage_key.clone(),
+        media_type: "application/octet-stream".into(),
+        filename: None,
+        realm_id: Some(fixture.realm.to_string()),
+        encryption: None,
+        legal_hold: false,
+        redacted: false,
+        visibility: arkret_models_collaboration::objects::blob::BlobVisibility::RealmBound,
+        uploaded_by: fixture.pcr.history.account.principal_id.to_string(),
+        created_at: chrono::Utc::now(),
+    };
+    fixture
+        .state
+        .test_put_object(&storage_key, bytes)
+        .await
+        .unwrap();
+    fixture
+        .state
+        .test_persistence()
+        .blobs()
+        .put(reference.as_str(), &record)
+        .await
+        .unwrap();
+    reference
+}
+
+async fn foreign_member(governor: &Fixture, member: &Fixture) {
+    for (source, target) in [(governor, member), (member, governor)] {
+        let id = target.state.service_core_id();
+        source
+            .state
+            .service_route_resolver()
+            .unwrap()
+            .resolve_carrier(
+                &arkret_models_identity::ServiceResolutionCarrier::ResolutionUrl {
+                    resolution_url: format!(
+                        "{}{}",
+                        target.state.config().public_base_url.trim_end_matches('/'),
+                        arkret_models_identity::canonical_service_resolution_path(&id)
+                    ),
+                },
+                &id,
+                "station",
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+    }
+    let scope = ScopeRef::Realm {
+        realm_id: governor.realm.clone(),
+    };
+    let invite = governor.admin_event(EventKind::InviteCreate, scope.clone(), json!({
+        "invitee_account_id":member.pcr.history.account,
+        "introduction_evidence_digest":format!("sha256:{}", "c".repeat(64)),
+        "expires_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now()+chrono::Duration::hours(1))
+    }));
+    let (status, value) = governor
+        .admin_post(
+            "/_arkret/self/events",
+            ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+            &json!(SelfAuthoritySubmitRequest::Event(
+                arkret_wire::EventAdmissionSubmission::new(invite.clone())
+            )),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "foreign invitation: {value}");
+    let authority = governor
+        .state
+        .test_persistence()
+        .authority_commits()
+        .current_authority(&governor.realm)
+        .await
+        .unwrap()
+        .unwrap();
+    member
+        .state
+        .test_persistence()
+        .authority_commits()
+        .record_remote_authority(&authority, &member.state.service_core_id())
+        .await
+        .unwrap();
+    let accept = member.admin_event(
+        EventKind::InviteAccept,
+        scope,
+        json!({
+            "invite_id":arkret_wire::InviteId::from_event_id(&invite.event_id),
+            "previous_state":"pending","invitee_account_id":member.pcr.history.account
+        }),
+    );
+    let (status, value) = member
+        .admin_post(
+            "/_arkret/self/events",
+            ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+            &json!(SelfAuthoritySubmitRequest::Event(
+                arkret_wire::EventAdmissionSubmission::new(accept)
+            )),
+            None,
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "foreign member accepted through own Station: {value}"
+    );
+}
+
+fn claim_request(
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    target: &Fixture,
+    keypackage: &str,
+) -> KeyPackagesClaimRequestBody {
+    let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let method = DidUrl::new(format!("{}#{}", authority.native_did, authority.device_id)).unwrap();
+    let scope = ScopeRef::Realm {
+        realm_id: authority.realm_id.clone(),
+    };
+    let mut request = KeyPackagesClaimRequestBody {
+        claim_request_id: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
+            rand::random::<[u8; 32]>(),
+        ))
+        .unwrap(),
+        target_account_id: Some(target.pcr.history.account.clone()),
+        target_actor_id: None,
+        requester_account_id: None,
+        requester_actor_id: Some(authority.actor_id.clone()),
+        intended_realm_id: authority.realm_id.clone(),
+        mls_group_id: scope.canonical_mls_group_id().unwrap(),
+        claim_purpose: PeerKeyPackageClaimPurpose::RealmMembership,
+        required_capabilities: vec![arkret_wire::NonEmptyString::new("ak.content.v1").unwrap()],
+        expires_at: at + chrono::Duration::minutes(4),
+        target_device_ids: vec![target.pcr.history.founding_device_id.clone()],
+        target_keypackage_ref: Some(arkret_wire::KeyPackageRef::new(keypackage).unwrap()),
+        target_agent_id: None,
+        target_agent_verification_method: None,
+        target_agent_key_authorize_event_id: None,
+        timeout_ms: None,
+        strand_id: None,
+        pair_key: None,
+        last_resort_allowed: None,
+        service_binding: KeyPackagesClaimServiceBinding {
+            source_id: authority.governance_service_id.clone(),
+            destination_id: target.state.service_core_id(),
+        },
+        requester_authorization: PeerKeyPackageRequesterAuthorization::RealmDevice {
+            verification_method: method.clone(),
+            requester_device_id: authority.device_id.clone(),
+            device_authorize_event_id: authority.authorization_ref.event_id.clone(),
+            signed_at: at,
+            signature: arkret_signatures::keypackages::keypackage_signature_from_bytes(
+                method.as_str(),
+                &[0; 64],
+            )
+            .unwrap(),
+        },
+    };
+    let input = keypackage_claim_authorization_signing_bytes(
+        &request.unsigned_request(),
+        &request.service_binding,
+        &request.requester_authorization,
+    )
+    .unwrap();
+    let PeerKeyPackageRequesterAuthorization::RealmDevice { signature, .. } =
+        &mut request.requester_authorization
+    else {
+        unreachable!()
+    };
+    *signature = arkret_signatures::keypackages::sign_keypackage_signing_input(
+        &[79; 32],
+        method.as_str(),
+        &input,
+    )
+    .unwrap();
+    request.validate_shape().unwrap();
+    request
+}
+
+pub(super) async fn run(
+    fixture: &Fixture,
+    package: &AppletPackage,
+    candidate: &RealmActorCreatePayload,
+    device: &DeviceId,
+) {
+    let authority = fixture
+        .state
+        .test_persistence()
+        .device_revocations()
+        .applet_managed_device_authority(&candidate.actor_id, device, chrono::Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    let child = boxed_step(|| business_grant(fixture, package, &candidate.actor_id)).await;
+    eprintln!("native MLS: foreign member");
+    let database = boxed_step(coland_storage_postgres::test_database::TestDatabase::lease).await;
+    let (recipient, _server) =
+        boxed_step(|| super::realm_native_fixture::network_fixture(database.pool())).await;
+    eprintln!("native MLS: foreign Station ready");
+    boxed_step(|| foreign_member(fixture, &recipient)).await;
+    eprintln!("native MLS: foreign member joined");
+    let mut group =
+        boxed_step(|| genesis(fixture, package, candidate, device, &authority, &child)).await;
+    let (recipient_identity, claim) =
+        boxed_step(|| claim_remote(fixture, &recipient, &authority)).await;
+    boxed_step(|| {
+        commit_add(
+            fixture,
+            package,
+            candidate,
+            device,
+            &authority,
+            &child,
+            &recipient,
+            recipient_identity,
+            claim,
+            &mut group,
+        )
+    })
+    .await;
+}
+
+async fn genesis(
+    fixture: &Fixture,
+    package: &AppletPackage,
+    candidate: &RealmActorCreatePayload,
+    device: &DeviceId,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    child: &GrantId,
+) -> Box<arkret_mls::ArkretMlsGroup> {
+    eprintln!("native MLS: create Genesis");
+    let scope = candidate.creation_scope.clone();
+    let key = SigningKey::from_bytes(&[79; 32]);
+    let signer = Ed25519PayloadSigner::new(
+        key.clone(),
+        authority.native_did.clone(),
+        DidUrl::new(format!("{}#{}", authority.native_did, device)).unwrap(),
+    );
+    let identity = arkret_mls::ArkretMlsIdentity::new_realm_device(
+        candidate.actor_id.clone(),
+        device.clone(),
+        arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone()),
+    )
+    .unwrap();
+    eprintln!("native MLS: creator identity ready");
+    let binding = MlsGovernanceBindingPayload::new(scope.clone(), None, 0, 0, 0).unwrap();
+    let mut group = identity
+        .create_group_with_governance_binding(&scope, &binding)
+        .unwrap();
+    eprintln!("native MLS: creator group ready");
+    let (info, tree) = group.public_group_state_bytes().unwrap();
+    let info = boxed_step(|| public_material(fixture, info)).await;
+    let tree = boxed_step(|| public_material(fixture, tree)).await;
+    eprintln!("native MLS: public material ready");
+    let genesis = signed_event(
+        package,
+        candidate.actor_id.clone(),
+        scope.clone(),
+        EventKind::MlsGenesis,
+        json!({
+            "cipher_suite":"MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+            "group_info_ref":info,"ratchet_tree_ref":tree,
+            "creator_leaf_authority":{
+                "leaf_signature_key_b64u":arkret_canonical::base64url_encode(key.verifying_key().as_bytes()),
+                "endpoint":{"kind":"device","device_id":device},
+                "authorization_event_ref":authority.authorization_ref.event_id
+            },"governance_binding":binding,
+            "created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())
+        }),
+        Some(&child),
+        &signer,
+    );
+    eprintln!("native MLS: submitting Genesis");
+    let (status, value) = boxed_step(|| {
+        device_post(
+            fixture,
+            &authority,
+            "/_arkret/self/events",
+            ServiceOperationId::SelfEventsCommandSubmitV1,
+            json!(SelfAuthoritySubmitRequest::Event(
+                arkret_wire::EventAdmissionSubmission::new(genesis)
+            )),
+        )
+    })
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Realm Device actual MLS Genesis: {value}"
+    );
+    group
+        .install_local_creator_binding(
+            candidate.actor_id.clone(),
+            Some(authority.authorization_ref.event_id.clone()),
+        )
+        .unwrap();
+    eprintln!("native MLS: Genesis accepted");
+    Box::new(group)
+}
+
+async fn claim_remote(
+    fixture: &Fixture,
+    recipient: &Fixture,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+) -> (arkret_mls::ArkretMlsIdentity, KeyPackagesClaimOutcome) {
+    eprintln!("native MLS: remote KeyPackage claim");
+    let recipient_key = SigningKey::from_bytes(&recipient.pcr.history.founding_device_signing_seed);
+    let recipient_identity = arkret_mls::ArkretMlsIdentity::new_human_device(
+        ActorId::account(recipient.pcr.history.account.clone()),
+        recipient.pcr.history.founding_device_id.clone(),
+        arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(recipient_key),
+    )
+    .unwrap();
+    let record = recipient_identity.key_package_record().unwrap();
+    let upload = recipient_identity
+        .signed_key_packages_upload_request(
+            &[record],
+            recipient.pcr.history.device_verification_method.as_str(),
+        )
+        .unwrap();
+    let (status, value) = recipient
+        .admin_post(
+            "/_arkret/self/keys/keypackages/upload",
+            ServiceOperationId::SelfKeysKeypackagesUploadCreateV1.as_str(),
+            &json!(upload),
+            None,
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "real foreign Account package upload: {value}"
+    );
+    assert_eq!(value["accepted"], 1);
+    let command = claim_request(
+        &authority,
+        &recipient,
+        &upload.keypackages[0].keypackage_ref,
+    );
+    let before = recipient
+        .state
+        .test_persistence()
+        .mls_key_packages()
+        .snapshot_all()
+        .await
+        .unwrap();
+    let mut invalid = command.clone();
+    let PeerKeyPackageRequesterAuthorization::RealmDevice { signature, .. } =
+        &mut invalid.requester_authorization
+    else {
+        unreachable!()
+    };
+    signature.sig =
+        arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode([0; 64])).unwrap();
+    let (status, _) = boxed_step(|| {
+        device_post(
+            fixture,
+            &authority,
+            "/_arkret/self/keys/keypackages/claim",
+            ServiceOperationId::SelfKeysKeypackagesCommandClaimV1,
+            json!(invalid),
+        )
+    })
+    .await;
+    assert_ne!(status, StatusCode::OK);
+    assert_eq!(
+        before,
+        recipient
+            .state
+            .test_persistence()
+            .mls_key_packages()
+            .snapshot_all()
+            .await
+            .unwrap()
+    );
+    let (status, value) = boxed_step(|| {
+        device_post(
+            fixture,
+            &authority,
+            "/_arkret/self/keys/keypackages/claim",
+            ServiceOperationId::SelfKeysKeypackagesCommandClaimV1,
+            json!(command),
+        )
+    })
+    .await;
+    if status != StatusCode::OK {
+        let stored = fixture
+            .state
+            .test_persistence()
+            .mls_key_packages()
+            .realm_claim_source(
+                command.service_binding.source_id.as_str(),
+                command.claim_request_id.as_str(),
+            )
+            .await
+            .unwrap();
+        eprintln!(
+            "native MLS: retained source state {:?}",
+            stored.and_then(|row| row.result).map(|result| result.state)
+        );
+        let stored = recipient
+            .state
+            .test_persistence()
+            .mls_key_packages()
+            .get_peer_claim(
+                command.service_binding.source_id.as_str(),
+                command.claim_request_id.as_str(),
+            )
+            .await
+            .unwrap();
+        eprintln!(
+            "native MLS: recipient ledger state {:?}",
+            stored.map(|row| row.state)
+        );
+    }
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Realm requester claims foreign ordinary device: {value}"
+    );
+    let claim: KeyPackagesClaimOutcome = serde_json::from_value(value.clone()).unwrap();
+    let (status, replay) = boxed_step(|| {
+        device_post(
+            fixture,
+            &authority,
+            "/_arkret/self/keys/keypackages/claim",
+            ServiceOperationId::SelfKeysKeypackagesCommandClaimV1,
+            json!(command),
+        )
+    })
+    .await;
+    assert_eq!(status, StatusCode::OK, "exact original retry: {replay}");
+    assert_eq!(replay, value);
+    let stored = fixture
+        .state
+        .test_persistence()
+        .mls_key_packages()
+        .realm_claim_source(
+            command.service_binding.source_id.as_str(),
+            command.claim_request_id.as_str(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(json!(stored.result.unwrap().claim_outcome.unwrap()), value);
+    eprintln!("native MLS: remote claim retained");
+    (recipient_identity, claim)
+}
+
+async fn commit_add(
+    fixture: &Fixture,
+    package: &AppletPackage,
+    candidate: &RealmActorCreatePayload,
+    device: &DeviceId,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    child: &GrantId,
+    recipient: &Fixture,
+    recipient_identity: arkret_mls::ArkretMlsIdentity,
+    claim: KeyPackagesClaimOutcome,
+    group: &mut arkret_mls::ArkretMlsGroup,
+) {
+    let scope = candidate.creation_scope.clone();
+    let key = SigningKey::from_bytes(&[79; 32]);
+    let signer = Ed25519PayloadSigner::new(
+        key.clone(),
+        authority.native_did.clone(),
+        DidUrl::new(format!("{}#{}", authority.native_did, device)).unwrap(),
+    );
+    let groups = coland_storage_postgres::PgMlsGroupCurrentStore {
+        pool: fixture.pool.clone(),
+    };
+    let current = groups.current(&scope).await.unwrap().unwrap().value;
+    let binding = MlsGovernanceBindingPayload::new(
+        scope.clone(),
+        Some(current.current_mls_commit_event_ref.clone()),
+        current.epoch,
+        current.epoch + 1,
+        current.current_key_access_revision,
+    )
+    .unwrap();
+    let package_record = arkret_mls::mls_key_package_record_from_claim(&claim.claims[0]).unwrap();
+    let added = group
+        .add_member_with_governance_binding(&package_record, &binding)
+        .unwrap();
+    let payload = MlsCommitPayload::new(
+        current.current_mls_commit_event_ref.clone(),
+        current.current_key_access_revision,
+        &added.commit,
+        binding,
+    )
+    .unwrap();
+    let event = signed_event(
+        package,
+        candidate.actor_id.clone(),
+        scope.clone(),
+        EventKind::MlsCommit,
+        json!(payload),
+        Some(&child),
+        &signer,
+    );
+    let at = event.created_at;
+    let mut welcome = arkret_wire::MlsWelcomeDelivery {
+        welcome_id: arkret_wire::MlsWelcomeDeliveryId::new(format!(
+            "ak:mls_welcome_delivery:{}",
+            uuid::Uuid::now_v7()
+        ))
+        .unwrap(),
+        realm_id: fixture.realm.clone(),
+        effective_scope: scope.clone(),
+        commit_event_ref: event.event_id.clone(),
+        recipient_actor_id: ActorId::account(recipient.pcr.history.account.clone()),
+        recipient_endpoint: arkret_wire::MlsWelcomeRecipientEndpoint::Device {
+            device_id: recipient.pcr.history.founding_device_id.clone(),
+        },
+        keypackage_claim_ref: added.welcome.keypackage_claim_ref,
+        ciphertext_b64: added.welcome.ciphertext_b64,
+        producer_proof: arkret_signatures::detached_object::sign_detached_object(
+            &Value::Null,
+            arkret_wire::DetachedSignatureContext::MlsWelcomeDelivery,
+            DidUrl::new(format!("{}#{}", authority.native_did, device)).unwrap(),
+            at,
+            &key,
+        )
+        .unwrap(),
+    };
+    welcome.producer_proof = arkret_signatures::detached_object::sign_detached_object(
+        &arkret_canonical::unsigned_value(&welcome, &["producer_proof"]).unwrap(),
+        arkret_wire::DetachedSignatureContext::MlsWelcomeDelivery,
+        welcome.producer_proof.verification_method.clone(),
+        at,
+        &key,
+    )
+    .unwrap();
+    let submission = SelfAuthoritySubmitRequest::MlsCommit(arkret_wire::MlsCommitSubmission {
+        commit_event: event.clone(),
+        welcomes: vec![welcome.clone()],
+        idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
+    });
+    let (status, value) = boxed_step(|| {
+        device_post(
+            fixture,
+            &authority,
+            "/_arkret/self/events",
+            ServiceOperationId::SelfEventsCommandSubmitV1,
+            json!(submission),
+        )
+    })
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Realm Device complete foreign Add/Welcome: {value}"
+    );
+    let accepted = fixture
+        .state
+        .test_persistence()
+        .authority_commits()
+        .committed_event(&event.event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let accepted = arkret_wire::CommittedEventFullView {
+        event: accepted.event,
+        commit: accepted.commit,
+    };
+    group.install_accepted_commit(&accepted, &current).unwrap();
+    assert_eq!(
+        groups.current(&scope).await.unwrap().unwrap().value.epoch,
+        1
+    );
+    boxed_step(|| {
+        receive_and_consume(
+            fixture,
+            recipient,
+            recipient_identity,
+            &welcome,
+            &accepted,
+            &claim,
+        )
+    })
+    .await;
+}
+
+async fn account_request(
+    account: &Fixture,
+    method: reqwest::Method,
+    path: &str,
+    operation: ServiceOperationId,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let url = format!(
+        "{}{path}",
+        account.state.config().public_base_url.trim_end_matches('/')
+    );
+    let dpop = arkret_signatures::dpop::build_dpop_proof(
+        &arkret_signatures::dpop::DpopProofRequest::new(method.as_str(), url.clone())
+            .access_token(account.token.clone()),
+        &account.holder_key,
+    )
+    .unwrap();
+    let client = reqwest::Client::builder()
+        .add_root_certificate(
+            reqwest::Certificate::from_pem(include_bytes!(
+                "../../../server/tests/fixtures/outbox-test-ca.pem"
+            ))
+            .unwrap(),
+        )
+        .build()
+        .unwrap();
+    let mut request = client
+        .request(method, url)
+        .header("authorization", format!("DPoP {}", account.token))
+        .header("dpop", dpop.header_value)
+        .header("arkret-operation", operation.as_str());
+    if let Some(body) = body {
+        request = request
+            .header("content-type", "application/json")
+            .body(arkret_canonical::canonical_json_bytes(&body).unwrap());
+    }
+    let response = request.send().await.unwrap();
+    let status = StatusCode::from_u16(response.status().as_u16()).unwrap();
+    (status, response.json().await.unwrap())
+}
+
+async fn receive_and_consume(
+    governor: &Fixture,
+    recipient: &Fixture,
+    identity: arkret_mls::ArkretMlsIdentity,
+    welcome: &arkret_wire::MlsWelcomeDelivery,
+    accepted: &arkret_wire::CommittedEventFullView,
+    claim: &KeyPackagesClaimOutcome,
+) {
+    use arkret_models_collaboration::device_messages::{
+        DeviceMessagesGetOutcome, RecipientDelivery,
+    };
+    let sender =
+        coland_http::routing::federation::outbox::FederationDispatcher::new(governor.state.clone());
+    let receiver = coland_http::routing::federation::outbox::FederationDispatcher::new(
+        recipient.state.clone(),
+    );
+    let mut queued = None;
+    for _ in 0..12 {
+        boxed_step(|| sender.run_one_pass()).await.unwrap();
+        boxed_step(|| receiver.run_one_pass()).await.unwrap();
+        let (status, value) = boxed_step(|| {
+            account_request(
+                recipient,
+                reqwest::Method::GET,
+                "/_arkret/self/device_messages",
+                ServiceOperationId::SelfDeviceMessagesReadListV1,
+                None,
+            )
+        })
+        .await;
+        assert_eq!(status, StatusCode::OK, "real recipient queue: {value}");
+        let page: DeviceMessagesGetOutcome = serde_json::from_value(value).unwrap();
+        queued = page.deliveries.into_iter().find_map(|item| match item {
+            RecipientDelivery::MlsWelcome { mls_welcome }
+                if mls_welcome.welcome_id == welcome.welcome_id =>
+            {
+                Some(mls_welcome)
+            }
+            _ => None,
+        });
+        if queued.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    let queued = queued.expect("remote committed replication must queue the original Welcome");
+    assert_eq!(json!(queued), json!(welcome));
+    let replicated = recipient
+        .state
+        .test_persistence()
+        .authority_commits()
+        .committed_event(&accepted.event.event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(json!(replicated.event), json!(accepted.event));
+    assert_eq!(json!(replicated.commit), json!(accepted.commit));
+    let key = arkret_signatures::PublicKeyMaterial::Ed25519Multibase {
+        value: arkret_canonical::ed25519_pubkey_to_did_key_multibase(
+            SigningKey::from_bytes(&[79; 32]).verifying_key().as_bytes(),
+        ),
+    };
+    arkret_signatures::detached_object::verify_detached_object_signature(
+        &queued.producer_proof,
+        &arkret_canonical::unsigned_value(&queued, &["producer_proof"]).unwrap(),
+        arkret_wire::DetachedSignatureContext::MlsWelcomeDelivery,
+        &key,
+    )
+    .unwrap();
+    let mut joined = arkret_mls::ArkretMlsGroup::join_from_verified_welcome_delivery(
+        identity, &queued, accepted,
+    )
+    .unwrap();
+    boxed_step(|| install_received_roster(recipient, accepted, &mut joined)).await;
+    let record = joined.export_state_record().unwrap();
+    let checkpoint =
+        std::env::temp_dir().join(format!("arkret-realm-mls-{}.json", uuid::Uuid::now_v7()));
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&checkpoint)
+            .unwrap();
+        file.write_all(&serde_json::to_vec(&record).unwrap())
+            .unwrap();
+        file.sync_all().unwrap();
+    }
+    let restored = arkret_mls::ArkretMlsGroup::restore_from_state_record(
+        &serde_json::from_slice(&std::fs::read(&checkpoint).unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(restored.epoch(), 1);
+    let receipt = RecipientMlsDurableReceipt {
+        domain: arkret_wire::NonEmptyString::new(
+            arkret_wire::DomainSeparationId::MLS_RECIPIENT_DURABLE_RECEIPT_V1.to_owned(),
+        )
+        .unwrap(),
+        claim_request_id: claim.claim_request_id.clone(),
+        key_package_ref: arkret_wire::NonEmptyString::new(claim.claims[0].keypackage_ref.clone())
+            .unwrap(),
+        recipient: RecipientMlsDurableSigner::Device {
+            recipient_account_id: recipient.pcr.history.account.clone(),
+            recipient_device_id: recipient.pcr.history.founding_device_id.clone(),
+            device_verification_method: recipient.pcr.history.device_verification_method.clone(),
+        },
+        recipient_id: recipient.state.service_core_id(),
+        realm_id: queued.realm_id.clone(),
+        mls_group_id: queued.effective_scope.canonical_mls_group_id().unwrap(),
+        mls_epoch: restored.epoch(),
+        welcome_ref: queued.welcome_id.clone(),
+        welcome_digest: queued.durable_receipt_digest().unwrap(),
+        durable_at: chrono::Utc::now(),
+        signature: KeyOperationSignature {
+            kid: arkret_wire::NonEmptyString::new(
+                recipient.pcr.history.device_verification_method.to_string(),
+            )
+            .unwrap(),
+            signature_algorithm: None,
+            sig: arkret_wire::Base64UrlString::new("AA".to_owned()).unwrap(),
+        },
+    };
+    let command = joined
+        .identity()
+        .signed_key_packages_consume_request(
+            queued.keypackage_claim_ref.clone(),
+            joined
+                .identity()
+                .sign_recipient_mls_durable_receipt(receipt)
+                .unwrap(),
+        )
+        .unwrap();
+    let (status, consumed) = boxed_step(|| {
+        account_request(
+            recipient,
+            reqwest::Method::POST,
+            "/_arkret/self/keys/keypackages/consume",
+            ServiceOperationId::SelfKeysKeypackagesCommandConsumeV1,
+            Some(json!(command)),
+        )
+    })
+    .await;
+    assert_eq!(status, StatusCode::OK, "real recipient consume: {consumed}");
+    let (status, replay) = boxed_step(|| {
+        account_request(
+            recipient,
+            reqwest::Method::POST,
+            "/_arkret/self/keys/keypackages/consume",
+            ServiceOperationId::SelfKeysKeypackagesCommandConsumeV1,
+            Some(json!(command)),
+        )
+    })
+    .await;
+    assert_eq!(status, StatusCode::OK, "real consume replay: {replay}");
+    assert_eq!(consumed, replay);
+    let ledger = recipient
+        .state
+        .test_persistence()
+        .mls_key_packages()
+        .get_peer_claim_by_claim_id(queued.keypackage_claim_ref.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ledger.state, "consumed");
+    std::fs::remove_file(checkpoint).unwrap();
+    eprintln!("native MLS: remote queue, durable checkpoint and exact consume accepted");
+}
+
+async fn install_received_roster(
+    recipient: &Fixture,
+    accepted: &arkret_wire::CommittedEventFullView,
+    group: &mut arkret_mls::ArkretMlsGroup,
+) {
+    use arkret_models_collaboration::mls_roster_authority::{
+        MlsMemberRosterAuthorityReadRequestBody, MlsSelfRosterAuthorityReadOutcome,
+    };
+    let request = MlsMemberRosterAuthorityReadRequestBody {
+        realm_id: accepted.event.realm_id.clone(),
+        effective_scope: accepted.event.scope_ref.clone(),
+        mls_group_id: accepted.event.scope_ref.canonical_mls_group_id().unwrap(),
+        target_commit_event_ref: accepted.event.event_id.clone(),
+        target_epoch: group.epoch(),
+        caller_actor_id: ActorId::account(recipient.pcr.history.account.clone()),
+        cursor: None,
+    };
+    let mut next = request.clone();
+    let mut pages = Vec::new();
+    for _ in 0..16 {
+        let (status, value) = boxed_step(|| {
+            account_request(
+                recipient,
+                reqwest::Method::POST,
+                arkret_wire::peer_operation_paths::PATH_SELF_MLS_ROSTER_AUTHORITY,
+                ServiceOperationId::SelfMlsReadRosterAuthorityV1,
+                Some(json!(next)),
+            )
+        })
+        .await;
+        assert_eq!(status, StatusCode::OK, "recipient roster: {value}");
+        let page: MlsSelfRosterAuthorityReadOutcome = serde_json::from_value(value).unwrap();
+        next.cursor = page.roster.next_cursor.clone();
+        pages.push(page);
+        if next.cursor.is_none() {
+            break;
+        }
+    }
+    assert!(next.cursor.is_none(), "roster pagination must terminate");
+    let peer = arkret::verify_mls_member_roster_authority_pages(&pages, &request).unwrap();
+    let material_request =
+        arkret::mls_roster_genesis_material_request(&peer, &pages[0].roster.manifest);
+    let (status, material) = boxed_step(|| {
+        account_request(
+            recipient,
+            reqwest::Method::POST,
+            arkret_wire::peer_operation_paths::PATH_SELF_MLS_GROUP_STATE_MATERIAL,
+            ServiceOperationId::SelfMlsReadGroupStateMaterialV1,
+            Some(json!(material_request)),
+        )
+    })
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "recipient Genesis public material: {material}"
+    );
+    let material = serde_json::from_value(material).unwrap();
+    arkret::install_verified_mls_self_roster_bindings(group, &pages, &request, &material).unwrap();
+}

@@ -29,7 +29,7 @@ pub(crate) async fn original(
     claim_request_id: &str,
     request_digest: &str,
 ) -> PersistenceResult<Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>> {
-    let rows = sql_query("SELECT request_body AS payload FROM keypackage_claim_sources WHERE claim_request_id=$1 AND request_digest=$2 LIMIT 2")
+    let rows = sql_query("SELECT request_body AS payload FROM keypackage_claim_sources WHERE claim_request_id=$1 AND request_digest=$2 UNION SELECT request_body AS payload FROM realm_keypackage_claim_sources WHERE claim_request_id=$1 AND request_digest=$2 LIMIT 2")
         .bind::<Text,_>(claim_request_id).bind::<Text,_>(request_digest)
         .get_results::<crate::JsonPayloadRow>(conn).await.map_err(PersistenceError::database)?;
     if rows.len() > 1 {

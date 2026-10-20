@@ -89,15 +89,6 @@ pub(super) async fn claim(
             "Realm requester Agent signer verification is unavailable"
         ));
     }
-    if destination == state.service_core_id()
-        && body.service_binding.destination_id == destination
-        && body.service_binding.source_id == state.service_core_id()
-    {
-        let authorization = VerifiedClaimAuthorization::for_verified_request(&peer)?;
-        return claim_keypackage_at_destination(state, &peer, authorization, Some(source))
-            .await
-            .map(|Json(outcome)| Json(outcome.into()));
-    }
     let digest = arkret_canonical::canonical_sha256(&peer)
         .map_err(|error| AppError::internal(error.to_string()))?;
     if body.service_binding.destination_id != destination
@@ -117,14 +108,20 @@ pub(super) async fn claim(
         .map_err(claim_error)?;
     if let Some(record) = state
         .mls_key_packages()
-        .peer_claim(
+        .realm_claim_source(
             body.service_binding.source_id.as_str(),
             body.claim_request_id.as_str(),
         )
         .await
-        .map_err(|error| AppError::internal(error.to_string()))?
+        .map_err(claim_error)?
+        && let Some(result) = record.result
+        && !(result.state == PeerKeyPackagesClaimQueryState::Claimed
+            && result
+                .claim_outcome
+                .as_ref()
+                .is_some_and(|outcome| outcome.claim_receipt.expires_at <= Utc::now()))
     {
-        return replay_peer_claim(record, &digest).map(|Json(outcome)| Json(outcome.into()));
+        return replay_source_result(result);
     }
     let original = arkret_canonical::canonical_json_bytes(&peer)
         .map_err(|error| AppError::internal(error.to_string()))?;
@@ -149,6 +146,7 @@ pub(super) async fn claim(
                 "/_arkret/peer/keys/keypackages/claims/query",
                 &arkret_canonical::canonical_json_bytes(&query_body)
                     .map_err(|error| AppError::internal(error.to_string()))?,
+                None,
             )
             .await?,
         )
@@ -165,13 +163,29 @@ pub(super) async fn claim(
                 return Err(keypackage_claim_unknown());
             }
             validate_peer_claim_time_window(&peer)?;
-            read_remote_claim(
-                state,
-                &destination,
-                "/_arkret/peer/keys/keypackages/claim",
-                &original,
-            )
-            .await?
+            if destination == state.service_core_id() {
+                let authorization = VerifiedClaimAuthorization::for_verified_request(&peer)?;
+                let attempt =
+                    claim_keypackage_at_destination(state, &peer, authorization, Some(source))
+                        .await;
+                let query =
+                    query_claim_ledger(state, query_body.clone(), state.service_id().clone())
+                        .await?
+                        .0;
+                if query.state == PeerKeyPackagesClaimQueryState::Unknown {
+                    return attempt.map(|Json(outcome)| Json(outcome.into()));
+                }
+                query
+            } else {
+                read_remote_claim(
+                    state,
+                    &destination,
+                    "/_arkret/peer/keys/keypackages/claim",
+                    &original,
+                    Some(body.claim_request_id.as_str()),
+                )
+                .await?
+            }
         }
     };
     if matches!(
@@ -183,29 +197,140 @@ pub(super) async fn claim(
             "original KeyPackage claim has no terminal result"
         ));
     }
-    capture_relayed_keypackage_claim_query(
-        state,
-        destination.as_str(),
-        std::str::from_utf8(&original).map_err(|error| AppError::internal(error.to_string()))?,
-        &query,
-    )
-    .await
-    .map_err(|_| {
-        crate::app_error!(
-            TemporarilyUnavailable,
-            "original KeyPackage result could not be verified and retained"
-        )
-    })?;
-    let record = state
+    let result = capture_source_result(state, &peer, &query).await?;
+    replay_source_result(result)
+}
+
+fn replay_source_result(
+    result: PeerKeyPackagesClaimQueryOutcome,
+) -> JsonResult<KeyPackagesClaimOutcome> {
+    result
+        .validate_shape()
+        .map_err(|e| AppError::internal(e.to_string()))?;
+    result
+        .claim_outcome
+        .map(|outcome| Json(outcome.into()))
+        .ok_or_else(peer_claim_failed)
+}
+
+/// Retain full authenticated Station method histories before exposing a result.
+/// Storage rechecks signatures, original bindings and installed governance
+/// tenure under the same lock that freezes this requester's private archive.
+pub(super) async fn capture_source_result(
+    state: &AppState,
+    request: &PeerKeyPackagesClaimRequestBody,
+    result: &PeerKeyPackagesClaimQueryOutcome,
+) -> Result<PeerKeyPackagesClaimQueryOutcome, AppError> {
+    let retained = state
         .mls_key_packages()
-        .peer_claim(
-            body.service_binding.source_id.as_str(),
-            body.claim_request_id.as_str(),
+        .realm_claim_source(
+            request.service_binding.source_id.as_str(),
+            request.claim_request_id.as_str(),
         )
         .await
-        .map_err(|error| AppError::internal(error.to_string()))?
+        .map_err(claim_error)?
         .ok_or_else(keypackage_claim_unknown)?;
-    replay_peer_claim(record, &digest).map(|Json(outcome)| Json(outcome.into()))
+    let mut histories = retained.issuer_histories;
+    let mut issuers = Vec::new();
+    if let Some(outcome) = &result.claim_outcome {
+        issuers.push(outcome.claim_receipt.destination_id.clone());
+    }
+    for signature in [
+        result.consume_receipt.as_ref().map(|r| &r.signature),
+        result.terminal_receipt.as_ref().map(|r| &r.signature),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let did = signature
+            .kid
+            .as_str()
+            .split_once('#')
+            .ok_or_else(peer_claim_failed)?
+            .0;
+        let issuer = arkret_wire::Did::new(did)
+            .and_then(|did| arkret_wire::project_did_to_core_id(&did))
+            .map_err(|_| peer_claim_failed())?;
+        if !issuers.contains(&issuer) {
+            issuers.push(issuer);
+        }
+    }
+    for issuer in issuers {
+        let verifies = |history: &arkret_models_identity::AuthenticatedServiceResolution| {
+            if history.service_id != issuer {
+                return false;
+            }
+            let claim = result.claim_outcome.as_ref().is_none_or(|o| {
+                o.claim_receipt.destination_id != issuer
+                    || arkret::verify_peer_keypackage_claim_receipt_signature(
+                        &o.claim_receipt,
+                        history,
+                    )
+                    .is_ok()
+            });
+            let consume = result.consume_receipt.as_ref().is_none_or(|r| {
+                let own = r
+                    .signature
+                    .kid
+                    .as_str()
+                    .starts_with(&format!("{}#", history.normalized_did_document.id));
+                !own || arkret::verify_peer_keypackage_consume_receipt_signature(
+                    r, &issuer, history,
+                )
+                .is_ok()
+            });
+            let terminal = result.terminal_receipt.as_ref().is_none_or(|r| {
+                let own = r
+                    .signature
+                    .kid
+                    .as_str()
+                    .starts_with(&format!("{}#", history.normalized_did_document.id));
+                !own || arkret::verify_peer_keypackage_terminal_receipt_signature(
+                    r, &issuer, history,
+                )
+                .is_ok()
+            });
+            claim && consume && terminal
+        };
+        if histories.iter().any(verifies) {
+            continue;
+        }
+        if let Some(history) = state
+            .mls_key_packages()
+            .realm_claim_issuer_resolution(
+                request.service_binding.source_id.as_str(),
+                request.claim_request_id.as_str(),
+            )
+            .await
+            .map_err(claim_error)?
+            && verifies(&history)
+        {
+            histories.push(history);
+            continue;
+        }
+        let history = crate::routing::identity::agents::evidence::fetch_service_resolution(
+            state, &issuer, None,
+        )
+        .await
+        .map_err(|_| {
+            crate::app_error!(
+                RevisionUnavailable,
+                "claim issuer method history unavailable"
+            )
+        })?;
+        if !verifies(&history) {
+            return Err(crate::app_error!(
+                SignatureInvalid,
+                "claim result historical signature invalid"
+            ));
+        }
+        histories.push(history);
+    }
+    state
+        .mls_key_packages()
+        .retain_realm_claim_source_result(request, result, &histories, &state.service_core_id())
+        .await
+        .map_err(claim_error)
 }
 
 pub(super) async fn verify_ordinary_target(
@@ -213,23 +338,31 @@ pub(super) async fn verify_ordinary_target(
     request: &PeerKeyPackagesClaimRequestBody,
     outcome: &KeyPackagesClaimOutcome,
     deadline: DateTime<Utc>,
-) -> Result<DateTime<Utc>, AppError> {
+) -> Result<
+    (
+        DateTime<Utc>,
+        Vec<coland_storage::MlsClaimRemoteDeviceEvidence>,
+    ),
+    AppError,
+> {
     let Some(account) = &request.target_account_id else {
-        return Ok(deadline);
+        return Ok((deadline, Vec::new()));
     };
     if account.station_id == state.service_core_id() {
-        return Ok(deadline);
+        return Ok((deadline, Vec::new()));
     }
     let requester = request
         .requester_actor_id
         .as_ref()
         .ok_or_else(peer_claim_failed)?;
-    let mut deadline = deadline.min(request.expires_at);
+    // The locked source ledger separately bounds claimed versus consumed
+    // recovery. A current origin projection must not renew either window.
+    let mut deadline = deadline;
+    let mut evidence = Vec::new();
     for claim in &outcome.claims {
         let device = claim.device_id.as_ref().ok_or_else(peer_claim_failed)?;
         if claim.actor_id != arkret_wire::ActorId::account(account.clone())
             || !request.target_device_ids.contains(device)
-            || claim.expires_at <= Utc::now()
             || request.required_capabilities.iter().any(|value| {
                 !claim
                     .capabilities
@@ -239,7 +372,7 @@ pub(super) async fn verify_ordinary_target(
         {
             return Err(peer_claim_failed());
         }
-        let record = crate::routing::identity::keys::realm_mls_device_projection(
+        let (record, original) = crate::routing::identity::keys::realm_mls_device_projection(
             state, requester, account, device,
         )
         .await?;
@@ -260,15 +393,16 @@ pub(super) async fn verify_ordinary_target(
             .map_err(|_| peer_claim_failed())?;
         arkret_mls::validate_keypackage_capability_binding(&bytes, &claim.capabilities)
             .map_err(|_| peer_claim_failed())?;
-        deadline = deadline.min(projection.expires_at).min(claim.expires_at);
+        deadline = deadline.min(projection.expires_at);
         if let Some(expiry) = projection.authorization_window.expires_at {
             deadline = deadline.min(expiry);
         }
+        evidence.push(original);
     }
     if deadline <= Utc::now() {
         return Err(peer_claim_failed());
     }
-    Ok(deadline)
+    Ok((deadline, evidence))
 }
 
 async fn read_remote_claim(
@@ -276,22 +410,40 @@ async fn read_remote_claim(
     destination: &arkret_wire::DidCoreId,
     path: &str,
     body: &[u8],
+    idempotency_key: Option<&str>,
 ) -> Result<PeerKeyPackagesClaimQueryOutcome, AppError> {
-    let response = crate::routing::federation::outbox::signed_peer_request(
-        state,
-        destination.as_str(),
-        path,
-        body,
-        2 * 1024 * 1024,
-    )
-    .await
-    .map_err(|_| {
+    let response = if let Some(key) = idempotency_key {
+        crate::routing::federation::outbox::signed_peer_command(
+            state,
+            destination.as_str(),
+            path,
+            body,
+            key,
+            2 * 1024 * 1024,
+        )
+        .await
+    } else {
+        crate::routing::federation::outbox::signed_peer_request(
+            state,
+            destination.as_str(),
+            path,
+            body,
+            2 * 1024 * 1024,
+        )
+        .await
+    }
+    .map_err(|error| {
+        tracing::warn!(%error, "native KeyPackage peer request failed");
         crate::app_error!(
             TemporarilyUnavailable,
             "original KeyPackage peer result unavailable"
         )
     })?;
     if response.status != 200 {
+        tracing::warn!(
+            status = response.status,
+            "native KeyPackage peer request rejected"
+        );
         return Err(crate::app_error!(
             TemporarilyUnavailable,
             "original KeyPackage peer result unavailable"
@@ -396,6 +548,7 @@ pub(super) async fn delivery_guard(
     source: Option<&NativeRequester>,
     credential_deadline: DateTime<Utc>,
     command: Option<&PeerKeyPackagesClaimRequestBody>,
+    remote_devices: Vec<coland_storage::MlsClaimRemoteDeviceEvidence>,
 ) -> Result<Option<Box<dyn coland_storage::AccountContentDeliveryGuard>>, AppError> {
     let mut endpoints = source
         .map(|(guard, _)| vec![guard.clone()])
@@ -436,6 +589,7 @@ pub(super) async fn delivery_guard(
             outcome: outcome.clone(),
             endpoints,
             command: command.cloned(),
+            remote_devices,
         }],
         applet_endpoint: Some(primary.clone()),
         credential_expires_at: Some(credential_deadline),

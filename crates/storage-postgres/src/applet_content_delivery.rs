@@ -359,6 +359,7 @@ pub(crate) async fn acquire(
                 &claim.outcome,
                 claim.command.as_ref(),
                 station,
+                &claim.remote_devices,
             )
         })
         .await?
@@ -485,6 +486,7 @@ pub(crate) async fn acquire(
             claim.operation,
             outcome,
             endpoints,
+            &claim.remote_devices,
         )
         .await?;
         let mut proofs = Vec::new();

@@ -1216,7 +1216,7 @@ pub(super) async fn mimi_report_abuse(
         .jobs()
         .scoped_idempotency_record(&authenticated_actor, operation, &key)
         .await
-        .map_err(mimi_admission_error)?
+        .map_err(mimi_report_admission_error)?
     {
         return json_ok(
             serde_json::from_value(record.response_body)
@@ -1262,7 +1262,7 @@ pub(super) async fn mimi_report_abuse(
         arkret_models_collaboration::events_payloads::moderation::ModerationReportPayload,
     >(payload)
     .map_err(|e| {
-        mimi_admission_error(coland_services::ServiceError::SchemaViolation(
+        mimi_report_admission_error(coland_services::ServiceError::SchemaViolation(
             e.to_string(),
         ))
     })?;
@@ -1272,7 +1272,7 @@ pub(super) async fn mimi_report_abuse(
         payload,
     )
     .await
-    .map_err(mimi_admission_error)?;
+    .map_err(mimi_report_admission_error)?;
     let response = MimiReportAbuseOutcome {
         report_id: arkret_wire::ReportId::from_event_id(&event.event_id),
         routed_to_ids: Vec::new(),
@@ -1323,16 +1323,27 @@ pub(super) async fn mimi_report_abuse(
             .jobs()
             .scoped_idempotency_record(&authenticated_actor, operation, &key)
             .await
-            .map_err(mimi_admission_error)?
+            .map_err(mimi_report_admission_error)?
         {
             return json_ok(
                 serde_json::from_value(record.response_body)
                     .map_err(|e| AppError::internal(e.to_string()))?,
             );
         }
-        return Err(mimi_admission_error(error));
+        return Err(mimi_report_admission_error(error));
     }
     json_ok(response)
+}
+
+// Admission conflicts carry private current/visibility diagnostics. Only
+// infrastructure failures retain the generic server-error classification.
+fn mimi_report_admission_error(error: coland_services::ServiceError) -> AppError {
+    if error.is_conflict_kind() || error.is_not_found() {
+        tracing::debug!(error = %error, "MIMI reporter admission refused");
+        mimi_reporter_resolution_required()
+    } else {
+        mimi_admission_error(error)
+    }
 }
 
 fn mimi_reporter_resolution_required() -> AppError {

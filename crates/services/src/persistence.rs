@@ -227,15 +227,54 @@ impl PersistenceHandle {
             .await
     }
 
+    pub async fn mimi_consent_update_outcome(
+        &self,
+        request: &arkret_models_collaboration::mimi_operations::MimiUpdateConsentRequestBody,
+    ) -> PersistenceResult<
+        Option<arkret_models_collaboration::mimi_operations::MimiUpdateConsentOutcome>,
+    > {
+        self.persistence
+            .mimi_consent_correlations()
+            .update_outcome(request)
+            .await
+    }
+    pub async fn complete_mimi_consent_update(
+        &self,
+        request: &arkret_models_collaboration::mimi_operations::MimiUpdateConsentRequestBody,
+        outcome: &arkret_models_collaboration::mimi_operations::MimiUpdateConsentOutcome,
+    ) -> PersistenceResult<()> {
+        self.persistence
+            .mimi_consent_correlations()
+            .complete_update(request, outcome)
+            .await
+    }
+    pub async fn mimi_consent_update_binding(
+        &self,
+        request: &arkret_models_collaboration::mimi_operations::MimiUpdateConsentRequestBody,
+    ) -> PersistenceResult<Option<bool>> {
+        self.persistence
+            .mimi_consent_correlations()
+            .update_binding(request)
+            .await
+    }
+    pub async fn freeze_mimi_consent_update(
+        &self,
+        request: &arkret_models_collaboration::mimi_operations::MimiUpdateConsentRequestBody,
+    ) -> PersistenceResult<()> {
+        self.persistence
+            .mimi_consent_correlations()
+            .freeze_update(request)
+            .await
+    }
     pub async fn consent_historical_basis(
         &self,
         holder: &arkret_wire::AccountId,
-        id: &arkret_wire::ConsentId,
+        peer: &arkret_wire::ActorId,
         revision: &arkret_wire::CurrentRevision,
     ) -> PersistenceResult<Option<coland_storage::CommittedEventRecord>> {
         self.persistence
             .consent_current()
-            .historical_basis(holder, id, revision)
+            .historical_basis(holder, peer, revision)
             .await
     }
     pub async fn drain_native_consent_effects(
@@ -375,12 +414,11 @@ impl PersistenceHandle {
         &self,
         holder: &arkret_wire::AccountId,
         peer: &arkret_models_collaboration::events_payloads::consent::ConsentPeer,
-        scope: arkret_wire::ConsentScope,
         device: Option<&arkret_wire::DeviceId>,
     ) -> PersistenceResult<coland_storage::ConsentCurrentCut> {
         self.persistence
             .consent_current()
-            .read_cut(holder, peer, scope, device)
+            .read_cut(holder, peer, device)
             .await
     }
     pub async fn prepare_non_managed_forward_current_signer_evidence(

@@ -484,9 +484,23 @@ fn outcome_matches_row(
     let [claim] = outcome.claims.as_slice() else {
         return Err(denied("one candidate must bind one exact outcome"));
     };
+    // Agent publications retain their accountable controller as the private
+    // storage owner; their MLS recipient remains the Agent's complete Account.
+    let recipient = if row.agent_key_authorize_event_id.is_some() {
+        let controller = row
+            .owner_actor_id
+            .as_account_id()
+            .ok_or_else(|| denied("Agent publication has no full controller Account"))?;
+        ActorId::account(arkret_wire::AccountId::new(
+            arkret_wire::DidCoreId::new(row.actor_id.clone()).map_err(denied)?,
+            controller.station_id.clone(),
+        ))
+    } else {
+        row.owner_actor_id.clone()
+    };
     if claim.keypackage_ref != row.keypackage_ref
         || claim.principal_id.as_str() != row.actor_id
-        || claim.actor_id != row.owner_actor_id
+        || claim.actor_id != recipient
         || claim.device_id.as_ref().map(|id| id.as_str()) != row.device_id.as_deref()
         || claim
             .device_authorize_event_id

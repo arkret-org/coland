@@ -220,6 +220,7 @@ async fn frozen_cut(
             .optional()
             .map_err(PersistenceError::database)?
             .ok_or_else(|| invalid("the governing authority has not been imported"))?;
+    crate::pcr_private_authority::require_transferable(conn, realm).await?;
     let row = sql_query("SELECT c.commit_json AS value FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE c.realm_id=$1 AND c.stream_ref->>'kind'='realm' ORDER BY c.stream_position DESC LIMIT 1")
         .bind::<Text, _>(realm.as_str()).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let commit: arkret_wire::RealmCommit = serde_json::from_value(row.value).map_err(invalid)?;
@@ -511,6 +512,7 @@ impl PgAuthorityCommitStore {
         conn.transaction::<_, PgTransactionError, _>(async |conn| {
             sql_query("SELECT generation FROM realm_authorities WHERE realm_id=$1 FOR UPDATE")
                 .bind::<Text, _>(manifest.realm_id.as_str()).get_result::<AuthorityRow>(&mut *conn).await?;
+            crate::pcr_private_authority::require_transferable(conn, &manifest.realm_id).await?;
             let realm_pk=sql_query("SELECT pk FROM canonical_realms WHERE wire_id=$1")
                 .bind::<Text,_>(manifest.realm_id.as_str()).get_result::<Pk>(&mut *conn).await?.pk;
             for (table,_) in TABLES {

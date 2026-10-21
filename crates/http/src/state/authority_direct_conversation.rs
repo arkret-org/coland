@@ -346,9 +346,29 @@ pub(super) async fn submit_peer_direct_conversation_founding(
             ConflictCode::DirectConversationFoundingUnitInvalid
         )));
     }
-    if let DirectConversationFoundingAuthorityEvidence::Human { .. } =
-        &request.founding_authority_evidence
+    if let DirectConversationFoundingAuthorityEvidence::Human {
+        contact_round_evidence,
+    } = &request.founding_authority_evidence
     {
+        crate::routing::identity::contact_federation::verify_contact_bundle(
+            state,
+            contact_round_evidence,
+        )
+        .await
+        .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+        let accepted_at = request
+            .committed_events
+            .last()
+            .expect("validated four-Event unit")
+            .source_commit
+            .committed_at;
+        if contact_round_evidence.current_proofs.iter().any(|proof| {
+            proof.issuer_id != peer.source_service_id && proof.fresh_until <= accepted_at
+        }) {
+            return Err(ServiceError::Conflict(
+                "failed_precondition: source Contact proof expired at founding cut".into(),
+            ));
+        }
         let (participants, founder) = request
             .founding_authority_evidence
             .participants_and_founder()

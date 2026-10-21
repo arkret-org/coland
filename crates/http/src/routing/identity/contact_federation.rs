@@ -1948,8 +1948,17 @@ async fn establish_glare(
         ));
     }
     let (round, core, _) = derive_glare_basis(receipts)?;
+    // Opposite finalize carriers may list the same original requests in
+    // opposite order. Persist their evidence in the round's wire-byte order.
+    let mut ordered_receipts = receipts.clone();
+    ordered_receipts.sort_by(|a, b| {
+        arkret_models_collaboration::contact_operations::compare_contact_request_event_refs(
+            &a.core.request_event_ref,
+            &b.core.request_event_ref,
+        )
+    });
     let mut events = Vec::new();
-    for receipt in receipts {
+    for receipt in &ordered_receipts {
         let original = record
             .current_state
             .directions
@@ -1971,7 +1980,7 @@ async fn establish_glare(
             ContactRoundBasis {
                 contact_round_id: round.clone(),
                 contact_round: core,
-                request_receipts: receipts.to_vec(),
+                request_receipts: ordered_receipts.to_vec(),
                 normal_response_receipt: None,
                 glare_concurrency_attestations: Some(attestations),
             },

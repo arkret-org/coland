@@ -167,28 +167,14 @@ async fn consent_command(
     token: &str,
     event: arkret_wire::Event,
 ) -> (StatusCode, Value) {
-    use arkret_models_collaboration::consent_operations::{
-        ConsentGrantRequestBody, ConsentRevokeRequestBody,
-    };
-    let (path, operation, body) = if event.kind == arkret_wire::EventKind::ConsentGrant {
-        (
-            "grant",
-            "ak.self.consent.command.grant.v1",
-            arkret_canonical::canonical_json_bytes(&ConsentGrantRequestBody {
-                grant_event: arkret_wire::EventAdmissionSubmission::new(event),
-            })
-            .unwrap(),
-        )
-    } else {
-        (
-            "revoke",
-            "ak.self.consent.command.revoke.v1",
-            arkret_canonical::canonical_json_bytes(&ConsentRevokeRequestBody {
-                revoke_event: arkret_wire::EventAdmissionSubmission::new(event),
-            })
-            .unwrap(),
-        )
-    };
+    let path = "replace";
+    let operation = "ak.self.consent.command.replace.v1";
+    let body = arkret_canonical::canonical_json_bytes(
+        &arkret_models_collaboration::consent_operations::ConsentReplaceRequestBody {
+            consent_event: arkret_wire::EventAdmissionSubmission::new(event),
+        },
+    )
+    .unwrap();
     let mut response =
         TestClient::post(format!("http://server/_arkret/self/consent/results/{path}"))
             .add_header("Authorization", format!("Bearer {token}"), true)
@@ -236,7 +222,7 @@ async fn admit_consent_fixture(
 }
 
 #[tokio::test]
-async fn consent_holder_reads_exact_current_reject_ambiguity_and_local_bearer_writes() {
+async fn consent_holder_reads_one_complete_peer_summary_and_denies_foreign_sessions() {
     let state = coland_test_support::app_state(test_config());
     let app = service(state.clone());
     let holder = coland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
@@ -244,20 +230,26 @@ async fn consent_holder_reads_exact_current_reject_ambiguity_and_local_bearer_wr
     let token = dev_token(&state, &app, &holder).await;
     let other_token = dev_token(&state, &app, &other).await;
     let peer = serde_json::json!({"kind":"actor","actor_id":arkret_wire::ActorId::account(other.history.account.clone())});
-    let id = "ak:consent:01964137-0000-7000-8000-000000000081";
     let grant = signed_consent_event(
         &holder,
-        arkret_wire::EventKind::ConsentGrant,
-        serde_json::json!({"consent_id":id,"peer":peer,"consent_scope":"invite"}),
+        arkret_wire::EventKind::ConsentReplace,
+        serde_json::json!({"peer":peer,"expected_current":{"state":"never_written"},"permissions":[{"consent_scope":"invite"}]}),
     );
     let (status, value) = consent_command(&app, &token, grant.clone()).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{value}");
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let mut unsigned = grant.clone();
+    unsigned.producer_proof = None;
+    let (status, _) = consent_command(&app, &token, unsigned).await;
+    assert!(
+        status.is_client_error(),
+        "a holder session replaced a missing producer proof"
+    );
     let value = admit_consent_fixture(&state, grant.clone()).await;
     let granted: arkret_models_collaboration::consent_operations::ConsentView =
         serde_json::from_value(value).unwrap();
     assert_eq!(
-        granted.state,
-        arkret_models_collaboration::consent_operations::ConsentState::Active
+        granted.permission_scopes,
+        vec![arkret_wire::ConsentScope::Invite]
     );
     let duplicate = admit_consent_fixture(&state, grant.clone()).await;
     assert_eq!(
@@ -272,8 +264,7 @@ async fn consent_holder_reads_exact_current_reject_ambiguity_and_local_bearer_wr
     let mut query = url::Url::parse("http://server/_arkret/self/consent/result").unwrap();
     query
         .query_pairs_mut()
-        .append_pair("peer", &serde_json::to_string(&peer).unwrap())
-        .append_pair("consent_scope", "invite");
+        .append_pair("peer", &serde_json::to_string(&peer).unwrap());
     let mut get = TestClient::get(query.as_str())
         .add_header("Authorization", format!("Bearer {token}"), true)
         .add_header("Arkret-Operation", "ak.self.consent.resource.get.v1", true)
@@ -286,32 +277,17 @@ async fn consent_holder_reads_exact_current_reject_ambiguity_and_local_bearer_wr
             .unwrap(),
         granted
     );
-    let second = signed_consent_event(
-        &holder,
-        arkret_wire::EventKind::ConsentGrant,
-        serde_json::json!({"consent_id":"ak:consent:01964137-0000-7000-8000-000000000082","peer":peer,"consent_scope":"invite"}),
-    );
-    admit_consent_fixture(&state, second).await;
-    let mut ambiguous = TestClient::get(query.as_str())
-        .add_header("Authorization", format!("Bearer {token}"), true)
-        .add_header("Arkret-Operation", "ak.self.consent.resource.get.v1", true)
-        .send(&app)
-        .await;
-    assert_eq!(
-        ambiguous.take_json::<Value>().await.unwrap()["type"],
-        "https://arkret.org/problems/failed_precondition"
-    );
     let revoke = signed_consent_event(
         &holder,
-        arkret_wire::EventKind::ConsentRevoke,
-        serde_json::json!({"consent_id":id,"expected_revision":granted.revision,"reason":"holder_request"}),
+        arkret_wire::EventKind::ConsentReplace,
+        serde_json::json!({"peer":peer,"expected_current":{"state":"present","revision":granted.revision},"permissions":[]}),
     );
     let (status, value) = consent_command(&app, &token, revoke.clone()).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{value}");
+    assert_eq!(status, StatusCode::OK, "{value}");
     let value = admit_consent_fixture(&state, revoke).await;
-    assert_eq!(value["state"], "revoked");
+    assert_eq!(value["permission_scopes"], serde_json::json!([]));
     let value = admit_consent_fixture(&state, grant).await;
-    assert_eq!(value["state"], "active");
+    assert_eq!(value["permission_scopes"], serde_json::json!(["invite"]));
     let mut listed = TestClient::get("http://server/_arkret/self/consent/results")
         .add_header("Authorization", format!("Bearer {token}"), true)
         .add_header("Arkret-Operation", "ak.self.consent.read.list.v1", true)
@@ -321,15 +297,8 @@ async fn consent_holder_reads_exact_current_reject_ambiguity_and_local_bearer_wr
         .take_json::<arkret_models_collaboration::consent_operations::ConsentList>()
         .await
         .unwrap();
-    assert_eq!(list.consents.len(), 2);
-    assert_eq!(
-        list.consents
-            .iter()
-            .find(|row| row.consent_id.as_str() == id)
-            .unwrap()
-            .state,
-        arkret_models_collaboration::consent_operations::ConsentState::Revoked
-    );
+    assert_eq!(list.consents.len(), 1);
+    assert!(list.consents[0].permission_scopes.is_empty());
     let mut private = TestClient::get("http://server/_arkret/self/consent/results")
         .add_header("Authorization", format!("Bearer {other_token}"), true)
         .add_header("Arkret-Operation", "ak.self.consent.read.list.v1", true)

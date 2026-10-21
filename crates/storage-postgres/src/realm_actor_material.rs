@@ -233,6 +233,7 @@ pub(crate) async fn read(
                     validate_realm_actor_current_writer(selector, &original).map_err(|_| {
                         unavailable("private current writer does not produce this selector")
                     })?;
+
                     entries.push(RealmActorMaterialCurrentEntry::Present {
                         row: TypedCurrentRow::Value {
                             selector: selector.clone(),

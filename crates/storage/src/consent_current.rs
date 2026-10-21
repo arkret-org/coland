@@ -13,6 +13,7 @@ pub struct ConsentAdmissionWrite {
 
 #[derive(Clone, Debug)]
 pub struct ConsentCurrentRecord {
+    pub peer: arkret_models_collaboration::events_payloads::consent::ConsentPeer,
     pub value: ConsentValue,
     pub event: Event,
     pub commit: RealmCommit,
@@ -29,25 +30,25 @@ impl ConsentCurrentRecord {
         scope: arkret_wire::ConsentScope,
         at: chrono::DateTime<chrono::Utc>,
     ) -> bool {
-        self.value.status == arkret_models_collaboration::consent_operations::ConsentState::Active
-            && self.value.peer
-                == (arkret_models_collaboration::events_payloads::consent::ConsentPeer::Actor {
-                    actor_id: peer.clone(),
-                })
-            && (self.value.consent_scope == scope
-                || self.value.consent_scope == arkret_wire::ConsentScope::Any)
-            && self.value.not_before.is_none_or(|start| start <= at)
-            && self.value.expires_at.is_none_or(|end| at < end)
-            && self.value.constraints.as_ref().is_none_or(Vec::is_empty)
+        self.peer.actor_id() == peer
+            && self.value.validate().is_ok()
+            && self.value.permissions.iter().any(|permission| {
+                permission.consent_scope == scope
+                    && permission.not_before.is_none_or(|start| start <= at)
+                    && permission.expires_at.is_none_or(|end| at < end)
+                    && permission.constraints.as_ref().is_none_or(Vec::is_empty)
+            })
     }
 
     pub fn view(&self) -> ConsentView {
         ConsentView {
-            consent_id: self.value.consent_id.clone(),
-            peer: self.value.peer.clone(),
-            consent_scope: self.value.consent_scope,
-            state: self.value.status,
-            expires_at: self.value.expires_at,
+            peer: self.peer.clone(),
+            permission_scopes: self
+                .value
+                .permissions
+                .iter()
+                .map(|p| p.consent_scope)
+                .collect(),
             updated_at: self.commit.committed_at,
             revision: CurrentRevision {
                 commit_id: self.commit.commit_id.clone(),
@@ -70,7 +71,6 @@ pub struct ConsentDeliveryWrite {
     pub acceptor_service_id: arkret_wire::DidCoreId,
     pub peer: arkret_wire::ActorId,
     pub consent_grant_ref: arkret_wire::EventId,
-    pub consent_id: Option<arkret_identifiers::ConsentId>,
     pub record: crate::AccountDataRecord,
     pub expected_revision: u64,
 }
@@ -93,7 +93,7 @@ pub trait ConsentCurrentStore: Send + Sync {
     async fn historical_basis(
         &self,
         holder: &AccountId,
-        id: &arkret_wire::ConsentId,
+        peer: &arkret_wire::ActorId,
         revision: &CurrentRevision,
     ) -> PersistenceResult<Option<crate::CommittedEventRecord>>;
     async fn drain_native_effects(
@@ -200,7 +200,6 @@ pub trait ConsentCurrentStore: Send + Sync {
         &self,
         holder: &AccountId,
         peer: &arkret_models_collaboration::events_payloads::consent::ConsentPeer,
-        scope: arkret_wire::ConsentScope,
         device: Option<&arkret_wire::DeviceId>,
     ) -> PersistenceResult<ConsentCurrentCut>;
     async fn admit(

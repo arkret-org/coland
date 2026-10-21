@@ -1,7 +1,7 @@
 //! Exact Service-owned Applet authority material at one read-only MVCC cut.
 use arkret_models_collaboration::applet_installation_authority::{
     AppletAuthorityMaterialOutcome, AppletAuthorityMaterialRequestBody, AppletCommittedEvent,
-    AppletCurrentBinding,
+    AppletInstallationCurrentBinding,
 };
 use arkret_models_collaboration::events_payloads::CapabilityGrantPayload;
 use arkret_models_collaboration::exact_current_results::{
@@ -322,7 +322,7 @@ async fn current_binding(
     applet: &AppletId,
     service: &DidCoreId,
     scope: &arkret_wire::ScopeRef,
-) -> PersistenceResult<AppletCurrentBinding> {
+) -> PersistenceResult<AppletInstallationCurrentBinding> {
     use crate::capability_grant_current_results::{
         RealmAuthorityRootReadRow, accepted_grant_is_current, decode_authority_root,
     };
@@ -346,7 +346,7 @@ async fn current_binding(
     };
     let revoked_at: Option<chrono::DateTime<chrono::Utc>> = decode(install["revoked_at"].clone())?;
     if package.service_id != *service || revoked_at.is_some() || !installed {
-        return Ok(AppletCurrentBinding::Inactive {});
+        return Ok(AppletInstallationCurrentBinding::Inactive);
     }
     let fence = sql_query("SELECT record AS value FROM applet_managed_identities WHERE applet_id=$1 AND target_station_id=$2")
         .bind::<Text,_>(applet.as_str()).bind::<Text,_>(install["target_station_id"].as_str().ok_or_else(unavailable)?)
@@ -354,7 +354,7 @@ async fn current_binding(
     let fenced_at: Option<chrono::DateTime<chrono::Utc>> =
         decode(fence.value["globally_fenced_at"].clone())?;
     if fenced_at.is_some() {
-        return Ok(AppletCurrentBinding::Inactive {});
+        return Ok(AppletInstallationCurrentBinding::Inactive);
     }
     let current = sql_query(
         "SELECT value FROM applet_registration_current_results WHERE realm_id=$1 AND applet_id=$2",
@@ -371,7 +371,7 @@ async fn current_binding(
         || install["package"]["registration_epoch"]
             != serde_json::json!(registration.registration_epoch)
     {
-        return Ok(AppletCurrentBinding::Inactive {});
+        return Ok(AppletInstallationCurrentBinding::Inactive);
     }
     let did = arkret_identity::verification_method_did(registration.webhook_auth.key_ref.as_str())
         .map_err(PersistenceError::database)?;
@@ -392,14 +392,14 @@ async fn current_binding(
         .validate_against_did_document(&document)
         .is_err()
     {
-        return Ok(AppletCurrentBinding::Inactive {});
+        return Ok(AppletInstallationCurrentBinding::Inactive);
     }
     let current_instance = sql_query("SELECT c.commit_json AS value FROM applet_registration_current_results r JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref JOIN realm_commits c ON c.commit_id=a.accepted_commit_id WHERE r.realm_id=$1 AND r.applet_id=$2 AND a.registration_event_ref=$3")
         .bind::<Text,_>(scope.realm_id().as_str()).bind::<Text,_>(applet.as_str())
         .bind::<Text,_>(install["registration_event"]["event_id"].as_str().ok_or_else(unavailable)?)
         .get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     let Some(current_instance) = current_instance else {
-        return Ok(AppletCurrentBinding::Inactive {});
+        return Ok(AppletInstallationCurrentBinding::Inactive);
     };
     let commit: arkret_wire::RealmCommit = decode(current_instance.value)?;
     let registration_full = accepted(conn, &commit.event_ref).await?;
@@ -430,12 +430,54 @@ async fn current_binding(
         {
             return Err(unavailable());
         }
-        active |= accepted_grant_is_current(&id, &grants, &root, scope.realm_id(), at)?;
+        let bindings = grant
+            .constraints
+            .iter()
+            .filter(|constraint| {
+                constraint.constraint_kind == GrantConstraintKind::AuthorityControl
+                    && constraint.constraint_subkind
+                        == Some(GrantConstraintSubkind::AppletAuthority)
+            })
+            .collect::<Vec<_>>();
+        if event.scope_ref != *scope
+            || event.kind != EventKind::CapabilityGrant
+            || bindings.len() != 1
+            || bindings[0].applet_id.as_ref() != Some(applet)
+            || bindings[0].registration_epoch.as_ref() != Some(&registration.registration_epoch)
+            || bindings[0].executed_by.as_ref() != Some(&ActorId::service(service.clone()))
+            || !grant
+                .resources
+                .iter()
+                .any(|resource| resource.is_exact_scope(scope))
+        {
+            return Err(unavailable());
+        }
+        if !accepted_grant_is_current(&id, &grants, &root, scope.realm_id(), at)? {
+            continue;
+        }
+        let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
+            conn,
+            scope.realm_id(),
+            &grant.issuer_id,
+        )
+        .await?;
+        if let Err(error) = cut.require_open_business_mutation() {
+            if error.conflict_code() == Some(coland_storage::ConflictCode::FailedPrecondition) {
+                return Ok(inactive);
+            }
+            return Err(error);
+        }
+        if cut.actor_is_root_controller()
+            || (cut.actor_is_joined()
+                && cut.grants_cover_any(&[arkret_wire::CapabilityActionId::REALM_ADMIN], at))
+        {
+            active = true;
+        }
     }
     if !active {
-        return Ok(AppletCurrentBinding::Inactive {});
+        return Ok(AppletInstallationCurrentBinding::Inactive);
     }
-    Ok(AppletCurrentBinding::Active {
+    Ok(AppletInstallationCurrentBinding::Active {
         registration_ref: arkret_wire::CommittedEventRef {
             event_id: commit.event_ref,
             commit_id: commit.commit_id,

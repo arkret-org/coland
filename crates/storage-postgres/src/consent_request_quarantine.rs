@@ -216,7 +216,10 @@ pub(crate) async fn admit_in_connection(
         _ => HolderQuarantine::new(input.received_at),
     };
     if cell
-        .live_consent_request(&input.requester.principal_id, input.consent_scope)
+        .live_consent_request(
+            &arkret_wire::ActorId::account(input.requester.clone()),
+            input.consent_scope,
+        )
         .is_some_and(|entry| entry.expires_at > input.received_at)
     {
         return Ok(ConsentRequestQuarantineOutcome::AlreadyPending);
@@ -275,6 +278,7 @@ pub(crate) async fn admit_in_connection(
             .map_err(|_| invalid("Consent request digest is invalid"))?,
         account_id: input.holder.clone(),
         source_peer_principal_id: input.requester.principal_id.clone(),
+        source_peer_actor_id: arkret_wire::ActorId::account(input.requester.clone()),
         source_id: input.requester.station_id.clone(),
         surface: HolderQuarantineSurface::ConsentRequest {
             consent_scope: input.consent_scope,

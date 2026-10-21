@@ -1,7 +1,7 @@
 //! Immutable original Station method history for Realm target claims.
 use arkret_models_identity::AuthenticatedServiceResolution;
 use coland_storage::{PeerKeyPackageClaimAttempt, PersistenceError, PersistenceResult};
-use diesel::sql_types::{Jsonb, Text};
+use diesel::sql_types::{Jsonb, Nullable, Text};
 use diesel::{OptionalExtension, QueryableByName, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::Value;
@@ -72,6 +72,24 @@ pub(crate) async fn retain(
     let Some(admission) = &attempt.admission else {
         return Ok(());
     };
+    // Keep every accepted participant command in the KeyPackage/ledger CAS.
+    // Ordinary budget-only failures remain eligible for normal expiry pruning.
+    let request = &admission.request;
+    let original = serde_json::to_value(request).map_err(invalid)?;
+    sql_query("INSERT INTO keypackage_claim_sources(source_id,claim_request_id,request_digest,request_body,governing_realm_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING")
+        .bind::<Text,_>(&attempt.ledger.source_id)
+        .bind::<Text,_>(&attempt.ledger.claim_request_id)
+        .bind::<Text,_>(&attempt.ledger.request_digest)
+        .bind::<Jsonb,_>(&original)
+        .bind::<Nullable<Text>,_>(request.target_actor_id.as_ref().and_then(|actor|actor.as_realm_actor_id()).map(|actor|actor.realm_id.as_str()))
+        .execute(&mut *conn).await.map_err(PersistenceError::database)?;
+    let retained = sql_query("SELECT request_body AS payload FROM keypackage_claim_sources WHERE source_id=$1 AND claim_request_id=$2 AND request_digest=$3")
+        .bind::<Text,_>(&attempt.ledger.source_id).bind::<Text,_>(&attempt.ledger.claim_request_id)
+        .bind::<Text,_>(&attempt.ledger.request_digest)
+        .get_result::<crate::JsonPayloadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    if retained.is_none_or(|row| row.payload != original) {
+        return Err(invalid("accepted original differs from its claim ledger"));
+    }
     if admission.request.target_actor_id.is_none() {
         if admission.claim_issuer_resolution.is_some() {
             return Err(invalid(

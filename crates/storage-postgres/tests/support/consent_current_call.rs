@@ -140,12 +140,7 @@ pub async fn read_current(
     service: &arkret_wire::DidCoreId,
 ) -> coland_storage::PersistenceResult<Option<coland_storage::ConsentCurrentCut>> {
     let cut = store
-        .read_cut(
-            &request.holder_account_id,
-            &request.peer,
-            request.consent_scope,
-            None,
-        )
+        .read_cut(&request.holder_account_id, &request.peer, None)
         .await?;
     Ok((cut.service_id == *service).then_some(cut))
 }
@@ -163,7 +158,6 @@ pub async fn call_permitted_at_native_cut(
         .read_cut(
             &request.invitation.holder_account_id,
             &peer,
-            scope,
             Some(&request.subject_device_id),
         )
         .await?;

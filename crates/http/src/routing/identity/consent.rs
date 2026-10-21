@@ -4,8 +4,8 @@
 //! and introduction evidence use that same durable current, without caches.
 
 use arkret_models_collaboration::consent_operations::{
-    ConsentGrantRequestBody, ConsentList, ConsentRequestOutcome, ConsentRequestRequestBody,
-    ConsentRevokeRequestBody, ConsentView,
+    ConsentList, ConsentReplaceRequestBody, ConsentRequestOutcome, ConsentRequestRequestBody,
+    ConsentView,
 };
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
@@ -19,8 +19,7 @@ pub(super) fn router() -> Router {
     Router::with_path("consent")
         .push(Router::with_path("results").get(list_consents))
         .push(Router::with_path("result").get(get_consent))
-        .push(Router::with_path("results/grant").post(grant_consent))
-        .push(Router::with_path("results/revoke").post(revoke_consent))
+        .push(Router::with_path("results/replace").post(replace_consent))
         .push(Router::with_path("request").post(request_consent))
 }
 
@@ -52,65 +51,38 @@ async fn get_consent(
         .ok_or_else(|| AppError::param_invalid("peer is required"))?;
     let peer: arkret_models_collaboration::events_payloads::consent::ConsentPeer =
         serde_json::from_str(&peer_raw).map_err(|e| AppError::param_invalid(e.to_string()))?;
-    let scope = req
-        .query::<String>("consent_scope")
-        .map(|value| {
-            serde_json::from_value::<arkret_wire::ConsentScope>(serde_json::Value::String(value))
-        })
-        .transpose()
-        .map_err(|e| AppError::param_invalid(e.to_string()))?;
     let mut records = crate::routing::consent_private::list(state, &session)
         .await?
         .consents
         .into_iter()
-        .filter(|record| {
-            record.peer == peer && scope.is_none_or(|scope| record.consent_scope == scope)
-        });
+        .filter(|record| record.peer == peer);
     let record = records
         .next()
         .ok_or_else(|| crate::app_error!(NotFound, "Consent does not exist"))?;
     if records.next().is_some() {
         return Err(crate::app_error!(
             FailedPrecondition,
-            "Consent peer and scope match multiple IDs"
+            "Consent peer has multiple current results"
         ));
     }
     json_ok(record)
 }
 
 #[salvo::handler]
-#[tracing::instrument(skip_all, fields(op = "ak.self.consent.command.grant.v1"))]
-async fn grant_consent(
+#[tracing::instrument(skip_all, fields(op = "ak.self.consent.command.replace.v1"))]
+async fn replace_consent(
     aa: AuthArgs,
     depot: &mut Depot,
     req: &mut Request,
-    body: JsonBody<ConsentGrantRequestBody>,
+    body: JsonBody<ConsentReplaceRequestBody>,
 ) -> JsonResult<ConsentView> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let body = body.into_inner();
     body.validate()
-        .map_err(|error| AppError::param_invalid(format!("grant_event: {error}")))?;
+        .map_err(|error| AppError::param_invalid(format!("consent_event: {error}")))?;
     json_ok(
-        crate::routing::consent_private::submit_consent(state, &session, &body.grant_event).await?,
-    )
-}
-
-#[salvo::handler]
-#[tracing::instrument(skip_all, fields(op = "ak.self.consent.command.revoke.v1"))]
-async fn revoke_consent(
-    aa: AuthArgs,
-    depot: &mut Depot,
-    req: &mut Request,
-    body: JsonBody<ConsentRevokeRequestBody>,
-) -> JsonResult<ConsentView> {
-    let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
-    let body = body.into_inner();
-    body.validate()
-        .map_err(|error| AppError::param_invalid(format!("revoke_event: {error}")))?;
-    json_ok(
-        crate::routing::consent_private::submit_consent(state, &session, &body.revoke_event)
+        crate::routing::consent_private::submit_consent(state, &session, &body.consent_event)
             .await?,
     )
 }

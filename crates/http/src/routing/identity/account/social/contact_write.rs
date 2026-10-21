@@ -275,7 +275,7 @@ async fn verify_stored_request_receipt(
     let peer = receipt.core.peer.contact_actor_id();
     if !((holder == record.requester_id && peer == record.target_id)
         || (holder == record.target_id && peer == record.requester_id))
-        || Some(&receipt.core.issuer_id) != holder.as_account_id().map(|a| &a.station_id)
+        || &receipt.core.issuer_id != receipt.core.holder.delivery_station_id()
     {
         return Err(crate::app_error!(
             FailedPrecondition,
@@ -340,11 +340,9 @@ async fn validate_request_acceptance_receipt(
     .await?;
     validate_request_receipt_cryptography(state, receipt, "request_receipt")?;
 
-    let expected_issuer = record
-        .peer_host_id
-        .as_ref()
-        .map(arkret_wire::DidCoreId::as_str)
-        .unwrap_or_else(|| state.service_id());
+    // The exact request holder determines source authority. The pair row's
+    // peer route is a delivery hint and can change orientation during glare.
+    let expected_issuer = receipt.core.holder.delivery_station_id().as_str();
     if receipt.core.issuer_id.as_str() != expected_issuer {
         return Err(crate::app_error!(
             FailedPrecondition,
@@ -2263,11 +2261,12 @@ fn holder_head<'a>(
     record: &'a ContactRecord,
     holder: &arkret_wire::ActorId,
 ) -> Option<&'a EventId> {
-    if &record.requester_id == holder {
-        record.request_event_ref.as_ref()
-    } else {
-        record.response_event_ref.as_ref()
-    }
+    record
+        .current_state
+        .directions
+        .iter()
+        .find(|direction| direction.head_operation.holder().contact_actor_id() == *holder)
+        .map(|direction| &direction.head_operation.event().event_id)
 }
 
 fn set_holder_head(record: &mut ContactRecord, holder: &arkret_wire::ActorId, event_ref: EventId) {

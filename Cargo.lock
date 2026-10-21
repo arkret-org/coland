@@ -2157,6 +2157,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "bytes",
+ "chacha20poly1305 0.11.0",
  "chrono",
  "coland-domain",
  "coland-http",
@@ -9346,6 +9347,7 @@ version = "0.3.1"
 dependencies = [
  "anyhow",
  "arkret",
+ "arkret-bridge-runtime",
  "arkret-crypto",
  "arkret-models-collaboration",
  "arkret-models-crypto",

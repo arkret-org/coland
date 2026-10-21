@@ -7,7 +7,7 @@ use arkret_models_crypto::*;
 use arkret_wire::{DeviceId, DidUrl, GrantId, ServiceOperationId};
 use coland_storage::MlsGroupCurrentStore as _;
 
-use super::realm_native_fixture::boxed_step;
+use super::realm_native_fixture::{boxed_step, native_tls_material};
 use super::*;
 
 pub(super) fn enable(package: &mut AppletPackage) {
@@ -1351,12 +1351,8 @@ async fn account_request(
     )
     .unwrap();
     let client = reqwest::Client::builder()
-        .add_root_certificate(
-            reqwest::Certificate::from_pem(include_bytes!(
-                "../../../server/tests/fixtures/outbox-test-ca.pem"
-            ))
-            .unwrap(),
-        )
+        .tls_backend_rustls()
+        .tls_certs_only(reqwest::Certificate::from_pem_bundle(&native_tls_material().ca).unwrap())
         .build()
         .unwrap();
     let mut request = client

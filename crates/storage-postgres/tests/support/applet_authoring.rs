@@ -377,10 +377,11 @@ impl Fixture {
         )
         .unwrap();
         let client = reqwest::Client::builder()
-            .add_root_certificate(
-                reqwest::Certificate::from_pem(include_bytes!(
-                    "../../../server/tests/fixtures/outbox-test-ca.pem"
-                ))
+            .tls_backend_rustls()
+            .tls_certs_only(
+                reqwest::Certificate::from_pem_bundle(
+                    &realm_native_fixture::native_tls_material().ca,
+                )
                 .unwrap(),
             )
             .build()
@@ -1970,13 +1971,13 @@ mod realm_native_fixture {
     /// The native test runner issues one loopback certificate chain and one
     /// client trust store for this process. Every real fixture listener and
     /// explicit client must use that same authority as production DID egress.
-    struct NativeTlsMaterial {
+    pub(super) struct NativeTlsMaterial {
         chain: Vec<u8>,
         key: Vec<u8>,
-        ca: Vec<u8>,
+        pub(super) ca: Vec<u8>,
     }
 
-    fn native_tls_material() -> NativeTlsMaterial {
+    pub(super) fn native_tls_material() -> NativeTlsMaterial {
         let read = |name: &str| {
             let path = std::env::var_os(name).unwrap_or_else(|| {
                 panic!("{name} is required; run via cotest/scripts/run-native-rust-tests.py")
@@ -5912,6 +5913,8 @@ mod realm_native_fixture {
         CancelBeforePublish,
         ReplaceBeforePublish,
         CloseUnaccepted,
+        UnacceptedControl,
+        AcceptedControl,
     }
 
     pub(super) async fn run_bridge(
@@ -5932,6 +5935,7 @@ mod realm_native_fixture {
             armed: Arc<std::sync::atomic::AtomicBool>,
             authorization_armed: Arc<std::sync::atomic::AtomicBool>,
             control_armed: Arc<std::sync::atomic::AtomicBool>,
+            control_plan_skip: Arc<std::sync::atomic::AtomicUsize>,
             fail_after_control_plan: bool,
         }
         impl AuthoringStore for LostDeviceReceipt {
@@ -5986,10 +5990,21 @@ mod realm_native_fixture {
                     (key.starts_with("managed-control/v1/")
                         || key.starts_with("managed-owner-status/v1/"))
                         && value.is_some()
-                }) && self
-                    .control_armed
-                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                }) && self.control_armed.load(std::sync::atomic::Ordering::SeqCst)
                 {
+                    if self
+                        .control_plan_skip
+                        .fetch_update(
+                            std::sync::atomic::Ordering::SeqCst,
+                            std::sync::atomic::Ordering::SeqCst,
+                            |count| count.checked_sub(1),
+                        )
+                        .is_ok()
+                    {
+                        return self.inner.compare_exchange_batch(expected, writes);
+                    }
+                    self.control_armed
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
                     return Err(arkret_bridge_runtime::BridgeError::App(
                         "injected crash before control receipt persistence".into(),
                     ));
@@ -6022,11 +6037,17 @@ mod realm_native_fixture {
             author: ManagedActorAuthoringService,
             path: std::path::PathBuf,
             lost_control: Arc<std::sync::atomic::AtomicBool>,
+            control_plan_skip: Arc<std::sync::atomic::AtomicUsize>,
             make_edge: impl Fn() -> Arc<ArkretEdge>,
             scenario: RecoveryScenario,
         ) {
             let actor = candidate.actor_id.clone();
             let unaccepted = matches!(scenario, RecoveryScenario::CloseUnaccepted);
+            let pending_control = matches!(
+                scenario,
+                RecoveryScenario::UnacceptedControl | RecoveryScenario::AcceptedControl
+            );
+            let control_was_accepted = matches!(scenario, RecoveryScenario::AcceptedControl);
             let original = edge
                 .installed_managed_authoring(&candidate.creation_scope, &actor)
                 .unwrap()
@@ -6040,6 +6061,27 @@ mod realm_native_fixture {
             eprintln!("independent runtime recovery: administrator re-enable");
             let management_grant =
                 boxed_step(|| governance(fixture, native, candidate, creation)).await;
+            if pending_control {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                lost_control.store(true, std::sync::atomic::Ordering::SeqCst);
+                let error = boxed_step(|| devices.rotate_control(&actor, "lost-normal-control"))
+                    .await
+                    .unwrap_err();
+                assert!(
+                    error.to_string().contains(if control_was_accepted {
+                        "injected crash before control receipt persistence"
+                    } else {
+                        "injected crash after initial recovery plan persistence"
+                    }),
+                    "{error}"
+                );
+                let state = snapshot(fixture, &actor).await;
+                assert_eq!(
+                    state["realm_actor_control"]["control_method_kid"]
+                        != json!(candidate.control_method_kid),
+                    control_was_accepted
+                );
+            }
             boxed_step(|| {
                 installation_business_revocation(
                     fixture,
@@ -6051,6 +6093,82 @@ mod realm_native_fixture {
             .await;
             eprintln!("independent runtime recovery: erase daily key only");
             let custody = FileAuthoringStore::new(path.clone()).unwrap();
+            // Delete every daily controller copy, including the encrypted
+            // rotation journal, while retaining native update custody.
+            fn decode_control(storage_key: &str, raw: &str) -> Value {
+                use chacha20poly1305::aead::{Aead as _, KeyInit as _, Payload};
+                use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
+                let parts: Vec<_> = raw.split('.').collect();
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0], "v1");
+                let nonce = arkret::base64url_decode(parts[1]).unwrap();
+                let bytes = arkret::base64url_decode(parts[2]).unwrap();
+                let cipher = XChaCha20Poly1305::new(&Key::from([0x53; 32]));
+                let nonce = XNonce::try_from(nonce.as_slice()).unwrap();
+                let plain = cipher
+                    .decrypt(
+                        &nonce,
+                        Payload {
+                            msg: &bytes,
+                            aad: storage_key.as_bytes(),
+                        },
+                    )
+                    .unwrap();
+                serde_json::from_slice(&plain).unwrap()
+            }
+            fn encode_control(storage_key: &str, value: &Value) -> String {
+                use chacha20poly1305::aead::{Aead as _, KeyInit as _, Payload};
+                use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
+                let nonce = XNonce::from(rand::random::<[u8; 24]>());
+                let cipher = XChaCha20Poly1305::new(&Key::from([0x53; 32]));
+                let plain = arkret_canonical::canonical_json_bytes(value).unwrap();
+                let encrypted = cipher
+                    .encrypt(
+                        &nonce,
+                        Payload {
+                            msg: &plain,
+                            aad: storage_key.as_bytes(),
+                        },
+                    )
+                    .unwrap();
+                format!(
+                    "v1.{}.{}",
+                    arkret::base64url_encode(nonce),
+                    arkret::base64url_encode(encrypted)
+                )
+            }
+            let mut retained_control = None;
+            for (storage_key, raw) in custody.entries_with_prefix("managed-control/v1/").unwrap() {
+                let mut value = decode_control(&storage_key, &raw);
+                if value["actor_id"] != json!(actor) {
+                    continue;
+                }
+                if pending_control {
+                    let operation = value["operations"]
+                        .as_object()
+                        .unwrap()
+                        .values()
+                        .next()
+                        .unwrap()
+                        .clone();
+                    assert!(operation["outcome"].is_null());
+                    assert!(operation["closure"].is_null());
+                    retained_control = Some((storage_key.clone(), operation));
+                }
+                value["controllers"] = json!({});
+                assert!(
+                    custody
+                        .compare_exchange_batch(
+                            &[(storage_key.clone(), Some(raw))],
+                            &[(
+                                storage_key.clone(),
+                                Some(encode_control(&storage_key, &value))
+                            )]
+                        )
+                        .unwrap()
+                );
+            }
+            assert_eq!(retained_control.is_some(), pending_control);
             let (storage_key, before) = custody
                 .entries_with_prefix("managed-identity/v1/")
                 .unwrap()
@@ -6071,7 +6189,34 @@ mod realm_native_fixture {
                     )
                     .unwrap()
             );
+            if pending_control && !control_was_accepted {
+                let before_retry = snapshot(fixture, &actor).await;
+                assert!(
+                    boxed_step(|| devices.rotate_control(&actor, "lost-normal-control"))
+                        .await
+                        .is_err()
+                );
+                assert_eq!(snapshot(fixture, &actor).await, before_retry);
+                let (key, _) = retained_control.as_ref().unwrap();
+                let raw = custody.load(key).unwrap().unwrap();
+                assert!(
+                    decode_control(key, &raw)["operations"]
+                        .as_object()
+                        .unwrap()
+                        .values()
+                        .all(|op| op["closure"].is_null()),
+                    "unknown alone must not close the intent"
+                );
+            }
+            if pending_control {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
             let before_nonces = control_nonce_count(&fixture.pool, &actor).await;
+            if pending_control {
+                // Persist the new recovery plan into the existing control row;
+                // lose only the subsequent, already accepted begin receipt.
+                control_plan_skip.store(1, std::sync::atomic::Ordering::SeqCst);
+            }
             lost_control.store(true, std::sync::atomic::Ordering::SeqCst);
             eprintln!("independent runtime recovery: begin with receipt failure");
             let failure = boxed_step(|| devices.recover_control(&actor, "lost-daily-key"))
@@ -6107,7 +6252,7 @@ mod realm_native_fixture {
             let (_, unpublished) = author.published_principal(local_id).await.unwrap().unwrap();
             assert_eq!(
                 unpublished.len(),
-                1,
+                if pending_control { 2 } else { 1 },
                 "a missing begin receipt must not publish the planned successor"
             );
             drop(author);
@@ -6332,7 +6477,43 @@ mod realm_native_fixture {
                 completed
             );
             let (_, published) = author.published_principal(local_id).await.unwrap().unwrap();
-            assert_eq!(published.len(), 2);
+            assert_eq!(published.len(), if pending_control { 3 } else { 2 });
+            if let Some((key, original_operation)) = &retained_control {
+                let raw = custody.load(key).unwrap().unwrap();
+                let state = decode_control(key, &raw);
+                let retained =
+                    &state["operations"][original_operation["operation_id"].as_str().unwrap()];
+                assert_eq!(
+                    retained["event"], original_operation["event"],
+                    "recovery must retain the exact original"
+                );
+                if control_was_accepted {
+                    assert!(
+                        retained["outcome"].is_array(),
+                        "recover the accepted original receipt"
+                    );
+                    assert!(
+                        retained["closure"].is_null(),
+                        "accepted is never relabeled unaccepted"
+                    );
+                } else {
+                    assert!(retained["outcome"].is_null());
+                    assert_eq!(retained["closure"]["kind"], "unaccepted");
+                    assert!(retained["closure"]["advanced_current"]["signature"].is_object());
+                    assert!(retained["closure"]["subsequent_unknown"]["signature"].is_object());
+                }
+                let before_retry = snapshot(fixture, &actor).await;
+                assert!(
+                    boxed_step(|| devices.rotate_control(&actor, "lost-normal-control"))
+                        .await
+                        .is_err()
+                );
+                assert_eq!(
+                    snapshot(fixture, &actor).await,
+                    before_retry,
+                    "old operation cannot revive control after recovery"
+                );
+            }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             boxed_step(|| devices.rotate_control(&actor, "recovered-key-rotation"))
                 .await
@@ -6525,6 +6706,7 @@ mod realm_native_fixture {
         let lost_receipt = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let lost_authorization = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let lost_control = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let control_plan_skip = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let make_edge = || {
             Arc::new(
                 ArkretEdge::new_outbound(
@@ -6540,9 +6722,13 @@ mod realm_native_fixture {
                         armed: lost_receipt.clone(),
                         authorization_armed: lost_authorization.clone(),
                         control_armed: lost_control.clone(),
+                        control_plan_skip: control_plan_skip.clone(),
                         fail_after_control_plan: matches!(
                             recovery_scenario,
-                            Some(RecoveryScenario::CloseUnaccepted)
+                            Some(
+                                RecoveryScenario::CloseUnaccepted
+                                    | RecoveryScenario::UnacceptedControl
+                            )
                         ),
                     })),
                 )
@@ -6709,6 +6895,7 @@ mod realm_native_fixture {
                     author,
                     path.clone(),
                     lost_control.clone(),
+                    control_plan_skip.clone(),
                     make_edge,
                     scenario,
                 )
@@ -7731,6 +7918,21 @@ pub async fn realm_runtime_unaccepted_recovery(pool: PgPool) {
         false,
         false,
         Some(realm_native_fixture::RecoveryScenario::CloseUnaccepted),
+    )
+    .await;
+}
+
+pub async fn realm_runtime_recovery_with_unresolved_control(pool: PgPool, accepted: bool) {
+    realm_native_fixture::run_bridge(
+        pool,
+        false,
+        false,
+        false,
+        Some(if accepted {
+            realm_native_fixture::RecoveryScenario::AcceptedControl
+        } else {
+            realm_native_fixture::RecoveryScenario::UnacceptedControl
+        }),
     )
     .await;
 }

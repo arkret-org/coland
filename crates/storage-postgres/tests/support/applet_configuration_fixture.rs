@@ -73,12 +73,8 @@ pub(super) async fn run_configuration(pool: PgPool) {
         uuid::Uuid::now_v7()
     ));
     let http = reqwest::Client::builder()
-        .add_root_certificate(
-            reqwest::Certificate::from_pem(include_bytes!(
-                "../../../server/tests/fixtures/outbox-test-ca.pem"
-            ))
-            .unwrap(),
-        )
+        .tls_backend_rustls()
+        .tls_certs_only(reqwest::Certificate::from_pem_bundle(&native_tls_material().ca).unwrap())
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .unwrap();
@@ -785,12 +781,8 @@ async fn deliver_configuration_completion(
     delivery: &coland_storage::AppletAuthoringDelivery,
 ) -> Result<arkret_models_integration::AppletTransactionOutcome, String> {
     let http = reqwest::Client::builder()
-        .add_root_certificate(
-            reqwest::Certificate::from_pem(include_bytes!(
-                "../../../server/tests/fixtures/outbox-test-ca.pem"
-            ))
-            .unwrap(),
-        )
+        .tls_backend_rustls()
+        .tls_certs_only(reqwest::Certificate::from_pem_bundle(&native_tls_material().ca).unwrap())
         .build()
         .unwrap();
     let client = arkret_http_client::Client::builder(delivery.endpoint.parse().unwrap())
@@ -1695,12 +1687,8 @@ async fn configuration_peer_post_wire(
     )
     .unwrap();
     let client = reqwest::Client::builder()
-        .add_root_certificate(
-            reqwest::Certificate::from_pem(include_bytes!(
-                "../../../server/tests/fixtures/outbox-test-ca.pem"
-            ))
-            .unwrap(),
-        )
+        .tls_backend_rustls()
+        .tls_certs_only(reqwest::Certificate::from_pem_bundle(&native_tls_material().ca).unwrap())
         .timeout(std::time::Duration::from_secs(45))
         .build()
         .unwrap();

@@ -131,3 +131,21 @@ async fn bridge_closes_an_unaccepted_recovery_only_after_a_proven_cas_fence() {
     ))
     .await;
 }
+
+#[tokio::test]
+async fn bridge_recovers_lost_daily_keys_with_an_unaccepted_control_rotation() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(
+        applet_authoring::realm_runtime_recovery_with_unresolved_control(database.pool(), false),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn bridge_recovery_retains_the_original_accepted_control_rotation_receipt() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(
+        applet_authoring::realm_runtime_recovery_with_unresolved_control(database.pool(), true),
+    )
+    .await;
+}

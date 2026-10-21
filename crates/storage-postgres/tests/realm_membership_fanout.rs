@@ -3284,8 +3284,10 @@ async fn collaboration_governance_change_replica_case() {
             "new_governance_station_id":"ak:did_core:web:collaboration-successor.example"}),
         join.authority_commit.commit.committed_at,
     ));
-    change.authority_commit.event.authorization_ref =
-        Some(unit.transactions[0].event.event_id.to_string());
+    change.authority_commit.event.authorization_ref = Some(
+        arkret_wire::AuthorizationRef::new(unit.transactions[0].event.event_id.to_string())
+            .unwrap(),
+    );
     let change = heap_future(|| ordinary_realm::source_request(&pool, change)).await;
     heap_future(|| uow.commit_event(change.clone()))
         .await

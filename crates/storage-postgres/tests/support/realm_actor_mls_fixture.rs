@@ -44,7 +44,7 @@ pub(super) fn enable(package: &mut AppletPackage) {
         .unwrap();
 }
 
-fn signed_event(
+pub(super) fn signed_event(
     package: &AppletPackage,
     actor: ActorId,
     scope: ScopeRef,
@@ -140,7 +140,11 @@ async fn read_service_grants(
     )
 }
 
-async fn business_grant(fixture: &Fixture, package: &AppletPackage, actor: &ActorId) -> GrantId {
+pub(super) async fn business_grant(
+    fixture: &Fixture,
+    package: &AppletPackage,
+    actor: &ActorId,
+) -> GrantId {
     let scope = ScopeRef::Realm {
         realm_id: fixture.realm.clone(),
     };
@@ -310,7 +314,7 @@ async fn business_terminal_child(
                 committed_events: vec![],
                 signals: vec![],
             }),
-            "realm-mls-business-child",
+            &format!("realm-mls-business-child-{child_id}"),
         )
         .await;
     assert_eq!(
@@ -2147,3 +2151,30 @@ pub(super) async fn human_rotates_out_runtime(
 }
 
 include!("realm_actor_obligation_fixture.rs");
+include!("realm_actor_mls_admission_fixture.rs");
+include!("realm_actor_mls_boundary_fixture.rs");
+include!("realm_actor_grant_boundary_fixture.rs");
+
+pub(super) async fn run_admission(
+    fixture: &Fixture,
+    package: &AppletPackage,
+    candidate: &RealmActorCreatePayload,
+    device: &DeviceId,
+) {
+    let authority = fixture
+        .state
+        .test_persistence()
+        .device_revocations()
+        .applet_managed_device_authority(&candidate.actor_id, device, chrono::Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    let child = boxed_step(|| business_grant(fixture, package, &candidate.actor_id)).await;
+    boxed_step(|| keypackage_before_genesis(fixture, &authority)).await;
+    let mut group =
+        boxed_step(|| genesis(fixture, package, candidate, device, &authority, &child)).await;
+    boxed_step(|| {
+        keypackage_admission(fixture, package, candidate, &authority, &child, &mut group)
+    })
+    .await;
+}

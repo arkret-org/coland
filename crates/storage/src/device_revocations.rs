@@ -145,8 +145,8 @@ pub struct PcrDeviceGeneration {
     pub current_device_generation_ref: u64,
 }
 
-/// Receiver-derived identity at one confirmed PCR cut. This is transport
-/// authority, not permission to act on any business resource. Consumers must
+/// Receiver-derived identity at one accepted RealmActor private control cut.
+/// This is transport authority, not permission to act on any business resource. Consumers must
 /// still check the actual resource scope and all current business gates.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppletManagedDeviceAuthority {
@@ -182,8 +182,8 @@ pub trait DeviceRevocationStore: Send + Sync {
     }
 
     /// After cryptographic verification, re-read the exact Device instance
-    /// under its PCR writer lock and durably consume the HTTP nonce. This does
-    /// not consume business approvals or grant permission to a resource.
+    /// under its RealmControl writer lock and durably consume the HTTP nonce.
+    /// This does not consume business approvals or grant permission to a resource.
     async fn consume_applet_managed_device_nonce(
         &self,
         _expected: &AppletManagedDeviceAuthority,

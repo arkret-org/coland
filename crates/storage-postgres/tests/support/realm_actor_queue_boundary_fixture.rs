@@ -551,3 +551,295 @@ async fn welcome_checkpoint_consume_and_ack_recovery<F>(
         "all three exact boundaries reached"
     );
 }
+
+pub(super) async fn native_boundary_response(
+    fixture: &Fixture,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    scope: &ScopeRef,
+    seed: &[u8; 32],
+    path: &str,
+    operation: arkret_wire::ServiceOperationId,
+    body: Option<Value>,
+) -> salvo::Response {
+    let state = &fixture.state;
+    let metadata = AppletManagedDeviceMetadata {
+        actor_id: authority.actor_id.clone(),
+        device_id: authority.device_id.clone(),
+        authorization_event_id: authority.authorization_ref.event_id.clone(),
+        applet_id: authority.applet_id.clone(),
+        effective_scope: scope.clone(),
+        nonce: arkret_canonical::base64url_encode(rand::random::<[u8; 32]>()),
+    };
+    let uri = format!(
+        "{}{path}",
+        state.config().public_base_url.trim_end_matches('/')
+    );
+    let url = url::Url::parse(&uri).unwrap();
+    let mut headers = vec![
+        ("arkret-operation".into(), operation.to_string()),
+        (
+            "destination-service-id".into(),
+            state.service_core_id().to_string(),
+        ),
+        (
+            "arkret-managed-device".into(),
+            metadata.to_header_value().unwrap(),
+        ),
+    ];
+    let bytes = body
+        .as_ref()
+        .map(|value| arkret_canonical::canonical_json_bytes(value).unwrap());
+    let digest = bytes.as_ref().map(|value| content_digest_header(value));
+    let mut covered = vec![];
+    if let Some(value) = &body {
+        headers.push(("content-type".into(), "application/json".into()));
+        headers.push(("content-digest".into(), digest.clone().unwrap()));
+        let id = value
+            .get("claim_request_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        headers.push(("idempotency-key".into(), id));
+        covered.extend(["content-digest", "idempotency-key"]);
+    }
+    let parts = SignedRequestParts {
+        method: if body.is_some() { "POST" } else { "GET" }.into(),
+        target_uri: uri.clone(),
+        authority: url[url::Position::BeforeHost..url::Position::AfterPort].into(),
+        path: path.into(),
+        headers,
+        body_digest: digest,
+    };
+    let fingerprint = arkret_canonical::ed25519_pubkey_to_did_key_multibase(&authority.public_key);
+    let method = format!("did:key:{fingerprint}#{fingerprint}");
+    let signed = sign_http_message_for_scenario(
+        &parts,
+        HttpSignatureScenario::AppletManagedDeviceV1,
+        &covered,
+        "sig1",
+        &method,
+        chrono::Utc::now().timestamp(),
+        &SigningKey::from_bytes(seed),
+    )
+    .unwrap();
+    let mut request = if body.is_some() {
+        TestClient::post(uri)
+    } else {
+        TestClient::get(uri)
+    };
+    for (name, value) in parts.headers {
+        request = request.add_header(
+            salvo::http::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            value,
+            true,
+        );
+    }
+    if let Some(bytes) = bytes {
+        request = request.body(bytes);
+    }
+    request
+        .add_header("signature-input", signed.signature_input_header, true)
+        .add_header("signature", signed.signature_header, true)
+        .send(&service(state.clone()))
+        .await
+}
+
+async fn native_queue_handoff_footprint(fixture: &Fixture) -> Value {
+    use diesel_async::RunQueryDsl as _;
+    #[derive(diesel::QueryableByName)]
+    struct Row {
+        #[diesel(sql_type=diesel::sql_types::Jsonb)]
+        value: Value,
+    }
+    let mut value = boxed_step(|| native_business_footprint(fixture)).await;
+    let mut connection = fixture.pool.get().await.unwrap();
+    for table in [
+        "mls_welcome_deliveries",
+        "mls_key_packages",
+        "device_message_ack_tokens",
+        "sync_cursor_handles",
+        "sync_cursor_revocations",
+        "mls_group_current_results",
+        "device_messages",
+    ] {
+        let row=diesel::sql_query(format!("SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text),'[]'::jsonb) AS value FROM {table} r"))
+            .get_result::<Row>(&mut connection).await.unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert(table.into(), row.value);
+    }
+    value
+}
+
+async fn native_queue_cut_released(fixture: &Fixture) {
+    use diesel_async::RunQueryDsl as _;
+    let mut connection = fixture.pool.get().await.unwrap();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if diesel::sql_query(
+            "SELECT realm_id FROM realm_authorities WHERE realm_id=$1 FOR UPDATE NOWAIT",
+        )
+        .bind::<diesel::sql_types::Text, _>(fixture.realm.as_str())
+        .execute(&mut connection)
+        .await
+        .is_ok()
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < until,
+            "canceled native queue cut must release its actual Realm writer lock"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+pub(super) async fn native_prepared_queue_handoff_boundaries(
+    fixture: &Fixture,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    seed: &[u8; 32],
+    welcome: &arkret_wire::MlsWelcomeDelivery,
+    deadline: chrono::DateTime<chrono::Utc>,
+) {
+    use diesel_async::RunQueryDsl as _;
+    use futures_util::StreamExt as _;
+    #[derive(diesel::QueryableByName)]
+    struct Backend {
+        #[diesel(sql_type=diesel::sql_types::Integer)]
+        pid: i32,
+    }
+    #[derive(diesel::QueryableByName)]
+    struct Stopped {
+        #[diesel(sql_type=diesel::sql_types::Bool)]
+        stopped: bool,
+    }
+    let path = "/_arkret/self/device_messages?limit=1";
+    let scope = &welcome.effective_scope;
+    let operation = arkret_wire::ServiceOperationId::SelfDeviceMessagesReadListV1;
+    // First prove the retained original is really reachable through this route.
+    let mut initial = boxed_step(|| {
+        native_boundary_response(fixture, authority, scope, seed, path, operation, None)
+    })
+    .await;
+    assert_eq!(initial.status_code, Some(StatusCode::OK));
+    let page: arkret_models_collaboration::device_messages::DeviceMessagesGetOutcome =
+        initial.take_json().await.unwrap();
+    assert_eq!(
+        welcome_ids(&page, scope, &authority.actor_id, &authority.device_id),
+        vec![welcome.welcome_id.clone()]
+    );
+    assert!(page.ack_token.is_some());
+    assert!(page.next_cursor.is_some());
+    let before = boxed_step(|| native_queue_handoff_footprint(fixture)).await;
+    let mut observer = fixture.pool.get().await.unwrap();
+    let query = "SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND state='idle in transaction' AND query LIKE 'INSERT INTO sync_cursor_handles%'";
+    let old = diesel::sql_query(query)
+        .load::<Backend>(&mut observer)
+        .await
+        .unwrap();
+    let mut response = boxed_step(|| {
+        native_boundary_response(fixture, authority, scope, seed, path, operation, None)
+    })
+    .await;
+    assert_eq!(response.status_code, Some(StatusCode::OK));
+    let new = diesel::sql_query(query)
+        .load::<Backend>(&mut observer)
+        .await
+        .unwrap();
+    let owned = new
+        .iter()
+        .filter(|row| !old.iter().any(|p| p.pid == row.pid))
+        .collect::<Vec<_>>();
+    let exactly_one = owned.len() == 1;
+    let stopped = if exactly_one {
+        diesel::sql_query("SELECT pg_terminate_backend($1) AS stopped")
+            .bind::<diesel::sql_types::Integer, _>(owned[0].pid)
+            .get_result::<Stopped>(&mut observer)
+            .await
+            .unwrap()
+            .stopped
+    } else {
+        false
+    };
+    drop(observer);
+    let mut body = response.take_body();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), body.next()).await;
+    drop(body);
+    drop(response);
+    boxed_step(|| native_queue_cut_released(fixture)).await;
+    let after = boxed_step(|| native_queue_handoff_footprint(fixture)).await;
+    assert!(
+        exactly_one,
+        "must identify only this actual prepared native page backend"
+    );
+    assert!(
+        stopped,
+        "terminate only the held native queue cut owned by this test"
+    );
+    assert!(
+        matches!(first, Ok(Some(Err(_)))),
+        "a lost real DB authorization cut must fail before the first complete frame"
+    );
+    assert_eq!(
+        after, before,
+        "lost current cut must roll back all new ACK/cursor allocations"
+    );
+    // The same signed Welcome remains reachable; no ACK consumed its original.
+    let mut recovered = boxed_step(|| {
+        native_boundary_response(fixture, authority, scope, seed, path, operation, None)
+    })
+    .await;
+    assert_eq!(recovered.status_code, Some(StatusCode::OK));
+    let page: arkret_models_collaboration::device_messages::DeviceMessagesGetOutcome =
+        recovered.take_json().await.unwrap();
+    assert_eq!(
+        welcome_ids(&page, scope, &authority.actor_id, &authority.device_id),
+        vec![welcome.welcome_id.clone()]
+    );
+    let before = boxed_step(|| native_queue_handoff_footprint(fixture)).await;
+    let mut prepared = boxed_step(|| {
+        native_boundary_response(fixture, authority, scope, seed, path, operation, None)
+    })
+    .await;
+    assert_eq!(prepared.status_code, Some(StatusCode::OK));
+    assert!(
+        chrono::Utc::now() < deadline,
+        "genuine claim must still be live when queued original response is prepared"
+    );
+    assert_eq!(
+        boxed_step(|| native_queue_handoff_footprint(fixture)).await,
+        before,
+        "private response allocations stay uncommitted"
+    );
+    tokio::time::sleep(
+        (deadline - chrono::Utc::now()).to_std().unwrap() + std::time::Duration::from_millis(80),
+    )
+    .await;
+    let mut body = prepared.take_body();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), body.next()).await;
+    drop(body);
+    drop(prepared);
+    boxed_step(|| native_queue_cut_released(fixture)).await;
+    assert!(
+        matches!(first, Ok(Some(Err(_)))),
+        "physical claim expiry must deny the first actual Welcome response frame"
+    );
+    assert_eq!(
+        boxed_step(|| native_queue_handoff_footprint(fixture)).await,
+        before,
+        "expired queue handoff must leave neither ACK nor cursor allocation"
+    );
+    let mut refused = boxed_step(|| {
+        native_boundary_response(fixture, authority, scope, seed, path, operation, None)
+    })
+    .await;
+    assert_eq!(refused.status_code, Some(StatusCode::NOT_FOUND));
+    let problem: Value = refused.take_json().await.unwrap();
+    assert_eq!(problem["type"], "https://arkret.org/problems/not_found");
+    assert_eq!(problem["detail"], "native recipient queue is unavailable");
+    assert_eq!(
+        boxed_step(|| native_queue_handoff_footprint(fixture)).await,
+        before
+    );
+}

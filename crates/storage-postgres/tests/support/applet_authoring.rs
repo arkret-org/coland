@@ -1379,6 +1379,13 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
         if scope_label.contains("registered-audit") {
             actions.extend(["ak.strand.watch.set.others", "ak.audit.accessed"]);
         }
+        if package
+            .requested_scopes
+            .iter()
+            .any(|action| action == "ak.applet.bridge_error")
+        {
+            actions.push("ak.applet.bridge_error");
+        }
         // Durable capabilities are the canonical set projection of the
         // accepted grants, as in the production install finalizer.
         actions.sort_unstable();
@@ -1931,7 +1938,13 @@ mod realm_native_fixture {
     include!("applet_configuration_fixture.rs");
     include!("realm_actor_transport_fixture.rs");
     include!("realm_actor_queue_boundary_fixture.rs");
+    include!("realm_actor_runtime_recovery_fixture.rs");
+    include!("realm_actor_read_boundary_fixture.rs");
     include!("realm_actor_completion_fixture.rs");
+    include!("realm_actor_install_admission_fixture.rs");
+    include!("realm_actor_authority_admission_fixture.rs");
+    include!("realm_actor_revoke_boundary_fixture.rs");
+    include!("realm_actor_review_fixture.rs");
     use arkret_canonical::canonical_sha256;
     use arkret_models_identity::*;
     use arkret_signatures::detached_object::sign_detached_object;
@@ -1992,6 +2005,7 @@ mod realm_native_fixture {
 
     struct NativeService {
         package: AppletPackage,
+        service_resolution: Arc<Mutex<arkret_models_identity::AuthenticatedServiceResolution>>,
         actor_log: Arc<Mutex<Vec<Value>>>,
         managed_router: Arc<Mutex<Option<Arc<salvo::Service>>>>,
         configuration_response_fault: Arc<Mutex<Option<ConfigurationResponseFault>>>,
@@ -2063,7 +2077,8 @@ mod realm_native_fixture {
             let response_fault = configuration_response_fault.clone();
             let completion_handler = Arc::new(Mutex::new(None::<CompletionHandler>));
             let served_completion = completion_handler.clone();
-            let service_resolution = fixture_applet_service_history(&package);
+            let service_resolution = Arc::new(Mutex::new(fixture_applet_service_history(&package)));
+            let served_service_resolution = service_resolution.clone();
             let resolution_path =
                 arkret_models_identity::canonical_service_resolution_path(&package.service_id);
             let runtime = tokio::runtime::Handle::current();
@@ -2084,7 +2099,7 @@ mod realm_native_fixture {
                     let served_router = served_router.clone();
                     let response_fault = response_fault.clone();
                     let served_completion = served_completion.clone();
-                    let service_resolution = service_resolution.clone();
+                    let service_resolution = served_service_resolution.clone();
                     let resolution_path = resolution_path.clone();
                     let runtime = runtime.clone();
                     let endpoint = endpoint.clone();
@@ -2119,7 +2134,7 @@ mod realm_native_fixture {
                             return;
                         }
                         if method == "GET" && path == resolution_path && served_router.lock().unwrap().is_none() {
-                            let body = arkret_canonical::canonical_json_bytes(&service_resolution).unwrap();
+                            let body = arkret_canonical::canonical_json_bytes(&*service_resolution.lock().unwrap()).unwrap();
                             let header = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
                             let _ = stream.write_all(header.as_bytes());
                             let _ = stream.write_all(&body);
@@ -2163,7 +2178,13 @@ mod realm_native_fixture {
                             let _=stream.write_all(header.as_bytes());let _=stream.write_all(&body);let _=stream.flush();
                             return;
                         }
-                        let entries = if path.contains("/webvh/") && !path.contains("/service/") { published_actor.lock().unwrap().clone() } else { vec![entry] };
+                        let entries = if path.contains("/webvh/") && !path.contains("/service/") { published_actor.lock().unwrap().clone() } else {
+                            let resolution=service_resolution.lock().unwrap();
+                            match &resolution.method_history_evidence {
+                                ResolutionMethodHistoryEvidence::WebvhLog { log_entries, .. } => log_entries.clone(),
+                                _ => vec![entry],
+                            }
+                        };
                         let body=if path.ends_with("did.jsonl") {entries.iter().map(|entry|serde_json::to_string(entry).unwrap()+"\n").collect::<String>()}
                             else if path.ends_with("did.json") {entries.last().map(|entry|serde_json::to_string(&entry["state"]).unwrap()).unwrap_or_default()}
                             else {String::new()};
@@ -2178,6 +2199,7 @@ mod realm_native_fixture {
             });
             Self {
                 package,
+                service_resolution,
                 actor_log,
                 managed_router,
                 configuration_response_fault,
@@ -2708,6 +2730,32 @@ mod realm_native_fixture {
         actions: &[&str],
         expires_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> arkret_wire::DeviceId {
+        let scopes = serde_json::from_value(json!([{
+            "effective_scope": candidate.creation_scope,
+            "actions": actions,
+        }]))
+        .unwrap();
+        boxed_step(|| {
+            authorize_native_device_with_scopes(
+                fixture,
+                candidate,
+                creation_commit,
+                key_seed,
+                &scopes,
+                expires_at,
+            )
+        })
+        .await
+    }
+
+    pub(super) async fn authorize_native_device_with_scopes(
+        fixture: &Fixture,
+        candidate: &RealmActorCreatePayload,
+        creation_commit: &arkret_wire::RealmCommit,
+        key_seed: u8,
+        scopes: &arkret_models_collaboration::events_payloads::AppletManagedDeviceScopes,
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> arkret_wire::DeviceId {
         use arkret_models_collaboration::authority_commit::{
             SelfAuthoritySubmitOutcome, SelfAuthoritySubmitRequest,
         };
@@ -2732,7 +2780,7 @@ mod realm_native_fixture {
             "algorithms":["ak.hpke_x25519_aead_chacha20poly1305.v1"],
             "device_key_algorithm":"Ed25519",
             "authorized_by":candidate.actor_id.signing_principal_id(),
-            "scopes":[{"effective_scope":candidate.creation_scope,"actions":actions}],
+            "scopes":scopes,
             "not_before":at, "expires_at":expires_at.unwrap_or(at+chrono::Duration::hours(1)),
             "authorization_binding_kind":"realm_managed_delegation", "authorized_generation_ref":1,
             "device_signature":"unsigned", "applet_id":candidate.applet_id,
@@ -5859,6 +5907,7 @@ mod realm_native_fixture {
             inner: FileAuthoringStore,
             armed: Arc<std::sync::atomic::AtomicBool>,
             recipient_fault: Arc<NativeRecipientStoreFault>,
+            runtime_fault: Arc<NativeRuntimeRecoveryFault>,
         }
         impl AuthoringStore for LostRevokeReceipt {
             fn load(&self, key: &str) -> arkret_bridge_runtime::Result<Option<String>> {
@@ -5876,6 +5925,8 @@ mod realm_native_fixture {
                 writes: &[(String, Option<String>)],
             ) -> arkret_bridge_runtime::Result<bool> {
                 self.recipient_fault
+                    .before_compare_exchange(expected, writes, &self.inner)?;
+                self.runtime_fault
                     .before_compare_exchange(expected, writes, &self.inner)?;
                 if expected.iter().any(|(key, value)| {
                     key.starts_with("managed-device-revocation/v1/") && value.is_some()
@@ -5979,6 +6030,7 @@ mod realm_native_fixture {
             .unwrap();
         let lost_receipt = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let recipient_fault = Arc::new(NativeRecipientStoreFault::default());
+        let runtime_fault = Arc::new(NativeRuntimeRecoveryFault::default());
         let make_edge = || {
             Arc::new(
                 ArkretEdge::new_outbound(
@@ -5993,6 +6045,7 @@ mod realm_native_fixture {
                         inner: FileAuthoringStore::new(path.clone()).unwrap(),
                         armed: lost_receipt.clone(),
                         recipient_fault: recipient_fault.clone(),
+                        runtime_fault: runtime_fault.clone(),
                     })),
                 )
                 .unwrap(),
@@ -6072,6 +6125,24 @@ mod realm_native_fixture {
             std::fs::remove_file(&path).unwrap();
             return;
         }
+        if recipient_mode == 4 {
+            drop(author);
+            drop(edge);
+            boxed_step(|| {
+                run_native_runtime_recovery(
+                    &factory.fixture,
+                    package,
+                    &actor,
+                    &content_scope,
+                    &make_edge,
+                    &path,
+                    &runtime_fault,
+                )
+            })
+            .await;
+            std::fs::remove_file(&path).unwrap();
+            return;
+        }
         eprintln!("real Bridge runtime: current private control and native Device");
         let devices = ManagedDeviceRuntime::new(edge.clone()).unwrap();
         if let Some((scope, outcome)) = &parent_installation {
@@ -6107,7 +6178,7 @@ mod realm_native_fixture {
             )
         })
         .await;
-        if circle {
+        let parent_device = if circle {
             let parent_scope = ScopeRef::Realm {
                 realm_id: factory.fixture.realm.clone(),
             };
@@ -6127,7 +6198,10 @@ mod realm_native_fixture {
             boxed_step(|| devices.join_circle_after_realm_join(&device, &parent))
                 .await
                 .unwrap();
-        }
+            Some(parent)
+        } else {
+            None
+        };
         boxed_step(|| devices.ensure_realm_membership(&device))
             .await
             .unwrap();
@@ -6636,6 +6710,13 @@ mod realm_native_fixture {
                 .await
                 .is_err()
         );
+        if let Some(parent) = parent_device.as_ref() {
+            let original = EventId::new(&event_id).unwrap();
+            boxed_step(|| {
+                realm_native_read_boundaries(&factory.fixture, &device, parent, &original)
+            })
+            .await;
+        }
         let redaction = arkret::MessageRedactPayload {
             message_id: arkret::MessageId::from_event_id(&arkret::EventId::new(&event_id).unwrap()),
             track_name: None,
@@ -6910,10 +6991,27 @@ mod realm_native_fixture {
         }
     }
 
+    pub(super) enum NativeSuite {
+        Lifecycle,
+        Mls,
+        MlsAdmission,
+        MlsBoundary(realm_actor_mls_fixture::BoundaryCase),
+    }
+
     pub(super) async fn run(pool: PgPool, mls: bool) {
+        let suite = if mls {
+            NativeSuite::Mls
+        } else {
+            NativeSuite::Lifecycle
+        };
+        boxed_step(|| run_suite(pool, suite)).await;
+    }
+
+    pub(super) async fn run_suite(pool: PgPool, suite: NativeSuite) {
         use arkret_models_collaboration::authority_commit::{
             SelfAuthoritySubmitOutcome, SelfAuthoritySubmitRequest,
         };
+        let mls = !matches!(suite, NativeSuite::Lifecycle);
         let (fixture, _governor_server) = Box::pin(network_fixture(pool.clone())).await;
         let factory = AppletAuthoringFactory {
             fixture,
@@ -6930,9 +7028,45 @@ mod realm_native_fixture {
             .lock()
             .await
             .insert(id.to_string(), native.package.clone());
-        let install = factory.prepare_install(&id, "realm-native-control").await;
+        let install = boxed_step(|| factory.prepare_install(&id, "realm-native-control")).await;
         let applets = PgAppletStore { pool: pool.clone() };
-        install.commit(&applets).await.unwrap();
+        if matches!(
+            &suite,
+            NativeSuite::MlsBoundary(
+                realm_actor_mls_fixture::BoundaryCase::ClaimExpiry
+                    | realm_actor_mls_fixture::BoundaryCase::QueryExpiry
+                    | realm_actor_mls_fixture::BoundaryCase::EncryptedReadExpiry,
+            )
+        ) {
+            let finite = boxed_step(|| {
+                prepare_expiring_install(
+                    &factory,
+                    &id,
+                    "realm-native-control",
+                    chrono::Utc::now() + chrono::Duration::seconds(90),
+                )
+            })
+            .await;
+            let (status, value) = boxed_step(|| async {
+                factory
+                    .fixture
+                    .admin_post(
+                        "/_arkret/self/applets/install",
+                        arkret_wire::ServiceOperationId::SelfAppletCommandInstallV1.as_str(),
+                        &json!(finite),
+                        Some("actual-finite-native-boundary-install"),
+                    )
+                    .await
+            })
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::CREATED,
+                "finite original installation: {value}"
+            );
+        } else {
+            install.commit(&applets).await.unwrap();
+        }
         let record = applets
             .get(
                 id.as_str(),
@@ -7083,13 +7217,57 @@ mod realm_native_fixture {
         } else {
             boxed_step(|| first_device(&factory.fixture, &candidate, &before)).await
         };
+        let boundary_source = if matches!(suite, NativeSuite::MlsBoundary(_)) {
+            Some(
+                boxed_step(|| {
+                    realm_actor_mls_fixture::prepare_boundary_current_source(&factory.fixture)
+                })
+                .await,
+            )
+        } else {
+            None
+        };
         eprintln!("native lifecycle: Device-authored self join");
         boxed_step(|| self_join(&factory.fixture, &candidate, &device, &record)).await;
         if mls {
-            boxed_step(|| {
-                realm_actor_mls_fixture::run(&factory.fixture, &package, &candidate, &device)
-            })
-            .await;
+            match suite {
+                NativeSuite::Mls => {
+                    boxed_step(|| {
+                        realm_actor_mls_fixture::run(
+                            &factory.fixture,
+                            &package,
+                            &candidate,
+                            &device,
+                        )
+                    })
+                    .await
+                }
+                NativeSuite::MlsAdmission => {
+                    boxed_step(|| {
+                        realm_actor_mls_fixture::run_admission(
+                            &factory.fixture,
+                            &package,
+                            &candidate,
+                            &device,
+                        )
+                    })
+                    .await
+                }
+                NativeSuite::MlsBoundary(case) => {
+                    boxed_step(|| {
+                        realm_actor_mls_fixture::run_boundary(
+                            &factory.fixture,
+                            &package,
+                            &candidate,
+                            &device,
+                            boundary_source.unwrap(),
+                            case,
+                        )
+                    })
+                    .await
+                }
+                NativeSuite::Lifecycle => unreachable!(),
+            }
             return;
         }
         eprintln!("native lifecycle: independent Device revoke terminal");
@@ -7146,6 +7324,45 @@ pub async fn realm_native_mls(pool: PgPool) {
     realm_native_fixture::run(pool, true).await;
 }
 
+pub async fn realm_native_install_admission(pool: PgPool) {
+    realm_native_fixture::run_install_admission(pool).await;
+}
+
+pub async fn realm_native_authority_admission(pool: PgPool) {
+    realm_native_fixture::run_authority_admission(pool).await;
+}
+
+pub async fn realm_native_mls_admission(pool: PgPool) {
+    realm_native_fixture::run_suite(pool, realm_native_fixture::NativeSuite::MlsAdmission).await;
+}
+
+pub async fn realm_native_review_admission(pool: PgPool) {
+    realm_native_fixture::run_reviews(pool).await;
+}
+
+macro_rules! native_boundary_entry {
+    ($name:ident, $case:ident) => {
+        pub async fn $name(pool: PgPool) {
+            realm_native_fixture::run_suite(
+                pool,
+                realm_native_fixture::NativeSuite::MlsBoundary(
+                    realm_actor_mls_fixture::BoundaryCase::$case,
+                ),
+            )
+            .await;
+        }
+    };
+}
+native_boundary_entry!(
+    realm_native_worker_publication_budget,
+    WorkerPublicationBudget
+);
+native_boundary_entry!(realm_native_human_pcr_handoff, HumanPcrHandoff);
+native_boundary_entry!(realm_native_claim_e2ee_expiry, ClaimExpiry);
+native_boundary_entry!(realm_native_query_e2ee_expiry, QueryExpiry);
+native_boundary_entry!(realm_native_encrypted_read_e2ee_expiry, EncryptedReadExpiry);
+native_boundary_entry!(realm_native_exact_current_floor, ExactCurrentFloor);
+
 pub async fn realm_bridge_runtime(pool: PgPool) {
     realm_native_fixture::run_bridge(pool, false).await;
 }
@@ -7199,4 +7416,9 @@ pub fn completion_application(
 /// Real accepted creation delivered to the production Bridge transaction router.
 pub async fn realm_bridge_completion_receiver(pool: PgPool) {
     realm_native_fixture::run_bridge_recipient_mode(pool, false, 3).await;
+}
+
+/// Real initial Device and KeyPackage accepted-outcome persistence recovery.
+pub async fn realm_native_runtime_recovery(pool: PgPool) {
+    realm_native_fixture::run_bridge_recipient_mode(pool, false, 4).await;
 }

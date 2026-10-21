@@ -89,6 +89,7 @@ coland-contracts.workspace = true
 diesel = { workspace = true, features = ["postgres", "serde_json"] }
 diesel-async = { workspace = true, features = ["postgres", "deadpool"] }
 arkret-schema-conformance = { workspace = true }
+arkret-test-kit.workspace = true
 arkret = { workspace = true, features = ["mls"] }
 arkret-bootstrap.workspace = true
 arkret-crypto = { workspace = true, features = ["account-data"] }

@@ -357,6 +357,63 @@ pub use coland_storage::{
 
 #[async_trait::async_trait]
 pub trait AppletPort: Send + Sync {
+    /// Internal exact-candidate lookup for current Account lock planning.
+    async fn configuration_review_account(
+        &self,
+        _request: &arkret_models_integration::ManagementReviewRequestBody,
+    ) -> ServiceResult<Option<arkret_wire::AccountId>> {
+        if _request.configuration_ref.is_none() {
+            return Ok(None);
+        }
+        Err(crate::ServiceError::Internal(
+            "configuration ledger unavailable".into(),
+        ))
+    }
+
+    async fn configuration_candidate_account(
+        &self,
+        _event: &arkret_wire::Event,
+    ) -> ServiceResult<Option<arkret_wire::AccountId>> {
+        Err(crate::ServiceError::Internal(
+            "configuration ledger unavailable".into(),
+        ))
+    }
+    async fn configuration_intent(
+        &self,
+        _governor: &arkret_wire::DidCoreId,
+        _applet: &arkret_wire::AppletId,
+        _actor: &arkret_wire::ActorId,
+        _intent: &arkret_models_integration::AppletConfigurationIntent,
+        _current: &coland_storage::ManagementReviewCurrent,
+    ) -> ServiceResult<Option<arkret_models_integration::AppletConfigurationExecutionIntent>> {
+        Err(crate::ServiceError::Internal(
+            "configuration ledger unavailable".into(),
+        ))
+    }
+    async fn configuration(
+        &self,
+        _governor: &arkret_wire::DidCoreId,
+        _intent: &arkret_models_integration::AppletConfigurationExecutionIntent,
+        _command: arkret_models_integration::AppletConfigurationCommand,
+        _current: &coland_storage::ManagementReviewCurrent,
+        _ingress: &coland_storage::AppletConfigurationIngress,
+    ) -> ServiceResult<arkret_models_integration::AppletConfigurationOutcome> {
+        Err(crate::ServiceError::Internal(
+            "configuration ledger unavailable".into(),
+        ))
+    }
+    async fn retain_configuration_source(
+        &self,
+        _governor: &arkret_wire::DidCoreId,
+        _intent: &arkret_models_integration::AppletConfigurationExecutionIntent,
+        _source: &arkret_models_integration::AppletConfigurationExecutionOutcome,
+        _producer: &coland_storage::AppletEventProducerGuard,
+        _current: &coland_storage::ManagementReviewCurrent,
+    ) -> ServiceResult<arkret_models_integration::AppletConfigurationOutcome> {
+        Err(crate::ServiceError::Internal(
+            "configuration ledger unavailable".into(),
+        ))
+    }
     async fn issue_widget_token(
         &self,
         _record: coland_storage::AppletWidgetTokenRecord,
@@ -969,6 +1026,57 @@ impl EventQueryService {
         candidate: AppletAuthoringPreviewState,
     ) -> ServiceResult<AppletAuthoringPreviewState> {
         self.applets.issue_applet_authoring_preview(candidate).await
+    }
+
+    pub async fn configuration_review_account(
+        &self,
+        request: &arkret_models_integration::ManagementReviewRequestBody,
+    ) -> ServiceResult<Option<arkret_wire::AccountId>> {
+        self.applets.configuration_review_account(request).await
+    }
+
+    pub async fn configuration_candidate_account(
+        &self,
+        event: &arkret_wire::Event,
+    ) -> ServiceResult<Option<arkret_wire::AccountId>> {
+        self.applets.configuration_candidate_account(event).await
+    }
+
+    pub async fn configuration_intent(
+        &self,
+        governor: &arkret_wire::DidCoreId,
+        applet: &arkret_wire::AppletId,
+        actor: &arkret_wire::ActorId,
+        intent: &arkret_models_integration::AppletConfigurationIntent,
+        current: &coland_storage::ManagementReviewCurrent,
+    ) -> ServiceResult<Option<arkret_models_integration::AppletConfigurationExecutionIntent>> {
+        self.applets
+            .configuration_intent(governor, applet, actor, intent, current)
+            .await
+    }
+    pub async fn applet_configuration(
+        &self,
+        governor: &arkret_wire::DidCoreId,
+        intent: &arkret_models_integration::AppletConfigurationExecutionIntent,
+        command: arkret_models_integration::AppletConfigurationCommand,
+        current: &coland_storage::ManagementReviewCurrent,
+        ingress: &coland_storage::AppletConfigurationIngress,
+    ) -> ServiceResult<arkret_models_integration::AppletConfigurationOutcome> {
+        self.applets
+            .configuration(governor, intent, command, current, ingress)
+            .await
+    }
+    pub async fn retain_configuration_source(
+        &self,
+        governor: &arkret_wire::DidCoreId,
+        intent: &arkret_models_integration::AppletConfigurationExecutionIntent,
+        source: &arkret_models_integration::AppletConfigurationExecutionOutcome,
+        producer: &coland_storage::AppletEventProducerGuard,
+        current: &coland_storage::ManagementReviewCurrent,
+    ) -> ServiceResult<arkret_models_integration::AppletConfigurationOutcome> {
+        self.applets
+            .retain_configuration_source(governor, intent, source, producer, current)
+            .await
     }
 
     pub async fn current_applet_authoring_preview(

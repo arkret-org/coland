@@ -50,6 +50,10 @@ use crate::state::AppState;
 pub(in crate::routing::extensions) fn protocol_router() -> Router {
     Router::new()
         .push(
+            Router::with_path("peer/applets/{applet_id}/configuration")
+                .post(super::configuration::peer_submit),
+        )
+        .push(
             Router::with_path("edge").push(
                 Router::with_path("applet")
                     .push(Router::with_path("ping").get(protocol_ping_endpoint))
@@ -83,6 +87,10 @@ pub(in crate::routing::extensions) fn protocol_router() -> Router {
                     )
                     .push(
                         Router::with_path("{applet_id}")
+                            .push(
+                                Router::with_path("configuration")
+                                    .post(super::configuration::self_submit),
+                            )
                             .push(
                                 Router::with_path("authority/material")
                                     .hoop(super::signature::require_authority_material_signature)

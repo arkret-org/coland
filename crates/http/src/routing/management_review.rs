@@ -79,6 +79,9 @@ async fn request_review(
     }
     // This verifies the original producer. It neither authors nor queues the Event.
     let outcome = async {
+        if let Some(account) = state.event_queries().configuration_review_account(&body).await? {
+            accounts.insert(account);
+        }
         let mut current =
             crate::approval_admission::observe_management_accounts(state, accounts).await?;
         current.applet_event = super::extensions::applet_bridge::prepare_event_current(state,&body.target).await?;

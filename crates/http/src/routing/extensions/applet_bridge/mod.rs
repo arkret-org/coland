@@ -6,6 +6,7 @@
 
 mod authority_material;
 mod bot;
+mod configuration;
 mod endpoints;
 mod ghost;
 mod ghost_reuse;

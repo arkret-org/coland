@@ -442,6 +442,30 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
             );
         }
 
+        // A consumer's durable, authenticated membership snapshot establishes
+        // the actual governing Station even before legacy in-memory views are
+        // rebuilt. A bare locator or unproven product row is not a relationship.
+        let governance = sql_query(
+            "SELECT DISTINCT 'realm_membership'::text AS source, a.service_id AS candidate \
+             FROM member_state_current_results m JOIN realm_authorities a ON a.realm_id=m.realm_id \
+             LEFT JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position \
+             WHERE m.member_id=$1 AND m.membership='join' AND (c.commit_id IS NOT NULL OR EXISTS( \
+                 SELECT 1 FROM replica_authorization_rows r WHERE r.realm_id=m.realm_id \
+                 AND r.selector=jsonb_build_object('kind','member_state','actor_id',$2::jsonb) \
+                 AND r.source_stream_ref=jsonb_build_object('kind','realm','realm_id',m.realm_id) \
+                 AND r.current_commit_id=m.current_commit_id AND r.current_stream_position=m.current_stream_position AND r.value=m.value))",
+        ).bind::<Text,_>(&account_actor).bind::<Jsonb,_>(serde_json::json!(arkret_wire::ActorId::account(account_id.clone())))
+            .load::<AffectedCandidateRow>(&mut conn).await.map_err(PersistenceError::database)?;
+        for row in governance {
+            push_unique_observation(
+                &mut observations,
+                arkret_wire::DidCoreId::new(row.candidate)
+                    .map_err(|error| PersistenceError::Internal(error.to_string()))?,
+                affected_source(&row.source)?,
+                observed_at,
+            );
+        }
+
         // Session audiences are explicit service identities. They are not
         // inferred from a URL or deployment config.
         let session_candidates = sql_query(

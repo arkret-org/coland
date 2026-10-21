@@ -40,6 +40,7 @@ const TABLES: &[(&str, &str)] = &[
         "EXISTS(SELECT 1 FROM canonical_events e WHERE e.realm_id=$1 AND e.scope_ref->>'kind'='realm_control' AND e.pk=t.provision_event_pk)",
     ),
     ("realm_actor_creations", "t.realm_id=$1"),
+    ("applet_configurations", "t.realm_id=$1"),
     ("realm_actor_current_results", "t.realm_id=$1"),
     ("realm_actor_private_signer_facts", "t.realm_id=$1"),
     ("management_private_handoff_imports", "t.realm_id=$1"),

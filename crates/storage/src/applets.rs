@@ -1,6 +1,65 @@
 use super::{PersistenceResult, Value, async_trait};
 #[async_trait]
 pub trait AppletStore: Send + Sync {
+    /// Internal exact-candidate lookup for current Account lock planning.
+    async fn configuration_review_account(
+        &self,
+        _request: &arkret_models_integration::ManagementReviewRequestBody,
+    ) -> PersistenceResult<Option<arkret_wire::AccountId>> {
+        if _request.configuration_ref.is_none() {
+            return Ok(None);
+        }
+        Err(super::PersistenceError::Internal(
+            "configuration ledger unavailable".into(),
+        ))
+    }
+
+    async fn configuration_candidate_account(
+        &self,
+        _event: &arkret_wire::Event,
+    ) -> PersistenceResult<Option<arkret_wire::AccountId>> {
+        Err(super::PersistenceError::Internal(
+            "configuration ledger unavailable".into(),
+        ))
+    }
+    async fn configuration_intent(
+        &self,
+        _governor: &arkret_wire::DidCoreId,
+        _applet: &arkret_wire::AppletId,
+        _actor: &arkret_wire::ActorId,
+        _intent: &arkret_models_integration::AppletConfigurationIntent,
+        _current: &crate::ManagementReviewCurrent,
+    ) -> PersistenceResult<Option<arkret_models_integration::AppletConfigurationExecutionIntent>>
+    {
+        Err(super::PersistenceError::Internal(
+            "configuration ledger unavailable".into(),
+        ))
+    }
+    /// Private configuration ledger owned by the current Realm governor.
+    async fn configuration(
+        &self,
+        _governor: &arkret_wire::DidCoreId,
+        _intent: &arkret_models_integration::AppletConfigurationExecutionIntent,
+        _command: arkret_models_integration::AppletConfigurationCommand,
+        _current: &crate::ManagementReviewCurrent,
+        _ingress: &crate::AppletConfigurationIngress,
+    ) -> PersistenceResult<arkret_models_integration::AppletConfigurationOutcome> {
+        Err(super::PersistenceError::Internal(
+            "configuration ledger unavailable".into(),
+        ))
+    }
+    async fn retain_configuration_source(
+        &self,
+        _governor: &arkret_wire::DidCoreId,
+        _intent: &arkret_models_integration::AppletConfigurationExecutionIntent,
+        _source: &arkret_models_integration::AppletConfigurationExecutionOutcome,
+        _producer: &crate::AppletEventProducerGuard,
+        _current: &crate::ManagementReviewCurrent,
+    ) -> PersistenceResult<arkret_models_integration::AppletConfigurationOutcome> {
+        Err(super::PersistenceError::Internal(
+            "configuration ledger unavailable".into(),
+        ))
+    }
     async fn authority_material(
         &self,
         _applet: &arkret_wire::AppletId,
@@ -291,3 +350,29 @@ pub type AppletResolutionAttester = std::sync::Arc<
         + Send
         + Sync,
 >;
+
+/// Private receiver audit material. Only the authenticated HTTP ingress builds
+/// this record; it is never accepted as a client-supplied protocol carrier.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AppletConfigurationIngress {
+    pub requester_account_id: arkret_wire::AccountId,
+    pub request: arkret_models_integration::AppletConfigurationRequest,
+    pub source: AppletConfigurationIngressSource,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AppletConfigurationIngressSource {
+    LocalSession,
+    Peer {
+        source_service_id: arkret_wire::DidCoreId,
+        signature_input: String,
+        signature: String,
+        content_digest: String,
+        verified_key_digest: [u8; 32],
+        method: String,
+        target_uri: String,
+        authority: String,
+        signed_headers: std::collections::BTreeMap<String, String>,
+    },
+}

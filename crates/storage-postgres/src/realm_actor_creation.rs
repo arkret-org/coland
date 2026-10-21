@@ -99,6 +99,7 @@ pub(crate) async fn admit(
     )
     .await?;
     cut.require_open_lifecycle(event)?;
+    crate::applet_configuration::require_candidate(conn, event, prepared).await?;
     crate::realm_actor_control::admit_creation(conn, event, commit).await?;
     let (fact, approvals) = crate::managed_message_actor::require_applet_producer_in_connection(
         conn, event, producer, commit, prepared,
@@ -161,6 +162,7 @@ pub(crate) async fn admit(
         commit.committed_at,
     )
     .await?;
+    crate::applet_configuration::accepted(conn, event).await?;
     Ok(outcome)
 }
 

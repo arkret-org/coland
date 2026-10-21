@@ -51,3 +51,16 @@ async fn bridge_runtime_circle_only_device_preserves_blob_scope_over_real_https(
     ))
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn applet_configuration_preserves_original_intent_and_candidate_over_real_https() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_test_writer()
+        .try_init();
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_applet_configuration(
+        database.pool(),
+    ))
+    .await;
+}

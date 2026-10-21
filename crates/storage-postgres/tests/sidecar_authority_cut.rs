@@ -6511,6 +6511,7 @@ async fn management_review_atomic_join_scenario(
     });
     candidate.self_producer_guard = Some(producer.clone());
     let body = ManagementReviewRequestBody {
+        configuration_ref: None,
         request_id: "management-review-atomic-original".into(),
         effective_scope: ScopeRef::Realm {
             realm_id: realm.clone(),
@@ -7225,6 +7226,7 @@ async fn management_review_atomic_join_scenario(
     ))).await;
     publish.self_producer_guard = Some(producer.clone());
     let mut public_body = ManagementReviewRequestBody {
+        configuration_ref: None,
         request_id: "management-review-publish-cancelled".into(),
         effective_scope: body.effective_scope.clone(),
         management_operation: ManagementOperation::Publish,

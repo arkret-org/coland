@@ -362,6 +362,71 @@ impl crate::events::MessagePort for PersistenceEventReader {
 
 #[async_trait::async_trait]
 impl crate::events::AppletPort for PersistenceEventReader {
+    async fn configuration_review_account(
+        &self,
+        request: &arkret_models_integration::ManagementReviewRequestBody,
+    ) -> crate::ServiceResult<Option<arkret_wire::AccountId>> {
+        Ok(self
+            .0
+            .applets()
+            .configuration_review_account(request)
+            .await?)
+    }
+
+    async fn configuration_candidate_account(
+        &self,
+        event: &arkret_wire::Event,
+    ) -> crate::ServiceResult<Option<arkret_wire::AccountId>> {
+        Ok(self
+            .0
+            .applets()
+            .configuration_candidate_account(event)
+            .await?)
+    }
+
+    async fn configuration_intent(
+        &self,
+        governor: &arkret_wire::DidCoreId,
+        applet: &arkret_wire::AppletId,
+        actor: &arkret_wire::ActorId,
+        intent: &arkret_models_integration::AppletConfigurationIntent,
+        current: &coland_storage::ManagementReviewCurrent,
+    ) -> crate::ServiceResult<Option<arkret_models_integration::AppletConfigurationExecutionIntent>>
+    {
+        Ok(self
+            .0
+            .applets()
+            .configuration_intent(governor, applet, actor, intent, current)
+            .await?)
+    }
+    async fn configuration(
+        &self,
+        governor: &arkret_wire::DidCoreId,
+        intent: &arkret_models_integration::AppletConfigurationExecutionIntent,
+        command: arkret_models_integration::AppletConfigurationCommand,
+        current: &coland_storage::ManagementReviewCurrent,
+        ingress: &coland_storage::AppletConfigurationIngress,
+    ) -> crate::ServiceResult<arkret_models_integration::AppletConfigurationOutcome> {
+        Ok(self
+            .0
+            .applets()
+            .configuration(governor, intent, command, current, ingress)
+            .await?)
+    }
+    async fn retain_configuration_source(
+        &self,
+        governor: &arkret_wire::DidCoreId,
+        intent: &arkret_models_integration::AppletConfigurationExecutionIntent,
+        source: &arkret_models_integration::AppletConfigurationExecutionOutcome,
+        producer: &coland_storage::AppletEventProducerGuard,
+        current: &coland_storage::ManagementReviewCurrent,
+    ) -> crate::ServiceResult<arkret_models_integration::AppletConfigurationOutcome> {
+        Ok(self
+            .0
+            .applets()
+            .retain_configuration_source(governor, intent, source, producer, current)
+            .await?)
+    }
     async fn issue_widget_token(
         &self,
         record: coland_storage::AppletWidgetTokenRecord,

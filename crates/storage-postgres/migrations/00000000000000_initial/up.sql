@@ -569,6 +569,26 @@ CREATE INDEX applet_installations_owner_idx ON public.applet_installations USING
 
 CREATE INDEX applet_installations_status_idx ON public.applet_installations USING btree ((record->>'status'));
 
+CREATE TABLE public.applet_configurations (
+    realm_id text NOT NULL,
+    applet_id text NOT NULL,
+    request_id text NOT NULL,
+    intent jsonb NOT NULL,
+    outcome jsonb NOT NULL,
+    candidate_event_id text UNIQUE,
+    candidate jsonb,
+    ingress jsonb NOT NULL,
+    PRIMARY KEY (realm_id, request_id),
+    CHECK (intent->>'request_id' = request_id
+        AND intent->>'applet_id' = applet_id
+        AND intent#>>'{effective_scope,realm_id}' = realm_id
+        AND outcome->>'request_id' = request_id),
+    CHECK (candidate_event_id IS NOT DISTINCT FROM
+        candidate->>'event_id'),
+    CHECK (outcome#>'{source_outcome,create_event}' IS NULL OR
+        outcome#>'{source_outcome,create_event}' = candidate)
+);
+
 CREATE TABLE public.applet_namespace_claims (
     applet_id text NOT NULL,
     domain text NOT NULL CHECK (domain IN ('actors', 'realms', 'handles')),

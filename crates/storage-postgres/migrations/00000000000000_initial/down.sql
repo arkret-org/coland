@@ -307,3 +307,4 @@ DROP TABLE IF EXISTS schema_definition_current_results;
 DROP TABLE IF EXISTS pin_current_results;
 DROP TABLE IF EXISTS public.realm_actor_control_nonces;
 DROP TABLE IF EXISTS public.realm_actor_operation_outcomes;
+DROP TABLE IF EXISTS public.applet_configurations;

@@ -6721,6 +6721,7 @@ async fn creation_review_atomic_case(
         }
     };
     let request = ManagementReviewRequestBody {
+        configuration_ref: None,
         request_id: format!("creation-review-{index}-{}", uuid::Uuid::now_v7()),
         effective_scope: scope,
         management_operation: if is_bot {
@@ -7001,6 +7002,7 @@ async fn creation_review_atomic_lifecycle(context: &CreationReviewAtomicContext)
         )
         .await;
     let mut request = ManagementReviewRequestBody {
+        configuration_ref: None,
         request_id: format!("superseded-{}", uuid::Uuid::now_v7()),
         effective_scope: ScopeRef::Realm {
             realm_id: fixture.realm.clone(),
@@ -7946,6 +7948,7 @@ async fn approve_creation_management(
 ) -> arkret_wire::ApprovalSignature {
     use arkret_models_integration::management_review::*;
     let request = ManagementReviewRequestBody {
+        configuration_ref: None,
         request_id: format!("combined-creation-{}", uuid::Uuid::now_v7()),
         effective_scope: scope,
         management_operation: arkret_wire::ManagementOperation::CreateBot,

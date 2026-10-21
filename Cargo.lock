@@ -379,15 +379,20 @@ dependencies = [
  "async-trait",
  "chacha20poly1305 0.11.0",
  "chrono",
+ "diesel",
+ "diesel_migrations",
  "ed25519-dalek 3.0.0",
  "futures",
  "garth",
  "getrandom 0.4.3",
  "hex",
+ "metrics",
+ "metrics-exporter-prometheus",
  "parking_lot",
  "redb",
  "reqwest 0.13.5",
  "rustls",
+ "salvo 1.0.1",
  "serde",
  "serde-saphyr",
  "serde_json",
@@ -3052,6 +3057,7 @@ dependencies = [
  "itoa",
  "pq-src",
  "pq-sys",
+ "r2d2",
  "serde_json",
  "uuid",
 ]
@@ -6096,6 +6102,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "moka"
+version = "0.12.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4293f18e7567a1caf3c584855554377025c65e0aa445344d04171f5ad63d19b9"
+dependencies = [
+ "async-lock",
+ "crossbeam-channel",
+ "crossbeam-epoch",
+ "crossbeam-utils",
+ "equivalent",
+ "event-listener",
+ "futures-util",
+ "parking_lot",
+ "portable-atomic",
+ "smallvec",
+ "tagptr",
+ "uuid",
+]
+
+[[package]]
 name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7949,6 +7975,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
+name = "r2d2"
+version = "0.8.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51de85fb3fb6524929c8a2eb85e6b6d363de4e8c48f9e2c2eac4944abc181c93"
+dependencies = [
+ "log",
+ "parking_lot",
+ "scheduled-thread-pool",
+]
+
+[[package]]
 name = "radium"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8768,6 +8805,7 @@ dependencies = [
  "salvo-oapi",
  "salvo-otel",
  "salvo-proxy 1.0.1",
+ "salvo-rate-limiter",
  "salvo_core 1.0.1",
  "salvo_extra 1.0.1",
 ]
@@ -8924,6 +8962,20 @@ dependencies = [
  "reqwest 0.13.5",
  "rustls",
  "salvo_core 1.0.1",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "salvo-rate-limiter"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f69e3fc0d174e3c4f8097dba85162869e9afec2bf19b4a487730944cdf2aba4b"
+dependencies = [
+ "moka",
+ "salvo_core 1.0.1",
+ "serde",
+ "time",
  "tokio",
  "tracing",
 ]
@@ -9875,6 +9927,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91c1b7e4904c873ef0710c1f407dde2e6287de2bebc1bbbf7d430bb7cbffd939"
 dependencies = [
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "scheduled-thread-pool"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3cbc66816425a074528352f5789333ecff06ca41b36b0b0efdfbb29edc391a19"
+dependencies = [
+ "parking_lot",
 ]
 
 [[package]]
@@ -11147,6 +11208,12 @@ dependencies = [
  "core-foundation-sys",
  "libc",
 ]
+
+[[package]]
+name = "tagptr"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
 name = "take_mut"

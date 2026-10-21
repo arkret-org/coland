@@ -558,7 +558,9 @@ async fn lock_current_account_realms(
         // This is a lock plan, not qualification: after locking, the accepted
         // PCR binding and its exact current AA receipt must prove the same PCR.
         let pcr = observation.record().principal_control_realm_id.clone();
-        realms.insert(pcr.clone());
+        if account.station_id == current.station_id {
+            realms.insert(pcr.clone());
+        }
         pcrs.insert(account.clone(), pcr);
     }
     for held in realms {
@@ -567,7 +569,7 @@ async fn lock_current_account_realms(
     Ok(pcrs)
 }
 
-async fn require_current_accounts(
+pub(crate) async fn require_current_accounts(
     conn: &mut AsyncPgConnection,
     realm: &arkret_wire::RealmId,
     accounts: &[AccountId],
@@ -575,7 +577,10 @@ async fn require_current_accounts(
 ) -> PersistenceResult<()> {
     let pcrs = lock_current_account_realms(conn, realm, accounts, Some(current), &[]).await?;
     for (account, pcr) in pcrs {
-        if crate::morph_projection_reads::human_realm_in_connection(conn, &account).await? != pcr {
+        if account.station_id == current.station_id
+            && crate::morph_projection_reads::human_realm_in_connection(conn, &account).await?
+                != pcr
+        {
             return Err(refused(
                 "revision_unavailable",
                 "management human PCR changed during lock planning",
@@ -592,10 +597,15 @@ async fn require_current_accounts(
                 "management AA observation is not unique",
             ));
         }
-        crate::morph_projection_reads::require_accepted_human_pcr_in_connection(
-            conn, &account, &pcr,
-        )
-        .await?;
+        if account.station_id == current.station_id {
+            crate::morph_projection_reads::require_accepted_human_pcr_in_connection(
+                conn, &account, &pcr,
+            )
+            .await?;
+        }
+        // For a foreign Account, the freshly authenticated origin AA record
+        // and our exact durable receipt bind its private PCR coordinate. The
+        // governing Realm still checks its own current administrator grant.
         let status =
             crate::morph_projection_reads::require_observed_account_status_binding_in_connection(
                 conn,
@@ -645,7 +655,7 @@ fn current_account_is_active(
         == arkret_models_collaboration::objects::account_status::AccountStatus::Active)
 }
 
-fn require_active_caller(
+pub(crate) fn require_active_caller(
     caller: &ActorId,
     current: &coland_storage::ManagementReviewCurrent,
 ) -> PersistenceResult<()> {
@@ -821,20 +831,26 @@ pub(crate) async fn request_in_connection(
     current: &coland_storage::ManagementReviewCurrent,
 ) -> PersistenceResult<ManagementReviewOutcome> {
     let realm = realm(request)?;
-    applet::lock(conn, request, &current.station_id).await?;
     if caller != &request.requester_actor_id {
         return Err(hidden());
     }
     let initial = read(conn, &request.request_id, false).await?;
-    let accounts = match initial.as_ref() {
+    let mut accounts = match initial.as_ref() {
         Some(row) => material_accounts(row, caller, &[])?,
         None => caller.as_account_id().cloned().into_iter().collect(),
     };
+    if let Some(account) = crate::applet_configuration::review_account(conn, request).await? {
+        if !accounts.contains(&account) {
+            accounts.push(account);
+        }
+    }
     require_current_accounts(conn, realm, &accounts, current).await?;
-    if !accounts.is_empty() {
+    if caller.as_account_id().is_some() {
         require_active_caller(caller, current)?;
     }
     crate::realm_authorization_cut::lock_realm_authorization_cut(conn, realm).await?;
+    applet::lock(conn, request, &current.station_id).await?;
+    crate::applet_configuration::bind_review(conn, request, current).await?;
     let at = arkret_canonical::normalize_timestamp_canonical(Utc::now());
     let digest = request
         .canonical_intent_digest()
@@ -1500,7 +1516,14 @@ pub(crate) async fn lock_candidate_current_realms_in_connection(
         }
         _ => Vec::new(),
     });
+    let configuration_account = crate::applet_configuration::candidate_account(conn, event).await?;
     let Some(prepared) = prepared else {
+        if configuration_account.is_some() {
+            return Err(refused(
+                "revision_unavailable",
+                "configuration administrator current is unavailable",
+            ));
+        }
         if !extra_realms.is_empty() {
             lock_current_account_realms(conn, &event.realm_id, &[], None, &extra_realms).await?;
         }
@@ -1520,8 +1543,16 @@ pub(crate) async fn lock_candidate_current_realms_in_connection(
         })
         .collect::<std::collections::BTreeSet<_>>();
     if ids.is_empty() {
-        if !extra_realms.is_empty() {
-            lock_current_account_realms(conn, &event.realm_id, &[], None, &extra_realms).await?;
+        let accounts = configuration_account.into_iter().collect::<Vec<_>>();
+        if !accounts.is_empty() || !extra_realms.is_empty() {
+            lock_current_account_realms(
+                conn,
+                &event.realm_id,
+                &accounts,
+                prepared.management_current.as_ref(),
+                &extra_realms,
+            )
+            .await?;
         }
         return Ok(());
     }
@@ -1541,7 +1572,8 @@ pub(crate) async fn lock_candidate_current_realms_in_connection(
             "approved candidate bytes changed",
         ));
     }
-    let required = material_accounts(&row, &request.requester_actor_id, &[])?;
+    let mut required = material_accounts(&row, &request.requester_actor_id, &[])?;
+    required.extend(configuration_account.clone());
     let current = prepared.management_current.as_ref();
     if required.iter().any(|account| {
         !current.is_some_and(|current| {
@@ -1556,7 +1588,7 @@ pub(crate) async fn lock_candidate_current_realms_in_connection(
             "management participants changed after current preparation",
         ));
     }
-    let accounts = if row.status == "consumed" {
+    let accounts = if row.status == "consumed" && configuration_account.is_none() {
         Vec::new()
     } else {
         current

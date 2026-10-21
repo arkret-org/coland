@@ -84,6 +84,87 @@ pub struct PgAppletStore {
 }
 #[async_trait]
 impl AppletStore for PgAppletStore {
+    async fn configuration_review_account(
+        &self,
+        request: &arkret_models_integration::ManagementReviewRequestBody,
+    ) -> PersistenceResult<Option<arkret_wire::AccountId>> {
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        crate::applet_configuration::review_account(&mut conn, request).await
+    }
+
+    async fn configuration_candidate_account(
+        &self,
+        event: &arkret_wire::Event,
+    ) -> PersistenceResult<Option<arkret_wire::AccountId>> {
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        crate::applet_configuration::candidate_account(&mut conn, event).await
+    }
+
+    async fn configuration_intent(
+        &self,
+        governor: &arkret_wire::DidCoreId,
+        applet: &arkret_wire::AppletId,
+        actor: &arkret_wire::ActorId,
+        intent: &arkret_models_integration::AppletConfigurationIntent,
+        current: &coland_storage::ManagementReviewCurrent,
+    ) -> PersistenceResult<Option<arkret_models_integration::AppletConfigurationExecutionIntent>>
+    {
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            Ok(crate::applet_configuration::original_intent(
+                conn, governor, applet, actor, intent, current,
+            )
+            .await?)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+    async fn configuration(
+        &self,
+        governor: &arkret_wire::DidCoreId,
+        intent: &arkret_models_integration::AppletConfigurationExecutionIntent,
+        command: arkret_models_integration::AppletConfigurationCommand,
+        current: &coland_storage::ManagementReviewCurrent,
+        ingress: &coland_storage::AppletConfigurationIngress,
+    ) -> PersistenceResult<arkret_models_integration::AppletConfigurationOutcome> {
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            Ok(crate::applet_configuration::command(
+                conn, governor, intent, command, current, ingress,
+            )
+            .await?)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+    async fn retain_configuration_source(
+        &self,
+        governor: &arkret_wire::DidCoreId,
+        intent: &arkret_models_integration::AppletConfigurationExecutionIntent,
+        source: &arkret_models_integration::AppletConfigurationExecutionOutcome,
+        producer: &coland_storage::AppletEventProducerGuard,
+        current: &coland_storage::ManagementReviewCurrent,
+    ) -> PersistenceResult<arkret_models_integration::AppletConfigurationOutcome> {
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            Ok(crate::applet_configuration::source(
+                conn, governor, intent, source, producer, current,
+            )
+            .await?)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
     async fn authority_material(
         &self,
         applet: &arkret_wire::AppletId,

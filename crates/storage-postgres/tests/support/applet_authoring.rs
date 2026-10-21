@@ -62,7 +62,8 @@ impl Fixture {
 
     async fn new_at(pool: PgPool, public_base: Option<String>) -> Self {
         let slot = Arc::new(Mutex::new(Value::Null));
-        let origin = spawn_introspection_mock(slot.clone()).await;
+        let management_authority = Arc::new(Mutex::new(None));
+        let origin = spawn_introspection_mock(slot.clone(), management_authority.clone()).await;
         let mut config = AppConfig {
             development_mode: true,
             embedded_webvh_registration_bearer: Some("applet-fixture-registration".to_owned()),
@@ -91,6 +92,29 @@ impl Fixture {
         let state = coland_test_support::app_state_with_persistence(config, persistence).await;
         let pcr = PcrGenesisFixture::new(state.service_did());
         Box::pin(pcr.admit(&state)).await.unwrap();
+        let record = arkret_signatures::account_status::sign_account_status_record(
+            arkret_models_collaboration::account_status::UnsignedAccountStatusRecord {
+                schema: arkret_wire::SchemaId::ACCOUNT_STATUS_RECORD_V1.into(),
+                account_authority_id: state.service_core_id(),
+                account_id: pcr.history.account.clone(),
+                principal_control_realm_id: pcr.unit.transactions[0].event.realm_id.clone(),
+                binding_version: 1,
+                status_seq: 1,
+                previous_account_status_record_id: None,
+                status: arkret_models_collaboration::objects::account_status::AccountStatus::Active,
+                reason_code: None,
+                reason: None,
+                issued_at: arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()),
+                expires_at: None,
+            },
+            state.service_verification_method("notary-key").unwrap(),
+            state.notary_signing_key().as_ref(),
+        )
+        .unwrap();
+        *management_authority.lock().unwrap() = Some(ManagementAuthorityFixture {
+            record,
+            public_key: *state.notary_verifying_key().as_bytes(),
+        });
         state
             .test_persistence()
             .accounts()
@@ -776,7 +800,16 @@ fn safe_did_token(value: &str) -> String {
         .collect()
 }
 
-async fn spawn_introspection_mock(slot: Arc<Mutex<Value>>) -> String {
+#[derive(Clone)]
+struct ManagementAuthorityFixture {
+    record: arkret_models_collaboration::account_status::AccountStatusRecord,
+    public_key: [u8; 32],
+}
+
+async fn spawn_introspection_mock(
+    slot: Arc<Mutex<Value>>,
+    authority: Arc<Mutex<Option<ManagementAuthorityFixture>>>,
+) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("introspection mock binds");
@@ -787,9 +820,72 @@ async fn spawn_introspection_mock(slot: Arc<Mutex<Value>>) -> String {
                 return;
             };
             let slot = slot.clone();
+            let authority = authority.clone();
             tokio::spawn(async move {
-                read_http_request(&mut stream).await;
-                let body = serde_json::to_vec(&*slot.lock().unwrap()).expect("serialize outcome");
+                let request = read_http_request(&mut stream).await;
+                let end = request
+                    .windows(4)
+                    .position(|bytes| bytes == b"\r\n\r\n")
+                    .unwrap()
+                    + 4;
+                let headers = String::from_utf8_lossy(&request[..end]);
+                let body = if headers.lines().next()
+                    == Some("POST /_arkret/peer/account-status/resolve HTTP/1.1")
+                {
+                    use arkret_models_collaboration::account_lifecycle::{
+                        AccountStatusResolveOutcome, AccountStatusResolveRequestBody,
+                    };
+                    let query: AccountStatusResolveRequestBody =
+                        serde_json::from_slice(&request[end..]).unwrap();
+                    query.validate().unwrap();
+                    let source = authority
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .expect("explicit signed AA fixture prerequisite");
+                    assert_eq!(query.account_id, source.record.account_id);
+                    assert_eq!(
+                        query.account_authority_id,
+                        source.record.account_authority_id
+                    );
+                    let pairs = headers
+                        .lines()
+                        .skip(1)
+                        .filter_map(|line| line.split_once(':'))
+                        .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_owned()))
+                        .collect::<Vec<_>>();
+                    let policy=arkret_signatures::http_signature::SignatureVerificationPolicy::for_scenario(HttpSignatureScenario::ServiceToServiceV1,&["content-digest","source-trust-domain","destination-trust-domain"]).unwrap();
+                    arkret_signatures::http_signature::verify_signed_canonical_json_message(
+                        "POST",
+                        &format!("http://{address}/_arkret/peer/account-status/resolve"),
+                        &address.to_string(),
+                        "/_arkret/peer/account-status/resolve",
+                        pairs
+                            .iter()
+                            .map(|(name, value)| (name.as_str(), value.as_str())),
+                        false,
+                        &request[end..],
+                        &ed25519_dalek::VerifyingKey::from_bytes(&source.public_key).unwrap(),
+                        &policy,
+                        chrono::Utc::now().timestamp(),
+                    )
+                    .unwrap();
+                    let answer = AccountStatusResolveOutcome {
+                        account_authority_id: query.account_authority_id.clone(),
+                        account_id: query.account_id.clone(),
+                        records: if query.from_status_seq <= source.record.status_seq {
+                            vec![source.record]
+                        } else {
+                            vec![]
+                        },
+                        next_status_seq: None,
+                        has_more: false,
+                    };
+                    answer.validate_for_request(&query).unwrap();
+                    arkret_canonical::canonical_json_bytes(&answer).unwrap()
+                } else {
+                    serde_json::to_vec(&*slot.lock().unwrap()).expect("serialize outcome")
+                };
                 let headers = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                     body.len()
@@ -802,7 +898,7 @@ async fn spawn_introspection_mock(slot: Arc<Mutex<Value>>) -> String {
     format!("http://{address}")
 }
 
-async fn read_http_request(stream: &mut tokio::net::TcpStream) {
+async fn read_http_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
     let mut request = Vec::new();
     let mut expected = None;
     loop {
@@ -825,7 +921,7 @@ async fn read_http_request(stream: &mut tokio::net::TcpStream) {
             expected = Some(index + 4 + length);
         }
         if expected.is_some_and(|total| request.len() >= total) {
-            return;
+            return request;
         }
     }
 }
@@ -1802,6 +1898,7 @@ pub async fn registered_service_pair(pool: PgPool) {
 }
 
 mod realm_native_fixture {
+    include!("applet_configuration_fixture.rs");
     use arkret_canonical::canonical_sha256;
     use arkret_models_identity::*;
     use arkret_signatures::detached_object::sign_detached_object;
@@ -1816,6 +1913,7 @@ mod realm_native_fixture {
     struct NativeService {
         package: AppletPackage,
         actor_log: Arc<Mutex<Vec<Value>>>,
+        managed_router: Arc<Mutex<Option<Arc<salvo::Service>>>>,
         stop: Arc<std::sync::atomic::AtomicBool>,
         thread: Option<std::thread::JoinHandle<()>>,
     }
@@ -1877,6 +1975,12 @@ mod realm_native_fixture {
             let stopping = stop.clone();
             let actor_log = Arc::new(Mutex::new(Vec::<Value>::new()));
             let published_actor = actor_log.clone();
+            let managed_router = Arc::new(Mutex::new(None::<Arc<salvo::Service>>));
+            let served_router = managed_router.clone();
+            let service_resolution = fixture_applet_service_history(&package);
+            let resolution_path =
+                arkret_models_identity::canonical_service_resolution_path(&package.service_id);
+            let runtime = tokio::runtime::Handle::current();
             let thread = std::thread::spawn(move || {
                 let mut connections = Vec::new();
                 while !stopping.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1891,6 +1995,11 @@ mod realm_native_fixture {
                     let tls = tls.clone();
                     let entry = native.log_entry.clone();
                     let published_actor = published_actor.clone();
+                    let served_router = served_router.clone();
+                    let service_resolution = service_resolution.clone();
+                    let resolution_path = resolution_path.clone();
+                    let runtime = runtime.clone();
+                    let endpoint = endpoint.clone();
                     connections.push(std::thread::spawn(move || {
                         stream.set_nonblocking(false).unwrap();
                         stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
@@ -1900,8 +2009,42 @@ mod realm_native_fixture {
                         while !bytes.windows(4).any(|v|v==b"\r\n\r\n") {
                             let count=stream.read(&mut buffer).unwrap_or(0); if count==0{return;} bytes.extend_from_slice(&buffer[..count]);
                         }
-                        let request=String::from_utf8_lossy(&bytes);
-                        let path=request.lines().next().unwrap().split_whitespace().nth(1).unwrap();
+                        let header_end=bytes.windows(4).position(|v|v==b"\r\n\r\n").unwrap()+4;
+                        let request=String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+                        let mut first=request.lines().next().unwrap().split_whitespace();
+                        let method=first.next().unwrap();
+                        let path=first.next().unwrap();
+                        if method == "GET" && path == resolution_path {
+                            let body = arkret_canonical::canonical_json_bytes(&service_resolution).unwrap();
+                            let header = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                            let _ = stream.write_all(header.as_bytes());
+                            let _ = stream.write_all(&body);
+                            let _ = stream.flush();
+                            return;
+                        }
+                        let router=served_router.lock().unwrap().clone();
+                        if let Some(router)=router.filter(|_| path.starts_with("/_arkret/") || (path.starts_with("/webvh/") && !path.contains("/service/"))) {
+                            let headers=request.lines().skip(1).filter_map(|line|line.split_once(':'))
+                                .map(|(name,value)|(name.to_owned(),value.trim().to_owned())).collect::<Vec<_>>();
+                            let length=headers.iter().find(|(name,_)|name.eq_ignore_ascii_case("content-length"))
+                                .map(|(_,value)|value.parse::<usize>().unwrap()).unwrap_or(0);
+                            assert!(length<=262144);
+                            while bytes.len()<header_end+length {
+                                let count=stream.read(&mut buffer).unwrap();
+                                assert!(count>0);bytes.extend_from_slice(&buffer[..count]);
+                            }
+                            let url=format!("{}{path}",endpoint.trim_end_matches('/'));
+                            let mut forwarded=if method=="POST" {TestClient::post(url)} else {TestClient::get(url)};
+                            for (name,value) in headers { forwarded=forwarded.add_header(salvo::http::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),value,true); }
+                            forwarded=forwarded.body(bytes[header_end..header_end+length].to_vec());
+                            let (status,body)=runtime.block_on(async {
+                                let mut response=forwarded.send(router.as_ref()).await;
+                                (response.status_code.unwrap_or(StatusCode::OK), response.take_bytes(None).await.unwrap())
+                            });
+                            let header=format!("HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",status.as_u16(),status.canonical_reason().unwrap_or("Result"),body.len());
+                            let _=stream.write_all(header.as_bytes());let _=stream.write_all(&body);let _=stream.flush();
+                            return;
+                        }
                         let entries = if path.contains("/webvh/") && !path.contains("/service/") { published_actor.lock().unwrap().clone() } else { vec![entry] };
                         let body=if path.ends_with("did.jsonl") {entries.iter().map(|entry|serde_json::to_string(entry).unwrap()+"\n").collect::<String>()}
                             else if path.ends_with("did.json") {entries.last().map(|entry|serde_json::to_string(&entry["state"]).unwrap()).unwrap_or_default()}
@@ -1918,6 +2061,7 @@ mod realm_native_fixture {
             Self {
                 package,
                 actor_log,
+                managed_router,
                 stop,
                 thread: Some(thread),
             }
@@ -6487,4 +6631,8 @@ pub async fn realm_bridge_runtime(pool: PgPool) {
 
 pub async fn realm_bridge_circle_runtime(pool: PgPool) {
     realm_native_fixture::run_bridge(pool, true).await;
+}
+
+pub async fn realm_applet_configuration(pool: PgPool) {
+    realm_native_fixture::run_configuration(pool).await;
 }

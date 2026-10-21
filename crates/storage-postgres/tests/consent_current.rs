@@ -555,6 +555,22 @@ async fn consent_current_guards_invite_delivery_cas_and_rejects_a_pre_revoke_pro
         },
         expected_revision: 0,
     };
+    // The introduction keeps its original accepted Event while a later
+    // complete replacement still grants Invite to this exact peer.
+    let preserving = write(
+        &f,
+        &active.commit,
+        EventKind::ConsentReplace,
+        replacement(
+            &peer,
+            Some(active.view().revision),
+            &["invite", "voice_call"],
+        ),
+    );
+    let ConsentAdmissionOutcome::Committed(preserved) = store.admit(preserving).await.unwrap()
+    else {
+        panic!("preserving replacement")
+    };
     let before = footprint(&pool).await;
     let mut wrong_peer = delivery.clone();
     wrong_peer.peer = ActorId::account(arkret_wire::AccountId::new(
@@ -581,9 +597,9 @@ async fn consent_current_guards_invite_delivery_cas_and_rejects_a_pre_revoke_pro
     assert_eq!(footprint(&pool).await, before);
     let revoke = write(
         &f,
-        &active.commit,
+        &preserved.commit,
         EventKind::ConsentReplace,
-        replacement(&peer, Some(active.view().revision), &["voice_call"]),
+        replacement(&peer, Some(preserved.view().revision), &["voice_call"]),
     );
     store.admit(revoke).await.unwrap();
     assert!(
@@ -821,6 +837,7 @@ async fn human_pcr_rejects_change_export_proxy_import_and_activation_without_any
         "consent_private_effect_jobs",
         "consent_private_proxy_fences",
         "mimi_consent_correlations",
+        "mimi_consent_decision_attempts",
     ] {
         tables.insert(table.into(), serde_json::json!([]));
     }

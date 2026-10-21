@@ -3644,7 +3644,6 @@ mod tests {
         use arkret_models_collaboration::events_payloads::direct_conversation::{
             DirectConversationBindingCurrentValue, DirectConversationBoundPayload,
         };
-        use arkret_models_collaboration::exact_current_results::CanonicalEventDot;
 
         let (alice, mut material, facts) = fixture();
         let pair_key = arkret_wire::Hash::new(format!("sha256:{}", "71".repeat(32))).unwrap();

@@ -558,9 +558,11 @@ impl ConsentCurrentStore for PgConsentCurrentStore {
             let holder = serde_json::to_value(&write.holder).map_err(corrupt)?;
             // Match the canonical proof, then serialize with replacement on
             // the same PCR lock. Re-read current AFTER acquiring that lock.
-            let current = sql_query("SELECT r.value,e.envelope,c.commit_json FROM consent_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk JOIN realm_authorities a ON a.realm_id=r.realm_id JOIN realm_authority_root_current_results root ON root.realm_id=r.realm_id WHERE r.holder_account_id=$1 AND r.realm_id=$2 AND e.envelope->>'event_id'=$3 AND a.service_id=$4 AND root.controller_actor_id=$5")
-                .bind::<Jsonb,_>(&holder).bind::<Text,_>(authority.realm_id.as_str()).bind::<Text,_>(write.consent_grant_ref.as_str())
+            let peer = serde_json::to_value(&write.peer).map_err(corrupt)?;
+            let current = sql_query("SELECT r.value,e.envelope,c.commit_json FROM consent_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk JOIN realm_authorities a ON a.realm_id=r.realm_id JOIN realm_authority_root_current_results root ON root.realm_id=r.realm_id WHERE r.holder_account_id=$1 AND r.realm_id=$2 AND r.peer_id=$3 AND a.service_id=$4 AND root.controller_actor_id=$5 AND EXISTS(SELECT 1 FROM canonical_events original JOIN realm_commits original_commit ON original_commit.event_pk=original.pk WHERE original_commit.realm_id=r.realm_id AND original.envelope->>'event_id'=$6 AND original.state='committed' AND original.envelope->>'kind'='ak.consent.replace' AND original.envelope->'actor_id'=$5 AND original.envelope->'payload'->'peer'->'actor_id'=$3 AND original.envelope->'payload'->'permissions' @> '[{\"consent_scope\":\"invite\"}]'::jsonb)")
+                .bind::<Jsonb,_>(&holder).bind::<Text,_>(authority.realm_id.as_str()).bind::<Jsonb,_>(&peer)
                 .bind::<Text,_>(write.acceptor_service_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(ActorId::account(write.holder.clone())).map_err(corrupt)?)
+                .bind::<Text,_>(write.consent_grant_ref.as_str())
                 .get_result::<Row>(&mut *conn).await.optional()?;
             let Some(current) = current else { return Ok(None) };
             let current = record(current)?;

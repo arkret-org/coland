@@ -14,7 +14,6 @@ mod device_authorization_history;
 mod pcr_genesis;
 
 use arkret_models_collaboration::call_invitation::*;
-use arkret_models_collaboration::consent_operations::*;
 use arkret_models_collaboration::events_payloads::consent::ConsentPeer;
 use arkret_wire::{ActorId, EventKind};
 use coland_storage::{ConsentAdmissionOutcome, ConsentCurrentStore};
@@ -99,7 +98,7 @@ async fn consent_full_holder_current_and_call_cut_keep_exact_peers_empty_and_ind
     );
     let mut other = request.clone();
     let mut account = f.history.account.clone();
-    account.station_id = "ak:did_core:web:other-station.example".parse().unwrap();
+    account.station_id = "ak:did_core:web:other.example".parse().unwrap();
     other.invitation.inviter_actor_id = ActorId::account(account);
     assert!(
         !support::call_permitted_at_native_cut(&store, &other, &f.history.account.station_id)
@@ -130,7 +129,7 @@ async fn consent_full_holder_current_and_call_cut_keep_exact_peers_empty_and_ind
         support::read_current(
             &store,
             &full_request,
-            &"ak:did_core:web:other-station.example".parse().unwrap()
+            &"ak:did_core:web:other.example".parse().unwrap()
         )
         .await
         .unwrap()

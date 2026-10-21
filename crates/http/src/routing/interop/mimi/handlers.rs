@@ -2656,6 +2656,8 @@ mod consent_proof_tests {
                 panic!("first grant must commit")
             };
             body.decision = decision;
+            body.consent_id = ConsentId::new_v7_at(chrono::Utc::now().timestamp_millis() as u64);
+            install_correlation(&state, &body, &fixture.history.account).await;
             body.consent_event = EventAdmissionSubmission::new(signed_event(
                 EventKind::ConsentReplace,
                 json!({

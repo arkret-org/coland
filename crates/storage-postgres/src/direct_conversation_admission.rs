@@ -1162,12 +1162,12 @@ pub(crate) async fn commit_binding_current_result_in_connection(
     if payload.realm_id != event.realm_id
         || commit.realm_id != event.realm_id
         || commit.event_ref != event.event_id
-        || commit.stream_ref
-            != (arkret_wire::CommitStreamRef::Realm {
-                realm_id: event.realm_id.clone(),
-            })
         || event.scope_ref
             != (ScopeRef::Realm {
+                realm_id: event.realm_id.clone(),
+            })
+        || commit.stream_ref
+            != (arkret_wire::CommitStreamRef::Realm {
                 realm_id: event.realm_id.clone(),
             })
     {
@@ -1207,7 +1207,7 @@ pub(crate) async fn guard_binding_snapshot_in_connection(
     } = entry;
     let arkret_wire::CurrentSelector::DirectConversationBinding { pair_key } = selector else {
         return Err(PersistenceError::SchemaViolation(
-            "binding selector is invalid".into(),
+            "invalid binding selector".into(),
         ));
     };
     let incoming: DirectConversationBindingCurrentValue =

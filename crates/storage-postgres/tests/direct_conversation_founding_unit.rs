@@ -4046,7 +4046,7 @@ async fn binding_current_row(pool: &PgPool, realm_id: &RealmId) -> arkret_wire::
 /// cut: the root's materialization mask admits the one group Genesis; the
 /// bootstrap source's provisional phase lets only the founder send and Add the
 /// peer; once the peer's Welcome of the first exact-pair Commit is durable,
-/// the completion phase admits only binding endorsements, whose integrity is
+/// the completion phase admits one immutable participant binding, whose integrity is
 /// checked against the founding facts and that Commit; after the first
 /// endorsement both phases exit and every participant write names the binding
 /// under the participant source, with the pair's Contact still granting

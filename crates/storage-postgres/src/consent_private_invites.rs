@@ -103,18 +103,47 @@ pub(crate) async fn admit(
         .as_account_id()
         .ok_or_else(|| invalid("Invite producer is not a human Account"))?;
     let records = crate::consent_current::records_in_connection(conn, holder, realm).await?;
-    let consent = match &delivery.introduction_evidence {
-        IntroductionEvidence::ConsentGrant { consent_grant_ref } => records
-            .iter()
-            .find(|record| record.event.event_id == *consent_grant_ref)
-            .is_some_and(|record| {
-                record.permits(
-                    &delivery.invite_event.actor_id,
-                    arkret_wire::ConsentScope::Invite,
-                    at,
-                )
-            }),
-        _ => false,
+    let consent = if let IntroductionEvidence::ConsentGrant { consent_grant_ref } =
+        &delivery.introduction_evidence
+    {
+        #[derive(diesel::QueryableByName)]
+        struct Evidence {
+            #[diesel(sql_type=Jsonb)]
+            envelope: Value,
+        }
+        let original = sql_query("SELECT e.envelope FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.envelope->>'event_id'=$1 AND c.realm_id=$2 AND e.envelope->>'kind'='ak.consent.replace' AND e.state='committed'")
+            .bind::<Text,_>(consent_grant_ref.as_str()).bind::<Text,_>(realm.as_str())
+            .get_result::<Evidence>(&mut *conn).await.optional()?;
+        let original = original
+            .map(|row| serde_json::from_value::<arkret_wire::Event>(row.envelope).map_err(invalid))
+            .transpose()?;
+        let original_payload = original.as_ref().map(|event| {
+            let payload: arkret_models_collaboration::events_payloads::consent::ConsentReplacePayload =
+                serde_json::from_value(serde_json::to_value(&event.payload).map_err(invalid)?)
+                    .map_err(invalid)?;
+            payload.validate().map_err(invalid)?;
+            Ok::<_, PersistenceError>(payload)
+        }).transpose()?;
+        original.as_ref().is_some_and(|event| {
+            event.realm_id == *realm && event.actor_id.as_account_id() == Some(holder)
+        }) && original_payload.is_some_and(|payload| {
+            let arkret_models_collaboration::events_payloads::consent::ConsentPeer::Actor {
+                actor_id,
+            } = &payload.peer;
+            actor_id == &delivery.invite_event.actor_id
+                && payload
+                    .permissions
+                    .iter()
+                    .any(|permission| permission.consent_scope == arkret_wire::ConsentScope::Invite)
+        }) && records.iter().any(|record| {
+            record.permits(
+                &delivery.invite_event.actor_id,
+                arkret_wire::ConsentScope::Invite,
+                at,
+            )
+        })
+    } else {
+        false
     };
     let decision = coland_domain::invite_receive::evaluate_resolved(
         prepared.constraints(),

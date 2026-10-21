@@ -254,6 +254,17 @@ fn contact_record_from_row(row: ContactRow) -> PersistenceResult<ContactRecord> 
         updated_at: row.updated_at,
     })
 }
+/// Parse large closed Contact evidence away from nested async poll frames.
+/// The transaction keeps its connection and locks while awaiting this pure work.
+async fn decode_contact_rows(rows: Vec<ContactRow>) -> PersistenceResult<Vec<ContactRecord>> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    tokio::task::spawn_blocking(move || rows.into_iter().map(contact_record_from_row).collect())
+        .await
+        .map_err(|error| PersistenceError::Internal(format!("Contact row decode task: {error}")))?
+}
+
 const CONTACT_COLUMNS: &str = "requester_id, target_id, contact_round_id, granted_to_target_scopes, granted_to_requester_scopes, status, pending_incoming_admitted, request_event_ref, request_slot_states, request_receipts, request_mirror_receipts, contact_round_evidence, current_state, response_event_ref, tombstone_event_ref, message, peer_id AS peer_host_id, peer_service_resolution, created_at, updated_at";
 /// Both directional Contact rows of an exact pair, share-locked so a
 /// concurrent Contact change cannot commit inside the reading transaction.
@@ -262,7 +273,7 @@ pub(crate) async fn pair_contacts_in_connection(
     left: &ActorId,
     right: &ActorId,
 ) -> PersistenceResult<Vec<ContactRecord>> {
-    sql_query(format!(
+    let rows = sql_query(format!(
         "SELECT {CONTACT_COLUMNS} FROM contacts \
          WHERE (requester_id = $1 AND target_id = $2) OR (requester_id = $2 AND target_id = $1) \
          ORDER BY updated_at ASC, requester_id ASC FOR SHARE"
@@ -271,10 +282,8 @@ pub(crate) async fn pair_contacts_in_connection(
     .bind::<Text, _>(right.to_string())
     .load::<ContactRow>(&mut *conn)
     .await
-    .map_err(PersistenceError::database)?
-    .into_iter()
-    .map(contact_record_from_row)
-    .collect()
+    .map_err(PersistenceError::database)?;
+    decode_contact_rows(rows).await
 }
 
 /// Read the pair at a repeatable-read Snapshot cut without row locks.
@@ -285,7 +294,7 @@ pub(crate) async fn pair_contacts_snapshot_in_connection(
     left: &ActorId,
     right: &ActorId,
 ) -> PersistenceResult<Vec<ContactRecord>> {
-    sql_query(format!(
+    let rows = sql_query(format!(
         "SELECT {CONTACT_COLUMNS} FROM contacts \
          WHERE (requester_id = $1 AND target_id = $2) OR (requester_id = $2 AND target_id = $1) \
          ORDER BY updated_at ASC, requester_id ASC"
@@ -294,10 +303,8 @@ pub(crate) async fn pair_contacts_snapshot_in_connection(
     .bind::<Text, _>(right.to_string())
     .load::<ContactRow>(&mut *conn)
     .await
-    .map_err(PersistenceError::database)?
-    .into_iter()
-    .map(contact_record_from_row)
-    .collect()
+    .map_err(PersistenceError::database)?;
+    decode_contact_rows(rows).await
 }
 
 /// The one Contact row of a pair, in either orientation, locked for update.
@@ -306,7 +313,7 @@ pub(crate) async fn lock_pair_contact_in_connection(
     left: &ActorId,
     right: &ActorId,
 ) -> PersistenceResult<Option<ContactRecord>> {
-    sql_query(format!(
+    let rows = sql_query(format!(
         "SELECT {CONTACT_COLUMNS} FROM contacts \
          WHERE (requester_id = $1 AND target_id = $2) OR (requester_id = $2 AND target_id = $1) \
          FOR UPDATE"
@@ -316,9 +323,10 @@ pub(crate) async fn lock_pair_contact_in_connection(
     .get_result::<ContactRow>(&mut *conn)
     .await
     .optional()
-    .map_err(PersistenceError::database)?
-    .map(contact_record_from_row)
-    .transpose()
+    .map_err(PersistenceError::database)?;
+    decode_contact_rows(rows.into_iter().collect())
+        .await
+        .map(|mut rows| rows.pop())
 }
 
 /// The exact Contact row of a pair at revision `updated_at`, locked for the
@@ -329,7 +337,7 @@ pub(crate) async fn lock_pair_contact_at_in_connection(
     right: &ActorId,
     updated_at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<Option<ContactRecord>> {
-    sql_query(format!(
+    let rows = sql_query(format!(
         "SELECT {CONTACT_COLUMNS} FROM contacts \
          WHERE ((requester_id = $1 AND target_id = $2) OR (requester_id = $2 AND target_id = $1)) \
            AND updated_at = $3 \
@@ -341,9 +349,10 @@ pub(crate) async fn lock_pair_contact_at_in_connection(
     .get_result::<ContactRow>(&mut *conn)
     .await
     .optional()
-    .map_err(PersistenceError::database)?
-    .map(contact_record_from_row)
-    .transpose()
+    .map_err(PersistenceError::database)?;
+    decode_contact_rows(rows.into_iter().collect())
+        .await
+        .map(|mut rows| rows.pop())
 }
 
 pub(crate) async fn put_if_updated_at_in_connection(
@@ -487,7 +496,9 @@ impl ContactStore for PgContactStore {
         .await
         .optional()
         .map_err(PersistenceError::database)?;
-        row.map(contact_record_from_row).transpose()
+        decode_contact_rows(row.into_iter().collect())
+            .await
+            .map(|mut rows| rows.pop())
     }
 
     async fn put(&self, record: &ContactRecord) -> PersistenceResult<()> {
@@ -600,7 +611,7 @@ impl ContactStore for PgContactStore {
         .get_results::<ContactRow>(&mut *conn)
         .await
         .map_err(PersistenceError::database)?;
-        rows.into_iter().map(contact_record_from_row).collect()
+        decode_contact_rows(rows).await
     }
 
     async fn delete(&self, requester_id: &ActorId, target_id: &ActorId) -> PersistenceResult<()> {

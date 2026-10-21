@@ -5967,12 +5967,13 @@ mod realm_native_fixture {
                         "injected crash before authorization receipt persistence".into(),
                     ));
                 }
-                if expected
-                    .iter()
-                    .any(|(key, value)| key.starts_with("managed-control/v1/") && value.is_some())
-                    && self
-                        .control_armed
-                        .swap(false, std::sync::atomic::Ordering::SeqCst)
+                if expected.iter().any(|(key, value)| {
+                    (key.starts_with("managed-control/v1/")
+                        || key.starts_with("managed-owner-status/v1/"))
+                        && value.is_some()
+                }) && self
+                    .control_armed
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
                 {
                     return Err(arkret_bridge_runtime::BridgeError::App(
                         "injected crash before control receipt persistence".into(),
@@ -6333,6 +6334,77 @@ mod realm_native_fixture {
                     .await
                     .is_err(),
                 "old authorization remains fenced"
+            );
+            lost_control.store(true, std::sync::atomic::Ordering::SeqCst);
+            let lost_status = boxed_step(|| {
+                devices.set_owner_status(
+                    &actor,
+                    "explicit-resume",
+                    RealmActorStatusSetPayloadState::Active,
+                )
+            })
+            .await
+            .expect_err("lose the accepted owner status before local receipt persistence");
+            assert!(
+                lost_status
+                    .to_string()
+                    .contains("injected crash before control receipt persistence")
+            );
+            assert_eq!(
+                snapshot(fixture, &actor).await["realm_actor_statusowner"],
+                "active"
+            );
+            drop(devices);
+            let devices = ManagedDeviceRuntime::new(make_edge()).unwrap();
+            let resumed = boxed_step(|| {
+                devices.set_owner_status(
+                    &actor,
+                    "explicit-resume",
+                    RealmActorStatusSetPayloadState::Active,
+                )
+            })
+            .await
+            .unwrap();
+            let paused = boxed_step(|| {
+                devices.set_owner_status(
+                    &actor,
+                    "explicit-pause",
+                    RealmActorStatusSetPayloadState::Paused,
+                )
+            })
+            .await
+            .unwrap();
+            assert!(paused.stream_position > resumed.stream_position);
+            let before_replay = snapshot(fixture, &actor).await;
+            assert_eq!(
+                boxed_step(|| devices.set_owner_status(
+                    &actor,
+                    "explicit-resume",
+                    RealmActorStatusSetPayloadState::Active,
+                ))
+                .await
+                .unwrap(),
+                resumed,
+                "historical resume must not reactivate after a later pause"
+            );
+            assert!(
+                boxed_step(|| devices.set_owner_status(
+                    &actor,
+                    "explicit-resume",
+                    RealmActorStatusSetPayloadState::Retired,
+                ))
+                .await
+                .is_err(),
+                "an operation ID cannot be reused to retire the actor"
+            );
+            assert_eq!(snapshot(fixture, &actor).await, before_replay);
+            assert_eq!(before_replay["realm_actor_statusowner"], "paused");
+            assert_eq!(before_replay["realm_actor_statusgovernance"], "active");
+            assert!(
+                boxed_step(|| devices.device_for_actor(&actor))
+                    .await
+                    .is_err(),
+                "owner resume must not restore a fenced old Device"
             );
             let retained = edge
                 .installed_managed_authoring(&candidate.creation_scope, &actor)

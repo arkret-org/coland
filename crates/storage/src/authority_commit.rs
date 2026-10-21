@@ -212,6 +212,8 @@ pub struct AcceptedRealmRoster {
 pub struct RealmStateSnapshotMaterial {
     pub realm_id: arkret_wire::RealmId,
     pub governance_generation: u64,
+    pub purpose: arkret_wire::RealmSnapshotPurpose,
+    pub history_basis: Option<arkret_wire::RealmSnapshotHistoryBasis>,
     pub visible_stream_heads: Vec<arkret_wire::CommitStreamHead>,
     pub current_state_entries: Vec<arkret_wire::TypedCurrentRow>,
     pub retention_and_history_floor: arkret_wire::RetentionAndHistoryFloor,
@@ -306,17 +308,18 @@ pub const UNRESERVED_ISSUED_SNAPSHOT_RETENTION_MS: i64 = 3_660_000;
 /// stream cursor that carries the window never lives longer.
 pub const MAX_ACCOUNT_WINDOW_RESERVATION_MS: i64 = 3_600_000;
 
-/// Issued snapshots of one Account and Realm that no live window reservation
+/// Issued snapshots of one Account and signed coverage (full Realm or one
+/// history target stream) that no live window reservation
 /// names are kept to the newest this many (0441). Issuing a further one
 /// reclaims the oldest; a head whose issuance was reclaimed backs no later
 /// window basis, so that window is `preview_only`.
-pub const MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_REALM: i64 = 8;
+pub const MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_COVERAGE: i64 = 8;
 
 /// Live window reservations one Account may hold on one stream (0441). At
 /// the cap a newly frozen limited window names no basis and is
 /// `preview_only`; a reservation is never evicted before its deadline.
 /// Together with the unreserved cap this bounds the signed objects kept for
-/// one Account and Realm to 40 within the reservation lifetime.
+/// each Account history stream to 40 within the reservation lifetime.
 pub const MAX_LIVE_WINDOW_RESERVATIONS_PER_ACCOUNT_STREAM: i64 = 32;
 
 /// Decision 0081 / 0068: the complete RFC 8785 canonical signed body is one
@@ -344,6 +347,8 @@ pub fn signed_snapshot_matches_material(
     material: &RealmStateSnapshotMaterial,
 ) -> bool {
     snapshot.realm_id == material.realm_id
+        && snapshot.purpose == material.purpose
+        && snapshot.history_basis == material.history_basis
         && snapshot.governance_generation == material.governance_generation
         && snapshot.visible_stream_heads == material.visible_stream_heads
         && snapshot.current_state_entries == material.current_state_entries
@@ -3162,6 +3167,22 @@ pub trait AuthorityCommitStore: Send + Sync {
         issuer: &arkret_wire::DidCoreId,
         sign: RealmStateSnapshotSigner<'_>,
     ) -> PersistenceResult<Option<RealmStateSnapshot>>;
+
+    /// Issue one independent history original at the source's accepted cut.
+    async fn issue_stream_history_snapshot_for_account(
+        &self,
+        realm_id: &arkret_wire::RealmId,
+        account: &arkret_wire::AccountId,
+        issuer: &arkret_wire::DidCoreId,
+        stream: &arkret_wire::CommitStreamRef,
+        expected_membership: Option<&arkret_wire::RealmCommitId>,
+        sign: RealmStateSnapshotSigner<'_>,
+    ) -> PersistenceResult<Option<RealmStateSnapshot>> {
+        let _ = (realm_id, account, issuer, stream, expected_membership, sign);
+        Err(crate::PersistenceError::Internal(
+            "stream history issuance is unavailable".into(),
+        ))
+    }
 
     /// Issue the complete material visible in one accepted native Device
     /// scope, proving its current read ceiling before signing or storing it.

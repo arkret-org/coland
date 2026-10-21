@@ -242,6 +242,78 @@ async fn check_circle_reads(history: &str) {
             .unwrap(),
         Some(issued.clone())
     );
+    let realm_stream = CommitStreamRef::Realm {
+        realm_id: realm.clone(),
+    };
+    assert!(
+        store
+            .issue_stream_history_snapshot_for_account(
+                &realm,
+                account,
+                &issuer,
+                &realm_stream,
+                Some(&arkret_wire::RealmCommitId::from_digest([0xee; 32])),
+                &sign
+            )
+            .await
+            .is_err(),
+        "a stale or forged opening join must not issue a history original"
+    );
+    let realm_history = store
+        .issue_stream_history_snapshot_for_account(
+            &realm,
+            account,
+            &issuer,
+            &realm_stream,
+            None,
+            &sign,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let circle_history = store
+        .issue_stream_history_snapshot_for_account(&realm, account, &issuer, &stream, None, &sign)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        realm_history.purpose,
+        arkret_wire::RealmSnapshotPurpose::StreamHistory
+    );
+    assert!(realm_history.require_full_recovery().is_err());
+    assert!(
+        realm_history
+            .current_state_entries
+            .iter()
+            .all(|row| !matches!(
+                row,
+                TypedCurrentRow::Value {
+                    selector: CurrentSelector::Circle { .. } | CurrentSelector::Sidecar { .. },
+                    ..
+                }
+            ))
+    );
+    assert_eq!(realm_history.visible_stream_heads.len(), 1);
+    assert!(
+        circle_history
+            .history_basis
+            .as_ref()
+            .unwrap()
+            .accepted_dependency_refs
+            .len()
+            >= 1
+    );
+    assert_ne!(realm_history.snapshot_id, issued.snapshot_id);
+    for narrow in [&realm_history, &circle_history] {
+        assert_eq!(
+            store
+                .issued_realm_state_snapshot(&realm, account, &narrow.snapshot_id, &issuer)
+                .await
+                .unwrap()
+                .as_ref(),
+            Some(narrow)
+        );
+    }
     let leave = membership(
         &join.authority_commit,
         &circle,
@@ -305,6 +377,20 @@ async fn check_circle_reads(history: &str) {
             .is_err(),
         "leaving the Circle must withdraw its old heads and state"
     );
+    assert_eq!(
+        store
+            .issued_realm_state_snapshot(&realm, account, &realm_history.snapshot_id, &issuer)
+            .await
+            .unwrap(),
+        Some(realm_history)
+    );
+    assert!(
+        store
+            .issued_realm_state_snapshot(&realm, account, &circle_history.snapshot_id, &issuer)
+            .await
+            .is_err(),
+        "target-scope loss still withdraws its own narrow basis"
+    );
     let rejoin = membership(
         &leave.authority_commit,
         &circle,
@@ -343,15 +429,16 @@ async fn check_circle_reads(history: &str) {
     } else {
         assert!(matches!(prior_read, MemberCommittedEventRead::Read(_)));
     }
-    // State families remain disclosable below the new content floor. The
-    // archived membership row does not replace current authority at recheck.
-    assert_eq!(
-        store
-            .issued_realm_state_snapshot(&realm, account, &issued.snapshot_id, &issuer)
-            .await
-            .unwrap(),
-        Some(issued)
-    );
+    // State values alone remain readable below a new floor, but an exact
+    // original carrying an older signed floor is no longer disclosable.
+    let reread = store
+        .issued_realm_state_snapshot(&realm, account, &issued.snapshot_id, &issuer)
+        .await;
+    if history == "since_join" {
+        assert!(reread.is_err());
+    } else {
+        assert_eq!(reread.unwrap(), Some(issued));
+    }
     let peer = page(peer_interval_decision(
         store
             .scan_stream_for_peer(&request, &issuer, &issuer)

@@ -298,6 +298,16 @@ pub(crate) async fn issue_actor_in_connection(
     actor: &arkret_wire::ActorId,
     snapshot: &arkret_wire::RealmStateSnapshot,
 ) -> PersistenceResult<()> {
+    snapshot
+        .validate_purpose()
+        .map_err(PersistenceError::database)?;
+    if snapshot
+        .history_basis
+        .as_ref()
+        .is_some_and(|basis| actor.as_account_id() != Some(&basis.account_id))
+    {
+        return Err(undisclosable("history basis belongs to another Account"));
+    }
     let account_key = actor_key(actor)?;
     let body = serde_json::to_value(snapshot).map_err(PersistenceError::database)?;
     let generation = i64::try_from(snapshot.governance_generation).map_err(|_| {
@@ -356,7 +366,7 @@ struct IssuedCandidateRow {
 /// method) is reissued instead of archiving `signed`: retries and repeated
 /// freezes at one head add no object. The Account's unreserved issuances in
 /// this Realm are then trimmed to
-/// [`coland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_REALM`],
+/// [`coland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_COVERAGE`],
 /// never touching a reserved one or a never-issued handoff object. The
 /// caller holds the shared retention lock, so GC cannot interleave.
 pub(crate) async fn issue_head_in_connection(
@@ -399,7 +409,7 @@ pub(crate) async fn issue_actor_head_in_connection(
     .bind::<Text, _>(material.realm_id.as_str())
     .bind::<super::BigInt, _>(generation)
     .bind::<Jsonb, _>(&heads)
-    .bind::<super::BigInt, _>(coland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_REALM)
+    .bind::<super::BigInt, _>(coland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_COVERAGE)
     .load::<IssuedCandidateRow>(&mut *conn)
     .await
     .map_err(snapshot_cut_error)?;
@@ -440,6 +450,8 @@ pub(crate) async fn issue_actor_head_in_connection(
            FROM realm_state_snapshot_issuances issued \
            JOIN realm_state_snapshots snapshot ON snapshot.snapshot_id = issued.snapshot_id \
            WHERE issued.account_id=$1 AND snapshot.realm_id=$2 AND issued.snapshot_id <> $3 \
+             AND snapshot.snapshot_json->>'purpose'=$5 \
+             AND snapshot.snapshot_json->'history_basis'->'stream_ref' IS NOT DISTINCT FROM $6 \
              AND NOT EXISTS (SELECT 1 FROM realm_state_snapshot_window_reservations reserved \
                              WHERE reserved.snapshot_id = issued.snapshot_id \
                                AND reserved.account_id = issued.account_id) \
@@ -463,7 +475,21 @@ pub(crate) async fn issue_actor_head_in_connection(
     .bind::<Text, _>(&account_key)
     .bind::<Text, _>(material.realm_id.as_str())
     .bind::<Text, _>(issued.snapshot_id.as_str())
-    .bind::<super::BigInt, _>(coland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_REALM - 1)
+    .bind::<super::BigInt, _>(
+        coland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_COVERAGE - 1,
+    )
+    .bind::<Text, _>(match material.purpose {
+        arkret_wire::RealmSnapshotPurpose::FullRecovery => "full_recovery",
+        arkret_wire::RealmSnapshotPurpose::StreamHistory => "stream_history",
+    })
+    .bind::<diesel::sql_types::Nullable<Jsonb>, _>(
+        material
+            .history_basis
+            .as_ref()
+            .map(|basis| serde_json::to_value(&basis.stream_ref))
+            .transpose()
+            .map_err(PersistenceError::database)?,
+    )
     .execute(&mut *conn)
     .await
     .map_err(|error| snapshot_write_error("unreserved_issuance_prune", error))?;
@@ -534,6 +560,62 @@ fn require_observed_cut(
     current: &coland_storage::RealmStateSnapshotMaterial,
 ) -> PersistenceResult<()> {
     use arkret_wire::TypedCurrentRow::Value;
+    let project = |material: &coland_storage::RealmStateSnapshotMaterial| {
+        let mut selected = material.clone();
+        if let Some(basis) = &snapshot.history_basis {
+            let member = arkret_wire::CurrentSelector::MemberState {
+                actor_id: arkret_wire::ActorId::account(basis.account_id.clone()),
+            };
+            let parent = match &basis.stream_ref {
+                arkret_wire::CommitStreamRef::Circle { circle_id, .. } => {
+                    Some(arkret_wire::CurrentSelector::Circle {
+                        circle_id: circle_id.clone(),
+                    })
+                }
+                arkret_wire::CommitStreamRef::Sidecar { sidecar_id, .. } => {
+                    Some(arkret_wire::CurrentSelector::Sidecar {
+                        sidecar_id: sidecar_id.clone(),
+                    })
+                }
+                _ => None,
+            };
+            selected.current_state_entries.retain(|row| {
+                let Value {
+                    selector,
+                    source_stream_ref,
+                    ..
+                } = row;
+                (source_stream_ref == &basis.stream_ref
+                    && !matches!(
+                        selector,
+                        arkret_wire::CurrentSelector::Circle { .. }
+                            | arkret_wire::CurrentSelector::Sidecar { .. }
+                    ))
+                    || (parent.is_some()
+                        && (selector == &member || Some(selector) == parent.as_ref()))
+            });
+            selected.visible_stream_heads.retain(|h| {
+                snapshot
+                    .visible_stream_heads
+                    .iter()
+                    .any(|s| s.stream_ref == h.stream_ref)
+            });
+            selected
+                .retention_and_history_floor
+                .stream_floors
+                .retain(|f| {
+                    snapshot
+                        .visible_stream_heads
+                        .iter()
+                        .any(|s| s.stream_ref == f.stream_ref)
+                });
+        }
+        selected
+    };
+    let projected_minimum = project(minimum);
+    let projected_current = project(current);
+    let (minimum, current) = (&projected_minimum, &projected_current);
+
     if minimum.realm_id != snapshot.realm_id
         || minimum.governance_generation != snapshot.governance_generation
     {
@@ -687,6 +769,8 @@ pub(crate) async fn install_verified_account_snapshot(
             .await?;
             recheck_disclosure_in_connection(conn, account, issuer, snapshot).await?;
             let original = coland_storage::RealmStateSnapshotMaterial {
+                purpose: snapshot.purpose,
+                history_basis: snapshot.history_basis.clone(),
                 realm_id: snapshot.realm_id.clone(),
                 governance_generation: snapshot.governance_generation,
                 visible_stream_heads: snapshot.visible_stream_heads.clone(),
@@ -809,6 +893,16 @@ pub(crate) async fn recheck_actor_disclosure_in_connection(
     issuer: &arkret_wire::DidCoreId,
     snapshot: &arkret_wire::RealmStateSnapshot,
 ) -> PersistenceResult<()> {
+    snapshot
+        .validate_purpose()
+        .map_err(PersistenceError::database)?;
+    if snapshot
+        .history_basis
+        .as_ref()
+        .is_some_and(|basis| actor.as_account_id() != Some(&basis.account_id))
+    {
+        return Err(undisclosable("history basis belongs to another Account"));
+    }
     if derived_snapshot_id(snapshot)? != snapshot.snapshot_id {
         return Err(undisclosable(
             "the Snapshot body differs from its content id",
@@ -854,18 +948,44 @@ pub(crate) async fn recheck_actor_disclosure_in_connection(
     // and rows remains disclosed to this Account. New visible streams may have
     // appeared since issuance; they do not invalidate the older exact slice.
     let original = coland_storage::RealmStateSnapshotMaterial {
+        purpose: snapshot.purpose,
+        history_basis: snapshot.history_basis.clone(),
         realm_id: snapshot.realm_id.clone(),
         governance_generation: snapshot.governance_generation,
         visible_stream_heads: snapshot.visible_stream_heads.clone(),
         current_state_entries: snapshot.current_state_entries.clone(),
         retention_and_history_floor: snapshot.retention_and_history_floor.clone(),
     };
+    // Full disclosure validation needs its current Realm context. Overlay the
+    // exact historical rows internally, then compare only the signed coverage;
+    // context rows are never included in the returned historical original.
+    let candidate = if snapshot.history_basis.is_some() {
+        let mut context = crate::authority_commit::realm_state_snapshot_material_in_connection(
+            conn,
+            &snapshot.realm_id,
+        )
+        .await?
+        .ok_or_else(|| undisclosable("missing current context"))?;
+        for historical in &snapshot.current_state_entries {
+            let arkret_wire::TypedCurrentRow::Value { selector, .. } = historical;
+            context.current_state_entries.retain(|row| {
+                let arkret_wire::TypedCurrentRow::Value {
+                    selector: actual, ..
+                } = row;
+                actual != selector
+            });
+            context.current_state_entries.push(historical.clone());
+        }
+        context
+    } else {
+        original
+    };
     let materials = crate::boxed_future(|| {
         crate::snapshot_disclosure_gate::actor_snapshot_candidates_in_connection(
             conn,
             &snapshot.realm_id,
             actor,
-            vec![None, Some(original)],
+            vec![None, Some(candidate)],
         )
     })
     .await?
@@ -911,7 +1031,13 @@ pub(crate) async fn recheck_actor_disclosure_in_connection(
             return Err(undisclosable("a signed floor is no longer disclosed"));
         }
     }
-    if disclosed.current_state_entries != snapshot.current_state_entries {
+    if snapshot
+        .current_state_entries
+        .iter()
+        .any(|row| !disclosed.current_state_entries.contains(row))
+        || (snapshot.history_basis.is_none()
+            && disclosed.current_state_entries != snapshot.current_state_entries)
+    {
         return Err(undisclosable("a signed row is no longer disclosed"));
     }
     for row in &snapshot.current_state_entries {
@@ -951,6 +1077,31 @@ pub(crate) async fn recheck_actor_disclosure_in_connection(
         if present.present != 1 {
             return Err(undisclosable(
                 "a signed head is no longer an accepted Commit",
+            ));
+        }
+    }
+    if let Some(signed) = &snapshot.history_basis {
+        let account = actor
+            .as_account_id()
+            .ok_or_else(|| undisclosable("history basis requires Account"))?;
+        let anchor = snapshot
+            .visible_stream_heads
+            .iter()
+            .find(|h| h.stream_ref == signed.stream_ref)
+            .ok_or_else(|| undisclosable("history target head missing"))?;
+        let floor = snapshot
+            .retention_and_history_floor
+            .stream_floors
+            .iter()
+            .find(|f| f.stream_ref == signed.stream_ref)
+            .ok_or_else(|| undisclosable("history target floor missing"))?
+            .oldest_position;
+        if disclosed_basis_from_snapshot(conn, account, snapshot, &signed.stream_ref, anchor, floor)
+            .await?
+            .is_none()
+        {
+            return Err(undisclosable(
+                "history dependency original is no longer disclosed",
             ));
         }
     }
@@ -1105,7 +1256,18 @@ async fn disclosed_basis_from_snapshot(
     };
     let caller = arkret_wire::ActorId::account(account.clone());
     let mut selectors = match stream_ref {
-        CommitStreamRef::Realm { .. } => return Ok(Some(basis)),
+        CommitStreamRef::Realm { .. } => {
+            if snapshot.history_basis.as_ref().is_some_and(|signed| {
+                signed.account_id != *account
+                    || signed.stream_ref != *stream_ref
+                    || signed.anchor_position != anchor.stream_position
+                    || signed.anchor_commit_ref != anchor.commit_id
+                    || !signed.accepted_dependency_refs.is_empty()
+            }) {
+                return Ok(None);
+            }
+            return Ok(Some(basis));
+        }
         CommitStreamRef::Circle { circle_id, .. } => vec![CurrentSelector::Circle {
             circle_id: circle_id.clone(),
         }],
@@ -1213,9 +1375,228 @@ async fn disclosed_basis_from_snapshot(
         }
     }
     dependencies.sort();
-    basis.accepted_dependency_refs = Some(dependencies);
+    if snapshot.history_basis.as_ref().is_some_and(|signed| {
+        signed.account_id != *account
+            || signed.stream_ref != *stream_ref
+            || signed.anchor_position != anchor.stream_position
+            || signed.anchor_commit_ref != anchor.commit_id
+            || signed.accepted_dependency_refs != dependencies
+    }) {
+        return Ok(None);
+    }
+    basis.accepted_dependency_refs = (!dependencies.is_empty()).then_some(dependencies);
     basis.validate().map_err(PersistenceError::database)?;
     Ok(Some(basis))
+}
+
+pub(crate) async fn issue_stream_history_snapshot(
+    pool: &PgPool,
+    realm: &arkret_wire::RealmId,
+    account: &arkret_wire::AccountId,
+    issuer: &arkret_wire::DidCoreId,
+    stream: &arkret_wire::CommitStreamRef,
+    expected_membership: Option<&arkret_wire::RealmCommitId>,
+    sign: coland_storage::RealmStateSnapshotSigner<'_>,
+) -> PersistenceResult<Option<arkret_wire::RealmStateSnapshot>> {
+    if stream.realm_id() != realm {
+        return Err(window_rejected("history target belongs to another Realm"));
+    }
+    let mut conn = SnapshotIssuanceConnection::acquire(pool, realm).await?;
+    let result = conn
+        .transaction::<_, PgTransactionError, _>(async |conn| {
+            sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                .execute(&mut *conn)
+                .await?;
+            crate::sync_cursor::retention::lock(conn, false).await?;
+            let Some(tenure) = sql_query(
+                "SELECT service_id,generation FROM realm_authorities WHERE realm_id=$1 FOR SHARE",
+            )
+            .bind::<Text, _>(realm.as_str())
+            .get_result::<ReadTenureRow>(&mut *conn)
+            .await
+            .optional()?
+            else {
+                return Ok(None);
+            };
+            if tenure.service_id != issuer.as_str() {
+                return Err(window_rejected("only source governor can issue history").into());
+            }
+            let Some(material) = crate::boxed_future(|| {
+                crate::snapshot_disclosure_gate::account_snapshot_material_in_connection(
+                    conn, realm, account,
+                )
+            })
+            .await?
+            else {
+                return Ok(None);
+            };
+            if let Some(expected) = expected_membership {
+                if !material.current_state_entries.iter().any(|row| matches!(row, arkret_wire::TypedCurrentRow::Value { selector: arkret_wire::CurrentSelector::MemberState { actor_id }, revision, .. } if actor_id.as_account_id() == Some(account) && &revision.commit_id == expected)) {
+                    return Err(undisclosable("history request no longer names the current opening join").into());
+                }
+            }
+            require_snapshot_serving_cut(conn, account, issuer, &tenure.service_id, &material)
+                .await?;
+            let Some(head) = material
+                .visible_stream_heads
+                .iter()
+                .find(|h| &h.stream_ref == stream)
+            else {
+                return Ok(None);
+            };
+            let floor = material
+                .retention_and_history_floor
+                .stream_floors
+                .iter()
+                .find(|f| &f.stream_ref == stream)
+                .ok_or_else(|| window_rejected("missing target floor"))?
+                .oldest_position;
+            let full = sign(&material)?;
+            if !coland_storage::signed_snapshot_matches_material(&full, &material) {
+                return Err(window_rejected("signer changed source cut").into());
+            }
+            Ok(crate::boxed_future(|| {
+                stream_history_original(
+                    conn,
+                    account,
+                    issuer,
+                    &tenure.service_id,
+                    &full,
+                    stream,
+                    head,
+                    floor,
+                    sign,
+                )
+            })
+            .await?)
+        })
+        .await
+        .map_err(snapshot_transaction_error);
+    conn.finish(result).await
+}
+
+/// Materialize a complete target selector set from an immutable accepted cut.
+/// Only its own governor may sign a new history object. A member Station may
+/// reuse an already issued narrow original, never re-sign foreign material.
+async fn stream_history_original(
+    conn: &mut AsyncPgConnection,
+    account: &arkret_wire::AccountId,
+    issuer: &arkret_wire::DidCoreId,
+    governing_service: &str,
+    snapshot: &arkret_wire::RealmStateSnapshot,
+    stream: &arkret_wire::CommitStreamRef,
+    anchor: &arkret_wire::CommitStreamHead,
+    floor: u64,
+    sign: coland_storage::RealmStateSnapshotSigner<'_>,
+) -> PersistenceResult<Option<arkret_wire::RealmStateSnapshot>> {
+    use arkret_wire::{
+        CurrentSelector, RealmSnapshotHistoryBasis, RealmSnapshotPurpose, TypedCurrentRow,
+    };
+    if derived_snapshot_id(snapshot)? != snapshot.snapshot_id {
+        return Ok(None);
+    }
+    let Some(basis) =
+        disclosed_basis_from_snapshot(conn, account, snapshot, stream, anchor, floor).await?
+    else {
+        return Ok(None);
+    };
+    if snapshot.purpose == RealmSnapshotPurpose::StreamHistory {
+        snapshot
+            .validate_purpose()
+            .map_err(PersistenceError::database)?;
+        return if still_disclosable(conn, account, issuer, snapshot).await? {
+            Ok(Some(snapshot.clone()))
+        } else {
+            Ok(None)
+        };
+    }
+    if issuer.as_str() != governing_service {
+        return Ok(None);
+    }
+    let member = CurrentSelector::MemberState {
+        actor_id: arkret_wire::ActorId::account(account.clone()),
+    };
+    let parent = match stream {
+        arkret_wire::CommitStreamRef::Circle { circle_id, .. } => Some(CurrentSelector::Circle {
+            circle_id: circle_id.clone(),
+        }),
+        arkret_wire::CommitStreamRef::Sidecar { sidecar_id, .. } => {
+            Some(CurrentSelector::Sidecar {
+                sidecar_id: sidecar_id.clone(),
+            })
+        }
+        _ => None,
+    };
+    let entries: Vec<_> = snapshot
+        .current_state_entries
+        .iter()
+        .filter(|row| {
+            let TypedCurrentRow::Value {
+                selector,
+                source_stream_ref,
+                ..
+            } = row;
+            (source_stream_ref == stream
+                && !matches!(
+                    selector,
+                    CurrentSelector::Circle { .. } | CurrentSelector::Sidecar { .. }
+                ))
+                || (parent.is_some() && (selector == &member || Some(selector) == parent.as_ref()))
+        })
+        .cloned()
+        .collect();
+    let mut sources = std::collections::BTreeSet::from([stream.clone()]);
+    for row in &entries {
+        let TypedCurrentRow::Value {
+            source_stream_ref, ..
+        } = row;
+        sources.insert(source_stream_ref.clone());
+    }
+    let material = coland_storage::RealmStateSnapshotMaterial {
+        realm_id: snapshot.realm_id.clone(),
+        governance_generation: snapshot.governance_generation,
+        purpose: RealmSnapshotPurpose::StreamHistory,
+        history_basis: Some(RealmSnapshotHistoryBasis {
+            account_id: account.clone(),
+            stream_ref: stream.clone(),
+            anchor_position: anchor.stream_position,
+            anchor_commit_ref: anchor.commit_id.clone(),
+            accepted_dependency_refs: basis.accepted_dependency_refs.unwrap_or_default(),
+        }),
+        visible_stream_heads: snapshot
+            .visible_stream_heads
+            .iter()
+            .filter(|h| sources.contains(&h.stream_ref))
+            .cloned()
+            .collect(),
+        current_state_entries: entries,
+        retention_and_history_floor: arkret_wire::RetentionAndHistoryFloor {
+            history_access: snapshot.retention_and_history_floor.history_access,
+            stream_floors: snapshot
+                .retention_and_history_floor
+                .stream_floors
+                .iter()
+                .filter(|f| sources.contains(&f.stream_ref))
+                .cloned()
+                .collect(),
+        },
+    };
+    let narrowed = sign(&material)?;
+    if !coland_storage::signed_snapshot_matches_material(&narrowed, &material) {
+        return Err(window_rejected("signer changed history coverage"));
+    }
+    narrowed
+        .validate_purpose()
+        .map_err(PersistenceError::database)?;
+    if !still_disclosable(conn, account, issuer, &narrowed).await? {
+        return Ok(None);
+    }
+    if coland_storage::enforce_inline_realm_state_snapshot_capacity(&narrowed).is_err() {
+        return Ok(None);
+    }
+    Ok(Some(
+        issue_head_in_connection(conn, account, &material, narrowed).await?,
+    ))
 }
 
 /// Re-prove an issued object for a basis at the caller's cut. Only a
@@ -1398,6 +1779,7 @@ pub(crate) async fn freeze_account_realm_window(
                    ON issued.snapshot_id = snapshot.snapshot_id \
                  WHERE snapshot.realm_id=$1 AND snapshot.governance_generation=$2 \
                    AND issued.account_id=$3 \
+                   AND (snapshot.snapshot_json->>'purpose'='full_recovery' OR snapshot.snapshot_json->'history_basis'->'stream_ref'=$6) \
                    AND snapshot.snapshot_json->'visible_stream_heads' @> $4 \
                  ORDER BY issued.issued_at DESC, snapshot.snapshot_id \
                  LIMIT $5 FOR KEY SHARE OF issued",
@@ -1410,37 +1792,16 @@ pub(crate) async fn freeze_account_realm_window(
                             .map_err(PersistenceError::database)?,
                     )
                     .bind::<super::BigInt, _>(
-                        coland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_REALM,
+                        coland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_COVERAGE,
                     )
+                    .bind::<Jsonb, _>(serde_json::to_value(&stream_ref).map_err(PersistenceError::database)?)
                     .load::<SnapshotJsonRow>(&mut *conn)
                     .await?;
                     for candidate in candidates {
                         let snapshot: arkret_wire::RealmStateSnapshot =
                             serde_json::from_value(candidate.snapshot_json)
                                 .map_err(PersistenceError::database)?;
-                        if crate::boxed_future(|| {
-                            disclosed_basis_from_snapshot(
-                                conn,
-                                &request.account,
-                                &snapshot,
-                                &stream_ref,
-                                head,
-                                floor,
-                            )
-                        })
-                        .await?
-                        .is_some()
-                            && derived_snapshot_id(&snapshot)? == snapshot.snapshot_id
-                            && crate::boxed_future(|| {
-                                still_disclosable(
-                                    conn,
-                                    &request.account,
-                                    &request.issuer,
-                                    &snapshot,
-                                )
-                            })
-                            .await?
-                        {
+                        if crate::boxed_future(|| stream_history_original(conn, &request.account, &request.issuer, &tenure.service_id, &snapshot, &stream_ref, head, floor, sign)).await?.is_some() {
                             head_basis_available = true;
                             break;
                         }
@@ -1594,6 +1955,7 @@ pub(crate) async fn freeze_account_realm_window(
                    ON issued.snapshot_id = snapshot.snapshot_id \
                  WHERE snapshot.realm_id=$1 AND snapshot.governance_generation=$2 \
                    AND issued.account_id=$3 \
+                   AND (snapshot.snapshot_json->>'purpose'='full_recovery' OR snapshot.snapshot_json->'history_basis'->'stream_ref'=$6) \
                    AND snapshot.snapshot_json->'visible_stream_heads' @> $4 \
                  ORDER BY issued.issued_at DESC, snapshot.snapshot_id \
                  LIMIT $5 FOR KEY SHARE OF issued",
@@ -1606,41 +1968,17 @@ pub(crate) async fn freeze_account_realm_window(
                             .map_err(PersistenceError::database)?,
                     )
                     .bind::<super::BigInt, _>(
-                        coland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_REALM,
+                        coland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_COVERAGE,
                     )
+                    .bind::<Jsonb, _>(serde_json::to_value(&stream_ref).map_err(PersistenceError::database)?)
                     .load::<SnapshotJsonRow>(&mut *conn)
                     .await?;
                     for candidate in candidates {
                         let snapshot: arkret_wire::RealmStateSnapshot =
                             serde_json::from_value(candidate.snapshot_json)
                                 .map_err(PersistenceError::database)?;
-                        let Some(candidate_basis) = crate::boxed_future(|| {
-                            disclosed_basis_from_snapshot(
-                                conn,
-                                &request.account,
-                                &snapshot,
-                                &stream_ref,
-                                &anchor,
-                                floor,
-                            )
-                        })
-                        .await?
-                        else {
-                            continue;
-                        };
-                        if derived_snapshot_id(&snapshot)? != snapshot.snapshot_id
-                            || !crate::boxed_future(|| {
-                                still_disclosable(
-                                    conn,
-                                    &request.account,
-                                    &request.issuer,
-                                    &snapshot,
-                                )
-                            })
-                            .await?
-                        {
-                            continue;
-                        }
+                        let Some(snapshot) = crate::boxed_future(|| stream_history_original(conn, &request.account, &request.issuer, &tenure.service_id, &snapshot, &stream_ref, &anchor, floor, sign)).await? else { continue; };
+                        let Some(candidate_basis) = crate::boxed_future(|| disclosed_basis_from_snapshot(conn, &request.account, &snapshot, &stream_ref, &anchor, floor)).await? else { continue; };
                         sql_query(
                             "INSERT INTO realm_state_snapshot_window_reservations \
                      (window_cursor, account_id, stream_key, snapshot_id, expires_at_ms) \
@@ -1706,8 +2044,11 @@ pub(crate) async fn freeze_account_realm_window(
                 if coland_storage::enforce_inline_realm_state_snapshot_capacity(&head_snapshot)
                     .is_ok()
                 {
-                    issue_head_in_connection(conn, &request.account, &material, head_snapshot)
-                        .await?;
+                    let head_snapshot = issue_head_in_connection(conn, &request.account, &material, head_snapshot).await?;
+                    for head in &selected_heads {
+                        let floor = material.retention_and_history_floor.stream_floors.iter().find(|f| f.stream_ref == head.stream_ref).ok_or_else(|| window_rejected("missing history floor"))?.oldest_position;
+                        crate::boxed_future(|| stream_history_original(conn, &request.account, &request.issuer, &tenure.service_id, &head_snapshot, &head.stream_ref, head, floor, sign)).await?;
+                    }
                 }
             }
             let mut windows = windows.into_iter();
@@ -1892,6 +2233,8 @@ mod tests {
             realm_id: realm_id.clone(),
         };
         let material = coland_storage::RealmStateSnapshotMaterial {
+            purpose: arkret_wire::RealmSnapshotPurpose::FullRecovery,
+            history_basis: None,
             realm_id,
             governance_generation: 0,
             visible_stream_heads: vec![CommitStreamHead {
@@ -1981,6 +2324,8 @@ mod tests {
         let base = signed_snapshot();
         let sized = |payload: usize| {
             let material = coland_storage::RealmStateSnapshotMaterial {
+                purpose: arkret_wire::RealmSnapshotPurpose::FullRecovery,
+                history_basis: None,
                 realm_id: base.realm_id.clone(),
                 governance_generation: 0,
                 visible_stream_heads: base.visible_stream_heads.clone(),
@@ -2053,6 +2398,8 @@ mod tests {
         let alice = account("ak:did_core:web:alice.example");
         let snapshot = signed_snapshot();
         let material = coland_storage::RealmStateSnapshotMaterial {
+            purpose: arkret_wire::RealmSnapshotPurpose::FullRecovery,
+            history_basis: None,
             realm_id: snapshot.realm_id.clone(),
             governance_generation: snapshot.governance_generation,
             visible_stream_heads: snapshot.visible_stream_heads.clone(),
@@ -2215,6 +2562,8 @@ mod tests {
         let alice = account("ak:did_core:web:alice.example");
         let snapshot = signed_snapshot();
         let material = coland_storage::RealmStateSnapshotMaterial {
+            purpose: arkret_wire::RealmSnapshotPurpose::FullRecovery,
+            history_basis: None,
             realm_id: snapshot.realm_id.clone(),
             governance_generation: snapshot.governance_generation,
             visible_stream_heads: snapshot.visible_stream_heads.clone(),
@@ -2363,6 +2712,8 @@ mod tests {
             let mut other = snapshot.clone();
             other.created_at -= chrono::Duration::seconds(1);
             let material = coland_storage::RealmStateSnapshotMaterial {
+                purpose: arkret_wire::RealmSnapshotPurpose::FullRecovery,
+                history_basis: None,
                 realm_id: other.realm_id.clone(),
                 governance_generation: other.governance_generation,
                 visible_stream_heads: other.visible_stream_heads.clone(),

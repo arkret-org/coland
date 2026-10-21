@@ -1364,6 +1364,8 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
         })
         .collect();
     Ok(Some(coland_storage::RealmStateSnapshotMaterial {
+        purpose: arkret_wire::RealmSnapshotPurpose::FullRecovery,
+        history_basis: None,
         realm_id: realm_id.clone(),
         governance_generation: authority.generation,
         visible_stream_heads: heads,
@@ -6010,6 +6012,27 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .await
     }
 
+    async fn issue_stream_history_snapshot_for_account(
+        &self,
+        realm_id: &arkret_wire::RealmId,
+        account: &arkret_wire::AccountId,
+        issuer: &arkret_wire::DidCoreId,
+        stream: &arkret_wire::CommitStreamRef,
+        expected_membership: Option<&arkret_wire::RealmCommitId>,
+        sign: coland_storage::RealmStateSnapshotSigner<'_>,
+    ) -> PersistenceResult<Option<arkret_wire::RealmStateSnapshot>> {
+        crate::issued_realm_snapshots::issue_stream_history_snapshot(
+            &self.pool,
+            realm_id,
+            account,
+            issuer,
+            stream,
+            expected_membership,
+            sign,
+        )
+        .await
+    }
+
     async fn issue_realm_state_snapshot_for_applet_device(
         &self,
         endpoint: &coland_storage::AppletManagedDeviceScopeGuard,
@@ -6424,6 +6447,7 @@ impl PgAuthorityCommitStore {
         manifest: Option<&arkret_models_collaboration::authority_commit::PcrPrivateHandoffManifest>,
         management: &arkret_models_collaboration::authority_commit::ManagementPrivateHandoffManifest,
     ) -> PersistenceResult<()> {
+        snapshot.require_full_recovery().map_err(invalid)?;
         management.validate_handoff(handoff).map_err(invalid)?;
         match (manifest, handoff.pcr_private_state_digest.as_ref()) {
             (Some(manifest), Some(digest))

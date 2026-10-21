@@ -740,6 +740,8 @@ product_agent: None,
                         ordinary_realm::signature(&ordinary_realm::station(), signal_at);
                     snapshot_signature.context = arkret_wire::DetachedSignatureContext::RealmSnapshot;
                     let mut snapshot = arkret_wire::RealmStateSnapshot {
+                        purpose: arkret_wire::RealmSnapshotPurpose::FullRecovery,
+                        history_basis: None,
                         snapshot_id: arkret_wire::RealmSnapshotId::from_digest([0x91; 32]),
                         realm_id: realm.clone(),
                         governance_generation: 0,

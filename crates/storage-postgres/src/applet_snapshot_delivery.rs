@@ -73,6 +73,8 @@ pub(super) async fn prepare(
     )
     .await?;
     let material = coland_storage::RealmStateSnapshotMaterial {
+        purpose: arkret_wire::RealmSnapshotPurpose::FullRecovery,
+        history_basis: None,
         realm_id: snapshot.realm_id.clone(),
         governance_generation: snapshot.governance_generation,
         visible_stream_heads: snapshot.visible_stream_heads.clone(),

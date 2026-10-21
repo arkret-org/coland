@@ -545,20 +545,14 @@ async fn commit_invite_revoke(
         match payload.previous_state {
             InviteRevokePreviousState::Pending => InviteState::Pending,
             InviteRevokePreviousState::Claimed => InviteState::Claimed,
-            InviteRevokePreviousState::SendFailed => InviteState::SendFailed,
         },
     )?;
     let target = match payload.target_state {
         InviteRevokeTargetState::Revoked => InviteState::Revoked,
         InviteRevokeTargetState::Expired => InviteState::Expired,
-        InviteRevokeTargetState::SendFailed => InviteState::SendFailed,
-        InviteRevokeTargetState::RevokedByCapabilityLoss => InviteState::RevokedByCapabilityLoss,
-        InviteRevokeTargetState::RevokedByInviterLeft => InviteState::RevokedByInviterLeft,
-        InviteRevokeTargetState::InvalidatedByRateLimit => InviteState::InvalidatedByRateLimit,
     };
-    if payload.target_state.releases_live_target() {
-        // `stored_field_matches_payload`, conditioned on target_state: both
-        // absent, or both present and byte-equal.
+    {
+        // Match the stored target in both directions for every terminal edge.
         let stored_invitee = directed_invitee(conn, realm_id, &payload.invite_id).await?;
         if stored_invitee != payload.invitee_account_id {
             return Err(coded(

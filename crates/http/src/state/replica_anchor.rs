@@ -268,7 +268,148 @@ pub(crate) async fn refresh_account_snapshot(
     // Same-cut issuance may retain an earlier signed original. Verify that
     // actual object under this read's fresh authority before emitting its ID.
     verify_snapshot(state, &mut located, &issued).await?;
+    spawn_history_originals(
+        state,
+        account,
+        &issued,
+        &material,
+        located.authority.current_service_id(),
+    );
     Ok(issued)
+}
+
+/// Optional history preparation must not delay a valid full recovery response.
+/// Coalesce by complete Account and Realm; later reads may retry a failed cut.
+fn spawn_history_originals(
+    state: &AppState,
+    account: &arkret_wire::AccountId,
+    issued: &arkret_wire::RealmStateSnapshot,
+    material: &coland_storage::RealmStateSnapshotMaterial,
+    governor: &DidCoreId,
+) {
+    let key = (
+        state.service_id().to_owned(),
+        arkret_canonical::canonical_json_string(&("history", account, &issued.realm_id))
+            .unwrap_or_default(),
+    );
+    {
+        let Ok(mut in_flight) = IN_FLIGHT.lock() else {
+            return;
+        };
+        if !in_flight.insert(key.clone()) {
+            return;
+        }
+    }
+    let in_flight = ConvergenceInFlight(key);
+    let (state, account, issued, material, governor) = (
+        state.clone(),
+        account.clone(),
+        issued.clone(),
+        material.clone(),
+        governor.clone(),
+    );
+    tokio::spawn(async move {
+        let _in_flight = in_flight;
+        prepare_history_originals(&state, &account, &issued, &material, governor).await;
+    });
+}
+
+async fn prepare_history_originals(
+    state: &AppState,
+    account: &arkret_wire::AccountId,
+    issued: &arkret_wire::RealmStateSnapshot,
+    material: &coland_storage::RealmStateSnapshotMaterial,
+    governor: DidCoreId,
+) {
+    for head in &issued.visible_stream_heads {
+        if let Err(reason) =
+            prepare_history_original(state, account, issued, material, &governor, head).await
+        {
+            tracing::debug!(%reason, realm_id=%issued.realm_id, "history original not prepared; full recovery retained");
+        }
+    }
+}
+
+async fn prepare_history_original(
+    state: &AppState,
+    account: &arkret_wire::AccountId,
+    issued: &arkret_wire::RealmStateSnapshot,
+    material: &coland_storage::RealmStateSnapshotMaterial,
+    governor: &DidCoreId,
+    head: &CommitStreamHead,
+) -> Result<(), String> {
+    let realm_id = &issued.realm_id;
+    let membership_commit_id = material
+        .current_state_entries
+        .iter()
+        .find_map(|row| {
+            let arkret_wire::TypedCurrentRow::Value {
+                selector, revision, ..
+            } = row;
+            match selector {
+                arkret_wire::CurrentSelector::MemberState { actor_id }
+                    if actor_id.as_account_id() == Some(account) =>
+                {
+                    Some(revision.commit_id.clone())
+                }
+                _ => None,
+            }
+        })
+        .ok_or("missing current member join")?;
+    let request = PeerRealmJoinBootstrapRequestBody {
+        request_id: RequestId::new(format!("ak:request:{}", uuid::Uuid::now_v7()))
+            .map_err(temporary)?,
+        realm_id: realm_id.clone(),
+        member_account_id: account.clone(),
+        membership_commit_id,
+        history_stream_ref: Some(head.stream_ref.clone()),
+    };
+    let body = post_peer(
+        state,
+        governor,
+        BOOTSTRAP_PATH,
+        &request,
+        BOOTSTRAP_MAX_BYTES,
+    )
+    .await?;
+    let outcome: PeerRealmJoinBootstrapOutcome =
+        serde_json::from_slice(&body).map_err(temporary)?;
+    let history = outcome.snapshot;
+    history.validate_purpose().map_err(temporary)?;
+    let signed = history
+        .history_basis
+        .as_ref()
+        .ok_or("source returned a full snapshot for history")?;
+    if outcome.request_id != request.request_id
+        || history.realm_id != *realm_id
+        || signed.account_id != *account
+        || signed.stream_ref != head.stream_ref
+        || outcome.visible_stream_heads != history.visible_stream_heads
+    {
+        return Err("history response differs from requested coverage".into());
+    }
+    if history.governance_generation != issued.governance_generation
+        || history
+            .visible_stream_heads
+            .iter()
+            .any(|h| !issued.visible_stream_heads.contains(h))
+    {
+        return Ok::<(), String>(());
+    }
+    let nonce = crate::routing::realm_join::nonce_for_request(&request.request_id)
+        .map_err(|e| e.message)?;
+    let mut served =
+        crate::routing::realm_join::verify_served_bundle(state, outcome.authority_bundle, &nonce)
+            .await
+            .map_err(|e| e.message)?;
+    verify_snapshot(state, &mut served, &history).await?;
+    complete_snapshot_tails(state, &history, material, &mut served).await?;
+    state
+        .authority_commits()
+        .install_verified_account_snapshot(account, &state.service_core_id(), &history, material)
+        .await
+        .map_err(temporary)?;
+    Ok(())
 }
 
 /// Pull only the missing tails of this already verified original. Re-fetching
@@ -358,6 +499,7 @@ async fn verified_account_snapshot(
     .await
     .map_err(|error| error.message)?;
     let request = PeerRealmJoinBootstrapRequestBody {
+        history_stream_ref: None,
         request_id: RequestId::new(format!("ak:request:{}", uuid::Uuid::now_v7()))
             .map_err(temporary)?,
         realm_id: realm_id.clone(),
@@ -826,6 +968,7 @@ async fn anchor_stream_with_forward_source(
     let realm_id = &anchor.realm_id;
     let join = &anchor.join_commit;
     let request = PeerRealmJoinBootstrapRequestBody {
+        history_stream_ref: None,
         request_id: RequestId::new(format!("ak:request:{}", uuid::Uuid::now_v7()))
             .map_err(temporary)?,
         realm_id: realm_id.clone(),

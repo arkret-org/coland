@@ -222,6 +222,31 @@ async fn peer_bootstrap(
     let bundle =
         local_authority_bundle(state, &body.realm_id, &nonce_for_request(&body.request_id)?)
             .await?;
+    if let Some(stream) = &body.history_stream_ref {
+        let snapshot = state
+            .authority_commits()
+            .issue_stream_history_snapshot_for_account(
+                &body.realm_id,
+                &body.member_account_id,
+                &state.service_core_id(),
+                stream,
+                Some(&body.membership_commit_id),
+                &state
+                    .service_verification_method("notary-key")
+                    .map_err(unavailable)?,
+                state.notary_signing_key().as_ref(),
+                crate::wire::now(),
+            )
+            .await
+            .map_err(unavailable)?
+            .ok_or_else(|| AppError::not_found("history basis unavailable"))?;
+        return json_ok(PeerRealmJoinBootstrapOutcome {
+            request_id: body.request_id,
+            authority_bundle: bundle,
+            visible_stream_heads: snapshot.visible_stream_heads.clone(),
+            snapshot,
+        });
+    }
     // The member Station anchors its held stream on this snapshot: the
     // member's complete disclosure with the Realm stream floor at its own
     // join, which must still be its current membership (`federation.md`

@@ -62,6 +62,8 @@ fn bootstrap_snapshot(
 ) -> arkret_wire::RealmStateSnapshot {
     let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let mut snapshot = arkret_wire::RealmStateSnapshot {
+        purpose: arkret_wire::RealmSnapshotPurpose::FullRecovery,
+        history_basis: None,
         snapshot_id: arkret_wire::RealmSnapshotId::from_digest([0; 32]),
         realm_id: realm.clone(),
         governance_generation: generation,
@@ -3612,6 +3614,49 @@ async fn member_account_snapshot_preserves_governance_and_exact_replica_cut() {
         Some(snapshot.clone()),
         "restoring the original verified anchor must restore the same signed cut"
     );
+    let narrow = governor
+        .issue_stream_history_snapshot_for_account(
+            &realm,
+            account,
+            &governor
+                .current_authority(&realm)
+                .await
+                .unwrap()
+                .unwrap()
+                .service_id,
+            &arkret_wire::CommitStreamRef::Realm {
+                realm_id: realm.clone(),
+            },
+            Some(&join.authority_commit.commit.commit_id),
+            &sign,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let before_narrow_bootstrap = governance_gate_footprint(&member_pool).await;
+    assert!(
+        member
+            .install_replica_anchor(&ReplicaAnchorInstall {
+                realm_id: realm.clone(),
+                join_commit_id: join.authority_commit.commit.commit_id.clone(),
+                governance_generation: narrow.governance_generation,
+                snapshot_head: narrow.visible_stream_heads[0].clone(),
+                visible_stream_heads: narrow.visible_stream_heads.clone(),
+                current_state_entries: narrow.current_state_entries.clone(),
+                verified_snapshot: narrow.clone(),
+            })
+            .await
+            .is_err(),
+        "a narrow original must never install a complete replica baseline"
+    );
+    assert_eq!(
+        governance_gate_footprint(&member_pool).await,
+        before_narrow_bootstrap
+    );
+    member
+        .install_verified_account_snapshot(account, &issuer, &narrow, &material)
+        .await
+        .unwrap();
     let now_ms = chrono::Utc::now().timestamp_millis();
     let window = member
         .freeze_account_realm_window(
@@ -4059,7 +4104,29 @@ async fn account_window_starts_joined_member_at_its_join_commit() {
     assert_eq!(bootstrapped.window.next_position, head_position + 1);
     let bootstrap_basis = bootstrapped.window.window_start_basis.unwrap();
     assert_eq!(bootstrap_basis.anchor_position, head_position);
-    assert_eq!(bootstrap_basis.snapshot_ref, at_head.snapshot_id);
+    assert_ne!(bootstrap_basis.snapshot_ref, at_head.snapshot_id);
+    let basis_original = store
+        .issued_realm_state_snapshot(
+            &realm.realm_id,
+            &bob_account,
+            &bootstrap_basis.snapshot_ref,
+            &issuer,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        basis_original.purpose,
+        arkret_wire::RealmSnapshotPurpose::StreamHistory
+    );
+    assert_eq!(
+        basis_original.history_basis.as_ref().unwrap().account_id,
+        bob_account
+    );
+    assert_eq!(
+        basis_original.visible_stream_heads,
+        at_head.visible_stream_heads
+    );
 
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let founder_reply = sourced(next_request(
@@ -4085,7 +4152,7 @@ async fn account_window_starts_joined_member_at_its_join_commit() {
         basis.anchor_commit_ref,
         realm.bob_message.authority_commit.commit.commit_id
     );
-    assert_eq!(basis.snapshot_ref, at_head.snapshot_id);
+    assert_eq!(basis.snapshot_ref, bootstrap_basis.snapshot_ref);
     assert_eq!(
         at_head.retention_and_history_floor.stream_floors[0].oldest_position,
         join_position
@@ -5104,7 +5171,7 @@ fn recipient_roster_witness(
         agent_id: None,
         agent_verification_method: None,
         keypackage: "AQ".to_owned(),
-        capabilities: vec!["mls".to_owned()],
+        capabilities: vec!["ak.content.v1".to_owned()],
         device_authorize_event_id: Some(authorization_event_ref.clone()),
         agent_key_authorize_event_id: None,
         expires_at: at + chrono::Duration::hours(1),
@@ -5117,7 +5184,9 @@ fn recipient_roster_witness(
         "intended_realm_id": delivery.realm_id,
         "mls_group_id": delivery.effective_scope.canonical_mls_group_id().unwrap(),
         "claim_purpose": "realm_membership",
-        "required_capabilities": ["mls"],
+        "target_account_id": delivery.recipient_actor_id.as_account_id().unwrap(),
+        "target_device_ids": [record.device_id.as_ref().unwrap()],
+        "required_capabilities": ["ak.content.v1"],
         "expires_at": arkret_canonical::format_timestamp_canonical(at + chrono::Duration::hours(1)),
     }))
     .unwrap();

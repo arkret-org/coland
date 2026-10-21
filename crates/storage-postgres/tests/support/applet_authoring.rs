@@ -59,10 +59,14 @@ struct Fixture {
 
 impl Fixture {
     async fn new(pool: PgPool) -> Self {
-        Box::pin(Self::new_at(pool, None)).await
+        Box::pin(Self::new_at(pool, None, None)).await
     }
 
-    async fn new_at(pool: PgPool, public_base: Option<String>) -> Self {
+    async fn new_at(
+        pool: PgPool,
+        public_base: Option<String>,
+        founding_device_seed: Option<[u8; 32]>,
+    ) -> Self {
         let slot = Arc::new(Mutex::new(Value::Null));
         let management_authority = Arc::new(Mutex::new(None));
         let origin = spawn_introspection_mock(slot.clone(), management_authority.clone()).await;
@@ -92,7 +96,17 @@ impl Fixture {
             pool.clone(),
         ));
         let state = coland_test_support::app_state_with_persistence(config, persistence).await;
-        let pcr = PcrGenesisFixture::new(state.service_did());
+        let pcr = match founding_device_seed {
+            None => PcrGenesisFixture::new(state.service_did()),
+            Some(seed) => PcrGenesisFixture::new_with(
+                state.service_did(),
+                coland_test_support::device_authorization_history::DeviceHistoryFixtureOptions {
+                    local_id: format!("applet-independent-{}", uuid::Uuid::now_v7().simple()),
+                    founding_device_signing_seed: seed,
+                    ..Default::default()
+                },
+            ),
+        };
         Box::pin(pcr.admit(&state)).await.unwrap();
         let record = arkret_signatures::account_status::sign_account_status_record(
             arkret_models_collaboration::account_status::UnsignedAccountStatusRecord {
@@ -4972,6 +4986,20 @@ mod realm_native_fixture {
     }
 
     pub(super) async fn network_fixture(pool: PgPool) -> (Fixture, NetworkStation) {
+        boxed_step(|| network_fixture_with_optional_seed(pool, None)).await
+    }
+
+    pub(super) async fn network_fixture_with_device_seed(
+        pool: PgPool,
+        seed: [u8; 32],
+    ) -> (Fixture, NetworkStation) {
+        boxed_step(|| network_fixture_with_optional_seed(pool, Some(seed))).await
+    }
+
+    async fn network_fixture_with_optional_seed(
+        pool: PgPool,
+        seed: Option<[u8; 32]>,
+    ) -> (Fixture, NetworkStation) {
         use salvo::conn::rustls::{Keycert, RustlsConfig};
         use salvo::conn::{Acceptor, Listener, TcpListener};
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -4987,7 +5015,12 @@ mod realm_native_fixture {
             .clone()
             .into_std()
             .unwrap();
-        let fixture = Box::pin(Fixture::new_at(pool, Some(format!("https://{address}")))).await;
+        let fixture = Box::pin(Fixture::new_at(
+            pool,
+            Some(format!("https://{address}")),
+            seed,
+        ))
+        .await;
         let document = fixture
             .state
             .test_persistence()

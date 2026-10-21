@@ -1,5 +1,5 @@
-// Candidate only: imported into realm_native_fixture; every receiver is a real
-// accepted RealmActor Device. Human accounts only produce the MLS Add/Remove.
+// Imported by realm_native_fixture; every receiver is a real accepted
+// RealmActor Device. Human accounts only produce the MLS Add/Remove.
 #[derive(Default)]
 struct NativeRecipientStoreFault {
     remaining: std::sync::atomic::AtomicUsize,

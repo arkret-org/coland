@@ -375,6 +375,19 @@ async fn obligation_post_through_expiry<F>(
 where
     F: std::future::Future<Output = (StatusCode, Value)>,
 {
+    boxed_step(|| obligation_post_through_held_cut(fixture, other, deadline, None, post)).await
+}
+
+async fn obligation_post_through_held_cut<F>(
+    fixture: &Fixture,
+    other: &Fixture,
+    deadline: chrono::DateTime<chrono::Utc>,
+    source: Option<(&str, &str)>,
+    post: F,
+) -> ((StatusCode, Value), Value, Value)
+where
+    F: std::future::Future<Output = (StatusCode, Value)>,
+{
     use diesel::sql_types::{Bool, Integer, Text};
     use diesel_async::{RunQueryDsl as _, SimpleAsyncConnection as _};
     #[derive(diesel::QueryableByName)]
@@ -396,17 +409,34 @@ where
         .await
         .unwrap()
         .pid;
-    diesel::sql_query("SELECT realm_id FROM realm_authorities WHERE realm_id=$1 FOR UPDATE")
-        .bind::<Text, _>(fixture.realm.as_str())
-        .execute(&mut holder)
-        .await
-        .unwrap();
+    if let Some((source_id, claim_request_id)) = source {
+        diesel::sql_query("SELECT source_id FROM realm_keypackage_claim_sources WHERE source_id=$1 AND claim_request_id=$2 FOR UPDATE")
+            .bind::<Text, _>(source_id)
+            .bind::<Text, _>(claim_request_id)
+            .execute(&mut holder)
+            .await
+            .unwrap();
+    } else {
+        diesel::sql_query("SELECT realm_id FROM realm_authorities WHERE realm_id=$1 FOR UPDATE")
+            .bind::<Text, _>(fixture.realm.as_str())
+            .execute(&mut holder)
+            .await
+            .unwrap();
+    }
     let gate = async {
         let mut monitor = fixture.pool.get().await.unwrap();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let observed = loop {
-            let state = diesel::sql_query("SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid<>pg_backend_pid() AND $1=ANY(pg_blocking_pids(a.pid)) AND a.query ILIKE '%realm_authorities%' AND a.query ILIKE '%FOR UPDATE%') AS waiting")
-                .bind::<Integer,_>(pid).get_result::<Waiting>(&mut monitor).await.unwrap();
+            let waiting_query = if source.is_some() {
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid<>pg_backend_pid() AND $1=ANY(pg_blocking_pids(a.pid)) AND a.query ILIKE '%realm_keypackage_claim_sources%' AND a.query ILIKE '%FOR SHARE%') AS waiting"
+            } else {
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid<>pg_backend_pid() AND $1=ANY(pg_blocking_pids(a.pid)) AND a.query ILIKE '%realm_authorities%' AND a.query ILIKE '%FOR UPDATE%') AS waiting"
+            };
+            let state = diesel::sql_query(waiting_query)
+                .bind::<Integer, _>(pid)
+                .get_result::<Waiting>(&mut monitor)
+                .await
+                .unwrap();
             if state.waiting {
                 break true;
             }
@@ -561,11 +591,43 @@ async fn realm_device_prepared_add_writer_wait_crosses_claim_deadline(
     child: &GrantId,
     recipient: &Fixture,
     original_group: &arkret_mls::ArkretMlsGroup,
+) -> (
+    super::realm_native_fixture::NetworkStation,
+    coland_storage_postgres::test_database::TestDatabase,
 ) {
     let before_private = original_group.export_state_record().unwrap();
     let mut restored =
         arkret_mls::ArkretMlsGroup::restore_from_state_record(&before_private).unwrap();
     let group = &mut restored;
+    let other_database =
+        boxed_step(coland_storage_postgres::test_database::TestDatabase::lease).await;
+    let (other_recipient, other_server) = boxed_step(|| {
+        super::realm_native_fixture::network_fixture_with_device_seed(
+            other_database.pool(),
+            [83; 32],
+        )
+    })
+    .await;
+    boxed_step(|| foreign_member(fixture, &other_recipient)).await;
+    assert_ne!(
+        recipient.pcr.history.founding_device_signing_seed,
+        other_recipient.pcr.history.founding_device_signing_seed,
+        "two independent recipients must not reuse a leaf signing key",
+    );
+    assert_ne!(
+        recipient.pcr.history.account,
+        other_recipient.pcr.history.account
+    );
+    let (_other_identity, other_claim) = boxed_step(|| {
+        claim_remote_with_lifetime(
+            fixture,
+            &other_recipient,
+            authority,
+            chrono::Duration::seconds(60),
+            false,
+        )
+    })
+    .await;
     let (_recipient_identity, claim) = boxed_step(|| {
         claim_remote_with_lifetime(
             fixture,
@@ -596,10 +658,14 @@ async fn realm_device_prepared_add_writer_wait_crosses_claim_deadline(
         current.current_key_access_revision,
     )
     .unwrap();
-    let package_record = arkret_mls::mls_key_package_record_from_claim(&claim.claims[0]).unwrap();
+    let package_records = [
+        arkret_mls::mls_key_package_record_from_claim(&claim.claims[0]).unwrap(),
+        arkret_mls::mls_key_package_record_from_claim(&other_claim.claims[0]).unwrap(),
+    ];
     let added = group
-        .add_member_with_governance_binding(&package_record, &binding)
+        .add_members_with_governance_binding(&package_records, &binding)
         .unwrap();
+    assert_eq!(added.welcomes.len(), 2);
     let payload = MlsCommitPayload::new(
         current.current_mls_commit_event_ref.clone(),
         current.current_key_access_revision,
@@ -617,41 +683,50 @@ async fn realm_device_prepared_add_writer_wait_crosses_claim_deadline(
         &signer,
     );
     let at = event.created_at;
-    let mut welcome = arkret_wire::MlsWelcomeDelivery {
-        welcome_id: arkret_wire::MlsWelcomeDeliveryId::new(format!(
-            "ak:mls_welcome_delivery:{}",
-            uuid::Uuid::now_v7()
-        ))
-        .unwrap(),
-        realm_id: fixture.realm.clone(),
-        effective_scope: scope.clone(),
-        commit_event_ref: event.event_id.clone(),
-        recipient_actor_id: ActorId::account(recipient.pcr.history.account.clone()),
-        recipient_endpoint: arkret_wire::MlsWelcomeRecipientEndpoint::Device {
-            device_id: recipient.pcr.history.founding_device_id.clone(),
-        },
-        keypackage_claim_ref: added.welcome.keypackage_claim_ref,
-        ciphertext_b64: added.welcome.ciphertext_b64,
-        producer_proof: arkret_signatures::detached_object::sign_detached_object(
-            &Value::Null,
+    let mut welcomes = Vec::new();
+    for (recipient, claim) in [(recipient, &claim), (&other_recipient, &other_claim)] {
+        let draft = added
+            .welcomes
+            .iter()
+            .find(|draft| draft.keypackage_claim_ref.as_str() == claim.claims[0].claim_id)
+            .expect("each actual Add must have its original claim's Welcome");
+        let mut welcome = arkret_wire::MlsWelcomeDelivery {
+            welcome_id: arkret_wire::MlsWelcomeDeliveryId::new(format!(
+                "ak:mls_welcome_delivery:{}",
+                uuid::Uuid::now_v7(),
+            ))
+            .unwrap(),
+            realm_id: fixture.realm.clone(),
+            effective_scope: scope.clone(),
+            commit_event_ref: event.event_id.clone(),
+            recipient_actor_id: ActorId::account(recipient.pcr.history.account.clone()),
+            recipient_endpoint: arkret_wire::MlsWelcomeRecipientEndpoint::Device {
+                device_id: recipient.pcr.history.founding_device_id.clone(),
+            },
+            keypackage_claim_ref: draft.keypackage_claim_ref.clone(),
+            ciphertext_b64: draft.ciphertext_b64.clone(),
+            producer_proof: arkret_signatures::detached_object::sign_detached_object(
+                &Value::Null,
+                arkret_wire::DetachedSignatureContext::MlsWelcomeDelivery,
+                DidUrl::new(format!("{}#{}", authority.native_did, device)).unwrap(),
+                at,
+                &key,
+            )
+            .unwrap(),
+        };
+        welcome.producer_proof = arkret_signatures::detached_object::sign_detached_object(
+            &arkret_canonical::unsigned_value(&welcome, &["producer_proof"]).unwrap(),
             arkret_wire::DetachedSignatureContext::MlsWelcomeDelivery,
-            DidUrl::new(format!("{}#{}", authority.native_did, device)).unwrap(),
+            welcome.producer_proof.verification_method.clone(),
             at,
             &key,
         )
-        .unwrap(),
-    };
-    welcome.producer_proof = arkret_signatures::detached_object::sign_detached_object(
-        &arkret_canonical::unsigned_value(&welcome, &["producer_proof"]).unwrap(),
-        arkret_wire::DetachedSignatureContext::MlsWelcomeDelivery,
-        welcome.producer_proof.verification_method.clone(),
-        at,
-        &key,
-    )
-    .unwrap();
+        .unwrap();
+        welcomes.push(welcome);
+    }
     let submission = SelfAuthoritySubmitRequest::MlsCommit(arkret_wire::MlsCommitSubmission {
         commit_event: event.clone(),
-        welcomes: vec![welcome.clone()],
+        welcomes,
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
     });
 
@@ -659,11 +734,16 @@ async fn realm_device_prepared_add_writer_wait_crosses_claim_deadline(
         chrono::Utc::now() < deadline,
         "the exact signed Add must be fully prepared while its real claim is live"
     );
+    let other_before = boxed_step(|| obligation_mls_footprint(&other_recipient)).await;
     let (reply, before, recipient_before) = boxed_step(|| {
-        obligation_post_through_expiry(
+        obligation_post_through_held_cut(
             fixture,
             recipient,
             deadline,
+            Some((
+                other_claim.claim_receipt.source_id.as_str(),
+                other_claim.claim_request_id.as_str(),
+            )),
             device_post(
                 fixture,
                 authority,
@@ -674,6 +754,15 @@ async fn realm_device_prepared_add_writer_wait_crosses_claim_deadline(
         )
     })
     .await;
+    assert!(
+        chrono::Utc::now() < other_claim.claim_receipt.expires_at,
+        "the second original reservation must still be live after its own row wait"
+    );
+    assert_eq!(
+        boxed_step(|| obligation_mls_footprint(&other_recipient)).await,
+        other_before,
+        "the second recipient must also have no partial Welcome, claim use, or queue writes",
+    );
     assert_eq!(
         reply.0,
         StatusCode::CONFLICT,
@@ -713,6 +802,9 @@ async fn realm_device_prepared_add_writer_wait_crosses_claim_deadline(
     eprintln!(
         "RealmDevice actual claim deadline: blocked Add refused with no Event/Commit/queue/claim consumption"
     );
+    // The accepted ordinary membership still owes real fanout to this Station
+    // during the rest of the driver's valid Add/consume and replay sequence.
+    (other_server, other_database)
 }
 
 async fn realm_device_prepared_claim_guard_crosses_actual_deadline(
@@ -1164,7 +1256,7 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
             fixture,
             candidate,
             &creation.commit,
-            81,
+            82,
             expires_at,
         )
     })
@@ -1180,6 +1272,11 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
         .expect("the second independently authorized Device is actually current");
     assert_eq!(recipient_authority.expires_at, expires_at);
     assert_ne!(recipient_authority.public_key, authority.public_key);
+    assert_ne!(
+        recipient_authority.public_key,
+        SigningKey::from_bytes(&[81; 32]).verifying_key().to_bytes(),
+        "the independent native endpoint must differ from the already accepted foreign Human leaf",
+    );
     let recipient_method = DidUrl::new(format!(
         "{}#{}",
         recipient_authority.native_did, recipient_device
@@ -1190,7 +1287,7 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
             recipient_authority.actor_id.clone(),
             recipient_device.clone(),
             arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(SigningKey::from_bytes(
-                &[81; 32],
+                &[82; 32],
             )),
         )
         .unwrap(),
@@ -1202,7 +1299,7 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
         .unsigned();
     upload.mls_group_id = Some(candidate.creation_scope.canonical_mls_group_id().unwrap());
     let signature = arkret_signatures::keypackages::sign_keypackage_signing_input(
-        &[81; 32],
+        &[82; 32],
         recipient_method.as_str(),
         &keypackages_upload_signing_input(&upload).unwrap(),
     )
@@ -1212,7 +1309,7 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
         obligation_recipient_post(
             fixture,
             &recipient_authority,
-            &[81; 32],
+            &[82; 32],
             "/_arkret/self/keys/keypackages/upload",
             ServiceOperationId::SelfKeysKeypackagesUploadCreateV1,
             json!(upload),
@@ -1426,7 +1523,7 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
         obligation_install_native_roster(
             fixture,
             &recipient_authority,
-            &[81; 32],
+            &[82; 32],
             &accepted,
             &mut joined,
         )
@@ -1526,7 +1623,7 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
         obligation_recipient_post(
             fixture,
             &recipient_authority,
-            &[81; 32],
+            &[82; 32],
             "/_arkret/self/keys/keypackages/claims/query",
             ServiceOperationId::SelfKeysKeypackagesReadClaimV1,
             json!(query),
@@ -1551,7 +1648,7 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
             obligation_recipient_post(
                 fixture,
                 &recipient_authority,
-                &[81; 32],
+                &[82; 32],
                 "/_arkret/self/keys/keypackages/consume",
                 ServiceOperationId::SelfKeysKeypackagesCommandConsumeV1,
                 json!(command),
@@ -1619,6 +1716,6 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
         "the earlier real accepted Add is retained unchanged"
     );
     eprintln!(
-        "actual native recipient Device81: valid signed durable consume reached the real writer then lost its own physical lifetime; claim still live, no consumption/ACK/new Commit"
+        "actual independent native recipient: valid signed durable consume reached the real writer then lost its own physical lifetime; claim still live, no consumption/ACK/new Commit"
     );
 }

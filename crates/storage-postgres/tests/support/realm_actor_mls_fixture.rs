@@ -644,7 +644,7 @@ pub(super) async fn run(
     eprintln!("native MLS: foreign member joined");
     let mut group =
         boxed_step(|| genesis(fixture, package, candidate, device, &authority, &child)).await;
-    boxed_step(|| {
+    let _additional_recipient = boxed_step(|| {
         realm_device_prepared_add_writer_wait_crosses_claim_deadline(
             fixture, package, candidate, device, &authority, &child, &recipient, &group,
         )

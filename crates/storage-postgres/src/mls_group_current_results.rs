@@ -353,7 +353,9 @@ pub(crate) async fn commit_mls_group_current_result_in_connection(
     {
         return Err(coland_storage::MlsSendGateRefusal::EpochUpdateRequired.into_conflict());
     }
-    crate::boxed_future(|| require_fresh_claims_in_connection(conn, transaction)).await?;
+    let deadlines =
+        crate::boxed_future(|| fresh_claim_deadlines_in_connection(conn, transaction)).await?;
+    require_live_claim_deadlines(conn, &deadlines).await?;
     write_group(
         conn,
         &key,
@@ -1136,18 +1138,40 @@ async fn physical_clock(
 /// Fresh acceptance, never historical replica installation or exact accepted
 /// replay. Recheck after held-cut and writer waits: a candidate's signed Commit
 /// time cannot keep an unconsumed reservation alive (§2.6).
-pub(crate) async fn require_fresh_claims_in_connection(
+pub(crate) async fn fresh_claim_deadlines_in_connection(
     conn: &mut AsyncPgConnection,
     transaction: &AuthorityCommitTransaction,
-) -> PersistenceResult<()> {
+) -> PersistenceResult<Vec<chrono::DateTime<chrono::Utc>>> {
+    let mut deadlines = Vec::new();
     if transaction.event.kind != EventKind::MlsCommit {
-        return Ok(());
+        return Ok(deadlines);
     }
     for welcome in &transaction.welcomes {
         if let Some(claim) = &welcome.claim {
-            require_live_claim(conn, claim, None).await?;
+            deadlines.push(require_live_claim(conn, claim, None).await?);
         } else if transaction.event.actor_id.as_realm_actor_id().is_some() {
-            crate::boxed_future(|| require_realm_source_claim(conn, transaction, welcome)).await?;
+            deadlines.push(
+                crate::boxed_future(|| require_realm_source_claim(conn, transaction, welcome))
+                    .await?,
+            );
+        }
+    }
+    Ok(deadlines)
+}
+
+/// The final batch barrier uses one physical instant after every writer and
+/// every claim's original/current checks. A later Welcome cannot keep an
+/// earlier reservation alive by delaying its own verification or row lock.
+pub(crate) async fn require_live_claim_deadlines(
+    conn: &mut AsyncPgConnection,
+    deadlines: &[chrono::DateTime<chrono::Utc>],
+) -> PersistenceResult<()> {
+    if !deadlines.is_empty() {
+        let at = physical_clock(conn).await?;
+        if deadlines.iter().any(|deadline| at >= *deadline) {
+            return Err(failed_precondition(
+                "an MLS Add claim reservation expired before final batch acceptance",
+            ));
         }
     }
     Ok(())
@@ -1157,7 +1181,7 @@ async fn require_realm_source_claim(
     conn: &mut AsyncPgConnection,
     transaction: &AuthorityCommitTransaction,
     welcome: &coland_storage::VerifiedMlsWelcome,
-) -> PersistenceResult<()> {
+) -> PersistenceResult<chrono::DateTime<chrono::Utc>> {
     #[derive(QueryableByName)]
     struct Source {
         #[diesel(sql_type = Text)]
@@ -1277,14 +1301,18 @@ async fn require_realm_source_claim(
             "Realm Add original claim reservation expired before acceptance",
         ));
     }
-    Ok(())
+    Ok(original
+        .request
+        .expires_at
+        .min(outcome.claim_receipt.expires_at)
+        .min(record.expires_at))
 }
 
 async fn require_live_claim(
     conn: &mut AsyncPgConnection,
     claim: &coland_storage::MlsWelcomeClaimLedgerKey,
     historical_at: Option<chrono::DateTime<chrono::Utc>>,
-) -> PersistenceResult<()> {
+) -> PersistenceResult<chrono::DateTime<chrono::Utc>> {
     let row = sql_query(
         "SELECT request_digest,state,claim_expires_at_unix_ms FROM peer_keypackage_claims \
          WHERE source_id=$1 AND claim_request_id=$2 FOR UPDATE",
@@ -1312,7 +1340,9 @@ async fn require_live_claim(
             "the Welcome's KeyPackage claim is no longer live",
         ));
     }
-    Ok(())
+    row.claim_expires_at_unix_ms
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .ok_or_else(|| failed_precondition("the Welcome's original claim deadline is invalid"))
 }
 
 fn message_envelopes(

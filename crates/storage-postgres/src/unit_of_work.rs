@@ -2441,6 +2441,7 @@ fn commit_one_in_connection<'a>(
     event_approvals: Option<&'a coland_storage::EventApprovalCommit>,
     outcome: &'a mut EventCommitOutcome,
     audit_unit: Option<&'a coland_storage::RegisteredAuditCommit>,
+    fresh_claim_deadlines: &'a mut Vec<chrono::DateTime<chrono::Utc>>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PgTransactionError>> + Send + 'a>>
 {
     // Construct this state machine outside the batch caller's poll frame.
@@ -2453,6 +2454,7 @@ fn commit_one_in_connection<'a>(
         event_approvals,
         outcome,
         audit_unit,
+        fresh_claim_deadlines,
     ))
 }
 
@@ -2476,6 +2478,7 @@ async fn commit_one_inner(
     event_approvals: Option<&coland_storage::EventApprovalCommit>,
     outcome: &mut EventCommitOutcome,
     audit_unit: Option<&coland_storage::RegisteredAuditCommit>,
+    fresh_claim_deadlines: &mut Vec<chrono::DateTime<chrono::Utc>>,
 ) -> Result<(), PgTransactionError> {
     if request.event.event_id != request.authority_commit.event.event_id.as_str() {
         return Err(PersistenceError::SchemaViolation(
@@ -3275,13 +3278,6 @@ async fn commit_prepared_event_inner(
         }
     }
     if matches!(authority_write, AuthorityCommitWriteOutcome::Committed) {
-        crate::boxed_future(|| {
-            crate::mls_group_current_results::require_fresh_claims_in_connection(
-                conn,
-                &request.authority_commit,
-            )
-        })
-        .await?;
         if matches!(
             event.kind,
             arkret_wire::EventKind::MlsGenesis | arkret_wire::EventKind::MlsCommit
@@ -3310,6 +3306,15 @@ async fn commit_prepared_event_inner(
                 .await?;
             }
         }
+        fresh_claim_deadlines.extend(
+            crate::boxed_future(|| {
+                crate::mls_group_current_results::fresh_claim_deadlines_in_connection(
+                    conn,
+                    &request.authority_commit,
+                )
+            })
+            .await?,
+        );
     }
 
     Ok(())
@@ -3808,6 +3813,7 @@ async fn commit_batch_in_connection(
     .await?;
 
     let mut outcome = EventCommitOutcome::default();
+    let mut fresh_claim_deadlines = Vec::new();
     let audit_events = request
         .events
         .iter()
@@ -3839,6 +3845,7 @@ async fn commit_batch_in_connection(
             slot_approvals,
             &mut outcome,
             audit_unit,
+            &mut fresh_claim_deadlines,
         ))
         .await?;
     }
@@ -3880,6 +3887,8 @@ async fn commit_batch_in_connection(
             .await?,
         );
     }
+    crate::mls_group_current_results::require_live_claim_deadlines(conn, &fresh_claim_deadlines)
+        .await?;
     Ok(outcome)
 }
 

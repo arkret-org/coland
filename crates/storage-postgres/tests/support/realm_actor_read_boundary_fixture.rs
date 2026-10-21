@@ -242,7 +242,7 @@ async fn realm_native_read_boundaries(
         .unwrap();
     assert_eq!(join.commit.stream_ref, stream);
     assert_eq!(join.commit.stream_position, floor.oldest_position);
-    assert_eq!(join.event.kind, EventKind::MemberState);
+    assert_eq!(join.event.kind, EventKind::CircleMemberState);
     assert_eq!(join.event.payload["member_id"], json!(circle.actor_id));
     assert_eq!(join.event.payload["membership"], "join");
     let predecessor = fixture

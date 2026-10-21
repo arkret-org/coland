@@ -271,7 +271,7 @@ pub(super) async fn run_authority_admission(pool: PgPool) {
         );
     }
     let first_candidate: RealmActorCreatePayload =
-        serde_json::from_value(originals[0].event.payload.clone()).unwrap();
+        serde_json::from_value(json!(originals[0].event.payload)).unwrap();
     boxed_step(|| {
         run_active_revoke(
             &factory.fixture,

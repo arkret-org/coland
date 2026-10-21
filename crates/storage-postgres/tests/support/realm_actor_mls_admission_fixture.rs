@@ -827,8 +827,9 @@ async fn admission_native_last_resort(
     let outcome: KeyPackagesConsumeOutcome = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(outcome.consume_receipt.claim_id, command.claim_id);
     assert_eq!(
-        outcome.consume_receipt.recipient_durable_receipt,
-        command.recipient_durable_receipt
+        arkret_canonical::canonical_json_bytes(&outcome.consume_receipt.recipient_durable_receipt)
+            .unwrap(),
+        arkret_canonical::canonical_json_bytes(&command.recipient_durable_receipt).unwrap()
     );
     let store = fixture.state.test_persistence();
     let ledger = store
@@ -840,7 +841,7 @@ async fn admission_native_last_resort(
     assert_eq!(ledger.state, "consumed");
     assert_eq!(
         ledger.consume_receipt,
-        Some(outcome.consume_receipt.clone())
+        Some(json!(&outcome.consume_receipt))
     );
     let row = store
         .mls_key_packages()
@@ -895,7 +896,7 @@ async fn admission_native_last_resort(
         .unwrap()
         .unwrap();
     assert_eq!(prior.state, "consumed");
-    assert_eq!(prior.consume_receipt, Some(outcome.consume_receipt));
+    assert_eq!(prior.consume_receipt, Some(json!(&outcome.consume_receipt)));
     let next = store
         .mls_key_packages()
         .get_peer_claim_by_claim_id(&second.claims[0].claim_id)
@@ -1238,7 +1239,8 @@ async fn admission_read_parent(
     }
     body.issued_at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let parent = boxed_step(|| obligation_admin_grant(fixture, body.clone())).await;
-    boxed_step(|| obligation_terminal_child(fixture, package, actor, &[(parent, body)])).await
+    let sources = [(parent, body)];
+    boxed_step(|| obligation_terminal_child(fixture, package, actor, &sources)).await
 }
 
 async fn admission_claimed_target_fence(

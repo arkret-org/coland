@@ -22,7 +22,9 @@ fn realm_review_vote(
             },
             request_canonical_digest: Hash::new(arkret_canonical::canonical_sha256(event).unwrap())
                 .unwrap(),
-            operation: ServiceOperationId::SelfEventsCommandSubmitV1.into(),
+            operation: ServiceOperationId::SelfEventsCommandSubmitV1
+                .as_str()
+                .into(),
             action,
             realm_id: event.realm_id.clone(),
             initiating_actor_id: event.actual_signer().clone(),
@@ -553,8 +555,8 @@ async fn realm_review_creation_case(pool: PgPool, bot: bool) {
         "a valid Service signature cannot repair invalid native control possession: {problem}"
     );
     assert_eq!(boxed_step(|| realm_review_footprint(fixture)).await, before);
-    boxed_step(|| realm_review_policy(fixture, &[if bot { "create_bot" } else { "map_ghost" }]))
-        .await;
+    let reviewed_operations = [if bot { "create_bot" } else { "map_ghost" }];
+    boxed_step(|| realm_review_policy(fixture, &reviewed_operations)).await;
     boxed_step(|| realm_review_governance(fixture, action.as_str())).await;
     let before = boxed_step(|| realm_review_footprint(fixture)).await;
     let (status, problem) = boxed_step(|| realm_review_service_submit(&context, &event, &[])).await;

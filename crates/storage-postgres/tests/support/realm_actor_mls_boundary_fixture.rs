@@ -162,11 +162,12 @@ async fn boundary_publish_human(fixture: &Fixture) -> arkret_wire::KeyPackageRef
         .unwrap();
     let reference =
         arkret_wire::KeyPackageRef::new(upload.keypackages[0].keypackage_ref.as_str()).unwrap();
+    let upload_body = json!(upload);
     let (status, value) = boxed_step(|| {
         fixture.admin_post(
             "/_arkret/self/keys/keypackages/upload",
             ServiceOperationId::SelfKeysKeypackagesUploadCreateV1.as_str(),
-            &json!(upload),
+            &upload_body,
             None,
         )
     })
@@ -698,11 +699,12 @@ async fn boundary_claim_native_recipient(
     )
     .unwrap();
     command.validate_shape().unwrap();
+    let command_body = json!(command);
     let (status, value) = boxed_step(|| {
         fixture.admin_post(
             "/_arkret/self/keys/keypackages/claim",
             ServiceOperationId::SelfKeysKeypackagesCommandClaimV1.as_str(),
-            &json!(command),
+            &command_body,
             Some(command.claim_request_id.as_str()),
         )
     })
@@ -966,8 +968,9 @@ async fn boundary_finite_read_parent(
         issued_at: arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()),
     };
     let id = boxed_step(|| obligation_admin_grant(fixture, parent.clone())).await;
+    let parent_sources = [(id, parent)];
     boxed_step(|| {
-        obligation_terminal_child(fixture, package, &authority.actor_id, &[(id, parent)])
+        obligation_terminal_child(fixture, package, &authority.actor_id, &parent_sources)
     })
     .await;
     deadline
@@ -1132,10 +1135,11 @@ async fn boundary_human_pcr_handoff(
         "counterpart must be a different accepted Human PCR at this Station"
     );
     assert_ne!(human.pcr.history.account, fixture.pcr.history.account);
+    let human_persistence = human.state.test_persistence();
     let revoker = boxed_step(|| {
         human
             .pcr
-            .admit_accepted_device(human.state.test_persistence().as_ref(), [181; 32])
+            .admit_accepted_device(human_persistence.as_ref(), [181; 32])
     })
     .await
     .unwrap();
@@ -1158,13 +1162,14 @@ async fn boundary_human_pcr_handoff(
     // recording a "remote" authority at its own Station would be invalid.
     let join=human.admin_event(EventKind::MemberState,ScopeRef::Realm{realm_id:fixture.realm.clone()},
         json!({"member_id":ActorId::account(human.pcr.history.account.clone()),"membership":"join"}));
+    let join_body = json!(SelfAuthoritySubmitRequest::Event(
+        arkret_wire::EventAdmissionSubmission::new(join)
+    ));
     let (status, value) = boxed_step(|| {
         human.admin_post(
             "/_arkret/self/events",
             ServiceOperationId::SelfEventsCommandSubmitV1.as_str(),
-            &json!(SelfAuthoritySubmitRequest::Event(
-                arkret_wire::EventAdmissionSubmission::new(join)
-            )),
+            &join_body,
             None,
         )
     })

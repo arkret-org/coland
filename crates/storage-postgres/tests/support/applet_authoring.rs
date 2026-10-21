@@ -2537,10 +2537,11 @@ mod realm_native_fixture {
         let RealmActorMaterialResult::Current { entries } = material.result else {
             panic!("current material required");
         };
-        assert!(matches!(
-            &entries[0],
-            RealmActorMaterialCurrentEntry::Present { .. }
-        ));
+        let RealmActorMaterialCurrentEntry::Present { source_ref, .. } = &entries[0] else {
+            panic!("present private control required");
+        };
+        assert_eq!(source_ref, &metadata.control_ref);
+        assert_eq!(source_ref.event_id, commit.event_ref);
         assert!(matches!(
             &entries[1],
             RealmActorMaterialCurrentEntry::NeverWritten { .. }
@@ -3643,6 +3644,7 @@ mod realm_native_fixture {
         fixture: &Fixture,
         native: &NativeService,
         candidate: &RealmActorCreatePayload,
+        completion_pending: bool,
     ) {
         use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
         let persistence = fixture.state.test_persistence();
@@ -3817,8 +3819,15 @@ mod realm_native_fixture {
             .unwrap();
         let completion = pending
             .iter()
-            .find(|row| row.actor_id == candidate.actor_id)
-            .expect("creation completion survives business revocation");
+            .find(|row| row.actor_id == candidate.actor_id);
+        assert_eq!(
+            completion.is_some(),
+            completion_pending,
+            "revocation preserves the existing completion delivery state"
+        );
+        let Some(completion) = completion else {
+            return;
+        };
         let historical_delivery = prepare_configuration_completion(fixture, completion)
             .await
             .unwrap();
@@ -3865,7 +3874,7 @@ mod realm_native_fixture {
                 .unwrap()
                 .is_some()
         );
-        boxed_step(|| installation_business_revocation(fixture, native, candidate)).await;
+        boxed_step(|| installation_business_revocation(fixture, native, candidate, true)).await;
         eprintln!("recovery: authoring native plan");
         let (plan, published) = recovery_plan(candidate, creation);
         let make_begin = |payload: RealmActorRecoveryBeginPayload| {
@@ -4722,6 +4731,7 @@ mod realm_native_fixture {
 
     async fn governance(
         fixture: &Fixture,
+        native: &NativeService,
         candidate: &arkret_models_integration::RealmActorCreatePayload,
         creation: &arkret_wire::RealmCommit,
     ) {
@@ -4754,13 +4764,13 @@ mod realm_native_fixture {
         );
         let send = |event: Event| async move {
             fixture
-                .admin_post(
+                .admin_post_network(
                     "/_arkret/self/events",
                     arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
                     &json!(SelfAuthoritySubmitRequest::Event(
                         arkret_wire::EventAdmissionSubmission::new(event)
                     )),
-                    None,
+                    "governance-control",
                 )
                 .await
         };
@@ -4780,11 +4790,11 @@ mod realm_native_fixture {
         }))
         .unwrap();
         let (status, _) = fixture
-            .admin_post(
+            .admin_post_network(
                 "/_arkret/self/realm-actors/material",
                 arkret_wire::ServiceOperationId::SELF_REALM_ACTOR_READ_MATERIAL_V1,
                 &json!(audit_request),
-                None,
+                "governance-audit",
             )
             .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "manage does not imply audit");
@@ -4796,11 +4806,11 @@ mod realm_native_fixture {
                 "issued_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())}}));
         accepted_admin_domain_event(fixture, audit_permission).await;
         let (status, response) = fixture
-            .admin_post(
+            .admin_post_network(
                 "/_arkret/self/realm-actors/material",
                 arkret_wire::ServiceOperationId::SELF_REALM_ACTOR_READ_MATERIAL_V1,
                 &json!(audit_request),
-                None,
+                "governance-audit",
             )
             .await;
         assert_eq!(status, StatusCode::OK, "explicit Account audit: {response}");
@@ -4908,8 +4918,12 @@ mod realm_native_fixture {
                 "expected_manager_revision":{"commit_id":creation.commit_id,"stream_position":creation.stream_position}
             }),
         );
-        let (status, response) = send(enable).await;
+        let (status, response) = send(enable.clone()).await;
         assert_eq!(status, StatusCode::OK, "enable recovery: {response}");
+        boxed_step(|| {
+            service_recovery_source_after_reenable(fixture, native, candidate, creation, &enable)
+        })
+        .await;
         let resume = command(
             EventKind::RealmActorStatusSet,
             json!({
@@ -4936,6 +4950,107 @@ mod realm_native_fixture {
                 "Account governance signer facts stay on the private control stream"
             );
         }
+    }
+
+    async fn service_recovery_source_after_reenable(
+        fixture: &Fixture,
+        native: &NativeService,
+        candidate: &RealmActorCreatePayload,
+        creation: &arkret_wire::RealmCommit,
+        enable: &Event,
+    ) {
+        // The Applet did not author the administrator's replacement. Obtain
+        // its complete original coordinate solely through the signed API.
+        let request: RealmActorMaterialRequest = serde_json::from_value(json!({
+            "purpose":"current", "actor_id":candidate.actor_id,
+            "request_nonce":arkret_canonical::base64url_encode(rand::random::<[u8;32]>()),
+            "selectors":[{"kind":"realm_actor_recovery","actor_id":candidate.actor_id}]
+        }))
+        .unwrap();
+        let (status, response) = fixture
+            .service_post(
+                &native.package,
+                "/_arkret/self/realm-actors/material",
+                arkret_wire::ServiceOperationId::SELF_REALM_ACTOR_READ_MATERIAL_V1,
+                &json!(request),
+                "current-after-admin-recovery-reenable",
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "Service current after re-enable: {response}"
+        );
+        let material: RealmActorMaterialOutcome = serde_json::from_value(response).unwrap();
+        material
+            .validate_for_request(
+                &request,
+                &ActorId::service(candidate.service_id.clone()),
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        arkret_signatures::detached_object::verify_detached_object_signature(
+            &material.signature,
+            &arkret_canonical::unsigned_value(&material, &["signature"]).unwrap(),
+            DetachedSignatureContext::RealmActorMaterial,
+            &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+                bytes: fixture
+                    .state
+                    .notary_signing_key()
+                    .verifying_key()
+                    .to_bytes()
+                    .to_vec(),
+            },
+        )
+        .unwrap();
+        let RealmActorMaterialResult::Current { entries } = &material.result else {
+            panic!("current required")
+        };
+        let RealmActorMaterialCurrentEntry::Present { row, source_ref } = &entries[0] else {
+            panic!("recovery must be present")
+        };
+        let arkret_wire::TypedCurrentRow::Value {
+            revision, value, ..
+        } = row
+        else {
+            panic!("value required")
+        };
+        assert_eq!(value["enabled"], true);
+        assert_eq!(source_ref.event_id, enable.event_id);
+        assert_ne!(source_ref.event_id, creation.event_ref);
+        assert_eq!(source_ref.commit_id, revision.commit_id);
+        assert_eq!(source_ref.stream_position, revision.stream_position);
+        let request = RealmActorMaterialRequest::Event {
+            actor_id: candidate.actor_id.clone(),
+            request_nonce: arkret_canonical::base64url_encode(rand::random::<[u8; 32]>()),
+            target: source_ref.clone(),
+        };
+        let (status, response) = fixture
+            .service_post(
+                &native.package,
+                "/_arkret/self/realm-actors/material",
+                arkret_wire::ServiceOperationId::SELF_REALM_ACTOR_READ_MATERIAL_V1,
+                &json!(request),
+                "original-admin-recovery-reenable",
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "Service reads actual re-enable original: {response}"
+        );
+        let material: RealmActorMaterialOutcome = serde_json::from_value(response).unwrap();
+        material
+            .validate_for_request(
+                &request,
+                &ActorId::service(candidate.service_id.clone()),
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        let RealmActorMaterialResult::Event { event, .. } = material.result else {
+            panic!("original required")
+        };
+        assert_eq!(&event, enable);
     }
 
     pub(super) struct NetworkStation(tokio::task::JoinHandle<()>);
@@ -5778,6 +5893,7 @@ mod realm_native_fixture {
         circle: bool,
         bot: bool,
         rotate_during_reply: bool,
+        recover_lost_key: bool,
     ) {
         use arkret_bridge_runtime::managed_actor_authoring::ManagedActorAuthoringService;
         use arkret_bridge_runtime::managed_device::ManagedDeviceRuntime;
@@ -5789,6 +5905,7 @@ mod realm_native_fixture {
             inner: FileAuthoringStore,
             armed: Arc<std::sync::atomic::AtomicBool>,
             authorization_armed: Arc<std::sync::atomic::AtomicBool>,
+            control_armed: Arc<std::sync::atomic::AtomicBool>,
         }
         impl AuthoringStore for LostDeviceReceipt {
             fn load(&self, key: &str) -> arkret_bridge_runtime::Result<Option<String>> {
@@ -5824,6 +5941,17 @@ mod realm_native_fixture {
                         "injected crash before authorization receipt persistence".into(),
                     ));
                 }
+                if expected
+                    .iter()
+                    .any(|(key, value)| key.starts_with("managed-control/v1/") && value.is_some())
+                    && self
+                        .control_armed
+                        .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(arkret_bridge_runtime::BridgeError::App(
+                        "injected crash before control receipt persistence".into(),
+                    ));
+                }
                 self.inner.compare_exchange_batch(expected, writes)
             }
         }
@@ -5842,6 +5970,171 @@ mod realm_native_fixture {
             .await
             .unwrap()
             .count
+        }
+        async fn recover_runtime_key_loss(
+            fixture: &Fixture,
+            native: &NativeService,
+            candidate: &RealmActorCreatePayload,
+            edge: Arc<ArkretEdge>,
+            devices: ManagedDeviceRuntime,
+            author: ManagedActorAuthoringService,
+            path: std::path::PathBuf,
+            lost_control: Arc<std::sync::atomic::AtomicBool>,
+            make_edge: impl Fn() -> Arc<ArkretEdge>,
+        ) {
+            let actor = candidate.actor_id.clone();
+            let original = edge
+                .installed_managed_authoring(&candidate.creation_scope, &actor)
+                .unwrap()
+                .unwrap();
+            let RealmActorMaterialResult::Event {
+                commit: creation, ..
+            } = &original.authoring_context.material.result
+            else {
+                panic!("accepted creation original required");
+            };
+            eprintln!("independent runtime recovery: administrator re-enable");
+            boxed_step(|| governance(fixture, native, candidate, creation)).await;
+            boxed_step(|| {
+                installation_business_revocation(
+                    fixture,
+                    native,
+                    candidate,
+                    candidate.actor_role == arkret::RealmActorCreatePayloadActorRole::Ghost,
+                )
+            })
+            .await;
+            eprintln!("independent runtime recovery: erase daily key only");
+            let custody = FileAuthoringStore::new(path.clone()).unwrap();
+            let (storage_key, before) = custody
+                .entries_with_prefix("managed-identity/v1/")
+                .unwrap()
+                .into_iter()
+                .find(|(_, raw)| {
+                    serde_json::from_str::<Value>(raw).unwrap()["actor_did"]
+                        == json!(candidate.initial_resolution.did)
+                })
+                .expect("independent native identity custody");
+            let mut missing: Value = serde_json::from_str(&before).unwrap();
+            assert!(missing["encrypted_controller_material"].is_string());
+            missing["encrypted_controller_material"] = Value::Null;
+            assert!(
+                custody
+                    .compare_exchange_batch(
+                        &[(storage_key.clone(), Some(before))],
+                        &[(storage_key, Some(serde_json::to_string(&missing).unwrap()))]
+                    )
+                    .unwrap()
+            );
+            let before_nonces = control_nonce_count(&fixture.pool, &actor).await;
+            lost_control.store(true, std::sync::atomic::Ordering::SeqCst);
+            eprintln!("independent runtime recovery: begin with receipt failure");
+            let failure = boxed_step(|| devices.recover_control(&actor, "lost-daily-key"))
+                .await
+                .err()
+                .expect("accepted begin receipt persistence must fail");
+            assert!(
+                failure
+                    .to_string()
+                    .contains("injected crash before control receipt persistence"),
+                "{failure}"
+            );
+            let fenced = snapshot(fixture, &actor).await;
+            assert_eq!(fenced["realm_actor_statusowner"], "paused");
+            assert_eq!(
+                fenced["realm_actor_device_generation"]["current_device_generation_ref"],
+                2
+            );
+            assert_eq!(
+                fenced["realm_actor_control"]["resolution"]["did"],
+                json!(candidate.initial_resolution.did)
+            );
+            let document_url =
+                arkret::identity::DidWebvhResolver::document_url(&candidate.initial_resolution.did)
+                    .unwrap();
+            let parsed = url::Url::parse(&document_url).unwrap();
+            let local_id = parsed.path_segments().unwrap().rev().nth(1).unwrap();
+            let (_, unpublished) = author.published_principal(local_id).await.unwrap().unwrap();
+            assert_eq!(
+                unpublished.len(),
+                1,
+                "a missing begin receipt must not publish the planned successor"
+            );
+            drop(author);
+            drop(devices);
+            drop(edge);
+            let edge = make_edge();
+            *native.managed_router.lock().unwrap() = Some(Arc::new(salvo::Service::new(
+                arkret_bridge_runtime::web::managed_applet_router(edge.clone()).unwrap(),
+            )));
+            let author = ManagedActorAuthoringService::new(edge.clone()).unwrap();
+            let devices = ManagedDeviceRuntime::new(edge.clone()).unwrap();
+            eprintln!("independent runtime recovery: reopen host and finish original");
+            let completed = boxed_step(|| devices.recover_control(&actor, "lost-daily-key"))
+                .await
+                .unwrap();
+            assert_eq!(completed.stream_ref, creation.stream_ref);
+            let after = snapshot(fixture, &actor).await;
+            assert_eq!(
+                after["realm_actor_statusowner"], "paused",
+                "key recovery does not resume business"
+            );
+            assert_eq!(after["realm_actor_statusgovernance"], "active");
+            assert_eq!(
+                after["realm_actor_device_generation"]["current_device_generation_ref"],
+                2
+            );
+            assert_eq!(
+                after["realm_actor_control"]["resolution"]["did"],
+                json!(candidate.initial_resolution.did)
+            );
+            assert_ne!(
+                after["realm_actor_control"]["control_method_kid"],
+                json!(candidate.control_method_kid)
+            );
+            assert!(after["realm_actor_recovery"]["pending"].is_null());
+            assert_eq!(
+                control_nonce_count(&fixture.pool, &actor).await,
+                before_nonces,
+                "independent recovery cannot authenticate with the missing daily control key"
+            );
+            assert_eq!(
+                boxed_step(|| devices.recover_control(&actor, "lost-daily-key"))
+                    .await
+                    .unwrap(),
+                completed
+            );
+            let (_, published) = author.published_principal(local_id).await.unwrap().unwrap();
+            assert_eq!(published.len(), 2);
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            boxed_step(|| devices.rotate_control(&actor, "recovered-key-rotation"))
+                .await
+                .unwrap();
+            assert_eq!(
+                boxed_step(|| devices.recover_control(&actor, "lost-daily-key"))
+                    .await
+                    .unwrap(),
+                completed,
+                "historical recovery completion survives subsequent normal control changes"
+            );
+            assert!(
+                boxed_step(|| devices.device_for_actor(&actor))
+                    .await
+                    .is_err(),
+                "old authorization remains fenced"
+            );
+            let retained = edge
+                .installed_managed_authoring(&candidate.creation_scope, &actor)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                canonical_sha256(&retained.authoring_context.material.result).unwrap(),
+                canonical_sha256(&original.authoring_context.material.result).unwrap()
+            );
+            drop(custody);
+            drop(devices);
+            drop(edge);
+            std::fs::remove_file(path).unwrap();
         }
         let (fixture, _governor_server) = boxed_step(|| network_fixture(pool.clone())).await;
         let factory = AppletAuthoringFactory {
@@ -5935,6 +6228,7 @@ mod realm_native_fixture {
             .unwrap();
         let lost_receipt = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let lost_authorization = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let lost_control = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let make_edge = || {
             Arc::new(
                 ArkretEdge::new_outbound(
@@ -5949,6 +6243,7 @@ mod realm_native_fixture {
                         inner: FileAuthoringStore::new(path.clone()).unwrap(),
                         armed: lost_receipt.clone(),
                         authorization_armed: lost_authorization.clone(),
+                        control_armed: lost_control.clone(),
                     })),
                 )
                 .unwrap(),
@@ -5962,15 +6257,15 @@ mod realm_native_fixture {
             external_id: "user-1".into(),
         };
         eprintln!("real Bridge runtime: signed governance preview and independent native creation");
+        *native.managed_router.lock().unwrap() = Some(Arc::new(salvo::Service::new(
+            arkret_bridge_runtime::web::managed_applet_router(edge.clone()).unwrap(),
+        )));
         let candidate = if bot {
             use arkret_models_integration::{
                 AppletConfigurationAdmissionStatus, AppletConfigurationCommand,
                 AppletConfigurationIntent, AppletConfigurationOutcome, AppletConfigurationRequest,
                 AppletConfigurationSelection,
             };
-            *native.managed_router.lock().unwrap() = Some(Arc::new(salvo::Service::new(
-                arkret_bridge_runtime::web::managed_applet_router(edge.clone()).unwrap(),
-            )));
             let request = AppletConfigurationRequest {
                 command: AppletConfigurationCommand::Configure,
                 intent: AppletConfigurationIntent {
@@ -6072,7 +6367,7 @@ mod realm_native_fixture {
             assert_eq!(commit, replay);
             candidate
         };
-        let actor = candidate.actor_id;
+        let actor = candidate.actor_id.clone();
         assert!(
             edge.installed_managed_authoring(&candidate.creation_scope, &actor)
                 .unwrap()
@@ -6102,6 +6397,59 @@ mod realm_native_fixture {
                 .to_string()
                 .contains("injected crash before authorization receipt persistence"),
             "{failure}"
+        );
+        if recover_lost_key {
+            boxed_step(|| {
+                recover_runtime_key_loss(
+                    &factory.fixture,
+                    &native,
+                    &candidate,
+                    edge,
+                    devices,
+                    author,
+                    path.clone(),
+                    lost_control.clone(),
+                    make_edge,
+                )
+            })
+            .await;
+            return;
+        }
+        lost_control.store(true, std::sync::atomic::Ordering::SeqCst);
+        let failure = boxed_step(|| devices.rotate_control(&actor, "native-control-rotation"))
+            .await
+            .err()
+            .expect("control receipt persistence must fail");
+        assert!(
+            failure
+                .to_string()
+                .contains("injected crash before control receipt persistence"),
+            "{failure}"
+        );
+        let accepted_rotation_nonces = control_nonce_count(&factory.fixture.pool, &actor).await;
+        drop(devices);
+        drop(edge);
+        let edge = make_edge();
+        let devices = ManagedDeviceRuntime::new(edge.clone()).unwrap();
+        let rotated = boxed_step(|| devices.rotate_control(&actor, "native-control-rotation"))
+            .await
+            .unwrap();
+        let rotation_nonces = control_nonce_count(&factory.fixture.pool, &actor).await;
+        assert_eq!(
+            rotation_nonces,
+            accepted_rotation_nonces + 1,
+            "recovery must reuse the accepted activation and submit only retirement"
+        );
+        assert_eq!(
+            boxed_step(|| devices.rotate_control(&actor, "native-control-rotation"))
+                .await
+                .unwrap(),
+            rotated
+        );
+        assert_eq!(
+            control_nonce_count(&factory.fixture.pool, &actor).await,
+            rotation_nonces,
+            "completed rotation replay must not submit another control Event"
         );
         let authorized_nonces = control_nonce_count(&factory.fixture.pool, &actor).await;
         drop(devices);
@@ -6812,6 +7160,13 @@ mod realm_native_fixture {
         F: FnOnce() -> Fut,
         Fut: std::future::Future,
     {
+        if std::mem::size_of::<Fut>() > 262_144 {
+            eprintln!(
+                "large boxed fixture future: {} bytes ({})",
+                std::mem::size_of::<Fut>(),
+                std::any::type_name::<Fut>()
+            );
+        }
         Box::pin(make())
     }
 
@@ -6980,7 +7335,7 @@ mod realm_native_fixture {
         })
         .await;
         eprintln!("native lifecycle: Account governance and audit");
-        boxed_step(|| governance(&factory.fixture, &candidate, &before)).await;
+        boxed_step(|| governance(&factory.fixture, &native, &candidate, &before)).await;
         eprintln!("native lifecycle: cross-Station Account audit");
         boxed_step(|| cross_station_audit(&factory.fixture, &candidate)).await;
         eprintln!("native lifecycle: management Service handover");
@@ -7020,11 +7375,11 @@ pub async fn realm_native_mls(pool: PgPool) {
 }
 
 pub async fn realm_bridge_runtime(pool: PgPool) {
-    realm_native_fixture::run_bridge(pool, false, false, false).await;
+    realm_native_fixture::run_bridge(pool, false, false, false, false).await;
 }
 
 pub async fn realm_bridge_circle_runtime(pool: PgPool) {
-    realm_native_fixture::run_bridge(pool, true, false, false).await;
+    realm_native_fixture::run_bridge(pool, true, false, false, false).await;
 }
 
 pub async fn realm_applet_configuration(pool: PgPool) {
@@ -7032,5 +7387,9 @@ pub async fn realm_applet_configuration(pool: PgPool) {
 }
 
 pub async fn realm_bot_runtime(pool: PgPool, rotate_during_reply: bool) {
-    realm_native_fixture::run_bridge(pool, false, true, rotate_during_reply).await;
+    realm_native_fixture::run_bridge(pool, false, true, rotate_during_reply, false).await;
+}
+
+pub async fn realm_runtime_key_loss_recovery(pool: PgPool, bot: bool) {
+    realm_native_fixture::run_bridge(pool, false, bot, false, true).await;
 }

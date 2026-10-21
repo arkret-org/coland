@@ -84,3 +84,23 @@ async fn realm_bot_retains_output_across_mls_update_and_worker_restart() {
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     Box::pin(applet_authoring::realm_bot_runtime(database.pool(), true)).await;
 }
+
+#[tokio::test]
+async fn bridge_bot_recovers_same_identity_after_admin_reenable_and_daily_key_loss() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_runtime_key_loss_recovery(
+        database.pool(),
+        true,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn bridge_ghost_recovers_same_identity_after_admin_reenable_and_daily_key_loss() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_runtime_key_loss_recovery(
+        database.pool(),
+        false,
+    ))
+    .await;
+}

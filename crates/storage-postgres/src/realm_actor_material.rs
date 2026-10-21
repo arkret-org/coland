@@ -224,19 +224,26 @@ pub(crate) async fn read(
                     actor,
                     json!(selector),
                 )
-                .await?;
+                .await
+                .map_err(|_| unavailable("private current source unavailable"))?;
                 if let Some((value, source)) = current {
-                    crate::realm_actor_control_source::original(conn, &source).await?;
+                    let (original, _) = crate::realm_actor_control_source::original(conn, &source)
+                        .await
+                        .map_err(|_| unavailable("private current original unavailable"))?;
+                    validate_realm_actor_current_writer(selector, &original).map_err(|_| {
+                        unavailable("private current writer does not produce this selector")
+                    })?;
                     entries.push(RealmActorMaterialCurrentEntry::Present {
                         row: TypedCurrentRow::Value {
                             selector: selector.clone(),
-                            source_stream_ref: source.stream_ref,
+                            source_stream_ref: source.stream_ref.clone(),
                             revision: arkret_wire::CurrentRevision {
-                                commit_id: source.commit_id,
+                                commit_id: source.commit_id.clone(),
                                 stream_position: source.stream_position,
                             },
                             value,
                         },
+                        source_ref: source,
                     });
                 } else {
                     let (kind, device) = match selector {

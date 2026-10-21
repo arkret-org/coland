@@ -238,7 +238,10 @@ pub(crate) async fn consume(
             .bind::<Text,_>(if reusable {"last_resort_claimed"}else{"claimed"}).bind::<BigInt,_>(at.timestamp_millis()).bind::<Text,_>(&digest).execute(&mut *conn).await?;
         if count!=1 {return Err(conflict("consume ledger CAS changed").into());}
         let final_at=clock(conn).await?;
-        if final_at>=transport_expires_at || final_at>=authority.expires_at || ledger.claim_expires_at_unix_ms.is_none_or(|end|final_at.timestamp_millis()>=end) {
+        if final_at>=authority.expires_at {
+            return Err(PersistenceError::Conflict(format!("{}: consume Device expired before finalization",coland_storage::ConflictCode::DeviceUnauthorized)).into());
+        }
+        if final_at>=transport_expires_at || ledger.claim_expires_at_unix_ms.is_none_or(|end|final_at.timestamp_millis()>=end) {
             return Err(denied("consume authority expired before finalization").into());
         }
         Ok(MlsKeyPackageConsumption {outcome:KeyPackagesConsumeOutcome {consume_receipt:signed},record:package})

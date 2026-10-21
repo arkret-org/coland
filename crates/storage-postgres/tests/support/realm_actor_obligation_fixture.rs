@@ -364,8 +364,9 @@ async fn obligation_mls_footprint(fixture: &Fixture) -> Value {
     result
 }
 
-// A separate real SQL connection owns only the selected production writer row.
-// No clock/current/claim row is changed. Always release it before asserting.
+// A separate real SQL connection owns only the selected writer row or the
+// finalization trigger advisory lock. No clock/current/claim value is changed.
+// Release the lock and remove the owned trigger before asserting, even on timeout.
 #[derive(Clone, Copy)]
 enum NativeWriterWaitTarget<'a> {
     RealmAuthority,
@@ -377,6 +378,13 @@ enum NativeWriterWaitTarget<'a> {
         keypackage_ref: &'a str,
         actor_id: &'a ActorId,
         device_id: &'a DeviceId,
+    },
+    ConsumeFinalization {
+        source_id: &'a str,
+        claim_request_id: &'a str,
+        actor_id: &'a ActorId,
+        device_id: &'a DeviceId,
+        lock_key: i64,
     },
 }
 
@@ -411,7 +419,7 @@ async fn obligation_post_through_held_cut<F>(
 where
     F: std::future::Future<Output = (StatusCode, Value)>,
 {
-    use diesel::sql_types::{Bool, Integer, Text};
+    use diesel::sql_types::{BigInt, Bool, Integer, Text};
     use diesel_async::{RunQueryDsl as _, SimpleAsyncConnection as _};
     #[derive(diesel::QueryableByName)]
     struct Pid {
@@ -433,6 +441,21 @@ where
     let initial = boxed_step(|| obligation_mls_footprint(fixture)).await;
     let other_initial = boxed_step(|| obligation_mls_footprint(other)).await;
     let mut holder = fixture.pool.get().await.unwrap();
+    if let NativeWriterWaitTarget::ConsumeFinalization {
+        source_id,
+        claim_request_id,
+        lock_key,
+        ..
+    } = target
+    {
+        // This test-only AFTER trigger changes no value. It waits only after
+        // the actual production writer has verified the initial current cut,
+        // signed the real receipt and updated this exact claim's state.
+        holder.batch_execute(&format!(
+            "CREATE FUNCTION test_native_consume_finalization_wait() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.source_id=TG_ARGV[0] AND NEW.claim_request_id=TG_ARGV[1] AND NEW.state='consumed' THEN PERFORM pg_advisory_xact_lock(TG_ARGV[2]::bigint); END IF; RETURN NEW; END $$; CREATE TRIGGER test_native_consume_finalization_wait AFTER UPDATE OF state ON peer_keypackage_claims FOR EACH ROW EXECUTE FUNCTION test_native_consume_finalization_wait('{}','{}','{}');",
+            source_id.replace('\'', "''"), claim_request_id.replace('\'', "''"), lock_key,
+        )).await.unwrap();
+    }
     holder.batch_execute("BEGIN").await.unwrap();
     let pid = diesel::sql_query("SELECT pg_backend_pid() AS pid")
         .get_result::<Pid>(&mut holder)
@@ -440,6 +463,11 @@ where
         .unwrap()
         .pid;
     let original_nonces = if let NativeWriterWaitTarget::ConsumePackage {
+        actor_id,
+        device_id,
+        ..
+    }
+    | NativeWriterWaitTarget::ConsumeFinalization {
         actor_id,
         device_id,
         ..
@@ -486,6 +514,13 @@ where
             .await
             .unwrap();
         }
+        NativeWriterWaitTarget::ConsumeFinalization { lock_key, .. } => {
+            diesel::sql_query("SELECT pg_advisory_xact_lock($1)")
+                .bind::<BigInt, _>(lock_key)
+                .execute(&mut holder)
+                .await
+                .unwrap();
+        }
     }
     let gate = async {
         let mut monitor = fixture.pool.get().await.unwrap();
@@ -500,6 +535,9 @@ where
                 }
                 NativeWriterWaitTarget::ConsumePackage { .. } => {
                     "SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid<>pg_backend_pid() AND $1=ANY(pg_blocking_pids(a.pid)) AND a.query ILIKE 'SELECT % FROM mls_key_packages WHERE keypackage_ref=$1 FOR UPDATE') AS waiting"
+                }
+                NativeWriterWaitTarget::ConsumeFinalization { .. } => {
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid<>pg_backend_pid() AND $1=ANY(pg_blocking_pids(a.pid)) AND a.query ILIKE 'UPDATE peer_keypackage_claims SET state=%' AND a.wait_event_type='Lock' AND a.wait_event='advisory') AS waiting"
                 }
             };
             let state = diesel::sql_query(waiting_query)
@@ -517,6 +555,11 @@ where
         };
         let observed_at = chrono::Utc::now();
         let authenticated_before_wait = if let NativeWriterWaitTarget::ConsumePackage {
+            actor_id,
+            device_id,
+            ..
+        }
+        | NativeWriterWaitTarget::ConsumeFinalization {
             actor_id,
             device_id,
             ..
@@ -559,6 +602,9 @@ where
         tokio::time::timeout(std::time::Duration::from_secs(75), post),
         gate
     );
+    if matches!(target, NativeWriterWaitTarget::ConsumeFinalization { .. }) {
+        holder.batch_execute("DROP TRIGGER test_native_consume_finalization_wait ON peer_keypackage_claims; DROP FUNCTION test_native_consume_finalization_wait();").await.unwrap();
+    }
     // A legitimate remote Add may retain an immutable attestation while
     // preparing. It may not leave queued Events, Commits, MLS state, queue,
     // claim use, quota, or native current before the held writer cut.
@@ -584,7 +630,7 @@ where
     );
     assert!(
         authenticated_before_wait.unwrap_or(true),
-        "the consume request must commit one fresh exact Device authentication nonce and reach its package writer while the Device is still live",
+        "the consume request must commit one fresh exact Device authentication nonce and reach its selected writer stage while the Device is still live",
     );
     assert!(
         chrono::Utc::now() >= deadline,
@@ -1328,6 +1374,12 @@ async fn obligation_install_native_roster(
     arkret::install_verified_mls_self_roster_bindings(group, &pages, &request, &material).unwrap();
 }
 
+#[derive(Clone, Copy, Debug)]
+enum NativeConsumeExpiryBoundary {
+    InitialCurrent,
+    Finalization,
+}
+
 async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
     fixture: &Fixture,
     package: &AppletPackage,
@@ -1337,6 +1389,34 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
     child: &GrantId,
     group: &mut arkret_mls::ArkretMlsGroup,
 ) {
+    for boundary in [
+        NativeConsumeExpiryBoundary::InitialCurrent,
+        NativeConsumeExpiryBoundary::Finalization,
+    ] {
+        boxed_step(|| {
+            realm_device_consume_writer_wait_crosses_device_expiry_at(
+                fixture, package, candidate, device, authority, child, group, boundary,
+            )
+        })
+        .await;
+    }
+}
+
+async fn realm_device_consume_writer_wait_crosses_device_expiry_at(
+    fixture: &Fixture,
+    package: &AppletPackage,
+    candidate: &RealmActorCreatePayload,
+    device: &DeviceId,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    child: &GrantId,
+    group: &mut arkret_mls::ArkretMlsGroup,
+    boundary: NativeConsumeExpiryBoundary,
+) {
+    let recipient_seed = match boundary {
+        NativeConsumeExpiryBoundary::InitialCurrent => 82,
+        NativeConsumeExpiryBoundary::Finalization => 84,
+    };
+    let recipient_signing_seed = [recipient_seed; 32];
     let creation = fixture
         .state
         .test_persistence()
@@ -1357,7 +1437,7 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
             fixture,
             candidate,
             &creation.commit,
-            82,
+            recipient_seed,
             expires_at,
         )
     })
@@ -1388,7 +1468,7 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
             recipient_authority.actor_id.clone(),
             recipient_device.clone(),
             arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(SigningKey::from_bytes(
-                &[82; 32],
+                &recipient_signing_seed,
             )),
         )
         .unwrap(),
@@ -1400,7 +1480,7 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
         .unsigned();
     upload.mls_group_id = Some(candidate.creation_scope.canonical_mls_group_id().unwrap());
     let signature = arkret_signatures::keypackages::sign_keypackage_signing_input(
-        &[82; 32],
+        &recipient_signing_seed,
         recipient_method.as_str(),
         &keypackages_upload_signing_input(&upload).unwrap(),
     )
@@ -1410,7 +1490,7 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
         obligation_recipient_post(
             fixture,
             &recipient_authority,
-            &[82; 32],
+            &recipient_signing_seed,
             "/_arkret/self/keys/keypackages/upload",
             ServiceOperationId::SelfKeysKeypackagesUploadCreateV1,
             json!(upload),
@@ -1624,7 +1704,7 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
         obligation_install_native_roster(
             fixture,
             &recipient_authority,
-            &[82; 32],
+            &recipient_signing_seed,
             &accepted,
             &mut joined,
         )
@@ -1724,7 +1804,7 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
         obligation_recipient_post(
             fixture,
             &recipient_authority,
-            &[82; 32],
+            &recipient_signing_seed,
             "/_arkret/self/keys/keypackages/claims/query",
             ServiceOperationId::SelfKeysKeypackagesReadClaimV1,
             json!(query),
@@ -1746,15 +1826,28 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
             fixture,
             fixture,
             expires_at,
-            NativeWriterWaitTarget::ConsumePackage {
-                keypackage_ref: command.recipient_durable_receipt.key_package_ref.as_str(),
-                actor_id: &recipient_authority.actor_id,
-                device_id: &recipient_authority.device_id,
+            match boundary {
+                NativeConsumeExpiryBoundary::InitialCurrent => {
+                    NativeWriterWaitTarget::ConsumePackage {
+                        keypackage_ref: command.recipient_durable_receipt.key_package_ref.as_str(),
+                        actor_id: &recipient_authority.actor_id,
+                        device_id: &recipient_authority.device_id,
+                    }
+                }
+                NativeConsumeExpiryBoundary::Finalization => {
+                    NativeWriterWaitTarget::ConsumeFinalization {
+                        source_id: claim.claim_receipt.source_id.as_str(),
+                        claim_request_id: claim.claim_request_id.as_str(),
+                        actor_id: &recipient_authority.actor_id,
+                        device_id: &recipient_authority.device_id,
+                        lock_key: rand::random::<i64>(),
+                    }
+                }
             },
             obligation_recipient_post(
                 fixture,
                 &recipient_authority,
-                &[82; 32],
+                &recipient_signing_seed,
                 "/_arkret/self/keys/keypackages/consume",
                 ServiceOperationId::SelfKeysKeypackagesCommandConsumeV1,
                 json!(command),
@@ -1765,7 +1858,7 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
     assert_eq!(
         reply.0,
         StatusCode::FORBIDDEN,
-        "native consume current Device expires behind its actual writer wait: {}",
+        "native consume Device expires at {boundary:?} behind its actual writer wait: {}",
         reply.1
     );
     assert_eq!(
@@ -1775,6 +1868,10 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
     assert_eq!(
         reply.1["detail"], "native consume current Device is unavailable",
         "the authenticated request must be refused by the actual consume writer after its wait",
+    );
+    assert!(
+        reply.1.get("consume_receipt").is_none(),
+        "the receipt signed before the finalization wait must never become observable",
     );
     assert!(
         chrono::Utc::now() < claim.claim_receipt.expires_at,
@@ -1826,6 +1923,6 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
         "the earlier real accepted Add is retained unchanged"
     );
     eprintln!(
-        "actual independent native recipient: valid signed durable consume reached the real writer then lost its own physical lifetime; claim still live, no consumption/ACK/new Commit"
+        "actual independent native recipient at {boundary:?}: valid signed durable consume reached the real writer then lost its own physical lifetime; claim still live, no consumption/ACK/new Commit"
     );
 }

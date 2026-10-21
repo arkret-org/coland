@@ -615,16 +615,23 @@ async fn verify_mimi_operation_proof(
         MimiProofSigner::PrincipalDevice {
             authority,
             device_id,
-        } => crate::jws_verify::verify_principal_authorized_jws_with_account_authority_async(
-            binding,
-            &proof.jws,
-            &proof.verification_method,
-            &authority,
-            &device_id,
-            state,
-        )
-        .await
-        .map_err(|error| error.to_string()),
+        } => {
+            if proof
+                .verification_method
+                .as_str()
+                .rsplit_once('#')
+                .map(|(_, fragment)| fragment)
+                != Some(device_id.as_str())
+            {
+                Err("MIMI proof does not name the expected device".to_owned())
+            } else {
+                // Projection freshness alone does not prove the accepted PCR
+                // device is still active or admitted by its durable revoke gate.
+                crate::state::verify_account_device_payload_proof(state, &authority, proof, binding)
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+        }
         MimiProofSigner::DidController(issuer) => {
             crate::jws_verify::verify_did_controlled_jws_async(
                 binding,
@@ -1012,7 +1019,7 @@ async fn verify_mimi_consent_correlation(
         return Err(mimi_consent_correlation_unavailable());
     }
     let previous = match &payload.expected_current {
-        ConsentExpectedCurrent::NeverWritten {} => Vec::new(),
+        ConsentExpectedCurrent::NeverWritten => None,
         ConsentExpectedCurrent::Present { revision } => {
             let basis = state
                 .persistence()
@@ -1020,23 +1027,36 @@ async fn verify_mimi_consent_correlation(
                 .await
                 .map_err(|_| mimi_consent_correlation_unavailable())?;
             if let Some(basis) = basis {
-                let basis: ConsentReplacePayload = serde_json::from_value(
+                let replacement: ConsentReplacePayload = serde_json::from_value(
                     serde_json::to_value(&basis.event.payload)
                         .map_err(|_| mimi_consent_correlation_unavailable())?,
                 )
                 .map_err(|_| mimi_consent_correlation_unavailable())?;
-                if basis.peer != peer {
+                if replacement.peer != peer {
                     return Err(mimi_consent_correlation_unavailable());
                 }
-                basis.permissions
+                Some(arkret_models_collaboration::consent_operations::ConsentCurrentRow {
+                    selector: arkret_models_collaboration::consent_operations::ConsentCurrentSelector {
+                        kind: arkret_models_collaboration::consent_operations::ConsentCurrentSelectorKind::Consent,
+                        peer_id: peer.actor_id().clone(),
+                    },
+                    source_stream_ref: basis.commit.stream_ref,
+                    revision: revision.clone(),
+                    value: arkret_models_collaboration::consent_operations::ConsentValue { permissions: replacement.permissions },
+                })
             } else {
-                let read=arkret_models_collaboration::consent_operations::ConsentCurrentReadRequestBody {holder_account_id:body_holder_account_id.clone(),peer:peer.clone(),audience_actor_id:arkret_wire::ActorId::service(body_holder_account_id.station_id.clone()),nonce:crate::routing::call_admission::nonce()};
+                let read = arkret_models_collaboration::consent_operations::ConsentCurrentReadRequestBody {
+                    holder_account_id: body_holder_account_id.clone(), peer: peer.clone(),
+                    audience_actor_id: arkret_wire::ActorId::service(body_holder_account_id.station_id.clone()),
+                    nonce: crate::routing::call_admission::nonce(),
+                };
                 let current = crate::routing::call_admission::verified_holder_current(state, &read)
                     .await
                     .map_err(|_| mimi_consent_correlation_unavailable())?;
                 match current.current {
-                    arkret_models_collaboration::consent_operations::ConsentCurrentReadState::Present{result} if result.revision==*revision=>result.value.permissions,
-                    _=>return Err(mimi_consent_correlation_unavailable()),
+                    arkret_models_collaboration::consent_operations::ConsentCurrentState::Present { result }
+                        if result.revision == *revision => Some(result),
+                    _ => return Err(mimi_consent_correlation_unavailable()),
                 }
             }
         }
@@ -1045,15 +1065,7 @@ async fn verify_mimi_consent_correlation(
         .purpose
         .parse::<arkret_wire::ConsentScope>()
         .map_err(|_| mimi_consent_correlation_unavailable())?;
-    payload
-        .validate_scope_diff(
-            &previous,
-            scope,
-            matches!(
-                body.decision,
-                arkret_models_collaboration::mimi_operations::MimiConsentDecision::Accept
-            ),
-        )
+    body.validate_replacement_for(peer.actor_id(), scope, previous.as_ref())
         .map_err(|_| mimi_consent_correlation_unavailable())?;
 
     state
@@ -1517,7 +1529,7 @@ mod consent_proof_tests {
         let realm_id =
             RealmId::new("ak:realm:Aaqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq".to_owned())
                 .unwrap();
-        let consent_event = crate::test_event::raw_event_at(
+        let mut consent_event = crate::test_event::raw_event_at(
             EventKind::ConsentReplace.as_str(),
             ScopeRef::Realm { realm_id },
             crate::test_actor_id(&actor_did),
@@ -1539,6 +1551,15 @@ mod consent_proof_tests {
             now(),
         )
         .unwrap();
+        consent_event.actor_id = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+            actor_id.clone(),
+            state.service_core_id(),
+        ));
+        consent_event = coland_test_support::device_authorization_history::sign_event(
+            consent_event,
+            arkret_wire::DidUrl::new(verification_method.clone()).unwrap(),
+            arkret_test_kit::keys::development_signing_key(&verification_method).to_bytes(),
+        );
         let mut request = MimiUpdateConsentRequestBody {
             consent_id,
             decision: MimiConsentDecision::Accept,
@@ -2035,6 +2056,68 @@ mod consent_proof_tests {
             error.reason_code.as_deref(),
             Some(arkret_wire::ReasonCode::PROOF_INVALID)
         );
+    }
+
+    #[tokio::test]
+    async fn principal_device_operation_proof_rechecks_the_durable_revocation_gate() {
+        use coland_test_support::AppStateTestExt as _;
+        let (external, pool) =
+            coland_test_support::app_state_with_pool(coland_test_support::app_config());
+        let persistence = external.test_persistence();
+        let mut config = crate::config::AppConfig::test_default();
+        config.development_mode = true;
+        config.public_base_url = external.config().public_base_url.clone();
+        let state = AppState::new_with_service_identity(
+            config,
+            Db { pool: Some(pool) },
+            persistence.clone(),
+            external.service_identity_state().as_ref().clone(),
+            external.service_resolution_commitment().as_ref().clone(),
+            external.notary_signing_key().to_bytes(),
+        );
+        let fixture = coland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
+        let selector = fixture
+            .admit_founding_device(persistence.as_ref())
+            .await
+            .unwrap();
+        let binding = b"MIMI current device proof revocation regression";
+        let mut proof = unsigned_request_proof(&state, &fixture.history.device_verification_method);
+        proof.payload_digest = Hash::new(arkret_canonical::sha256_digest(binding)).unwrap();
+        proof.jws = arkret_signatures::jws::sign_jws_ed25519(
+            binding,
+            &ed25519_dalek::SigningKey::from_bytes(&fixture.history.founding_device_signing_seed),
+        )
+        .unwrap();
+        let signer = || MimiProofSigner::PrincipalDevice {
+            authority: fixture.history.account.clone(),
+            device_id: fixture.history.founding_device_id.clone(),
+        };
+        verify_mimi_operation_proof(&state, binding, &proof, signer(), "MIMI test")
+            .await
+            .unwrap();
+        // Exercise the real durable terminal gate. The complete SecurityRotation
+        // ceremony is independently covered by its owner, not simulated here.
+        persistence
+            .device_revocations()
+            .commit_revocation(&coland_storage::DeviceRevocationTransition {
+                selector: selector.clone(),
+                revoke_ref: arkret_wire::CommittedEventRef {
+                    event_id: EventId::from_digest(
+                        arkret_canonical::DigestSuite::Sha256,
+                        [0x70; 32],
+                    ),
+                    commit_id: arkret_wire::RealmCommitId::from_digest([0x71; 32]),
+                    stream_ref: selector.authorization_ref.stream_ref.clone(),
+                    stream_position: selector.authorization_ref.stream_position + 1,
+                },
+                committed_at: now(),
+            })
+            .await
+            .unwrap();
+        let error = verify_mimi_operation_proof(&state, binding, &proof, signer(), "MIMI test")
+            .await
+            .unwrap_err();
+        assert_rejected_proof(&error);
     }
 
     #[tokio::test]

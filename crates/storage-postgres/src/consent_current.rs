@@ -150,7 +150,7 @@ async fn admit(
     let current = sql_query("SELECT r.value,e.envelope,c.commit_json FROM consent_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND r.peer_id=$2 FOR UPDATE OF r")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(&peer_json).get_result::<Row>(&mut *conn).await.optional()?.map(record).transpose()?;
     let expected_matches = match (&replacement.expected_current, &current) {
-        (ConsentExpectedCurrent::NeverWritten {}, None) => true,
+        (ConsentExpectedCurrent::NeverWritten, None) => true,
         (ConsentExpectedCurrent::Present { revision }, Some(current)) => {
             revision.commit_id == current.commit.commit_id
                 && revision.stream_position == current.commit.stream_position

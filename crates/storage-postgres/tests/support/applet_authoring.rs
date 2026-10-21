@@ -2200,12 +2200,13 @@ mod realm_native_fixture {
         )
         .unwrap();
         let client = reqwest::Client::builder()
-            .add_root_certificate(
+            .tls_backend_rustls()
+            .tls_certs_only(vec![
                 reqwest::Certificate::from_pem(include_bytes!(
                     "../../../server/tests/fixtures/outbox-test-ca.pem"
                 ))
                 .unwrap(),
-            )
+            ])
             .build()
             .unwrap();
         let mut request = client.post(request_url);
@@ -2457,10 +2458,13 @@ mod realm_native_fixture {
         let RealmActorMaterialResult::Current { entries } = material.result else {
             panic!("current material required");
         };
-        assert!(matches!(
-            &entries[0],
-            RealmActorMaterialCurrentEntry::Present { .. }
-        ));
+        let RealmActorMaterialCurrentEntry::Present { source_ref, .. } = &entries[0] else {
+            panic!("control current must retain its accepted source");
+        };
+        assert_eq!(source_ref.event_id, commit.event_ref);
+        assert_eq!(source_ref.commit_id, commit.commit_id);
+        assert_eq!(source_ref.stream_ref, commit.stream_ref);
+        assert_eq!(source_ref.stream_position, commit.stream_position);
         assert!(matches!(
             &entries[1],
             RealmActorMaterialCurrentEntry::NeverWritten { .. }
@@ -5633,12 +5637,13 @@ mod realm_native_fixture {
         let path =
             std::env::temp_dir().join(format!("arkret-bridge-real-{}.redb", uuid::Uuid::now_v7()));
         let http = reqwest::Client::builder()
-            .add_root_certificate(
+            .tls_backend_rustls()
+            .tls_certs_only(vec![
                 reqwest::Certificate::from_pem(include_bytes!(
                     "../../../server/tests/fixtures/outbox-test-ca.pem"
                 ))
                 .unwrap(),
-            )
+            ])
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap();

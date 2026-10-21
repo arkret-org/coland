@@ -81,10 +81,9 @@ pub(crate) async fn native_inception(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,
 ) -> PersistenceResult<bool> {
-    Ok(!matches!(
-        accepted_governance(conn, realm).await?,
-        arkret_wire::GenesisGovernance::Collaboration
-    ))
+    Ok(accepted_governance(conn, realm)
+        .await?
+        .is_principal_control())
 }
 
 pub(crate) async fn require_transferable(

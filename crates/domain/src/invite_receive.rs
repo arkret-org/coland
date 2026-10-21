@@ -79,7 +79,7 @@ pub fn evaluate_resolved(
     }
 
     // §2 — `consent_grant` evidence: verify the referenced grant is an
-    // active `invite`/`any` current record the subject gave that complete inviter
+    // active `invite` permission in the exact-peer current the subject signed for that inviter
     // ActorId. On failure
     // MUST downgrade to low-trust `explicit_address`.
     if principal_service_blocked(policy, constraints, source_id)

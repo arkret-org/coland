@@ -1017,7 +1017,6 @@ mod tests {
             },
         );
         for operation in [
-            arkret_wire::ServiceOperationId::SelfMessagesCommandPrepareV1,
             arkret_wire::ServiceOperationId::SelfRealmJoinCommandPrepareV1,
             arkret_wire::ServiceOperationId::PeerRealmJoinReadBootstrapV1,
             arkret_wire::ServiceOperationId::SelfRealmStateSnapshotReadManifestHeadV1,
@@ -1032,6 +1031,11 @@ mod tests {
         description
             .validate()
             .expect("advertised bundles are registered");
+        assert!(
+            !serde_json::to_string(&description)
+                .unwrap()
+                .contains("ak.self.messages.command.prepare.v1")
+        );
         assert!(
             arkret_models_discovery::websocket_binding::websocket_operations_reachable(
                 &description

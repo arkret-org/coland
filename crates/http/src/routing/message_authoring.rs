@@ -2,7 +2,7 @@
 use arkret_models_crypto::EncryptedEnvelope;
 use arkret_wire::{Event, ScopeRef};
 /// Why the current MLS send gate refuses one application body; the gate is
-/// shared by message prepare, self Event submit and the accepting
+/// shared by self Event submit and the accepting
 /// transaction, so every surface answers the same state with the same
 /// registered identity (encryption-and-audit §2.5.2, decision 0100).
 pub(crate) use coland_storage::MlsSendGateRefusal;

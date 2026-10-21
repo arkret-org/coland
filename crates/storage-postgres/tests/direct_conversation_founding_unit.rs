@@ -2785,6 +2785,108 @@ async fn terminal_persistent_rows(pool: &coland_storage_postgres::PgPool) -> ser
     serde_json::Value::Object(snapshot)
 }
 
+/// Exercise the durable activation gate with a shape-valid, doubly signed
+/// alleged import. No claim is made that this forbidden Realm exported it.
+async fn assert_direct_handoff_refused(
+    pool: &PgPool,
+    store: &PgAuthorityCommitStore,
+    realm: &RealmId,
+    station_did: &arkret_wire::Did,
+    at: chrono::DateTime<chrono::Utc>,
+) {
+    let material = store
+        .realm_state_snapshot_material(realm)
+        .await
+        .unwrap()
+        .unwrap();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+    let old_method = DidUrl::new(format!("{station_did}#authority")).unwrap();
+    let new_method = DidUrl::new("did:web:other-station.example#authority").unwrap();
+    let snapshot = coland_services::authority_commit::build_signed_realm_state_snapshot(
+        &material,
+        old_method.clone(),
+        &key,
+        at,
+    )
+    .unwrap();
+    let heads = snapshot.visible_stream_heads.clone();
+    let management =
+        arkret_models_collaboration::authority_commit::ManagementPrivateHandoffManifest {
+            realm_id: realm.clone(),
+            governance_generation: 0,
+            final_stream_heads_digest: Hash::new(
+                arkret_canonical::canonical_sha256(&heads).unwrap(),
+            )
+            .unwrap(),
+            nonce: arkret_canonical::base64url_encode([7u8; 32]),
+            state_digest: fixture_hash('5'),
+        };
+    let mut old_signature = ordinary_realm::signature(
+        &arkret_wire::project_did_to_core_id(station_did).unwrap(),
+        at,
+    );
+    old_signature.context = arkret_wire::DetachedSignatureContext::RealmAuthorityHandoffOld;
+    let mut new_signature = ordinary_realm::signature(
+        &"ak:did_core:web:other-station.example".parse().unwrap(),
+        at,
+    );
+    new_signature.context =
+        arkret_wire::DetachedSignatureContext::RealmAuthorityHandoffNewAcceptance;
+    let mut handoff = arkret_wire::RealmAuthorityHandoff {
+        handoff_id: arkret_wire::RealmAuthorityHandoffId::from_digest([0x43; 32]),
+        realm_id: realm.clone(),
+        from_generation: 0,
+        to_generation: 1,
+        from_service_id: arkret_wire::project_did_to_core_id(station_did).unwrap(),
+        to_service_id: "ak:did_core:web:other-station.example".parse().unwrap(),
+        change_event_ref: unique_event_id("forbidden-direct-handoff"),
+        change_commit_id: arkret_wire::RealmCommitId::from_digest([0x44; 32]),
+        final_stream_heads_digest: management.final_stream_heads_digest.clone(),
+        snapshot_ref: snapshot.snapshot_id.clone(),
+        historical_signer_facts_digest: None,
+        pcr_private_state_digest: None,
+        management_private_state_digest: Some(management.digest().unwrap()),
+        old_authority_signature: old_signature,
+        new_authority_acceptance_signature: new_signature,
+    };
+    let unsigned = arkret_canonical::unsigned_value(
+        &handoff,
+        &[
+            "old_authority_signature",
+            "new_authority_acceptance_signature",
+        ],
+    )
+    .unwrap();
+    handoff.old_authority_signature = arkret_signatures::detached_object::sign_detached_object(
+        &unsigned,
+        arkret_wire::DetachedSignatureContext::RealmAuthorityHandoffOld,
+        old_method,
+        at,
+        &key,
+    )
+    .unwrap();
+    handoff.new_authority_acceptance_signature =
+        arkret_signatures::detached_object::sign_detached_object(
+            &unsigned,
+            arkret_wire::DetachedSignatureContext::RealmAuthorityHandoffNewAcceptance,
+            new_method,
+            at,
+            &key,
+        )
+        .unwrap();
+    handoff.validate_shape().unwrap();
+    let before = terminal_persistent_rows(pool).await;
+    assert_eq!(
+        refusal_code(
+            store
+                .install_handoff_with_private_state(&handoff, &heads, &snapshot, None, &management,)
+                .await
+        ),
+        ConflictCode::FailedPrecondition
+    );
+    assert_eq!(terminal_persistent_rows(pool).await, before);
+}
+
 #[tokio::test]
 async fn profile_admission_table_refuses_in_registered_precedence_with_zero_writes() {
     let database = TestDatabase::lease().await;
@@ -2858,6 +2960,53 @@ async fn profile_admission_table_refuses_in_registered_precedence_with_zero_writ
         );
         code
     };
+
+    // Fixed-governor eligibility wins before all seven profile-table rows,
+    // including an outsider that would otherwise fail participant authority.
+    for actor in [&pair.founder, &pair.peer, &third] {
+        let payload = serde_json::json!({
+            "new_governance_station_id":"ak:did_core:web:other-station.example",
+            "expected_governance_generation":0,
+            "expected_realm_stream_commit_id":head.commit.commit_id,
+        });
+        let request = ordinary_realm::next_request(
+            &head,
+            EventKind::RealmGovernanceStationChange,
+            &actor.principal_id,
+            payload.clone(),
+            at,
+        );
+        let before = terminal_persistent_rows(&pool).await;
+        let result = store
+            .direct_conversation_admission(&request.authority_commit.event)
+            .await;
+        assert_eq!(refusal_code(result), ConflictCode::FailedPrecondition);
+        assert_eq!(terminal_persistent_rows(&pool).await, before);
+        assert_eq!(
+            Box::pin(refused(
+                EventKind::RealmGovernanceStationChange,
+                actor,
+                payload
+            ))
+            .await,
+            ConflictCode::FailedPrecondition
+        );
+    }
+    let before = terminal_persistent_rows(&pool).await;
+    assert_eq!(
+        refusal_code(store.export_management_private_state(&realm_id).await),
+        ConflictCode::FailedPrecondition
+    );
+    assert_eq!(terminal_persistent_rows(&pool).await, before);
+
+    Box::pin(assert_direct_handoff_refused(
+        &pool,
+        &store,
+        &realm_id,
+        &pair.station_did,
+        at,
+    ))
+    .await;
 
     // A pair-external invite hits both the third-party and the invite guard;
     // the third-party reason wins.
@@ -4621,6 +4770,33 @@ async fn terminal_founding_claim_repairs_the_same_group_and_keeps_the_first_bind
     );
     uow.commit_event(bound.clone()).await.unwrap();
     let binding_ref = bound.authority_commit.event.event_id.clone();
+    Box::pin(assert_direct_handoff_refused(
+        &pool,
+        &store,
+        &realm,
+        &pair.station_did,
+        at,
+    ))
+    .await;
+    let handoff = cited(
+        &bound.authority_commit,
+        EventKind::RealmGovernanceStationChange,
+        founder.clone(),
+        serde_json::json!({"expected_governance_generation":0,
+            "expected_realm_stream_commit_id":bound.authority_commit.commit.commit_id,
+            "new_governance_station_id":"ak:did_core:web:other-station.example"}),
+        Cites::Participant(&binding_ref),
+    );
+    let before = dc_footprint(&pool, &realm).await;
+    assert_eq!(
+        refusal_code(
+            store
+                .direct_conversation_admission(&handoff.authority_commit.event)
+                .await
+        ),
+        ConflictCode::FailedPrecondition
+    );
+    assert_eq!(dc_footprint(&pool, &realm).await, before);
     // A later replacement must not inherit the prior occupied leaf's consumed
     // receipt, even though actor, leaf index and signature key are identical.
     let later = with_group(

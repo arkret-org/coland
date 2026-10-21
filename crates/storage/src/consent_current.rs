@@ -30,7 +30,14 @@ impl ConsentCurrentRecord {
         scope: arkret_wire::ConsentScope,
         at: chrono::DateTime<chrono::Utc>,
     ) -> bool {
-        self.peer.actor_id() == peer && self.value.permits(scope, at)
+        self.peer.actor_id() == peer
+            && self.value.validate().is_ok()
+            && self.value.permissions.iter().any(|permission| {
+                permission.consent_scope == scope
+                    && permission.not_before.is_none_or(|start| start <= at)
+                    && permission.expires_at.is_none_or(|end| at < end)
+                    && permission.constraints.as_ref().is_none_or(Vec::is_empty)
+            })
     }
 
     pub fn view(&self) -> ConsentView {

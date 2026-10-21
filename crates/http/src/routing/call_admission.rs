@@ -135,7 +135,7 @@ async fn current_at_authority(
         governance_generation: cut.generation,
         effective_stream_head: cut.head,
         current: match cut.records.into_iter().next() {
-            Some(r) => ConsentCurrentReadState::Present {
+            Some(r) => ConsentCurrentState::Present {
                 result: ConsentCurrentRow {
                     selector: ConsentCurrentSelector {
                         kind: ConsentCurrentSelectorKind::Consent,
@@ -149,7 +149,7 @@ async fn current_at_authority(
                     value: r.value,
                 },
             },
-            None => ConsentCurrentReadState::NeverWritten {},
+            None => ConsentCurrentState::NeverWritten,
         },
         evaluated_at: cut.evaluated_at,
         expires_at: cut.evaluated_at + Duration::seconds(30),

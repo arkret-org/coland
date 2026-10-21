@@ -118,7 +118,7 @@ async fn cut_in_connection(
     else {
         return Ok(None);
     };
-    binding.validate_shape().map_err(invalid)?;
+    binding.validate().map_err(invalid)?;
     let participants = binding
         .binding
         .unordered_participant_ids

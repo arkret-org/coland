@@ -364,8 +364,22 @@ async fn obligation_mls_footprint(fixture: &Fixture) -> Value {
     result
 }
 
-// A separate real SQL connection owns the actual production Realm writer lock.
+// A separate real SQL connection owns only the selected production writer row.
 // No clock/current/claim row is changed. Always release it before asserting.
+#[derive(Clone, Copy)]
+enum NativeWriterWaitTarget<'a> {
+    RealmAuthority,
+    ClaimSource {
+        source_id: &'a str,
+        claim_request_id: &'a str,
+    },
+    ConsumePackage {
+        keypackage_ref: &'a str,
+        actor_id: &'a ActorId,
+        device_id: &'a DeviceId,
+    },
+}
+
 async fn obligation_post_through_expiry<F>(
     fixture: &Fixture,
     other: &Fixture,
@@ -375,14 +389,23 @@ async fn obligation_post_through_expiry<F>(
 where
     F: std::future::Future<Output = (StatusCode, Value)>,
 {
-    boxed_step(|| obligation_post_through_held_cut(fixture, other, deadline, None, post)).await
+    boxed_step(|| {
+        obligation_post_through_held_cut(
+            fixture,
+            other,
+            deadline,
+            NativeWriterWaitTarget::RealmAuthority,
+            post,
+        )
+    })
+    .await
 }
 
 async fn obligation_post_through_held_cut<F>(
     fixture: &Fixture,
     other: &Fixture,
     deadline: chrono::DateTime<chrono::Utc>,
-    source: Option<(&str, &str)>,
+    target: NativeWriterWaitTarget<'_>,
     post: F,
 ) -> ((StatusCode, Value), Value, Value)
 where
@@ -400,6 +423,13 @@ where
         #[diesel(sql_type = Bool)]
         waiting: bool,
     }
+    #[derive(diesel::QueryableByName)]
+    struct AuthenticatedNonce {
+        #[diesel(sql_type = Text)]
+        nonce: String,
+        #[diesel(sql_type = diesel::sql_types::Timestamptz)]
+        consumed_at: chrono::DateTime<chrono::Utc>,
+    }
     let initial = boxed_step(|| obligation_mls_footprint(fixture)).await;
     let other_initial = boxed_step(|| obligation_mls_footprint(other)).await;
     let mut holder = fixture.pool.get().await.unwrap();
@@ -409,28 +439,68 @@ where
         .await
         .unwrap()
         .pid;
-    if let Some((source_id, claim_request_id)) = source {
-        diesel::sql_query("SELECT source_id FROM realm_keypackage_claim_sources WHERE source_id=$1 AND claim_request_id=$2 FOR UPDATE")
+    let original_nonces = if let NativeWriterWaitTarget::ConsumePackage {
+        actor_id,
+        device_id,
+        ..
+    } = target
+    {
+        Some(
+            diesel::sql_query("SELECT nonce,consumed_at FROM applet_managed_device_nonces WHERE actor_id=$1 AND device_id=$2")
+                .bind::<diesel::sql_types::Jsonb, _>(json!(actor_id))
+                .bind::<Text, _>(device_id.as_str())
+                .load::<AuthenticatedNonce>(&mut holder)
+                .await
+                .unwrap(),
+        )
+    } else {
+        None
+    };
+    match target {
+        NativeWriterWaitTarget::ClaimSource {
+            source_id,
+            claim_request_id,
+        } => {
+            diesel::sql_query("SELECT source_id FROM realm_keypackage_claim_sources WHERE source_id=$1 AND claim_request_id=$2 FOR UPDATE")
             .bind::<Text, _>(source_id)
             .bind::<Text, _>(claim_request_id)
             .execute(&mut holder)
             .await
             .unwrap();
-    } else {
-        diesel::sql_query("SELECT realm_id FROM realm_authorities WHERE realm_id=$1 FOR UPDATE")
+        }
+        NativeWriterWaitTarget::RealmAuthority => {
+            diesel::sql_query(
+                "SELECT realm_id FROM realm_authorities WHERE realm_id=$1 FOR UPDATE",
+            )
             .bind::<Text, _>(fixture.realm.as_str())
             .execute(&mut holder)
             .await
             .unwrap();
+        }
+        NativeWriterWaitTarget::ConsumePackage { keypackage_ref, .. } => {
+            diesel::sql_query(
+                "SELECT keypackage_ref FROM mls_key_packages WHERE keypackage_ref=$1 FOR UPDATE",
+            )
+            .bind::<Text, _>(keypackage_ref)
+            .execute(&mut holder)
+            .await
+            .unwrap();
+        }
     }
     let gate = async {
         let mut monitor = fixture.pool.get().await.unwrap();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let observed = loop {
-            let waiting_query = if source.is_some() {
-                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid<>pg_backend_pid() AND $1=ANY(pg_blocking_pids(a.pid)) AND a.query ILIKE '%realm_keypackage_claim_sources%' AND a.query ILIKE '%FOR SHARE%') AS waiting"
-            } else {
-                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid<>pg_backend_pid() AND $1=ANY(pg_blocking_pids(a.pid)) AND a.query ILIKE '%realm_authorities%' AND a.query ILIKE '%FOR UPDATE%') AS waiting"
+            let waiting_query = match target {
+                NativeWriterWaitTarget::ClaimSource { .. } => {
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid<>pg_backend_pid() AND $1=ANY(pg_blocking_pids(a.pid)) AND a.query ILIKE '%realm_keypackage_claim_sources%' AND a.query ILIKE '%FOR SHARE%') AS waiting"
+                }
+                NativeWriterWaitTarget::RealmAuthority => {
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid<>pg_backend_pid() AND $1=ANY(pg_blocking_pids(a.pid)) AND a.query ILIKE '%realm_authorities%' AND a.query ILIKE '%FOR UPDATE%') AS waiting"
+                }
+                NativeWriterWaitTarget::ConsumePackage { .. } => {
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid<>pg_backend_pid() AND $1=ANY(pg_blocking_pids(a.pid)) AND a.query ILIKE 'SELECT % FROM mls_key_packages WHERE keypackage_ref=$1 FOR UPDATE') AS waiting"
+                }
             };
             let state = diesel::sql_query(waiting_query)
                 .bind::<Integer, _>(pid)
@@ -445,6 +515,33 @@ where
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         };
+        let observed_at = chrono::Utc::now();
+        let authenticated_before_wait = if let NativeWriterWaitTarget::ConsumePackage {
+            actor_id,
+            device_id,
+            ..
+        } = target
+        {
+            let nonces = diesel::sql_query("SELECT nonce,consumed_at FROM applet_managed_device_nonces WHERE actor_id=$1 AND device_id=$2")
+                .bind::<diesel::sql_types::Jsonb, _>(json!(actor_id))
+                .bind::<Text, _>(device_id.as_str())
+                .load::<AuthenticatedNonce>(&mut monitor)
+                .await
+                .unwrap();
+            let original = original_nonces.as_ref().unwrap();
+            let fresh = nonces
+                .iter()
+                .filter(|row| !original.iter().any(|prior| prior.nonce == row.nonce))
+                .collect::<Vec<_>>();
+            Some(
+                observed
+                    && observed_at < deadline
+                    && fresh.len() == 1
+                    && fresh[0].consumed_at < deadline,
+            )
+        } else {
+            None
+        };
         drop(monitor);
         let before = boxed_step(|| obligation_mls_footprint(fixture)).await;
         let other_before = boxed_step(|| obligation_mls_footprint(other)).await;
@@ -456,9 +553,9 @@ where
             .await;
         }
         holder.batch_execute("ROLLBACK").await.unwrap();
-        (observed, before, other_before)
+        (observed, before, other_before, authenticated_before_wait)
     };
-    let (response, (observed, before, other_before)) = tokio::join!(
+    let (response, (observed, before, other_before, authenticated_before_wait)) = tokio::join!(
         tokio::time::timeout(std::time::Duration::from_secs(75), post),
         gate
     );
@@ -483,7 +580,11 @@ where
     }
     assert!(
         observed,
-        "the real HTTP operation must reach the real Realm writer lock before its signed deadline"
+        "the real HTTP operation must reach the selected actual writer row before its signed deadline"
+    );
+    assert!(
+        authenticated_before_wait.unwrap_or(true),
+        "the consume request must commit one fresh exact Device authentication nonce and reach its package writer while the Device is still live",
     );
     assert!(
         chrono::Utc::now() >= deadline,
@@ -740,10 +841,10 @@ async fn realm_device_prepared_add_writer_wait_crosses_claim_deadline(
             fixture,
             recipient,
             deadline,
-            Some((
-                other_claim.claim_receipt.source_id.as_str(),
-                other_claim.claim_request_id.as_str(),
-            )),
+            NativeWriterWaitTarget::ClaimSource {
+                source_id: other_claim.claim_receipt.source_id.as_str(),
+                claim_request_id: other_claim.claim_request_id.as_str(),
+            },
             device_post(
                 fixture,
                 authority,
@@ -1641,10 +1742,15 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
         "the valid body+transport must enter writer wait while the Device is genuinely live"
     );
     let (reply, before, other_before) = boxed_step(|| {
-        obligation_post_through_expiry(
+        obligation_post_through_held_cut(
             fixture,
             fixture,
             expires_at,
+            NativeWriterWaitTarget::ConsumePackage {
+                keypackage_ref: command.recipient_durable_receipt.key_package_ref.as_str(),
+                actor_id: &recipient_authority.actor_id,
+                device_id: &recipient_authority.device_id,
+            },
             obligation_recipient_post(
                 fixture,
                 &recipient_authority,
@@ -1665,6 +1771,10 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
     assert_eq!(
         reply.1["type"],
         "https://arkret.org/problems/capability_denied"
+    );
+    assert_eq!(
+        reply.1["detail"], "native consume current Device is unavailable",
+        "the authenticated request must be refused by the actual consume writer after its wait",
     );
     assert!(
         chrono::Utc::now() < claim.claim_receipt.expires_at,

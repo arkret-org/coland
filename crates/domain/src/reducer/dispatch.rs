@@ -1087,9 +1087,40 @@ mod tests {
         let actual = default_apply_registry().into_keys().collect::<HashSet<_>>();
         assert!(actual.iter().all(EventKind::is_reducer_input));
         assert!(actual.contains(&EventKind::AppletBridgeError));
-        assert!(actual.contains(&EventKind::AppletManagedActorProvision));
         assert!(actual.contains(&EventKind::AuditAccessed));
         assert!(actual.contains(&EventKind::RealmGovernanceStationChange));
+    }
+
+    #[test]
+    fn realm_actor_typed_writers_cannot_become_durable_fact_noops() {
+        let registry = default_apply_registry();
+        let mut state = super::ProjectionState::default();
+        let baseline = format!("{state:?}");
+        let hlc = super::ServerHlc::new("realm-actor-writer-test");
+        for kind in [
+            EventKind::RealmActorCreate,
+            EventKind::RealmActorControlUpdate,
+            EventKind::RealmActorManagerChange,
+            EventKind::RealmActorStatusSet,
+            EventKind::RealmActorRecoverySet,
+            EventKind::RealmActorRecoveryBegin,
+            EventKind::RealmActorControlReset,
+            EventKind::RealmActorDevicesReset,
+        ] {
+            assert!(kind.is_reducer_input());
+            let descriptor = kind.effect_descriptor().unwrap();
+            assert_eq!(
+                descriptor.ownership,
+                super::EventEffectOwnership::TypedResultWriter
+            );
+            assert!(!descriptor.result_families.is_empty());
+            assert!(!registry.contains_key(&kind));
+            assert!(matches!(
+                state.apply_projected(&operation(&kind), &hlc),
+                super::ProjectionEffect::Rejected { .. }
+            ));
+            assert_eq!(format!("{state:?}"), baseline);
+        }
     }
 
     #[test]
@@ -1098,7 +1129,6 @@ mod tests {
         let hlc = super::ServerHlc::new("durable-fact-owner-test");
         for kind in [
             EventKind::AppletBridgeError,
-            EventKind::AppletManagedActorProvision,
             EventKind::AuditAccessed,
             EventKind::SelfModerationReport,
         ] {

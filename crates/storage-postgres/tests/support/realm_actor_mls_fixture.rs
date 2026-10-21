@@ -1307,7 +1307,8 @@ async fn receive_and_consume(
     claim: &KeyPackagesClaimOutcome,
 ) {
     use arkret_models_collaboration::device_messages::{
-        DeviceMessagesGetOutcome, RecipientDelivery,
+        DeviceMessagesAckOutcome, DeviceMessagesAckRequestBody, DeviceMessagesGetOutcome,
+        RecipientDelivery,
     };
     let sender =
         coland_http::routing::federation::outbox::FederationDispatcher::new(governor.state.clone());
@@ -1315,6 +1316,7 @@ async fn receive_and_consume(
         recipient.state.clone(),
     );
     let mut queued = None;
+    let mut delivered_page = None;
     for _ in 0..12 {
         boxed_step(|| sender.run_one_pass()).await.unwrap();
         boxed_step(|| receiver.run_one_pass()).await.unwrap();
@@ -1330,21 +1332,61 @@ async fn receive_and_consume(
         .await;
         assert_eq!(status, StatusCode::OK, "real recipient queue: {value}");
         let page: DeviceMessagesGetOutcome = serde_json::from_value(value).unwrap();
-        queued = page.deliveries.into_iter().find_map(|item| match item {
+        assert_ne!(page.lost, Some(true));
+        queued = page.deliveries.iter().find_map(|item| match item {
             RecipientDelivery::MlsWelcome { mls_welcome }
                 if mls_welcome.welcome_id == welcome.welcome_id =>
             {
-                Some(mls_welcome)
+                Some(mls_welcome.clone())
             }
             _ => None,
         });
         if queued.is_some() {
+            delivered_page = Some(page);
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
     let queued = queued.expect("remote committed replication must queue the original Welcome");
     assert_eq!(json!(queued), json!(welcome));
+    // The authentic recipient acknowledges the delivered prefix. Consume must
+    // remain independent of the queue row and recover the retained claim.
+    let delivered_page = delivered_page.unwrap();
+    let ack = DeviceMessagesAckRequestBody {
+        ack_token: delivered_page.ack_token.unwrap(),
+    };
+    let (status, acknowledged) = boxed_step(|| {
+        account_request(
+            recipient,
+            reqwest::Method::POST,
+            "/_arkret/self/device_messages/ack",
+            ServiceOperationId::SelfDeviceMessagesCommandAckV1,
+            Some(json!(ack)),
+        )
+    })
+    .await;
+    assert_eq!(status, StatusCode::OK, "actual Welcome ACK: {acknowledged}");
+    let acknowledged: DeviceMessagesAckOutcome = serde_json::from_value(acknowledged).unwrap();
+    assert!(acknowledged.pruned_count > 0);
+    let (status, after_ack) = boxed_step(|| {
+        account_request(
+            recipient,
+            reqwest::Method::GET,
+            "/_arkret/self/device_messages",
+            ServiceOperationId::SelfDeviceMessagesReadListV1,
+            None,
+        )
+    })
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "actual queue after ACK: {after_ack}"
+    );
+    let after_ack: DeviceMessagesGetOutcome = serde_json::from_value(after_ack).unwrap();
+    assert!(!after_ack.deliveries.iter().any(|delivery| matches!(delivery,
+        RecipientDelivery::MlsWelcome { mls_welcome } if mls_welcome.welcome_id == welcome.welcome_id
+    )), "ACK must prune the original even without a continuation cursor");
     let replicated = recipient
         .state
         .test_persistence()
@@ -1430,6 +1472,56 @@ async fn receive_and_consume(
                 .unwrap(),
         )
         .unwrap();
+    let before_refusals =
+        boxed_step(|| super::realm_native_fixture::native_business_footprint(recipient)).await;
+    for (name, digest, epoch) in [
+        (
+            "wrong_welcome_digest",
+            arkret_wire::Hash::new(format!("sha256:{}", "7".repeat(64))).unwrap(),
+            restored.epoch(),
+        ),
+        (
+            "wrong_epoch",
+            queued.durable_receipt_digest().unwrap(),
+            restored.epoch() + 1,
+        ),
+    ] {
+        let mut rejected = command.clone();
+        rejected.recipient_durable_receipt.welcome_digest = digest;
+        rejected.recipient_durable_receipt.mls_epoch = epoch;
+        rejected.recipient_durable_receipt = joined
+            .identity()
+            .sign_recipient_mls_durable_receipt(rejected.recipient_durable_receipt)
+            .unwrap();
+        rejected = joined
+            .identity()
+            .signed_key_packages_consume_request(
+                queued.keypackage_claim_ref.clone(),
+                rejected.recipient_durable_receipt,
+            )
+            .unwrap();
+        let (status, problem) = boxed_step(|| {
+            account_request(
+                recipient,
+                reqwest::Method::POST,
+                "/_arkret/self/keys/keypackages/consume",
+                ServiceOperationId::SelfKeysKeypackagesCommandConsumeV1,
+                Some(json!(rejected)),
+            )
+        })
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{name}: {problem}");
+        assert_eq!(
+            problem["type"], "https://arkret.org/problems/conflict",
+            "{name}"
+        );
+        assert_eq!(
+            boxed_step(|| { super::realm_native_fixture::native_business_footprint(recipient) })
+                .await,
+            before_refusals,
+            "{name}: signed invalid receipt must leave the claim live and unchanged"
+        );
+    }
     let (status, consumed) = boxed_step(|| {
         account_request(
             recipient,

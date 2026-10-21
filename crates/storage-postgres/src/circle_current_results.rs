@@ -541,9 +541,7 @@ pub(crate) async fn admit_with_audit_in_connection(
                 ));
             }
             if next == CircleMembership::Join {
-                let managed = sql_query("SELECT EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.applet.managed_actor.provision' AND e.envelope#>'{payload,actor_id}'=$1) AS present")
-                    .bind::<Jsonb,_>(json!(&member)).get_result::<PresentRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-                if managed.present || event.applet_id.is_some() {
+                if member.as_realm_actor_id().is_some() || event.applet_id.is_some() {
                     if member != event.actor_id
                         || event.applet_id.is_none()
                         || event.executed_by.is_some()

@@ -1,4 +1,4 @@
-//! Included inside the real Applet admission fixture after the shared build freeze.
+//! Widget inventory uses the shared native install fixture without creating a Bot Account or PCR.
 use coland_storage::{
     AppletStore as _, AppletWidgetInstallSelector, AppletWidgetTokenGateSelector,
     AppletWidgetTokenRecord,
@@ -7,7 +7,7 @@ use coland_storage_postgres::PgAppletStore;
 
 use super::*;
 impl Fixture {
-    async fn install_widget(&self) -> Installed {
+    async fn install_widget(&self) -> WidgetInstalled {
         let ghost = false;
         let endpoint = None;
         let namespace = format!("bridge.{}", uuid::Uuid::now_v7().simple());
@@ -143,14 +143,9 @@ impl Fixture {
             .await;
         assert_eq!(status, StatusCode::CREATED, "install commit: {outcome}");
         let outcome: AppletInstallOutcome = serde_json::from_value(outcome).unwrap();
-        let (bot_outcome, bot_body) = self
-            .provision_bot(&package, &namespace, outcome.registration_event_ref.clone())
-            .await;
-        Installed {
+        WidgetInstalled {
             package,
             outcome,
-            bot_outcome,
-            bot_body,
             body,
             key,
         }
@@ -190,14 +185,14 @@ async fn widget_native_grant(fixture: &Fixture) -> arkret_wire::GrantId {
     Box::pin(accepted_admin_domain_event(fixture, event)).await;
     grant
 }
-#[tokio::test]
-async fn widget_inventory_real_install_checks_scope_consent_and_three_revoke_modes() {
+pub(super) async fn run_widget_inventory() {
     for mode in [
         arkret_wire::AppletRevokeMode::RevokeWidgetOnly,
         arkret_wire::AppletRevokeMode::RevokeRuntimeOnly,
         arkret_wire::AppletRevokeMode::RevokeAll,
     ] {
-        let fixture = Box::new(Box::pin(Fixture::new()).await);
+        let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+        let fixture = Box::new(Box::pin(Fixture::new(database.pool())).await);
         let install = Box::new(Box::pin(fixture.install_widget()).await);
         let grant = Box::pin(widget_native_grant(&fixture)).await;
         let selector = AppletWidgetInstallSelector {
@@ -229,7 +224,7 @@ async fn widget_inventory_real_install_checks_scope_consent_and_three_revoke_mod
         let store = PgAppletStore {
             pool: fixture.pool.clone(),
         };
-        let before = authority_snapshot(&fixture.pool).await;
+        let before = widget_authority_snapshot(&fixture.pool).await;
         let mut no_consent = record.clone();
         no_consent.consent_approved = false;
         assert!(store.issue_widget_token(no_consent).await.is_err());
@@ -240,7 +235,7 @@ async fn widget_inventory_real_install_checks_scope_consent_and_three_revoke_mod
         wrong_install.install.registration_epoch =
             Hash::new(format!("sha256:{}", "b".repeat(64))).unwrap();
         assert!(store.issue_widget_token(wrong_install).await.is_err());
-        assert_eq!(authority_snapshot(&fixture.pool).await, before);
+        assert_eq!(widget_authority_snapshot(&fixture.pool).await, before);
         assert!(
             store.widget_tokens(&selector, at).await.unwrap().is_empty(),
             "rejected issuance wrote widget inventory"
@@ -336,19 +331,19 @@ async fn widget_inventory_real_install_checks_scope_consent_and_three_revoke_mod
         request.widget_token_gate = Some(write_gate.clone());
         let uow = coland_storage_postgres::PgEventCommitUnitOfWork::new(fixture.pool.clone());
         use coland_storage::EventCommitUnitOfWork as _;
-        let before_write = authority_snapshot(&fixture.pool).await;
+        let before_write = widget_authority_snapshot(&fixture.pool).await;
         let mut wrong_token = request.clone();
         wrong_token.widget_token_gate.as_mut().unwrap().token_digest =
             Hash::new(format!("sha256:{}", "c".repeat(64))).unwrap();
         assert!(Box::pin(uow.commit_event(wrong_token)).await.is_err());
         assert_eq!(
             before_write,
-            authority_snapshot(&fixture.pool).await,
+            widget_authority_snapshot(&fixture.pool).await,
             "widget refusal partially wrote canonical data"
         );
         Box::pin(uow.commit_event(request)).await.unwrap();
         assert_accepted_event(&fixture, &event).await;
-        let native_before = authority_snapshot(&fixture.pool).await;
+        let native_before = widget_authority_snapshot(&fixture.pool).await;
         let install_before = store
             .get(
                 install.package.applet_id.as_str(),
@@ -395,7 +390,7 @@ async fn widget_inventory_real_install_checks_scope_consent_and_three_revoke_mod
             );
         }
         if mode == arkret_wire::AppletRevokeMode::RevokeWidgetOnly {
-            let after = authority_snapshot(&fixture.pool).await;
+            let after = widget_authority_snapshot(&fixture.pool).await;
             for key in [
                 "events",
                 "commits",
@@ -419,4 +414,129 @@ async fn widget_inventory_real_install_checks_scope_consent_and_three_revoke_mod
             assert_eq!(current["status"], install_before["status"]);
         }
     }
+}
+
+struct WidgetInstalled {
+    package: AppletPackage,
+    outcome: AppletInstallOutcome,
+    body: Value,
+    key: String,
+}
+
+impl Fixture {
+    fn revoke_with_mode<'a>(
+        &'a self,
+        install: &'a WidgetInstalled,
+        revoke_mode: arkret_wire::AppletRevokeMode,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppletRevokeOutcome> + Send + 'a>> {
+        Box::pin(async move {
+            let reason = arkret_wire::ReasonCode::from_wire("applet_revoked");
+            let preview_body = serde_json::to_value(AppletRevokePreviewRequestBody {
+                effective_scope: ScopeRef::Realm {
+                    realm_id: self.realm.clone(),
+                },
+                reason_code: reason.clone(),
+                revoke_mode,
+            })
+            .unwrap();
+            let path = format!(
+                "/_arkret/self/applets/{}/revoke/preview",
+                install.package.applet_id
+            );
+
+            let (status, preview) = self
+                .admin_post(
+                    &path,
+                    arkret_wire::ServiceOperationId::SELF_APPLET_REVOKE_COMMAND_PREVIEW_V1,
+                    &preview_body,
+                    None,
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "revoke preview: {preview}");
+
+            let preview: AppletRevokePreviewOutcome = serde_json::from_value(preview).unwrap();
+            let revoke_plan_digest =
+                Hash::new(arkret_canonical::canonical_sha256(&preview.revoke_plan).unwrap())
+                    .unwrap();
+            let events = preview
+                .revoke_plan
+                .capability_revocations
+                .iter()
+                .map(|intent| arkret_wire::EventAdmissionSubmission {
+                    event: self.admin_event(
+                        EventKind::CapabilityRevoke,
+                        ScopeRef::Realm {
+                            realm_id: self.realm.clone(),
+                        },
+                        serde_json::to_value(
+                            arkret_models_collaboration::events_payloads::CapabilityRevokePayload {
+                                grant_id: intent.grant_id.clone(),
+                                expected_revision: intent.expected_revision.clone(),
+                                reason: Some(intent.reason_code.as_str().to_owned()),
+                            },
+                        )
+                        .unwrap(),
+                    ),
+                    approval_signatures: None,
+                })
+                .collect();
+            let members=preview.revoke_plan.membership_removals.iter().map(|intent| arkret_wire::EventAdmissionSubmission {
+            event:self.admin_event(EventKind::MemberState,ScopeRef::Realm {realm_id:self.realm.clone()},json!({"member_id":intent.member_id,"membership":intent.membership,"reason":intent.reason_code})), approval_signatures:None,
+        }).collect();
+            let body = serde_json::to_value(AppletRevokeRequestBody {
+                revoke_plan_digest,
+                effective_scope: preview.revoke_plan.effective_scope,
+                reason_code: reason,
+                revoke_mode,
+                capability_revoke_events: events,
+                membership_state_events: members,
+            })
+            .unwrap();
+            let path = format!("/_arkret/self/applets/{}/revoke", install.package.applet_id);
+
+            let (status, outcome) = self
+                .admin_post(
+                    &path,
+                    arkret_wire::ServiceOperationId::SELF_APPLET_COMMAND_REVOKE_V1,
+                    &body,
+                    Some(&format!("revoke-{}", uuid::Uuid::now_v7())),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "accepted Applet revoke: {outcome}");
+            let outcome: AppletRevokeOutcome = serde_json::from_value(outcome).unwrap();
+            assert_eq!(
+                outcome.status,
+                AppletRevokeSagaStatus::Complete,
+                "revoke outcome: {outcome:?}"
+            );
+            outcome
+        })
+    }
+}
+
+async fn widget_authority_snapshot(pool: &PgPool) -> Value {
+    use diesel::sql_types::Jsonb;
+    use diesel_async::RunQueryDsl as _;
+    #[derive(diesel::QueryableByName)]
+    struct Row {
+        #[diesel(sql_type=Jsonb)]
+        value: Value,
+    }
+    let mut connection = pool.get().await.unwrap();
+    let mut result = serde_json::Map::new();
+    for (key, table) in [
+        ("events", "canonical_events"),
+        ("commits", "realm_commits"),
+        ("profiles", "actor_profile_current_results"),
+        ("grants", "capability_grant_current_results"),
+        ("managed", "applet_managed_identities"),
+        ("claims", "realm_actor_creations"),
+        ("namespace_claims", "applet_namespace_claims"),
+        ("tokens", "applet_widget_tokens"),
+    ] {
+        let row = diesel::sql_query(format!("SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text),'[]'::jsonb) AS value FROM {table} r"))
+            .get_result::<Row>(&mut connection).await.unwrap();
+        result.insert(key.to_owned(), row.value);
+    }
+    Value::Object(result)
 }

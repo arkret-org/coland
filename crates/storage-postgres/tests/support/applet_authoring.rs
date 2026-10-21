@@ -2,6 +2,8 @@
 //! Mirrors the registered HTTP fixture's signed prerequisites; commits always
 //! pass the production closed aggregate, never a synthetic verified flag.
 
+#[path = "applet_widget_inventory_fixture.rs"]
+mod applet_widget_inventory_fixture;
 #[path = "management_archive_fixture.rs"]
 mod management_archive_fixture;
 #[path = "realm_actor_mls_fixture.rs"]
@@ -1912,6 +1914,7 @@ pub async fn registered_service_pair(pool: PgPool) {
 
 mod realm_native_fixture {
     include!("applet_configuration_fixture.rs");
+    include!("realm_actor_transport_fixture.rs");
     use arkret_canonical::canonical_sha256;
     use arkret_models_identity::*;
     use arkret_signatures::detached_object::sign_detached_object;
@@ -2222,7 +2225,23 @@ mod realm_native_fixture {
         body: &Value,
         seed: &[u8; 32],
     ) -> (StatusCode, Value) {
-        let bytes = arkret_canonical::canonical_json_bytes(body).unwrap();
+        Box::pin(managed_device_post_with_fault(
+            fixture, metadata, method, path, operation, body, seed, None,
+        ))
+        .await
+    }
+
+    async fn managed_device_post_with_fault(
+        fixture: &Fixture,
+        metadata: &arkret_models_integration::AppletManagedDeviceMetadata,
+        method: &DidUrl,
+        path: &str,
+        operation: arkret_wire::ServiceOperationId,
+        body: &Value,
+        seed: &[u8; 32],
+        fault: Option<&str>,
+    ) -> (StatusCode, Value) {
+        let mut bytes = arkret_canonical::canonical_json_bytes(body).unwrap();
         let digest = content_digest_header(&bytes);
         let metadata = metadata.to_header_value().unwrap();
         let idempotency = body
@@ -2260,8 +2279,17 @@ mod realm_native_fixture {
             &["content-digest", "idempotency-key"],
             "sig1",
             method.as_str(),
-            chrono::Utc::now().timestamp(),
-            &SigningKey::from_bytes(seed),
+            chrono::Utc::now().timestamp()
+                - if fault == Some("expired_signature") {
+                    601
+                } else {
+                    0
+                },
+            &SigningKey::from_bytes(if fault == Some("wrong_signature") {
+                &[81; 32]
+            } else {
+                seed
+            }),
         )
         .unwrap();
         let client = reqwest::Client::builder()
@@ -2272,8 +2300,19 @@ mod realm_native_fixture {
             .build()
             .unwrap();
         let mut request = client.post(request_url);
-        for (name, value) in parts.headers {
+        for (name, mut value) in parts.headers {
+            if fault == Some("wrong_destination") && name == "destination-service-id" {
+                value = "ak:did_core:web:another-station.example".to_owned();
+            }
             request = request.header(name, value);
+        }
+        if fault == Some("changed_body") {
+            let mut changed = body.clone();
+            changed["unsigned_transport_field"] = json!(true);
+            bytes = arkret_canonical::canonical_json_bytes(&changed).unwrap();
+        }
+        if fault == Some("mixed_credentials") {
+            request = request.header("authorization", "Bearer unrelated-session");
         }
         let response = request
             .header("signature-input", signature.signature_input_header)
@@ -2577,6 +2616,20 @@ mod realm_native_fixture {
         key_seed: u8,
         actions: &[&str],
     ) -> arkret_wire::DeviceId {
+        boxed_step(|| {
+            authorize_device_until(fixture, candidate, creation_commit, key_seed, actions, None)
+        })
+        .await
+    }
+
+    async fn authorize_device_until(
+        fixture: &Fixture,
+        candidate: &RealmActorCreatePayload,
+        creation_commit: &arkret_wire::RealmCommit,
+        key_seed: u8,
+        actions: &[&str],
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> arkret_wire::DeviceId {
         use arkret_models_collaboration::authority_commit::{
             SelfAuthoritySubmitOutcome, SelfAuthoritySubmitRequest,
         };
@@ -2602,7 +2655,7 @@ mod realm_native_fixture {
             "device_key_algorithm":"Ed25519",
             "authorized_by":candidate.actor_id.signing_principal_id(),
             "scopes":[{"effective_scope":candidate.creation_scope,"actions":actions}],
-            "not_before":at, "expires_at":at+chrono::Duration::hours(1),
+            "not_before":at, "expires_at":expires_at.unwrap_or(at+chrono::Duration::hours(1)),
             "authorization_binding_kind":"realm_managed_delegation", "authorized_generation_ref":1,
             "device_signature":"unsigned", "applet_id":candidate.applet_id,
             "expected_control_revision":{"commit_id":creation_commit.commit_id,"stream_position":creation_commit.stream_position},
@@ -2783,6 +2836,14 @@ mod realm_native_fixture {
             .unwrap()
             .unwrap();
         assert_eq!(accepted.event, event);
+        boxed_step(|| {
+            realm_device_transport_refusals(fixture, candidate, &metadata, &request, &accepted)
+        })
+        .await;
+        let package: AppletPackage =
+            serde_json::from_value(installation["package"].clone()).unwrap();
+        boxed_step(|| retired_managed_forward_carrier_is_rejected(fixture, &package, &accepted))
+            .await;
     }
 
     fn realm_candidate(
@@ -6524,12 +6585,17 @@ mod realm_native_fixture {
                 .clone(),
         )
         .unwrap();
+        let creation_grant = arkret_wire::GrantId::from_event_id(&grant_event.event_id);
         let (candidate, signer) = realm_candidate(
             &package,
             &factory.fixture.realm,
             &registration.event_id,
-            &arkret_wire::GrantId::from_event_id(&grant_event.event_id),
+            &creation_grant,
         );
+        boxed_step(|| {
+            retired_managed_pcr_creation_is_rejected(&factory.fixture, &package, &creation_grant)
+        })
+        .await;
         let event = arkret::author_realm_actor_create(
             candidate.clone(),
             arkret_canonical::DigestSuite::Sha256,
@@ -6541,6 +6607,8 @@ mod realm_native_fixture {
             arkret_wire::EventAdmissionSubmission::new(event.clone()),
         );
         let body = serde_json::to_value(&request).unwrap();
+        boxed_step(|| realm_creation_writer_failure_rolls_back(&factory.fixture, &package, &body))
+            .await;
         let send = |key: &'static str| {
             factory.fixture.service_post(
                 &package,
@@ -6594,6 +6662,10 @@ mod realm_native_fixture {
         assert_eq!(replay.commit, before);
         eprintln!("native lifecycle: private material");
         Box::pin(private_material(&factory.fixture, &candidate, &before)).await;
+        boxed_step(|| {
+            realm_profile_control_and_writer_atomicity(&factory.fixture, &candidate, &before)
+        })
+        .await;
         eprintln!("native lifecycle: first Device");
         let device = if mls {
             boxed_step(|| {
@@ -6688,4 +6760,8 @@ pub async fn realm_bridge_circle_runtime(pool: PgPool) {
 
 pub async fn realm_applet_configuration(pool: PgPool) {
     realm_native_fixture::run_configuration(pool).await;
+}
+
+pub async fn widget_inventory_native_install_and_revoke() {
+    applet_widget_inventory_fixture::run_widget_inventory().await;
 }

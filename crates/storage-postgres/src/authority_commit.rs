@@ -1994,19 +1994,7 @@ async fn commit_transaction_with_device_guard_inner(
         )
         .into());
     }
-    let applet_genesis = transaction.event.kind == arkret_wire::EventKind::RealmCreate
-        && transaction
-            .event
-            .payload
-            .get("object")
-            .and_then(|object| object.get("purpose"))
-            .and_then(serde_json::Value::as_str)
-            == Some("applet_managed_control");
-    if (applet_genesis
-        || matches!(
-            transaction.event.kind,
-            arkret_wire::EventKind::AppletRegistration
-        ))
+    if transaction.event.kind == arkret_wire::EventKind::AppletRegistration
         && verified_unit != VerifiedPcrUnit::Applet
     {
         return Err(PersistenceError::Conflict("applet_authoring_unit_required".to_owned()).into());

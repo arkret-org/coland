@@ -9,7 +9,7 @@ fn principal_genesis_resolution_value(
     };
     if !matches!(
         object.get("purpose").and_then(Value::as_str),
-        Some("principal_control" | "agent_control" | "applet_managed_control")
+        Some("principal_control" | "agent_control")
     ) {
         return Ok(None);
     }
@@ -964,12 +964,7 @@ impl ProjectionState {
                         .or_else(|| {
                             matches!(
                                 object.get("purpose").and_then(Value::as_str),
-                                Some(
-                                    "direct_conversation"
-                                        | "principal_control"
-                                        | "agent_control"
-                                        | "applet_managed_control"
-                                )
+                                Some("direct_conversation" | "principal_control" | "agent_control")
                             )
                             .then_some("since_join")
                         })

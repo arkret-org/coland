@@ -888,7 +888,7 @@ pub(crate) async fn verify_contact_current_material(
     material: &ContactCurrentMaterial,
 ) -> Result<(), AppError> {
     material.validate_shape().map_err(contact_error)?;
-    verify_current_proof(state, &material.current_proof).await?;
+    Box::pin(verify_current_proof(state, &material.current_proof)).await?;
     Box::pin(verify_original_contact_operation(
         state,
         &material.head_operation,
@@ -936,7 +936,7 @@ pub(crate) async fn verify_contact_bundle(
         Box::pin(verify_original_contact_operation(state, op)).await?;
     }
     for proof in &bundle.current_proofs {
-        verify_current_proof(state, proof).await?;
+        Box::pin(verify_current_proof(state, proof)).await?;
     }
     Ok(())
 }
@@ -1204,7 +1204,7 @@ async fn handle_current_refresh(
             "current_refresh direction/domain/request bounds invalid",
         ));
     }
-    if let Some(result) = read_exact_control(state, request, requester).await? {
+    if let Some(result) = Box::pin(read_exact_control(state, request, requester)).await? {
         return Ok(result);
     }
     let record = state
@@ -1221,7 +1221,7 @@ async fn handle_current_refresh(
                 .store_idempotency_record(frozen_control_record(request, requester, &result)?)
                 .await
                 .map_err(|e| AppError::internal(e.to_string()))?;
-            return read_exact_control(state, request, requester)
+            return Box::pin(read_exact_control(state, request, requester))
                 .await?
                 .ok_or_else(|| AppError::internal("opaque Contact result was not durable"));
         }
@@ -1260,7 +1260,7 @@ async fn handle_current_refresh(
         }
         return Ok(result);
     }
-    let proof = sign_direction_proof(state, &record.current_state, holder).await?;
+    let proof = Box::pin(sign_direction_proof(state, &record.current_state, holder)).await?;
     let historical_intervals = state
         .contacts()
         .scope_intervals(trust_domain_id, holder, requester, grant_event_refs)
@@ -1605,7 +1605,7 @@ async fn install_current_response(
     }
     if let Some(expected) = expected {
         advance_contact_revision(&mut record, expected);
-        save_contact_cas(state.contacts(), expected, record).await?;
+        Box::pin(save_contact_cas(state.contacts(), expected, record)).await?;
     } else {
         state
             .contacts()
@@ -1707,7 +1707,7 @@ pub(crate) async fn accept_outbound_contact_control_outcome(
                     ));
                 }
                 Box::pin(verify_original_contact_operation(state, op)).await?;
-                persist_authenticated_observation(state, op).await?;
+                Box::pin(persist_authenticated_observation(state, op)).await?;
             }
             if material.head_operation.round_closure().is_some() {
                 let op = &material.head_operation;
@@ -1729,7 +1729,7 @@ pub(crate) async fn accept_outbound_contact_control_outcome(
                     ));
                 }
                 Box::pin(verify_original_contact_operation(state, op)).await?;
-                persist_verified_round_closure(state, op).await?;
+                Box::pin(persist_verified_round_closure(state, op)).await?;
             }
             if let Some(closure) = &material.current_proof.closed_round {
                 let op = closure.operation.operation();
@@ -1751,7 +1751,7 @@ pub(crate) async fn accept_outbound_contact_control_outcome(
                     ));
                 }
                 Box::pin(verify_original_contact_operation(state, &op)).await?;
-                persist_verified_round_closure(state, &op).await?;
+                Box::pin(persist_verified_round_closure(state, &op)).await?;
             }
             Box::pin(install_current_response(state, request, material)).await
         }
@@ -1893,7 +1893,7 @@ async fn ensure_local_glare_choice(
     }
     let expected = record.updated_at;
     advance_contact_revision(record, expected);
-    save_contact_cas(state.contacts(), expected, record.clone()).await?;
+    Box::pin(save_contact_cas(state.contacts(), expected, record.clone())).await?;
     Ok(attestation)
 }
 async fn verify_glare_attestation(
@@ -1985,7 +1985,7 @@ async fn establish_glare(
         .core
         .holder
         .clone();
-    let proof = sign_direction_proof(state, &record.current_state, &holder).await?;
+    let proof = Box::pin(sign_direction_proof(state, &record.current_state, &holder)).await?;
     replace_direction_proof(&mut record.current_state, proof.clone())?;
     record.status = "accepted".into();
     record.contact_round_id = Some(round);
@@ -2029,7 +2029,7 @@ async fn handle_glare_finalize(
             "glare transport does not bind exact opposite pair",
         ));
     }
-    if let Some(result) = read_exact_control(state, request, requester).await? {
+    if let Some(result) = Box::pin(read_exact_control(state, request, requester)).await? {
         return Ok(result);
     }
     let (round, core, _) = derive_glare_basis(request_receipts)?;
@@ -2165,7 +2165,7 @@ async fn install_glare_response(
     ))
     .await?;
     if let Some(proof) = remote_proof {
-        verify_current_proof(state, proof).await?;
+        Box::pin(verify_current_proof(state, proof)).await?;
         if proof.holder != *peer || proof.peer != *holder || proof.fresh_until <= now() {
             return Err(contact_error(
                 "glare response current direction or freshness mismatch",
@@ -2175,7 +2175,7 @@ async fn install_glare_response(
     }
     sync_contact_summary(&mut record);
     advance_contact_revision(&mut record, expected);
-    save_contact_cas(state.contacts(), expected, record).await
+    Box::pin(save_contact_cas(state.contacts(), expected, record)).await
 }
 async fn queue_current_refresh(
     state: &AppState,
@@ -2264,7 +2264,7 @@ pub(crate) async fn persist_request_mirror_receipt(
         ));
     }
     advance_contact_revision(&mut record, expected);
-    save_contact_cas(state.contacts(), expected, record).await
+    Box::pin(save_contact_cas(state.contacts(), expected, record)).await
 }
 pub(crate) async fn enqueue_glare_finalize_if_ready(
     state: &AppState,
@@ -2316,12 +2316,17 @@ pub(crate) async fn enqueue_glare_finalize_if_ready(
             &remote,
         ))
         .await?;
-        let proof = sign_direction_proof(state, &record.current_state, &own.core.peer).await?;
+        let proof = Box::pin(sign_direction_proof(
+            state,
+            &record.current_state,
+            &own.core.peer,
+        ))
+        .await?;
         replace_direction_proof(&mut record.current_state, proof)?;
         sync_contact_summary(&mut record);
         let expected = record.updated_at;
         advance_contact_revision(&mut record, expected);
-        return save_contact_cas(state.contacts(), expected, record).await;
+        return Box::pin(save_contact_cas(state.contacts(), expected, record)).await;
     }
     let Some(mirror) = record
         .request_mirror_receipts
@@ -2386,8 +2391,14 @@ async fn apply_delivered_operation(
         Some(record) => record,
         None => {
             if !matches!(operation, ContactOperationEvidence::Request { .. }) {
-                queue_current_refresh(state, peer, holder, &ContactPrivateState::default(), vec![])
-                    .await?;
+                Box::pin(queue_current_refresh(
+                    state,
+                    peer,
+                    holder,
+                    &ContactPrivateState::default(),
+                    vec![],
+                ))
+                .await?;
                 return Err(crate::app_error!(
                     TemporarilyUnavailable,
                     "Contact exact current recovery required"
@@ -2476,7 +2487,14 @@ async fn apply_delivered_operation(
         .direction(holder)
         .map_or(0, |d| d.head_operation.version());
     if installed_version == 0 && operation.version() > 1 {
-        queue_current_refresh(state, peer, holder, &record.current_state, vec![]).await?;
+        Box::pin(queue_current_refresh(
+            state,
+            peer,
+            holder,
+            &record.current_state,
+            vec![],
+        ))
+        .await?;
         return Err(crate::app_error!(
             TemporarilyUnavailable,
             "original direction recovery required at durable observation floor"
@@ -2486,9 +2504,16 @@ async fn apply_delivered_operation(
         // A valid old closure is committed independently; no gap invents a head.
         if matches!(operation, ContactOperationEvidence::Tombstone { .. }) {
             advance_contact_revision(&mut record, expected);
-            save_contact_cas(state.contacts(), expected, record.clone()).await?;
+            Box::pin(save_contact_cas(state.contacts(), expected, record.clone())).await?;
         }
-        queue_current_refresh(state, peer, holder, &record.current_state, vec![]).await?;
+        Box::pin(queue_current_refresh(
+            state,
+            peer,
+            holder,
+            &record.current_state,
+            vec![],
+        ))
+        .await?;
         return Err(crate::app_error!(
             TemporarilyUnavailable,
             "Contact operation gap requires complete current"
@@ -2501,7 +2526,14 @@ async fn apply_delivered_operation(
             ));
         }
     } else if operation.initial_contact_round_id().is_some() {
-        queue_current_refresh(state, peer, holder, &record.current_state, vec![]).await?;
+        Box::pin(queue_current_refresh(
+            state,
+            peer,
+            holder,
+            &record.current_state,
+            vec![],
+        ))
+        .await?;
         return Err(crate::app_error!(
             TemporarilyUnavailable,
             "Contact fixed first identity recovery required"
@@ -2681,7 +2713,7 @@ async fn apply_delivered_operation(
         .find(|d| d.head_operation.holder().delivery_station_id().as_str() == state.service_id())
         .map(|d| d.head_operation.holder().clone())
     {
-        let proof = sign_direction_proof(state, &record.current_state, &local).await?;
+        let proof = Box::pin(sign_direction_proof(state, &record.current_state, &local)).await?;
         if let PeerContactSubmitOutcome::Event(result) = response {
             result.current_proof = Some(proof.clone());
         }
@@ -2791,15 +2823,16 @@ async fn peer_contacts_submit_inner(
             "Contact carrier source/direction/domain mismatch",
         ));
     }
-    if let Some(result) = read_exact_control(state, &delivery, operation.holder()).await? {
+    if let Some(result) = Box::pin(read_exact_control(state, &delivery, operation.holder())).await?
+    {
         return json_ok(result);
     }
     Box::pin(verify_original_contact_operation(state, &operation)).await?;
     if !matches!(operation, ContactOperationEvidence::Request { .. }) {
-        persist_authenticated_observation(state, &operation).await?;
+        Box::pin(persist_authenticated_observation(state, &operation)).await?;
     }
     if matches!(operation, ContactOperationEvidence::Tombstone { .. }) {
-        persist_verified_round_closure(state, &operation).await?;
+        Box::pin(persist_verified_round_closure(state, &operation)).await?;
     }
 
     if let PeerContactSubmitRequestBody::Request {
@@ -2825,10 +2858,10 @@ async fn peer_contacts_submit_inner(
                 ));
             }
             Box::pin(verify_original_contact_operation(state, &close)).await?;
-            persist_verified_round_closure(state, &close).await?;
+            Box::pin(persist_verified_round_closure(state, &close)).await?;
         }
 
-        verify_current_proof(state, proof).await?;
+        Box::pin(verify_current_proof(state, proof)).await?;
         if proof.holder != *operation.holder()
             || proof.peer != *operation.peer()
             || proof.trust_domain_id != *operation.trust_domain_id()
@@ -2912,14 +2945,14 @@ async fn peer_contacts_submit_inner(
                 .await
                 .map_err(|e| AppError::internal(e.to_string()))?;
             return json_ok(
-                read_exact_control(state, &delivery, operation.holder())
+                Box::pin(read_exact_control(state, &delivery, operation.holder()))
                     .await?
                     .ok_or_else(|| AppError::internal("opaque Contact receipt not durable"))?,
             );
         }
     }
     if matches!(operation, ContactOperationEvidence::Request { .. }) {
-        persist_authenticated_observation(state, &operation).await?;
+        Box::pin(persist_authenticated_observation(state, &operation)).await?;
     }
     let result_kind = match &operation {
         ContactOperationEvidence::Request { .. } => ContactResultKind::Request,
@@ -2949,12 +2982,12 @@ async fn peer_contacts_submit_inner(
     .await?;
     if matches!(operation, ContactOperationEvidence::Request { .. }) {
         if let PeerContactSubmitOutcome::Event(result) = &response {
-            persist_request_mirror_receipt(
+            Box::pin(persist_request_mirror_receipt(
                 state,
                 &operation.holder().contact_actor_id(),
                 &operation.peer().contact_actor_id(),
                 &result.mirror_receipt,
-            )
+            ))
             .await?;
         }
         Box::pin(enqueue_glare_finalize_if_ready(
@@ -3031,7 +3064,7 @@ pub(crate) async fn accept_outbound_contact_event_outcome(
     let holder = operation.holder();
     let peer = operation.peer();
     if let Some(proof) = &outcome.current_proof {
-        verify_current_proof(state, proof).await?;
+        Box::pin(verify_current_proof(state, proof)).await?;
         if proof.holder != *peer
             || proof.peer != *holder
             || proof.issuer_id.as_str() != peer_id
@@ -3065,9 +3098,16 @@ pub(crate) async fn accept_outbound_contact_event_outcome(
             replace_direction_proof(&mut record.current_state, proof.clone())?;
             sync_contact_summary(&mut record);
             advance_contact_revision(&mut record, expected);
-            save_contact_cas(state.contacts(), expected, record).await?;
+            Box::pin(save_contact_cas(state.contacts(), expected, record)).await?;
         } else {
-            queue_current_refresh(state, holder, peer, &record.current_state, vec![]).await?;
+            Box::pin(queue_current_refresh(
+                state,
+                holder,
+                peer,
+                &record.current_state,
+                vec![],
+            ))
+            .await?;
         }
     } else if !matches!(
         operation,
@@ -3079,15 +3119,22 @@ pub(crate) async fn accept_outbound_contact_event_outcome(
             .await
             .map_err(|e| AppError::internal(e.to_string()))?
             .ok_or_else(|| contact_error("Contact current unavailable"))?;
-        queue_current_refresh(state, holder, peer, &record.current_state, vec![]).await?;
+        Box::pin(queue_current_refresh(
+            state,
+            holder,
+            peer,
+            &record.current_state,
+            vec![],
+        ))
+        .await?;
     }
     if matches!(operation, ContactOperationEvidence::Request { .. }) {
-        persist_request_mirror_receipt(
+        Box::pin(persist_request_mirror_receipt(
             state,
             &holder.contact_actor_id(),
             &peer.contact_actor_id(),
             &outcome.mirror_receipt,
-        )
+        ))
         .await?;
         Box::pin(enqueue_glare_finalize_if_ready(
             state,
@@ -3103,7 +3150,7 @@ pub(crate) async fn refresh_local_contact_direction(
     current: &ContactPrivateState,
     holder: &ContactPeer,
 ) -> Result<ContactCurrentProof, AppError> {
-    sign_direction_proof(state, current, holder).await
+    Box::pin(sign_direction_proof(state, current, holder)).await
 }
 pub(crate) async fn request_remote_contact_current(
     state: &AppState,
@@ -3111,7 +3158,14 @@ pub(crate) async fn request_remote_contact_current(
     holder: &ContactPeer,
     current: &ContactPrivateState,
 ) -> Result<(), AppError> {
-    queue_current_refresh(state, requester, holder, current, vec![]).await
+    Box::pin(queue_current_refresh(
+        state,
+        requester,
+        holder,
+        current,
+        vec![],
+    ))
+    .await
 }
 async fn persist_verified_round_closure(
     state: &AppState,
@@ -3157,7 +3211,7 @@ async fn persist_verified_round_closure(
     sync_contact_summary(&mut record);
     if let Some(expected) = expected {
         advance_contact_revision(&mut record, expected);
-        save_contact_cas(state.contacts(), expected, record).await?;
+        Box::pin(save_contact_cas(state.contacts(), expected, record)).await?;
     } else {
         state
             .contacts()
@@ -3225,7 +3279,7 @@ async fn persist_authenticated_observation(
     sync_contact_summary(&mut record);
     if let Some(expected) = expected {
         advance_contact_revision(&mut record, expected);
-        save_contact_cas(state.contacts(), expected, record).await?;
+        Box::pin(save_contact_cas(state.contacts(), expected, record)).await?;
     } else {
         state
             .contacts()

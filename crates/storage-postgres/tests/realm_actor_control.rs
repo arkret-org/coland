@@ -122,3 +122,12 @@ async fn bridge_recovery_replacement_requires_the_exact_pending_original() {
     ))
     .await;
 }
+
+#[tokio::test]
+async fn bridge_closes_an_unaccepted_recovery_only_after_a_proven_cas_fence() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_runtime_unaccepted_recovery(
+        database.pool(),
+    ))
+    .await;
+}

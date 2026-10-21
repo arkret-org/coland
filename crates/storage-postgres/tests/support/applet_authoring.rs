@@ -5896,6 +5896,7 @@ mod realm_native_fixture {
         Continue,
         CancelBeforePublish,
         ReplaceBeforePublish,
+        CloseUnaccepted,
     }
 
     pub(super) async fn run_bridge(
@@ -5916,6 +5917,7 @@ mod realm_native_fixture {
             armed: Arc<std::sync::atomic::AtomicBool>,
             authorization_armed: Arc<std::sync::atomic::AtomicBool>,
             control_armed: Arc<std::sync::atomic::AtomicBool>,
+            fail_after_control_plan: bool,
         }
         impl AuthoringStore for LostDeviceReceipt {
             fn load(&self, key: &str) -> arkret_bridge_runtime::Result<Option<String>> {
@@ -5932,6 +5934,20 @@ mod realm_native_fixture {
                 expected: &[(String, Option<String>)],
                 writes: &[(String, Option<String>)],
             ) -> arkret_bridge_runtime::Result<bool> {
+                if self.fail_after_control_plan
+                    && expected.iter().any(|(key, value)| {
+                        key.starts_with("managed-control/v1/") && value.is_none()
+                    })
+                    && self
+                        .control_armed
+                        .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    let written = self.inner.compare_exchange_batch(expected, writes)?;
+                    assert!(written, "the first recovery plan must become durable");
+                    return Err(arkret_bridge_runtime::BridgeError::App(
+                        "injected crash after initial recovery plan persistence".into(),
+                    ));
+                }
                 if expected.iter().any(|(key, value)| {
                     key.starts_with("managed-device-revocation/v1/") && value.is_some()
                 }) && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -5994,6 +6010,7 @@ mod realm_native_fixture {
             scenario: RecoveryScenario,
         ) {
             let actor = candidate.actor_id.clone();
+            let unaccepted = matches!(scenario, RecoveryScenario::CloseUnaccepted);
             let original = edge
                 .installed_managed_authoring(&candidate.creation_scope, &actor)
                 .unwrap()
@@ -6046,16 +6063,21 @@ mod realm_native_fixture {
                 .err()
                 .expect("accepted begin receipt persistence must fail");
             assert!(
-                failure
-                    .to_string()
-                    .contains("injected crash before control receipt persistence"),
+                failure.to_string().contains(if unaccepted {
+                    "injected crash after initial recovery plan persistence"
+                } else {
+                    "injected crash before control receipt persistence"
+                }),
                 "{failure}"
             );
             let fenced = snapshot(fixture, &actor).await;
-            assert_eq!(fenced["realm_actor_statusowner"], "paused");
+            assert_eq!(
+                fenced["realm_actor_statusowner"],
+                if unaccepted { "active" } else { "paused" }
+            );
             assert_eq!(
                 fenced["realm_actor_device_generation"]["current_device_generation_ref"],
-                2
+                if unaccepted { 1 } else { 2 }
             );
             assert_eq!(
                 fenced["realm_actor_control"]["resolution"]["did"],
@@ -6083,40 +6105,40 @@ mod realm_native_fixture {
             let devices = ManagedDeviceRuntime::new(edge.clone()).unwrap();
             let cancelled = matches!(scenario, RecoveryScenario::CancelBeforePublish);
             let replaced = matches!(scenario, RecoveryScenario::ReplaceBeforePublish);
+            async fn policy(
+                fixture: &Fixture,
+                actor: &ActorId,
+                creation: &arkret_wire::RealmCommit,
+                grant: &arkret_wire::GrantId,
+                enabled: bool,
+            ) {
+                let revision = current_revision(fixture, actor, "realm_actor_recovery").await;
+                let mut event = fixture.admin_event(EventKind::RealmActorRecoverySet,
+                    ScopeRef::RealmControl { realm_id: fixture.realm.clone() }, json!({
+                        "target_actor_id":actor,"enabled":enabled,
+                        "expected_recovery_revision":revision,
+                        "expected_manager_revision":{"commit_id":creation.commit_id,"stream_position":creation.stream_position}
+                    }));
+                event.authorization_ref = Some(grant.clone().into());
+                let event = fixture.sign_admin(event);
+                let body = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
+                    arkret_wire::EventAdmissionSubmission::new(event));
+                let (status, response) = fixture
+                    .admin_post_network(
+                        "/_arkret/self/events",
+                        arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                        &json!(body),
+                        if enabled {
+                            "recovery-allow-again"
+                        } else {
+                            "recovery-cancel-pending"
+                        },
+                    )
+                    .await;
+                assert_eq!(status, StatusCode::OK, "recovery policy change: {response}");
+            }
             if cancelled {
                 eprintln!("independent runtime recovery: cancel pending before publication");
-                async fn policy(
-                    fixture: &Fixture,
-                    actor: &ActorId,
-                    creation: &arkret_wire::RealmCommit,
-                    grant: &arkret_wire::GrantId,
-                    enabled: bool,
-                ) {
-                    let revision = current_revision(fixture, actor, "realm_actor_recovery").await;
-                    let mut event = fixture.admin_event(EventKind::RealmActorRecoverySet,
-                        ScopeRef::RealmControl { realm_id: fixture.realm.clone() }, json!({
-                            "target_actor_id":actor,"enabled":enabled,
-                            "expected_recovery_revision":revision,
-                            "expected_manager_revision":{"commit_id":creation.commit_id,"stream_position":creation.stream_position}
-                        }));
-                    event.authorization_ref = Some(grant.clone().into());
-                    let event = fixture.sign_admin(event);
-                    let body = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
-                        arkret_wire::EventAdmissionSubmission::new(event));
-                    let (status, response) = fixture
-                        .admin_post_network(
-                            "/_arkret/self/events",
-                            arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-                            &json!(body),
-                            if enabled {
-                                "recovery-allow-again"
-                            } else {
-                                "recovery-cancel-pending"
-                            },
-                        )
-                        .await;
-                    assert_eq!(status, StatusCode::OK, "recovery policy change: {response}");
-                }
                 boxed_step(|| policy(fixture, &actor, creation, &management_grant, false)).await;
                 let error = boxed_step(|| devices.recover_control(&actor, "lost-daily-key"))
                     .await
@@ -6142,10 +6164,43 @@ mod realm_native_fixture {
                     "re-enabled permission must not resurrect the cancelled operation"
                 );
             }
+            if unaccepted {
+                let error =
+                    boxed_step(|| devices.close_unaccepted_recovery(&actor, "lost-daily-key"))
+                        .await
+                        .unwrap_err();
+                assert!(error.to_string().contains("unknown alone"), "{error}");
+                assert!(
+                    boxed_step(|| devices.recover_control(&actor, "new-without-proof"))
+                        .await
+                        .is_err(),
+                    "unknown does not release the original intent"
+                );
+                boxed_step(|| policy(fixture, &actor, creation, &management_grant, false)).await;
+                boxed_step(|| policy(fixture, &actor, creation, &management_grant, true)).await;
+                boxed_step(|| devices.close_unaccepted_recovery(&actor, "lost-daily-key"))
+                    .await
+                    .unwrap();
+                boxed_step(|| devices.close_unaccepted_recovery(&actor, "lost-daily-key"))
+                    .await
+                    .unwrap();
+                assert!(
+                    boxed_step(|| devices.recover_control(&actor, "lost-daily-key"))
+                        .await
+                        .is_err(),
+                    "a closed unaccepted original must never be sent later"
+                );
+                assert_eq!(
+                    snapshot(fixture, &actor).await["realm_actor_device_generation"]["current_device_generation_ref"],
+                    1
+                );
+            }
             let completed_operation = if cancelled {
                 "after-cancelled-recovery"
             } else if replaced {
                 "explicit-replacement-recovery"
+            } else if unaccepted {
+                "after-unaccepted-recovery"
             } else {
                 "lost-daily-key"
             };
@@ -6401,6 +6456,10 @@ mod realm_native_fixture {
                         armed: lost_receipt.clone(),
                         authorization_armed: lost_authorization.clone(),
                         control_armed: lost_control.clone(),
+                        fail_after_control_plan: matches!(
+                            recovery_scenario,
+                            Some(RecoveryScenario::CloseUnaccepted)
+                        ),
                     })),
                 )
                 .unwrap(),
@@ -7577,6 +7636,17 @@ pub async fn realm_runtime_replaced_recovery(pool: PgPool) {
         false,
         false,
         Some(realm_native_fixture::RecoveryScenario::ReplaceBeforePublish),
+    )
+    .await;
+}
+
+pub async fn realm_runtime_unaccepted_recovery(pool: PgPool) {
+    realm_native_fixture::run_bridge(
+        pool,
+        false,
+        false,
+        false,
+        Some(realm_native_fixture::RecoveryScenario::CloseUnaccepted),
     )
     .await;
 }

@@ -5917,12 +5917,76 @@ mod realm_native_fixture {
         AcceptedControl,
     }
 
-    pub(super) async fn run_bridge(
+    pub(super) fn run_bridge(
         pool: PgPool,
         circle: bool,
         bot: bool,
         rotate_during_reply: bool,
         recovery_scenario: Option<RecoveryScenario>,
+    ) -> impl std::future::Future<Output = ()> {
+        run_bridge_case(
+            pool,
+            circle,
+            bot,
+            rotate_during_reply,
+            recovery_scenario,
+            false,
+        )
+    }
+
+    async fn resume_runtime_after_handoff(
+        fixture: &Fixture,
+        device: &arkret_bridge_runtime::managed_device::ManagedDevice,
+        actor: &ActorId,
+        make_edge: &impl Fn() -> Arc<arkret_bridge_runtime::ArkretEdge>,
+    ) {
+        use arkret_bridge_runtime::managed_device::ManagedDeviceRuntime;
+        let database =
+            boxed_step(coland_storage_postgres::test_database::TestDatabase::lease).await;
+        let (next, _next_server) = boxed_step(|| network_fixture(database.pool())).await;
+        let _group = boxed_step(|| {
+            realm_actor_mls_fixture::human_admits_runtime_after_handoff(fixture, device, &next)
+        })
+        .await;
+        // Restart the real runtime against its own untouched private store.
+        // Only governance state moved; no Applet keys or MLS secrets were imported.
+        let cold = ManagedDeviceRuntime::new(make_edge()).unwrap();
+        let restored = boxed_step(|| cold.device_for_actor(actor)).await.unwrap();
+        assert_eq!(restored.device_id, device.device_id);
+        assert_eq!(restored.authorization_commit, device.authorization_commit);
+        assert_eq!(restored.governance_generation, 1);
+        assert_eq!(restored.governance_station, next.state.service_core_id());
+        let current_reader = boxed_step(|| cold.open_reader(&restored)).await.unwrap();
+        let progress = boxed_step(|| cold.poll_welcome_queue(&restored, &current_reader))
+            .await
+            .unwrap();
+        assert_eq!(progress.durable_welcomes, 1);
+        assert!(progress.acknowledged);
+        assert_eq!(cold.installed_mls_epoch(&restored).await.unwrap(), Some(1));
+        let reopened = ManagedDeviceRuntime::new(make_edge()).unwrap();
+        let restored = boxed_step(|| reopened.device_for_actor(actor))
+            .await
+            .unwrap();
+        let current_reader = boxed_step(|| reopened.open_reader(&restored))
+            .await
+            .unwrap();
+        let replay = boxed_step(|| reopened.poll_welcome_queue(&restored, &current_reader))
+            .await
+            .unwrap();
+        assert_eq!(replay.durable_welcomes, 0);
+        assert_eq!(
+            reopened.installed_mls_epoch(&restored).await.unwrap(),
+            Some(1)
+        );
+    }
+
+    pub(super) async fn run_bridge_case(
+        pool: PgPool,
+        circle: bool,
+        bot: bool,
+        rotate_during_reply: bool,
+        recovery_scenario: Option<RecoveryScenario>,
+        governance_handoff: bool,
     ) {
         use arkret_bridge_runtime::managed_actor_authoring::ManagedActorAuthoringService;
         use arkret_bridge_runtime::managed_device::ManagedDeviceRuntime;
@@ -6998,6 +7062,13 @@ mod realm_native_fixture {
             .await
             .unwrap();
         snapshot.value().unwrap();
+        if governance_handoff {
+            boxed_step(|| {
+                resume_runtime_after_handoff(&factory.fixture, &device, &actor, &make_edge)
+            })
+            .await;
+            return;
+        }
         eprintln!("real Bridge runtime: ordinary member MLS admission and private Welcome receive");
         let mut human_group =
             boxed_step(|| realm_actor_mls_fixture::human_admits_runtime(&factory.fixture, &device))
@@ -7935,4 +8006,8 @@ pub async fn realm_runtime_recovery_with_unresolved_control(pool: PgPool, accept
         }),
     )
     .await;
+}
+
+pub async fn realm_runtime_mls_handoff(pool: PgPool) {
+    realm_native_fixture::run_bridge_case(pool, false, false, false, None, true).await;
 }

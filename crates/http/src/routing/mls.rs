@@ -581,7 +581,7 @@ async fn resolve_peer_mls_group_state_material(
 
 /// The accepted Genesis selector and raw public bytes are checked identically
 /// for the original peer replication read and the member-authorized path.
-async fn serve_group_state_material(
+pub(crate) async fn serve_group_state_material(
     state: &AppState,
     request: &arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialRequestBody,
     event: &arkret_wire::Event,

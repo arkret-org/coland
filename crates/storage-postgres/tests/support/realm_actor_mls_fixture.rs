@@ -1609,6 +1609,22 @@ pub(super) async fn human_admits_runtime(
     fixture: &Fixture,
     device: &arkret_bridge_runtime::managed_device::ManagedDevice,
 ) -> Box<arkret_mls::ArkretMlsGroup> {
+    human_admits_runtime_in_authority(fixture, device, None).await
+}
+
+pub(super) async fn human_admits_runtime_after_handoff(
+    fixture: &Fixture,
+    device: &arkret_bridge_runtime::managed_device::ManagedDevice,
+    next: &Fixture,
+) -> Box<arkret_mls::ArkretMlsGroup> {
+    human_admits_runtime_in_authority(fixture, device, Some(next)).await
+}
+
+async fn human_admits_runtime_in_authority(
+    fixture: &Fixture,
+    device: &arkret_bridge_runtime::managed_device::ManagedDevice,
+    next: Option<&Fixture>,
+) -> Box<arkret_mls::ArkretMlsGroup> {
     let history = &fixture.pcr.history;
     let scope = device.effective_scope().clone();
     let actor = ActorId::account(history.account.clone());
@@ -1757,8 +1773,36 @@ pub(super) async fn human_admits_runtime(
     );
     let claim: KeyPackagesClaimOutcome = serde_json::from_value(value).unwrap();
     assert_eq!(claim.claims.len(), 1);
+    let original_claim = arkret_canonical::canonical_json_bytes(&claim).unwrap();
+    if let Some(next) = next {
+        assert_eq!(
+            claim.claim_receipt.destination_id,
+            fixture.state.service_core_id()
+        );
+        assert_eq!(
+            arkret_identity::verification_method_did(claim.claim_receipt.signature.kid.as_str())
+                .unwrap(),
+            fixture.state.service_did(),
+        );
+        eprintln!("native MLS: complete handoff after the original claim receipt");
+        boxed_step(|| super::realm_native_fixture::handoff_runtime_realm(fixture, next)).await;
+    }
+    let governor = next.unwrap_or(fixture);
+    let imported_claim = governor
+        .state
+        .test_persistence()
+        .mls_key_packages()
+        .get_peer_claim_by_claim_id(&claim.claims[0].claim_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        original_claim,
+        arkret_canonical::canonical_json_bytes(&imported_claim.outcome.unwrap()).unwrap(),
+        "the receiving ledger must retain the original claim including its old Station signature"
+    );
     let current = coland_storage_postgres::PgMlsGroupCurrentStore {
-        pool: fixture.pool.clone(),
+        pool: governor.pool.clone(),
     }
     .current(&scope)
     .await
@@ -1845,7 +1889,7 @@ pub(super) async fn human_admits_runtime(
         StatusCode::OK,
         "ordinary member admits runtime with actual Add/Welcome: {value}"
     );
-    let accepted = fixture
+    let accepted = governor
         .state
         .test_persistence()
         .authority_commits()
@@ -1853,6 +1897,29 @@ pub(super) async fn human_admits_runtime(
         .await
         .unwrap()
         .unwrap();
+    if next.is_some() {
+        assert_eq!(accepted.commit.governance_generation, 1);
+        assert_eq!(
+            arkret_identity::verification_method_did(
+                accepted.commit.signature.verification_method.as_str()
+            )
+            .unwrap(),
+            governor.state.service_did(),
+        );
+        if let Some(replica) = fixture
+            .state
+            .test_persistence()
+            .authority_commits()
+            .committed_event(&event.event_id)
+            .await
+            .unwrap()
+        {
+            assert_eq!(
+                replica.commit, accepted.commit,
+                "an old Station replica must retain the actual new governor's original"
+            );
+        }
+    }
     group
         .install_accepted_commit(
             &arkret_wire::CommittedEventFullView {

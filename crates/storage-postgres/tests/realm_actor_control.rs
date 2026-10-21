@@ -149,3 +149,13 @@ async fn bridge_recovery_retains_the_original_accepted_control_rotation_receipt(
     )
     .await;
 }
+
+#[tokio::test]
+async fn bridge_keeps_original_claim_across_real_governance_handoff_and_cold_welcome() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_test_writer()
+        .try_init();
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_runtime_mls_handoff(database.pool())).await;
+}

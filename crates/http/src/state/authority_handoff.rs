@@ -211,6 +211,9 @@ pub(crate) async fn install(
             crate::wire::now(),
         )
         .map_err(key_unavailable)?;
+    if local == request.handoff.to_service_id {
+        require_imported_mls_public_material(state, &originals).await?;
+    }
     drop(originals);
     if local == request.handoff.from_service_id {
         // The accepted chain supplies the new governor's authenticated locator.
@@ -235,6 +238,50 @@ pub(crate) async fn install(
     // cannot race activation into accepting a different durable cut.
     state.authority_commits().install_handoff(&request).await?;
     Ok(request.handoff)
+}
+
+/// Imported rows do not prove the corresponding object bytes are present.
+/// Validate every frozen MLS Genesis with the ordinary bounded material reader
+/// before enabling the receiving authority. No member private state is read.
+async fn require_imported_mls_public_material(
+    state: &AppState,
+    originals: &[arkret_wire::CommittedEventFullView],
+) -> ServiceResult<()> {
+    use arkret_models_collaboration::events_payloads::{MlsGenesisEpoch, MlsGenesisPayload};
+    use arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialRequestBody;
+
+    for full in originals {
+        let event = &full.event;
+        if event.kind != arkret_wire::EventKind::MlsGenesis {
+            continue;
+        }
+        let payload: MlsGenesisPayload =
+            serde_json::from_value(serde_json::to_value(&event.payload).map_err(refused)?)
+                .map_err(refused)?;
+        payload.validate().map_err(refused)?;
+        let request = MlsGroupStateMaterialRequestBody {
+            realm_id: event.realm_id.clone(),
+            effective_scope: payload.effective_scope().clone(),
+            mls_group_id: payload.mls_group_id().map_err(refused)?,
+            epoch: MlsGenesisEpoch::try_from(0).map_err(refused)?,
+            group_state_event_id: event.event_id.clone(),
+            caller_actor_id: None,
+            target_commit_event_ref: None,
+            target_epoch: None,
+            group_info_ref: payload.group_info_ref,
+            ratchet_tree_ref: payload.ratchet_tree_ref,
+            max_response_bytes: None,
+        };
+        crate::routing::mls::serve_group_state_material(state, &request, event)
+            .await
+            .map_err(|error| {
+                ServiceError::Conflict(format!(
+                    "temporarily_unavailable: handoff MLS public material is incomplete: {}",
+                    error.message
+                ))
+            })?;
+    }
+    Ok(())
 }
 
 /// Native PCR and Agent originals do not carry the Human/Service inventory

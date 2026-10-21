@@ -870,14 +870,12 @@ async fn prepare_configuration_completion(
         .await
 }
 
-async fn configuration_handoff_resume(
+// The same signed activation is exercised by configuration and native MLS.
+async fn activate_fixture_handoff(
     previous: &Fixture,
     next: &Fixture,
-    request: &arkret_models_integration::AppletConfigurationRequest,
     manifest: &arkret_models_collaboration::authority_commit::ManagementPrivateHandoffManifest,
     bytes: &[u8],
-    pending: &Value,
-    completion: &coland_storage::AppletAuthoringCompletion,
 ) {
     use arkret_models_collaboration::authority_commit::{
         AuthorityHandoffRequest, HistoricalProducerSignerFactEntry, historical_signer_facts_digest,
@@ -1187,6 +1185,98 @@ async fn configuration_handoff_resume(
             .generation,
         manifest.governance_generation
     );
+    let mut public_objects = Vec::new();
+    for full in source.handoff_originals(&previous.realm).await.unwrap() {
+        if full.event.kind != EventKind::MlsGenesis {
+            continue;
+        }
+        let payload: arkret_models_collaboration::events_payloads::MlsGenesisPayload =
+            serde_json::from_value(serde_json::to_value(&full.event.payload).unwrap()).unwrap();
+        for reference in [&payload.group_info_ref, &payload.ratchet_tree_ref] {
+            let record = previous
+                .state
+                .test_persistence()
+                .blobs()
+                .get(reference.as_str())
+                .await
+                .unwrap()
+                .unwrap();
+            let bytes = previous.state.test_object_by_sha256(&record.sha256).await;
+            assert_eq!(
+                reference.as_str(),
+                format!("ak:blob:{}", arkret_canonical::sha256_digest(&bytes))
+            );
+            assert_eq!(
+                next.state
+                    .test_persistence()
+                    .blobs()
+                    .get(reference.as_str())
+                    .await
+                    .unwrap(),
+                Some(record.clone()),
+                "the imported index alone does not import its public bytes"
+            );
+            public_objects.push((record.storage_key, bytes));
+        }
+    }
+    if !public_objects.is_empty() {
+        // Neither absent nor corrupted public objects may enable authority.
+        // Only public GroupInfo/tree bytes are copied, never member secrets.
+        for corrupt in [false, true] {
+            if corrupt {
+                for (key, bytes) in &public_objects {
+                    next.state
+                        .test_put_object(key, vec![0; bytes.len()])
+                        .await
+                        .unwrap();
+                }
+            }
+            let (status, refused) = configuration_peer_post(
+                previous,
+                next,
+                "/_arkret/peer/realm-authority/handoff",
+                ServiceOperationId::PEER_REALM_AUTHORITY_COMMAND_HANDOFF_V1,
+                &activation,
+            )
+            .await;
+            assert_ne!(status, StatusCode::OK);
+            assert_eq!(
+                refused["type"], "https://arkret.org/problems/temporarily_unavailable",
+                "{refused}"
+            );
+            assert!(
+                refused["detail"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("MLS public material"),
+                "{refused}"
+            );
+            assert_eq!(
+                target
+                    .current_authority(&previous.realm)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .generation,
+                manifest.governance_generation
+            );
+            assert!(
+                target
+                    .authority_handoffs(&previous.realm)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let (_, unchanged) = target
+                .export_management_private_state(&previous.realm)
+                .await
+                .unwrap();
+            assert_eq!(bytes, unchanged);
+        }
+        for (key, bytes) in public_objects {
+            next.state.test_put_object(&key, bytes).await.unwrap();
+        }
+    }
     for (sender, receiver) in [(previous, next), (next, previous)] {
         let (status, result) = configuration_peer_post(
             sender,
@@ -1202,6 +1292,25 @@ async fn configuration_handoff_resume(
             "activate signed configuration handoff: {result}"
         );
     }
+}
+
+async fn configuration_handoff_resume(
+    previous: &Fixture,
+    next: &Fixture,
+    request: &arkret_models_integration::AppletConfigurationRequest,
+    manifest: &arkret_models_collaboration::authority_commit::ManagementPrivateHandoffManifest,
+    bytes: &[u8],
+    pending: &Value,
+    completion: &coland_storage::AppletAuthoringCompletion,
+) {
+    use arkret_wire::*;
+    boxed_step(|| activate_fixture_handoff(previous, next, manifest, bytes)).await;
+    let source = PgAuthorityCommitStore {
+        pool: previous.pool.clone(),
+    };
+    let target = PgAuthorityCommitStore {
+        pool: next.pool.clone(),
+    };
     assert!(
         prepare_configuration_completion(previous, completion)
             .await
@@ -1724,5 +1833,58 @@ async fn configuration_admin_event(fixture: &Fixture, event: Event) {
         status,
         StatusCode::OK,
         "administrator Event with actual peer fanout: {response}"
+    );
+}
+
+pub(super) async fn handoff_runtime_realm(previous: &Fixture, next: &Fixture) {
+    let store = PgAuthorityCommitStore {
+        pool: previous.pool.clone(),
+    };
+    let head = store
+        .stream_head(&arkret_wire::CommitStreamRef::Realm {
+            realm_id: previous.realm.clone(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let authority = store
+        .current_authority(&previous.realm)
+        .await
+        .unwrap()
+        .unwrap();
+    let change = previous.admin_event(
+        EventKind::RealmGovernanceStationChange,
+        ScopeRef::Realm {
+            realm_id: previous.realm.clone(),
+        },
+        json!({"expected_governance_generation":authority.generation,
+            "expected_realm_stream_commit_id":head.commit_id,
+            "new_governance_station_id":next.state.service_core_id()}),
+    );
+    let request = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
+        arkret_wire::EventAdmissionSubmission::new(change.clone()),
+    );
+    // Keep client orchestration outside the server's admission stack, exactly
+    // as a deployed Account client sending the same signed change would be.
+    let (status, outcome) = previous
+        .admin_post_network(
+            "/_arkret/self/events",
+            arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+            &json!(request),
+            change.event_id.as_str(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "real governance change: {outcome}");
+    let (manifest, bytes) = store
+        .export_management_private_state(&previous.realm)
+        .await
+        .unwrap();
+    boxed_step(|| activate_fixture_handoff(previous, next, &manifest, &bytes)).await;
+    assert!(
+        store
+            .export_management_private_state(&previous.realm)
+            .await
+            .is_err(),
+        "the former governor cannot issue another outgoing archive after activation"
     );
 }
